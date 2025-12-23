@@ -1,16 +1,57 @@
 <script lang="ts">
-  import Sidebar from './lib/Sidebar.svelte'
+  import Sidebar, { type FileCategory } from './lib/Sidebar.svelte'
   import DiffViewer from './lib/DiffViewer.svelte'
   import CommitPanel from './lib/CommitPanel.svelte'
+  import { getFileDiff, getUntrackedFileDiff } from './lib/services/git'
+  import type { FileDiff } from './lib/types'
+
+  let selectedFile: string | null = $state(null);
+  let selectedCategory: FileCategory | null = $state(null);
+  let currentDiff: FileDiff | null = $state(null);
+  let diffLoading = $state(false);
+  let diffError: string | null = $state(null);
+
+  async function handleFileSelect(path: string, category: FileCategory) {
+    selectedFile = path;
+    selectedCategory = category;
+    diffLoading = true;
+    diffError = null;
+    currentDiff = null;
+
+    try {
+      if (category === 'untracked') {
+        currentDiff = await getUntrackedFileDiff(path);
+      } else {
+        currentDiff = await getFileDiff(path, category === 'staged');
+      }
+    } catch (e) {
+      diffError = e instanceof Error ? e.message : String(e);
+      console.error('Failed to load diff:', e);
+    } finally {
+      diffLoading = false;
+    }
+  }
 </script>
 
 <main>
   <div class="app-container">
     <aside class="sidebar">
-      <Sidebar />
+      <Sidebar 
+        onFileSelect={handleFileSelect}
+        selectedFile={selectedFile}
+      />
     </aside>
     <section class="main-content">
-      <DiffViewer />
+      {#if diffLoading}
+        <div class="loading-state">Loading diff...</div>
+      {:else if diffError}
+        <div class="error-state">
+          <p>Error loading diff:</p>
+          <p class="error-message">{diffError}</p>
+        </div>
+      {:else}
+        <DiffViewer diff={currentDiff} />
+      {/if}
     </section>
   </div>
   <footer class="commit-panel">
@@ -55,6 +96,27 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+
+  .loading-state, .error-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #888;
+    font-size: 14px;
+  }
+
+  .error-state {
+    color: #f14c4c;
+  }
+
+  .error-message {
+    font-family: monospace;
+    font-size: 12px;
+    color: #888;
+    margin-top: 8px;
   }
 
   .commit-panel {

@@ -1,6 +1,6 @@
 mod git;
 
-use git::{GitError, GitStatus};
+use git::{FileDiff, GitStatus};
 
 #[tauri::command]
 fn get_git_status(path: Option<String>) -> Result<GitStatus, String> {
@@ -10,6 +10,23 @@ fn get_git_status(path: Option<String>) -> Result<GitStatus, String> {
 #[tauri::command]
 fn open_repository(path: String) -> Result<GitStatus, String> {
     git::get_status(Some(&path)).map_err(|e| e.message)
+}
+
+#[tauri::command]
+fn get_file_diff(
+    repo_path: Option<String>,
+    file_path: String,
+    staged: bool,
+) -> Result<FileDiff, String> {
+    git::get_file_diff(repo_path.as_deref(), &file_path, staged).map_err(|e| e.message)
+}
+
+#[tauri::command]
+fn get_untracked_file_diff(
+    repo_path: Option<String>,
+    file_path: String,
+) -> Result<FileDiff, String> {
+    git::get_untracked_file_diff(repo_path.as_deref(), &file_path).map_err(|e| e.message)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -25,7 +42,12 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_git_status, open_repository])
+        .invoke_handler(tauri::generate_handler![
+            get_git_status,
+            open_repository,
+            get_file_diff,
+            get_untracked_file_diff
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

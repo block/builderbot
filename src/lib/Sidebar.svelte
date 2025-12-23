@@ -3,25 +3,36 @@
   import { getGitStatus } from './services/git';
   import type { FileStatus, GitStatus } from './types';
 
+  export type FileCategory = 'staged' | 'unstaged' | 'untracked';
+
+  interface Props {
+    onFileSelect?: (path: string, category: FileCategory) => void;
+    selectedFile?: string | null;
+  }
+
+  let { onFileSelect, selectedFile = null }: Props = $props();
+
   let gitStatus: GitStatus | null = $state(null);
   let error: string | null = $state(null);
   let loading = $state(true);
-  let selectedFile: string | null = $state(null);
 
   onMount(() => {
     loadStatus();
   });
 
-  async function loadStatus() {
+  export async function loadStatus() {
     loading = true;
     error = null;
     try {
       gitStatus = await getGitStatus();
       // Auto-select first file if none selected
-      if (!selectedFile && gitStatus) {
-        const firstFile = gitStatus.unstaged[0] || gitStatus.staged[0] || gitStatus.untracked[0];
-        if (firstFile) {
-          selectedFile = firstFile.path;
+      if (!selectedFile && gitStatus && onFileSelect) {
+        if (gitStatus.unstaged.length > 0) {
+          onFileSelect(gitStatus.unstaged[0].path, 'unstaged');
+        } else if (gitStatus.staged.length > 0) {
+          onFileSelect(gitStatus.staged[0].path, 'staged');
+        } else if (gitStatus.untracked.length > 0) {
+          onFileSelect(gitStatus.untracked[0].path, 'untracked');
         }
       }
     } catch (e) {
@@ -31,9 +42,8 @@
     }
   }
 
-  function selectFile(path: string) {
-    selectedFile = path;
-    // TODO: Emit event to parent to show diff for this file
+  function selectFile(path: string, category: FileCategory) {
+    onFileSelect?.(path, category);
   }
 
   function getStatusIcon(status: string): string {
@@ -97,7 +107,7 @@
               <li 
                 class="file-item" 
                 class:selected={selectedFile === file.path}
-                onclick={() => selectFile(file.path)}
+                onclick={() => selectFile(file.path, 'staged')}
               >
                 <span class="status-icon" style="color: {getStatusColor(file.status)}">{getStatusIcon(file.status)}</span>
                 <span class="file-path">
@@ -121,7 +131,7 @@
               <li 
                 class="file-item"
                 class:selected={selectedFile === file.path}
-                onclick={() => selectFile(file.path)}
+                onclick={() => selectFile(file.path, 'unstaged')}
               >
                 <span class="status-icon" style="color: {getStatusColor(file.status)}">{getStatusIcon(file.status)}</span>
                 <span class="file-path">
@@ -145,7 +155,7 @@
               <li 
                 class="file-item"
                 class:selected={selectedFile === file.path}
-                onclick={() => selectFile(file.path)}
+                onclick={() => selectFile(file.path, 'untracked')}
               >
                 <span class="status-icon" style="color: {getStatusColor(file.status)}">{getStatusIcon(file.status)}</span>
                 <span class="file-path">

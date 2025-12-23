@@ -27,3 +27,4 @@ git2 = "0.19"
 
 # Syntax highlighting
 syntect = "5.2"
+tauri-plugin-dialog = "2.4.2"

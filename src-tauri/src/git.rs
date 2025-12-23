@@ -513,7 +513,7 @@ pub fn discard_file(repo_path: Option<&str>, file_path: &str) -> Result<(), GitE
 
     match entry {
         Some(entry) => {
-            // File exists in index - restore it
+            // File exists in index - restore it from index
             let blob = repo.find_blob(entry.id)?;
             let content = blob.content();
             let full_path = workdir.join(file_path);
@@ -528,14 +528,36 @@ pub fn discard_file(repo_path: Option<&str>, file_path: &str) -> Result<(), GitE
             std::fs::write(&full_path, content).map_err(|e| GitError {
                 message: format!("Failed to write file: {}", e),
             })?;
+            
+            // Also need to update the file's mode/permissions if needed
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = entry.mode;
+                if mode & 0o111 != 0 {
+                    // File should be executable
+                    let mut perms = std::fs::metadata(&full_path)
+                        .map_err(|e| GitError { message: format!("Failed to get metadata: {}", e) })?
+                        .permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(&full_path, perms)
+                        .map_err(|e| GitError { message: format!("Failed to set permissions: {}", e) })?;
+                }
+            }
         }
         None => {
             // File not in index - it's untracked, delete it
             let full_path = workdir.join(file_path);
             if full_path.exists() {
-                std::fs::remove_file(&full_path).map_err(|e| GitError {
-                    message: format!("Failed to delete file: {}", e),
-                })?;
+                if full_path.is_dir() {
+                    std::fs::remove_dir_all(&full_path).map_err(|e| GitError {
+                        message: format!("Failed to delete directory: {}", e),
+                    })?;
+                } else {
+                    std::fs::remove_file(&full_path).map_err(|e| GitError {
+                        message: format!("Failed to delete file: {}", e),
+                    })?;
+                }
             }
         }
     }

@@ -3,6 +3,7 @@
   import DiffViewer from './lib/DiffViewer.svelte'
   import CommitPanel from './lib/CommitPanel.svelte'
   import { getFileDiff, getUntrackedFileDiff, stageFile, unstageFile, discardFile } from './lib/services/git'
+  import { ask } from '@tauri-apps/plugin-dialog'
   import type { FileDiff } from './lib/types'
 
   let selectedFile: string | null = $state(null);
@@ -40,19 +41,26 @@
   async function handleStageFile() {
     if (!selectedFile || !selectedCategory) return;
 
+    const filePath = selectedFile;
+    const wasStaged = selectedCategory === 'staged';
+
     try {
-      if (selectedCategory === 'staged') {
+      if (wasStaged) {
         // Already staged - unstage it
-        await unstageFile(selectedFile);
+        await unstageFile(filePath);
       } else {
         // Stage the file
-        await stageFile(selectedFile);
+        await stageFile(filePath);
       }
-      // Refresh sidebar and clear diff (file moved to different category)
+      
+      // Refresh sidebar
       await sidebarRef?.loadStatus();
-      currentDiff = null;
-      selectedFile = null;
-      selectedCategory = null;
+      
+      // Follow the file to its new category and reload the diff
+      const newCategory: FileCategory = wasStaged ? 'unstaged' : 'staged';
+      selectedFile = filePath;
+      selectedCategory = newCategory;
+      await loadDiff(filePath, newCategory);
     } catch (e) {
       console.error('Failed to stage/unstage file:', e);
       diffError = e instanceof Error ? e.message : String(e);
@@ -62,8 +70,16 @@
   async function handleDiscardFile() {
     if (!selectedFile || !selectedCategory) return;
 
-    // Confirm before discarding
-    const confirmed = window.confirm(`Discard all changes to ${selectedFile}? This cannot be undone.`);
+    // Use Tauri's native dialog for confirmation
+    const confirmed = await ask(
+      `Discard all changes to ${selectedFile}? This cannot be undone.`,
+      { 
+        title: 'Discard Changes',
+        kind: 'warning',
+        okLabel: 'Discard',
+        cancelLabel: 'Cancel'
+      }
+    );
     if (!confirmed) return;
 
     try {

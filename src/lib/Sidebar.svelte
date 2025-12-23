@@ -1,22 +1,39 @@
 <script lang="ts">
-  // Placeholder data - will be replaced with real git data
-  let stagedFiles = [
-    { name: 'src/main.rs', status: 'modified' },
-  ];
-  
-  let unstagedFiles = [
-    { name: 'src/lib.rs', status: 'modified' },
-    { name: 'README.md', status: 'modified' },
-  ];
-  
-  let untrackedFiles = [
-    { name: 'notes.txt', status: 'untracked' },
-  ];
+  import { onMount } from 'svelte';
+  import { getGitStatus } from './services/git';
+  import type { FileStatus, GitStatus } from './types';
 
-  let selectedFile: string | null = 'src/lib.rs';
+  let gitStatus: GitStatus | null = $state(null);
+  let error: string | null = $state(null);
+  let loading = $state(true);
+  let selectedFile: string | null = $state(null);
 
-  function selectFile(name: string) {
-    selectedFile = name;
+  onMount(() => {
+    loadStatus();
+  });
+
+  async function loadStatus() {
+    loading = true;
+    error = null;
+    try {
+      gitStatus = await getGitStatus();
+      // Auto-select first file if none selected
+      if (!selectedFile && gitStatus) {
+        const firstFile = gitStatus.unstaged[0] || gitStatus.staged[0] || gitStatus.untracked[0];
+        if (firstFile) {
+          selectedFile = firstFile.path;
+        }
+      }
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = false;
+    }
+  }
+
+  function selectFile(path: string) {
+    selectedFile = path;
+    // TODO: Emit event to parent to show diff for this file
   }
 
   function getStatusIcon(status: string): string {
@@ -40,77 +57,115 @@
       default: return '#d4d4d4';
     }
   }
+
+  function getFileName(path: string): string {
+    return path.split('/').pop() || path;
+  }
+
+  function getFileDir(path: string): string {
+    const parts = path.split('/');
+    if (parts.length > 1) {
+      return parts.slice(0, -1).join('/') + '/';
+    }
+    return '';
+  }
 </script>
 
 <div class="sidebar-content">
   <div class="header">
     <h2>Changes</h2>
+    <button class="refresh-btn" onclick={loadStatus} title="Refresh">↻</button>
   </div>
 
-  <div class="file-sections">
-    {#if stagedFiles.length > 0}
-      <div class="section">
-        <div class="section-header">
-          <span class="section-title">Staged</span>
-          <span class="badge">{stagedFiles.length}</span>
+  {#if loading}
+    <div class="loading">Loading...</div>
+  {:else if error}
+    <div class="error">
+      <p>Error: {error}</p>
+      <button onclick={loadStatus}>Retry</button>
+    </div>
+  {:else if gitStatus}
+    <div class="file-sections">
+      {#if gitStatus.staged.length > 0}
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Staged</span>
+            <span class="badge staged-badge">{gitStatus.staged.length}</span>
+          </div>
+          <ul class="file-list">
+            {#each gitStatus.staged as file}
+              <li 
+                class="file-item" 
+                class:selected={selectedFile === file.path}
+                onclick={() => selectFile(file.path)}
+              >
+                <span class="status-icon" style="color: {getStatusColor(file.status)}">{getStatusIcon(file.status)}</span>
+                <span class="file-path">
+                  <span class="file-dir">{getFileDir(file.path)}</span>
+                  <span class="file-name">{getFileName(file.path)}</span>
+                </span>
+              </li>
+            {/each}
+          </ul>
         </div>
-        <ul class="file-list">
-          {#each stagedFiles as file}
-            <li 
-              class="file-item" 
-              class:selected={selectedFile === file.name}
-              onclick={() => selectFile(file.name)}
-            >
-              <span class="status-icon" style="color: {getStatusColor(file.status)}">{getStatusIcon(file.status)}</span>
-              <span class="file-name">{file.name}</span>
-            </li>
-          {/each}
-        </ul>
-      </div>
-    {/if}
+      {/if}
 
-    {#if unstagedFiles.length > 0}
-      <div class="section">
-        <div class="section-header">
-          <span class="section-title">Unstaged</span>
-          <span class="badge">{unstagedFiles.length}</span>
+      {#if gitStatus.unstaged.length > 0}
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Unstaged</span>
+            <span class="badge">{gitStatus.unstaged.length}</span>
+          </div>
+          <ul class="file-list">
+            {#each gitStatus.unstaged as file}
+              <li 
+                class="file-item"
+                class:selected={selectedFile === file.path}
+                onclick={() => selectFile(file.path)}
+              >
+                <span class="status-icon" style="color: {getStatusColor(file.status)}">{getStatusIcon(file.status)}</span>
+                <span class="file-path">
+                  <span class="file-dir">{getFileDir(file.path)}</span>
+                  <span class="file-name">{getFileName(file.path)}</span>
+                </span>
+              </li>
+            {/each}
+          </ul>
         </div>
-        <ul class="file-list">
-          {#each unstagedFiles as file}
-            <li 
-              class="file-item"
-              class:selected={selectedFile === file.name}
-              onclick={() => selectFile(file.name)}
-            >
-              <span class="status-icon" style="color: {getStatusColor(file.status)}">{getStatusIcon(file.status)}</span>
-              <span class="file-name">{file.name}</span>
-            </li>
-          {/each}
-        </ul>
-      </div>
-    {/if}
+      {/if}
 
-    {#if untrackedFiles.length > 0}
-      <div class="section">
-        <div class="section-header">
-          <span class="section-title">Untracked</span>
-          <span class="badge">{untrackedFiles.length}</span>
+      {#if gitStatus.untracked.length > 0}
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">Untracked</span>
+            <span class="badge">{gitStatus.untracked.length}</span>
+          </div>
+          <ul class="file-list">
+            {#each gitStatus.untracked as file}
+              <li 
+                class="file-item"
+                class:selected={selectedFile === file.path}
+                onclick={() => selectFile(file.path)}
+              >
+                <span class="status-icon" style="color: {getStatusColor(file.status)}">{getStatusIcon(file.status)}</span>
+                <span class="file-path">
+                  <span class="file-dir">{getFileDir(file.path)}</span>
+                  <span class="file-name">{getFileName(file.path)}</span>
+                </span>
+              </li>
+            {/each}
+          </ul>
         </div>
-        <ul class="file-list">
-          {#each untrackedFiles as file}
-            <li 
-              class="file-item"
-              class:selected={selectedFile === file.name}
-              onclick={() => selectFile(file.name)}
-            >
-              <span class="status-icon" style="color: {getStatusColor(file.status)}">{getStatusIcon(file.status)}</span>
-              <span class="file-name">{file.name}</span>
-            </li>
-          {/each}
-        </ul>
-      </div>
-    {/if}
-  </div>
+      {/if}
+
+      {#if gitStatus.staged.length === 0 && gitStatus.unstaged.length === 0 && gitStatus.untracked.length === 0}
+        <div class="empty-state">
+          <p>No changes</p>
+          <p class="empty-hint">Working tree is clean</p>
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -122,6 +177,9 @@
   }
 
   .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 12px 16px;
     border-bottom: 1px solid #3c3c3c;
   }
@@ -133,6 +191,50 @@
     text-transform: uppercase;
     letter-spacing: 0.5px;
     color: #cccccc;
+  }
+
+  .refresh-btn {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+  }
+
+  .refresh-btn:hover {
+    background-color: #3c3c3c;
+    color: #cccccc;
+  }
+
+  .loading, .error, .empty-state {
+    padding: 20px 16px;
+    text-align: center;
+    color: #888;
+  }
+
+  .error {
+    color: #f14c4c;
+  }
+
+  .error button {
+    margin-top: 8px;
+    padding: 4px 12px;
+    background-color: #3c3c3c;
+    border: none;
+    border-radius: 4px;
+    color: #d4d4d4;
+    cursor: pointer;
+  }
+
+  .empty-state p {
+    margin: 0;
+  }
+
+  .empty-hint {
+    font-size: 12px;
+    margin-top: 4px !important;
   }
 
   .file-sections {
@@ -172,6 +274,11 @@
     border-radius: 10px;
   }
 
+  .staged-badge {
+    background-color: #2ea043;
+    color: white;
+  }
+
   .file-list {
     list-style: none;
     margin: 0;
@@ -199,11 +306,20 @@
     font-family: monospace;
     font-weight: bold;
     margin-right: 8px;
+    flex-shrink: 0;
   }
 
-  .file-name {
+  .file-path {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .file-dir {
+    color: #888;
+  }
+
+  .file-name {
+    color: #d4d4d4;
   }
 </style>

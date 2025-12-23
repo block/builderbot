@@ -1,7 +1,23 @@
 <script lang="ts">
-  let commitMessage = '';
-  let amendCommit = false;
-  let currentBranch = 'main';
+  import { onMount } from 'svelte';
+  import { getGitStatus } from './services/git';
+
+  let commitMessage = $state('');
+  let amendCommit = $state(false);
+  let currentBranch = $state<string | null>(null);
+
+  onMount(() => {
+    loadBranch();
+  });
+
+  async function loadBranch() {
+    try {
+      const status = await getGitStatus();
+      currentBranch = status.branch;
+    } catch (e) {
+      console.error('Failed to get branch:', e);
+    }
+  }
 
   function handleCommit() {
     console.log('Committing:', commitMessage, 'Amend:', amendCommit);
@@ -17,7 +33,7 @@
 <div class="commit-panel-content">
   <div class="branch-info">
     <span class="branch-icon">⎇</span>
-    <span class="branch-name">{currentBranch}</span>
+    <span class="branch-name">{currentBranch ?? 'loading...'}</span>
   </div>
 
   <div class="commit-form">

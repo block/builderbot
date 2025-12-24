@@ -1,14 +1,11 @@
 <script lang="ts">
-  import type { FileDiff, DiffLine } from './types';
+  import type { FileDiff } from './types';
 
   interface Props {
     diff: FileDiff | null;
-    onStageFile?: () => void;
-    onDiscardFile?: () => void;
-    stageButtonLabel?: string;
   }
 
-  let { diff, onStageFile, onDiscardFile, stageButtonLabel = 'Stage' }: Props = $props();
+  let { diff }: Props = $props();
 
   let leftPane: HTMLDivElement | null = $state(null);
   let rightPane: HTMLDivElement | null = $state(null);
@@ -60,18 +57,6 @@
   {:else if diff.is_binary}
     <div class="diff-header">
       <span class="file-path">{diff.path}</span>
-      <div class="diff-actions">
-        {#if onStageFile}
-          <button class="action-btn" onclick={onStageFile} title="{stageButtonLabel} file"
-            >{stageButtonLabel}</button
-          >
-        {/if}
-        {#if onDiscardFile}
-          <button class="action-btn danger" onclick={onDiscardFile} title="Discard changes"
-            >Discard</button
-          >
-        {/if}
-      </div>
     </div>
     <div class="binary-notice">
       <p>Binary file - cannot display diff</p>
@@ -85,18 +70,6 @@
         {/if}
         {diff.path}
       </span>
-      <div class="diff-actions">
-        {#if onStageFile}
-          <button class="action-btn" onclick={onStageFile} title="{stageButtonLabel} file"
-            >{stageButtonLabel}</button
-          >
-        {/if}
-        {#if onDiscardFile}
-          <button class="action-btn danger" onclick={onDiscardFile} title="Discard changes"
-            >Discard</button
-          >
-        {/if}
-      </div>
     </div>
 
     <div class="diff-content">
@@ -174,33 +147,6 @@
   .arrow {
     margin: 0 8px;
     color: var(--text-muted);
-  }
-
-  .diff-actions {
-    display: flex;
-    gap: 8px;
-  }
-
-  .action-btn {
-    padding: 4px 12px;
-    font-size: 12px;
-    background-color: var(--ui-accent);
-    color: white;
-    border: none;
-    border-radius: 3px;
-    cursor: pointer;
-  }
-
-  .action-btn:hover {
-    background-color: var(--ui-accent-hover);
-  }
-
-  .action-btn.danger {
-    background-color: var(--ui-danger);
-  }
-
-  .action-btn.danger:hover {
-    background-color: var(--ui-danger-hover);
   }
 
   .diff-content {

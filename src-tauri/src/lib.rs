@@ -2,6 +2,10 @@ mod git;
 
 use git::{CommitResult, FileDiff, GitStatus};
 
+// =============================================================================
+// Tauri Commands
+// =============================================================================
+
 #[tauri::command]
 fn get_git_status(path: Option<String>) -> Result<GitStatus, String> {
     git::get_status(path.as_deref()).map_err(|e| e.message)
@@ -68,6 +72,10 @@ fn create_commit(repo_path: Option<String>, message: String) -> Result<CommitRes
 fn amend_commit(repo_path: Option<String>, message: String) -> Result<CommitResult, String> {
     git::amend_commit(repo_path.as_deref(), &message).map_err(|e| e.message)
 }
+
+// =============================================================================
+// Tauri App Setup
+// =============================================================================
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

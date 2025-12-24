@@ -1,6 +1,6 @@
 mod git;
 
-use git::{FileDiff, GitStatus};
+use git::{CommitResult, FileDiff, GitStatus};
 
 #[tauri::command]
 fn get_git_status(path: Option<String>) -> Result<GitStatus, String> {
@@ -54,6 +54,21 @@ fn unstage_all(repo_path: Option<String>) -> Result<(), String> {
     git::unstage_all(repo_path.as_deref()).map_err(|e| e.message)
 }
 
+#[tauri::command]
+fn get_last_commit_message(repo_path: Option<String>) -> Result<Option<String>, String> {
+    git::get_last_commit_message(repo_path.as_deref()).map_err(|e| e.message)
+}
+
+#[tauri::command]
+fn create_commit(repo_path: Option<String>, message: String) -> Result<CommitResult, String> {
+    git::create_commit(repo_path.as_deref(), &message).map_err(|e| e.message)
+}
+
+#[tauri::command]
+fn amend_commit(repo_path: Option<String>, message: String) -> Result<CommitResult, String> {
+    git::amend_commit(repo_path.as_deref(), &message).map_err(|e| e.message)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -77,7 +92,10 @@ pub fn run() {
             unstage_file,
             discard_file,
             stage_all,
-            unstage_all
+            unstage_all,
+            get_last_commit_message,
+            create_commit,
+            amend_commit
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

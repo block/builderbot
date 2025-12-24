@@ -18,6 +18,7 @@
   let diffLoading = $state(false);
   let diffError: string | null = $state(null);
   let sidebarRef: Sidebar | null = $state(null);
+  let commitPanelRef: CommitPanel | null = $state(null);
 
   async function handleFileSelect(path: string, category: FileCategory) {
     selectedFile = path;
@@ -103,6 +104,16 @@
     if (selectedCategory === 'staged') return 'Unstage';
     return 'Stage';
   }
+
+  async function handleCommitComplete() {
+    // Refresh sidebar and commit panel after successful commit
+    await sidebarRef?.loadStatus();
+    commitPanelRef?.refresh();
+    // Clear the diff view since staged files are now committed
+    currentDiff = null;
+    selectedFile = null;
+    selectedCategory = null;
+  }
 </script>
 
 <main>
@@ -129,7 +140,7 @@
     </section>
   </div>
   <footer class="commit-panel">
-    <CommitPanel />
+    <CommitPanel bind:this={commitPanelRef} onCommitComplete={handleCommitComplete} />
   </footer>
 </main>
 

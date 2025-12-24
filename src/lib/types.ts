@@ -36,3 +36,8 @@ export interface FileDiff {
   old_content: DiffLine[];
   new_content: DiffLine[];
 }
+
+export interface CommitResult {
+  oid: string;
+  message: string;
+}

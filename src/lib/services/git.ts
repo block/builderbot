@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { GitStatus, FileDiff } from '../types';
+import type { GitStatus, FileDiff, CommitResult } from '../types';
 
 export async function getGitStatus(path?: string): Promise<GitStatus> {
   return invoke<GitStatus>('get_git_status', { path: path ?? null });
@@ -60,5 +60,27 @@ export async function stageAll(repoPath?: string): Promise<void> {
 export async function unstageAll(repoPath?: string): Promise<void> {
   return invoke('unstage_all', {
     repoPath: repoPath ?? null,
+  });
+}
+
+// Commit operations
+
+export async function getLastCommitMessage(repoPath?: string): Promise<string | null> {
+  return invoke<string | null>('get_last_commit_message', {
+    repoPath: repoPath ?? null,
+  });
+}
+
+export async function createCommit(message: string, repoPath?: string): Promise<CommitResult> {
+  return invoke<CommitResult>('create_commit', {
+    repoPath: repoPath ?? null,
+    message,
+  });
+}
+
+export async function amendCommit(message: string, repoPath?: string): Promise<CommitResult> {
+  return invoke<CommitResult>('amend_commit', {
+    repoPath: repoPath ?? null,
+    message,
   });
 }

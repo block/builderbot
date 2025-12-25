@@ -1,4 +1,4 @@
-mod git;
+pub mod git;
 mod refresh;
 mod watcher;
 

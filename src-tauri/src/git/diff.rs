@@ -1,4 +1,6 @@
 //! Diff operations
+//!
+//! Generates side-by-side diff data with range mappings for scroll synchronization.
 
 use super::repo::find_repo;
 use super::GitError;
@@ -6,16 +8,18 @@ use git2::{Diff, DiffOptions, Repository};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// Represents a single line in a diff
+/// A single line in a diff pane
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffLine {
-    pub line_type: String, // "context", "added", "removed"
-    pub old_lineno: Option<u32>,
-    pub new_lineno: Option<u32>,
+    /// "context", "added", or "removed"
+    pub line_type: String,
+    /// 1-indexed line number in the source file
+    pub lineno: u32,
+    /// Line content (without trailing newline)
     pub content: String,
 }
 
-/// Represents a hunk (chunk) of changes
+/// A hunk from git's diff output (used internally, also exposed for potential future use)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffHunk {
     pub old_start: u32,
@@ -23,36 +27,51 @@ pub struct DiffHunk {
     pub new_start: u32,
     pub new_lines: u32,
     pub header: String,
+    pub lines: Vec<HunkLine>,
+}
+
+/// A line within a hunk (internal representation with both line numbers)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HunkLine {
+    pub line_type: String,
+    pub old_lineno: Option<u32>,
+    pub new_lineno: Option<u32>,
+    pub content: String,
+}
+
+/// Half-open interval [start, end) of row indices
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Maps corresponding regions between before/after panes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Range {
+    pub before: Span,
+    pub after: Span,
+    /// true = region contains changes, false = identical lines
+    pub changed: bool,
+}
+
+/// Content for one side of the diff
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffSide {
+    pub path: Option<String>,
     pub lines: Vec<DiffLine>,
 }
 
-/// A row in the side-by-side view - either a line of code or a collapse indicator
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum DiffRow {
-    /// A line of code
-    Line(DiffLine),
-    /// A collapse indicator showing N lines exist on the other side
-    Collapse {
-        /// Number of lines collapsed (on the other pane)
-        count: u32,
-        /// Starting line number on the other pane
-        start_line: u32,
-        /// Index into the other pane's rows where this collapse corresponds
-        other_pane_index: usize,
-    },
-}
-
-/// Represents the complete diff for a file
+/// Complete diff for a file
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileDiff {
-    pub path: String,
-    pub old_path: Option<String>, // For renames
     pub status: String,
-    pub hunks: Vec<DiffHunk>,
     pub is_binary: bool,
-    pub old_content: Vec<DiffRow>, // Rows for left pane (original)
-    pub new_content: Vec<DiffRow>, // Rows for right pane (modified)
+    pub hunks: Vec<DiffHunk>,
+    pub before: DiffSide,
+    pub after: DiffSide,
+    /// Range mappings for scroll sync and visual connectors
+    pub ranges: Vec<Range>,
 }
 
 /// Get diff for a specific file
@@ -78,16 +97,35 @@ pub fn get_file_diff(
     };
 
     // Get full file contents for both sides
-    let old_file_content = get_old_file_content(&repo, file_path, staged)?;
-    let new_file_content = get_new_file_content(&repo, file_path, staged)?;
+    let before_content = get_before_content(&repo, file_path, staged)?;
+    let after_content = get_after_content(&repo, file_path, staged)?;
 
-    parse_diff_for_file(&diff, file_path, &old_file_content, &new_file_content)
+    // Determine paths
+    let before_path = if before_content.is_some() {
+        Some(file_path.to_string())
+    } else {
+        None
+    };
+    let after_path = if after_content.is_some() {
+        Some(file_path.to_string())
+    } else {
+        None
+    };
+
+    parse_diff_for_file(
+        &diff,
+        file_path,
+        before_path,
+        after_path,
+        &before_content,
+        &after_content,
+    )
 }
 
-/// Get the "old" file content (what we're comparing from)
+/// Get the "before" file content (what we're comparing from)
 /// - For staged diffs: content from HEAD
 /// - For unstaged diffs: content from index
-fn get_old_file_content(
+fn get_before_content(
     repo: &Repository,
     file_path: &str,
     staged: bool,
@@ -131,10 +169,10 @@ fn get_old_file_content(
     }
 }
 
-/// Get the "new" file content (what we're comparing to)
+/// Get the "after" file content (what we're comparing to)
 /// - For staged diffs: content from index
 /// - For unstaged diffs: content from working directory
-fn get_new_file_content(
+fn get_after_content(
     repo: &Repository,
     file_path: &str,
     staged: bool,
@@ -183,47 +221,56 @@ pub fn get_untracked_file_diff(
         message: format!("Failed to read file: {}", e),
     })?;
 
-    let lines: Vec<DiffLine> = content
+    let after_lines: Vec<DiffLine> = content
         .lines()
         .enumerate()
         .map(|(i, line)| DiffLine {
             line_type: "added".to_string(),
-            old_lineno: None,
-            new_lineno: Some((i + 1) as u32),
+            lineno: (i + 1) as u32,
             content: line.to_string(),
         })
         .collect();
 
-    let line_count = lines.len();
+    let line_count = after_lines.len();
 
-    // For untracked files: left pane has collapse indicator, right pane has all lines
-    let old_content = if line_count > 0 {
-        vec![DiffRow::Collapse {
-            count: line_count as u32,
-            start_line: 1,
-            other_pane_index: 0,
-        }]
-    } else {
-        vec![]
-    };
-
-    let new_content: Vec<DiffRow> = lines.iter().cloned().map(DiffRow::Line).collect();
+    // Single range: empty before, all lines in after
+    let ranges = vec![Range {
+        before: Span { start: 0, end: 0 },
+        after: Span {
+            start: 0,
+            end: line_count,
+        },
+        changed: true,
+    }];
 
     Ok(FileDiff {
-        path: file_path.to_string(),
-        old_path: None,
         status: "untracked".to_string(),
+        is_binary: false,
         hunks: vec![DiffHunk {
             old_start: 0,
             old_lines: 0,
             new_start: 1,
             new_lines: line_count as u32,
             header: format!("@@ -0,0 +1,{} @@", line_count),
-            lines,
+            lines: after_lines
+                .iter()
+                .map(|l| HunkLine {
+                    line_type: l.line_type.clone(),
+                    old_lineno: None,
+                    new_lineno: Some(l.lineno),
+                    content: l.content.clone(),
+                })
+                .collect(),
         }],
-        is_binary: false,
-        old_content,
-        new_content,
+        before: DiffSide {
+            path: None,
+            lines: vec![],
+        },
+        after: DiffSide {
+            path: Some(file_path.to_string()),
+            lines: after_lines,
+        },
+        ranges,
     })
 }
 
@@ -231,18 +278,20 @@ pub fn get_untracked_file_diff(
 fn parse_diff_for_file(
     diff: &Diff,
     target_path: &str,
-    old_file_content: &Option<String>,
-    new_file_content: &Option<String>,
+    before_path: Option<String>,
+    after_path: Option<String>,
+    before_content: &Option<String>,
+    after_content: &Option<String>,
 ) -> Result<FileDiff, GitError> {
     use std::cell::RefCell;
 
     let hunks: RefCell<Vec<DiffHunk>> = RefCell::new(Vec::new());
     let is_binary: RefCell<bool> = RefCell::new(false);
     let file_status: RefCell<String> = RefCell::new("modified".to_string());
-    let old_path: RefCell<Option<String>> = RefCell::new(None);
     let found_file: RefCell<bool> = RefCell::new(false);
+    let renamed_from: RefCell<Option<String>> = RefCell::new(None);
 
-    let current_hunk_lines: RefCell<Vec<DiffLine>> = RefCell::new(Vec::new());
+    let current_hunk_lines: RefCell<Vec<HunkLine>> = RefCell::new(Vec::new());
     let current_hunk_header: RefCell<String> = RefCell::new(String::new());
     let current_hunk_old_start: RefCell<u32> = RefCell::new(0);
     let current_hunk_old_lines: RefCell<u32> = RefCell::new(0);
@@ -275,7 +324,7 @@ fn parse_diff_for_file(
                 .to_string();
 
                 if delta.status() == git2::Delta::Renamed {
-                    *old_path.borrow_mut() = old_file_path.map(|s| s.to_string());
+                    *renamed_from.borrow_mut() = old_file_path.map(|s| s.to_string());
                 }
             }
             true
@@ -321,7 +370,7 @@ fn parse_diff_for_file(
                     .trim_end_matches('\r')
                     .to_string();
 
-                current_hunk_lines.borrow_mut().push(DiffLine {
+                current_hunk_lines.borrow_mut().push(HunkLine {
                     line_type,
                     old_lineno: line.old_lineno(),
                     new_lineno: line.new_lineno(),
@@ -341,15 +390,23 @@ fn parse_diff_for_file(
         });
     }
 
+    let status = file_status.into_inner();
+    let renamed_from = renamed_from.into_inner();
+
     if *is_binary.borrow() {
         return Ok(FileDiff {
-            path: target_path.to_string(),
-            old_path: old_path.into_inner(),
-            status: file_status.into_inner(),
-            hunks: vec![],
+            status,
             is_binary: true,
-            old_content: vec![],
-            new_content: vec![],
+            hunks: vec![],
+            before: DiffSide {
+                path: renamed_from.or(before_path),
+                lines: vec![],
+            },
+            after: DiffSide {
+                path: after_path,
+                lines: vec![],
+            },
+            ranges: vec![],
         });
     }
 
@@ -369,52 +426,56 @@ fn parse_diff_for_file(
 
     let hunks = hunks.into_inner();
 
-    // Build side-by-side content from full file contents and hunks
-    let (old_content, new_content) =
-        build_full_file_side_by_side(old_file_content, new_file_content, &hunks);
+    // Build side-by-side content and ranges
+    let (before_lines, after_lines, ranges) =
+        build_side_by_side(before_content, after_content, &hunks);
 
     Ok(FileDiff {
-        path: target_path.to_string(),
-        old_path: old_path.into_inner(),
-        status: file_status.into_inner(),
-        hunks,
+        status,
         is_binary: false,
-        old_content,
-        new_content,
+        hunks,
+        before: DiffSide {
+            path: renamed_from.or(before_path),
+            lines: before_lines,
+        },
+        after: DiffSide {
+            path: after_path,
+            lines: after_lines,
+        },
+        ranges,
     })
 }
 
-/// Build side-by-side content from full file contents, using hunks to identify changes.
-/// Shows the complete file with changed lines highlighted and collapse indicators.
-fn build_full_file_side_by_side(
-    old_file_content: &Option<String>,
-    new_file_content: &Option<String>,
+/// Build side-by-side line arrays and range mappings from file contents and hunks.
+fn build_side_by_side(
+    before_content: &Option<String>,
+    after_content: &Option<String>,
     hunks: &[DiffHunk],
-) -> (Vec<DiffRow>, Vec<DiffRow>) {
-    let old_lines: Vec<&str> = old_file_content
+) -> (Vec<DiffLine>, Vec<DiffLine>, Vec<Range>) {
+    let before_file_lines: Vec<&str> = before_content
         .as_ref()
         .map(|s| s.lines().collect())
         .unwrap_or_default();
-    let new_lines: Vec<&str> = new_file_content
+    let after_file_lines: Vec<&str> = after_content
         .as_ref()
         .map(|s| s.lines().collect())
         .unwrap_or_default();
 
     // Build sets of changed line numbers from hunks
-    let mut old_removed: HashSet<u32> = HashSet::new();
-    let mut new_added: HashSet<u32> = HashSet::new();
+    let mut removed_lines: HashSet<u32> = HashSet::new();
+    let mut added_lines: HashSet<u32> = HashSet::new();
 
     for hunk in hunks {
         for line in &hunk.lines {
             match line.line_type.as_str() {
                 "removed" => {
                     if let Some(lineno) = line.old_lineno {
-                        old_removed.insert(lineno);
+                        removed_lines.insert(lineno);
                     }
                 }
                 "added" => {
                     if let Some(lineno) = line.new_lineno {
-                        new_added.insert(lineno);
+                        added_lines.insert(lineno);
                     }
                 }
                 _ => {}
@@ -422,228 +483,262 @@ fn build_full_file_side_by_side(
         }
     }
 
-    let mut old_content: Vec<DiffRow> = Vec::new();
-    let mut new_content: Vec<DiffRow> = Vec::new();
+    let mut before_lines: Vec<DiffLine> = Vec::new();
+    let mut after_lines: Vec<DiffLine> = Vec::new();
+    let mut ranges: Vec<Range> = Vec::new();
 
-    let mut old_idx: usize = 0; // 0-indexed into old_lines
-    let mut new_idx: usize = 0; // 0-indexed into new_lines
+    // Track positions for range building
+    let mut before_idx: usize = 0; // 0-indexed into before_file_lines
+    let mut after_idx: usize = 0; // 0-indexed into after_file_lines
 
     // Process hunks in order, filling in unchanged lines between them
     for hunk in hunks {
-        let hunk_old_start = hunk.old_start as usize;
-        let hunk_new_start = hunk.new_start as usize;
+        let hunk_before_start = hunk.old_start as usize;
+        let hunk_after_start = hunk.new_start as usize;
 
-        // Add unchanged lines before this hunk (context lines that aren't in any hunk)
-        // These go to both panes simultaneously
-        while old_idx + 1 < hunk_old_start && new_idx + 1 < hunk_new_start {
-            let old_lineno = (old_idx + 1) as u32;
-            let new_lineno = (new_idx + 1) as u32;
+        // Add unchanged lines before this hunk as a context range
+        if (before_idx + 1 < hunk_before_start || hunk.old_start == 0)
+            && (after_idx + 1 < hunk_after_start || hunk.new_start == 0)
+        {
+            let range_before_start = before_lines.len();
+            let range_after_start = after_lines.len();
 
-            let content = old_lines.get(old_idx).unwrap_or(&"").to_string();
+            while before_idx + 1 < hunk_before_start && after_idx + 1 < hunk_after_start {
+                let content = before_file_lines.get(before_idx).unwrap_or(&"").to_string();
 
-            old_content.push(DiffRow::Line(DiffLine {
-                line_type: "context".to_string(),
-                old_lineno: Some(old_lineno),
-                new_lineno: None,
-                content: content.clone(),
-            }));
-            new_content.push(DiffRow::Line(DiffLine {
-                line_type: "context".to_string(),
-                old_lineno: None,
-                new_lineno: Some(new_lineno),
-                content,
-            }));
+                before_lines.push(DiffLine {
+                    line_type: "context".to_string(),
+                    lineno: (before_idx + 1) as u32,
+                    content: content.clone(),
+                });
+                after_lines.push(DiffLine {
+                    line_type: "context".to_string(),
+                    lineno: (after_idx + 1) as u32,
+                    content,
+                });
 
-            old_idx += 1;
-            new_idx += 1;
-        }
+                before_idx += 1;
+                after_idx += 1;
+            }
 
-        // Process the hunk - collect consecutive changes for collapse indicators
-        let mut pending_removed: Vec<DiffLine> = Vec::new();
-        let mut pending_added: Vec<DiffLine> = Vec::new();
-
-        for line in &hunk.lines {
-            match line.line_type.as_str() {
-                "context" => {
-                    // Flush pending changes
-                    flush_pending_changes(
-                        &mut old_content,
-                        &mut new_content,
-                        &mut pending_removed,
-                        &mut pending_added,
-                    );
-
-                    // Add context line to both sides
-                    old_content.push(DiffRow::Line(DiffLine {
-                        line_type: "context".to_string(),
-                        old_lineno: line.old_lineno,
-                        new_lineno: None,
-                        content: line.content.clone(),
-                    }));
-                    new_content.push(DiffRow::Line(DiffLine {
-                        line_type: "context".to_string(),
-                        old_lineno: None,
-                        new_lineno: line.new_lineno,
-                        content: line.content.clone(),
-                    }));
-
-                    if let Some(ln) = line.old_lineno {
-                        old_idx = ln as usize;
-                    }
-                    if let Some(ln) = line.new_lineno {
-                        new_idx = ln as usize;
-                    }
-                }
-                "removed" => {
-                    // Flush added if we have them (handles interleaved)
-                    if !pending_added.is_empty() {
-                        flush_pending_changes(
-                            &mut old_content,
-                            &mut new_content,
-                            &mut pending_removed,
-                            &mut pending_added,
-                        );
-                    }
-                    pending_removed.push(line.clone());
-                    if let Some(ln) = line.old_lineno {
-                        old_idx = ln as usize;
-                    }
-                }
-                "added" => {
-                    pending_added.push(line.clone());
-                    if let Some(ln) = line.new_lineno {
-                        new_idx = ln as usize;
-                    }
-                }
-                _ => {}
+            // Add context range if we added any lines
+            if before_lines.len() > range_before_start {
+                ranges.push(Range {
+                    before: Span {
+                        start: range_before_start,
+                        end: before_lines.len(),
+                    },
+                    after: Span {
+                        start: range_after_start,
+                        end: after_lines.len(),
+                    },
+                    changed: false,
+                });
             }
         }
 
-        // Flush any remaining changes from this hunk
-        flush_pending_changes(
-            &mut old_content,
-            &mut new_content,
-            &mut pending_removed,
-            &mut pending_added,
+        // Process the hunk
+        process_hunk(
+            hunk,
+            &mut before_lines,
+            &mut after_lines,
+            &mut ranges,
+            &mut before_idx,
+            &mut after_idx,
         );
     }
 
     // Add any remaining unchanged lines after the last hunk
-    while old_idx < old_lines.len() && new_idx < new_lines.len() {
-        let old_lineno = (old_idx + 1) as u32;
-        let new_lineno = (new_idx + 1) as u32;
+    if before_idx < before_file_lines.len() || after_idx < after_file_lines.len() {
+        let range_before_start = before_lines.len();
+        let range_after_start = after_lines.len();
 
-        let content = old_lines.get(old_idx).unwrap_or(&"").to_string();
+        while before_idx < before_file_lines.len() && after_idx < after_file_lines.len() {
+            let content = before_file_lines.get(before_idx).unwrap_or(&"").to_string();
 
-        old_content.push(DiffRow::Line(DiffLine {
-            line_type: "context".to_string(),
-            old_lineno: Some(old_lineno),
-            new_lineno: None,
-            content: content.clone(),
-        }));
-        new_content.push(DiffRow::Line(DiffLine {
-            line_type: "context".to_string(),
-            old_lineno: None,
-            new_lineno: Some(new_lineno),
-            content,
-        }));
+            before_lines.push(DiffLine {
+                line_type: "context".to_string(),
+                lineno: (before_idx + 1) as u32,
+                content: content.clone(),
+            });
+            after_lines.push(DiffLine {
+                line_type: "context".to_string(),
+                lineno: (after_idx + 1) as u32,
+                content,
+            });
 
-        old_idx += 1;
-        new_idx += 1;
+            before_idx += 1;
+            after_idx += 1;
+        }
+
+        // Handle remaining lines on either side (edge case)
+        while before_idx < before_file_lines.len() {
+            let content = before_file_lines.get(before_idx).unwrap_or(&"").to_string();
+            before_lines.push(DiffLine {
+                line_type: "context".to_string(),
+                lineno: (before_idx + 1) as u32,
+                content,
+            });
+            before_idx += 1;
+        }
+
+        while after_idx < after_file_lines.len() {
+            let content = after_file_lines.get(after_idx).unwrap_or(&"").to_string();
+            after_lines.push(DiffLine {
+                line_type: "context".to_string(),
+                lineno: (after_idx + 1) as u32,
+                content,
+            });
+            after_idx += 1;
+        }
+
+        // Add final context range
+        if before_lines.len() > range_before_start || after_lines.len() > range_after_start {
+            ranges.push(Range {
+                before: Span {
+                    start: range_before_start,
+                    end: before_lines.len(),
+                },
+                after: Span {
+                    start: range_after_start,
+                    end: after_lines.len(),
+                },
+                changed: false,
+            });
+        }
     }
 
-    // Handle case where one file is longer (shouldn't happen in normal diffs, but be safe)
-    while old_idx < old_lines.len() {
-        let old_lineno = (old_idx + 1) as u32;
-        let content = old_lines.get(old_idx).unwrap_or(&"").to_string();
-        old_content.push(DiffRow::Line(DiffLine {
-            line_type: "context".to_string(),
-            old_lineno: Some(old_lineno),
-            new_lineno: None,
-            content,
-        }));
-        old_idx += 1;
-    }
-
-    while new_idx < new_lines.len() {
-        let new_lineno = (new_idx + 1) as u32;
-        let content = new_lines.get(new_idx).unwrap_or(&"").to_string();
-        new_content.push(DiffRow::Line(DiffLine {
-            line_type: "context".to_string(),
-            old_lineno: None,
-            new_lineno: Some(new_lineno),
-            content,
-        }));
-        new_idx += 1;
-    }
-
-    (old_content, new_content)
+    (before_lines, after_lines, ranges)
 }
 
-/// Flush pending removed/added lines, creating collapse indicators as needed
-fn flush_pending_changes(
-    old_content: &mut Vec<DiffRow>,
-    new_content: &mut Vec<DiffRow>,
-    pending_removed: &mut Vec<DiffLine>,
-    pending_added: &mut Vec<DiffLine>,
+/// Process a single hunk, adding lines and ranges
+fn process_hunk(
+    hunk: &DiffHunk,
+    before_lines: &mut Vec<DiffLine>,
+    after_lines: &mut Vec<DiffLine>,
+    ranges: &mut Vec<Range>,
+    before_idx: &mut usize,
+    after_idx: &mut usize,
+) {
+    let mut pending_removed: Vec<&HunkLine> = Vec::new();
+    let mut pending_added: Vec<&HunkLine> = Vec::new();
+
+    for line in &hunk.lines {
+        match line.line_type.as_str() {
+            "context" => {
+                // Flush pending changes as a change range
+                flush_changes(
+                    &mut pending_removed,
+                    &mut pending_added,
+                    before_lines,
+                    after_lines,
+                    ranges,
+                );
+
+                // Add context line to both sides
+                let range_before_start = before_lines.len();
+                let range_after_start = after_lines.len();
+
+                before_lines.push(DiffLine {
+                    line_type: "context".to_string(),
+                    lineno: line.old_lineno.unwrap_or(0),
+                    content: line.content.clone(),
+                });
+                after_lines.push(DiffLine {
+                    line_type: "context".to_string(),
+                    lineno: line.new_lineno.unwrap_or(0),
+                    content: line.content.clone(),
+                });
+
+                // Single-line context range
+                ranges.push(Range {
+                    before: Span {
+                        start: range_before_start,
+                        end: before_lines.len(),
+                    },
+                    after: Span {
+                        start: range_after_start,
+                        end: after_lines.len(),
+                    },
+                    changed: false,
+                });
+
+                if let Some(ln) = line.old_lineno {
+                    *before_idx = ln as usize;
+                }
+                if let Some(ln) = line.new_lineno {
+                    *after_idx = ln as usize;
+                }
+            }
+            "removed" => {
+                pending_removed.push(line);
+                if let Some(ln) = line.old_lineno {
+                    *before_idx = ln as usize;
+                }
+            }
+            "added" => {
+                pending_added.push(line);
+                if let Some(ln) = line.new_lineno {
+                    *after_idx = ln as usize;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Flush any remaining changes
+    flush_changes(
+        &mut pending_removed,
+        &mut pending_added,
+        before_lines,
+        after_lines,
+        ranges,
+    );
+}
+
+/// Flush pending removed/added lines as a single change range
+fn flush_changes(
+    pending_removed: &mut Vec<&HunkLine>,
+    pending_added: &mut Vec<&HunkLine>,
+    before_lines: &mut Vec<DiffLine>,
+    after_lines: &mut Vec<DiffLine>,
+    ranges: &mut Vec<Range>,
 ) {
     if pending_removed.is_empty() && pending_added.is_empty() {
         return;
     }
 
-    let removed_count = pending_removed.len();
-    let added_count = pending_added.len();
+    let range_before_start = before_lines.len();
+    let range_after_start = after_lines.len();
 
-    // Get starting line numbers for collapse indicators
-    let removed_start_line = pending_removed
-        .first()
-        .and_then(|l| l.old_lineno)
-        .unwrap_or(0);
-    let added_start_line = pending_added
-        .first()
-        .and_then(|l| l.new_lineno)
-        .unwrap_or(0);
-
-    // Record positions before inserting
-    let old_insert_index = old_content.len();
-    let new_insert_index = new_content.len();
-
-    // Add removed lines to old pane
+    // Add removed lines to before pane
     for line in pending_removed.drain(..) {
-        old_content.push(DiffRow::Line(line));
+        before_lines.push(DiffLine {
+            line_type: "removed".to_string(),
+            lineno: line.old_lineno.unwrap_or(0),
+            content: line.content.clone(),
+        });
     }
 
-    // Add added lines to new pane
+    // Add added lines to after pane
     for line in pending_added.drain(..) {
-        new_content.push(DiffRow::Line(line));
+        after_lines.push(DiffLine {
+            line_type: "added".to_string(),
+            lineno: line.new_lineno.unwrap_or(0),
+            content: line.content.clone(),
+        });
     }
 
-    // Add collapse indicator to new pane if there were removals
-    if removed_count > 0 {
-        new_content.insert(
-            new_insert_index,
-            DiffRow::Collapse {
-                count: removed_count as u32,
-                start_line: removed_start_line,
-                other_pane_index: old_insert_index,
-            },
-        );
-    }
-
-    // Add collapse indicator to old pane if there were additions
-    if added_count > 0 {
-        let adjusted_new_index = if removed_count > 0 {
-            new_insert_index + 1
-        } else {
-            new_insert_index
-        };
-        old_content.insert(
-            old_insert_index + removed_count,
-            DiffRow::Collapse {
-                count: added_count as u32,
-                start_line: added_start_line,
-                other_pane_index: adjusted_new_index,
-            },
-        );
-    }
+    // Create change range
+    ranges.push(Range {
+        before: Span {
+            start: range_before_start,
+            end: before_lines.len(),
+        },
+        after: Span {
+            start: range_after_start,
+            end: after_lines.len(),
+        },
+        changed: true,
+    });
 }

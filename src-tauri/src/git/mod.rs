@@ -4,7 +4,7 @@
 //! All functions are stateless - they discover the repo fresh each call.
 
 mod commit;
-mod diff;
+pub mod diff;
 pub mod provider;
 mod repo;
 mod staging;

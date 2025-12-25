@@ -7,6 +7,7 @@ license = "MIT"
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
+default-run = "staged"
 
 [lib]
 name = "staged_lib"

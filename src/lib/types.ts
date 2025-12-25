@@ -13,8 +13,7 @@ export interface GitStatus {
 
 export interface DiffLine {
   line_type: 'context' | 'added' | 'removed';
-  old_lineno: number | null;
-  new_lineno: number | null;
+  lineno: number;
   content: string;
 }
 
@@ -27,24 +26,33 @@ export interface DiffHunk {
   lines: DiffLine[];
 }
 
-// A row in the side-by-side view - either a line of code or a collapse indicator
-export type DiffRow =
-  | ({ type: 'Line' } & DiffLine)
-  | {
-      type: 'Collapse';
-      count: number;
-      start_line: number;
-      other_pane_index: number;
-    };
+/** Half-open interval [start, end) of row indices */
+export interface Span {
+  start: number;
+  end: number;
+}
+
+/** Maps corresponding regions between before/after panes */
+export interface Range {
+  before: Span;
+  after: Span;
+  /** true = region contains changes, false = identical lines */
+  changed: boolean;
+}
+
+/** Content for one side of the diff */
+export interface DiffSide {
+  path: string | null;
+  lines: DiffLine[];
+}
 
 export interface FileDiff {
-  path: string;
-  old_path: string | null;
   status: string;
-  hunks: DiffHunk[];
   is_binary: boolean;
-  old_content: DiffRow[];
-  new_content: DiffRow[];
+  hunks: DiffHunk[];
+  before: DiffSide;
+  after: DiffSide;
+  ranges: Range[];
 }
 
 export interface CommitResult {

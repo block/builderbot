@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { FileDiff, DiffRow } from './types';
+  import type { FileDiff, DiffLine } from './types';
   import {
     initHighlighter,
     highlightLine,
@@ -9,8 +9,7 @@
     getTheme,
     type Token,
   } from './services/highlighter';
-  import { createScrollSync, isLine, isCollapse } from './services/diffScroll';
-  import CollapseIndicator from './components/CollapseIndicator.svelte';
+  import { createScrollSync } from './services/scrollSync';
 
   interface Props {
     diff: FileDiff | null;
@@ -18,8 +17,8 @@
 
   let { diff }: Props = $props();
 
-  let leftPane: HTMLDivElement | null = $state(null);
-  let rightPane: HTMLDivElement | null = $state(null);
+  let beforePane: HTMLDivElement | null = $state(null);
+  let afterPane: HTMLDivElement | null = $state(null);
   let highlighterReady = $state(false);
   let languageReady = $state(false);
   let themeBg = $state('#1e1e1e');
@@ -28,7 +27,18 @@
   const scrollSync = createScrollSync();
 
   // Detect language from file path
-  let language = $derived(diff ? detectLanguage(diff.path) : null);
+  let language = $derived(
+    diff?.after.path ? detectLanguage(diff.after.path) : 
+    diff?.before.path ? detectLanguage(diff.before.path) : 
+    null
+  );
+
+  // Update scroll sync ranges when diff changes
+  $effect(() => {
+    if (diff) {
+      scrollSync.setRanges(diff.ranges);
+    }
+  });
 
   onMount(async () => {
     await initHighlighter('github-dark');
@@ -43,9 +53,12 @@
   $effect(() => {
     if (highlighterReady && diff) {
       languageReady = false;
-      prepareLanguage(diff.path).then((ready) => {
-        languageReady = ready;
-      });
+      const path = diff.after.path || diff.before.path;
+      if (path) {
+        prepareLanguage(path).then((ready) => {
+          languageReady = ready;
+        });
+      }
     }
   });
 
@@ -56,20 +69,28 @@
     return highlightLine(content, language);
   }
 
-  function formatLineNumber(num: number | null | undefined): string {
-    return num != null ? String(num) : '';
-  }
-
-  function handleLeftScroll(e: Event) {
+  function handleBeforeScroll(e: Event) {
     if (!diff) return;
     const target = e.target as HTMLDivElement;
-    scrollSync.sync(target, rightPane, 'left', diff.old_content, diff.new_content);
+    scrollSync.onScroll('before', target, afterPane);
   }
 
-  function handleRightScroll(e: Event) {
+  function handleAfterScroll(e: Event) {
     if (!diff) return;
     const target = e.target as HTMLDivElement;
-    scrollSync.sync(target, leftPane, 'right', diff.old_content, diff.new_content);
+    scrollSync.onScroll('after', target, beforePane);
+  }
+
+  // Get display path (handles renames)
+  function getDisplayPath(): string {
+    if (!diff) return '';
+    const beforePath = diff.before.path;
+    const afterPath = diff.after.path;
+    
+    if (beforePath && afterPath && beforePath !== afterPath) {
+      return `${beforePath} → ${afterPath}`;
+    }
+    return afterPath || beforePath || '';
   }
 </script>
 
@@ -80,80 +101,66 @@
     </div>
   {:else if diff.is_binary}
     <div class="diff-header">
-      <span class="file-path">{diff.path}</span>
+      <span class="file-path">{getDisplayPath()}</span>
     </div>
     <div class="binary-notice">
       <p>Binary file - cannot display diff</p>
     </div>
   {:else}
     <div class="diff-header">
-      <span class="file-path">
-        {#if diff.old_path}
-          <span class="old-path">{diff.old_path}</span>
-          <span class="arrow">→</span>
-        {/if}
-        {diff.path}
-      </span>
+      <span class="file-path">{getDisplayPath()}</span>
     </div>
 
     <div class="diff-content">
-      <!-- Left pane: Original -->
-      <div class="diff-pane left-pane">
-        <div class="pane-header">Original</div>
+      <!-- Before pane -->
+      <div class="diff-pane before-pane">
+        <div class="pane-header">Before</div>
         <div
           class="code-container"
-          bind:this={leftPane}
-          onscroll={handleLeftScroll}
+          bind:this={beforePane}
+          onscroll={handleBeforeScroll}
           style="background-color: {themeBg}"
         >
-          {#each diff.old_content as row}
-            {#if isLine(row)}
-              <div class="line" class:line-removed={row.line_type === 'removed'}>
-                <span class="line-number" class:gutter-removed={row.line_type === 'removed'}>
-                  {formatLineNumber(row.old_lineno)}
-                </span>
-                <span class="line-content" class:content-removed={row.line_type === 'removed'}>
-                  {#each getTokens(row.content) as token}
-                    <span style="color: {token.color}">{token.content}</span>
-                  {/each}
-                </span>
-              </div>
-            {:else if isCollapse(row)}
-              <CollapseIndicator count={row.count} startLine={row.start_line} />
-            {/if}
+          {#each diff.before.lines as line}
+            <div class="line" class:line-removed={line.line_type === 'removed'}>
+              <span class="line-number" class:gutter-removed={line.line_type === 'removed'}>
+                {line.lineno}
+              </span>
+              <span class="line-content" class:content-removed={line.line_type === 'removed'}>
+                {#each getTokens(line.content) as token}
+                  <span style="color: {token.color}">{token.content}</span>
+                {/each}
+              </span>
+            </div>
           {/each}
-          {#if diff.old_content.length === 0}
+          {#if diff.before.lines.length === 0}
             <div class="empty-file-notice">New file</div>
           {/if}
         </div>
       </div>
 
-      <!-- Right pane: Modified -->
-      <div class="diff-pane right-pane">
-        <div class="pane-header">Modified</div>
+      <!-- After pane -->
+      <div class="diff-pane after-pane">
+        <div class="pane-header">After</div>
         <div
           class="code-container"
-          bind:this={rightPane}
-          onscroll={handleRightScroll}
+          bind:this={afterPane}
+          onscroll={handleAfterScroll}
           style="background-color: {themeBg}"
         >
-          {#each diff.new_content as row}
-            {#if isLine(row)}
-              <div class="line" class:line-added={row.line_type === 'added'}>
-                <span class="line-number" class:gutter-added={row.line_type === 'added'}>
-                  {formatLineNumber(row.new_lineno)}
-                </span>
-                <span class="line-content" class:content-added={row.line_type === 'added'}>
-                  {#each getTokens(row.content) as token}
-                    <span style="color: {token.color}">{token.content}</span>
-                  {/each}
-                </span>
-              </div>
-            {:else if isCollapse(row)}
-              <CollapseIndicator count={row.count} startLine={row.start_line} />
-            {/if}
+          {#each diff.after.lines as line}
+            <div class="line" class:line-added={line.line_type === 'added'}>
+              <span class="line-number" class:gutter-added={line.line_type === 'added'}>
+                {line.lineno}
+              </span>
+              <span class="line-content" class:content-added={line.line_type === 'added'}>
+                {#each getTokens(line.content) as token}
+                  <span style="color: {token.color}">{token.content}</span>
+                {/each}
+              </span>
+            </div>
           {/each}
-          {#if diff.new_content.length === 0}
+          {#if diff.after.lines.length === 0}
             <div class="empty-file-notice">File deleted</div>
           {/if}
         </div>
@@ -195,16 +202,6 @@
     color: var(--status-modified);
   }
 
-  .old-path {
-    color: var(--text-muted);
-    text-decoration: line-through;
-  }
-
-  .arrow {
-    margin: 0 8px;
-    color: var(--text-muted);
-  }
-
   .diff-content {
     display: flex;
     flex: 1;
@@ -218,7 +215,7 @@
     overflow: hidden;
   }
 
-  .left-pane {
+  .before-pane {
     border-right: 1px solid var(--border-primary);
   }
 

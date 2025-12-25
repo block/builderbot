@@ -6,27 +6,11 @@
 
 ## Architecture
 
-```
-Frontend (Svelte/TS)           Backend (Rust/Tauri)
-────────────────────           ────────────────────
-src/                           src-tauri/src/
-  App.svelte                     lib.rs (Tauri commands)
-  lib/                           git/
-    *.svelte (components)          mod.rs (re-exports)
-    services/git.ts ──invoke──►    repo.rs (find_repo, get_branch_name)
-    theme.ts (color theming)       status.rs (get_status)
-    types.ts                       diff.rs (get_file_diff, parse diff)
-                                   staging.rs (stage/unstage/discard)
-                                   commit.rs (create/amend commit)
-```
-
 Frontend calls Rust via Tauri's `invoke()`. All git operations happen in Rust using libgit2.
 
 ### Design Principles
 
 - **Stateless**: Git is the state. All Rust functions are pure - they discover the repo fresh each call.
-- **Thin commands**: Tauri commands in `lib.rs` are one-liner wrappers around `git::*` functions.
-- **Pure git module**: `src-tauri/src/git/` has no Tauri dependency - just git2 + serde.
 - **Rebuildable features**: Design features as self-contained modules with clear boundaries and minimal tendrils into the rest of the codebase. If a feature needs to be completely rewritten, it should be possible to delete and rebuild it without surgery across multiple files. See `refresh.rs` as an example.
 
 ### Theming

@@ -130,11 +130,7 @@ export function createScrollSync(config: Partial<ScrollSyncConfig> = {}) {
      * @param target - The pane to sync
      * @returns true if sync was performed
      */
-    onScroll(
-      side: 'before' | 'after',
-      source: HTMLElement,
-      target: HTMLElement | null
-    ): boolean {
+    onScroll(side: 'before' | 'after', source: HTMLElement, target: HTMLElement | null): boolean {
       if (!target || ranges.length === 0) return false;
 
       const otherSide = side === 'before' ? 'after' : 'before';

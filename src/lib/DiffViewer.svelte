@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { FileDiff, DiffLine } from './types';
+  import type { FileDiff } from './types';
   import {
     initHighlighter,
     highlightLine,
@@ -10,6 +10,9 @@
     type Token,
   } from './services/highlighter';
   import { createScrollSync } from './services/scrollSync';
+  import { drawConnectors } from './diffConnectors';
+  import { getDisplayPath, getLineBoundary, getLanguageFromDiff } from './diffUtils';
+  import { setupKeyboardNav } from './diffKeyboard';
 
   interface Props {
     diff: FileDiff | null;
@@ -19,37 +22,35 @@
 
   let beforePane: HTMLDivElement | null = $state(null);
   let afterPane: HTMLDivElement | null = $state(null);
+  let connectorSvg: SVGSVGElement | null = $state(null);
   let highlighterReady = $state(false);
   let languageReady = $state(false);
   let themeBg = $state('#1e1e1e');
 
-  // Scroll sync controller
   const scrollSync = createScrollSync();
 
-  // Detect language from file path
-  let language = $derived(
-    diff?.after.path ? detectLanguage(diff.after.path) : 
-    diff?.before.path ? detectLanguage(diff.before.path) : 
-    null
-  );
-
-  // Update scroll sync ranges when diff changes
   $effect(() => {
     if (diff) {
       scrollSync.setRanges(diff.ranges);
     }
   });
 
-  onMount(async () => {
-    await initHighlighter('github-dark');
-    const theme = getTheme();
-    if (theme) {
-      themeBg = theme.bg;
-    }
-    highlighterReady = true;
-  });
+  function handleBeforeScroll(e: Event) {
+    if (!diff) return;
+    const target = e.target as HTMLDivElement;
+    scrollSync.onScroll('before', target, afterPane);
+    redrawConnectors();
+  }
 
-  // Load language when file changes
+  function handleAfterScroll(e: Event) {
+    if (!diff) return;
+    const target = e.target as HTMLDivElement;
+    scrollSync.onScroll('after', target, beforePane);
+    redrawConnectors();
+  }
+
+  let language = $derived(diff ? getLanguageFromDiff(diff, detectLanguage) : null);
+
   $effect(() => {
     if (highlighterReady && diff) {
       languageReady = false;
@@ -69,29 +70,29 @@
     return highlightLine(content, language);
   }
 
-  function handleBeforeScroll(e: Event) {
-    if (!diff) return;
-    const target = e.target as HTMLDivElement;
-    scrollSync.onScroll('before', target, afterPane);
+  function redrawConnectors() {
+    if (!connectorSvg || !beforePane || !afterPane || !diff) return;
+    drawConnectors(connectorSvg, diff.ranges, beforePane.scrollTop, afterPane.scrollTop);
   }
 
-  function handleAfterScroll(e: Event) {
-    if (!diff) return;
-    const target = e.target as HTMLDivElement;
-    scrollSync.onScroll('after', target, beforePane);
-  }
-
-  // Get display path (handles renames)
-  function getDisplayPath(): string {
-    if (!diff) return '';
-    const beforePath = diff.before.path;
-    const afterPath = diff.after.path;
-    
-    if (beforePath && afterPath && beforePath !== afterPath) {
-      return `${beforePath} → ${afterPath}`;
+  $effect(() => {
+    if (diff && connectorSvg && beforePane) {
+      const _ = beforePane.scrollTop; // dependency
+      redrawConnectors();
     }
-    return afterPath || beforePath || '';
-  }
+  });
+
+  onMount(() => {
+    initHighlighter('github-dark').then(() => {
+      const theme = getTheme();
+      if (theme) themeBg = theme.bg;
+      highlighterReady = true;
+    });
+
+    return setupKeyboardNav({
+      getScrollTarget: () => afterPane,
+    });
+  });
 </script>
 
 <div class="diff-viewer">
@@ -101,19 +102,19 @@
     </div>
   {:else if diff.is_binary}
     <div class="diff-header">
-      <span class="file-path">{getDisplayPath()}</span>
+      <span class="file-path">{getDisplayPath(diff)}</span>
     </div>
     <div class="binary-notice">
       <p>Binary file - cannot display diff</p>
     </div>
   {:else}
     <div class="diff-header">
-      <span class="file-path">{getDisplayPath()}</span>
+      <span class="file-path">{getDisplayPath(diff)}</span>
     </div>
 
     <div class="diff-content">
       <!-- Before pane -->
-      <div class="diff-pane before-pane">
+      <div class="diff-pane">
         <div class="pane-header">Before</div>
         <div
           class="code-container"
@@ -121,11 +122,14 @@
           onscroll={handleBeforeScroll}
           style="background-color: {themeBg}"
         >
-          {#each diff.before.lines as line}
-            <div class="line" class:line-removed={line.line_type === 'removed'}>
-              <span class="line-number" class:gutter-removed={line.line_type === 'removed'}>
-                {line.lineno}
-              </span>
+          {#each diff.before.lines as line, i}
+            {@const boundary = getLineBoundary(diff.ranges, 'before', i)}
+            <div
+              class="line"
+              class:line-removed={line.line_type === 'removed'}
+              class:range-start={boundary.isStart}
+              class:range-end={boundary.isEnd}
+            >
               <span class="line-content" class:content-removed={line.line_type === 'removed'}>
                 {#each getTokens(line.content) as token}
                   <span style="color: {token.color}">{token.content}</span>
@@ -139,8 +143,14 @@
         </div>
       </div>
 
+      <!-- Range connectors -->
+      <div class="connector-gutter">
+        <div class="connector-header"></div>
+        <svg class="connector-svg" bind:this={connectorSvg}></svg>
+      </div>
+
       <!-- After pane -->
-      <div class="diff-pane after-pane">
+      <div class="diff-pane">
         <div class="pane-header">After</div>
         <div
           class="code-container"
@@ -148,11 +158,14 @@
           onscroll={handleAfterScroll}
           style="background-color: {themeBg}"
         >
-          {#each diff.after.lines as line}
-            <div class="line" class:line-added={line.line_type === 'added'}>
-              <span class="line-number" class:gutter-added={line.line_type === 'added'}>
-                {line.lineno}
-              </span>
+          {#each diff.after.lines as line, i}
+            {@const boundary = getLineBoundary(diff.ranges, 'after', i)}
+            <div
+              class="line"
+              class:line-added={line.line_type === 'added'}
+              class:range-start={boundary.isStart}
+              class:range-end={boundary.isEnd}
+            >
               <span class="line-content" class:content-added={line.line_type === 'added'}>
                 {#each getTokens(line.content) as token}
                   <span style="color: {token.color}">{token.content}</span>
@@ -177,14 +190,18 @@
     overflow: hidden;
   }
 
-  .empty-state,
-  .binary-notice {
+  .diff-content {
     display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--text-muted);
-    font-size: 14px;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .diff-pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
   }
 
   .diff-header {
@@ -202,23 +219,6 @@
     color: var(--status-modified);
   }
 
-  .diff-content {
-    display: flex;
-    flex: 1;
-    overflow: hidden;
-  }
-
-  .diff-pane {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-
-  .before-pane {
-    border-right: 1px solid var(--border-primary);
-  }
-
   .pane-header {
     padding: 6px 12px;
     font-size: 11px;
@@ -228,58 +228,96 @@
     border-bottom: 1px solid var(--border-primary);
   }
 
+  .connector-gutter {
+    width: 24px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    background-color: var(--bg-secondary);
+  }
+
+  .connector-header {
+    height: 29px;
+    background-color: var(--diff-header-bg);
+    border-bottom: 1px solid var(--border-primary);
+  }
+
+  .connector-svg {
+    flex: 1;
+    width: 100%;
+    overflow: visible;
+  }
+
   .code-container {
     flex: 1;
     overflow: auto;
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
     font-size: 13px;
     line-height: 1.5;
+    min-width: 0;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
   }
 
-  .empty-file-notice {
-    padding: 20px;
-    color: var(--text-muted);
-    font-style: italic;
+  .code-container::-webkit-scrollbar {
+    display: none;
   }
 
   .line {
     display: flex;
     min-height: 20px;
+    position: relative;
   }
 
-  /* Line number (gutter) styling */
-  .line-number {
-    width: 50px;
-    padding: 0 12px;
-    text-align: right;
-    color: var(--diff-line-number);
-    user-select: none;
-    flex-shrink: 0;
-  }
-
-  .gutter-added {
-    background-color: var(--diff-added-gutter);
-    color: var(--diff-added-text);
-  }
-
-  .gutter-removed {
-    background-color: var(--diff-removed-gutter);
-    color: var(--diff-removed-text);
-  }
-
-  /* Line content styling */
   .line-content {
     flex: 1;
     padding: 0 12px;
     white-space: pre;
   }
 
-  /* Overlay tints for diff highlighting */
   .content-added {
     background-color: var(--diff-added-overlay);
   }
 
   .content-removed {
     background-color: var(--diff-removed-overlay);
+  }
+
+  .line.range-start::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background-color: var(--diff-line-number);
+    opacity: 0.5;
+  }
+
+  .line.range-end::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background-color: var(--diff-line-number);
+    opacity: 0.5;
+  }
+
+  .empty-state,
+  .binary-notice {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 14px;
+  }
+
+  .empty-file-notice {
+    padding: 20px;
+    color: var(--text-muted);
+    font-style: italic;
   }
 </style>

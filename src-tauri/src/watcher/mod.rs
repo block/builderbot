@@ -4,10 +4,12 @@
 //! for triggering status refreshes when files change.
 //!
 //! The current implementation uses `notify` with FSEvents on macOS.
-//! This can be swapped out for polling, git hooks, or other mechanisms.
+//! Uses the `ignore` crate to respect .gitignore and skip ignored directories.
 
+use ignore::WalkBuilder;
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebouncedEvent, Debouncer, RecommendedCache};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -48,9 +50,10 @@ impl From<notify::Error> for WatcherError {
 
 /// FSEvents-based watcher using the `notify` crate.
 /// Debounces rapid changes and filters irrelevant paths.
+/// Uses `ignore` crate to respect .gitignore when setting up watches.
 pub struct NotifyWatcher {
     debouncer: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
-    repo_path: Option<PathBuf>,
+    watched_paths: HashSet<PathBuf>,
 }
 
 impl Default for NotifyWatcher {
@@ -63,7 +66,7 @@ impl NotifyWatcher {
     pub fn new() -> Self {
         Self {
             debouncer: None,
-            repo_path: None,
+            watched_paths: HashSet::new(),
         }
     }
 }
@@ -73,7 +76,6 @@ impl WatcherManager for NotifyWatcher {
         // Stop any existing watcher
         self.stop();
 
-        let repo_path_owned = repo_path.to_path_buf();
         let repo_path_for_filter = repo_path.to_path_buf();
 
         // Create debouncer with 1s timeout, no max_wait
@@ -110,17 +112,47 @@ impl WatcherManager for NotifyWatcher {
             },
         )?;
 
-        // Watch the repository root recursively
-        debouncer.watch(repo_path, RecursiveMode::Recursive)?;
+        // Use ignore crate to walk only non-ignored directories
+        // This respects .gitignore and skips node_modules, target/, etc.
+        let mut dirs_to_watch: HashSet<PathBuf> = HashSet::new();
 
-        // Also explicitly watch .git directory for index/HEAD changes
+        // Always include repo root
+        dirs_to_watch.insert(repo_path.to_path_buf());
+
+        // Walk the repo, collecting directories that aren't ignored
+        let walker = WalkBuilder::new(repo_path)
+            .hidden(false) // Don't skip hidden files (we want .gitignore'd stuff skipped, not hidden)
+            .git_ignore(true) // Respect .gitignore
+            .git_global(true) // Respect global gitignore
+            .git_exclude(true) // Respect .git/info/exclude
+            .ignore(true) // Respect .ignore files
+            .parents(true) // Check parent directories for ignore files
+            .build();
+
+        for entry in walker.flatten() {
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                dirs_to_watch.insert(entry.path().to_path_buf());
+            }
+        }
+
+        // Watch each directory non-recursively
+        // (we've already enumerated the non-ignored dirs)
+        for dir in &dirs_to_watch {
+            if let Err(e) = debouncer.watch(dir, RecursiveMode::NonRecursive) {
+                log::warn!("Failed to watch {}: {}", dir.display(), e);
+            }
+        }
+
+        // Also watch .git directory for index/HEAD changes
         let git_dir = repo_path.join(".git");
         if git_dir.exists() {
+            // Watch .git recursively since it's not walked by ignore crate
             debouncer.watch(&git_dir, RecursiveMode::Recursive)?;
+            dirs_to_watch.insert(git_dir);
         }
 
         self.debouncer = Some(debouncer);
-        self.repo_path = Some(repo_path_owned);
+        self.watched_paths = dirs_to_watch;
 
         log::info!("Started watching repository: {}", repo_path.display());
         Ok(())
@@ -128,16 +160,12 @@ impl WatcherManager for NotifyWatcher {
 
     fn stop(&mut self) {
         if let Some(mut debouncer) = self.debouncer.take() {
-            if let Some(repo_path) = &self.repo_path {
-                let _ = debouncer.unwatch(repo_path);
-                let git_dir = repo_path.join(".git");
-                if git_dir.exists() {
-                    let _ = debouncer.unwatch(&git_dir);
-                }
+            for path in &self.watched_paths {
+                let _ = debouncer.unwatch(path);
             }
             log::info!("Stopped watching repository");
         }
-        self.repo_path = None;
+        self.watched_paths.clear();
     }
 }
 

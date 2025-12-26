@@ -88,7 +88,10 @@ fn amend_commit(repo_path: Option<String>, message: String) -> Result<CommitResu
 struct RefreshControllerState(Mutex<Option<RefreshController>>);
 
 #[tauri::command]
-fn start_watching(repo_path: String, state: State<RefreshControllerState>) -> Result<(), String> {
+async fn start_watching(
+    repo_path: String,
+    state: State<'_, RefreshControllerState>,
+) -> Result<(), String> {
     let controller = state.0.lock().unwrap();
     if let Some(ref ctrl) = *controller {
         ctrl.start(PathBuf::from(repo_path))

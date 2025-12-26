@@ -20,6 +20,9 @@
   let sidebarRef: Sidebar | null = $state(null);
   let commitPanelRef: CommitPanel | null = $state(null);
 
+  // Guard against concurrent diff loads
+  let loadingPath: string | null = null;
+
   // Watcher cleanup function
   let unsubscribe: Unsubscribe | null = null;
 
@@ -123,20 +126,35 @@
   }
 
   async function loadDiff(path: string, category: FileCategory) {
+    // Skip if already loading this exact path (prevents duplicate calls)
+    if (loadingPath === path) {
+      return;
+    }
+
+    loadingPath = path;
     diffLoading = true;
     diffError = null;
     currentDiff = null;
 
     try {
+      let diff: FileDiff;
       if (category === 'untracked') {
-        currentDiff = await getUntrackedFileDiff(path);
+        diff = await getUntrackedFileDiff(path);
       } else {
-        currentDiff = await getFileDiff(path, category === 'staged');
+        diff = await getFileDiff(path, category === 'staged');
+      }
+
+      // Only update if this is still the file we want
+      if (loadingPath === path) {
+        currentDiff = diff;
       }
     } catch (e) {
       diffError = e instanceof Error ? e.message : String(e);
       console.error('Failed to load diff:', e);
     } finally {
+      if (loadingPath === path) {
+        loadingPath = null;
+      }
       diffLoading = false;
     }
   }

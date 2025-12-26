@@ -3,7 +3,7 @@
   import type { FileDiff } from './types';
   import {
     initHighlighter,
-    highlightLine,
+    highlightLines,
     detectLanguage,
     prepareLanguage,
     getTheme,
@@ -26,6 +26,10 @@
   let highlighterReady = $state(false);
   let languageReady = $state(false);
   let themeBg = $state('#1e1e1e');
+
+  // Pre-computed tokens for all lines (computed once when diff/language changes)
+  let beforeTokens: Token[][] = $state([]);
+  let afterTokens: Token[][] = $state([]);
 
   // Panel minimization state
   let beforeMinimized = $state(false);
@@ -92,6 +96,29 @@
 
   let language = $derived(diff ? getLanguageFromDiff(diff, detectLanguage) : null);
 
+  // Pre-compute all tokens when diff or language readiness changes
+  $effect(() => {
+    if (!diff) {
+      beforeTokens = [];
+      afterTokens = [];
+      return;
+    }
+
+    if (highlighterReady && languageReady) {
+      // Batch highlight all lines at once (much faster than per-line)
+      const beforeCode = diff.before.lines.map((l) => l.content).join('\n');
+      const afterCode = diff.after.lines.map((l) => l.content).join('\n');
+
+      beforeTokens = beforeCode ? highlightLines(beforeCode, language) : [];
+      afterTokens = afterCode ? highlightLines(afterCode, language) : [];
+    } else {
+      // Fallback: plain text tokens
+      const defaultColor = '#d4d4d4';
+      beforeTokens = diff.before.lines.map((l) => [{ content: l.content, color: defaultColor }]);
+      afterTokens = diff.after.lines.map((l) => [{ content: l.content, color: defaultColor }]);
+    }
+  });
+
   $effect(() => {
     if (highlighterReady && diff) {
       languageReady = false;
@@ -104,11 +131,13 @@
     }
   });
 
-  function getTokens(content: string): Token[] {
-    if (!highlighterReady || !languageReady) {
-      return [{ content, color: '#d4d4d4' }];
-    }
-    return highlightLine(content, language);
+  // Simple lookup - tokens are pre-computed
+  function getBeforeTokens(index: number): Token[] {
+    return beforeTokens[index] || [{ content: '', color: '#d4d4d4' }];
+  }
+
+  function getAfterTokens(index: number): Token[] {
+    return afterTokens[index] || [{ content: '', color: '#d4d4d4' }];
   }
 
   function redrawConnectors() {
@@ -192,7 +221,7 @@
                   class="line-content"
                   class:content-removed={showRangeMarkers && line.line_type === 'removed'}
                 >
-                  {#each getTokens(line.content) as token}
+                  {#each getBeforeTokens(i) as token}
                     <span style="color: {token.color}">{token.content}</span>
                   {/each}
                 </span>
@@ -254,7 +283,7 @@
                   class="line-content"
                   class:content-added={showRangeMarkers && line.line_type === 'added'}
                 >
-                  {#each getTokens(line.content) as token}
+                  {#each getAfterTokens(i) as token}
                     <span style="color: {token.color}">{token.content}</span>
                   {/each}
                 </span>

@@ -29,6 +29,7 @@ git2 = "0.19"
 # File watching
 notify = "8.0"
 notify-debouncer-full = "0.5"
+ignore = "0.4"
 
 # Syntax highlighting
 syntect = "5.2"

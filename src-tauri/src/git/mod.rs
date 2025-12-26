@@ -1,7 +1,15 @@
-//! Git operations for Staged
+//! Git operations for Staged.
 //!
 //! Pure git2 operations with no Tauri dependency.
 //! All functions are stateless - they discover the repo fresh each call.
+//!
+//! ## Module Structure
+//! - `commit`: Create and amend commits
+//! - `diff`: Side-by-side diff generation (see submodules for details)
+//! - `provider`: Status fetching with git2/CLI fallback
+//! - `repo`: Repository discovery utilities
+//! - `staging`: Stage, unstage, and discard operations
+//! - `status`: Working tree and index status
 
 mod commit;
 pub mod diff;

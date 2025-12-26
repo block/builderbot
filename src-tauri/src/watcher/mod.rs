@@ -78,12 +78,18 @@ impl WatcherManager for NotifyWatcher {
 
         let repo_path_for_filter = repo_path.to_path_buf();
 
-        // Create debouncer with 1s timeout, no max_wait
-        // - timeout: fire after 1s of quiet (coalesces rapid changes)
-        // - no max_wait: let the backend throttle handle continuous activity
+        // Debouncer timing policy:
+        // - timeout (500ms): fire after 500ms of quiet, coalescing rapid changes
+        // - max_wait (2000ms): guarantee an update even during continuous activity
+        //
+        // Combined with backend throttle (refresh.rs), the behavior is:
+        // - Single file save: ~500ms response time
+        // - Burst of saves: coalesced, fires 500ms after last change
+        // - Continuous activity: fires every 2s max
+        // - Slow repos: backend adaptive throttle (1.5× duration) adds protection
         let mut debouncer = new_debouncer(
-            Duration::from_millis(1000),
-            None,
+            Duration::from_millis(500),
+            Some(Duration::from_millis(2000)),
             move |result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| {
                 match result {
                     Ok(events) => {

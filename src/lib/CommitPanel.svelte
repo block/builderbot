@@ -1,3 +1,10 @@
+<!--
+  CommitPanel.svelte - Commit message input and actions
+  
+  Fixed footer panel for composing commit messages. Supports regular commits
+  and amending the previous commit. Validates that staged changes exist
+  before allowing commit.
+-->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getGitStatus, getLastCommitMessage, createCommit, amendCommit } from './services/git';

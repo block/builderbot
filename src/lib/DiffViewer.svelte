@@ -1,3 +1,10 @@
+<!--
+  DiffViewer.svelte - Side-by-side diff display
+  
+  Renders a two-pane diff view with synchronized scrolling, syntax highlighting,
+  and visual connectors between corresponding changed regions. Supports panel
+  minimization for new/deleted files.
+-->
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { FileDiff } from './types';

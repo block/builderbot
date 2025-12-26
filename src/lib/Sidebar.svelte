@@ -1,3 +1,10 @@
+<!--
+  Sidebar.svelte - File list and staging controls
+  
+  Displays changed files in a unified list with stage/unstage checkboxes
+  and discard buttons. Receives status updates from parent (via watcher)
+  or can fetch directly.
+-->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getGitStatus, stageFile, unstageFile, discardFile } from './services/git';
@@ -28,6 +35,36 @@
   let loading = $state(true);
 
   /**
+   * Build unified file list from git status.
+   * Combines staged, unstaged, and untracked into a single sorted list.
+   */
+  function buildFileList(status: GitStatus): FileEntry[] {
+    const entries: FileEntry[] = [];
+
+    // Add staged files
+    for (const f of status.staged) {
+      entries.push({ path: f.path, status: f.status, staged: true, untracked: false });
+    }
+
+    // Add unstaged files (may overlap with staged if partially staged)
+    for (const f of status.unstaged) {
+      // Check if already in list (file can be both staged and unstaged)
+      const existing = entries.find((e) => e.path === f.path);
+      if (!existing) {
+        entries.push({ path: f.path, status: f.status, staged: false, untracked: false });
+      }
+    }
+
+    // Add untracked files
+    for (const f of status.untracked) {
+      entries.push({ path: f.path, status: f.status, staged: false, untracked: true });
+    }
+
+    // Sort by path for stable ordering
+    return entries.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  /**
    * Set status from external source (e.g., watcher events).
    * This is the primary way status gets updated when auto-refresh is active.
    */
@@ -38,33 +75,7 @@
   }
 
   // Unified file list - combines all categories, sorted by path
-  let files = $derived.by(() => {
-    if (!gitStatus) return [];
-
-    const entries: FileEntry[] = [];
-
-    // Add staged files
-    for (const f of gitStatus.staged) {
-      entries.push({ path: f.path, status: f.status, staged: true, untracked: false });
-    }
-
-    // Add unstaged files (may overlap with staged if partially staged)
-    for (const f of gitStatus.unstaged) {
-      // Check if already in list (file can be both staged and unstaged)
-      const existing = entries.find((e) => e.path === f.path);
-      if (!existing) {
-        entries.push({ path: f.path, status: f.status, staged: false, untracked: false });
-      }
-    }
-
-    // Add untracked files
-    for (const f of gitStatus.untracked) {
-      entries.push({ path: f.path, status: f.status, staged: false, untracked: true });
-    }
-
-    // Sort by path for stable ordering
-    return entries.sort((a, b) => a.path.localeCompare(b.path));
-  });
+  let files = $derived(gitStatus ? buildFileList(gitStatus) : []);
 
   let stagedCount = $derived(files.filter((f) => f.staged).length);
   let totalCount = $derived(files.length);
@@ -137,26 +148,11 @@
       }
       await discardFile(file.path);
 
-      // Get fresh status to find next file
+      // Get fresh status and select next file
       const newStatus = await getGitStatus();
       gitStatus = newStatus;
 
-      // Build new file list to select from
-      const newFiles: FileEntry[] = [];
-      for (const f of newStatus.staged) {
-        newFiles.push({ path: f.path, status: f.status, staged: true, untracked: false });
-      }
-      for (const f of newStatus.unstaged) {
-        if (!newFiles.find((e) => e.path === f.path)) {
-          newFiles.push({ path: f.path, status: f.status, staged: false, untracked: false });
-        }
-      }
-      for (const f of newStatus.untracked) {
-        newFiles.push({ path: f.path, status: f.status, staged: false, untracked: true });
-      }
-      newFiles.sort((a, b) => a.path.localeCompare(b.path));
-
-      // Select first available file
+      const newFiles = buildFileList(newStatus);
       if (newFiles.length > 0) {
         const firstFile = newFiles[0];
         onFileSelect?.(firstFile.path, getCategory(firstFile));

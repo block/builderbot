@@ -1,3 +1,10 @@
+<!--
+  HoldToDiscard.svelte - Hold-to-confirm discard button
+  
+  A safety mechanism for destructive actions. User must hold the button
+  for a short duration to confirm, preventing accidental discards.
+  Shows visual progress feedback during the hold.
+-->
 <script lang="ts">
   interface Props {
     onDiscard: () => void;

@@ -26,13 +26,65 @@
   // Current repo path (for watcher)
   let currentRepoPath: string | null = $state(null);
 
+  /**
+   * Check if a file path exists in the given status, and return its category.
+   * Returns null if the file is not found in any category.
+   */
+  function findFileInStatus(
+    status: GitStatus,
+    path: string
+  ): { category: FileCategory; found: boolean } | null {
+    // Check staged
+    if (status.staged.some((f) => f.path === path)) {
+      return { category: 'staged', found: true };
+    }
+    // Check unstaged
+    if (status.unstaged.some((f) => f.path === path)) {
+      return { category: 'unstaged', found: true };
+    }
+    // Check untracked
+    if (status.untracked.some((f) => f.path === path)) {
+      return { category: 'untracked', found: true };
+    }
+    return null;
+  }
+
+  /**
+   * Handle status updates from the file watcher.
+   * Updates sidebar and refreshes/clears the diff viewer as needed.
+   */
+  async function handleStatusUpdate(status: GitStatus) {
+    // Forward to sidebar
+    sidebarRef?.setStatus(status);
+
+    // Refresh commit panel
+    commitPanelRef?.refresh();
+
+    // Check if currently selected file still exists in the new status
+    if (selectedFile && selectedCategory) {
+      const fileInfo = findFileInStatus(status, selectedFile);
+
+      if (!fileInfo) {
+        // File no longer has changes - clear the diff
+        currentDiff = null;
+        selectedFile = null;
+        selectedCategory = null;
+      } else if (fileInfo.category !== selectedCategory) {
+        // File moved categories (e.g., staged -> unstaged) - reload diff
+        selectedCategory = fileInfo.category;
+        await loadDiff(selectedFile, selectedCategory);
+      } else {
+        // File still in same category - reload diff in case content changed
+        await loadDiff(selectedFile, selectedCategory);
+      }
+    }
+  }
+
   onMount(async () => {
     // Subscribe to status events from the backend
     unsubscribe = await subscribeToStatusEvents(
-      // On status update - forward to sidebar
-      (status: GitStatus) => {
-        sidebarRef?.setStatus(status);
-      },
+      // On status update - handle refresh logic
+      handleStatusUpdate,
       // On slow repo detected (optional one-time notification)
       () => {
         console.log(

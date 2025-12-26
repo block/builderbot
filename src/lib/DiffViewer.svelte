@@ -27,6 +27,47 @@
   let languageReady = $state(false);
   let themeBg = $state('#1e1e1e');
 
+  // Panel minimization state
+  let beforeMinimized = $state(false);
+  let afterMinimized = $state(false);
+
+  // Detect if this is a new file (no before content)
+  let isNewFile = $derived(diff !== null && diff.before.lines.length === 0);
+  // Detect if this is a deleted file (no after content)
+  let isDeletedFile = $derived(diff !== null && diff.after.lines.length === 0);
+
+  // Hide range markers (gutter connectors, bounding lines, content highlights)
+  // for new/deleted files since the entire file is one big change
+  let showRangeMarkers = $derived(!isNewFile && !isDeletedFile);
+
+  // Auto-minimize empty panels when diff changes
+  $effect(() => {
+    if (diff) {
+      beforeMinimized = isNewFile;
+      afterMinimized = isDeletedFile;
+    }
+  });
+
+  // Sync scroll position when expanding a minimized panel
+  function expandBefore() {
+    beforeMinimized = false;
+    // Sync scroll on next tick after DOM updates
+    requestAnimationFrame(() => {
+      if (beforePane && afterPane && diff) {
+        scrollSync.onScroll('after', afterPane, beforePane);
+      }
+    });
+  }
+
+  function expandAfter() {
+    afterMinimized = false;
+    requestAnimationFrame(() => {
+      if (beforePane && afterPane && diff) {
+        scrollSync.onScroll('before', beforePane, afterPane);
+      }
+    });
+  }
+
   const scrollSync = createScrollSync();
 
   $effect(() => {
@@ -114,70 +155,117 @@
 
     <div class="diff-content">
       <!-- Before pane -->
-      <div class="diff-pane">
-        <div class="pane-header">Before</div>
-        <div
-          class="code-container"
-          bind:this={beforePane}
-          onscroll={handleBeforeScroll}
-          style="background-color: {themeBg}"
-        >
-          {#each diff.before.lines as line, i}
-            {@const boundary = getLineBoundary(diff.ranges, 'before', i)}
-            <div
-              class="line"
-              class:line-removed={line.line_type === 'removed'}
-              class:range-start={boundary.isStart}
-              class:range-end={boundary.isEnd}
+      {#if beforeMinimized}
+        <button class="minimized-pane" onclick={expandBefore} title="Expand before panel">
+          <span class="minimized-label">Before</span>
+          <span class="expand-icon">›</span>
+        </button>
+      {:else}
+        <div class="diff-pane">
+          <div class="pane-header">
+            <span>Before</span>
+            <button
+              class="minimize-btn"
+              onclick={() => (beforeMinimized = true)}
+              title="Minimize panel"
             >
-              <span class="line-content" class:content-removed={line.line_type === 'removed'}>
-                {#each getTokens(line.content) as token}
-                  <span style="color: {token.color}">{token.content}</span>
-                {/each}
-              </span>
-            </div>
-          {/each}
-          {#if diff.before.lines.length === 0}
-            <div class="empty-file-notice">New file</div>
-          {/if}
+              ‹
+            </button>
+          </div>
+          <div
+            class="code-container"
+            bind:this={beforePane}
+            onscroll={handleBeforeScroll}
+            style="background-color: {themeBg}"
+          >
+            {#each diff.before.lines as line, i}
+              {@const boundary = showRangeMarkers
+                ? getLineBoundary(diff.ranges, 'before', i)
+                : { isStart: false, isEnd: false }}
+              <div
+                class="line"
+                class:line-removed={line.line_type === 'removed'}
+                class:range-start={boundary.isStart}
+                class:range-end={boundary.isEnd}
+              >
+                <span
+                  class="line-content"
+                  class:content-removed={showRangeMarkers && line.line_type === 'removed'}
+                >
+                  {#each getTokens(line.content) as token}
+                    <span style="color: {token.color}">{token.content}</span>
+                  {/each}
+                </span>
+              </div>
+            {/each}
+            {#if diff.before.lines.length === 0}
+              <div class="empty-file-notice">New file</div>
+            {/if}
+          </div>
         </div>
-      </div>
+      {/if}
 
-      <!-- Range connectors -->
+      <!-- Gutter between panes (always visible for consistency) -->
       <div class="connector-gutter">
         <div class="connector-header"></div>
-        <svg class="connector-svg" bind:this={connectorSvg}></svg>
+        <!-- Range connectors only drawn when showRangeMarkers is true -->
+        {#if showRangeMarkers}
+          <svg class="connector-svg" bind:this={connectorSvg}></svg>
+        {:else}
+          <div class="connector-placeholder"></div>
+        {/if}
       </div>
 
       <!-- After pane -->
-      <div class="diff-pane">
-        <div class="pane-header">After</div>
-        <div
-          class="code-container"
-          bind:this={afterPane}
-          onscroll={handleAfterScroll}
-          style="background-color: {themeBg}"
-        >
-          {#each diff.after.lines as line, i}
-            {@const boundary = getLineBoundary(diff.ranges, 'after', i)}
-            <div
-              class="line"
-              class:line-added={line.line_type === 'added'}
-              class:range-start={boundary.isStart}
-              class:range-end={boundary.isEnd}
+      {#if afterMinimized}
+        <button class="minimized-pane" onclick={expandAfter} title="Expand after panel">
+          <span class="expand-icon">‹</span>
+          <span class="minimized-label">After</span>
+        </button>
+      {:else}
+        <div class="diff-pane">
+          <div class="pane-header">
+            <span>After</span>
+            <button
+              class="minimize-btn"
+              onclick={() => (afterMinimized = true)}
+              title="Minimize panel"
             >
-              <span class="line-content" class:content-added={line.line_type === 'added'}>
-                {#each getTokens(line.content) as token}
-                  <span style="color: {token.color}">{token.content}</span>
-                {/each}
-              </span>
-            </div>
-          {/each}
-          {#if diff.after.lines.length === 0}
-            <div class="empty-file-notice">File deleted</div>
-          {/if}
+              ›
+            </button>
+          </div>
+          <div
+            class="code-container"
+            bind:this={afterPane}
+            onscroll={handleAfterScroll}
+            style="background-color: {themeBg}"
+          >
+            {#each diff.after.lines as line, i}
+              {@const boundary = showRangeMarkers
+                ? getLineBoundary(diff.ranges, 'after', i)
+                : { isStart: false, isEnd: false }}
+              <div
+                class="line"
+                class:line-added={line.line_type === 'added'}
+                class:range-start={boundary.isStart}
+                class:range-end={boundary.isEnd}
+              >
+                <span
+                  class="line-content"
+                  class:content-added={showRangeMarkers && line.line_type === 'added'}
+                >
+                  {#each getTokens(line.content) as token}
+                    <span style="color: {token.color}">{token.content}</span>
+                  {/each}
+                </span>
+              </div>
+            {/each}
+            {#if diff.after.lines.length === 0}
+              <div class="empty-file-notice">File deleted</div>
+            {/if}
+          </div>
         </div>
-      </div>
+      {/if}
     </div>
   {/if}
 </div>
@@ -220,12 +308,73 @@
   }
 
   .pane-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     padding: 6px 12px;
     font-size: 11px;
     text-transform: uppercase;
     color: var(--text-muted);
     background-color: var(--diff-header-bg);
     border-bottom: 1px solid var(--border-primary);
+  }
+
+  .minimize-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0 4px;
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0.6;
+    transition: opacity 0.15s;
+  }
+
+  .minimize-btn:hover {
+    opacity: 1;
+  }
+
+  .minimized-pane {
+    width: 28px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background-color: var(--bg-secondary);
+    border: none;
+    border-left: 1px solid var(--border-primary);
+    border-right: 1px solid var(--border-primary);
+    cursor: pointer;
+    transition: background-color 0.15s;
+  }
+
+  .minimized-pane:first-child {
+    border-left: none;
+  }
+
+  .minimized-pane:last-child {
+    border-right: none;
+  }
+
+  .minimized-pane:hover {
+    background-color: var(--bg-tertiary);
+  }
+
+  .minimized-label {
+    writing-mode: vertical-rl;
+    text-orientation: mixed;
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+  }
+
+  .expand-icon {
+    color: var(--text-muted);
+    font-size: 14px;
   }
 
   .connector-gutter {
@@ -242,7 +391,8 @@
     border-bottom: 1px solid var(--border-primary);
   }
 
-  .connector-svg {
+  .connector-svg,
+  .connector-placeholder {
     flex: 1;
     width: 100%;
     overflow: visible;

@@ -190,15 +190,6 @@
 
 <main>
   <div class="app-container">
-    <aside class="sidebar">
-      <Sidebar
-        bind:this={sidebarRef}
-        onFileSelect={handleFileSelect}
-        onStatusChange={handleStatusChange}
-        onRepoLoaded={handleRepoLoaded}
-        {selectedFile}
-      />
-    </aside>
     <section class="main-content">
       {#if diffLoading}
         <div class="loading-state">Loading diff...</div>
@@ -211,6 +202,15 @@
         <DiffViewer diff={currentDiff} />
       {/if}
     </section>
+    <aside class="sidebar">
+      <Sidebar
+        bind:this={sidebarRef}
+        onFileSelect={handleFileSelect}
+        onStatusChange={handleStatusChange}
+        onRepoLoaded={handleRepoLoaded}
+        {selectedFile}
+      />
+    </aside>
   </div>
   <footer class="commit-panel">
     <CommitPanel bind:this={commitPanelRef} onCommitComplete={handleCommitComplete} />
@@ -243,7 +243,7 @@
     width: 280px;
     min-width: 200px;
     background-color: var(--bg-secondary);
-    border-right: 1px solid var(--border-primary);
+    border-left: 1px solid var(--border-primary);
     display: flex;
     flex-direction: column;
     overflow: hidden;

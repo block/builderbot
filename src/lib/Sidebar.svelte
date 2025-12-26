@@ -444,6 +444,8 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+    direction: rtl;
+    text-align: left;
   }
 
   .file-dir {

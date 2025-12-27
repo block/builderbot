@@ -84,20 +84,22 @@
 
 <style>
   .hold-to-discard {
-    height: 20px;
-    border: none;
-    border-radius: 3px;
-    background: transparent;
+    height: 100%;
+    border: 1px solid var(--border-primary);
+    border-right: none;
+    border-radius: 3px 0 0 3px;
+    background: var(--bg-secondary);
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    padding: 0;
+    padding: 0 calc(var(--size-base) * 0.4);
     transition:
       width 0.15s ease,
+      color 0.1s ease,
       background-color 0.1s ease;
-    width: 20px;
+    width: auto;
   }
 
   .hold-to-discard:not(.holding) {
@@ -105,18 +107,18 @@
   }
 
   .hold-to-discard:not(.holding):hover {
-    background-color: var(--status-deleted);
-    color: white;
+    background-color: var(--bg-input);
+    color: var(--status-deleted);
   }
 
   .hold-to-discard.holding {
-    width: 30px;
+    padding: 0 calc(var(--size-base) * 0.8);
     background-color: var(--bg-input);
     border: 1px solid var(--status-deleted);
   }
 
   .icon {
-    font-size: 16px;
+    font-size: var(--size-xl);
     line-height: 1;
   }
 

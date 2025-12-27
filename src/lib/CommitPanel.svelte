@@ -157,12 +157,12 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--size-sm);
     color: var(--text-muted);
   }
 
   .branch-icon {
-    font-size: 14px;
+    font-size: var(--size-lg);
   }
 
   .branch-name {
@@ -173,7 +173,7 @@
   .staged-count {
     margin-left: auto;
     color: var(--status-added);
-    font-size: 11px;
+    font-size: var(--size-xs);
   }
 
   .commit-form {
@@ -186,7 +186,7 @@
   .commit-input {
     flex: 1;
     padding: 8px 12px;
-    font-size: 13px;
+    font-size: var(--size-md);
     background-color: var(--bg-input);
     border: 1px solid var(--border-primary);
     border-radius: 4px;
@@ -215,7 +215,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12px;
+    font-size: var(--size-sm);
     color: var(--text-muted);
     cursor: pointer;
   }
@@ -231,7 +231,7 @@
 
   .btn {
     padding: 8px 16px;
-    font-size: 13px;
+    font-size: var(--size-md);
     border: none;
     border-radius: 4px;
     cursor: pointer;
@@ -255,7 +255,7 @@
 
   .error-message {
     color: var(--status-deleted);
-    font-size: 12px;
+    font-size: var(--size-sm);
     padding: 4px 0;
   }
 </style>

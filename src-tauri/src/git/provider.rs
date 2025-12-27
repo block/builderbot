@@ -79,8 +79,10 @@ impl AdaptiveProvider {
             });
 
         // Get porcelain status
+        // -uall lists individual untracked files (not collapsed directories)
+        // to match git2's recurse_untracked_dirs(true) behavior
         let output = Command::new("git")
-            .args(["status", "--porcelain"])
+            .args(["status", "--porcelain", "-uall"])
             .current_dir(repo_path)
             .output()
             .map_err(|e| GitError {

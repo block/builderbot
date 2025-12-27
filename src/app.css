@@ -59,9 +59,20 @@
   --scrollbar-thumb: #424242;
   --scrollbar-thumb-hover: #4f4f4f;
 
+  /* 
+   * Size scale - all sizes derive from --size-base
+   * Adjust --size-base to scale the entire UI (e.g., for CMD+SHIFT+PLUS/MINUS)
+   */
+  --size-base: 13px;
+  --size-xs: calc(var(--size-base) * 0.846); /* ~11px at base 13 */
+  --size-sm: calc(var(--size-base) * 0.923); /* ~12px at base 13 */
+  --size-md: var(--size-base); /* 13px */
+  --size-lg: calc(var(--size-base) * 1.077); /* ~14px at base 13 */
+  --size-xl: calc(var(--size-base) * 1.231); /* ~16px at base 13 */
+
   /* Typography */
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-  font-size: 14px;
+  font-size: var(--size-lg);
   line-height: 1.5;
   font-weight: 400;
 

@@ -339,7 +339,7 @@
 
   .file-path {
     font-family: monospace;
-    font-size: 13px;
+    font-size: var(--size-md);
     color: var(--status-modified);
   }
 
@@ -348,7 +348,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 6px 12px;
-    font-size: 11px;
+    font-size: var(--size-xs);
     text-transform: uppercase;
     color: var(--text-muted);
     background-color: var(--diff-header-bg);
@@ -361,7 +361,7 @@
     color: var(--text-muted);
     cursor: pointer;
     padding: 0 4px;
-    font-size: 14px;
+    font-size: var(--size-lg);
     line-height: 1;
     opacity: 0.6;
     transition: opacity 0.15s;
@@ -402,7 +402,7 @@
   .minimized-label {
     writing-mode: vertical-rl;
     text-orientation: mixed;
-    font-size: 11px;
+    font-size: var(--size-xs);
     text-transform: uppercase;
     color: var(--text-muted);
     letter-spacing: 0.5px;
@@ -410,7 +410,7 @@
 
   .expand-icon {
     color: var(--text-muted);
-    font-size: 14px;
+    font-size: var(--size-lg);
   }
 
   .spine {
@@ -438,7 +438,7 @@
     flex: 1;
     overflow: auto;
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: 13px;
+    font-size: var(--size-md);
     line-height: 1.5;
     min-width: 0;
     scrollbar-width: none;
@@ -498,7 +498,7 @@
     justify-content: center;
     height: 100%;
     color: var(--text-muted);
-    font-size: 14px;
+    font-size: var(--size-lg);
   }
 
   .empty-file-notice {

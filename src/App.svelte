@@ -12,6 +12,70 @@
   } from './lib/services/statusEvents';
   import type { FileDiff, GitStatus } from './lib/types';
 
+  // UI scaling
+  const SIZE_STEP = 1;
+  const SIZE_MIN = 10;
+  const SIZE_MAX = 24;
+  const SIZE_DEFAULT = 13;
+  const SIZE_STORAGE_KEY = 'staged-size-base';
+
+  let sizeBase = $state(SIZE_DEFAULT);
+
+  function loadSavedSize() {
+    const saved = localStorage.getItem(SIZE_STORAGE_KEY);
+    if (saved) {
+      const parsed = parseInt(saved, 10);
+      if (!isNaN(parsed) && parsed >= SIZE_MIN && parsed <= SIZE_MAX) {
+        sizeBase = parsed;
+      }
+    }
+    applySize();
+  }
+
+  function applySize() {
+    document.documentElement.style.setProperty('--size-base', `${sizeBase}px`);
+  }
+
+  function increaseSize() {
+    if (sizeBase < SIZE_MAX) {
+      sizeBase += SIZE_STEP;
+      applySize();
+      localStorage.setItem(SIZE_STORAGE_KEY, String(sizeBase));
+    }
+  }
+
+  function decreaseSize() {
+    if (sizeBase > SIZE_MIN) {
+      sizeBase -= SIZE_STEP;
+      applySize();
+      localStorage.setItem(SIZE_STORAGE_KEY, String(sizeBase));
+    }
+  }
+
+  function resetSize() {
+    sizeBase = SIZE_DEFAULT;
+    applySize();
+    localStorage.setItem(SIZE_STORAGE_KEY, String(sizeBase));
+  }
+
+  function handleKeydown(event: KeyboardEvent) {
+    // Cmd/Ctrl + Shift + = (plus) to increase size
+    // Cmd/Ctrl + Shift + - (minus) to decrease size
+    // Cmd/Ctrl + Shift + 0 to reset size
+    if ((event.metaKey || event.ctrlKey) && event.shiftKey) {
+      if (event.key === '=' || event.key === '+') {
+        event.preventDefault();
+        increaseSize();
+      } else if (event.key === '-' || event.key === '_') {
+        event.preventDefault();
+        decreaseSize();
+      } else if (event.key === '0') {
+        event.preventDefault();
+        resetSize();
+      }
+    }
+  }
+
   let selectedFile: string | null = $state(null);
   let selectedCategory: FileCategory | null = $state(null);
   let currentDiff: FileDiff | null = $state(null);
@@ -84,6 +148,12 @@
   }
 
   onMount(async () => {
+    // Load saved UI size preference
+    loadSavedSize();
+
+    // Listen for keyboard shortcuts
+    window.addEventListener('keydown', handleKeydown);
+
     // Subscribe to status events from the backend
     unsubscribe = await subscribeToStatusEvents(
       // On status update - handle refresh logic
@@ -99,6 +169,9 @@
   });
 
   onDestroy(() => {
+    // Clean up keyboard listener
+    window.removeEventListener('keydown', handleKeydown);
+
     // Clean up watcher and event listeners
     unsubscribe?.();
     stopWatching().catch(() => {
@@ -209,6 +282,7 @@
         onStatusChange={handleStatusChange}
         onRepoLoaded={handleRepoLoaded}
         {selectedFile}
+        {selectedCategory}
       />
     </aside>
   </div>
@@ -216,6 +290,7 @@
     <CommitPanel bind:this={commitPanelRef} onCommitComplete={handleCommitComplete} />
   </footer>
 </main>
+// to remove
 
 <style>
   :global(body) {
@@ -264,7 +339,7 @@
     justify-content: center;
     height: 100%;
     color: var(--text-muted);
-    font-size: 14px;
+    font-size: var(--size-lg);
   }
 
   .error-state {
@@ -273,7 +348,7 @@
 
   .error-message {
     font-family: monospace;
-    font-size: 12px;
+    font-size: var(--size-sm);
     color: var(--text-muted);
     margin-top: 8px;
   }

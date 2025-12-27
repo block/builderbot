@@ -112,7 +112,8 @@
   }
 
   .hold-to-discard.holding {
-    padding: 0 calc(var(--size-base) * 0.8);
+    width: 30px;
+    padding: 0;
     background-color: var(--bg-input);
     border: 1px solid var(--status-deleted);
   }

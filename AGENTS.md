@@ -24,12 +24,14 @@ All components use `var(--*)` CSS variables for colors.
 Use `just` for all dev tasks:
 
 ```bash
-just dev        # Run with hot-reload
+just dev        # Run with hot-reload (human runs this, not you)
 just fmt        # Format all code (cargo fmt + prettier)
 just lint       # Clippy for Rust
 just typecheck  # Type check everything
 just check-all  # All checks before submitting
 ```
+
+**Note:** The human always runs the dev server. Don't start it yourself.
 
 ## Code Quality
 

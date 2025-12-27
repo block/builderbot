@@ -12,7 +12,7 @@
 //! 4. Track positions in both panes to build accurate range mappings
 
 use super::parse::{DiffHunk, HunkLine};
-use super::{DiffLine, Range, Span};
+use super::{DiffLine, Range, SourceLines, Span};
 
 /// Build side-by-side line arrays and range mappings from file contents and hunks.
 ///
@@ -129,6 +129,7 @@ impl SideBySideBuilder {
                     end: self.after_lines.len(),
                 },
                 changed: false,
+                source_lines: None,
             });
         }
     }
@@ -170,6 +171,7 @@ impl SideBySideBuilder {
                             end: self.after_lines.len(),
                         },
                         changed: false,
+                        source_lines: None,
                     });
 
                     if let Some(ln) = line.old_lineno {
@@ -212,6 +214,12 @@ impl SideBySideBuilder {
         let range_before_start = self.before_lines.len();
         let range_after_start = self.after_lines.len();
 
+        // Track source line numbers for this change
+        let old_start = pending_removed.first().and_then(|l| l.old_lineno);
+        let old_end = pending_removed.last().and_then(|l| l.old_lineno);
+        let new_start = pending_added.first().and_then(|l| l.new_lineno);
+        let new_end = pending_added.last().and_then(|l| l.new_lineno);
+
         // Add removed lines to before pane
         for line in pending_removed.drain(..) {
             self.before_lines.push(DiffLine {
@@ -230,7 +238,7 @@ impl SideBySideBuilder {
             });
         }
 
-        // Create change range
+        // Create change range with source line info
         self.ranges.push(Range {
             before: Span {
                 start: range_before_start,
@@ -241,6 +249,12 @@ impl SideBySideBuilder {
                 end: self.after_lines.len(),
             },
             changed: true,
+            source_lines: Some(SourceLines {
+                old_start,
+                old_end,
+                new_start,
+                new_end,
+            }),
         });
     }
 
@@ -307,6 +321,7 @@ impl SideBySideBuilder {
                     end: self.after_lines.len(),
                 },
                 changed: false,
+                source_lines: None,
             });
         }
     }

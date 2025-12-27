@@ -220,8 +220,19 @@
       }
     } catch (e) {
       if (loadingPath === path) {
-        diffError = e instanceof Error ? e.message : String(e);
-        currentDiff = null; // Only clear on error
+        const errorMsg = e instanceof Error ? e.message : String(e);
+
+        // "File not found in diff" means the file no longer has changes
+        // (e.g., all changes were discarded). Clear selection gracefully.
+        if (errorMsg.includes('File not found in diff')) {
+          currentDiff = null;
+          selectedFile = null;
+          selectedCategory = null;
+        } else {
+          // Real error - show it
+          diffError = errorMsg;
+          currentDiff = null;
+        }
       }
       console.error('Failed to load diff:', e);
     } finally {
@@ -238,14 +249,7 @@
     // If the selected file was discarded, clear the diff
     // The sidebar will handle re-selecting if needed
     if (selectedFile && selectedCategory) {
-      try {
-        await loadDiff(selectedFile, selectedCategory);
-      } catch {
-        // File may have been discarded
-        currentDiff = null;
-        selectedFile = null;
-        selectedCategory = null;
-      }
+      await loadDiff(selectedFile, selectedCategory);
     }
   }
 
@@ -269,7 +273,13 @@
           <p class="error-message">{diffError}</p>
         </div>
       {:else}
-        <DiffViewer diff={currentDiff} {sizeBase} />
+        <DiffViewer
+          diff={currentDiff}
+          filePath={selectedFile}
+          category={selectedCategory}
+          {sizeBase}
+          onHunkAction={handleStatusChange}
+        />
       {/if}
     </section>
     <aside class="sidebar">

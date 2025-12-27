@@ -3,11 +3,13 @@
   
   Renders a two-pane diff view with synchronized scrolling, syntax highlighting,
   and visual connectors between corresponding changed regions. Supports panel
-  minimization for new/deleted files.
+  minimization for new/deleted files and hunk-level discard operations.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { X } from 'lucide-svelte';
   import type { FileDiff } from './types';
+  import type { FileCategory } from './Sidebar.svelte';
   import {
     initHighlighter,
     highlightLines,
@@ -16,6 +18,7 @@
     getTheme,
     type Token,
   } from './services/highlighter';
+  import { discardLines } from './services/git';
   import { createScrollSync } from './services/scrollSync';
   import { drawConnectors } from './diffConnectors';
   import { getDisplayPath, getLineBoundary, getLanguageFromDiff } from './diffUtils';
@@ -23,14 +26,18 @@
 
   interface Props {
     diff: FileDiff | null;
+    filePath?: string | null;
+    category?: FileCategory | null;
     sizeBase?: number;
+    onHunkAction?: () => void;
   }
 
-  let { diff, sizeBase }: Props = $props();
+  let { diff, filePath = null, category = null, sizeBase, onHunkAction }: Props = $props();
 
   let beforePane: HTMLDivElement | null = $state(null);
   let afterPane: HTMLDivElement | null = $state(null);
   let connectorSvg: SVGSVGElement | null = $state(null);
+  let diffViewerEl: HTMLDivElement | null = $state(null);
   let highlighterReady = $state(false);
   let languageReady = $state(false);
   let themeBg = $state('#1e1e1e');
@@ -43,6 +50,10 @@
   let beforeMinimized = $state(false);
   let afterMinimized = $state(false);
 
+  // Hunk hover state
+  let hoveredHunkIndex: number | null = $state(null);
+  let hunkToolbarStyle: { top: number; left: number } | null = $state(null);
+
   // Detect if this is a new file (no before content)
   let isNewFile = $derived(diff !== null && diff.before.lines.length === 0);
   // Detect if this is a deleted file (no after content)
@@ -52,11 +63,42 @@
   // for new/deleted files since the entire file is one big change
   let showRangeMarkers = $derived(!isNewFile && !isDeletedFile);
 
+  // Build a map of changed ranges (hunks) with their indices
+  // Only ranges with changed: true are hunks
+  let changedRanges = $derived(
+    diff?.ranges.map((range, index) => ({ range, index })).filter(({ range }) => range.changed) ??
+      []
+  );
+
+  // Map line index to hunk index for quick lookup
+  let beforeLineToHunk = $derived(() => {
+    const map = new Map<number, number>();
+    changedRanges.forEach(({ range }, hunkIdx) => {
+      for (let i = range.before.start; i < range.before.end; i++) {
+        map.set(i, hunkIdx);
+      }
+    });
+    return map;
+  });
+
+  let afterLineToHunk = $derived(() => {
+    const map = new Map<number, number>();
+    changedRanges.forEach(({ range }, hunkIdx) => {
+      for (let i = range.after.start; i < range.after.end; i++) {
+        map.set(i, hunkIdx);
+      }
+    });
+    return map;
+  });
+
   // Auto-minimize empty panels when diff changes
   $effect(() => {
     if (diff) {
       beforeMinimized = isNewFile;
       afterMinimized = isDeletedFile;
+      // Clear hover state when diff changes
+      hoveredHunkIndex = null;
+      hunkToolbarStyle = null;
     }
   });
 
@@ -93,6 +135,7 @@
     const target = e.target as HTMLDivElement;
     scrollSync.onScroll('before', target, afterPane);
     redrawConnectors();
+    updateToolbarPosition();
   }
 
   function handleAfterScroll(e: Event) {
@@ -100,6 +143,7 @@
     const target = e.target as HTMLDivElement;
     scrollSync.onScroll('after', target, beforePane);
     redrawConnectors();
+    updateToolbarPosition();
   }
 
   let language = $derived(diff ? getLanguageFromDiff(diff, detectLanguage) : null);
@@ -185,6 +229,94 @@
     }
   });
 
+  // ==========================================================================
+  // Hunk hover handling
+  // ==========================================================================
+
+  function updateToolbarPosition() {
+    if (hoveredHunkIndex === null || !afterPane || !diffViewerEl) {
+      hunkToolbarStyle = null;
+      return;
+    }
+
+    const hunkData = changedRanges[hoveredHunkIndex];
+    if (!hunkData) {
+      hunkToolbarStyle = null;
+      return;
+    }
+
+    // Find the first line of this hunk in the after pane
+    const lineIndex = hunkData.range.after.start;
+    const lineEl = afterPane.querySelectorAll('.line')[lineIndex] as HTMLElement | null;
+
+    if (!lineEl) {
+      hunkToolbarStyle = null;
+      return;
+    }
+
+    const lineRect = lineEl.getBoundingClientRect();
+    const viewerRect = diffViewerEl.getBoundingClientRect();
+
+    // Position toolbar above the hunk, aligned to left of the line
+    hunkToolbarStyle = {
+      top: lineRect.top - viewerRect.top,
+      left: lineRect.left - viewerRect.left,
+    };
+  }
+
+  function handleLineMouseEnter(pane: 'before' | 'after', lineIndex: number) {
+    const map = pane === 'before' ? beforeLineToHunk() : afterLineToHunk();
+    const hunkIdx = map.get(lineIndex);
+
+    if (hunkIdx !== undefined) {
+      hoveredHunkIndex = hunkIdx;
+      requestAnimationFrame(updateToolbarPosition);
+    }
+  }
+
+  function handleLineMouseLeave(event: MouseEvent) {
+    // Don't clear if moving to another line in the same hunk or to the toolbar
+    const relatedTarget = event.relatedTarget as HTMLElement | null;
+    if (relatedTarget?.closest('.hunk-toolbar') || relatedTarget?.closest('.line')) {
+      return;
+    }
+    hoveredHunkIndex = null;
+    hunkToolbarStyle = null;
+  }
+
+  function handleToolbarMouseLeave(event: MouseEvent) {
+    const relatedTarget = event.relatedTarget as HTMLElement | null;
+    if (relatedTarget?.closest('.line')) {
+      // Moving back to a line - check if it's in the same hunk
+      return;
+    }
+    hoveredHunkIndex = null;
+    hunkToolbarStyle = null;
+  }
+
+  // ==========================================================================
+  // Hunk actions
+  // ==========================================================================
+
+  async function handleDiscardRange() {
+    if (hoveredHunkIndex === null || !filePath || !category) return;
+
+    const hunkData = changedRanges[hoveredHunkIndex];
+    if (!hunkData?.range.source_lines) {
+      console.error('No source_lines data for range');
+      return;
+    }
+
+    try {
+      await discardLines(filePath, hunkData.range.source_lines, category === 'staged');
+      hoveredHunkIndex = null;
+      hunkToolbarStyle = null;
+      onHunkAction?.();
+    } catch (e) {
+      console.error('Failed to discard range:', e);
+    }
+  }
+
   onMount(() => {
     initHighlighter('github-dark').then(() => {
       const theme = getTheme();
@@ -198,7 +330,7 @@
   });
 </script>
 
-<div class="diff-viewer">
+<div class="diff-viewer" bind:this={diffViewerEl}>
   {#if diff === null}
     <div class="empty-state">
       <p>Select a file to view changes</p>
@@ -244,11 +376,17 @@
               {@const boundary = showRangeMarkers
                 ? getLineBoundary(diff.ranges, 'before', i)
                 : { isStart: false, isEnd: false }}
+              {@const isInHoveredHunk =
+                hoveredHunkIndex !== null && beforeLineToHunk().get(i) === hoveredHunkIndex}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="line"
                 class:line-removed={line.line_type === 'removed'}
                 class:range-start={boundary.isStart}
                 class:range-end={boundary.isEnd}
+                class:hunk-hovered={isInHoveredHunk}
+                onmouseenter={() => handleLineMouseEnter('before', i)}
+                onmouseleave={handleLineMouseLeave}
               >
                 <span
                   class="line-content"
@@ -306,11 +444,17 @@
               {@const boundary = showRangeMarkers
                 ? getLineBoundary(diff.ranges, 'after', i)
                 : { isStart: false, isEnd: false }}
+              {@const isInHoveredHunk =
+                hoveredHunkIndex !== null && afterLineToHunk().get(i) === hoveredHunkIndex}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="line"
                 class:line-added={line.line_type === 'added'}
                 class:range-start={boundary.isStart}
                 class:range-end={boundary.isEnd}
+                class:hunk-hovered={isInHoveredHunk}
+                onmouseenter={() => handleLineMouseEnter('after', i)}
+                onmouseleave={handleLineMouseLeave}
               >
                 <span
                   class="line-content"
@@ -329,6 +473,20 @@
         </div>
       {/if}
     </div>
+
+    <!-- Hunk action toolbar (floating) -->
+    {#if hoveredHunkIndex !== null && hunkToolbarStyle && filePath && category}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="hunk-toolbar"
+        style="top: {hunkToolbarStyle.top}px; left: {hunkToolbarStyle.left}px;"
+        onmouseleave={handleToolbarMouseLeave}
+      >
+        <button class="hunk-btn discard-btn" onclick={handleDiscardRange} title="Discard changes">
+          <X size={12} />
+        </button>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -338,6 +496,7 @@
     flex-direction: column;
     height: 100%;
     overflow: hidden;
+    position: relative;
   }
 
   .diff-content {
@@ -517,6 +676,10 @@
     opacity: 0.7;
   }
 
+  .line.hunk-hovered {
+    background-color: var(--bg-tertiary);
+  }
+
   .empty-state,
   .binary-notice {
     display: flex;
@@ -531,5 +694,41 @@
     padding: 20px;
     color: var(--text-muted);
     font-style: italic;
+  }
+
+  /* Hunk action toolbar */
+  .hunk-toolbar {
+    position: absolute;
+    display: flex;
+    gap: 1px;
+    transform: translateY(-100%);
+    z-index: 100;
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+  }
+
+  .hunk-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 8px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: 3px 3px 0 0;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
+  }
+
+  .hunk-btn:hover {
+    background-color: var(--bg-tertiary);
+  }
+
+  .hunk-btn.discard-btn:hover {
+    color: var(--status-deleted);
   }
 </style>

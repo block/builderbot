@@ -2,7 +2,7 @@ pub mod git;
 mod refresh;
 mod watcher;
 
-use git::{CommitResult, FileDiff, GitStatus};
+use git::{CommitResult, DiscardRange, FileDiff, GitStatus};
 use refresh::RefreshController;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -77,6 +77,29 @@ fn create_commit(repo_path: Option<String>, message: String) -> Result<CommitRes
 #[tauri::command]
 fn amend_commit(repo_path: Option<String>, message: String) -> Result<CommitResult, String> {
     git::amend_commit(repo_path.as_deref(), &message).map_err(|e| e.message)
+}
+
+/// Discard specific lines from a file.
+///
+/// Takes line ranges from the UI's source_lines data and reverts those
+/// specific changes, allowing fine-grained control over what to discard.
+#[tauri::command]
+fn discard_lines(
+    repo_path: Option<String>,
+    file_path: String,
+    old_start: Option<u32>,
+    old_end: Option<u32>,
+    new_start: Option<u32>,
+    new_end: Option<u32>,
+    staged: bool,
+) -> Result<(), String> {
+    let range = DiscardRange {
+        old_start,
+        old_end,
+        new_start,
+        new_end,
+    };
+    git::discard_lines(repo_path.as_deref(), &file_path, range, staged).map_err(|e| e.message)
 }
 
 // =============================================================================
@@ -155,6 +178,7 @@ pub fn run() {
             discard_file,
             stage_all,
             unstage_all,
+            discard_lines,
             get_last_commit_message,
             create_commit,
             amend_commit,

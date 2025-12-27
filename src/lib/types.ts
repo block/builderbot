@@ -32,12 +32,24 @@ export interface Span {
   end: number;
 }
 
+/** Source file line numbers for a changed region (1-indexed, inclusive) */
+export interface SourceLines {
+  /** Lines removed from the "before" file. None if pure addition */
+  old_start: number | null;
+  old_end: number | null;
+  /** Lines added in the "after" file. None if pure deletion */
+  new_start: number | null;
+  new_end: number | null;
+}
+
 /** Maps corresponding regions between before/after panes */
 export interface Range {
   before: Span;
   after: Span;
   /** true = region contains changes, false = identical lines */
   changed: boolean;
+  /** Source file line numbers (only present for changed ranges) */
+  source_lines?: SourceLines;
 }
 
 /** Content for one side of the diff */

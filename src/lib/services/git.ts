@@ -84,3 +84,24 @@ export async function amendCommit(message: string, repoPath?: string): Promise<C
     message,
   });
 }
+
+// Line-level operations
+
+import type { SourceLines } from '../types';
+
+export async function discardLines(
+  filePath: string,
+  sourceLines: SourceLines,
+  staged: boolean,
+  repoPath?: string
+): Promise<void> {
+  return invoke('discard_lines', {
+    repoPath: repoPath ?? null,
+    filePath,
+    oldStart: sourceLines.old_start,
+    oldEnd: sourceLines.old_end,
+    newStart: sourceLines.new_start,
+    newEnd: sourceLines.new_end,
+    staged,
+  });
+}

@@ -39,6 +39,20 @@ pub struct Span {
     pub end: usize,
 }
 
+/// Source file line numbers for a changed region.
+/// These are 1-indexed line numbers in the original files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceLines {
+    /// Lines removed from the "before" file (1-indexed, inclusive range)
+    /// None if this is a pure addition
+    pub old_start: Option<u32>,
+    pub old_end: Option<u32>,
+    /// Lines added in the "after" file (1-indexed, inclusive range)
+    /// None if this is a pure deletion
+    pub new_start: Option<u32>,
+    pub new_end: Option<u32>,
+}
+
 /// Maps corresponding regions between before/after panes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Range {
@@ -46,6 +60,9 @@ pub struct Range {
     pub after: Span,
     /// true = region contains changes, false = identical lines
     pub changed: bool,
+    /// Source file line numbers (only present for changed ranges)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_lines: Option<SourceLines>,
 }
 
 /// Content for one side of the diff.
@@ -226,6 +243,12 @@ pub fn get_untracked_file_diff(
             end: line_count,
         },
         changed: true,
+        source_lines: Some(SourceLines {
+            old_start: None,
+            old_end: None,
+            new_start: Some(1),
+            new_end: Some(line_count as u32),
+        }),
     }];
 
     Ok(FileDiff {

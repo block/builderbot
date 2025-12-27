@@ -23,9 +23,10 @@
 
   interface Props {
     diff: FileDiff | null;
+    sizeBase?: number;
   }
 
-  let { diff }: Props = $props();
+  let { diff, sizeBase }: Props = $props();
 
   let beforePane: HTMLDivElement | null = $state(null);
   let afterPane: HTMLDivElement | null = $state(null);
@@ -149,13 +150,38 @@
 
   function redrawConnectors() {
     if (!connectorSvg || !beforePane || !afterPane || !diff) return;
-    drawConnectors(connectorSvg, diff.ranges, beforePane.scrollTop, afterPane.scrollTop);
+
+    // Measure actual line height from the first line element in the DOM
+    const firstLine = beforePane.querySelector('.line') as HTMLElement | null;
+    const lineHeight = firstLine ? firstLine.getBoundingClientRect().height : 20;
+
+    // Measure the structural offset between SVG top and code container top
+    // This accounts for the pane-header height which scales with font size
+    const svgRect = connectorSvg.getBoundingClientRect();
+    const containerRect = beforePane.getBoundingClientRect();
+    const verticalOffset = containerRect.top - svgRect.top;
+
+    drawConnectors(connectorSvg, diff.ranges, beforePane.scrollTop, afterPane.scrollTop, {
+      lineHeight,
+      verticalOffset,
+    });
   }
 
+  // Redraw connectors when diff changes or scroll position changes
   $effect(() => {
     if (diff && connectorSvg && beforePane) {
       const _ = beforePane.scrollTop; // dependency
       redrawConnectors();
+    }
+  });
+
+  // Redraw connectors when font size changes
+  $effect(() => {
+    if (sizeBase && diff && connectorSvg && beforePane) {
+      // Wait for DOM to update with new font size
+      requestAnimationFrame(() => {
+        redrawConnectors();
+      });
     }
   });
 
@@ -451,7 +477,7 @@
 
   .line {
     display: flex;
-    min-height: 20px;
+    min-height: calc(var(--size-md) * 1.5);
     position: relative;
   }
 

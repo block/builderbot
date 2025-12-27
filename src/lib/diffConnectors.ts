@@ -13,6 +13,8 @@ export interface ConnectorConfig {
   width: number;
   fillColor: string;
   strokeColor: string;
+  /** Vertical offset to adjust bezier alignment (positive = down, negative = up) */
+  verticalOffset: number;
 }
 
 const DEFAULT_CONFIG: ConnectorConfig = {
@@ -20,6 +22,7 @@ const DEFAULT_CONFIG: ConnectorConfig = {
   width: 24,
   fillColor: 'rgba(110, 118, 129, 0.12)',
   strokeColor: 'rgba(110, 118, 129, 0.7)',
+  verticalOffset: 0,
 };
 
 /**
@@ -44,12 +47,17 @@ export function drawConnectors(
     if (!range.changed) continue;
 
     // Calculate pixel positions relative to viewport
-    // Top borders are at start * lineHeight, bottom borders at end * lineHeight - 1
-    // Add 0.5px offset for crisp 1px stroke rendering
-    const beforeTop = range.before.start * cfg.lineHeight - beforeScroll + 0.5;
-    const beforeBottom = range.before.end * cfg.lineHeight - 1 - beforeScroll + 0.5;
-    const afterTop = range.after.start * cfg.lineHeight - afterScroll + 0.5;
-    const afterBottom = range.after.end * cfg.lineHeight - 1 - afterScroll + 0.5;
+    // Top border: at the top edge of the first line (start * lineHeight)
+    // Bottom border: at the bottom edge of the last line (end * lineHeight)
+    // The CSS pseudo-elements for range-start/range-end are at top:0 and bottom:0 of their lines
+    // Add 0.5px offset for crisp 1px stroke rendering on pixel boundaries
+    // Bottom uses -0.5 to align with the CSS ::after pseudo-element at bottom:0
+    // verticalOffset adjusts for structural differences between SVG and code container
+    const beforeTop = range.before.start * cfg.lineHeight - beforeScroll + 0.5 + cfg.verticalOffset;
+    const beforeBottom =
+      range.before.end * cfg.lineHeight - beforeScroll - 0.5 + cfg.verticalOffset;
+    const afterTop = range.after.start * cfg.lineHeight - afterScroll + 0.5 + cfg.verticalOffset;
+    const afterBottom = range.after.end * cfg.lineHeight - afterScroll - 0.5 + cfg.verticalOffset;
 
     // Skip if completely out of view
     if (beforeBottom < 0 && afterBottom < 0) continue;

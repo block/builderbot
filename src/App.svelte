@@ -272,7 +272,7 @@
           <p class="error-message">{diffError}</p>
         </div>
       {:else}
-        <DiffViewer diff={currentDiff} />
+        <DiffViewer diff={currentDiff} {sizeBase} />
       {/if}
     </section>
     <aside class="sidebar">
@@ -290,7 +290,6 @@
     <CommitPanel bind:this={commitPanelRef} onCommitComplete={handleCommitComplete} />
   </footer>
 </main>
-// to remove
 
 <style>
   :global(body) {

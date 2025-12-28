@@ -289,7 +289,6 @@
         onStatusChange={handleStatusChange}
         onRepoLoaded={handleRepoLoaded}
         {selectedFile}
-        {selectedCategory}
       />
     </aside>
   </div>

@@ -1,75 +1,27 @@
 <!--
-  Sidebar.svelte - File list and staging controls
+  Sidebar.svelte - File list with review workflow
   
-  Displays changed files with staged/unstaged state indicators.
-  Click row to view unstaged diff. Click staged icon to view staged diff.
-  Hover for stage/unstage/discard actions that appear above/below the line.
+  Files needing review appear above the line.
+  Approved files (staged, no unstaged) appear below the line.
+  Hover for approve/discard actions via d-pad overlay.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
+    Check,
     CircleFadingArrowUp,
     CircleFadingPlus,
     CircleArrowUp,
     CirclePlus,
-    CircleSlash,
+    CircleMinus,
     CircleX,
-    ArrowLeft,
-    ArrowRight,
+    X,
   } from 'lucide-svelte';
-  import { getGitStatus, stageFile, unstageFile, discardFile } from './services/git';
+  import { getGitStatus, stageFile, discardFile } from './services/git';
   import type { GitStatus } from './types';
   import HoldToDiscard from './HoldToDiscard.svelte';
 
   export type FileCategory = 'staged' | 'unstaged' | 'untracked';
-
-  // Hover state for d-pad positioning (fixed position in viewport)
-  let hoveredFile: FileEntry | null = $state(null);
-  let dpadStyle: {
-    lineTop: number;
-    lineBottom: number;
-    lineLeft: number;
-    lineRight: number;
-    iconsCenterX: number;
-  } | null = $state(null);
-
-  function handleMouseEnter(event: MouseEvent, file: FileEntry) {
-    const li = event.currentTarget as HTMLElement;
-    const icons = li.querySelector('.state-indicators') as HTMLElement;
-    if (!li || !icons) return;
-
-    const lineRect = li.getBoundingClientRect();
-    const iconsRect = icons.getBoundingClientRect();
-
-    hoveredFile = file;
-    dpadStyle = {
-      lineTop: lineRect.top,
-      lineBottom: lineRect.bottom,
-      lineLeft: lineRect.left,
-      lineRight: lineRect.right,
-      iconsCenterX: iconsRect.left + iconsRect.width / 2,
-    };
-  }
-
-  function handleMouseLeave(event: MouseEvent) {
-    // Don't clear hover if we're moving to the d-pad overlay
-    const relatedTarget = event.relatedTarget as HTMLElement | null;
-    if (relatedTarget?.closest('.dpad-overlay')) {
-      return;
-    }
-    hoveredFile = null;
-    dpadStyle = null;
-  }
-
-  function handleOverlayMouseLeave(event: MouseEvent) {
-    // Don't clear hover if we're moving back to the hovered file item
-    const relatedTarget = event.relatedTarget as HTMLElement | null;
-    if (relatedTarget?.closest('.file-item.is-hovered')) {
-      return;
-    }
-    hoveredFile = null;
-    dpadStyle = null;
-  }
 
   interface FileEntry {
     path: string;
@@ -83,20 +35,72 @@
     onStatusChange?: () => void;
     onRepoLoaded?: (repoPath: string) => void;
     selectedFile?: string | null;
-    selectedCategory?: FileCategory | null;
   }
 
-  let {
-    onFileSelect,
-    onStatusChange,
-    onRepoLoaded,
-    selectedFile = null,
-    selectedCategory = null,
-  }: Props = $props();
+  let { onFileSelect, onStatusChange, onRepoLoaded, selectedFile = null }: Props = $props();
 
   let gitStatus: GitStatus | null = $state(null);
   let error: string | null = $state(null);
   let loading = $state(true);
+
+  // Hover state for d-pad positioning (fixed position in viewport)
+  let hoveredFile: FileEntry | null = $state(null);
+  let dpadStyle: {
+    lineTop: number;
+    lineBottom: number;
+    lineLeft: number;
+    lineRight: number;
+  } | null = $state(null);
+  let hoverTimeout: number | null = null;
+
+  function clearHoverState() {
+    hoveredFile = null;
+    dpadStyle = null;
+  }
+
+  function scheduleClearHover() {
+    // Small delay to allow mouse to reach the button
+    if (hoverTimeout) clearTimeout(hoverTimeout);
+    hoverTimeout = window.setTimeout(() => {
+      clearHoverState();
+      hoverTimeout = null;
+    }, 100);
+  }
+
+  function cancelClearHover() {
+    if (hoverTimeout) {
+      clearTimeout(hoverTimeout);
+      hoverTimeout = null;
+    }
+  }
+
+  function handleMouseEnter(event: MouseEvent, file: FileEntry) {
+    cancelClearHover();
+    const li = event.currentTarget as HTMLElement;
+    if (!li) return;
+
+    const lineRect = li.getBoundingClientRect();
+
+    hoveredFile = file;
+    dpadStyle = {
+      lineTop: lineRect.top,
+      lineBottom: lineRect.bottom,
+      lineLeft: lineRect.left,
+      lineRight: lineRect.right,
+    };
+  }
+
+  function handleMouseLeave() {
+    scheduleClearHover();
+  }
+
+  function handleOverlayMouseLeave() {
+    scheduleClearHover();
+  }
+
+  function handleButtonMouseEnter() {
+    cancelClearHover();
+  }
 
   /**
    * Build unified file list from git status.
@@ -154,7 +158,12 @@
   }
 
   let files = $derived(gitStatus ? buildFileList(gitStatus) : []);
-  let stagedCount = $derived(files.filter((f) => f.hasStaged).length);
+
+  // Split into needs review (has unstaged) and approved (staged only)
+  let needsReview = $derived(files.filter((f) => f.hasUnstaged));
+  let approved = $derived(files.filter((f) => f.hasStaged && !f.hasUnstaged));
+
+  let approvedCount = $derived(approved.length);
   let totalCount = $derived(files.length);
 
   onMount(() => {
@@ -173,11 +182,9 @@
 
       // Auto-select first file if none selected
       if (!selectedFile && gitStatus && onFileSelect) {
-        const firstFile = files[0];
+        const firstFile = needsReview[0] || approved[0];
         if (firstFile) {
-          // Default to unstaged if available, otherwise staged
-          const category = firstFile.hasUnstaged ? 'unstaged' : 'staged';
-          onFileSelect(firstFile.path, category);
+          selectFile(firstFile);
         }
       }
     } catch (e) {
@@ -187,57 +194,38 @@
     }
   }
 
-  function selectUnstaged(file: FileEntry) {
+  /**
+   * Select a file - shows unstaged diff if available, else staged.
+   */
+  function selectFile(file: FileEntry) {
     if (file.hasUnstaged) {
       onFileSelect?.(file.path, file.status === 'untracked' ? 'untracked' : 'unstaged');
     } else if (file.hasStaged) {
-      // Fall back to staged if no unstaged changes
       onFileSelect?.(file.path, 'staged');
     }
   }
 
-  function selectStaged(event: MouseEvent, file: FileEntry) {
-    event.stopPropagation();
-    if (file.hasStaged) {
-      onFileSelect?.(file.path, 'staged');
-    }
-  }
-
-  async function handleStage(event: MouseEvent, file: FileEntry) {
+  async function handleApprove(event: MouseEvent, file: FileEntry) {
     event.stopPropagation();
     try {
       await stageFile(file.path);
       await loadStatus();
-      // Switch view to staged
-      onFileSelect?.(file.path, 'staged');
+      // Keep file selected, view will update
+      const updatedFile = files.find((f) => f.path === file.path);
+      if (updatedFile) {
+        selectFile(updatedFile);
+      }
       onStatusChange?.();
     } catch (e) {
-      console.error('Failed to stage:', e);
-    }
-  }
-
-  async function handleUnstage(event: MouseEvent, file: FileEntry) {
-    event.stopPropagation();
-    try {
-      await unstageFile(file.path);
-      await loadStatus();
-      // Switch view to unstaged
-      onFileSelect?.(file.path, 'unstaged');
-      onStatusChange?.();
-    } catch (e) {
-      console.error('Failed to unstage:', e);
+      console.error('Failed to approve:', e);
     }
   }
 
   async function handleDiscard(file: FileEntry) {
     try {
-      // Unstage first if staged, then discard working changes
-      if (file.hasStaged) {
-        await unstageFile(file.path);
-      }
       await discardFile(file.path);
 
-      // Clear hover state since the file is gone
+      // Clear hover state since the file may be gone
       hoveredFile = null;
       dpadStyle = null;
 
@@ -246,9 +234,8 @@
 
       const newFiles = buildFileList(newStatus);
       if (newFiles.length > 0) {
-        const firstFile = newFiles[0];
-        const category = firstFile.hasUnstaged ? 'unstaged' : 'staged';
-        onFileSelect?.(firstFile.path, category);
+        const firstFile = newFiles.filter((f) => f.hasUnstaged)[0] || newFiles[0];
+        selectFile(firstFile);
       } else {
         onFileSelect?.('', 'unstaged');
       }
@@ -270,17 +257,6 @@
     }
     return '';
   }
-
-  function isSelected(file: FileEntry, category: FileCategory): boolean {
-    return selectedFile === file.path && selectedCategory === category;
-  }
-
-  function isUnstagedSelected(file: FileEntry): boolean {
-    return (
-      selectedFile === file.path &&
-      (selectedCategory === 'unstaged' || selectedCategory === 'untracked')
-    );
-  }
 </script>
 
 <div class="sidebar-content">
@@ -289,7 +265,7 @@
     <div class="header-right">
       {#if totalCount > 0}
         <span class="file-counts">
-          <span class="staged-count" title="Staged">{stagedCount}</span>
+          <span class="approved-count" title="Approved">{approvedCount}</span>
           <span class="separator">/</span>
           <span class="total-count" title="Total">{totalCount}</span>
         </span>
@@ -311,60 +287,96 @@
       <p class="empty-hint">Working tree is clean</p>
     </div>
   {:else}
-    <ul class="file-list">
-      {#each files as file (file.path)}
-        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-        <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-        <li
-          class="file-item"
-          class:has-selection={selectedFile === file.path}
-          class:is-hovered={hoveredFile?.path === file.path}
-          onclick={() => selectUnstaged(file)}
-          onkeydown={(e) => e.key === 'Enter' && selectUnstaged(file)}
-          onmouseenter={(e) => handleMouseEnter(e, file)}
-          onmouseleave={handleMouseLeave}
-          tabindex="0"
-          role="button"
-        >
-          <!-- State indicators (side by side) -->
-          <div class="state-indicators">
-            <!-- Staged indicator (clickable) -->
-            <button
-              class="state-icon staged"
-              class:active={file.hasStaged}
-              disabled={!file.hasStaged}
-              onclick={(e) => selectStaged(e, file)}
-              title={file.hasStaged ? 'View staged changes' : ''}
+    <div class="file-list">
+      <!-- Needs Review section -->
+      {#if needsReview.length > 0}
+        <ul class="file-section">
+          {#each needsReview as file (file.path)}
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+            <li
+              class="file-item"
+              class:selected={selectedFile === file.path}
+              class:is-hovered={hoveredFile?.path === file.path}
+              onclick={() => selectFile(file)}
+              onkeydown={(e) => e.key === 'Enter' && selectFile(file)}
+              onmouseenter={(e) => handleMouseEnter(e, file)}
+              onmouseleave={handleMouseLeave}
+              tabindex="0"
+              role="button"
             >
-              {#if file.status === 'added' || file.status === 'untracked'}
-                <CirclePlus size={14} />
-              {:else if file.status === 'deleted'}
-                <CircleX size={14} />
-              {:else}
-                <CircleArrowUp size={14} />
-              {/if}
-            </button>
+              <!-- Status icon - fading if no checkpoint, solid if has checkpoint -->
+              <span class="status-icon" class:has-checkpoint={file.hasStaged}>
+                {#if file.hasStaged}
+                  <!-- Solid icons for files with checkpoint -->
+                  {#if file.status === 'added' || file.status === 'untracked'}
+                    <CirclePlus size={16} />
+                  {:else if file.status === 'deleted'}
+                    <CircleMinus size={16} />
+                  {:else}
+                    <CircleArrowUp size={16} />
+                  {/if}
+                {:else}
+                  <!-- Fading icons for files without checkpoint -->
+                  {#if file.status === 'added' || file.status === 'untracked'}
+                    <CircleFadingPlus size={16} />
+                  {:else if file.status === 'deleted'}
+                    <CircleX size={16} />
+                  {:else}
+                    <CircleFadingArrowUp size={16} />
+                  {/if}
+                {/if}
+              </span>
 
-            <!-- Unstaged indicator -->
-            <div class="state-icon unstaged" class:active={file.hasUnstaged}>
-              {#if file.status === 'added' || file.status === 'untracked'}
-                <CircleFadingPlus size={14} />
-              {:else if file.status === 'deleted'}
-                <CircleSlash size={14} />
-              {:else}
-                <CircleFadingArrowUp size={14} />
-              {/if}
-            </div>
-          </div>
+              <!-- File path -->
+              <span class="file-path">
+                <span class="file-dir">{getFileDir(file.path)}</span>
+                <span class="file-name">{getFileName(file.path)}</span>
+              </span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
 
-          <!-- File path -->
-          <span class="file-path">
-            <span class="file-dir">{getFileDir(file.path)}</span>
-            <span class="file-name">{getFileName(file.path)}</span>
-          </span>
-        </li>
-      {/each}
-    </ul>
+      <!-- Separator -->
+      {#if needsReview.length > 0 && approved.length > 0}
+        <div class="section-divider"></div>
+      {/if}
+
+      <!-- Approved section -->
+      {#if approved.length > 0}
+        <ul class="file-section approved-section">
+          {#each approved as file (file.path)}
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+            <li
+              class="file-item approved"
+              class:selected={selectedFile === file.path}
+              onclick={() => selectFile(file)}
+              onkeydown={(e) => e.key === 'Enter' && selectFile(file)}
+              tabindex="0"
+              role="button"
+            >
+              <!-- Status icon - solid (approved/checkpointed) -->
+              <span class="status-icon has-checkpoint">
+                {#if file.status === 'added' || file.status === 'untracked'}
+                  <CirclePlus size={16} />
+                {:else if file.status === 'deleted'}
+                  <CircleMinus size={16} />
+                {:else}
+                  <CircleArrowUp size={16} />
+                {/if}
+              </span>
+
+              <span class="file-path">
+                <span class="file-dir">{getFileDir(file.path)}</span>
+                <span class="file-name">{getFileName(file.path)}</span>
+              </span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
   {/if}
 
   <!-- D-pad overlay - fixed positioned outside the list -->
@@ -384,47 +396,33 @@
         "
       ></div>
 
-      <!-- Stage button (above, centered on icons) -->
-      {#if file.hasUnstaged}
-        <button
-          class="dpad-btn stage-btn"
-          style="
-            top: {pos.lineTop}px;
-            left: {pos.iconsCenterX}px;
-            transform: translate(-50%, -100%);
-          "
-          onclick={(e) => handleStage(e, file)}
-          title="Stage"
-        >
-          <ArrowLeft size={12} />
-        </button>
-      {/if}
+      <!-- Approve button (left side, aligned with sidebar border) -->
+      <button
+        class="dpad-btn approve-btn"
+        style="
+          top: {pos.lineTop}px;
+          left: {pos.lineLeft - 1}px;
+          height: {pos.lineBottom - pos.lineTop}px;
+          transform: translateX(-100%);
+        "
+        onclick={(e) => handleApprove(e, file)}
+        onmouseenter={handleButtonMouseEnter}
+        title="Approve"
+      >
+        <Check size={12} />
+      </button>
 
-      <!-- Unstage button (below, centered on icons) -->
-      {#if file.hasStaged}
-        <button
-          class="dpad-btn unstage-btn"
-          style="
-            top: {pos.lineBottom}px;
-            left: {pos.iconsCenterX}px;
-            transform: translateX(-50%);
-          "
-          onclick={(e) => handleUnstage(e, file)}
-          title="Unstage"
-        >
-          <ArrowRight size={12} />
-        </button>
-      {/if}
-
-      <!-- Discard button (left side) - hold to confirm -->
+      <!-- Discard button (right side, inside row) - hold to confirm -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="dpad-discard-wrapper"
         style="
           top: {pos.lineTop}px;
           left: {pos.lineLeft}px;
+          width: {pos.lineRight - pos.lineLeft}px;
           height: {pos.lineBottom - pos.lineTop}px;
-          transform: translateX(-100%);
         "
+        onmouseenter={handleButtonMouseEnter}
       >
         <HoldToDiscard onDiscard={() => handleDiscard(file)} title="Hold to discard" />
       </div>
@@ -468,7 +466,7 @@
     font-family: monospace;
   }
 
-  .staged-count {
+  .approved-count {
     color: var(--status-added);
   }
 
@@ -529,9 +527,23 @@
   .file-list {
     flex: 1;
     overflow-y: auto;
+    padding: 8px 0;
+  }
+
+  .file-section {
     list-style: none;
     margin: 0;
-    padding: 8px 0;
+    padding: 0;
+  }
+
+  .section-divider {
+    height: 1px;
+    background: var(--border-primary);
+    margin: 4px 8px;
+  }
+
+  .approved-section {
+    opacity: 0.7;
   }
 
   .file-item {
@@ -541,65 +553,35 @@
     font-size: var(--size-md);
     gap: 6px;
     cursor: pointer;
+    position: relative;
   }
 
-  .file-item:hover {
+  .file-item:hover,
+  .file-item.is-hovered {
     background-color: var(--bg-tertiary);
   }
 
-  .file-item.has-selection {
+  .file-item.selected {
     background-color: var(--ui-selection);
   }
 
-  /* State indicators (side by side) */
-  .state-indicators {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    flex-shrink: 0;
-  }
-
-  .state-icon {
+  /* Status icon */
+  .status-icon {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 14px;
-    height: 14px;
+    flex-shrink: 0;
     color: var(--text-muted);
-    opacity: 0.25;
-    transition:
-      opacity 0.1s,
-      color 0.1s;
   }
 
-  .state-icon.active {
-    opacity: 1;
-  }
-
-  /* Staged icons - solid style, green tint */
-  .state-icon.staged {
-    background: none;
-    border: none;
-    padding: 0;
-    cursor: default;
-  }
-
-  .state-icon.staged.active {
-    color: var(--status-added);
-    cursor: pointer;
-  }
-
-  .state-icon.staged.active:hover {
-    color: var(--text-primary);
-  }
-
-  .state-icon.staged:disabled {
-    cursor: default;
-  }
-
-  /* Unstaged icons - fading style, yellow/orange tint */
-  .state-icon.unstaged.active {
+  /* Has checkpoint + needs review = yellow (modified color) */
+  .status-icon.has-checkpoint {
     color: var(--status-modified);
+  }
+
+  /* Approved section = green (fully approved) */
+  .approved-section .status-icon.has-checkpoint {
+    color: var(--status-added);
   }
 
   .file-path {
@@ -634,7 +616,8 @@
   .dpad-outline {
     position: fixed;
     border: 1px solid var(--border-primary);
-    border-radius: 0 3px 3px 0;
+    border-left: none;
+    border-radius: 0;
     pointer-events: none;
   }
 
@@ -659,32 +642,27 @@
     background-color: var(--bg-input);
   }
 
-  /* Stage button - above the line */
-  .dpad-btn.stage-btn {
-    border-radius: 3px 3px 0 0;
-    border-bottom: none;
+  /* Approve button - left side */
+  .dpad-btn.approve-btn {
+    border-radius: 3px 0 0 3px;
+    border-right: none;
   }
 
-  .dpad-btn.stage-btn:hover {
+  .dpad-btn.approve-btn:hover {
     color: var(--status-added);
   }
 
-  /* Unstage button - below the line */
-  .dpad-btn.unstage-btn {
-    border-radius: 0 0 3px 3px;
-    border-top: none;
-  }
-
-  .dpad-btn.unstage-btn:hover {
-    color: var(--status-modified);
-  }
-
-  /* Discard wrapper - positions HoldToDiscard component */
+  /* Discard wrapper - positions HoldToDiscard component flush to right edge */
   .dpad-discard-wrapper {
     position: fixed;
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-end;
+    pointer-events: none;
+  }
+
+  /* Only the button itself should capture pointer events */
+  :global(.dpad-discard-wrapper .hold-to-discard) {
     pointer-events: auto;
   }
 </style>

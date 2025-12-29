@@ -4,11 +4,13 @@
   Renders a two-pane diff view with synchronized scrolling, syntax highlighting,
   and visual connectors between corresponding changed regions. Supports panel
   minimization for new/deleted files and range-level discard operations.
+  
+  Alignments are loaded progressively to keep the UI responsive for large files.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { X } from 'lucide-svelte';
-  import type { FileDiff } from './types';
+  import type { FileDiff, Alignment } from './types';
   import {
     initHighlighter,
     highlightLines,
@@ -58,6 +60,65 @@
   let hoveredRangeIndex: number | null = $state(null);
   let rangeToolbarStyle: { top: number; left: number } | null = $state(null);
 
+  // ==========================================================================
+  // Progressive alignment loading
+  // ==========================================================================
+
+  // How many alignments to process per batch
+  const ALIGNMENT_BATCH_SIZE = 20;
+
+  // Alignments that have been "activated" (ready to render)
+  let activeAlignmentCount = $state(0);
+
+  // The alignments to use for rendering (slice of full alignments)
+  let activeAlignments = $derived.by(() => {
+    if (!diff) return [];
+    return diff.alignments.slice(0, activeAlignmentCount);
+  });
+
+  // Are we still loading alignments?
+  let alignmentsLoading = $derived(diff !== null && activeAlignmentCount < diff.alignments.length);
+
+  // Track the current diff to cancel loading when it changes
+  let loadingForDiff: FileDiff | null = null;
+
+  /**
+   * Progressively load alignments in batches using requestIdleCallback.
+   */
+  function startAlignmentLoading(targetDiff: FileDiff) {
+    loadingForDiff = targetDiff;
+    activeAlignmentCount = 0;
+
+    const totalAlignments = targetDiff.alignments.length;
+
+    function loadNextBatch(deadline?: IdleDeadline) {
+      // Abort if diff changed
+      if (loadingForDiff !== targetDiff) return;
+
+      // Load a batch
+      const nextCount = Math.min(activeAlignmentCount + ALIGNMENT_BATCH_SIZE, totalAlignments);
+      activeAlignmentCount = nextCount;
+
+      // Schedule next batch if more to load
+      if (nextCount < totalAlignments) {
+        if ('requestIdleCallback' in window) {
+          requestIdleCallback(loadNextBatch, { timeout: 50 });
+        } else {
+          setTimeout(() => loadNextBatch(), 16);
+        }
+      }
+    }
+
+    // Start loading
+    if (totalAlignments > 0) {
+      if ('requestIdleCallback' in window) {
+        requestIdleCallback(loadNextBatch, { timeout: 50 });
+      } else {
+        setTimeout(() => loadNextBatch(), 0);
+      }
+    }
+  }
+
   // Discard is only available when viewing the working tree
   let canDiscard = $derived(diffHead === '@');
 
@@ -78,14 +139,16 @@
   let showRangeMarkers = $derived(!isNewFile && !isDeletedFile);
 
   // Build a list of changed alignments with their indices (for hover/discard)
+  // Only includes active (loaded) alignments
   let changedAlignments = $derived(
-    diff?.alignments
+    activeAlignments
       .map((alignment, index) => ({ alignment, index }))
-      .filter(({ alignment }) => alignment.changed) ?? []
+      .filter(({ alignment }) => alignment.changed)
   );
 
   // Map line index to changed alignment index for quick lookup during hover
-  let beforeLineToAlignment = $derived(() => {
+  // Uses activeAlignments so it updates progressively
+  let beforeLineToAlignment = $derived.by(() => {
     const map = new Map<number, number>();
     changedAlignments.forEach(({ alignment }, alignmentIdx) => {
       for (let i = alignment.before.start; i < alignment.before.end; i++) {
@@ -95,7 +158,7 @@
     return map;
   });
 
-  let afterLineToAlignment = $derived(() => {
+  let afterLineToAlignment = $derived.by(() => {
     const map = new Map<number, number>();
     changedAlignments.forEach(({ alignment }, alignmentIdx) => {
       for (let i = alignment.after.start; i < alignment.after.end; i++) {
@@ -105,7 +168,7 @@
     return map;
   });
 
-  // Auto-minimize empty panels when diff changes
+  // Auto-minimize empty panels and start alignment loading when diff changes
   $effect(() => {
     if (diff) {
       beforeMinimized = isNewFile;
@@ -113,6 +176,11 @@
       // Clear hover state when diff changes
       hoveredRangeIndex = null;
       rangeToolbarStyle = null;
+      // Start progressive alignment loading
+      startAlignmentLoading(diff);
+    } else {
+      loadingForDiff = null;
+      activeAlignmentCount = 0;
     }
   });
 
@@ -138,10 +206,9 @@
 
   const scrollSync = createScrollSync();
 
+  // Update scroll sync with active alignments (progressively)
   $effect(() => {
-    if (diff) {
-      scrollSync.setAlignments(diff.alignments);
-    }
+    scrollSync.setAlignments(activeAlignments);
   });
 
   function handleBeforeScroll(e: Event) {
@@ -219,16 +286,18 @@
     const containerRect = beforePane.getBoundingClientRect();
     const verticalOffset = containerRect.top - svgRect.top;
 
-    drawConnectors(connectorSvg, diff.alignments, beforePane.scrollTop, afterPane.scrollTop, {
+    // Draw connectors for active alignments only
+    drawConnectors(connectorSvg, activeAlignments, beforePane.scrollTop, afterPane.scrollTop, {
       lineHeight,
       verticalOffset,
     });
   }
 
-  // Redraw connectors when diff changes or scroll position changes
+  // Redraw connectors when alignments load or scroll position changes
   $effect(() => {
     if (diff && connectorSvg && beforePane) {
-      const _ = beforePane.scrollTop; // dependency
+      // Dependencies: activeAlignmentCount triggers redraw as alignments load
+      const _ = [beforePane.scrollTop, activeAlignmentCount];
       redrawConnectors();
     }
   });
@@ -281,7 +350,7 @@
   function handleLineMouseEnter(pane: 'before' | 'after', lineIndex: number) {
     if (!canDiscard) return; // Don't show hover if discard not available
 
-    const map = pane === 'before' ? beforeLineToAlignment() : afterLineToAlignment();
+    const map = pane === 'before' ? beforeLineToAlignment : afterLineToAlignment;
     const alignmentIdx = map.get(lineIndex);
 
     if (alignmentIdx !== undefined) {
@@ -330,7 +399,7 @@
    * Check if a line is within a changed alignment (for highlighting).
    */
   function isLineInChangedAlignment(side: 'before' | 'after', lineIndex: number): boolean {
-    const map = side === 'before' ? beforeLineToAlignment() : afterLineToAlignment();
+    const map = side === 'before' ? beforeLineToAlignment : afterLineToAlignment;
     return map.has(lineIndex);
   }
 
@@ -384,10 +453,10 @@
           >
             {#each beforeLines as line, i}
               {@const boundary = showRangeMarkers
-                ? getLineBoundary(diff.alignments, 'before', i)
+                ? getLineBoundary(activeAlignments, 'before', i)
                 : { isStart: false, isEnd: false }}
               {@const isInHoveredRange =
-                hoveredRangeIndex !== null && beforeLineToAlignment().get(i) === hoveredRangeIndex}
+                hoveredRangeIndex !== null && beforeLineToAlignment.get(i) === hoveredRangeIndex}
               {@const isChanged = showRangeMarkers && isLineInChangedAlignment('before', i)}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
@@ -449,10 +518,10 @@
           >
             {#each afterLines as line, i}
               {@const boundary = showRangeMarkers
-                ? getLineBoundary(diff.alignments, 'after', i)
+                ? getLineBoundary(activeAlignments, 'after', i)
                 : { isStart: false, isEnd: false }}
               {@const isInHoveredRange =
-                hoveredRangeIndex !== null && afterLineToAlignment().get(i) === hoveredRangeIndex}
+                hoveredRangeIndex !== null && afterLineToAlignment.get(i) === hoveredRangeIndex}
               {@const isChanged = showRangeMarkers && isLineInChangedAlignment('after', i)}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div

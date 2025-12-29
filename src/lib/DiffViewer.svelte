@@ -8,7 +8,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { X } from 'lucide-svelte';
-  import type { LegacyFileDiff } from './types';
+  import type { FileDiff } from './types';
   import {
     initHighlighter,
     highlightLines,
@@ -17,22 +17,26 @@
     getTheme,
     type Token,
   } from './services/highlighter';
-  import { discardLines } from './services/git';
   import { createScrollSync } from './services/scrollSync';
   import { drawConnectors } from './diffConnectors';
-  import { getLineBoundary, getLanguageFromDiff } from './diffUtils';
+  import {
+    getLineBoundary,
+    getLanguageFromDiff,
+    getFilePath,
+    isBinaryDiff,
+    getTextLines,
+  } from './diffUtils';
   import { setupKeyboardNav } from './diffKeyboard';
 
   interface Props {
-    diff: LegacyFileDiff | null;
-    filePath?: string | null;
+    diff: FileDiff | null;
     /** Head ref for the diff - "@" means working tree, enabling discard */
     diffHead?: string;
     sizeBase?: number;
     onRangeDiscard?: () => void;
   }
 
-  let { diff, filePath = null, diffHead = '@', sizeBase, onRangeDiscard }: Props = $props();
+  let { diff, diffHead = '@', sizeBase, onRangeDiscard }: Props = $props();
 
   let beforePane: HTMLDivElement | null = $state(null);
   let afterPane: HTMLDivElement | null = $state(null);
@@ -57,37 +61,45 @@
   // Discard is only available when viewing the working tree
   let canDiscard = $derived(diffHead === '@');
 
+  // Extract lines from the diff
+  let beforeLines = $derived(diff ? getTextLines(diff, 'before') : []);
+  let afterLines = $derived(diff ? getTextLines(diff, 'after') : []);
+
   // Detect if this is a new file (no before content)
-  let isNewFile = $derived(diff !== null && diff.before.lines.length === 0);
+  let isNewFile = $derived(diff !== null && diff.before === null);
   // Detect if this is a deleted file (no after content)
-  let isDeletedFile = $derived(diff !== null && diff.after.lines.length === 0);
+  let isDeletedFile = $derived(diff !== null && diff.after === null);
+
+  // Check if binary
+  let isBinary = $derived(diff !== null && isBinaryDiff(diff));
 
   // Hide range markers (spine connectors, bounding lines, content highlights)
   // for new/deleted files since the entire file is one big change
   let showRangeMarkers = $derived(!isNewFile && !isDeletedFile);
 
-  // Build a list of changed ranges with their indices (for hover/discard)
-  let changedRanges = $derived(
-    diff?.ranges.map((range, index) => ({ range, index })).filter(({ range }) => range.changed) ??
-      []
+  // Build a list of changed alignments with their indices (for hover/discard)
+  let changedAlignments = $derived(
+    diff?.alignments
+      .map((alignment, index) => ({ alignment, index }))
+      .filter(({ alignment }) => alignment.changed) ?? []
   );
 
-  // Map line index to changed range index for quick lookup during hover
-  let beforeLineToRange = $derived(() => {
+  // Map line index to changed alignment index for quick lookup during hover
+  let beforeLineToAlignment = $derived(() => {
     const map = new Map<number, number>();
-    changedRanges.forEach(({ range }, rangeIdx) => {
-      for (let i = range.before.start; i < range.before.end; i++) {
-        map.set(i, rangeIdx);
+    changedAlignments.forEach(({ alignment }, alignmentIdx) => {
+      for (let i = alignment.before.start; i < alignment.before.end; i++) {
+        map.set(i, alignmentIdx);
       }
     });
     return map;
   });
 
-  let afterLineToRange = $derived(() => {
+  let afterLineToAlignment = $derived(() => {
     const map = new Map<number, number>();
-    changedRanges.forEach(({ range }, rangeIdx) => {
-      for (let i = range.after.start; i < range.after.end; i++) {
-        map.set(i, rangeIdx);
+    changedAlignments.forEach(({ alignment }, alignmentIdx) => {
+      for (let i = alignment.after.start; i < alignment.after.end; i++) {
+        map.set(i, alignmentIdx);
       }
     });
     return map;
@@ -128,7 +140,7 @@
 
   $effect(() => {
     if (diff) {
-      scrollSync.setRanges(diff.ranges);
+      scrollSync.setAlignments(diff.alignments);
     }
   });
 
@@ -160,23 +172,23 @@
 
     if (highlighterReady && languageReady) {
       // Batch highlight all lines at once (much faster than per-line)
-      const beforeCode = diff.before.lines.map((l) => l.content).join('\n');
-      const afterCode = diff.after.lines.map((l) => l.content).join('\n');
+      const beforeCode = beforeLines.join('\n');
+      const afterCode = afterLines.join('\n');
 
       beforeTokens = beforeCode ? highlightLines(beforeCode, language) : [];
       afterTokens = afterCode ? highlightLines(afterCode, language) : [];
     } else {
       // Fallback: plain text tokens
       const defaultColor = '#d4d4d4';
-      beforeTokens = diff.before.lines.map((l) => [{ content: l.content, color: defaultColor }]);
-      afterTokens = diff.after.lines.map((l) => [{ content: l.content, color: defaultColor }]);
+      beforeTokens = beforeLines.map((line) => [{ content: line, color: defaultColor }]);
+      afterTokens = afterLines.map((line) => [{ content: line, color: defaultColor }]);
     }
   });
 
   $effect(() => {
     if (highlighterReady && diff) {
       languageReady = false;
-      const path = diff.after.path || diff.before.path;
+      const path = getFilePath(diff);
       if (path) {
         prepareLanguage(path).then((ready) => {
           languageReady = ready;
@@ -207,7 +219,7 @@
     const containerRect = beforePane.getBoundingClientRect();
     const verticalOffset = containerRect.top - svgRect.top;
 
-    drawConnectors(connectorSvg, diff.ranges, beforePane.scrollTop, afterPane.scrollTop, {
+    drawConnectors(connectorSvg, diff.alignments, beforePane.scrollTop, afterPane.scrollTop, {
       lineHeight,
       verticalOffset,
     });
@@ -241,14 +253,14 @@
       return;
     }
 
-    const rangeData = changedRanges[hoveredRangeIndex];
-    if (!rangeData) {
+    const alignmentData = changedAlignments[hoveredRangeIndex];
+    if (!alignmentData) {
       rangeToolbarStyle = null;
       return;
     }
 
-    // Find the first line of this range in the after pane
-    const lineIndex = rangeData.range.after.start;
+    // Find the first line of this alignment in the after pane
+    const lineIndex = alignmentData.alignment.after.start;
     const lineEl = afterPane.querySelectorAll('.line')[lineIndex] as HTMLElement | null;
 
     if (!lineEl) {
@@ -269,11 +281,11 @@
   function handleLineMouseEnter(pane: 'before' | 'after', lineIndex: number) {
     if (!canDiscard) return; // Don't show hover if discard not available
 
-    const map = pane === 'before' ? beforeLineToRange() : afterLineToRange();
-    const rangeIdx = map.get(lineIndex);
+    const map = pane === 'before' ? beforeLineToAlignment() : afterLineToAlignment();
+    const alignmentIdx = map.get(lineIndex);
 
-    if (rangeIdx !== undefined) {
-      hoveredRangeIndex = rangeIdx;
+    if (alignmentIdx !== undefined) {
+      hoveredRangeIndex = alignmentIdx;
       requestAnimationFrame(updateToolbarPosition);
     }
   }
@@ -302,24 +314,24 @@
   // ==========================================================================
 
   async function handleDiscardRange() {
-    if (hoveredRangeIndex === null || !filePath || !canDiscard) return;
+    if (hoveredRangeIndex === null || !canDiscard || !diff) return;
 
-    const rangeData = changedRanges[hoveredRangeIndex];
-    if (!rangeData?.range.source_lines) {
-      console.error('No source_lines data for range');
-      return;
-    }
+    const alignmentData = changedAlignments[hoveredRangeIndex];
+    if (!alignmentData) return;
 
-    try {
-      // When diffHead is "@", we're viewing working tree changes.
-      // Discard reverts working tree to match the base (staged: false).
-      await discardLines(filePath, rangeData.range.source_lines, false);
-      hoveredRangeIndex = null;
-      rangeToolbarStyle = null;
-      onRangeDiscard?.();
-    } catch (e) {
-      console.error('Failed to discard range:', e);
-    }
+    // TODO: Implement discard via new backend API
+    console.log('Discard alignment:', alignmentData.alignment);
+    hoveredRangeIndex = null;
+    rangeToolbarStyle = null;
+    onRangeDiscard?.();
+  }
+
+  /**
+   * Check if a line is within a changed alignment (for highlighting).
+   */
+  function isLineInChangedAlignment(side: 'before' | 'after', lineIndex: number): boolean {
+    const map = side === 'before' ? beforeLineToAlignment() : afterLineToAlignment();
+    return map.has(lineIndex);
   }
 
   onMount(() => {
@@ -340,7 +352,7 @@
     <div class="empty-state">
       <p>Select a file to view changes</p>
     </div>
-  {:else if diff.is_binary}
+  {:else if isBinary}
     <div class="binary-notice">
       <p>Binary file - cannot display diff</p>
     </div>
@@ -370,33 +382,30 @@
             onscroll={handleBeforeScroll}
             style="background-color: {themeBg}"
           >
-            {#each diff.before.lines as line, i}
+            {#each beforeLines as line, i}
               {@const boundary = showRangeMarkers
-                ? getLineBoundary(diff.ranges, 'before', i)
+                ? getLineBoundary(diff.alignments, 'before', i)
                 : { isStart: false, isEnd: false }}
               {@const isInHoveredRange =
-                hoveredRangeIndex !== null && beforeLineToRange().get(i) === hoveredRangeIndex}
+                hoveredRangeIndex !== null && beforeLineToAlignment().get(i) === hoveredRangeIndex}
+              {@const isChanged = showRangeMarkers && isLineInChangedAlignment('before', i)}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="line"
-                class:line-removed={line.line_type === 'removed'}
                 class:range-start={boundary.isStart}
                 class:range-end={boundary.isEnd}
                 class:range-hovered={isInHoveredRange}
                 onmouseenter={() => handleLineMouseEnter('before', i)}
                 onmouseleave={handleLineMouseLeave}
               >
-                <span
-                  class="line-content"
-                  class:content-removed={showRangeMarkers && line.line_type === 'removed'}
-                >
+                <span class="line-content" class:content-changed={isChanged}>
                   {#each getBeforeTokens(i) as token}
                     <span style="color: {token.color}">{token.content}</span>
                   {/each}
                 </span>
               </div>
             {/each}
-            {#if diff.before.lines.length === 0}
+            {#if beforeLines.length === 0}
               <div class="empty-file-notice">New file</div>
             {/if}
           </div>
@@ -438,33 +447,30 @@
             onscroll={handleAfterScroll}
             style="background-color: {themeBg}"
           >
-            {#each diff.after.lines as line, i}
+            {#each afterLines as line, i}
               {@const boundary = showRangeMarkers
-                ? getLineBoundary(diff.ranges, 'after', i)
+                ? getLineBoundary(diff.alignments, 'after', i)
                 : { isStart: false, isEnd: false }}
               {@const isInHoveredRange =
-                hoveredRangeIndex !== null && afterLineToRange().get(i) === hoveredRangeIndex}
+                hoveredRangeIndex !== null && afterLineToAlignment().get(i) === hoveredRangeIndex}
+              {@const isChanged = showRangeMarkers && isLineInChangedAlignment('after', i)}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="line"
-                class:line-added={line.line_type === 'added'}
                 class:range-start={boundary.isStart}
                 class:range-end={boundary.isEnd}
                 class:range-hovered={isInHoveredRange}
                 onmouseenter={() => handleLineMouseEnter('after', i)}
                 onmouseleave={handleLineMouseLeave}
               >
-                <span
-                  class="line-content"
-                  class:content-added={showRangeMarkers && line.line_type === 'added'}
-                >
+                <span class="line-content" class:content-changed={isChanged}>
                   {#each getAfterTokens(i) as token}
                     <span style="color: {token.color}">{token.content}</span>
                   {/each}
                 </span>
               </div>
             {/each}
-            {#if diff.after.lines.length === 0}
+            {#if afterLines.length === 0}
               <div class="empty-file-notice">File deleted</div>
             {/if}
           </div>
@@ -473,7 +479,7 @@
     </div>
 
     <!-- Range action toolbar (floating, only when viewing working tree) -->
-    {#if hoveredRangeIndex !== null && rangeToolbarStyle && filePath && canDiscard}
+    {#if hoveredRangeIndex !== null && rangeToolbarStyle && canDiscard}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="range-toolbar"
@@ -629,12 +635,8 @@
     white-space: pre;
   }
 
-  .content-added {
+  .content-changed {
     background-color: var(--diff-added-overlay);
-  }
-
-  .content-removed {
-    background-color: var(--diff-removed-overlay);
   }
 
   .line.range-start::before {

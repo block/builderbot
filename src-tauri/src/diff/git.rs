@@ -349,6 +349,8 @@ fn compute_alignments(before: &Option<File>, after: &Option<File>) -> Vec<Alignm
 /// Find matching blocks between two sequences of lines.
 ///
 /// Returns a list of (before_start, after_start, length) tuples.
+/// The matches are guaranteed to be monotonically increasing in both dimensions,
+/// i.e., for consecutive matches A and B: A.before_end <= B.before_start AND A.after_end <= B.after_start
 fn find_matching_blocks(before: &[String], after: &[String]) -> Vec<(usize, usize, usize)> {
     if before.is_empty() || after.is_empty() {
         return vec![];
@@ -360,7 +362,7 @@ fn find_matching_blocks(before: &[String], after: &[String]) -> Vec<(usize, usiz
         after_positions.entry(line.as_str()).or_default().push(i);
     }
 
-    // Find longest common subsequence using patience diff approach
+    // Find matching blocks greedily
     let mut matches = Vec::new();
     let mut after_used = vec![false; after.len()];
 
@@ -395,7 +397,22 @@ fn find_matching_blocks(before: &[String], after: &[String]) -> Vec<(usize, usiz
 
     // Sort by position in before
     matches.sort_by_key(|m| m.0);
-    matches
+
+    // Filter to ensure monotonicity in both dimensions.
+    // We need matches where both before and after positions are strictly increasing.
+    // Use a greedy approach: keep a match if it doesn't violate monotonicity with the last kept match.
+    let mut filtered = Vec::new();
+    let mut last_after_end = 0usize;
+
+    for (before_start, after_start, len) in matches {
+        // Skip this match if it would go backwards in the after dimension
+        if after_start >= last_after_end {
+            filtered.push((before_start, after_start, len));
+            last_after_end = after_start + len;
+        }
+    }
+
+    filtered
 }
 
 #[cfg(test)]
@@ -487,5 +504,81 @@ mod tests {
         assert!(alignments[0].changed);
         assert_eq!(alignments[0].before, Span::new(0, 2));
         assert_eq!(alignments[0].after, Span::new(0, 0));
+    }
+
+    #[test]
+    fn test_find_matching_blocks_monotonicity() {
+        // Test case where greedy matching could produce non-monotonic results.
+        // If "x" appears at position 5 in after, and "y" appears at position 2 in after,
+        // but "x" comes before "y" in before, we must skip the "y" match.
+        let before: Vec<String> = vec!["x", "y", "z"].into_iter().map(String::from).collect();
+        let after: Vec<String> = vec!["a", "b", "y", "c", "d", "x", "z"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let matches = find_matching_blocks(&before, &after);
+
+        // Verify monotonicity: each match's after_start must be >= previous match's after_end
+        let mut last_after_end = 0;
+        for (before_start, after_start, len) in &matches {
+            assert!(
+                *after_start >= last_after_end,
+                "Non-monotonic match: after_start {} < last_after_end {} (before_start={})",
+                after_start,
+                last_after_end,
+                before_start
+            );
+            last_after_end = after_start + len;
+        }
+    }
+
+    #[test]
+    fn test_alignments_no_overlap() {
+        // Test with content that previously caused overlaps
+        let before = Some(File {
+            path: "test.txt".into(),
+            content: FileContent::Text {
+                lines: vec!["a", "b", "c", "d", "e"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+            },
+        });
+        let after = Some(File {
+            path: "test.txt".into(),
+            content: FileContent::Text {
+                lines: vec!["x", "c", "y", "a", "z"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+            },
+        });
+
+        let alignments = compute_alignments(&before, &after);
+
+        // Verify no overlaps in before spans
+        let mut last_before_end = 0u32;
+        for a in &alignments {
+            assert!(
+                a.before.start >= last_before_end,
+                "Overlap in before: start {} < last_end {}",
+                a.before.start,
+                last_before_end
+            );
+            last_before_end = a.before.end;
+        }
+
+        // Verify no overlaps in after spans
+        let mut last_after_end = 0u32;
+        for a in &alignments {
+            assert!(
+                a.after.start >= last_after_end,
+                "Overlap in after: start {} < last_end {}",
+                a.after.start,
+                last_after_end
+            );
+            last_after_end = a.after.end;
+        }
     }
 }

@@ -1,12 +1,12 @@
 /**
  * Spine Connectors
  *
- * Draws bezier curve connectors between corresponding changed ranges
+ * Draws bezier curve connectors between corresponding changed regions
  * in the center spine. These visualize how regions in the "before"
  * pane map to the "after" pane.
  */
 
-import type { Range } from './types';
+import type { Alignment } from './types';
 
 export interface ConnectorConfig {
   lineHeight: number;
@@ -26,11 +26,11 @@ const DEFAULT_CONFIG: ConnectorConfig = {
 };
 
 /**
- * Draw connectors between changed ranges.
+ * Draw connectors between changed alignments.
  */
 export function drawConnectors(
   svg: SVGSVGElement,
-  ranges: Range[],
+  alignments: Alignment[],
   beforeScroll: number,
   afterScroll: number,
   config: Partial<ConnectorConfig> = {}
@@ -43,8 +43,8 @@ export function drawConnectors(
   svg.innerHTML = '';
   svg.setAttribute('shape-rendering', 'geometricPrecision');
 
-  for (const range of ranges) {
-    if (!range.changed) continue;
+  for (const alignment of alignments) {
+    if (!alignment.changed) continue;
 
     // Calculate pixel positions relative to viewport
     // Top border: at the top edge of the first line (start * lineHeight)
@@ -53,18 +53,21 @@ export function drawConnectors(
     // Add 0.5px offset for crisp 1px stroke rendering on pixel boundaries
     // Bottom uses -0.5 to align with the CSS ::after pseudo-element at bottom:0
     // verticalOffset adjusts for structural differences between SVG and code container
-    const beforeTop = range.before.start * cfg.lineHeight - beforeScroll + 0.5 + cfg.verticalOffset;
+    const beforeTop =
+      alignment.before.start * cfg.lineHeight - beforeScroll + 0.5 + cfg.verticalOffset;
     const beforeBottom =
-      range.before.end * cfg.lineHeight - beforeScroll - 0.5 + cfg.verticalOffset;
-    const afterTop = range.after.start * cfg.lineHeight - afterScroll + 0.5 + cfg.verticalOffset;
-    const afterBottom = range.after.end * cfg.lineHeight - afterScroll - 0.5 + cfg.verticalOffset;
+      alignment.before.end * cfg.lineHeight - beforeScroll - 0.5 + cfg.verticalOffset;
+    const afterTop =
+      alignment.after.start * cfg.lineHeight - afterScroll + 0.5 + cfg.verticalOffset;
+    const afterBottom =
+      alignment.after.end * cfg.lineHeight - afterScroll - 0.5 + cfg.verticalOffset;
 
     // Skip if completely out of view
     if (beforeBottom < 0 && afterBottom < 0) continue;
     if (beforeTop > svgHeight && afterTop > svgHeight) continue;
 
-    const isInsertion = range.before.start === range.before.end;
-    const isDeletion = range.after.start === range.after.end;
+    const isInsertion = alignment.before.start === alignment.before.end;
+    const isDeletion = alignment.after.start === alignment.after.end;
 
     // Build bezier path
     let d: string;

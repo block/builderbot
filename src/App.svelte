@@ -5,14 +5,15 @@
   import DiffViewer from './lib/DiffViewer.svelte';
   import CommitPanel from './lib/CommitPanel.svelte';
   import DiffSelectorModal from './lib/DiffSelectorModal.svelte';
-  import { getRefDiff, resolveRef } from './lib/services/git';
+  import { getDiff, resolveRef, getGitStatus } from './lib/services/git';
   import {
     subscribeToStatusEvents,
     startWatching,
     stopWatching,
     type Unsubscribe,
   } from './lib/services/statusEvents';
-  import type { LegacyFileDiff, GitStatus, DiffSpec } from './lib/types';
+  import type { FileDiff, GitStatus, DiffSpec } from './lib/types';
+  import { getFilePath } from './lib/diffUtils';
 
   // UI scaling
   const SIZE_STEP = 1;
@@ -137,8 +138,8 @@
     currentDiff = null;
     // Update resolved SHAs for tooltip
     updateResolvedShas();
-    // Trigger sidebar reload with new diff spec
-    sidebarRef?.loadStatus();
+    // Reload all diffs
+    loadAllDiffs();
   }
 
   function handleCustomDiffSelect(base: string, head: string, label: string) {
@@ -158,14 +159,24 @@
     diffSelectorOpen = false;
   }
 
+  // ==========================================================================
+  // Diff State
+  // ==========================================================================
+
+  // All diffs for the current base..head
+  let allDiffs: FileDiff[] = $state([]);
+  let diffsLoading = $state(true);
+  let diffsError: string | null = $state(null);
+
+  // Currently selected file and its diff
   let selectedFile: string | null = $state(null);
-  let currentDiff: LegacyFileDiff | null = $state(null);
-  let diffError: string | null = $state(null);
+  let currentDiff = $derived.by(() => {
+    if (!selectedFile) return null;
+    return allDiffs.find((d) => getFilePath(d) === selectedFile) ?? null;
+  });
+
   let sidebarRef: Sidebar | null = $state(null);
   let commitPanelRef: CommitPanel | null = $state(null);
-
-  // Guard against concurrent diff loads
-  let loadingPath: string | null = null;
 
   // Watcher cleanup function
   let unsubscribe: Unsubscribe | null = null;
@@ -174,41 +185,52 @@
   let currentRepoPath: string | null = $state(null);
 
   /**
-   * Check if a file path exists in the given status (any category).
+   * Load all diffs for the current base..head.
    */
-  function fileExistsInStatus(status: GitStatus, path: string): boolean {
-    return (
-      status.staged.some((f) => f.path === path) ||
-      status.unstaged.some((f) => f.path === path) ||
-      status.untracked.some((f) => f.path === path)
-    );
+  async function loadAllDiffs() {
+    diffsLoading = true;
+    diffsError = null;
+
+    try {
+      allDiffs = await getDiff(diffBase, diffHead);
+
+      // Auto-select first file if none selected
+      if (!selectedFile && allDiffs.length > 0) {
+        selectedFile = getFilePath(allDiffs[0]);
+      }
+
+      // Update sidebar with the new file list
+      sidebarRef?.setDiffs(allDiffs);
+    } catch (e) {
+      diffsError = e instanceof Error ? e.message : String(e);
+      allDiffs = [];
+    } finally {
+      diffsLoading = false;
+    }
   }
 
   /**
    * Handle status updates from the file watcher.
    * Only relevant when diffHead is "@" (working tree).
    */
-  async function handleStatusUpdate(status: GitStatus) {
-    // Forward to sidebar
-    sidebarRef?.setStatus(status);
-
+  async function handleStatusUpdate(_status: GitStatus) {
     // Refresh commit panel
     commitPanelRef?.refresh();
 
-    // Only reload diff if we're viewing the working tree
+    // Only reload diffs if we're viewing the working tree
     if (diffHead !== '@') {
       return;
     }
 
+    // Reload all diffs
+    await loadAllDiffs();
+
     // Check if currently selected file still exists
     if (selectedFile) {
-      if (!fileExistsInStatus(status, selectedFile)) {
-        // File no longer has changes - clear the diff
-        currentDiff = null;
-        selectedFile = null;
-      } else {
-        // File still has changes - reload diff (content may have changed)
-        await loadDiff(selectedFile);
+      const stillExists = allDiffs.some((d) => getFilePath(d) === selectedFile);
+      if (!stillExists) {
+        // File no longer has changes - select first available or clear
+        selectedFile = allDiffs.length > 0 ? getFilePath(allDiffs[0]) : null;
       }
     }
   }
@@ -223,6 +245,21 @@
     // Resolve initial SHAs for tooltip
     updateResolvedShas();
 
+    // Load initial diffs
+    await loadAllDiffs();
+
+    // Get repo path for watcher
+    try {
+      const status = await getGitStatus();
+      if (status?.repo_path) {
+        currentRepoPath = status.repo_path;
+        await startWatching(status.repo_path);
+        console.log('Started watching:', status.repo_path);
+      }
+    } catch (e) {
+      console.error('Failed to start watcher:', e);
+    }
+
     // Subscribe to status events from the backend
     unsubscribe = await subscribeToStatusEvents(
       // On status update - handle refresh logic
@@ -232,7 +269,6 @@
         console.log(
           'Slow repository detected. Consider enabling git fsmonitor: git config core.fsmonitor true'
         );
-        // Could show a toast/notification here in the future
       }
     );
   });
@@ -248,79 +284,23 @@
     });
   });
 
-  // Called by Sidebar when it loads a repo
-  async function handleRepoLoaded(repoPath: string) {
-    if (repoPath && repoPath !== currentRepoPath) {
-      currentRepoPath = repoPath;
-      try {
-        await startWatching(repoPath);
-        console.log('Started watching:', repoPath);
-      } catch (e) {
-        console.error('Failed to start watcher:', e);
-      }
-    }
-  }
-
-  async function handleFileSelect(path: string) {
+  function handleFileSelect(path: string) {
     selectedFile = path;
-    await loadDiff(path);
-  }
-
-  async function loadDiff(path: string) {
-    // Skip if already loading this exact path (prevents duplicate calls)
-    if (loadingPath === path) {
-      return;
-    }
-
-    loadingPath = path;
-    diffError = null;
-
-    try {
-      const diff = await getRefDiff(diffBase, diffHead, path);
-
-      // Only update if this is still the file we want
-      if (loadingPath === path) {
-        currentDiff = diff;
-      }
-    } catch (e) {
-      if (loadingPath === path) {
-        const errorMsg = e instanceof Error ? e.message : String(e);
-
-        // "File not found" means the file no longer has changes
-        // (e.g., all changes were discarded). Clear selection gracefully.
-        if (errorMsg.includes('not found')) {
-          currentDiff = null;
-          selectedFile = null;
-        } else {
-          // Real error - show it
-          diffError = errorMsg;
-          currentDiff = null;
-        }
-      }
-      console.error('Failed to load diff:', e);
-    } finally {
-      if (loadingPath === path) {
-        loadingPath = null;
-      }
-    }
   }
 
   async function handleStatusChange() {
     // Sidebar staged/unstaged/discarded a file - refresh commit panel
     commitPanelRef?.refresh();
 
-    // Reload diff if file still selected (content may have changed from discard)
-    if (selectedFile) {
-      await loadDiff(selectedFile);
-    }
+    // Reload all diffs (content may have changed from discard)
+    await loadAllDiffs();
   }
 
   async function handleCommitComplete() {
-    // Refresh sidebar and commit panel after successful commit
-    await sidebarRef?.loadStatus();
+    // Refresh after successful commit
+    await loadAllDiffs();
     commitPanelRef?.refresh();
-    // Clear the diff view since files may have changed
-    currentDiff = null;
+    // Clear the selection since files may have changed
     selectedFile = null;
   }
 </script>
@@ -367,19 +347,17 @@
 
   <div class="app-container">
     <section class="main-content">
-      {#if diffError}
+      {#if diffsLoading}
+        <div class="loading-state">
+          <p>Loading...</p>
+        </div>
+      {:else if diffsError}
         <div class="error-state">
           <p>Error loading diff:</p>
-          <p class="error-message">{diffError}</p>
+          <p class="error-message">{diffsError}</p>
         </div>
       {:else}
-        <DiffViewer
-          diff={currentDiff}
-          filePath={selectedFile}
-          {diffHead}
-          {sizeBase}
-          onRangeDiscard={handleStatusChange}
-        />
+        <DiffViewer diff={currentDiff} {diffHead} {sizeBase} onRangeDiscard={handleStatusChange} />
       {/if}
     </section>
     <aside class="sidebar">
@@ -387,7 +365,6 @@
         bind:this={sidebarRef}
         onFileSelect={handleFileSelect}
         onStatusChange={handleStatusChange}
-        onRepoLoaded={handleRepoLoaded}
         {selectedFile}
         {diffBase}
         {diffHead}
@@ -544,6 +521,15 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+
+  .loading-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: var(--size-lg);
   }
 
   .error-state {

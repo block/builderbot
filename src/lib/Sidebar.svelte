@@ -22,24 +22,16 @@
     Check,
     RotateCcw,
   } from 'lucide-svelte';
-  import {
-    getGitStatus,
-    getChangedFiles,
-    stageFile,
-    unstageFile,
-    discardFile,
-  } from './services/git';
+  import { stageFile, unstageFile, discardFile } from './services/git';
   import { getReview, markReviewed, unmarkReviewed } from './services/review';
-  import type { GitStatus, Review, ChangedFile } from './types';
+  import type { FileDiff, Review } from './types';
+  import { getFilePath, isBinaryDiff } from './diffUtils';
 
   interface FileEntry {
     path: string;
-    status: string;
+    status: 'added' | 'deleted' | 'modified' | 'renamed';
     isReviewed: boolean;
     commentCount: number;
-    // Only populated when viewing working tree (diffHead === "@")
-    hasStaged?: boolean;
-    hasUnstaged?: boolean;
   }
 
   interface Props {
@@ -47,8 +39,6 @@
     onFileSelect?: (path: string) => void;
     /** Called when staging/unstaging/discarding changes */
     onStatusChange?: () => void;
-    /** Called when repo is loaded */
-    onRepoLoaded?: (repoPath: string) => void;
     /** Currently selected file path */
     selectedFile?: string | null;
     /** Base ref for the diff (controlled by parent) */
@@ -60,15 +50,13 @@
   let {
     onFileSelect,
     onStatusChange,
-    onRepoLoaded,
     selectedFile = null,
     diffBase = 'HEAD',
     diffHead = '@',
   }: Props = $props();
 
-  let changedFiles: ChangedFile[] = $state([]);
+  let diffs: FileDiff[] = $state([]);
   let review: Review | null = $state(null);
-  let error: string | null = $state(null);
   let loading = $state(true);
 
   // Context menu state - only show for working tree diffs
@@ -83,9 +71,19 @@
   let canModify = $derived(diffHead === '@');
 
   /**
-   * Build file list with review state.
+   * Determine file status from a FileDiff.
    */
-  function buildFileList(files: ChangedFile[], reviewData: Review | null): FileEntry[] {
+  function getFileStatus(diff: FileDiff): 'added' | 'deleted' | 'modified' | 'renamed' {
+    if (diff.before === null) return 'added';
+    if (diff.after === null) return 'deleted';
+    if (diff.before.path !== diff.after.path) return 'renamed';
+    return 'modified';
+  }
+
+  /**
+   * Build file list from diffs with review state.
+   */
+  function buildFileList(fileDiffs: FileDiff[], reviewData: Review | null): FileEntry[] {
     const reviewedSet = new Set(reviewData?.reviewed || []);
 
     // Count comments per file
@@ -94,33 +92,34 @@
       commentCounts.set(comment.path, (commentCounts.get(comment.path) || 0) + 1);
     }
 
-    return files.map((f) => ({
-      path: f.path,
-      status: f.status,
-      isReviewed: reviewedSet.has(f.path),
-      commentCount: commentCounts.get(f.path) || 0,
-    }));
+    return fileDiffs.map((diff) => {
+      const path = getFilePath(diff) || '';
+      return {
+        path,
+        status: getFileStatus(diff),
+        isReviewed: reviewedSet.has(path),
+        commentCount: commentCounts.get(path) || 0,
+      };
+    });
   }
 
   /**
-   * Set status from external source (e.g., watcher events).
-   * Only relevant when viewing working tree.
+   * Set diffs from external source (App.svelte).
    */
-  export function setStatus(_status: GitStatus) {
-    // When watcher fires, reload the file list
-    if (diffHead === '@') {
-      loadStatus();
-    }
+  export function setDiffs(newDiffs: FileDiff[]) {
+    diffs = newDiffs;
+    loading = false;
   }
 
-  let files = $derived(buildFileList(changedFiles, review));
+  let files = $derived(buildFileList(diffs, review));
   let needsReview = $derived(files.filter((f) => !f.isReviewed));
   let reviewed = $derived(files.filter((f) => f.isReviewed));
   let reviewedCount = $derived(reviewed.length);
   let totalCount = $derived(files.length);
 
   onMount(() => {
-    loadStatus();
+    // Load review state
+    loadReview();
 
     // Close context menu on click outside
     const handleClickOutside = () => {
@@ -132,39 +131,19 @@
     return () => window.removeEventListener('click', handleClickOutside);
   });
 
-  export async function loadStatus() {
-    // Only show loading state on initial load
-    const isInitialLoad = changedFiles.length === 0 && !error;
-    if (isInitialLoad) {
-      loading = true;
-    }
-    error = null;
+  // Reload review when diff spec changes
+  $effect(() => {
+    // Track diffBase and diffHead to trigger reload
+    const _ = diffBase + diffHead;
+    loadReview();
+  });
 
+  async function loadReview() {
     try {
-      // Get changed files for the current diff
-      changedFiles = await getChangedFiles(diffBase, diffHead);
-
-      // Load review state for current diff
       review = await getReview(diffBase, diffHead);
-
-      // Get repo path for watcher (only need this once)
-      const status = await getGitStatus();
-      if (status?.repo_path) {
-        onRepoLoaded?.(status.repo_path);
-      }
-
-      // Auto-select first file if none selected
-      if (!selectedFile && changedFiles.length > 0 && onFileSelect) {
-        const allFiles = buildFileList(changedFiles, review);
-        const firstFile = allFiles.filter((f) => !f.isReviewed)[0] || allFiles[0];
-        if (firstFile) {
-          selectFile(firstFile);
-        }
-      }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      loading = false;
+      console.error('Failed to load review:', e);
+      review = null;
     }
   }
 
@@ -203,7 +182,6 @@
   async function handleStage(file: FileEntry) {
     try {
       await stageFile(file.path);
-      await loadStatus();
       onStatusChange?.();
     } catch (e) {
       console.error('Failed to stage:', e);
@@ -214,7 +192,6 @@
   async function handleUnstage(file: FileEntry) {
     try {
       await unstageFile(file.path);
-      await loadStatus();
       onStatusChange?.();
     } catch (e) {
       console.error('Failed to unstage:', e);
@@ -225,19 +202,6 @@
   async function handleDiscard(file: FileEntry) {
     try {
       await discardFile(file.path);
-      await loadStatus();
-
-      // Select next file if available
-      if (files.length > 0) {
-        const nextFile = needsReview[0] || reviewed[0];
-        if (nextFile) {
-          selectFile(nextFile);
-        }
-      } else {
-        // No files left - clear selection
-        onFileSelect?.('');
-      }
-
       onStatusChange?.();
     } catch (e) {
       console.error('Failed to discard:', e);
@@ -296,16 +260,10 @@
     {:else}
       <span class="file-counts">Files</span>
     {/if}
-    <button class="refresh-btn" onclick={loadStatus} title="Refresh">↻</button>
   </div>
 
   {#if loading}
     <div class="loading">Loading...</div>
-  {:else if error}
-    <div class="error">
-      <p>Error: {error}</p>
-      <button onclick={loadStatus}>Retry</button>
-    </div>
   {:else if files.length === 0}
     <div class="empty-state">
       <p>No changes</p>
@@ -338,7 +296,7 @@
               >
                 <!-- Default icon (hidden on hover) -->
                 <span class="icon-default">
-                  {#if file.status === 'added' || file.status === 'untracked'}
+                  {#if file.status === 'added'}
                     {#if canModify}
                       <CircleFadingPlus size={16} />
                     {:else}
@@ -408,7 +366,7 @@
               >
                 <!-- Default icon (hidden on hover) -->
                 <span class="icon-default">
-                  {#if file.status === 'added' || file.status === 'untracked'}
+                  {#if file.status === 'added'}
                     {#if canModify}
                       <CircleFadingPlus size={16} />
                     {:else}
@@ -458,18 +416,14 @@
       style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       onclick={(e) => e.stopPropagation()}
     >
-      {#if contextMenu.file.hasUnstaged}
-        <button class="context-item" onclick={() => handleStage(contextMenu!.file)}>
-          <Plus size={14} />
-          <span>Stage</span>
-        </button>
-      {/if}
-      {#if contextMenu.file.hasStaged}
-        <button class="context-item" onclick={() => handleUnstage(contextMenu!.file)}>
-          <Minus size={14} />
-          <span>Unstage</span>
-        </button>
-      {/if}
+      <button class="context-item" onclick={() => handleStage(contextMenu!.file)}>
+        <Plus size={14} />
+        <span>Stage</span>
+      </button>
+      <button class="context-item" onclick={() => handleUnstage(contextMenu!.file)}>
+        <Minus size={14} />
+        <span>Unstage</span>
+      </button>
       <div class="context-divider"></div>
       <button
         class="context-item discard-item"
@@ -507,41 +461,11 @@
     color: var(--text-muted);
   }
 
-  .refresh-btn {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    font-size: var(--size-lg);
-    cursor: pointer;
-    padding: 2px 4px;
-    border-radius: 4px;
-  }
-
-  .refresh-btn:hover {
-    background-color: var(--bg-input);
-    color: var(--text-secondary);
-  }
-
   .loading,
-  .error,
   .empty-state {
     padding: 20px 16px;
     text-align: center;
     color: var(--text-muted);
-  }
-
-  .error {
-    color: var(--status-deleted);
-  }
-
-  .error button {
-    margin-top: 8px;
-    padding: 4px 12px;
-    background-color: var(--bg-input);
-    border: none;
-    border-radius: 4px;
-    color: var(--text-primary);
-    cursor: pointer;
   }
 
   .empty-state p {

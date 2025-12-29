@@ -1,10 +1,10 @@
 /**
  * Scroll Synchronization
  *
- * Handles synchronized scrolling between two diff panes using a range-based
+ * Handles synchronized scrolling between two diff panes using an alignment-based
  * line transfer algorithm.
  *
- * The approach maps corresponding regions (ranges) between panes and uses
+ * The approach maps corresponding regions (alignments) between panes and uses
  * proportional interpolation within change blocks. This was developed after
  * studying IntelliJ IDEA Community Edition's diff viewer (Apache 2.0 license)
  * to understand the general technique, then implemented independently.
@@ -16,7 +16,7 @@
  * - Proportional mapping within change regions
  */
 
-import type { Range, Span } from '../types';
+import type { Alignment, Span } from '../types';
 
 const LINE_HEIGHT = 20; // Must match CSS .line min-height
 
@@ -36,36 +36,40 @@ const DEFAULT_CONFIG: ScrollSyncConfig = {
 };
 
 /**
- * Find the range containing a given row index.
+ * Find the alignment containing a given row index.
  */
-function findRange(row: number, ranges: Range[], side: 'before' | 'after'): Range | null {
-  for (const range of ranges) {
-    const span = side === 'before' ? range.before : range.after;
+function findAlignment(
+  row: number,
+  alignments: Alignment[],
+  side: 'before' | 'after'
+): Alignment | null {
+  for (const alignment of alignments) {
+    const span = side === 'before' ? alignment.before : alignment.after;
     if (row < span.end) {
-      return range;
+      return alignment;
     }
   }
-  return ranges.length > 0 ? ranges[ranges.length - 1] : null;
+  return alignments.length > 0 ? alignments[alignments.length - 1] : null;
 }
 
 /**
  * Transfer a row index from one side to the corresponding position on the other side.
  *
  * Within unchanged regions: 1:1 mapping
- * Within change regions: proportional mapping, clamped to range bounds
+ * Within change regions: proportional mapping, clamped to alignment bounds
  */
-function transferRow(row: number, range: Range, side: 'before' | 'after'): number {
+function transferRow(row: number, alignment: Alignment, side: 'before' | 'after'): number {
   const [source, target]: [Span, Span] =
-    side === 'before' ? [range.before, range.after] : [range.after, range.before];
+    side === 'before' ? [alignment.before, alignment.after] : [alignment.after, alignment.before];
 
   // Exact boundary matches
   if (source.start === row) return target.start;
   if (source.end === row) return target.end;
 
-  // Past the range - linear offset from end
+  // Past the alignment - linear offset from end
   if (source.end < row) return row - source.end + target.end;
 
-  // Within the range
+  // Within the alignment
   const sourceSize = source.end - source.start;
   const targetSize = target.end - target.start;
 
@@ -79,7 +83,7 @@ function transferRow(row: number, range: Range, side: 'before' | 'after'): numbe
     return target.start;
   }
 
-  // Proportional mapping within the range
+  // Proportional mapping within the alignment
   const offset = row - source.start;
   const ratio = offset / sourceSize;
   const targetOffset = Math.floor(ratio * targetSize);
@@ -97,7 +101,7 @@ function transferRow(row: number, range: Range, side: 'before' | 'after'): numbe
 export function createScrollSync(config: Partial<ScrollSyncConfig> = {}) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
 
-  let ranges: Range[] = [];
+  let alignments: Alignment[] = [];
 
   // Track which pane is currently the "primary" (user is scrolling it)
   // null = no active scrolling, accept events from either
@@ -113,10 +117,10 @@ export function createScrollSync(config: Partial<ScrollSyncConfig> = {}) {
 
   return {
     /**
-     * Update the ranges when diff content changes.
+     * Update the alignments when diff content changes.
      */
-    setRanges(newRanges: Range[]) {
-      ranges = newRanges;
+    setAlignments(newAlignments: Alignment[]) {
+      alignments = newAlignments;
       // Reset tracking when content changes
       lastSetScrollTop = { before: null, after: null };
       primarySide = null;
@@ -131,7 +135,7 @@ export function createScrollSync(config: Partial<ScrollSyncConfig> = {}) {
      * @returns true if sync was performed
      */
     onScroll(side: 'before' | 'after', source: HTMLElement, target: HTMLElement | null): boolean {
-      if (!target || ranges.length === 0) return false;
+      if (!target || alignments.length === 0) return false;
 
       const otherSide = side === 'before' ? 'after' : 'before';
 
@@ -166,28 +170,28 @@ export function createScrollSync(config: Partial<ScrollSyncConfig> = {}) {
       const sourceRow = Math.floor(sourceY / cfg.lineHeight);
       const subRowOffset = sourceY % cfg.lineHeight;
 
-      // Find range and transfer row
-      const range = findRange(sourceRow, ranges, side);
-      if (!range) {
+      // Find alignment and transfer row
+      const alignment = findAlignment(sourceRow, alignments, side);
+      if (!alignment) {
         return false;
       }
 
-      const targetRow = transferRow(sourceRow, range, side);
+      const targetRow = transferRow(sourceRow, alignment, side);
 
-      // Calculate range sizes for proportional sub-row offset scaling
-      const sourceSpan = side === 'before' ? range.before : range.after;
-      const targetSpan = side === 'before' ? range.after : range.before;
-      const sourceRangeSize = sourceSpan.end - sourceSpan.start;
-      const targetRangeSize = targetSpan.end - targetSpan.start;
+      // Calculate alignment sizes for proportional sub-row offset scaling
+      const sourceSpan = side === 'before' ? alignment.before : alignment.after;
+      const targetSpan = side === 'before' ? alignment.after : alignment.before;
+      const sourceAlignmentSize = sourceSpan.end - sourceSpan.start;
+      const targetAlignmentSize = targetSpan.end - targetSpan.start;
 
-      // Scale sub-row offset proportionally to the range size ratio
+      // Scale sub-row offset proportionally to the alignment size ratio
       // If source has 9 rows and target has 1, sub-row offset should be scaled by 1/9
-      // If target range is empty, no sub-row offset at all
+      // If target alignment is empty, no sub-row offset at all
       let adjustedSubRowOffset = 0;
-      if (targetRangeSize > 0 && sourceRangeSize > 0) {
-        const ratio = targetRangeSize / sourceRangeSize;
+      if (targetAlignmentSize > 0 && sourceAlignmentSize > 0) {
+        const ratio = targetAlignmentSize / sourceAlignmentSize;
         adjustedSubRowOffset = subRowOffset * ratio;
-      } else if (!range.changed) {
+      } else if (!alignment.changed) {
         // Context regions are 1:1, use full sub-row offset
         adjustedSubRowOffset = subRowOffset;
       }
@@ -223,10 +227,10 @@ export function createScrollSync(config: Partial<ScrollSyncConfig> = {}) {
       beforePane: HTMLElement,
       afterPane: HTMLElement
     ) {
-      const range = findRange(row, ranges, side);
-      if (!range) return;
+      const alignment = findAlignment(row, alignments, side);
+      if (!alignment) return;
 
-      const otherRow = transferRow(row, range, side);
+      const otherRow = transferRow(row, alignment, side);
 
       const beforeRow = side === 'before' ? row : otherRow;
       const afterRow = side === 'after' ? row : otherRow;

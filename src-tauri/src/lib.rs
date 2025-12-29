@@ -3,7 +3,7 @@ mod refresh;
 pub mod review;
 mod watcher;
 
-use git::{CommitResult, DiscardRange, FileDiff, GitStatus};
+use git::{ChangedFile, CommitResult, DiscardRange, FileDiff, GitRef, GitStatus};
 use refresh::RefreshController;
 use review::{Comment, DiffId, Edit, NewComment, NewEdit, Review, ReviewStore};
 use std::path::PathBuf;
@@ -36,6 +36,30 @@ fn get_ref_diff(
     file_path: String,
 ) -> Result<FileDiff, String> {
     git::get_ref_diff(repo_path.as_deref(), &base, &head, &file_path).map_err(|e| e.message)
+}
+
+/// Get list of files changed between two refs.
+///
+/// Used to populate the sidebar when viewing a diff.
+#[tauri::command]
+fn get_changed_files(
+    repo_path: Option<String>,
+    base: String,
+    head: String,
+) -> Result<Vec<ChangedFile>, String> {
+    git::get_changed_files(repo_path.as_deref(), &base, &head).map_err(|e| e.message)
+}
+
+/// Get list of refs (branches, tags) for autocomplete.
+#[tauri::command]
+fn get_refs(repo_path: Option<String>) -> Result<Vec<GitRef>, String> {
+    git::get_refs(repo_path.as_deref()).map_err(|e| e.message)
+}
+
+/// Resolve a ref to its short SHA for display.
+#[tauri::command]
+fn resolve_ref(repo_path: Option<String>, ref_str: String) -> Result<String, String> {
+    git::resolve_ref_to_sha(repo_path.as_deref(), &ref_str).map_err(|e| e.message)
 }
 
 #[tauri::command]
@@ -241,6 +265,9 @@ pub fn run() {
             get_git_status,
             open_repository,
             get_ref_diff,
+            get_changed_files,
+            get_refs,
+            resolve_ref,
             stage_file,
             unstage_file,
             discard_file,

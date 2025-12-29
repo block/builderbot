@@ -22,20 +22,24 @@
     Check,
     RotateCcw,
   } from 'lucide-svelte';
-  import { getGitStatus, stageFile, unstageFile, discardFile } from './services/git';
+  import {
+    getGitStatus,
+    getChangedFiles,
+    stageFile,
+    unstageFile,
+    discardFile,
+  } from './services/git';
   import { getReview, markReviewed, unmarkReviewed } from './services/review';
-  import type { GitStatus, Review } from './types';
-
-  /** File category for staging operations (internal use) */
-  type FileCategory = 'staged' | 'unstaged' | 'untracked';
+  import type { GitStatus, Review, ChangedFile } from './types';
 
   interface FileEntry {
     path: string;
     status: string;
-    hasStaged: boolean;
-    hasUnstaged: boolean;
     isReviewed: boolean;
     commentCount: number;
+    // Only populated when viewing working tree (diffHead === "@")
+    hasStaged?: boolean;
+    hasUnstaged?: boolean;
   }
 
   interface Props {
@@ -47,22 +51,27 @@
     onRepoLoaded?: (repoPath: string) => void;
     /** Currently selected file path */
     selectedFile?: string | null;
+    /** Base ref for the diff (controlled by parent) */
+    diffBase?: string;
+    /** Head ref for the diff (controlled by parent) */
+    diffHead?: string;
   }
 
-  let { onFileSelect, onStatusChange, onRepoLoaded, selectedFile = null }: Props = $props();
+  let {
+    onFileSelect,
+    onStatusChange,
+    onRepoLoaded,
+    selectedFile = null,
+    diffBase = 'HEAD',
+    diffHead = '@',
+  }: Props = $props();
 
-  let gitStatus: GitStatus | null = $state(null);
+  let changedFiles: ChangedFile[] = $state([]);
   let review: Review | null = $state(null);
   let error: string | null = $state(null);
   let loading = $state(true);
 
-  // Current diff being reviewed - hardcoded for now, TSK-754 will make this selectable
-  // Using HEAD as base to match git status (which shows HEAD..workdir changes)
-  // TODO: Make this configurable via diff selector
-  const diffBase = 'HEAD';
-  const diffHead = '@';
-
-  // Context menu state
+  // Context menu state - only show for working tree diffs
   let contextMenu: { x: number; y: number; file: FileEntry } | null = $state(null);
   let holdingDiscard = $state(false);
   let discardProgress = $state(0);
@@ -70,11 +79,13 @@
   let discardAnimationFrame: number | null = null;
   const HOLD_DURATION = 700;
 
+  // Can we modify files? Only when viewing working tree
+  let canModify = $derived(diffHead === '@');
+
   /**
-   * Build unified file list from git status + review state.
+   * Build file list with review state.
    */
-  function buildFileList(status: GitStatus, reviewData: Review | null): FileEntry[] {
-    const fileMap = new Map<string, FileEntry>();
+  function buildFileList(files: ChangedFile[], reviewData: Review | null): FileEntry[] {
     const reviewedSet = new Set(reviewData?.reviewed || []);
 
     // Count comments per file
@@ -83,60 +94,26 @@
       commentCounts.set(comment.file_path, (commentCounts.get(comment.file_path) || 0) + 1);
     }
 
-    // Add staged files
-    for (const f of status.staged) {
-      fileMap.set(f.path, {
-        path: f.path,
-        status: f.status,
-        hasStaged: true,
-        hasUnstaged: false,
-        isReviewed: reviewedSet.has(f.path),
-        commentCount: commentCounts.get(f.path) || 0,
-      });
-    }
-
-    // Add/update with unstaged files
-    for (const f of status.unstaged) {
-      const existing = fileMap.get(f.path);
-      if (existing) {
-        existing.hasUnstaged = true;
-      } else {
-        fileMap.set(f.path, {
-          path: f.path,
-          status: f.status,
-          hasStaged: false,
-          hasUnstaged: true,
-          isReviewed: reviewedSet.has(f.path),
-          commentCount: commentCounts.get(f.path) || 0,
-        });
-      }
-    }
-
-    // Add untracked files
-    for (const f of status.untracked) {
-      fileMap.set(f.path, {
-        path: f.path,
-        status: f.status,
-        hasStaged: false,
-        hasUnstaged: true,
-        isReviewed: reviewedSet.has(f.path),
-        commentCount: commentCounts.get(f.path) || 0,
-      });
-    }
-
-    return Array.from(fileMap.values()).sort((a, b) => a.path.localeCompare(b.path));
+    return files.map((f) => ({
+      path: f.path,
+      status: f.status,
+      isReviewed: reviewedSet.has(f.path),
+      commentCount: commentCounts.get(f.path) || 0,
+    }));
   }
 
   /**
    * Set status from external source (e.g., watcher events).
+   * Only relevant when viewing working tree.
    */
-  export function setStatus(status: GitStatus) {
-    gitStatus = status;
-    loading = false;
-    error = null;
+  export function setStatus(_status: GitStatus) {
+    // When watcher fires, reload the file list
+    if (diffHead === '@') {
+      loadStatus();
+    }
   }
 
-  let files = $derived(gitStatus ? buildFileList(gitStatus, review) : []);
+  let files = $derived(buildFileList(changedFiles, review));
   let needsReview = $derived(files.filter((f) => !f.isReviewed));
   let reviewed = $derived(files.filter((f) => f.isReviewed));
   let reviewedCount = $derived(reviewed.length);
@@ -156,27 +133,29 @@
   });
 
   export async function loadStatus() {
-    // Only show loading state on initial load (no existing data)
-    // On refresh, keep showing old data until new data arrives
-    const isInitialLoad = gitStatus === null;
+    // Only show loading state on initial load
+    const isInitialLoad = changedFiles.length === 0 && !error;
     if (isInitialLoad) {
       loading = true;
     }
     error = null;
 
     try {
-      gitStatus = await getGitStatus();
+      // Get changed files for the current diff
+      changedFiles = await getChangedFiles(diffBase, diffHead);
 
       // Load review state for current diff
       review = await getReview(diffBase, diffHead);
 
-      if (gitStatus?.repo_path) {
-        onRepoLoaded?.(gitStatus.repo_path);
+      // Get repo path for watcher (only need this once)
+      const status = await getGitStatus();
+      if (status?.repo_path) {
+        onRepoLoaded?.(status.repo_path);
       }
 
       // Auto-select first file if none selected
-      if (!selectedFile && gitStatus && onFileSelect) {
-        const allFiles = buildFileList(gitStatus, review);
+      if (!selectedFile && changedFiles.length > 0 && onFileSelect) {
+        const allFiles = buildFileList(changedFiles, review);
         const firstFile = allFiles.filter((f) => !f.isReviewed)[0] || allFiles[0];
         if (firstFile) {
           selectFile(firstFile);
@@ -208,8 +187,9 @@
     }
   }
 
-  // Context menu handlers
+  // Context menu handlers - only for working tree mode
   function handleContextMenu(event: MouseEvent, file: FileEntry) {
+    if (!canModify) return; // No context menu for historical diffs
     event.preventDefault();
     event.stopPropagation();
     contextMenu = { x: event.clientX, y: event.clientY, file };
@@ -307,29 +287,16 @@
     }
     return '';
   }
-
-  // Display name for the diff base (use branch name if available, otherwise HEAD)
-  // This shows the current branch in the UI while the actual diff uses HEAD
-  function getDiffBaseDisplay(): string {
-    if (gitStatus && gitStatus.branch) {
-      return gitStatus.branch;
-    }
-    return 'HEAD';
-  }
 </script>
 
 <div class="sidebar-content">
   <div class="header">
-    <div class="branch-row">
-      <span class="branch-icon">⎇</span>
-      <span class="branch-name" title="{diffBase}..{diffHead}">{getDiffBaseDisplay()}</span>
-    </div>
-    <div class="header-right">
-      {#if totalCount > 0}
-        <span class="file-counts">{reviewedCount}/{totalCount}</span>
-      {/if}
-      <button class="refresh-btn" onclick={loadStatus} title="Refresh">↻</button>
-    </div>
+    {#if totalCount > 0}
+      <span class="file-counts">{reviewedCount}/{totalCount} reviewed</span>
+    {:else}
+      <span class="file-counts">Files</span>
+    {/if}
+    <button class="refresh-btn" onclick={loadStatus} title="Refresh">↻</button>
   </div>
 
   {#if loading}
@@ -342,7 +309,11 @@
   {:else if files.length === 0}
     <div class="empty-state">
       <p>No changes</p>
-      <p class="empty-hint">Working tree is clean</p>
+      {#if canModify}
+        <p class="empty-hint">Working tree is clean</p>
+      {:else}
+        <p class="empty-hint">No differences between refs</p>
+      {/if}
     </div>
   {:else}
     <div class="file-list">
@@ -362,26 +333,27 @@
               <!-- Status icon - clickable to toggle reviewed -->
               <button
                 class="status-icon"
-                class:is-staged={file.hasStaged && !file.hasUnstaged}
                 onclick={(e) => toggleReviewed(e, file)}
                 title="Mark as reviewed"
               >
                 <!-- Default icon (hidden on hover) -->
                 <span class="icon-default">
-                  {#if file.hasStaged && !file.hasUnstaged}
-                    {#if file.status === 'added' || file.status === 'untracked'}
-                      <CirclePlus size={16} />
-                    {:else if file.status === 'deleted'}
-                      <CircleMinus size={16} />
+                  {#if file.status === 'added' || file.status === 'untracked'}
+                    {#if canModify}
+                      <CircleFadingPlus size={16} />
                     {:else}
-                      <CircleArrowUp size={16} />
+                      <CirclePlus size={16} />
                     {/if}
-                  {:else if file.status === 'added' || file.status === 'untracked'}
-                    <CircleFadingPlus size={16} />
                   {:else if file.status === 'deleted'}
-                    <CircleX size={16} />
-                  {:else}
+                    {#if canModify}
+                      <CircleX size={16} />
+                    {:else}
+                      <CircleMinus size={16} />
+                    {/if}
+                  {:else if canModify}
                     <CircleFadingArrowUp size={16} />
+                  {:else}
+                    <CircleArrowUp size={16} />
                   {/if}
                 </span>
                 <!-- Hover icon (checkmark for "mark as reviewed") -->
@@ -431,26 +403,27 @@
               <!-- Status icon - clickable to toggle reviewed -->
               <button
                 class="status-icon"
-                class:is-staged={file.hasStaged && !file.hasUnstaged}
                 onclick={(e) => toggleReviewed(e, file)}
                 title="Mark as needs review"
               >
                 <!-- Default icon (hidden on hover) -->
                 <span class="icon-default">
-                  {#if file.hasStaged && !file.hasUnstaged}
-                    {#if file.status === 'added' || file.status === 'untracked'}
-                      <CirclePlus size={16} />
-                    {:else if file.status === 'deleted'}
-                      <CircleMinus size={16} />
+                  {#if file.status === 'added' || file.status === 'untracked'}
+                    {#if canModify}
+                      <CircleFadingPlus size={16} />
                     {:else}
-                      <CircleArrowUp size={16} />
+                      <CirclePlus size={16} />
                     {/if}
-                  {:else if file.status === 'added' || file.status === 'untracked'}
-                    <CircleFadingPlus size={16} />
                   {:else if file.status === 'deleted'}
-                    <CircleX size={16} />
-                  {:else}
+                    {#if canModify}
+                      <CircleX size={16} />
+                    {:else}
+                      <CircleMinus size={16} />
+                    {/if}
+                  {:else if canModify}
                     <CircleFadingArrowUp size={16} />
+                  {:else}
+                    <CircleArrowUp size={16} />
                   {/if}
                 </span>
                 <!-- Hover icon (rotate for "unmark as reviewed") -->
@@ -524,43 +497,13 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 12px;
+    padding: 8px 12px;
     border-bottom: 1px solid var(--border-primary);
     gap: 8px;
   }
 
-  .branch-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-
-  .branch-icon {
-    color: var(--text-muted);
-    font-size: var(--size-md);
-    flex-shrink: 0;
-  }
-
-  .branch-name {
-    color: var(--text-link);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
   .file-counts {
     font-size: var(--size-sm);
-    font-family: monospace;
     color: var(--text-muted);
   }
 
@@ -689,10 +632,6 @@
   .status-icon:hover {
     background-color: var(--bg-input);
     color: var(--status-added);
-  }
-
-  .status-icon.is-staged {
-    color: var(--text-secondary);
   }
 
   /* Icon swap on hover */

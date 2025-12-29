@@ -1,16 +1,18 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { ChevronDown } from 'lucide-svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import DiffViewer from './lib/DiffViewer.svelte';
   import CommitPanel from './lib/CommitPanel.svelte';
-  import { getRefDiff } from './lib/services/git';
+  import DiffSelectorModal from './lib/DiffSelectorModal.svelte';
+  import { getRefDiff, resolveRef } from './lib/services/git';
   import {
     subscribeToStatusEvents,
     startWatching,
     stopWatching,
     type Unsubscribe,
   } from './lib/services/statusEvents';
-  import type { FileDiff, GitStatus } from './lib/types';
+  import type { FileDiff, GitStatus, DiffSpec } from './lib/types';
 
   // UI scaling
   const SIZE_STEP = 1;
@@ -76,10 +78,85 @@
     }
   }
 
-  // Current diff being viewed - hardcoded for now, TSK-754 will make this selectable
-  // Using HEAD as base to match git status (which shows HEAD..workdir changes)
-  const diffBase = 'HEAD';
-  const diffHead = '@';
+  // ==========================================================================
+  // Diff Selector
+  // ==========================================================================
+
+  // Available diff presets
+  const DIFF_PRESETS: DiffSpec[] = [
+    { base: 'HEAD', head: '@', label: 'Working Changes' },
+    { base: 'main', head: '@', label: 'Against main' },
+    { base: 'HEAD~1', head: 'HEAD', label: 'Last Commit' },
+  ];
+
+  // Current diff spec - default to working changes
+  let currentDiffSpec = $state<DiffSpec>(DIFF_PRESETS[0]);
+  let diffSelectorOpen = $state(false);
+  let customDiffModalOpen = $state(false);
+
+  // Resolved SHAs for tooltip display
+  let resolvedBaseSha = $state<string | null>(null);
+  let resolvedHeadSha = $state<string | null>(null);
+
+  // Derived values for easy access
+  let diffBase = $derived(currentDiffSpec.base);
+  let diffHead = $derived(currentDiffSpec.head);
+
+  // Is this a preset or custom diff?
+  let isPreset = $derived(
+    DIFF_PRESETS.some(
+      (p) => p.base === diffBase && p.head === diffHead && p.label === currentDiffSpec.label
+    )
+  );
+
+  // Display label: short name for presets, base..head for custom
+  let displayLabel = $derived(isPreset ? currentDiffSpec.label : `${diffBase}..${diffHead}`);
+
+  // Tooltip with full details
+  let tooltipText = $derived(() => {
+    const basePart = resolvedBaseSha ? `${diffBase} (${resolvedBaseSha})` : diffBase;
+    const headPart = resolvedHeadSha ? `${diffHead} (${resolvedHeadSha})` : diffHead;
+    return `${basePart} → ${headPart}`;
+  });
+
+  async function updateResolvedShas() {
+    try {
+      resolvedBaseSha = await resolveRef(diffBase);
+      resolvedHeadSha = await resolveRef(diffHead);
+    } catch {
+      resolvedBaseSha = null;
+      resolvedHeadSha = null;
+    }
+  }
+
+  function selectDiffSpec(spec: DiffSpec) {
+    currentDiffSpec = spec;
+    diffSelectorOpen = false;
+    // Clear current selection and reload
+    selectedFile = null;
+    currentDiff = null;
+    // Update resolved SHAs for tooltip
+    updateResolvedShas();
+    // Trigger sidebar reload with new diff spec
+    sidebarRef?.loadStatus();
+  }
+
+  function handleCustomDiffSelect(base: string, head: string, label: string) {
+    selectDiffSpec({ base, head, label });
+  }
+
+  function openCustomDiffModal() {
+    diffSelectorOpen = false;
+    customDiffModalOpen = true;
+  }
+
+  function toggleDiffSelector() {
+    diffSelectorOpen = !diffSelectorOpen;
+  }
+
+  function closeDiffSelector() {
+    diffSelectorOpen = false;
+  }
 
   let selectedFile: string | null = $state(null);
   let currentDiff: FileDiff | null = $state(null);
@@ -142,6 +219,9 @@
 
     // Listen for keyboard shortcuts
     window.addEventListener('keydown', handleKeydown);
+
+    // Resolve initial SHAs for tooltip
+    updateResolvedShas();
 
     // Subscribe to status events from the backend
     unsubscribe = await subscribeToStatusEvents(
@@ -245,7 +325,46 @@
   }
 </script>
 
-<main>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<main onclick={closeDiffSelector}>
+  <!-- Diff selector header -->
+  <header class="diff-header">
+    <div class="diff-selector-container">
+      <button
+        class="diff-selector"
+        class:open={diffSelectorOpen}
+        onclick={(e) => {
+          e.stopPropagation();
+          toggleDiffSelector();
+        }}
+        title={tooltipText()}
+      >
+        <span class="diff-label">{displayLabel}</span>
+        <ChevronDown size={14} />
+      </button>
+
+      {#if diffSelectorOpen}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="diff-dropdown" onclick={(e) => e.stopPropagation()}>
+          {#each DIFF_PRESETS as preset}
+            <button
+              class="diff-option"
+              class:selected={preset.base === diffBase && preset.head === diffHead}
+              onclick={() => selectDiffSpec(preset)}
+            >
+              <span class="option-label">{preset.label}</span>
+              <span class="option-spec">{preset.base}..{preset.head}</span>
+            </button>
+          {/each}
+          <div class="dropdown-divider"></div>
+          <button class="diff-option" onclick={openCustomDiffModal}>
+            <span class="option-label">Custom...</span>
+          </button>
+        </div>
+      {/if}
+    </div>
+  </header>
+
   <div class="app-container">
     <section class="main-content">
       {#if diffError}
@@ -270,13 +389,25 @@
         onStatusChange={handleStatusChange}
         onRepoLoaded={handleRepoLoaded}
         {selectedFile}
+        {diffBase}
+        {diffHead}
       />
     </aside>
   </div>
-  <footer class="commit-panel">
-    <CommitPanel bind:this={commitPanelRef} onCommitComplete={handleCommitComplete} />
-  </footer>
+  {#if diffHead === '@'}
+    <footer class="commit-panel">
+      <CommitPanel bind:this={commitPanelRef} onCommitComplete={handleCommitComplete} />
+    </footer>
+  {/if}
 </main>
+
+<DiffSelectorModal
+  open={customDiffModalOpen}
+  onClose={() => (customDiffModalOpen = false)}
+  onSelect={handleCustomDiffSelect}
+  currentBase={diffBase}
+  currentHead={diffHead}
+/>
 
 <style>
   :global(body) {
@@ -292,6 +423,104 @@
     flex-direction: column;
     height: 100vh;
     overflow: hidden;
+  }
+
+  /* Diff selector header */
+  .diff-header {
+    display: flex;
+    align-items: center;
+    padding: 8px 16px;
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-primary);
+    flex-shrink: 0;
+  }
+
+  .diff-selector-container {
+    position: relative;
+  }
+
+  .diff-selector {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    cursor: pointer;
+    transition:
+      background-color 0.15s,
+      border-color 0.15s;
+  }
+
+  .diff-selector:hover {
+    background-color: var(--bg-input);
+    border-color: var(--text-muted);
+  }
+
+  .diff-selector.open {
+    background-color: var(--bg-input);
+    border-color: var(--text-link);
+  }
+
+  .diff-label {
+    font-weight: 500;
+  }
+
+  .diff-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    min-width: 200px;
+    z-index: 100;
+    overflow: hidden;
+  }
+
+  .diff-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    width: 100%;
+    padding: 8px 12px;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.1s;
+  }
+
+  .diff-option:hover {
+    background-color: var(--bg-tertiary);
+  }
+
+  .diff-option.selected {
+    background-color: var(--ui-selection);
+  }
+
+  .option-label {
+    font-weight: 500;
+  }
+
+  .option-spec {
+    font-family: monospace;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+  }
+
+  .dropdown-divider {
+    height: 1px;
+    background: var(--border-primary);
+    margin: 4px 0;
   }
 
   .app-container {

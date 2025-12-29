@@ -20,7 +20,7 @@
   import { discardLines } from './services/git';
   import { createScrollSync } from './services/scrollSync';
   import { drawConnectors } from './diffConnectors';
-  import { getDisplayPath, getLineBoundary, getLanguageFromDiff } from './diffUtils';
+  import { getLineBoundary, getLanguageFromDiff } from './diffUtils';
   import { setupKeyboardNav } from './diffKeyboard';
 
   interface Props {
@@ -341,17 +341,10 @@
       <p>Select a file to view changes</p>
     </div>
   {:else if diff.is_binary}
-    <div class="diff-header">
-      <span class="file-path">{getDisplayPath(diff)}</span>
-    </div>
     <div class="binary-notice">
       <p>Binary file - cannot display diff</p>
     </div>
   {:else}
-    <div class="diff-header">
-      <span class="file-path">{getDisplayPath(diff)}</span>
-    </div>
-
     <div class="diff-content">
       <!-- Before pane -->
       {#if beforeMinimized}
@@ -516,21 +509,6 @@
     flex-direction: column;
     overflow: hidden;
     min-width: 0;
-  }
-
-  .diff-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 16px;
-    background-color: var(--diff-header-bg);
-    border-bottom: 1px solid var(--border-primary);
-  }
-
-  .file-path {
-    font-family: monospace;
-    font-size: var(--size-md);
-    color: var(--status-modified);
   }
 
   .pane-header {

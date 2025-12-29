@@ -1,8 +1,24 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { GitStatus, FileDiff, CommitResult } from '../types';
+import type { GitStatus, FileDiff, CommitResult, ChangedFile, GitRef } from '../types';
 
 export async function getGitStatus(path?: string): Promise<GitStatus> {
   return invoke<GitStatus>('get_git_status', { path: path ?? null });
+}
+
+/**
+ * Get list of files changed between two refs.
+ * Used to populate the sidebar when viewing a diff.
+ */
+export async function getChangedFiles(
+  base: string,
+  head: string,
+  repoPath?: string
+): Promise<ChangedFile[]> {
+  return invoke<ChangedFile[]>('get_changed_files', {
+    repoPath: repoPath ?? null,
+    base,
+    head,
+  });
 }
 
 export async function openRepository(path: string): Promise<GitStatus> {
@@ -107,5 +123,26 @@ export async function discardLines(
     newStart: sourceLines.new_start,
     newEnd: sourceLines.new_end,
     staged,
+  });
+}
+
+// Ref operations (for autocomplete and display)
+
+/**
+ * Get list of refs (branches, tags, special refs) for autocomplete.
+ */
+export async function getRefs(repoPath?: string): Promise<GitRef[]> {
+  return invoke<GitRef[]>('get_refs', {
+    repoPath: repoPath ?? null,
+  });
+}
+
+/**
+ * Resolve a ref to its short SHA for display.
+ */
+export async function resolveRef(refStr: string, repoPath?: string): Promise<string> {
+  return invoke<string>('resolve_ref', {
+    repoPath: repoPath ?? null,
+    refStr,
   });
 }

@@ -364,3 +364,225 @@ fn get_content_from_workdir(
 fn is_binary_content(bytes: &[u8]) -> bool {
     bytes.contains(&0)
 }
+
+// =============================================================================
+// Changed Files List
+// =============================================================================
+
+/// A file that changed between two refs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangedFile {
+    pub path: String,
+    pub status: String,
+}
+
+/// A git reference (branch or tag) for autocomplete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRef {
+    pub name: String,
+    pub ref_type: String, // "branch", "tag", or "special"
+}
+
+/// Get list of refs for autocomplete (branches and tags).
+pub fn get_refs(repo_path: Option<&str>) -> Result<Vec<GitRef>, GitError> {
+    let repo = find_repo(repo_path)?;
+    let mut refs = Vec::new();
+
+    // Add special refs first
+    refs.push(GitRef {
+        name: "@".to_string(),
+        ref_type: "special".to_string(),
+    });
+    refs.push(GitRef {
+        name: "HEAD".to_string(),
+        ref_type: "special".to_string(),
+    });
+    refs.push(GitRef {
+        name: "HEAD~1".to_string(),
+        ref_type: "special".to_string(),
+    });
+
+    // Add branches
+    for branch in repo.branches(Some(git2::BranchType::Local))? {
+        let (branch, _) = branch?;
+        if let Some(name) = branch.name()? {
+            refs.push(GitRef {
+                name: name.to_string(),
+                ref_type: "branch".to_string(),
+            });
+        }
+    }
+
+    // Add tags
+    repo.tag_foreach(|_oid, name| {
+        if let Ok(name_str) = std::str::from_utf8(name) {
+            // Strip "refs/tags/" prefix
+            let short_name = name_str.strip_prefix("refs/tags/").unwrap_or(name_str);
+            refs.push(GitRef {
+                name: short_name.to_string(),
+                ref_type: "tag".to_string(),
+            });
+        }
+        true
+    })?;
+
+    Ok(refs)
+}
+
+/// Resolve a ref to its SHA (for display purposes).
+pub fn resolve_ref_to_sha(repo_path: Option<&str>, ref_str: &str) -> Result<String, GitError> {
+    if ref_str == WORKING_TREE_REF {
+        return Ok("working tree".to_string());
+    }
+
+    let repo = find_repo(repo_path)?;
+    let obj = repo.revparse_single(ref_str).map_err(|e| GitError {
+        message: format!("Failed to resolve ref '{}': {}", ref_str, e),
+    })?;
+
+    Ok(obj.id().to_string()[..8].to_string()) // Short SHA
+}
+
+/// Get list of files changed between two refs.
+///
+/// This is used to populate the sidebar when viewing a diff.
+/// For working tree diffs (head="@"), this combines staged, unstaged, and untracked.
+pub fn get_changed_files(
+    repo_path: Option<&str>,
+    base: &str,
+    head: &str,
+) -> Result<Vec<ChangedFile>, GitError> {
+    let repo = find_repo(repo_path)?;
+
+    if head == WORKING_TREE_REF {
+        // For working tree, we need to combine:
+        // 1. Changes from base to index (staged)
+        // 2. Changes from index to workdir (unstaged)
+        // 3. Untracked files
+        get_working_tree_changes(&repo, base)
+    } else {
+        // Diff between two trees
+        get_tree_diff_files(&repo, base, head)
+    }
+}
+
+/// Get files changed in working tree relative to a base ref.
+fn get_working_tree_changes(repo: &Repository, base: &str) -> Result<Vec<ChangedFile>, GitError> {
+    use git2::{Status, StatusOptions};
+    use std::collections::HashMap;
+
+    let mut files: HashMap<String, String> = HashMap::new();
+
+    // First, get changes from base to HEAD (committed since base)
+    // This handles the case where base is "main" and we want to see all changes
+    if base != "HEAD" {
+        if let (Ok(base_tree), Ok(head_tree)) =
+            (resolve_tree(repo, base), resolve_tree(repo, "HEAD"))
+        {
+            let diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)?;
+
+            diff.foreach(
+                &mut |delta, _| {
+                    if let Some(path) = delta.new_file().path().or(delta.old_file().path()) {
+                        let path_str = path.to_string_lossy().to_string();
+                        let status = match delta.status() {
+                            git2::Delta::Added => "added",
+                            git2::Delta::Deleted => "deleted",
+                            git2::Delta::Modified => "modified",
+                            git2::Delta::Renamed => "renamed",
+                            git2::Delta::Copied => "added",
+                            _ => "modified",
+                        };
+                        files.insert(path_str, status.to_string());
+                    }
+                    true
+                },
+                None,
+                None,
+                None,
+            )?;
+        }
+    }
+
+    // Then overlay with working tree status (staged + unstaged + untracked)
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+
+    let statuses = repo.statuses(Some(&mut opts))?;
+
+    for entry in statuses.iter() {
+        let path = entry.path().unwrap_or("").to_string();
+        let status = entry.status();
+
+        // Determine the display status
+        let status_str = if status.contains(Status::WT_NEW) {
+            "untracked"
+        } else if status.contains(Status::INDEX_NEW) || status.contains(Status::WT_NEW) {
+            "added"
+        } else if status.contains(Status::INDEX_DELETED) || status.contains(Status::WT_DELETED) {
+            "deleted"
+        } else if status.intersects(
+            Status::INDEX_MODIFIED
+                | Status::WT_MODIFIED
+                | Status::INDEX_RENAMED
+                | Status::WT_RENAMED,
+        ) {
+            "modified"
+        } else {
+            continue; // Skip unchanged files
+        };
+
+        files.insert(path, status_str.to_string());
+    }
+
+    let mut result: Vec<ChangedFile> = files
+        .into_iter()
+        .map(|(path, status)| ChangedFile { path, status })
+        .collect();
+
+    result.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(result)
+}
+
+/// Get files changed between two tree refs.
+fn get_tree_diff_files(
+    repo: &Repository,
+    base: &str,
+    head: &str,
+) -> Result<Vec<ChangedFile>, GitError> {
+    let base_tree = resolve_tree(repo, base)?;
+    let head_tree = resolve_tree(repo, head)?;
+
+    let diff = repo.diff_tree_to_tree(Some(&base_tree), Some(&head_tree), None)?;
+
+    let mut files = Vec::new();
+
+    diff.foreach(
+        &mut |delta, _| {
+            if let Some(path) = delta.new_file().path().or(delta.old_file().path()) {
+                let status = match delta.status() {
+                    git2::Delta::Added => "added",
+                    git2::Delta::Deleted => "deleted",
+                    git2::Delta::Modified => "modified",
+                    git2::Delta::Renamed => "renamed",
+                    git2::Delta::Copied => "added",
+                    git2::Delta::Typechange => "typechange",
+                    _ => "modified",
+                };
+                files.push(ChangedFile {
+                    path: path.to_string_lossy().to_string(),
+                    status: status.to_string(),
+                });
+            }
+            true
+        },
+        None,
+        None,
+        None,
+    )?;
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}

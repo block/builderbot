@@ -22,14 +22,14 @@ use serde::{Deserialize, Serialize};
 
 // Re-export public types (used by Tauri commands)
 pub use commit::CommitResult;
-pub use diff::FileDiff;
+pub use diff::{ChangedFile, FileDiff, GitRef};
 pub use provider::AdaptiveProvider;
 pub use staging::DiscardRange;
 pub use status::GitStatus;
 
 // Re-export public functions (used by Tauri commands)
 pub use commit::{amend_commit, create_commit, get_last_commit_message};
-pub use diff::{get_ref_diff, WORKING_TREE_REF};
+pub use diff::{get_changed_files, get_ref_diff, get_refs, resolve_ref_to_sha, WORKING_TREE_REF};
 pub use staging::{discard_file, discard_lines, stage_all, stage_file, unstage_all, unstage_file};
 pub use status::get_status;
 

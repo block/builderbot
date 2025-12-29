@@ -72,11 +72,30 @@ export interface CommitResult {
   message: string;
 }
 
+/** A file that changed between two refs */
+export interface ChangedFile {
+  path: string;
+  status: string;
+}
+
+/** A git reference for autocomplete */
+export interface GitRef {
+  name: string;
+  ref_type: 'branch' | 'tag' | 'special';
+}
+
 // Review types
 
 export interface DiffId {
   base: string; // SHA
   head: string; // SHA or "@" for working tree
+}
+
+/** A diff specification with display label */
+export interface DiffSpec {
+  base: string;
+  head: string;
+  label: string;
 }
 
 export interface Comment {

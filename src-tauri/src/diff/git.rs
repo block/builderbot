@@ -116,13 +116,33 @@ pub fn resolve_ref(repo: &Repository, ref_str: &str) -> Result<String> {
 
 /// Get the current branch name.
 pub fn current_branch(repo: &Repository) -> Result<Option<String>> {
-    let head = repo.head()?;
-    if head.is_branch() {
-        Ok(head.shorthand().map(String::from))
-    } else {
-        // Detached HEAD
-        Ok(None)
+    match repo.head() {
+        Ok(head) if head.is_branch() => Ok(head.shorthand().map(String::from)),
+        Ok(_) => Ok(None),  // Detached HEAD
+        Err(_) => Ok(None), // No commits yet
     }
+}
+
+/// Basic repository info needed by the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoInfo {
+    /// Absolute path to the repository root.
+    pub repo_path: String,
+    /// Current branch name, if on a branch.
+    pub branch: Option<String>,
+}
+
+/// Get basic repository info (path and branch).
+pub fn get_repo_info(repo: &Repository) -> Result<RepoInfo> {
+    let repo_path = repo
+        .workdir()
+        .ok_or_else(|| GitError("Bare repository".into()))?
+        .to_string_lossy()
+        .to_string();
+
+    let branch = current_branch(repo)?;
+
+    Ok(RepoInfo { repo_path, branch })
 }
 
 /// Get the last commit message (for amend).

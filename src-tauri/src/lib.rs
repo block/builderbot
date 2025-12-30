@@ -1,10 +1,8 @@
 pub mod diff;
-pub mod git;
 mod refresh;
 mod watcher;
 
-use diff::{Comment, DiffId, Edit, GitRef, NewComment, NewEdit, Review};
-use git::{CommitResult, GitStatus};
+use diff::{Comment, DiffId, Edit, GitRef, NewComment, NewEdit, RepoInfo, Review};
 use refresh::RefreshController;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -53,42 +51,29 @@ fn resolve_ref(repo_path: Option<String>, ref_str: String) -> Result<String, Str
 }
 
 // =============================================================================
-// Git Commands (legacy module - still needed)
+// Git Commands
 // =============================================================================
 
+/// Get basic repository info (path and branch name).
 #[tauri::command]
-fn get_git_status(path: Option<String>) -> Result<GitStatus, String> {
-    git::get_status(path.as_deref()).map_err(|e| e.message)
+fn get_repo_info(repo_path: Option<String>) -> Result<RepoInfo, String> {
+    let path = repo_path
+        .as_deref()
+        .map(std::path::Path::new)
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let repo = diff::open_repo(path).map_err(|e| e.0)?;
+    diff::get_repo_info(&repo).map_err(|e| e.0)
 }
 
-#[tauri::command]
-fn stage_file(repo_path: Option<String>, file_path: String) -> Result<(), String> {
-    git::stage_file(repo_path.as_deref(), &file_path).map_err(|e| e.message)
-}
-
-#[tauri::command]
-fn unstage_file(repo_path: Option<String>, file_path: String) -> Result<(), String> {
-    git::unstage_file(repo_path.as_deref(), &file_path).map_err(|e| e.message)
-}
-
-#[tauri::command]
-fn discard_file(repo_path: Option<String>, file_path: String) -> Result<(), String> {
-    git::discard_file(repo_path.as_deref(), &file_path).map_err(|e| e.message)
-}
-
+/// Get the last commit message (for amend UI).
 #[tauri::command]
 fn get_last_commit_message(repo_path: Option<String>) -> Result<Option<String>, String> {
-    git::get_last_commit_message(repo_path.as_deref()).map_err(|e| e.message)
-}
-
-#[tauri::command]
-fn create_commit(repo_path: Option<String>, message: String) -> Result<CommitResult, String> {
-    git::create_commit(repo_path.as_deref(), &message).map_err(|e| e.message)
-}
-
-#[tauri::command]
-fn amend_commit(repo_path: Option<String>, message: String) -> Result<CommitResult, String> {
-    git::amend_commit(repo_path.as_deref(), &message).map_err(|e| e.message)
+    let path = repo_path
+        .as_deref()
+        .map(std::path::Path::new)
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let repo = diff::open_repo(path).map_err(|e| e.0)?;
+    diff::last_commit_message(&repo).map_err(|e| e.0)
 }
 
 // =============================================================================
@@ -187,16 +172,6 @@ fn stop_watching(state: State<RefreshControllerState>) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-fn force_refresh(state: State<RefreshControllerState>) -> Result<GitStatus, String> {
-    let controller = state.0.lock().unwrap();
-    if let Some(ref ctrl) = *controller {
-        ctrl.force_refresh()
-    } else {
-        Err("Refresh controller not initialized".to_string())
-    }
-}
-
 // =============================================================================
 // Tauri App Setup
 // =============================================================================
@@ -225,18 +200,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // Diff commands (new module)
+            // Diff commands
             get_diff,
             get_refs,
             resolve_ref,
-            // Git commands (legacy - still needed)
-            get_git_status,
-            stage_file,
-            unstage_file,
-            discard_file,
+            // Git commands
+            get_repo_info,
             get_last_commit_message,
-            create_commit,
-            amend_commit,
             // Review commands
             get_review,
             add_comment,
@@ -249,7 +219,6 @@ pub fn run() {
             // Watcher commands
             start_watching,
             stop_watching,
-            force_refresh
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -52,9 +52,13 @@
   let beforeTokens: Token[][] = $state([]);
   let afterTokens: Token[][] = $state([]);
 
-  // Panel minimization state
-  let beforeMinimized = $state(false);
-  let afterMinimized = $state(false);
+  // Panel collapse state (collapsed = 10% width, not hidden)
+  let beforeCollapsed = $state(false);
+  let afterCollapsed = $state(false);
+
+  // Hover state for showing collapse/expand buttons
+  let beforeHovered = $state(false);
+  let afterHovered = $state(false);
 
   // Range hover state (for showing discard toolbar on changed ranges)
   let hoveredRangeIndex: number | null = $state(null);
@@ -168,11 +172,11 @@
     return map;
   });
 
-  // Auto-minimize empty panels and start alignment loading when diff changes
+  // Auto-collapse empty panels and start alignment loading when diff changes
   $effect(() => {
     if (diff) {
-      beforeMinimized = isNewFile;
-      afterMinimized = isDeletedFile;
+      beforeCollapsed = isNewFile;
+      afterCollapsed = isDeletedFile;
       // Clear hover state when diff changes
       hoveredRangeIndex = null;
       rangeToolbarStyle = null;
@@ -184,9 +188,9 @@
     }
   });
 
-  // Sync scroll position when expanding a minimized panel
+  // Sync scroll position when expanding a collapsed panel
   function expandBefore() {
-    beforeMinimized = false;
+    beforeCollapsed = false;
     // Sync scroll on next tick after DOM updates
     requestAnimationFrame(() => {
       if (beforePane && afterPane && diff) {
@@ -196,7 +200,7 @@
   }
 
   function expandAfter() {
-    afterMinimized = false;
+    afterCollapsed = false;
     requestAnimationFrame(() => {
       if (beforePane && afterPane && diff) {
         scrollSync.onScroll('before', beforePane, afterPane);
@@ -281,7 +285,6 @@
     const lineHeight = firstLine ? firstLine.getBoundingClientRect().height : 20;
 
     // Measure the structural offset between SVG top and code container top
-    // This accounts for the pane-header height which scales with font size
     const svgRect = connectorSvg.getBoundingClientRect();
     const containerRect = beforePane.getBoundingClientRect();
     const verticalOffset = containerRect.top - svgRect.top;
@@ -292,6 +295,13 @@
       verticalOffset,
     });
   }
+
+  // Redraw connectors when collapse state changes (after transition)
+  $effect(() => {
+    const _ = [beforeCollapsed, afterCollapsed];
+    // Wait for flex transition to complete
+    setTimeout(redrawConnectors, 250);
+  });
 
   // Redraw connectors when alignments load or scroll position changes
   $effect(() => {
@@ -428,29 +438,30 @@
   {:else}
     <div class="diff-content">
       <!-- Before pane -->
-      {#if beforeMinimized}
-        <button class="minimized-pane" onclick={expandBefore} title="Expand before panel">
-          <span class="minimized-label">Before</span>
-          <span class="expand-icon">›</span>
-        </button>
-      {:else}
-        <div class="diff-pane">
-          <div class="pane-header">
-            <span>Before</span>
-            <button
-              class="minimize-btn"
-              onclick={() => (beforeMinimized = true)}
-              title="Minimize panel"
-            >
-              ‹
-            </button>
-          </div>
-          <div
-            class="code-container"
-            bind:this={beforePane}
-            onscroll={handleBeforeScroll}
-            style="background-color: {themeBg}"
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="diff-pane before-pane"
+        class:collapsed={beforeCollapsed}
+        onmouseenter={() => (beforeHovered = true)}
+        onmouseleave={() => (beforeHovered = false)}
+      >
+        <!-- Collapse/expand button (shows on hover near top-left) -->
+        {#if beforeHovered}
+          <button
+            class="collapse-btn"
+            onclick={() => (beforeCollapsed ? expandBefore() : (beforeCollapsed = true))}
+            title={beforeCollapsed ? 'Expand panel' : 'Collapse panel'}
           >
+            {beforeCollapsed ? '›' : '‹'}
+          </button>
+        {/if}
+        <div
+          class="code-container"
+          bind:this={beforePane}
+          onscroll={handleBeforeScroll}
+          style="background-color: {themeBg}"
+        >
+          <div class="lines-wrapper">
             {#each beforeLines as line, i}
               {@const boundary = showRangeMarkers
                 ? getLineBoundary(activeAlignments, 'before', i)
@@ -464,10 +475,11 @@
                 class:range-start={boundary.isStart}
                 class:range-end={boundary.isEnd}
                 class:range-hovered={isInHoveredRange}
+                class:content-changed={isChanged}
                 onmouseenter={() => handleLineMouseEnter('before', i)}
                 onmouseleave={handleLineMouseLeave}
               >
-                <span class="line-content" class:content-changed={isChanged}>
+                <span class="line-content">
                   {#each getBeforeTokens(i) as token}
                     <span style="color: {token.color}">{token.content}</span>
                   {/each}
@@ -479,12 +491,10 @@
             {/if}
           </div>
         </div>
-      {/if}
+      </div>
 
-      <!-- Spine between panes (always visible for consistency) -->
+      <!-- Spine between panes -->
       <div class="spine">
-        <div class="spine-header"></div>
-        <!-- Range connectors only drawn when showRangeMarkers is true -->
         {#if showRangeMarkers}
           <svg class="spine-connector" bind:this={connectorSvg}></svg>
         {:else}
@@ -493,29 +503,30 @@
       </div>
 
       <!-- After pane -->
-      {#if afterMinimized}
-        <button class="minimized-pane" onclick={expandAfter} title="Expand after panel">
-          <span class="expand-icon">‹</span>
-          <span class="minimized-label">After</span>
-        </button>
-      {:else}
-        <div class="diff-pane">
-          <div class="pane-header">
-            <span>After</span>
-            <button
-              class="minimize-btn"
-              onclick={() => (afterMinimized = true)}
-              title="Minimize panel"
-            >
-              ›
-            </button>
-          </div>
-          <div
-            class="code-container"
-            bind:this={afterPane}
-            onscroll={handleAfterScroll}
-            style="background-color: {themeBg}"
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="diff-pane after-pane"
+        class:collapsed={afterCollapsed}
+        onmouseenter={() => (afterHovered = true)}
+        onmouseleave={() => (afterHovered = false)}
+      >
+        <!-- Collapse/expand button (shows on hover near top-left) -->
+        {#if afterHovered}
+          <button
+            class="collapse-btn"
+            onclick={() => (afterCollapsed ? expandAfter() : (afterCollapsed = true))}
+            title={afterCollapsed ? 'Expand panel' : 'Collapse panel'}
           >
+            {afterCollapsed ? '‹' : '›'}
+          </button>
+        {/if}
+        <div
+          class="code-container"
+          bind:this={afterPane}
+          onscroll={handleAfterScroll}
+          style="background-color: {themeBg}"
+        >
+          <div class="lines-wrapper">
             {#each afterLines as line, i}
               {@const boundary = showRangeMarkers
                 ? getLineBoundary(activeAlignments, 'after', i)
@@ -529,10 +540,11 @@
                 class:range-start={boundary.isStart}
                 class:range-end={boundary.isEnd}
                 class:range-hovered={isInHoveredRange}
+                class:content-changed={isChanged}
                 onmouseenter={() => handleLineMouseEnter('after', i)}
                 onmouseleave={handleLineMouseLeave}
               >
-                <span class="line-content" class:content-changed={isChanged}>
+                <span class="line-content">
                   {#each getAfterTokens(i) as token}
                     <span style="color: {token.color}">{token.content}</span>
                   {/each}
@@ -544,7 +556,7 @@
             {/if}
           </div>
         </div>
-      {/if}
+      </div>
     </div>
 
     <!-- Range action toolbar (floating, only when viewing working tree) -->
@@ -579,81 +591,72 @@
   }
 
   .diff-pane {
-    flex: 1;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     min-width: 0;
+    position: relative;
+    transition: flex 0.2s ease;
   }
 
-  .pane-header {
+  /* 40/60 split: before gets 40%, after gets 60% */
+  .before-pane {
+    flex: 4;
+  }
+
+  .after-pane {
+    flex: 6;
+  }
+
+  /* Collapsed state: 10% width (flex: 1 vs 9 for the other) */
+  .before-pane.collapsed {
+    flex: 1;
+  }
+
+  .after-pane.collapsed {
+    flex: 1;
+  }
+
+  /* When one is collapsed, the other expands */
+  .before-pane.collapsed ~ .spine ~ .after-pane {
+    flex: 9;
+  }
+
+  .before-pane:not(.collapsed) ~ .spine ~ .after-pane.collapsed {
+    flex: 1;
+  }
+
+  .before-pane:not(.collapsed) ~ .spine ~ .after-pane:not(.collapsed) {
+    flex: 6;
+  }
+
+  /* Collapse/expand button */
+  .collapse-btn {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 10;
+    width: 24px;
+    height: 24px;
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 6px 12px;
-    font-size: var(--size-xs);
-    text-transform: uppercase;
-    color: var(--text-muted);
-    background-color: var(--diff-header-bg);
-    border-bottom: 1px solid var(--border-primary);
-  }
-
-  .minimize-btn {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    padding: 0 4px;
-    font-size: var(--size-lg);
-    line-height: 1;
-    opacity: 0.6;
-    transition: opacity 0.15s;
-  }
-
-  .minimize-btn:hover {
-    opacity: 1;
-  }
-
-  .minimized-pane {
-    width: 28px;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
     background-color: var(--bg-secondary);
-    border: none;
-    border-left: 1px solid var(--border-primary);
-    border-right: 1px solid var(--border-primary);
+    border: 1px solid var(--border-primary);
+    border-radius: 4px;
+    color: var(--text-muted);
     cursor: pointer;
-    transition: background-color 0.15s;
-  }
-
-  .minimized-pane:first-child {
-    border-left: none;
-  }
-
-  .minimized-pane:last-child {
-    border-right: none;
-  }
-
-  .minimized-pane:hover {
-    background-color: var(--bg-tertiary);
-  }
-
-  .minimized-label {
-    writing-mode: vertical-rl;
-    text-orientation: mixed;
-    font-size: var(--size-xs);
-    text-transform: uppercase;
-    color: var(--text-muted);
-    letter-spacing: 0.5px;
-  }
-
-  .expand-icon {
-    color: var(--text-muted);
     font-size: var(--size-lg);
+    line-height: 1;
+    opacity: 0.8;
+    transition:
+      opacity 0.15s,
+      background-color 0.15s;
+  }
+
+  .collapse-btn:hover {
+    opacity: 1;
+    background-color: var(--bg-tertiary);
   }
 
   .spine {
@@ -662,12 +665,6 @@
     display: flex;
     flex-direction: column;
     background-color: var(--bg-secondary);
-  }
-
-  .spine-header {
-    height: 29px;
-    background-color: var(--diff-header-bg);
-    border-bottom: 1px solid var(--border-primary);
   }
 
   .spine-connector,
@@ -692,6 +689,12 @@
     display: none;
   }
 
+  /* Wrapper sizes to longest line, ensuring all lines can fill its width */
+  .lines-wrapper {
+    display: inline-block;
+    min-width: 100%;
+  }
+
   .line {
     display: flex;
     min-height: calc(var(--size-md) * 1.5);
@@ -704,7 +707,8 @@
     white-space: pre;
   }
 
-  .content-changed {
+  /* Changed line highlight - fills full width of lines-wrapper */
+  .line.content-changed {
     background-color: var(--diff-added-overlay);
   }
 

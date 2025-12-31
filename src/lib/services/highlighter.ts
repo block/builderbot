@@ -497,6 +497,9 @@ export async function initHighlighter(themeName: string = 'github-dark'): Promis
     // Mark core languages as loaded
     CORE_LANGUAGES.forEach((lang) => loadedLanguages.add(lang));
 
+    // Set current theme name (used by highlightLines)
+    currentThemeName = themeName;
+
     // Extract theme colors
     const theme = highlighter.getTheme(themeName);
     const fg = theme.fg || '#d4d4d4';

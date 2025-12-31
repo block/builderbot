@@ -343,6 +343,17 @@
     }
   });
 
+  // Redraw connectors when syntax theme changes (CSS variables update)
+  $effect(() => {
+    const _version = syntaxThemeVersion;
+    if (diff && connectorSvg && beforePane) {
+      // Small delay to ensure CSS variables have been applied
+      requestAnimationFrame(() => {
+        redrawConnectors();
+      });
+    }
+  });
+
   // ==========================================================================
   // Range hover handling
   // ==========================================================================
@@ -505,7 +516,6 @@
         class:zoomed={beforeHovered && !beforeCollapsed && spaceHeld}
         onmouseenter={() => (beforeHovered = true)}
         onmouseleave={() => (beforeHovered = false)}
-        style="background-color: {themeBg}"
       >
         <div class="pane-header">
           <span class="pane-ref">
@@ -565,7 +575,6 @@
         class:zoomed={afterHovered && !afterCollapsed && spaceHeld}
         onmouseenter={() => (afterHovered = true)}
         onmouseleave={() => (afterHovered = false)}
-        style="background-color: {themeBg}"
       >
         <div class="pane-header">
           <span class="pane-ref">
@@ -650,6 +659,7 @@
     transition: flex 0.2s ease;
     /* Island styling */
     border-radius: 12px;
+    background-color: var(--bg-primary);
   }
 
   /* Pane header - ref and file path */

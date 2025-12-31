@@ -83,13 +83,27 @@ interface RGB {
 }
 
 function hexToRgb(hex: string): RGB {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  if (!result) return { r: 128, g: 128, b: 128 };
-  return {
-    r: parseInt(result[1], 16),
-    g: parseInt(result[2], 16),
-    b: parseInt(result[3], 16),
-  };
+  // Try 6-digit (#rrggbb) or 8-digit (#rrggbbaa) hex
+  const long = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})?$/i.exec(hex);
+  if (long) {
+    return {
+      r: parseInt(long[1], 16),
+      g: parseInt(long[2], 16),
+      b: parseInt(long[3], 16),
+    };
+  }
+
+  // Try 3-digit (#rgb) or 4-digit (#rgba) shorthand
+  const short = /^#?([a-f\d])([a-f\d])([a-f\d])([a-f\d])?$/i.exec(hex);
+  if (short) {
+    return {
+      r: parseInt(short[1] + short[1], 16),
+      g: parseInt(short[2] + short[2], 16),
+      b: parseInt(short[3] + short[3], 16),
+    };
+  }
+
+  return { r: 128, g: 128, b: 128 };
 }
 
 function rgbToHex({ r, g, b }: RGB): string {
@@ -144,6 +158,93 @@ function overlay(hex: string, alpha: number): string {
 // =============================================================================
 
 /**
+ * Result of chrome/primary color calculation
+ */
+interface ChromeColors {
+  chrome: string;
+  primary: string; // May be adjusted from original if needed for contrast
+}
+
+/**
+ * Binary search to find a color with target luminance by mixing toward black or white.
+ */
+function findColorWithLuminance(baseColor: string, targetLum: number): string {
+  const baseLum = luminance(baseColor);
+  if (Math.abs(baseLum - targetLum) < 0.001) return baseColor;
+
+  const target = targetLum < baseLum ? '#000000' : '#ffffff';
+  let lo = 0,
+    hi = 1;
+
+  for (let i = 0; i < 20; i++) {
+    const mid = (lo + hi) / 2;
+    const testLum = luminance(mix(baseColor, target, mid));
+    const diff = testLum - targetLum;
+
+    if (Math.abs(diff) < 0.001) break;
+
+    if (target === '#000000') {
+      if (testLum > targetLum) lo = mid;
+      else hi = mid;
+    } else {
+      if (testLum < targetLum) lo = mid;
+      else hi = mid;
+    }
+  }
+  return mix(baseColor, target, (lo + hi) / 2);
+}
+
+// =============================================================================
+// Chrome/Primary Contrast Calculation
+// =============================================================================
+
+// Tuned values for logFloor algorithm
+// Formula: diff = value * ln(1 + (lum + offset) * 10)
+// - offset provides a floor so very dark themes still get some contrast
+// - value scales the overall contrast
+const CONTRAST_VALUE = 0.035;
+const CONTRAST_OFFSET = 0.0135;
+
+/**
+ * Calculate target luminance difference using logFloor algorithm.
+ * This provides gentle scaling that works across all theme luminances,
+ * with a floor for very dark themes.
+ */
+function calculateLumDiff(bgLum: number): number {
+  return CONTRAST_VALUE * Math.log(1 + (bgLum + CONTRAST_OFFSET) * 10);
+}
+
+/**
+ * Calculate chrome and primary background colors.
+ *
+ * Strategy:
+ * 1. Calculate luminance difference using logFloor algorithm
+ * 2. Darken chrome to achieve that difference
+ * 3. If theme is too dark, set chrome to black and lighten primary instead
+ */
+function calculateChromeColors(syntaxBg: string): ChromeColors {
+  const bgLum = luminance(syntaxBg);
+
+  // Calculate target luminance difference
+  const lumDiff = calculateLumDiff(bgLum);
+  const targetChromeLum = bgLum - lumDiff;
+
+  // Can we achieve this? (chrome luminance must be >= 0)
+  if (targetChromeLum >= 0) {
+    return {
+      chrome: findColorWithLuminance(syntaxBg, targetChromeLum),
+      primary: syntaxBg,
+    };
+  }
+
+  // Theme is too dark - chrome goes black, lighten primary
+  return {
+    chrome: '#000000',
+    primary: findColorWithLuminance(syntaxBg, lumDiff),
+  };
+}
+
+/**
  * Create an adaptive theme based on syntax theme colors.
  *
  * The key insight is detecting light vs dark and adjusting accordingly:
@@ -157,12 +258,15 @@ export function createAdaptiveTheme(
 ): Theme {
   const isDark = luminance(syntaxBg) < 0.5;
 
+  // Calculate chrome and potentially adjusted primary
+  const { chrome: chromeColor, primary: primaryBg } = calculateChromeColors(syntaxBg);
+
   // Direction multiplier: +1 for dark (lighten), -1 for light (darken)
   const dir = isDark ? 1 : -1;
 
   // Base adjustments - smaller values for subtlety
-  const elevate = (amount: number) => adjust(syntaxBg, dir * amount);
-  const sink = (amount: number) => adjust(syntaxBg, -dir * amount);
+  // Use the (potentially adjusted) primary bg as the base
+  const elevate = (amount: number) => adjust(primaryBg, dir * amount);
 
   // Accent colors that work on both light and dark
   const accentBlue = isDark ? '#58a6ff' : '#0969da';
@@ -171,28 +275,28 @@ export function createAdaptiveTheme(
   const accentOrange = isDark ? '#d29922' : '#9a6700';
 
   // Border that's visible but not harsh
-  const borderBase = mix(syntaxBg, syntaxFg, isDark ? 0.15 : 0.12);
+  const borderBase = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
 
   return {
     isDark,
 
     bg: {
-      primary: syntaxBg, // Editor islands use syntax theme bg
-      chrome: sink(0.12), // Unified chrome - noticeably darker/lighter than editor
-      elevated: elevate(0.04), // Floating elements (dropdowns, tooltips)
+      primary: primaryBg, // Editor islands - may be adjusted from syntax theme for contrast
+      chrome: chromeColor, // Calculated for consistent contrast ratio
+      elevated: elevate(0.08), // Floating elements (dropdowns, tooltips)
       hover: elevate(0.06), // Hover state
     },
 
     border: {
-      subtle: mix(syntaxBg, syntaxFg, 0.08),
+      subtle: mix(primaryBg, syntaxFg, 0.08),
       muted: borderBase,
-      emphasis: mix(syntaxBg, syntaxFg, isDark ? 0.25 : 0.2),
+      emphasis: mix(primaryBg, syntaxFg, isDark ? 0.25 : 0.2),
     },
 
     text: {
       primary: syntaxFg,
       muted: syntaxComment,
-      faint: mix(syntaxBg, syntaxComment, 0.5),
+      faint: mix(primaryBg, syntaxComment, 0.5),
       accent: accentBlue,
     },
 
@@ -211,7 +315,7 @@ export function createAdaptiveTheme(
       // Neutral highlight for changed lines - subtle foreground tint
       changedBg: overlay(syntaxFg, isDark ? 0.04 : 0.06),
       // Range borders need to be visible but not distracting
-      rangeBorder: mix(syntaxBg, syntaxFg, isDark ? 0.2 : 0.15),
+      rangeBorder: mix(primaryBg, syntaxFg, isDark ? 0.2 : 0.15),
     },
 
     ui: {
@@ -223,7 +327,7 @@ export function createAdaptiveTheme(
 
     scrollbar: {
       thumb: borderBase,
-      thumbHover: mix(syntaxBg, syntaxFg, 0.25),
+      thumbHover: mix(primaryBg, syntaxFg, 0.25),
     },
   };
 }

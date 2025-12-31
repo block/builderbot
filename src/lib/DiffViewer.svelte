@@ -444,14 +444,23 @@
     });
 
     // Space key = zoom modifier (hold to expand hovered panel to 90%)
+    // Use capture phase to intercept before browser defaults (scroll, button activation)
     function handleKeyDown(e: KeyboardEvent) {
       if (e.code === 'Space' && !e.repeat) {
-        // Only capture space if we're not in an input/textarea
         const target = e.target as HTMLElement;
-        if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA') {
-          e.preventDefault();
-          spaceHeld = true;
+        // Allow space in text inputs where user is typing
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+          return;
         }
+        // For other focusable elements (select, button), blur them and capture space.
+        // This prevents e.g. the theme selector from reopening when space is pressed.
+        // Trade-off: disrupts keyboard-only navigation flow, but this app is mouse-primary.
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        spaceHeld = true;
       }
     }
 
@@ -461,16 +470,16 @@
       }
     }
 
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('keydown', handleKeyDown, { capture: true });
+    window.addEventListener('keyup', handleKeyUp, { capture: true });
 
     const cleanupKeyboardNav = setupKeyboardNav({
       getScrollTarget: () => afterPane,
     });
 
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('keydown', handleKeyDown, { capture: true });
+      window.removeEventListener('keyup', handleKeyUp, { capture: true });
       cleanupKeyboardNav?.();
     };
   });

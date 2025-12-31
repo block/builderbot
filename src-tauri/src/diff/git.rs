@@ -2,10 +2,10 @@
 //!
 //! All functions are stateless - they discover the repo fresh each call.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
 use std::path::Path;
 
-use git2::{Delta, DiffOptions, Repository, Tree};
+use git2::{Delta, Diff, DiffOptions, Repository, Tree};
 use serde::{Deserialize, Serialize};
 
 use super::types::{Alignment, File, FileContent, FileDiff, Span};
@@ -178,6 +178,22 @@ struct FileChange {
     before_path: Option<String>,
     after_path: Option<String>,
     status: Delta,
+    /// Hunks from git diff: (old_start, old_lines, new_start, new_lines)
+    /// Line numbers are 1-indexed from git, we convert to 0-indexed.
+    hunks: Vec<Hunk>,
+}
+
+/// A hunk from git diff, converted to 0-indexed line numbers.
+#[derive(Debug, Clone, Copy)]
+struct Hunk {
+    /// Start line in old file (0-indexed)
+    old_start: u32,
+    /// Number of lines in old file
+    old_lines: u32,
+    /// Start line in new file (0-indexed)
+    new_start: u32,
+    /// Number of lines in new file
+    new_lines: u32,
 }
 
 /// Compute the diff between two refs.
@@ -190,6 +206,9 @@ pub fn compute_diff(repo: &Repository, before_ref: &str, after_ref: &str) -> Res
 
     let mut opts = DiffOptions::new();
     opts.ignore_submodules(true);
+    // Use 0 context lines so hunks contain only the actual changes,
+    // not surrounding context. This gives us precise alignment boundaries.
+    opts.context_lines(0);
 
     let diff = if is_working_tree {
         // Diff from before_tree to working directory
@@ -201,25 +220,8 @@ pub fn compute_diff(repo: &Repository, before_ref: &str, after_ref: &str) -> Res
         repo.diff_tree_to_tree(before_tree.as_ref(), after_tree.as_ref(), Some(&mut opts))?
     };
 
-    // Collect changed files with their paths and status
-    let mut file_changes: Vec<FileChange> = Vec::new();
-
-    for delta in diff.deltas() {
-        let before_path = delta
-            .old_file()
-            .path()
-            .map(|p| p.to_string_lossy().to_string());
-        let after_path = delta
-            .new_file()
-            .path()
-            .map(|p| p.to_string_lossy().to_string());
-
-        file_changes.push(FileChange {
-            before_path,
-            after_path,
-            status: delta.status(),
-        });
-    }
+    // Collect changed files with their paths, status, and hunks
+    let file_changes = collect_file_changes(&diff)?;
 
     // Build FileDiff for each changed file
     let mut result: Vec<FileDiff> = Vec::new();
@@ -249,7 +251,17 @@ pub fn compute_diff(repo: &Repository, before_ref: &str, after_ref: &str) -> Res
             None
         };
 
-        let alignments = compute_alignments(&before_file, &after_file);
+        // Skip entries where we couldn't load either file (e.g., submodules, directories)
+        if before_file.is_none() && after_file.is_none() {
+            log::debug!(
+                "Skipping diff entry with no loadable files: before={:?}, after={:?}",
+                change.before_path,
+                change.after_path
+            );
+            continue;
+        }
+
+        let alignments = compute_alignments_from_hunks(&change.hunks, &before_file, &after_file);
 
         result.push(FileDiff {
             before: before_file,
@@ -261,6 +273,163 @@ pub fn compute_diff(repo: &Repository, before_ref: &str, after_ref: &str) -> Res
     // Sort by path
     result.sort_by(|a, b| a.path().cmp(b.path()));
     Ok(result)
+}
+
+/// Collect file changes with hunks from a git diff.
+fn collect_file_changes(diff: &Diff) -> Result<Vec<FileChange>> {
+    // We need to collect hunks per file. The foreach callback gives us deltas and hunks,
+    // but we need to associate hunks with their files.
+    let file_changes: RefCell<Vec<FileChange>> = RefCell::new(Vec::new());
+    let current_file_idx: RefCell<Option<usize>> = RefCell::new(None);
+
+    diff.foreach(
+        &mut |delta, _progress| {
+            let before_path = delta
+                .old_file()
+                .path()
+                .map(|p| p.to_string_lossy().to_string());
+            let after_path = delta
+                .new_file()
+                .path()
+                .map(|p| p.to_string_lossy().to_string());
+
+            let mut changes = file_changes.borrow_mut();
+            changes.push(FileChange {
+                before_path,
+                after_path,
+                status: delta.status(),
+                hunks: Vec::new(),
+            });
+            *current_file_idx.borrow_mut() = Some(changes.len() - 1);
+            true
+        },
+        None, // binary callback
+        Some(&mut |_delta, hunk| {
+            // Git uses 1-indexed line numbers, convert to 0-indexed
+            // Also handle the special case where old_start/new_start is 0 for empty files
+            let old_start = if hunk.old_start() == 0 {
+                0
+            } else {
+                hunk.old_start() - 1
+            };
+            let new_start = if hunk.new_start() == 0 {
+                0
+            } else {
+                hunk.new_start() - 1
+            };
+
+            let h = Hunk {
+                old_start,
+                old_lines: hunk.old_lines(),
+                new_start,
+                new_lines: hunk.new_lines(),
+            };
+
+            if let Some(idx) = *current_file_idx.borrow() {
+                file_changes.borrow_mut()[idx].hunks.push(h);
+            }
+            true
+        }),
+        None, // line callback
+    )?;
+
+    Ok(file_changes.into_inner())
+}
+
+/// Compute alignments from git hunks.
+///
+/// This ensures our alignments match what git diff reports.
+/// Hunks define the changed regions; we fill in unchanged regions between them.
+fn compute_alignments_from_hunks(
+    hunks: &[Hunk],
+    before: &Option<File>,
+    after: &Option<File>,
+) -> Vec<Alignment> {
+    let before_len = before
+        .as_ref()
+        .map(|f| f.content.lines().len() as u32)
+        .unwrap_or(0);
+    let after_len = after
+        .as_ref()
+        .map(|f| f.content.lines().len() as u32)
+        .unwrap_or(0);
+
+    // Handle empty files
+    if before_len == 0 && after_len == 0 {
+        return vec![];
+    }
+
+    // If no hunks but files exist, it's either all added or all deleted
+    if hunks.is_empty() {
+        if before_len == 0 {
+            // All added
+            return vec![Alignment {
+                before: Span::new(0, 0),
+                after: Span::new(0, after_len),
+                changed: true,
+            }];
+        } else if after_len == 0 {
+            // All deleted
+            return vec![Alignment {
+                before: Span::new(0, before_len),
+                after: Span::new(0, 0),
+                changed: true,
+            }];
+        } else {
+            // No changes (shouldn't happen for files in a diff, but handle gracefully)
+            return vec![Alignment {
+                before: Span::new(0, before_len),
+                after: Span::new(0, after_len),
+                changed: false,
+            }];
+        }
+    }
+
+    let mut alignments = Vec::new();
+    let mut before_pos = 0u32;
+    let mut after_pos = 0u32;
+
+    for hunk in hunks {
+        // Unchanged region before this hunk
+        if before_pos < hunk.old_start || after_pos < hunk.new_start {
+            // The gap should be the same size on both sides for unchanged content
+            let before_gap = hunk.old_start - before_pos;
+            let after_gap = hunk.new_start - after_pos;
+
+            // They should match for truly unchanged content, but handle edge cases
+            if before_gap > 0 || after_gap > 0 {
+                alignments.push(Alignment {
+                    before: Span::new(before_pos, hunk.old_start),
+                    after: Span::new(after_pos, hunk.new_start),
+                    changed: false,
+                });
+            }
+        }
+
+        // The hunk itself (changed region)
+        let hunk_before_end = hunk.old_start + hunk.old_lines;
+        let hunk_after_end = hunk.new_start + hunk.new_lines;
+
+        alignments.push(Alignment {
+            before: Span::new(hunk.old_start, hunk_before_end),
+            after: Span::new(hunk.new_start, hunk_after_end),
+            changed: true,
+        });
+
+        before_pos = hunk_before_end;
+        after_pos = hunk_after_end;
+    }
+
+    // Unchanged region after the last hunk
+    if before_pos < before_len || after_pos < after_len {
+        alignments.push(Alignment {
+            before: Span::new(before_pos, before_len),
+            after: Span::new(after_pos, after_len),
+            changed: false,
+        });
+    }
+
+    alignments
 }
 
 /// Load a file from a git tree.
@@ -314,6 +483,15 @@ fn load_file_from_workdir(repo: &Repository, path: &Path) -> Result<Option<File>
         return Ok(None);
     }
 
+    // Skip directories (e.g., submodules)
+    if full_path.is_dir() {
+        log::debug!(
+            "Skipping directory in load_file_from_workdir: {}",
+            path.display()
+        );
+        return Ok(None);
+    }
+
     let bytes =
         std::fs::read(&full_path).map_err(|e| GitError(format!("Cannot read file: {}", e)))?;
 
@@ -330,224 +508,137 @@ fn load_file_from_workdir(repo: &Repository, path: &Path) -> Result<Option<File>
     }))
 }
 
-/// Compute alignments between before and after content.
-///
-/// Alignments exhaustively partition both files, marking which regions changed.
-fn compute_alignments(before: &Option<File>, after: &Option<File>) -> Vec<Alignment> {
-    let before_lines: &[String] = before
-        .as_ref()
-        .map(|f| f.content.lines())
-        .unwrap_or_default();
-    let after_lines: &[String] = after
-        .as_ref()
-        .map(|f| f.content.lines())
-        .unwrap_or_default();
-
-    if before_lines.is_empty() && after_lines.is_empty() {
-        return vec![];
-    }
-
-    // Handle simple cases: all added or all deleted
-    if before_lines.is_empty() {
-        return vec![Alignment {
-            before: Span::new(0, 0),
-            after: Span::new(0, after_lines.len() as u32),
-            changed: true,
-        }];
-    }
-
-    if after_lines.is_empty() {
-        return vec![Alignment {
-            before: Span::new(0, before_lines.len() as u32),
-            after: Span::new(0, 0),
-            changed: true,
-        }];
-    }
-
-    // Find matching blocks between the two files
-    let matches = find_matching_blocks(before_lines, after_lines);
-
-    // Convert matching blocks to alignments
-    let mut alignments = Vec::new();
-    let mut before_pos = 0u32;
-    let mut after_pos = 0u32;
-
-    for (before_start, after_start, len) in matches {
-        let before_start = before_start as u32;
-        let after_start = after_start as u32;
-        let len = len as u32;
-
-        // Gap before this match = changed region
-        if before_pos < before_start || after_pos < after_start {
-            alignments.push(Alignment {
-                before: Span::new(before_pos, before_start),
-                after: Span::new(after_pos, after_start),
-                changed: true,
-            });
-        }
-
-        // The matching region itself = unchanged
-        if len > 0 {
-            alignments.push(Alignment {
-                before: Span::new(before_start, before_start + len),
-                after: Span::new(after_start, after_start + len),
-                changed: false,
-            });
-        }
-
-        before_pos = before_start + len;
-        after_pos = after_start + len;
-    }
-
-    // Handle any remaining content after the last match
-    let before_len = before_lines.len() as u32;
-    let after_len = after_lines.len() as u32;
-    if before_pos < before_len || after_pos < after_len {
-        alignments.push(Alignment {
-            before: Span::new(before_pos, before_len),
-            after: Span::new(after_pos, after_len),
-            changed: true,
-        });
-    }
-
-    alignments
-}
-
-/// Find matching blocks between two sequences of lines.
-///
-/// Returns a list of (before_start, after_start, length) tuples.
-/// The matches are guaranteed to be monotonically increasing in both dimensions,
-/// i.e., for consecutive matches A and B: A.before_end <= B.before_start AND A.after_end <= B.after_start
-fn find_matching_blocks(before: &[String], after: &[String]) -> Vec<(usize, usize, usize)> {
-    if before.is_empty() || after.is_empty() {
-        return vec![];
-    }
-
-    // Build a map of line -> positions in "after"
-    let mut after_positions: HashMap<&str, Vec<usize>> = HashMap::new();
-    for (i, line) in after.iter().enumerate() {
-        after_positions.entry(line.as_str()).or_default().push(i);
-    }
-
-    // Find matching blocks greedily
-    let mut matches = Vec::new();
-    let mut after_used = vec![false; after.len()];
-
-    let mut before_idx = 0;
-    while before_idx < before.len() {
-        let line = &before[before_idx];
-
-        // Find the first unused occurrence in after
-        if let Some(positions) = after_positions.get(line.as_str()) {
-            if let Some(&after_idx) = positions.iter().find(|&&i| !after_used[i]) {
-                // Found a match - extend it as far as possible
-                let mut len = 1;
-                after_used[after_idx] = true;
-
-                while before_idx + len < before.len()
-                    && after_idx + len < after.len()
-                    && !after_used[after_idx + len]
-                    && before[before_idx + len] == after[after_idx + len]
-                {
-                    after_used[after_idx + len] = true;
-                    len += 1;
-                }
-
-                matches.push((before_idx, after_idx, len));
-                before_idx += len;
-                continue;
-            }
-        }
-
-        before_idx += 1;
-    }
-
-    // Sort by position in before
-    matches.sort_by_key(|m| m.0);
-
-    // Filter to ensure monotonicity in both dimensions.
-    // We need matches where both before and after positions are strictly increasing.
-    // Use a greedy approach: keep a match if it doesn't violate monotonicity with the last kept match.
-    let mut filtered = Vec::new();
-    let mut last_after_end = 0usize;
-
-    for (before_start, after_start, len) in matches {
-        // Skip this match if it would go backwards in the after dimension
-        if after_start >= last_after_end {
-            filtered.push((before_start, after_start, len));
-            last_after_end = after_start + len;
-        }
-    }
-
-    filtered
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_find_matching_blocks() {
-        let before: Vec<String> = vec!["a", "b", "c", "d"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let after: Vec<String> = vec!["a", "x", "c", "d"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-
-        let matches = find_matching_blocks(&before, &after);
-        // Should find "a" at (0,0,1) and "c","d" at (2,2,2)
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0], (0, 0, 1));
-        assert_eq!(matches[1], (2, 2, 2));
+    /// Helper to create a File with text content
+    fn text_file(path: &str, lines: Vec<&str>) -> Option<File> {
+        Some(File {
+            path: path.into(),
+            content: FileContent::Text {
+                lines: lines.into_iter().map(String::from).collect(),
+            },
+        })
     }
 
     #[test]
-    fn test_compute_alignments() {
-        let before = Some(File {
-            path: "test.txt".into(),
-            content: FileContent::Text {
-                lines: vec!["a".into(), "b".into(), "c".into()],
-            },
-        });
-        let after = Some(File {
-            path: "test.txt".into(),
-            content: FileContent::Text {
-                lines: vec!["a".into(), "x".into(), "c".into()],
-            },
-        });
+    fn test_alignments_from_single_hunk() {
+        // Simulates: lines 0-1 unchanged, line 2 changed (1 line -> 1 line), lines 3-4 unchanged
+        // Git hunk: @@ -2,1 +2,1 @@ (1-indexed: line 3 in both)
+        let hunks = vec![Hunk {
+            old_start: 2, // 0-indexed
+            old_lines: 1,
+            new_start: 2,
+            new_lines: 1,
+        }];
 
-        let alignments = compute_alignments(&before, &after);
+        let before = text_file("test.txt", vec!["a", "b", "X", "c", "d"]);
+        let after = text_file("test.txt", vec!["a", "b", "Y", "c", "d"]);
 
-        // Should have: "a" (unchanged), "b"->"x" (changed), "c" (unchanged)
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
+
         assert_eq!(alignments.len(), 3);
 
-        assert!(!alignments[0].changed); // "a"
-        assert_eq!(alignments[0].before, Span::new(0, 1));
-        assert_eq!(alignments[0].after, Span::new(0, 1));
+        // Lines 0-1 unchanged
+        assert!(!alignments[0].changed);
+        assert_eq!(alignments[0].before, Span::new(0, 2));
+        assert_eq!(alignments[0].after, Span::new(0, 2));
 
-        assert!(alignments[1].changed); // "b" -> "x"
-        assert_eq!(alignments[1].before, Span::new(1, 2));
-        assert_eq!(alignments[1].after, Span::new(1, 2));
+        // Line 2 changed
+        assert!(alignments[1].changed);
+        assert_eq!(alignments[1].before, Span::new(2, 3));
+        assert_eq!(alignments[1].after, Span::new(2, 3));
 
-        assert!(!alignments[2].changed); // "c"
-        assert_eq!(alignments[2].before, Span::new(2, 3));
-        assert_eq!(alignments[2].after, Span::new(2, 3));
+        // Lines 3-4 unchanged
+        assert!(!alignments[2].changed);
+        assert_eq!(alignments[2].before, Span::new(3, 5));
+        assert_eq!(alignments[2].after, Span::new(3, 5));
     }
 
     #[test]
-    fn test_compute_alignments_added_file() {
-        let before = None;
-        let after = Some(File {
-            path: "new.txt".into(),
-            content: FileContent::Text {
-                lines: vec!["line1".into(), "line2".into()],
-            },
-        });
+    fn test_alignments_from_hunk_with_different_sizes() {
+        // Simulates: 2 lines deleted, 3 lines added
+        // Git hunk: @@ -1,2 +1,3 @@ (delete 2 lines at position 1, add 3 lines)
+        let hunks = vec![Hunk {
+            old_start: 0,
+            old_lines: 2,
+            new_start: 0,
+            new_lines: 3,
+        }];
 
-        let alignments = compute_alignments(&before, &after);
+        let before = text_file("test.txt", vec!["old1", "old2", "same"]);
+        let after = text_file("test.txt", vec!["new1", "new2", "new3", "same"]);
+
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
+
+        assert_eq!(alignments.len(), 2);
+
+        // Changed region: 2 lines -> 3 lines
+        assert!(alignments[0].changed);
+        assert_eq!(alignments[0].before, Span::new(0, 2));
+        assert_eq!(alignments[0].after, Span::new(0, 3));
+
+        // Unchanged: "same"
+        assert!(!alignments[1].changed);
+        assert_eq!(alignments[1].before, Span::new(2, 3));
+        assert_eq!(alignments[1].after, Span::new(3, 4));
+    }
+
+    #[test]
+    fn test_alignments_from_multiple_hunks() {
+        // Two separate changes with unchanged content between them
+        let hunks = vec![
+            Hunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+            },
+            Hunk {
+                old_start: 4,
+                old_lines: 1,
+                new_start: 4,
+                new_lines: 1,
+            },
+        ];
+
+        let before = text_file("test.txt", vec!["a", "X", "b", "c", "Y", "d"]);
+        let after = text_file("test.txt", vec!["a", "X'", "b", "c", "Y'", "d"]);
+
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
+
+        assert_eq!(alignments.len(), 5);
+
+        // Line 0 unchanged
+        assert!(!alignments[0].changed);
+        assert_eq!(alignments[0].before, Span::new(0, 1));
+
+        // Line 1 changed
+        assert!(alignments[1].changed);
+        assert_eq!(alignments[1].before, Span::new(1, 2));
+
+        // Lines 2-3 unchanged
+        assert!(!alignments[2].changed);
+        assert_eq!(alignments[2].before, Span::new(2, 4));
+
+        // Line 4 changed
+        assert!(alignments[3].changed);
+        assert_eq!(alignments[3].before, Span::new(4, 5));
+
+        // Line 5 unchanged
+        assert!(!alignments[4].changed);
+        assert_eq!(alignments[4].before, Span::new(5, 6));
+    }
+
+    #[test]
+    fn test_alignments_added_file() {
+        // New file with no hunks (git reports the whole file as added)
+        let hunks = vec![];
+        let before = None;
+        let after = text_file("new.txt", vec!["line1", "line2"]);
+
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
 
         assert_eq!(alignments.len(), 1);
         assert!(alignments[0].changed);
@@ -556,16 +647,13 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_alignments_deleted_file() {
-        let before = Some(File {
-            path: "old.txt".into(),
-            content: FileContent::Text {
-                lines: vec!["line1".into(), "line2".into()],
-            },
-        });
+    fn test_alignments_deleted_file() {
+        // Deleted file with no hunks
+        let hunks = vec![];
+        let before = text_file("old.txt", vec!["line1", "line2"]);
         let after = None;
 
-        let alignments = compute_alignments(&before, &after);
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
 
         assert_eq!(alignments.len(), 1);
         assert!(alignments[0].changed);
@@ -574,78 +662,110 @@ mod tests {
     }
 
     #[test]
-    fn test_find_matching_blocks_monotonicity() {
-        // Test case where greedy matching could produce non-monotonic results.
-        // If "x" appears at position 5 in after, and "y" appears at position 2 in after,
-        // but "x" comes before "y" in before, we must skip the "y" match.
-        let before: Vec<String> = vec!["x", "y", "z"].into_iter().map(String::from).collect();
-        let after: Vec<String> = vec!["a", "b", "y", "c", "d", "x", "z"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+    fn test_alignments_exhaustive_coverage() {
+        // Verify alignments cover the entire file with no gaps or overlaps
+        let hunks = vec![
+            Hunk {
+                old_start: 2,
+                old_lines: 2,
+                new_start: 2,
+                new_lines: 3,
+            },
+            Hunk {
+                old_start: 6,
+                old_lines: 1,
+                new_start: 7,
+                new_lines: 2,
+            },
+        ];
 
-        let matches = find_matching_blocks(&before, &after);
+        let before = text_file(
+            "test.txt",
+            vec!["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+        );
+        let after = text_file(
+            "test.txt",
+            vec!["0", "1", "a", "b", "c", "4", "5", "x", "y", "7", "8"],
+        );
 
-        // Verify monotonicity: each match's after_start must be >= previous match's after_end
-        let mut last_after_end = 0;
-        for (before_start, after_start, len) in &matches {
-            assert!(
-                *after_start >= last_after_end,
-                "Non-monotonic match: after_start {} < last_after_end {} (before_start={})",
-                after_start,
-                last_after_end,
-                before_start
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
+
+        // Verify no gaps in before
+        let mut expected_before = 0u32;
+        for a in &alignments {
+            assert_eq!(
+                a.before.start, expected_before,
+                "Gap in before at {}",
+                expected_before
             );
-            last_after_end = after_start + len;
+            expected_before = a.before.end;
         }
+        assert_eq!(expected_before, 9, "Before not fully covered");
+
+        // Verify no gaps in after
+        let mut expected_after = 0u32;
+        for a in &alignments {
+            assert_eq!(
+                a.after.start, expected_after,
+                "Gap in after at {}",
+                expected_after
+            );
+            expected_after = a.after.end;
+        }
+        assert_eq!(expected_after, 11, "After not fully covered");
     }
 
     #[test]
-    fn test_alignments_no_overlap() {
-        // Test with content that previously caused overlaps
-        let before = Some(File {
-            path: "test.txt".into(),
-            content: FileContent::Text {
-                lines: vec!["a", "b", "c", "d", "e"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect(),
-            },
-        });
-        let after = Some(File {
-            path: "test.txt".into(),
-            content: FileContent::Text {
-                lines: vec!["x", "c", "y", "a", "z"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect(),
-            },
-        });
+    fn test_alignments_hunk_at_start() {
+        // Change at the very beginning of the file
+        let hunks = vec![Hunk {
+            old_start: 0,
+            old_lines: 1,
+            new_start: 0,
+            new_lines: 1,
+        }];
 
-        let alignments = compute_alignments(&before, &after);
+        let before = text_file("test.txt", vec!["X", "a", "b"]);
+        let after = text_file("test.txt", vec!["Y", "a", "b"]);
 
-        // Verify no overlaps in before spans
-        let mut last_before_end = 0u32;
-        for a in &alignments {
-            assert!(
-                a.before.start >= last_before_end,
-                "Overlap in before: start {} < last_end {}",
-                a.before.start,
-                last_before_end
-            );
-            last_before_end = a.before.end;
-        }
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
 
-        // Verify no overlaps in after spans
-        let mut last_after_end = 0u32;
-        for a in &alignments {
-            assert!(
-                a.after.start >= last_after_end,
-                "Overlap in after: start {} < last_end {}",
-                a.after.start,
-                last_after_end
-            );
-            last_after_end = a.after.end;
-        }
+        assert_eq!(alignments.len(), 2);
+
+        // First line changed
+        assert!(alignments[0].changed);
+        assert_eq!(alignments[0].before, Span::new(0, 1));
+        assert_eq!(alignments[0].after, Span::new(0, 1));
+
+        // Rest unchanged
+        assert!(!alignments[1].changed);
+        assert_eq!(alignments[1].before, Span::new(1, 3));
+        assert_eq!(alignments[1].after, Span::new(1, 3));
+    }
+
+    #[test]
+    fn test_alignments_hunk_at_end() {
+        // Change at the very end of the file
+        let hunks = vec![Hunk {
+            old_start: 2,
+            old_lines: 1,
+            new_start: 2,
+            new_lines: 1,
+        }];
+
+        let before = text_file("test.txt", vec!["a", "b", "X"]);
+        let after = text_file("test.txt", vec!["a", "b", "Y"]);
+
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
+
+        assert_eq!(alignments.len(), 2);
+
+        // First two lines unchanged
+        assert!(!alignments[0].changed);
+        assert_eq!(alignments[0].before, Span::new(0, 2));
+
+        // Last line changed
+        assert!(alignments[1].changed);
+        assert_eq!(alignments[1].before, Span::new(2, 3));
     }
 }

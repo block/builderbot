@@ -41,5 +41,9 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 
+[[bin]]
+name = "debug_diff"
+path = "src/bin/debug_diff.rs"
+
 [dev-dependencies]
 tempfile = "3.0"

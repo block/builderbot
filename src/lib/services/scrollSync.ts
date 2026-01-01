@@ -17,8 +17,12 @@
  */
 
 import type { Alignment, Span } from '../types';
-
-const LINE_HEIGHT = 20; // Must match CSS .line min-height
+import {
+  DEFAULT_LINE_HEIGHT,
+  SCROLL_ANCHOR_FRACTION,
+  SCROLL_THRESHOLD_PX,
+  SCROLL_SYNC_DEBOUNCE_MS,
+} from '../constants';
 
 export interface ScrollSyncConfig {
   /** Line height in pixels */
@@ -30,9 +34,9 @@ export interface ScrollSyncConfig {
 }
 
 const DEFAULT_CONFIG: ScrollSyncConfig = {
-  lineHeight: LINE_HEIGHT,
-  anchorFraction: 1 / 3,
-  scrollThreshold: 2,
+  lineHeight: DEFAULT_LINE_HEIGHT,
+  anchorFraction: SCROLL_ANCHOR_FRACTION,
+  scrollThreshold: SCROLL_THRESHOLD_PX,
 };
 
 /**

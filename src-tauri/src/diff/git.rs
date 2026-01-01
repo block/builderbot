@@ -214,6 +214,8 @@ pub fn compute_diff(repo: &Repository, before_ref: &str, after_ref: &str) -> Res
         // Diff from before_tree to working directory
         // Include untracked files so new files show up
         opts.include_untracked(true);
+        // Recurse into untracked directories to show individual files
+        opts.recurse_untracked_dirs(true);
         repo.diff_tree_to_workdir_with_index(before_tree.as_ref(), Some(&mut opts))?
     } else {
         // Diff between two trees

@@ -4,236 +4,71 @@
   import Sidebar from './lib/Sidebar.svelte';
   import DiffViewer from './lib/DiffViewer.svelte';
   import DiffSelectorModal from './lib/DiffSelectorModal.svelte';
-  import { getDiff, resolveRef, getRepoInfo } from './lib/services/git';
+  import { getRepoInfo } from './lib/services/git';
   import {
     subscribeToFileChanges,
     startWatching,
     stopWatching,
     type Unsubscribe,
   } from './lib/services/statusEvents';
-  import type { FileDiff, DiffSpec } from './lib/types';
-  import { getFilePath } from './lib/diffUtils';
-  import { themeToCssVars, createAdaptiveTheme } from './lib/theme';
   import {
-    SYNTAX_THEMES,
-    setSyntaxTheme,
-    getTheme,
-    type SyntaxThemeName,
-  } from './lib/services/highlighter';
+    preferences,
+    loadSavedSize,
+    loadSavedSyntaxTheme,
+    getAvailableSyntaxThemes,
+    selectSyntaxTheme,
+    handlePreferenceKeydown,
+  } from './lib/stores/preferences.svelte';
+  import {
+    DIFF_PRESETS,
+    diffSelection,
+    getDisplayLabel,
+    getTooltipText,
+    selectDiffSpec,
+    selectCustomDiff,
+    initDiffSelection,
+  } from './lib/stores/diffSelection.svelte';
+  import {
+    diffState,
+    getCurrentDiff,
+    loadDiffs,
+    selectFile,
+    resetState,
+  } from './lib/stores/diffState.svelte';
 
-  // UI scaling
-  const SIZE_STEP = 1;
-  const SIZE_MIN = 10;
-  const SIZE_MAX = 24;
-  const SIZE_DEFAULT = 13;
-  const SIZE_STORAGE_KEY = 'staged-size-base';
-
-  let sizeBase = $state(SIZE_DEFAULT);
-
-  function loadSavedSize() {
-    const saved = localStorage.getItem(SIZE_STORAGE_KEY);
-    if (saved) {
-      const parsed = parseInt(saved, 10);
-      if (!isNaN(parsed) && parsed >= SIZE_MIN && parsed <= SIZE_MAX) {
-        sizeBase = parsed;
-      }
-    }
-    applySize();
-  }
-
-  function applySize() {
-    document.documentElement.style.setProperty('--size-base', `${sizeBase}px`);
-  }
-
-  function increaseSize() {
-    if (sizeBase < SIZE_MAX) {
-      sizeBase += SIZE_STEP;
-      applySize();
-      localStorage.setItem(SIZE_STORAGE_KEY, String(sizeBase));
-    }
-  }
-
-  function decreaseSize() {
-    if (sizeBase > SIZE_MIN) {
-      sizeBase -= SIZE_STEP;
-      applySize();
-      localStorage.setItem(SIZE_STORAGE_KEY, String(sizeBase));
-    }
-  }
-
-  function resetSize() {
-    sizeBase = SIZE_DEFAULT;
-    applySize();
-    localStorage.setItem(SIZE_STORAGE_KEY, String(sizeBase));
-  }
-
-  function handleKeydown(event: KeyboardEvent) {
-    // Cmd/Ctrl + Shift + = (plus) to increase size
-    // Cmd/Ctrl + Shift + - (minus) to decrease size
-    // Cmd/Ctrl + Shift + 0 to reset size
-    if ((event.metaKey || event.ctrlKey) && event.shiftKey) {
-      if (event.key === '=' || event.key === '+') {
-        event.preventDefault();
-        increaseSize();
-      } else if (event.key === '-' || event.key === '_') {
-        event.preventDefault();
-        decreaseSize();
-      } else if (event.key === '0') {
-        event.preventDefault();
-        resetSize();
-      }
-    }
-    // T to cycle syntax themes
-    if (event.key === 't' && !event.metaKey && !event.ctrlKey && !event.shiftKey) {
-      // Don't trigger if typing in an input
-      const target = event.target as HTMLElement;
-      if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA') {
-        event.preventDefault();
-        cycleSyntaxTheme();
-      }
-    }
-  }
-
-  // ==========================================================================
-  // Theme (Adaptive - derived from syntax theme)
-  // ==========================================================================
-
-  function applyCssVars(cssVars: string) {
-    cssVars.split('\n').forEach((line) => {
-      const match = line.match(/^\s*(--[\w-]+):\s*(.+);?\s*$/);
-      if (match) {
-        document.documentElement.style.setProperty(match[1], match[2].replace(';', ''));
-      }
-    });
-  }
-
-  /**
-   * Apply adaptive theme based on current syntax theme colors.
-   */
-  function applyAdaptiveTheme() {
-    const themeInfo = getTheme();
-    if (themeInfo) {
-      const adaptiveTheme = createAdaptiveTheme(themeInfo.bg, themeInfo.fg, themeInfo.comment);
-      const cssVars = themeToCssVars(adaptiveTheme);
-      applyCssVars(cssVars);
-    }
-  }
-
-  // ==========================================================================
-  // Syntax Theme
-  // ==========================================================================
-
-  const SYNTAX_THEME_STORAGE_KEY = 'staged-syntax-theme';
-
-  let currentSyntaxTheme = $state<SyntaxThemeName>('laserwave');
-  // Trigger re-render when syntax theme changes
-  let syntaxThemeVersion = $state(0);
-
-  async function loadSavedSyntaxTheme() {
-    const saved = localStorage.getItem(SYNTAX_THEME_STORAGE_KEY);
-    if (saved && SYNTAX_THEMES.includes(saved as SyntaxThemeName)) {
-      currentSyntaxTheme = saved as SyntaxThemeName;
-    }
-    // Always initialize highlighter with the current theme (saved or default)
-    await setSyntaxTheme(currentSyntaxTheme);
-    // Apply adaptive theme from syntax theme colors
-    applyAdaptiveTheme();
-  }
-
-  async function selectSyntaxTheme(name: SyntaxThemeName) {
-    currentSyntaxTheme = name;
-    await setSyntaxTheme(name);
-    localStorage.setItem(SYNTAX_THEME_STORAGE_KEY, name);
-    // Bump version to trigger re-render of diff viewer
-    syntaxThemeVersion++;
-    // Update chrome to match new syntax theme
-    applyAdaptiveTheme();
-  }
-
-  function cycleSyntaxTheme() {
-    const currentIndex = SYNTAX_THEMES.indexOf(currentSyntaxTheme);
-    const nextIndex = (currentIndex + 1) % SYNTAX_THEMES.length;
-    selectSyntaxTheme(SYNTAX_THEMES[nextIndex]);
-  }
-
-  // ==========================================================================
-  // Diff Selector
-  // ==========================================================================
-
-  // Available diff presets
-  const DIFF_PRESETS: DiffSpec[] = [
-    { base: 'HEAD', head: '@', label: 'Working Changes' },
-    { base: 'main', head: '@', label: 'Against main' },
-    { base: 'HEAD~1', head: 'HEAD', label: 'Last Commit' },
-  ];
-
-  // Current diff spec - default to working changes
-  let currentDiffSpec = $state<DiffSpec>(DIFF_PRESETS[0]);
+  // UI State
   let diffSelectorOpen = $state(false);
   let customDiffModalOpen = $state(false);
+  let sidebarRef: Sidebar | null = $state(null);
+  let unsubscribe: Unsubscribe | null = null;
 
-  // Resolved SHAs for tooltip display
-  let resolvedBaseSha = $state<string | null>(null);
-  let resolvedHeadSha = $state<string | null>(null);
-
-  // Derived values for easy access
-  let diffBase = $derived(currentDiffSpec.base);
-  let diffHead = $derived(currentDiffSpec.head);
-
-  // Is this a preset or custom diff?
-  let isPreset = $derived(
-    DIFF_PRESETS.some(
-      (p) => p.base === diffBase && p.head === diffHead && p.label === currentDiffSpec.label
-    )
-  );
-
-  // Display label: short name for presets, base..head for custom
-  let displayLabel = $derived(isPreset ? currentDiffSpec.label : `${diffBase}..${diffHead}`);
-
-  // Tooltip with full details
-  let tooltipText = $derived(() => {
-    const basePart = resolvedBaseSha ? `${diffBase} (${resolvedBaseSha})` : diffBase;
-    const headPart = resolvedHeadSha ? `${diffHead} (${resolvedHeadSha})` : diffHead;
-    return `${basePart} → ${headPart}`;
-  });
-
-  async function updateResolvedShas() {
-    try {
-      resolvedBaseSha = await resolveRef(diffBase);
-      resolvedHeadSha = await resolveRef(diffHead);
-    } catch {
-      resolvedBaseSha = null;
-      resolvedHeadSha = null;
-    }
+  // Diff Loading
+  async function loadAllDiffs() {
+    await loadDiffs(diffSelection.spec.base, diffSelection.spec.head);
+    sidebarRef?.setDiffs(diffState.diffs);
   }
 
-  function selectDiffSpec(spec: DiffSpec) {
-    currentDiffSpec = spec;
+  async function handleFilesChanged() {
+    if (diffSelection.spec.head !== '@') return;
+    await loadAllDiffs();
+  }
+
+  // Diff Selector
+  async function handleDiffSelect(spec: (typeof DIFF_PRESETS)[number]) {
     diffSelectorOpen = false;
-    // Clear current selection and reload
-    selectedFile = null;
-    currentDiff = null;
-    // Update resolved SHAs for tooltip
-    updateResolvedShas();
-    // Reload all diffs
-    loadAllDiffs();
+    resetState();
+    await selectDiffSpec(spec);
+    await loadAllDiffs();
   }
 
-  function handleCustomDiffSelect(base: string, head: string, label: string) {
-    selectDiffSpec({ base, head, label });
-  }
-
-  function openCustomDiffModal() {
-    diffSelectorOpen = false;
-    customDiffModalOpen = true;
+  async function handleCustomDiffSelect(base: string, head: string, label: string) {
+    resetState();
+    await selectCustomDiff(base, head, label);
+    await loadAllDiffs();
   }
 
   function toggleDiffSelector() {
     diffSelectorOpen = !diffSelectorOpen;
-  }
-
-  function closeDiffSelector() {
-    diffSelectorOpen = false;
   }
 
   // Close dropdown when clicking outside
@@ -242,12 +77,11 @@
 
     function handleClickOutside(e: MouseEvent) {
       const target = e.target as HTMLElement;
-      // Don't close if clicking inside the dropdown or the toggle button
-      if (target.closest('.diff-selector-container')) return;
-      closeDiffSelector();
+      if (!target.closest('.diff-selector-container')) {
+        diffSelectorOpen = false;
+      }
     }
 
-    // Use setTimeout to avoid closing immediately from the same click that opened it
     const timeoutId = setTimeout(() => {
       document.addEventListener('click', handleClickOutside);
     }, 0);
@@ -258,123 +92,34 @@
     };
   });
 
-  // ==========================================================================
-  // Diff State
-  // ==========================================================================
-
-  // All diffs for the current base..head
-  let allDiffs: FileDiff[] = $state([]);
-  let diffsLoading = $state(true);
-  let diffsError: string | null = $state(null);
-
-  // Currently selected file and its diff
-  let selectedFile: string | null = $state(null);
-  let currentDiff = $derived.by(() => {
-    if (!selectedFile) return null;
-    return allDiffs.find((d) => getFilePath(d) === selectedFile) ?? null;
-  });
-
-  let sidebarRef: Sidebar | null = $state(null);
-
-  // Watcher cleanup function
-  let unsubscribe: Unsubscribe | null = null;
-
-  // Current repo path (for watcher)
-  let currentRepoPath: string | null = $state(null);
-
-  /**
-   * Load all diffs for the current base..head.
-   */
-  async function loadAllDiffs() {
-    diffsLoading = true;
-    diffsError = null;
-
-    try {
-      allDiffs = await getDiff(diffBase, diffHead);
-
-      // Auto-select first file if none selected
-      if (!selectedFile && allDiffs.length > 0) {
-        selectedFile = getFilePath(allDiffs[0]);
-      }
-
-      // Update sidebar with the new file list
-      sidebarRef?.setDiffs(allDiffs);
-    } catch (e) {
-      diffsError = e instanceof Error ? e.message : String(e);
-      allDiffs = [];
-    } finally {
-      diffsLoading = false;
-    }
-  }
-
-  /**
-   * Handle file change notifications from the watcher.
-   * Only relevant when diffHead is "@" (working tree).
-   */
-  async function handleFilesChanged() {
-    // Only reload diffs if we're viewing the working tree
-    if (diffHead !== '@') {
-      return;
-    }
-
-    // Reload all diffs
-    await loadAllDiffs();
-
-    // Check if currently selected file still exists
-    if (selectedFile) {
-      const stillExists = allDiffs.some((d) => getFilePath(d) === selectedFile);
-      if (!stillExists) {
-        // File no longer has changes - select first available or clear
-        selectedFile = allDiffs.length > 0 ? getFilePath(allDiffs[0]) : null;
-      }
-    }
-  }
-
-  onMount(async () => {
-    // Load saved preferences
+  // Lifecycle
+  onMount(() => {
     loadSavedSize();
-    // Load syntax theme (this also applies the adaptive chrome theme)
-    await loadSavedSyntaxTheme();
+    window.addEventListener('keydown', handlePreferenceKeydown);
 
-    // Listen for keyboard shortcuts
-    window.addEventListener('keydown', handleKeydown);
+    (async () => {
+      await loadSavedSyntaxTheme();
+      await initDiffSelection();
+      await loadAllDiffs();
 
-    // Resolve initial SHAs for tooltip
-    updateResolvedShas();
-
-    // Load initial diffs
-    await loadAllDiffs();
-
-    // Get repo path for watcher
-    try {
-      const info = await getRepoInfo();
-      if (info?.repo_path) {
-        currentRepoPath = info.repo_path;
-        await startWatching(info.repo_path);
-        console.log('Started watching:', info.repo_path);
+      try {
+        const info = await getRepoInfo();
+        if (info?.repo_path) {
+          await startWatching(info.repo_path);
+        }
+      } catch (e) {
+        console.error('Failed to start watcher:', e);
       }
-    } catch (e) {
-      console.error('Failed to start watcher:', e);
-    }
 
-    // Subscribe to file change events from the backend
-    unsubscribe = await subscribeToFileChanges(handleFilesChanged);
+      unsubscribe = await subscribeToFileChanges(handleFilesChanged);
+    })();
   });
 
   onDestroy(() => {
-    // Clean up keyboard listener
-    window.removeEventListener('keydown', handleKeydown);
-
-    // Clean up watcher and event listeners
+    window.removeEventListener('keydown', handlePreferenceKeydown);
     unsubscribe?.();
-    stopWatching().catch(() => {
-      // Ignore errors on cleanup
-    });
+    stopWatching().catch(() => {});
   });
-
-  function handleFileSelect(path: string) {
-    selectedFile = path;
-  }
 </script>
 
 <main>
@@ -385,9 +130,9 @@
         class="diff-selector"
         class:open={diffSelectorOpen}
         onclick={toggleDiffSelector}
-        title={tooltipText()}
+        title={getTooltipText()}
       >
-        <span class="diff-label">{displayLabel}</span>
+        <span class="diff-label">{getDisplayLabel()}</span>
         <ChevronDown size={14} />
       </button>
 
@@ -396,15 +141,22 @@
           {#each DIFF_PRESETS as preset}
             <button
               class="diff-option"
-              class:selected={preset.base === diffBase && preset.head === diffHead}
-              onclick={() => selectDiffSpec(preset)}
+              class:selected={preset.base === diffSelection.spec.base &&
+                preset.head === diffSelection.spec.head}
+              onclick={() => handleDiffSelect(preset)}
             >
               <span class="option-label">{preset.label}</span>
               <span class="option-spec">{preset.base}..{preset.head}</span>
             </button>
           {/each}
           <div class="dropdown-divider"></div>
-          <button class="diff-option" onclick={openCustomDiffModal}>
+          <button
+            class="diff-option"
+            onclick={() => {
+              diffSelectorOpen = false;
+              customDiffModalOpen = true;
+            }}
+          >
             <span class="option-label">Custom...</span>
           </button>
         </div>
@@ -416,11 +168,10 @@
       <span class="picker-label">Theme:</span>
       <select
         class="theme-select"
-        onchange={(e) =>
-          selectSyntaxTheme((e.target as HTMLSelectElement).value as SyntaxThemeName)}
+        onchange={(e) => selectSyntaxTheme((e.target as HTMLSelectElement).value as any)}
       >
-        {#each SYNTAX_THEMES as name}
-          <option value={name} selected={name === currentSyntaxTheme}>{name}</option>
+        {#each getAvailableSyntaxThemes() as name}
+          <option value={name} selected={name === preferences.syntaxTheme}>{name}</option>
         {/each}
       </select>
     </div>
@@ -428,26 +179,32 @@
 
   <div class="app-container">
     <section class="main-content">
-      {#if diffsLoading}
+      {#if diffState.loading}
         <div class="loading-state">
           <p>Loading...</p>
         </div>
-      {:else if diffsError}
+      {:else if diffState.error}
         <div class="error-state">
           <p>Error loading diff:</p>
-          <p class="error-message">{diffsError}</p>
+          <p class="error-message">{diffState.error}</p>
         </div>
       {:else}
-        <DiffViewer diff={currentDiff} {diffBase} {diffHead} {sizeBase} {syntaxThemeVersion} />
+        <DiffViewer
+          diff={getCurrentDiff()}
+          diffBase={diffSelection.spec.base}
+          diffHead={diffSelection.spec.head}
+          sizeBase={preferences.sizeBase}
+          syntaxThemeVersion={preferences.syntaxThemeVersion}
+        />
       {/if}
     </section>
     <aside class="sidebar">
       <Sidebar
         bind:this={sidebarRef}
-        onFileSelect={handleFileSelect}
-        {selectedFile}
-        {diffBase}
-        {diffHead}
+        onFileSelect={selectFile}
+        selectedFile={diffState.selectedFile}
+        diffBase={diffSelection.spec.base}
+        diffHead={diffSelection.spec.head}
       />
     </aside>
   </div>
@@ -457,8 +214,8 @@
   open={customDiffModalOpen}
   onClose={() => (customDiffModalOpen = false)}
   onSelect={handleCustomDiffSelect}
-  currentBase={diffBase}
-  currentHead={diffHead}
+  currentBase={diffSelection.spec.base}
+  currentHead={diffSelection.spec.head}
 />
 
 <style>

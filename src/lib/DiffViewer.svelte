@@ -28,6 +28,8 @@
     getTextLines,
   } from './diffUtils';
   import { setupKeyboardNav } from './diffKeyboard';
+  import { setupSpaceKeyHandler } from './panelLayout';
+  import { ALIGNMENT_BATCH_SIZE } from './constants';
 
   interface Props {
     diff: FileDiff | null;
@@ -79,9 +81,6 @@
   // ==========================================================================
   // Progressive alignment loading
   // ==========================================================================
-
-  // How many alignments to process per batch
-  const ALIGNMENT_BATCH_SIZE = 20;
 
   // Alignments that have been "activated" (ready to render)
   let activeAlignmentCount = $state(0);
@@ -446,42 +445,17 @@
     });
 
     // Space key = zoom modifier (hold to expand hovered panel to 90%)
-    // Use capture phase to intercept before browser defaults (scroll, button activation)
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.code === 'Space' && !e.repeat) {
-        const target = e.target as HTMLElement;
-        // Allow space in text inputs where user is typing
-        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
-          return;
-        }
-        // For other focusable elements (select, button), blur them and capture space.
-        // This prevents e.g. the theme selector from reopening when space is pressed.
-        // Trade-off: disrupts keyboard-only navigation flow, but this app is mouse-primary.
-        if (document.activeElement instanceof HTMLElement) {
-          document.activeElement.blur();
-        }
-        e.preventDefault();
-        e.stopPropagation();
-        spaceHeld = true;
-      }
-    }
+    const cleanupSpaceKey = setupSpaceKeyHandler((held) => {
+      spaceHeld = held;
+    });
 
-    function handleKeyUp(e: KeyboardEvent) {
-      if (e.code === 'Space') {
-        spaceHeld = false;
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown, { capture: true });
-    window.addEventListener('keyup', handleKeyUp, { capture: true });
-
+    // Arrow keys and Ctrl+N/P for scrolling
     const cleanupKeyboardNav = setupKeyboardNav({
       getScrollTarget: () => afterPane,
     });
 
     return () => {
-      window.removeEventListener('keydown', handleKeyDown, { capture: true });
-      window.removeEventListener('keyup', handleKeyUp, { capture: true });
+      cleanupSpaceKey();
       cleanupKeyboardNav?.();
     };
   });

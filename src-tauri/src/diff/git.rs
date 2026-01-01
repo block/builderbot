@@ -30,6 +30,10 @@ impl From<git2::Error> for GitError {
 
 type Result<T> = std::result::Result<T, GitError>;
 
+/// Special ref representing the working tree (uncommitted changes on disk).
+/// This is NOT a git ref - it's our own convention, handled specially in compute_diff.
+pub const WORKDIR: &str = "WORKDIR";
+
 /// A git reference with its type for display purposes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitRef {
@@ -53,13 +57,13 @@ pub fn open_repo(path: &Path) -> Result<Repository> {
 
 /// Get all refs with type information for autocomplete UI.
 ///
-/// Includes special refs (@, HEAD, HEAD~1), local branches, and tags.
+/// Includes special refs (WORKDIR, HEAD, HEAD~1), local branches, and tags.
 pub fn get_refs(repo: &Repository) -> Result<Vec<GitRef>> {
     let mut refs = Vec::new();
 
     // Special refs first (most commonly used)
     refs.push(GitRef {
-        name: "@".to_string(),
+        name: WORKDIR.to_string(),
         ref_type: RefType::Special,
     });
     refs.push(GitRef {
@@ -99,9 +103,9 @@ pub fn get_refs(repo: &Repository) -> Result<Vec<GitRef>> {
 
 /// Resolve a ref to a short SHA for display, or validate it exists.
 ///
-/// Returns "working tree" for "@", otherwise returns the short (8-char) SHA.
+/// Returns "working tree" for WORKDIR, otherwise returns the short (8-char) SHA.
 pub fn resolve_ref(repo: &Repository, ref_str: &str) -> Result<String> {
-    if ref_str == "@" {
+    if ref_str == WORKDIR {
         return Ok("working tree".to_string());
     }
 
@@ -155,10 +159,10 @@ pub fn last_commit_message(repo: &Repository) -> Result<Option<String>> {
 /// Resolve a ref string to a tree.
 ///
 /// Special values:
-/// - "@" means the working tree (returns None, caller handles specially)
+/// - WORKDIR means the working tree (returns None, caller handles specially)
 /// - "HEAD" resolves to the current HEAD commit
 fn resolve_to_tree<'a>(repo: &'a Repository, refspec: &str) -> Result<Option<Tree<'a>>> {
-    if refspec == "@" {
+    if refspec == WORKDIR {
         return Ok(None); // Working tree - no tree object
     }
 
@@ -200,9 +204,16 @@ struct Hunk {
 ///
 /// Returns a list of FileDiff objects with full content and alignments.
 pub fn compute_diff(repo: &Repository, before_ref: &str, after_ref: &str) -> Result<Vec<FileDiff>> {
+    // Validate: WORKDIR can only be used as the "after" ref
+    if before_ref == WORKDIR {
+        return Err(GitError(
+            "WORKDIR can only be used as the target (head), not the base".to_string(),
+        ));
+    }
+
     let before_tree = resolve_to_tree(repo, before_ref)?;
     let after_tree = resolve_to_tree(repo, after_ref)?;
-    let is_working_tree = after_ref == "@";
+    let is_working_tree = after_ref == WORKDIR;
 
     let mut opts = DiffOptions::new();
     opts.ignore_submodules(true);

@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { ChevronDown } from 'lucide-svelte';
+  import { ArrowRight, GitBranch, Tag, Diamond, AlertCircle } from 'lucide-svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import DiffViewer from './lib/DiffViewer.svelte';
-  import DiffSelectorModal from './lib/DiffSelectorModal.svelte';
-  import { getRepoInfo } from './lib/services/git';
+  import { getRepoInfo, getRefs, resolveRef } from './lib/services/git';
+  import type { GitRef } from './lib/types';
   import {
     subscribeToFileChanges,
     startWatching,
@@ -20,14 +20,15 @@
     handlePreferenceKeydown,
   } from './lib/stores/preferences.svelte';
   import {
-    DIFF_PRESETS,
+    getPresets,
+    WORKDIR,
     diffSelection,
-    getDisplayLabel,
-    getTooltipText,
     selectDiffSpec,
     selectCustomDiff,
     initDiffSelection,
+    setDefaultBranch,
   } from './lib/stores/diffSelection.svelte';
+  import type { DiffSpec } from './lib/types';
   import {
     diffState,
     getCurrentDiff,
@@ -37,10 +38,59 @@
   } from './lib/stores/diffState.svelte';
 
   // UI State
-  let diffSelectorOpen = $state(false);
-  let customDiffModalOpen = $state(false);
   let sidebarRef: Sidebar | null = $state(null);
   let unsubscribe: Unsubscribe | null = null;
+
+  // Inline diff selector state
+  let baseInput = $state('');
+  let headInput = $state('');
+  let selectorHovered = $state(false);
+  let inputFocused = $state(false);
+  let activeInput = $state<'base' | 'head' | null>(null);
+  let allRefs = $state<GitRef[]>([]);
+  let selectedSuggestionIndex = $state(0);
+
+  // Error state for custom diff input
+  let inputError = $state<string | null>(null);
+
+  // Sync inputs with current selection
+  $effect(() => {
+    baseInput = diffSelection.spec.base;
+    headInput = diffSelection.spec.head;
+  });
+
+  // Clear error when inputs change
+  $effect(() => {
+    const _ = [baseInput, headInput];
+    inputError = null;
+  });
+
+  // Filtered refs for autocomplete
+  // Filter out WORKDIR from base suggestions (it can only be used as head)
+  let filteredRefs = $derived(
+    activeInput
+      ? allRefs.filter((r) => {
+          // WORKDIR can only be used as head, not base
+          if (activeInput === 'base' && r.name === WORKDIR) return false;
+          const query = (activeInput === 'base' ? baseInput : headInput).toLowerCase();
+          return r.name.toLowerCase().includes(query);
+        })
+      : []
+  );
+
+  // Get ref type for displaying icons in the input bar
+  function getRefType(refName: string): 'branch' | 'tag' | 'special' | null {
+    const ref = allRefs.find((r) => r.name === refName);
+    if (ref) return ref.ref_type;
+    // Special cases not in refs list
+    if (refName === 'HEAD' || refName.startsWith('HEAD~') || refName.startsWith('HEAD^')) {
+      return 'special';
+    }
+    return null;
+  }
+
+  // Show dropdown when hovering OR when an input is focused
+  let showDropdown = $derived(selectorHovered || inputFocused);
 
   // Diff Loading
   async function loadAllDiffs() {
@@ -49,48 +99,121 @@
   }
 
   async function handleFilesChanged() {
-    if (diffSelection.spec.head !== '@') return;
+    if (diffSelection.spec.head !== WORKDIR) return;
     await loadAllDiffs();
   }
 
-  // Diff Selector
-  async function handleDiffSelect(spec: (typeof DIFF_PRESETS)[number]) {
-    diffSelectorOpen = false;
+  // Preset selection
+  async function handlePresetSelect(spec: DiffSpec) {
+    inputError = null;
     resetState();
     await selectDiffSpec(spec);
     await loadAllDiffs();
   }
 
-  async function handleCustomDiffSelect(base: string, head: string, label: string) {
-    resetState();
-    await selectCustomDiff(base, head, label);
-    await loadAllDiffs();
+  // Custom input submission
+  async function submitCustomDiff() {
+    inputError = null;
+
+    // Validate: WORKDIR can only be used as head
+    if (baseInput === WORKDIR) {
+      inputError = 'WORKDIR can only be used as head (target), not base';
+      return;
+    }
+
+    // Validate refs exist
+    try {
+      const baseSha = await resolveRef(baseInput);
+      const headSha = await resolveRef(headInput);
+      if (!baseSha) {
+        inputError = `Cannot resolve base ref: ${baseInput}`;
+        return;
+      }
+      if (!headSha) {
+        inputError = `Cannot resolve head ref: ${headInput}`;
+        return;
+      }
+
+      resetState();
+      await selectCustomDiff(baseInput, headInput);
+      await loadAllDiffs();
+    } catch (e) {
+      inputError = e instanceof Error ? e.message : String(e);
+    }
   }
 
-  function toggleDiffSelector() {
-    diffSelectorOpen = !diffSelectorOpen;
+  function handleInputKeydown(event: KeyboardEvent, field: 'base' | 'head') {
+    if (event.key === 'Escape') {
+      activeInput = null;
+      (event.target as HTMLInputElement).blur();
+    } else if (event.key === 'Enter') {
+      if (activeInput && filteredRefs.length > 0 && selectedSuggestionIndex < filteredRefs.length) {
+        selectSuggestion(filteredRefs[selectedSuggestionIndex]);
+        event.preventDefault();
+      } else {
+        submitCustomDiff();
+        (event.target as HTMLInputElement).blur();
+      }
+    } else if (event.key === 'ArrowDown' && activeInput) {
+      event.preventDefault();
+      selectedSuggestionIndex = Math.min(selectedSuggestionIndex + 1, filteredRefs.length - 1);
+    } else if (event.key === 'ArrowUp' && activeInput) {
+      event.preventDefault();
+      selectedSuggestionIndex = Math.max(selectedSuggestionIndex - 1, 0);
+    } else if (event.key === 'Tab' && activeInput && filteredRefs.length > 0) {
+      event.preventDefault();
+      selectSuggestion(filteredRefs[selectedSuggestionIndex]);
+    }
   }
 
-  // Close dropdown when clicking outside
-  $effect(() => {
-    if (!diffSelectorOpen) return;
+  function selectSuggestion(ref: GitRef) {
+    if (activeInput === 'base') {
+      baseInput = ref.name;
+    } else if (activeInput === 'head') {
+      headInput = ref.name;
+    }
+    selectedSuggestionIndex = 0;
+  }
 
-    function handleClickOutside(e: MouseEvent) {
-      const target = e.target as HTMLElement;
-      if (!target.closest('.diff-selector-container')) {
-        diffSelectorOpen = false;
+  function handleFocus(field: 'base' | 'head') {
+    activeInput = field;
+    inputFocused = true;
+    selectedSuggestionIndex = 0;
+  }
+
+  function handleBlur() {
+    setTimeout(() => {
+      activeInput = null;
+      inputFocused = false;
+      // If inputs differ from current selection, submit
+      if (baseInput !== diffSelection.spec.base || headInput !== diffSelection.spec.head) {
+        submitCustomDiff();
+      }
+    }, 150);
+  }
+
+  // Check if current selection matches a preset
+  function isPresetSelected(preset: DiffSpec): boolean {
+    return preset.base === diffSelection.spec.base && preset.head === diffSelection.spec.head;
+  }
+
+  /**
+   * Detect the default branch (main, master, etc.) from available refs.
+   */
+  function detectDefaultBranch(refs: GitRef[]): string {
+    const branchNames = refs.filter((r) => r.ref_type === 'branch').map((r) => r.name);
+
+    // Check common default branch names in order of preference
+    const candidates = ['main', 'master', 'develop', 'trunk'];
+    for (const name of candidates) {
+      if (branchNames.includes(name)) {
+        return name;
       }
     }
 
-    const timeoutId = setTimeout(() => {
-      document.addEventListener('click', handleClickOutside);
-    }, 0);
-
-    return () => {
-      clearTimeout(timeoutId);
-      document.removeEventListener('click', handleClickOutside);
-    };
-  });
+    // Fallback to first branch, or 'main' if no branches
+    return branchNames[0] ?? 'main';
+  }
 
   // Lifecycle
   onMount(() => {
@@ -99,6 +222,16 @@
 
     (async () => {
       await loadSavedSyntaxTheme();
+
+      // Load refs for autocomplete and detect default branch
+      try {
+        allRefs = await getRefs();
+        const defaultBranch = detectDefaultBranch(allRefs);
+        setDefaultBranch(defaultBranch);
+      } catch (e) {
+        console.error('Failed to load refs:', e);
+      }
+
       await initDiffSelection();
       await loadAllDiffs();
 
@@ -123,45 +256,110 @@
 </script>
 
 <main>
-  <!-- Diff selector header -->
   <header class="diff-header">
-    <div class="diff-selector-container">
-      <button
-        class="diff-selector"
-        class:open={diffSelectorOpen}
-        onclick={toggleDiffSelector}
-        title={getTooltipText()}
-      >
-        <span class="diff-label">{getDisplayLabel()}</span>
-        <ChevronDown size={14} />
-      </button>
+    <!-- Inline diff selector -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="diff-selector"
+      onmouseenter={() => (selectorHovered = true)}
+      onmouseleave={() => (selectorHovered = false)}
+    >
+      <div class="diff-inputs">
+        <div class="ref-input-wrapper">
+          <span class="input-icon">
+            {#if getRefType(baseInput) === 'branch'}
+              <GitBranch size={12} />
+            {:else if getRefType(baseInput) === 'tag'}
+              <Tag size={12} />
+            {:else}
+              <Diamond size={12} />
+            {/if}
+          </span>
+          <input
+            type="text"
+            class="ref-input"
+            bind:value={baseInput}
+            placeholder="base"
+            onfocus={() => handleFocus('base')}
+            onblur={handleBlur}
+            onkeydown={(e) => handleInputKeydown(e, 'base')}
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <span class="separator">
+          <ArrowRight size={14} />
+        </span>
+        <div class="ref-input-wrapper">
+          <span class="input-icon">
+            {#if getRefType(headInput) === 'branch'}
+              <GitBranch size={12} />
+            {:else if getRefType(headInput) === 'tag'}
+              <Tag size={12} />
+            {:else}
+              <Diamond size={12} />
+            {/if}
+          </span>
+          <input
+            type="text"
+            class="ref-input"
+            bind:value={headInput}
+            placeholder="head"
+            onfocus={() => handleFocus('head')}
+            onblur={handleBlur}
+            onkeydown={(e) => handleInputKeydown(e, 'head')}
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+      </div>
 
-      {#if diffSelectorOpen}
-        <div class="diff-dropdown">
-          {#each DIFF_PRESETS as preset}
-            <button
-              class="diff-option"
-              class:selected={preset.base === diffSelection.spec.base &&
-                preset.head === diffSelection.spec.head}
-              onclick={() => handleDiffSelect(preset)}
-            >
-              <span class="option-label">{preset.label}</span>
-              <span class="option-spec">{preset.base}..{preset.head}</span>
-            </button>
-          {/each}
-          <div class="dropdown-divider"></div>
-          <button
-            class="diff-option"
-            onclick={() => {
-              diffSelectorOpen = false;
-              customDiffModalOpen = true;
-            }}
-          >
-            <span class="option-label">Custom...</span>
-          </button>
+      {#if showDropdown}
+        <div class="presets-dropdown">
+          {#if activeInput && filteredRefs.length > 0}
+            <!-- Autocomplete suggestions -->
+            {#each filteredRefs.slice(0, 5) as ref, i}
+              <button
+                class="preset-option"
+                class:selected={i === selectedSuggestionIndex}
+                onmousedown={() => selectSuggestion(ref)}
+              >
+                <span class="option-icon">
+                  {#if ref.ref_type === 'branch'}
+                    <GitBranch size={12} />
+                  {:else if ref.ref_type === 'tag'}
+                    <Tag size={12} />
+                  {:else}
+                    <Diamond size={12} />
+                  {/if}
+                </span>
+                <span class="option-name">{ref.name}</span>
+              </button>
+            {/each}
+          {:else}
+            <!-- Preset options -->
+            {#each getPresets() as preset}
+              <button
+                class="preset-option"
+                class:active={isPresetSelected(preset)}
+                onmousedown={() => handlePresetSelect(preset)}
+              >
+                <span class="option-name">{preset.label}</span>
+                <span class="option-spec">{preset.base}..{preset.head}</span>
+              </button>
+            {/each}
+          {/if}
         </div>
       {/if}
     </div>
+
+    <!-- Input error display -->
+    {#if inputError}
+      <div class="input-error">
+        <AlertCircle size={14} />
+        <span>{inputError}</span>
+      </div>
+    {/if}
 
     <!-- Theme picker -->
     <div class="theme-picker">
@@ -210,14 +408,6 @@
   </div>
 </main>
 
-<DiffSelectorModal
-  open={customDiffModalOpen}
-  onClose={() => (customDiffModalOpen = false)}
-  onSelect={handleCustomDiffSelect}
-  currentBase={diffSelection.spec.base}
-  currentHead={diffSelection.spec.head}
-/>
-
 <style>
   :global(body) {
     margin: 0;
@@ -244,60 +434,96 @@
     flex-shrink: 0;
   }
 
-  .diff-selector-container {
+  /* Inline diff selector */
+  .diff-selector {
     position: relative;
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 8px; /* Extra padding for hover area to reach dropdown */
+    margin-bottom: -8px;
   }
 
-  .diff-selector {
+  .diff-inputs {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .ref-input-wrapper {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 8px;
+    padding: 5px 10px;
+    background: var(--bg-primary);
+    border-radius: 6px;
+    transition: background-color 0.1s;
+  }
+
+  .ref-input-wrapper:focus-within {
+    background: var(--bg-hover);
+  }
+
+  .input-icon {
+    display: flex;
+    align-items: center;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .ref-input {
+    width: 160px;
+    padding: 0;
     background: transparent;
-    border: 1px solid transparent;
-    border-radius: 4px;
+    border: none;
     color: var(--text-primary);
     font-size: var(--size-sm);
-    cursor: pointer;
-    transition:
-      background-color 0.15s,
-      border-color 0.15s;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    /* Truncate from left (show end of branch name) */
+    direction: rtl;
+    text-align: left;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
   }
 
-  .diff-selector:hover {
-    background-color: var(--bg-hover);
+  .ref-input::placeholder {
+    color: var(--text-faint);
+    direction: ltr;
   }
 
-  .diff-selector.open {
-    background-color: var(--bg-hover);
-    border-color: var(--border-muted);
+  .ref-input:focus {
+    outline: none;
+    /* Reset direction when editing */
+    direction: ltr;
   }
 
-  .diff-label {
-    font-weight: 500;
+  .separator {
+    color: var(--text-faint);
+    display: flex;
+    align-items: center;
+    user-select: none;
+    flex-shrink: 0;
   }
 
-  .diff-dropdown {
+  .presets-dropdown {
     position: absolute;
     top: 100%;
     left: 0;
-    margin-top: 4px;
+    margin-top: -4px; /* Overlap with padding for seamless hover */
+    min-width: 100%;
     background: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
     border-radius: 6px;
     box-shadow: var(--shadow-elevated);
-    min-width: 200px;
-    z-index: 100;
     overflow: hidden;
+    z-index: 100;
   }
 
-  .diff-option {
+  .preset-option {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 16px;
+    gap: 8px;
     width: 100%;
-    padding: 8px 12px;
+    padding: 6px 10px;
     background: none;
     border: none;
     color: var(--text-primary);
@@ -305,30 +531,51 @@
     text-align: left;
     cursor: pointer;
     transition: background-color 0.1s;
+    white-space: nowrap;
   }
 
-  .diff-option:hover {
+  .preset-option:hover {
     background-color: var(--bg-hover);
   }
 
-  .diff-option.selected {
-    background-color: var(--ui-selection);
+  .preset-option.selected,
+  .preset-option.active {
+    background-color: var(--bg-chrome);
   }
 
-  .option-label {
-    font-weight: 500;
+  .option-icon {
+    display: flex;
+    align-items: center;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .option-name {
+    flex: 1;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .option-spec {
-    font-family: monospace;
-    color: var(--text-muted);
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    color: var(--text-faint);
     font-size: var(--size-xs);
+    flex-shrink: 0;
+    margin-left: auto;
   }
 
-  .dropdown-divider {
-    height: 1px;
-    background: var(--border-subtle);
-    margin: 4px 0;
+  /* Input error message */
+  .input-error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 12px;
+    padding: 4px 8px;
+    background-color: color-mix(in srgb, var(--status-deleted) 15%, transparent);
+    border-radius: 4px;
+    color: var(--status-deleted);
+    font-size: var(--size-xs);
   }
 
   .app-container {

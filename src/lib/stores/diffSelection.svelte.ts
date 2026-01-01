@@ -12,15 +12,45 @@ import { resolveRef } from '../services/git';
 import type { DiffSpec } from '../types';
 
 // =============================================================================
+// Constants
+// =============================================================================
+
+/**
+ * Special ref representing the working tree (uncommitted changes on disk).
+ * Must match the backend constant in git.rs.
+ */
+export const WORKDIR = 'WORKDIR';
+
+// =============================================================================
 // Presets
 // =============================================================================
 
-/** Available diff presets */
-export const DIFF_PRESETS: readonly DiffSpec[] = [
-  { base: 'HEAD', head: '@', label: 'Working Changes' },
-  { base: 'main', head: '@', label: 'Against main' },
-  { base: 'HEAD~1', head: 'HEAD', label: 'Last Commit' },
-];
+/**
+ * Preset store - wrapped in object because Svelte doesn't allow exporting
+ * reassignable $state. Access via `presetStore.presets`.
+ */
+export const presetStore = $state({
+  presets: [
+    { base: 'HEAD', head: WORKDIR, label: 'Uncommitted' },
+    { base: 'main', head: WORKDIR, label: 'Branch Changes' },
+    { base: 'HEAD~1', head: 'HEAD', label: 'Last Commit' },
+  ] as DiffSpec[],
+});
+
+/** Convenience getter for presets */
+export function getPresets(): readonly DiffSpec[] {
+  return presetStore.presets;
+}
+
+/**
+ * Update the "Branch Changes" preset to use the detected default branch.
+ * Called during app initialization.
+ */
+export function setDefaultBranch(branch: string): void {
+  presetStore.presets = presetStore.presets.map((preset) =>
+    preset.label === 'Branch Changes' ? { ...preset, base: branch } : preset
+  );
+}
 
 // =============================================================================
 // Reactive State
@@ -36,7 +66,7 @@ export const DIFF_PRESETS: readonly DiffSpec[] = [
  */
 export const diffSelection = $state({
   /** Current diff specification */
-  spec: DIFF_PRESETS[0] as DiffSpec,
+  spec: presetStore.presets[0] as DiffSpec,
   /** Resolved SHA for base ref (for tooltip display) */
   resolvedBaseSha: null as string | null,
   /** Resolved SHA for head ref (for tooltip display) */
@@ -49,7 +79,7 @@ export const diffSelection = $state({
 
 /** Whether current spec matches a preset */
 export function isPreset(): boolean {
-  return DIFF_PRESETS.some(
+  return presetStore.presets.some(
     (p) =>
       p.base === diffSelection.spec.base &&
       p.head === diffSelection.spec.head &&

@@ -21,11 +21,11 @@ fn open_repo_from_path(repo_path: Option<&str>) -> Result<git2::Repository, Stri
 }
 
 /// Resolve a ref to a full SHA for use as a stable storage key.
-/// "@" is kept as-is (represents working tree).
+/// WORKDIR is kept as-is (represents working tree).
 /// All other refs are resolved to their full SHA.
 fn resolve_for_storage(repo: &git2::Repository, ref_str: &str) -> Result<String, String> {
-    if ref_str == "@" {
-        return Ok("@".to_string());
+    if ref_str == diff::WORKDIR {
+        return Ok(diff::WORKDIR.to_string());
     }
 
     let obj = repo

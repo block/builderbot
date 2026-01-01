@@ -50,7 +50,7 @@ export async function getRefs(repoPath?: string): Promise<GitRef[]> {
 
 /**
  * Resolve a ref to its short SHA for display/validation.
- * Returns "working tree" for "@", otherwise returns short SHA.
+ * Returns "working tree" for "WORKDIR", otherwise returns short SHA.
  */
 export async function resolveRef(refStr: string, repoPath?: string): Promise<string> {
   return invoke<string>('resolve_ref', {

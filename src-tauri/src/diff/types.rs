@@ -5,10 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::git::WORKDIR;
+
 /// Identifies a diff between two repository states.
 ///
 /// - `before`: A ref (branch name, tag), SHA, or "HEAD"
-/// - `after`: A ref, SHA, or "@" for the working tree
+/// - `after`: A ref, SHA, or "WORKDIR" for the working tree
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DiffId {
     pub before: String,
@@ -25,7 +27,7 @@ impl DiffId {
 
     /// Returns true if this diff includes the working tree.
     pub fn is_working_tree(&self) -> bool {
-        self.after == "@"
+        self.after == WORKDIR
     }
 }
 
@@ -172,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_diff_id_working_tree() {
-        let working = DiffId::new("HEAD", "@");
+        let working = DiffId::new("HEAD", WORKDIR);
         assert!(working.is_working_tree());
 
         let historical = DiffId::new("main", "feature");

@@ -4,7 +4,7 @@ import type { Review, Comment, Edit, NewComment, NewEdit } from '../types';
 /**
  * Get or create a review for a diff.
  * @param base - Base ref (SHA)
- * @param head - Head ref (SHA or "@" for working tree)
+ * @param head - Head ref (SHA or "WORKDIR" for working tree)
  */
 export async function getReview(base: string, head: string): Promise<Review> {
   return invoke<Review>('get_review', { base, head });

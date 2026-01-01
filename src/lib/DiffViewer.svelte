@@ -28,6 +28,7 @@
     getTextLines,
   } from './diffUtils';
   import { setupKeyboardNav } from './diffKeyboard';
+  import { WORKDIR } from './stores/diffSelection.svelte';
 
   /** Number of alignments to process per batch during progressive loading */
   const ALIGNMENT_BATCH_SIZE = 20;
@@ -76,7 +77,7 @@
     diff: FileDiff | null;
     /** Base ref for the diff (before side) */
     diffBase?: string;
-    /** Head ref for the diff - "@" means working tree, enabling discard */
+    /** Head ref for the diff - WORKDIR means working tree, enabling discard */
     diffHead?: string;
     sizeBase?: number;
     /** Bumped when syntax theme changes to trigger re-highlight */
@@ -87,7 +88,7 @@
   let {
     diff,
     diffBase = 'HEAD',
-    diffHead = '@',
+    diffHead = WORKDIR,
     sizeBase,
     syntaxThemeVersion = 0,
     onRangeDiscard,
@@ -176,7 +177,7 @@
   }
 
   // Discard is only available when viewing the working tree
-  let canDiscard = $derived(diffHead === '@');
+  let canDiscard = $derived(diffHead === WORKDIR);
 
   // Extract lines from the diff
   let beforeLines = $derived(diff ? getTextLines(diff, 'before') : []);
@@ -341,11 +342,14 @@
     });
   }
 
-  // Redraw connectors when panel size state changes (after transition)
+  // Redraw connectors and update toolbar when panel size state changes (after transition)
   $effect(() => {
     const _ = [beforeCollapsed, afterCollapsed, beforeHovered, afterHovered, spaceHeld];
     // Wait for flex transition to complete
-    setTimeout(redrawConnectors, 250);
+    setTimeout(() => {
+      redrawConnectors();
+      updateToolbarPosition();
+    }, PANEL_TRANSITION_MS);
   });
 
   // Redraw connectors when alignments load or scroll position changes
@@ -557,7 +561,9 @@
               </div>
             {/each}
             {#if beforeLines.length === 0}
-              <div class="empty-file-notice">New file</div>
+              <div class="empty-pane-notice">
+                <span class="empty-pane-label">No previous version</span>
+              </div>
             {/if}
           </div>
         </div>
@@ -585,7 +591,7 @@
         <div class="pane-header">
           <span class="pane-ref">
             <GitBranch size={12} />
-            {diffHead === '@' ? 'Working Tree' : diffHead}
+            {diffHead === WORKDIR ? 'Working Tree' : diffHead}
           </span>
           <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
         </div>
@@ -616,7 +622,9 @@
               </div>
             {/each}
             {#if afterLines.length === 0}
-              <div class="empty-file-notice">File deleted</div>
+              <div class="empty-pane-notice">
+                <span class="empty-pane-label">File deleted</span>
+              </div>
             {/if}
           </div>
         </div>
@@ -745,22 +753,27 @@
     flex: 1;
   }
 
-  /* Collapsed state: 10% width (flex: 1 vs 9 for the other) */
+  /* Collapsed state: fixed 10% width, ignores hover/focus states */
   .before-pane.collapsed {
-    flex: 1;
+    flex: 1 !important;
   }
 
   .after-pane.collapsed {
-    flex: 1;
+    flex: 1 !important;
   }
 
-  /* When one is collapsed, the other expands to 90% */
+  /* When one is collapsed, the other expands to 90% (also fixed) */
   .before-pane.collapsed ~ .spine ~ .after-pane {
-    flex: 9;
+    flex: 9 !important;
   }
 
   .before-pane:not(.collapsed) ~ .spine ~ .after-pane.collapsed {
-    flex: 1;
+    flex: 1 !important;
+  }
+
+  /* Override: when before is collapsed, after's flex is locked regardless of focus */
+  .before-pane.collapsed ~ .spine ~ .after-pane.focused {
+    flex: 9 !important;
   }
 
   /* Spine - chrome background, connectors draw on top */
@@ -869,9 +882,18 @@
     border-radius: 12px;
   }
 
-  .empty-file-notice {
-    padding: 20px;
-    color: var(--text-muted);
+  /* Empty pane notice - centered, subtle styling */
+  .empty-pane-notice {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    min-height: 200px;
+  }
+
+  .empty-pane-label {
+    color: var(--text-faint);
+    font-size: var(--size-sm);
     font-style: italic;
   }
 

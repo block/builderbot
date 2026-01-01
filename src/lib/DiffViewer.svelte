@@ -342,14 +342,31 @@
     });
   }
 
-  // Redraw connectors and update toolbar when panel size state changes (after transition)
+  // Redraw connectors and update toolbar when panel size state changes
+  // Use requestAnimationFrame loop during transition for smooth tracking
   $effect(() => {
     const _ = [beforeCollapsed, afterCollapsed, beforeHovered, afterHovered, spaceHeld];
-    // Wait for flex transition to complete
-    setTimeout(() => {
+
+    const startTime = performance.now();
+    let rafId: number;
+
+    function animateUpdate() {
       redrawConnectors();
       updateToolbarPosition();
-    }, PANEL_TRANSITION_MS);
+
+      // Continue updating until transition completes
+      if (performance.now() - startTime < PANEL_TRANSITION_MS) {
+        rafId = requestAnimationFrame(animateUpdate);
+      }
+    }
+
+    // Start the animation loop
+    rafId = requestAnimationFrame(animateUpdate);
+
+    // Cleanup on effect re-run
+    return () => {
+      cancelAnimationFrame(rafId);
+    };
   });
 
   // Redraw connectors when alignments load or scroll position changes

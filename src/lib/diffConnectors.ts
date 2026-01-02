@@ -8,10 +8,19 @@
  * The connectors only draw the top and bottom curves - no vertical lines
  * on the edges, since those would duplicate the range borders in the text panes.
  *
- * Also draws comment indicators for alignments that have comments.
+ * Comment indicators are drawn as vertical highlight lines on the spine,
+ * spanning the full height of the commented region.
  */
 
-import type { Alignment } from './types';
+import type { Alignment, Span, Comment } from './types';
+
+/** Info about a comment highlight for click handling */
+export interface CommentHighlightInfo {
+  /** The comment ID */
+  commentId: string;
+  /** The span this comment covers */
+  span: Span;
+}
 
 export interface ConnectorConfig {
   lineHeight: number;
@@ -19,15 +28,17 @@ export interface ConnectorConfig {
   verticalOffset: number;
   /** Index of the hovered alignment (in the changed alignments list), or null */
   hoveredIndex: number | null;
-  /** Set of changed alignment indices that have comments */
-  alignmentsWithComments?: Set<number>;
+  /** Comments for the current file - used to draw highlight bars on the spine */
+  comments?: Comment[];
+  /** Callback when a comment highlight is clicked */
+  onCommentClick?: (info: CommentHighlightInfo) => void;
 }
 
 const DEFAULT_CONFIG: ConnectorConfig = {
   lineHeight: 20,
   verticalOffset: 0,
   hoveredIndex: null,
-  alignmentsWithComments: new Set(),
+  comments: [],
 };
 
 /**
@@ -186,34 +197,121 @@ export function drawConnectors(
     clippedGroup.appendChild(bottomStroke);
   }
 
-  // Draw comment indicators for alignments with comments
-  // These are small dots in the center of the spine, positioned at the middle of the first line
-  if (cfg.alignmentsWithComments && cfg.alignmentsWithComments.size > 0) {
-    const commentColor = getCssVar('--text-muted', 'rgba(128, 128, 128, 0.6)');
-    const centerX = svgWidth / 2;
-    const dotRadius = 3;
+  // Draw comment highlight lines on the spine
+  // These are vertical bars indicating commented regions
+  drawCommentHighlights(clippedGroup, afterScroll, cfg, svgWidth, svgHeight, clipTop);
+}
 
-    let changedIdx = 0;
-    for (const alignment of alignments) {
-      if (!alignment.changed) continue;
+/**
+ * Draw comment highlight lines on the spine.
+ * Shows a vertical highlight bar for each commented region, aligned to the right
+ * edge to visually connect with the after pane. Highlights are clickable.
+ *
+ * Overlapping comments are stacked in a pyramid style - widest spans on the
+ * outside (right edge), narrower spans nested inside (further left).
+ */
+function drawCommentHighlights(
+  group: SVGGElement,
+  afterScroll: number,
+  cfg: ConnectorConfig,
+  svgWidth: number,
+  svgHeight: number,
+  clipTop: number
+): void {
+  const comments = cfg.comments || [];
+  if (comments.length === 0) return;
 
-      if (cfg.alignmentsWithComments.has(changedIdx)) {
-        // Position at the vertical center of the first line on the after side
-        const afterTop = alignment.after.start * cfg.lineHeight - afterScroll + cfg.verticalOffset;
-        const centerY = afterTop + cfg.lineHeight / 2;
+  const commentColor = getCssVar('--diff-comment-highlight', 'rgba(88, 166, 255, 0.5)');
+  const hoverColor = getCssVar('--diff-comment-highlight', 'rgba(88, 166, 255, 0.8)');
+  const highlightWidth = 4;
+  const highlightGap = 2; // Gap between stacked highlights
+  const hitAreaPadding = 6; // Extra padding around each highlight for easier clicking
 
-        // Only draw if visible
-        if (centerY > clipTop && centerY < svgHeight) {
-          const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-          dot.setAttribute('cx', String(centerX));
-          dot.setAttribute('cy', String(centerY));
-          dot.setAttribute('r', String(dotRadius));
-          dot.setAttribute('fill', commentColor);
-          clippedGroup.appendChild(dot);
-        }
+  // Filter out global comments (0,0 span) and sort by span size (largest first)
+  // This ensures wider spans are drawn first (on the right edge)
+  const validComments = comments
+    .filter((c) => c.span.start !== 0 || c.span.end !== 0)
+    .sort((a, b) => {
+      const sizeA = a.span.end - a.span.start;
+      const sizeB = b.span.end - b.span.start;
+      // Largest first, then by start position for stability
+      if (sizeB !== sizeA) return sizeB - sizeA;
+      return a.span.start - b.span.start;
+    });
+
+  // For each comment, calculate how many wider comments overlap with it
+  // This determines its x-offset (pyramid stacking)
+  const commentOffsets = new Map<string, number>();
+
+  for (let i = 0; i < validComments.length; i++) {
+    const comment = validComments[i];
+    let offset = 0;
+
+    // Count how many larger comments (earlier in sorted list) overlap with this one
+    for (let j = 0; j < i; j++) {
+      const other = validComments[j];
+      // Check if spans overlap
+      if (comment.span.start < other.span.end && comment.span.end > other.span.start) {
+        offset++;
       }
+    }
 
-      changedIdx++;
+    commentOffsets.set(comment.id, offset);
+  }
+
+  // Draw highlights for each comment
+  for (const comment of validComments) {
+    const { span } = comment;
+    const offset = commentOffsets.get(comment.id) || 0;
+
+    // Calculate pixel positions
+    const top = span.start * cfg.lineHeight - afterScroll + cfg.verticalOffset;
+    const bottom =
+      Math.max(span.end, span.start + 1) * cfg.lineHeight - afterScroll + cfg.verticalOffset;
+
+    // Skip if completely out of view
+    if (bottom < clipTop || top > svgHeight) continue;
+
+    // X position: start from right edge, offset left for nested comments
+    const xPos = svgWidth - highlightWidth - offset * (highlightWidth + highlightGap);
+
+    // Draw the visible highlight bar
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', String(xPos));
+    rect.setAttribute('y', String(top));
+    rect.setAttribute('width', String(highlightWidth));
+    rect.setAttribute('height', String(bottom - top));
+    rect.setAttribute('fill', commentColor);
+    rect.setAttribute('rx', '1'); // Slight rounding
+    group.appendChild(rect);
+
+    // Add hit area for clicking (slightly larger than visible rect)
+    if (cfg.onCommentClick) {
+      const hitArea = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      hitArea.setAttribute('x', String(xPos - hitAreaPadding));
+      hitArea.setAttribute('y', String(top));
+      hitArea.setAttribute('width', String(highlightWidth + hitAreaPadding * 2));
+      hitArea.setAttribute('height', String(bottom - top));
+      hitArea.setAttribute('fill', 'transparent');
+      hitArea.setAttribute('cursor', 'pointer');
+
+      // Hover effect
+      hitArea.addEventListener('mouseenter', () => {
+        rect.setAttribute('fill', hoverColor);
+        rect.setAttribute('width', String(highlightWidth + 1)); // Slightly wider on hover
+      });
+      hitArea.addEventListener('mouseleave', () => {
+        rect.setAttribute('fill', commentColor);
+        rect.setAttribute('width', String(highlightWidth));
+      });
+
+      // Click handler
+      hitArea.addEventListener('click', (e) => {
+        e.stopPropagation();
+        cfg.onCommentClick!({ commentId: comment.id, span: comment.span });
+      });
+
+      group.appendChild(hitArea);
     }
   }
 }

@@ -10,10 +10,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { X, GitBranch, MessageSquarePlus, MessageSquare, Trash2 } from 'lucide-svelte';
-  import type { FileDiff, Alignment, Comment, Selection } from './types';
+  import type { FileDiff, Alignment, Comment, Span } from './types';
   import {
     commentsState,
     getCommentsForRange,
+    getCommentsForCurrentFile,
+    findCommentBySpan,
+    findCommentById,
     addComment,
     updateComment,
     deleteComment,
@@ -26,7 +29,7 @@
     type Token,
   } from './services/highlighter';
   import { createScrollSync } from './services/scrollSync';
-  import { drawConnectors } from './diffConnectors';
+  import { drawConnectors, type CommentHighlightInfo } from './diffConnectors';
   import {
     getLineBoundary,
     getLanguageFromDiff,
@@ -166,6 +169,8 @@
     width: number;
     visible: boolean;
   } | null = $state(null);
+  // When editing an existing comment (clicked from spine highlight)
+  let editingCommentId: string | null = $state(null);
 
   // ==========================================================================
   // Progressive alignment loading
@@ -375,6 +380,9 @@
     return afterTokens[index] || [{ content: '', color: 'inherit' }];
   }
 
+  // Get comments for the current file (used for spine highlights)
+  let currentFileComments = $derived(getCommentsForCurrentFile());
+
   function redrawConnectors() {
     if (!connectorSvg || !beforePane || !afterPane || !diff) return;
 
@@ -392,7 +400,60 @@
       lineHeight,
       verticalOffset,
       hoveredIndex: hoveredRangeIndex,
-      alignmentsWithComments,
+      comments: currentFileComments,
+      onCommentClick: handleCommentHighlightClick,
+    });
+  }
+
+  /**
+   * Handle click on a comment highlight in the spine.
+   * Opens the comment editor for the clicked comment.
+   */
+  function handleCommentHighlightClick(info: CommentHighlightInfo) {
+    if (!afterPane) return;
+
+    const { span, commentId } = info;
+
+    // Scroll to make the span visible
+    scrollToLine(span.start);
+
+    // Set up line selection and open comment editor
+    const start = span.start;
+    const end = Math.max(span.start, span.end - 1); // Convert exclusive end to inclusive
+
+    lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
+    commentingOnLines = { pane: 'after', start, end };
+    // Store the comment ID so we can load its content
+    editingCommentId = commentId;
+    updateLineCommentEditorPosition();
+  }
+
+  /**
+   * Scroll the after pane to make a specific line visible.
+   */
+  function scrollToLine(lineIndex: number) {
+    if (!afterPane) return;
+
+    const lineElements = afterPane.querySelectorAll('.line');
+    const lineEl = lineElements[lineIndex] as HTMLElement | null;
+    if (!lineEl) return;
+
+    const paneRect = afterPane.getBoundingClientRect();
+    const lineRect = lineEl.getBoundingClientRect();
+
+    // Check if line is already visible
+    if (lineRect.top >= paneRect.top && lineRect.bottom <= paneRect.bottom) {
+      return; // Already visible, no need to scroll
+    }
+
+    // Scroll to center the line in the viewport
+    const lineTop = lineEl.offsetTop;
+    const paneHeight = afterPane.clientHeight;
+    const targetScroll = lineTop - paneHeight / 2;
+
+    afterPane.scrollTo({
+      top: Math.max(0, targetScroll),
+      behavior: 'smooth',
     });
   }
 
@@ -584,6 +645,15 @@
     return set;
   });
 
+  // Compute standalone comment spans (comments not tied to alignments)
+  // These are shown as highlight bars on the spine even outside changed regions
+  let standaloneCommentSpans = $derived.by((): Span[] => {
+    const comments = getCommentsForCurrentFile();
+    // All comments now have spans - just return them directly
+    // Filter out "global" comments (span 0,0) which don't have a line position
+    return comments.filter((c) => c.span.start !== 0 || c.span.end !== 0).map((c) => c.span);
+  });
+
   // Track whether comment should be above or below (decided once when opening)
   let commentPositionPreference: 'above' | 'below' = 'below';
 
@@ -708,12 +778,9 @@
     if (!alignmentData) return;
 
     const { alignment } = alignmentData;
-    const selection: Selection = {
-      type: 'range',
-      span: { start: alignment.after.start, end: alignment.after.end },
-    };
+    const span: Span = { start: alignment.after.start, end: alignment.after.end };
 
-    await addComment(currentFilePath, selection, content);
+    await addComment(currentFilePath, span, content);
     commentingOnRange = null;
     commentEditorStyle = null;
   }
@@ -822,6 +889,7 @@
     isSelecting = false;
     commentingOnLines = null;
     lineCommentEditorStyle = null;
+    editingCommentId = null;
   }
 
   // Track toolbar position for line selection
@@ -904,16 +972,12 @@
   async function handleLineCommentSubmit(content: string) {
     if (!commentingOnLines || !currentFilePath) return;
 
-    // Create selection based on whether it's a single line or range
-    const selection: Selection =
-      commentingOnLines.start === commentingOnLines.end
-        ? { type: 'line', line: commentingOnLines.start }
-        : {
-            type: 'range',
-            span: { start: commentingOnLines.start, end: commentingOnLines.end + 1 },
-          };
+    const span: Span = {
+      start: commentingOnLines.start,
+      end: commentingOnLines.end + 1,
+    };
 
-    await addComment(currentFilePath, selection, content);
+    await addComment(currentFilePath, span, content);
     clearLineSelection();
   }
 
@@ -1299,6 +1363,7 @@
 
     <!-- Line comment editor -->
     {#if commentingOnLines && lineCommentEditorStyle}
+      {@const existingComment = editingCommentId ? findCommentById(editingCommentId) : null}
       <div
         class="comment-editor line-comment-editor"
         class:comment-editor-hidden={!lineCommentEditorStyle.visible}
@@ -1309,16 +1374,24 @@
           placeholder="Add a comment on {commentingOnLines.end -
             commentingOnLines.start +
             1} line{commentingOnLines.end !== commentingOnLines.start ? 's' : ''}..."
+          value={existingComment?.content ?? ''}
           onkeydown={(e) => {
             if (e.key === 'Escape') {
               handleLineCommentCancel();
+              clearLineSelection();
             } else if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault();
               const content = (e.target as HTMLTextAreaElement).value.trim();
               if (content) {
-                handleLineCommentSubmit(content);
+                if (existingComment) {
+                  handleCommentEdit(existingComment.id, content);
+                  clearLineSelection();
+                } else {
+                  handleLineCommentSubmit(content);
+                }
               } else {
                 handleLineCommentCancel();
+                clearLineSelection();
               }
             }
           }}
@@ -1326,6 +1399,18 @@
         ></textarea>
         <div class="comment-editor-hint">
           <span>Enter to save · Esc to cancel</span>
+          {#if existingComment}
+            <button
+              class="delete-comment-btn"
+              onclick={() => {
+                handleCommentDelete(existingComment.id);
+                clearLineSelection();
+              }}
+              title="Delete comment"
+            >
+              <Trash2 size={12} />
+            </button>
+          {/if}
         </div>
       </div>
     {/if}

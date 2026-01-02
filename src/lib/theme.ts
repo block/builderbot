@@ -55,6 +55,7 @@ export interface Theme {
     removedBg: string; // Background tint for removed lines
     changedBg: string; // Neutral background for changed lines (not add/remove specific)
     rangeBorder: string; // Border color for change range markers
+    commentHighlight: string; // Highlight color for commented regions in spine
   };
 
   // Interactive elements
@@ -343,6 +344,8 @@ export function createAdaptiveTheme(
       changedBg: overlay(syntaxFg, isDark ? 0.04 : 0.06),
       // Range borders need to be visible but not distracting
       rangeBorder: mix(primaryBg, syntaxFg, isDark ? 0.2 : 0.15),
+      // Comment highlight - uses blue accent for "annotation" semantic
+      commentHighlight: overlay(accentBlue, isDark ? 0.5 : 0.4),
     },
 
     ui: {
@@ -403,6 +406,7 @@ export function themeToCssVars(t: Theme): string {
     --diff-removed-bg: ${t.diff.removedBg};
     --diff-changed-bg: ${t.diff.changedBg};
     --diff-range-border: ${t.diff.rangeBorder};
+    --diff-comment-highlight: ${t.diff.commentHighlight};
 
     --ui-accent: ${t.ui.accent};
     --ui-accent-hover: ${t.ui.accentHover};

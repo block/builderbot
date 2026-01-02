@@ -68,17 +68,12 @@ export interface DiffSpec {
   label: string;
 }
 
-/** Where a comment applies */
-export type Selection =
-  | { type: 'global' }
-  | { type: 'line'; line: number }
-  | { type: 'range'; span: Span };
-
 /** A comment attached to a specific location in a file */
 export interface Comment {
   id: string;
   path: string;
-  selection: Selection;
+  /** The line range this comment applies to (0-indexed, exclusive end) */
+  span: Span;
   content: string;
 }
 
@@ -100,7 +95,7 @@ export interface Review {
 /** Input for creating a new comment */
 export interface NewComment {
   path: string;
-  selection: Selection;
+  span: Span;
   content: string;
 }
 

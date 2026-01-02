@@ -5,7 +5,7 @@
  * Comments are loaded when a diff is selected and persisted via the review API.
  */
 
-import type { Comment, Selection, NewComment } from '../types';
+import type { Comment, Span, NewComment } from '../types';
 import {
   getReview,
   addComment as apiAddComment,
@@ -55,9 +55,10 @@ export function getCommentsForCurrentFile(): Comment[] {
  * Get comments for a specific line.
  */
 export function getCommentsForLine(lineIndex: number): Comment[] {
-  return getCommentsForCurrentFile().filter(
-    (c) => c.selection.type === 'line' && c.selection.line === lineIndex
-  );
+  return getCommentsForCurrentFile().filter((c) => {
+    // Single line comment: span.end === span.start + 1
+    return c.span.start === lineIndex && c.span.end === lineIndex + 1;
+  });
 }
 
 /**
@@ -65,16 +66,25 @@ export function getCommentsForLine(lineIndex: number): Comment[] {
  */
 export function getCommentsForRange(start: number, end: number): Comment[] {
   return getCommentsForCurrentFile().filter((c) => {
-    if (c.selection.type === 'range') {
-      const span = c.selection.span;
-      // Check if ranges overlap
-      return span.start < end && span.end > start;
-    }
-    if (c.selection.type === 'line') {
-      return c.selection.line >= start && c.selection.line < end;
-    }
-    return false;
+    // Check if spans overlap
+    return c.span.start < end && c.span.end > start;
   });
+}
+
+/**
+ * Find a comment with an exact matching span.
+ */
+export function findCommentBySpan(span: Span): Comment | undefined {
+  return getCommentsForCurrentFile().find(
+    (c) => c.span.start === span.start && c.span.end === span.end
+  );
+}
+
+/**
+ * Find a comment by ID.
+ */
+export function findCommentById(id: string): Comment | undefined {
+  return commentsState.comments.find((c) => c.id === id);
 }
 
 /**
@@ -126,7 +136,7 @@ export function setCurrentPath(path: string | null): void {
  */
 export async function addComment(
   path: string,
-  selection: Selection,
+  span: Span,
   content: string
 ): Promise<Comment | null> {
   if (!commentsState.diffBase || !commentsState.diffHead) {
@@ -135,7 +145,7 @@ export async function addComment(
   }
 
   try {
-    const newComment: NewComment = { path, selection, content };
+    const newComment: NewComment = { path, span, content };
     const comment = await apiAddComment(commentsState.diffBase, commentsState.diffHead, newComment);
     commentsState.comments = [...commentsState.comments, comment];
     return comment;

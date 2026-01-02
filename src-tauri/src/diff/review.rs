@@ -43,31 +43,19 @@ impl Review {
 pub struct Comment {
     pub id: String,
     pub path: String,
-    pub selection: Selection,
+    pub span: Span,
     pub content: String,
 }
 
 impl Comment {
-    pub fn new(path: impl Into<String>, selection: Selection, content: impl Into<String>) -> Self {
+    pub fn new(path: impl Into<String>, span: Span, content: impl Into<String>) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             path: path.into(),
-            selection,
+            span,
             content: content.into(),
         }
     }
-}
-
-/// Where a comment applies.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum Selection {
-    /// Applies to the whole file
-    Global,
-    /// Applies to a specific line (0-indexed)
-    Line { line: u32 },
-    /// Applies to a range of lines
-    Range { span: Span },
 }
 
 /// An edit made during review, stored as a unified diff.
@@ -93,7 +81,7 @@ impl Edit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewComment {
     pub path: String,
-    pub selection: Selection,
+    pub span: Span,
     pub content: String,
 }
 
@@ -198,15 +186,22 @@ impl ReviewStore {
     /// Initialize the database schema.
     fn init_schema(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+
+        // Drop legacy comments table and recreate with clean schema
         conn.execute_batch(
             r#"
-            CREATE TABLE IF NOT EXISTS reviews (
+            DROP TABLE IF EXISTS comments;
+            DROP TABLE IF EXISTS reviewed_files;
+            DROP TABLE IF EXISTS edits;
+            DROP TABLE IF EXISTS reviews;
+
+            CREATE TABLE reviews (
                 before_ref TEXT NOT NULL,
                 after_ref TEXT NOT NULL,
                 PRIMARY KEY (before_ref, after_ref)
             );
 
-            CREATE TABLE IF NOT EXISTS reviewed_files (
+            CREATE TABLE reviewed_files (
                 before_ref TEXT NOT NULL,
                 after_ref TEXT NOT NULL,
                 path TEXT NOT NULL,
@@ -214,20 +209,18 @@ impl ReviewStore {
                 FOREIGN KEY (before_ref, after_ref) REFERENCES reviews(before_ref, after_ref) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS comments (
+            CREATE TABLE comments (
                 id TEXT PRIMARY KEY,
                 before_ref TEXT NOT NULL,
                 after_ref TEXT NOT NULL,
                 path TEXT NOT NULL,
-                selection_type TEXT NOT NULL,
-                selection_line INTEGER,
-                selection_start INTEGER,
-                selection_end INTEGER,
+                span_start INTEGER NOT NULL,
+                span_end INTEGER NOT NULL,
                 content TEXT NOT NULL,
                 FOREIGN KEY (before_ref, after_ref) REFERENCES reviews(before_ref, after_ref) ON DELETE CASCADE
             );
 
-            CREATE TABLE IF NOT EXISTS edits (
+            CREATE TABLE edits (
                 id TEXT PRIMARY KEY,
                 before_ref TEXT NOT NULL,
                 after_ref TEXT NOT NULL,
@@ -284,37 +277,17 @@ impl ReviewStore {
             .query_map(params![&id.before, &id.after], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        // Load comments
         let mut stmt = conn.prepare(
-            "SELECT id, path, selection_type, selection_line, selection_start, selection_end, content 
+            "SELECT id, path, span_start, span_end, content 
              FROM comments WHERE before_ref = ?1 AND after_ref = ?2",
         )?;
         let comments: Vec<Comment> = stmt
             .query_map(params![&id.before, &id.after], |row| {
-                let id: String = row.get(0)?;
-                let path: String = row.get(1)?;
-                let selection_type: String = row.get(2)?;
-                let selection_line: Option<u32> = row.get(3)?;
-                let selection_start: Option<u32> = row.get(4)?;
-                let selection_end: Option<u32> = row.get(5)?;
-                let content: String = row.get(6)?;
-
-                let selection = match selection_type.as_str() {
-                    "global" => Selection::Global,
-                    "line" => Selection::Line {
-                        line: selection_line.unwrap_or(0),
-                    },
-                    "range" => Selection::Range {
-                        span: Span::new(selection_start.unwrap_or(0), selection_end.unwrap_or(0)),
-                    },
-                    _ => Selection::Global,
-                };
-
                 Ok(Comment {
-                    id,
-                    path,
-                    selection,
-                    content,
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    span: Span::new(row.get(2)?, row.get(3)?),
+                    content: row.get(4)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -365,26 +338,16 @@ impl ReviewStore {
     pub fn add_comment(&self, id: &DiffId, comment: &Comment) -> Result<()> {
         self.get_or_create(id)?;
         let conn = self.conn.lock().unwrap();
-
-        let (selection_type, selection_line, selection_start, selection_end) =
-            match &comment.selection {
-                Selection::Global => ("global", None, None, None),
-                Selection::Line { line } => ("line", Some(*line), None, None),
-                Selection::Range { span } => ("range", None, Some(span.start), Some(span.end)),
-            };
-
         conn.execute(
-            "INSERT INTO comments (id, before_ref, after_ref, path, selection_type, selection_line, selection_start, selection_end, content)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO comments (id, before_ref, after_ref, path, span_start, span_end, content)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 &comment.id,
                 &id.before,
                 &id.after,
                 &comment.path,
-                selection_type,
-                selection_line,
-                selection_start,
-                selection_end,
+                comment.span.start,
+                comment.span.end,
                 &comment.content
             ],
         )?;
@@ -477,10 +440,11 @@ pub fn export_markdown(review: &Review) -> String {
 
         if let Some(comments) = comments_by_file.get(file) {
             for comment in comments {
-                let location = match &comment.selection {
-                    Selection::Global => "File".to_string(),
-                    Selection::Line { line } => format!("Line {}", line + 1),
-                    Selection::Range { span } => format!("Lines {}-{}", span.start + 1, span.end),
+                let span = &comment.span;
+                let location = if span.end == span.start + 1 {
+                    format!("Line {}", span.start + 1)
+                } else {
+                    format!("Lines {}-{}", span.start + 1, span.end)
                 };
                 md.push_str(&format!("- **{}**: {}\n", location, comment.content));
             }
@@ -538,16 +502,15 @@ mod tests {
         let store = ReviewStore::open(db_path).unwrap();
         let id = DiffId::new("main", "feature");
 
-        let comment = Comment::new(
-            "src/lib.rs",
-            Selection::Line { line: 42 },
-            "This looks wrong",
-        );
+        // Single line comment (line 42 = span 42..43)
+        let comment = Comment::new("src/lib.rs", Span::new(42, 43), "This looks wrong");
 
         store.add_comment(&id, &comment).unwrap();
         let review = store.get(&id).unwrap();
         assert_eq!(review.comments.len(), 1);
         assert_eq!(review.comments[0].content, "This looks wrong");
+        assert_eq!(review.comments[0].span.start, 42);
+        assert_eq!(review.comments[0].span.end, 43);
 
         store
             .update_comment(&comment.id, "Actually it's fine")
@@ -587,8 +550,9 @@ mod tests {
         let id = DiffId::new("main", "feature");
 
         store.mark_reviewed(&id, "src/main.rs").unwrap();
+        // Range comment spanning lines 0-10
         store
-            .add_comment(&id, &Comment::new("src/main.rs", Selection::Global, "test"))
+            .add_comment(&id, &Comment::new("src/main.rs", Span::new(0, 10), "test"))
             .unwrap();
 
         store.delete(&id).unwrap();
@@ -602,10 +566,11 @@ mod tests {
         let id = DiffId::new("main", "feature");
         let mut review = Review::new(id);
 
+        // Single line comment on line 10 (0-indexed)
         review.comments.push(Comment {
             id: "c1".into(),
             path: "src/lib.rs".into(),
-            selection: Selection::Line { line: 10 },
+            span: Span::new(10, 11),
             content: "Fix this".into(),
         });
 

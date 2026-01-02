@@ -106,7 +106,7 @@ fn get_review(base: String, head: String) -> Result<Review, String> {
 fn add_comment(base: String, head: String, comment: NewComment) -> Result<Comment, String> {
     let store = diff::get_store().map_err(|e| e.0)?;
     let id = make_diff_id(None, &base, &head)?;
-    let comment = Comment::new(comment.path, comment.selection, comment.content);
+    let comment = Comment::new(comment.path, comment.span, comment.content);
     store.add_comment(&id, &comment).map_err(|e| e.0)?;
     Ok(comment)
 }

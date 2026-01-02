@@ -139,6 +139,34 @@
     visible: boolean; // false when scrolled out of view
   } | null = $state(null);
 
+  // Line selection state (for commenting on specific lines)
+  // Selection is always on one pane at a time
+  let lineSelection: {
+    pane: 'before' | 'after';
+    anchorLine: number; // where selection started
+    focusLine: number; // where selection currently ends (can be < anchor)
+  } | null = $state(null);
+  let isSelecting = $state(false); // true during drag
+  let justFinishedSelecting = $state(false); // flag to skip click after drag
+
+  // Derived: normalized selection range (start <= end)
+  let selectedLineRange = $derived.by(() => {
+    if (!lineSelection) return null;
+    const start = Math.min(lineSelection.anchorLine, lineSelection.focusLine);
+    const end = Math.max(lineSelection.anchorLine, lineSelection.focusLine);
+    return { pane: lineSelection.pane, start, end };
+  });
+
+  // Commenting on selected lines (separate from range comments)
+  let commentingOnLines: { pane: 'before' | 'after'; start: number; end: number } | null =
+    $state(null);
+  let lineCommentEditorStyle: {
+    top: number;
+    left: number;
+    width: number;
+    visible: boolean;
+  } | null = $state(null);
+
   // ==========================================================================
   // Progressive alignment loading
   // ==========================================================================
@@ -284,6 +312,8 @@
     redrawConnectors();
     updateToolbarPosition();
     updateCommentEditorPosition();
+    updateLineSelectionToolbar();
+    updateLineCommentEditorPosition();
   }
 
   function handleAfterScroll(e: Event) {
@@ -293,6 +323,8 @@
     redrawConnectors();
     updateToolbarPosition();
     updateCommentEditorPosition();
+    updateLineSelectionToolbar();
+    updateLineCommentEditorPosition();
   }
 
   let language = $derived(diff ? getLanguageFromDiff(diff, detectLanguage) : null);
@@ -715,10 +747,260 @@
   }
 
   /**
+   * Check if a line is within the current selection.
+   */
+  function isLineSelected(pane: 'before' | 'after', lineIndex: number): boolean {
+    if (!selectedLineRange || selectedLineRange.pane !== pane) return false;
+    return lineIndex >= selectedLineRange.start && lineIndex <= selectedLineRange.end;
+  }
+
+  // ==========================================================================
+  // Line selection handling
+  // ==========================================================================
+
+  function handleLineMouseDown(pane: 'before' | 'after', lineIndex: number, event: MouseEvent) {
+    // Only handle left click
+    if (event.button !== 0) return;
+
+    // Prevent native text selection
+    event.preventDefault();
+
+    // Clear any existing text selection
+    window.getSelection()?.removeAllRanges();
+
+    // Start selection
+    lineSelection = { pane, anchorLine: lineIndex, focusLine: lineIndex };
+    isSelecting = true;
+
+    // Clear any existing comment state
+    commentingOnLines = null;
+    lineCommentEditorStyle = null;
+
+    // Add document-level mousemove listener for drag selection
+    document.addEventListener('mousemove', handleDragMove);
+  }
+
+  function handleDragMove(event: MouseEvent) {
+    if (!isSelecting || !lineSelection) return;
+
+    // Find which line the mouse is over
+    const pane = lineSelection.pane === 'before' ? beforePane : afterPane;
+    if (!pane) return;
+
+    const lineElements = pane.querySelectorAll('.line');
+    for (let i = 0; i < lineElements.length; i++) {
+      const rect = lineElements[i].getBoundingClientRect();
+      if (event.clientY >= rect.top && event.clientY < rect.bottom) {
+        if (lineSelection.focusLine !== i) {
+          lineSelection = { ...lineSelection, focusLine: i };
+        }
+        break;
+      }
+    }
+  }
+
+  function handleLineMouseUp() {
+    if (!isSelecting) return;
+    isSelecting = false;
+    // Set flag to skip the click event that fires after mouseup
+    justFinishedSelecting = true;
+
+    // Remove document-level mousemove listener
+    document.removeEventListener('mousemove', handleDragMove);
+
+    // If we have a valid selection, show the toolbar
+    // Use requestAnimationFrame to ensure derived state is updated
+    if (lineSelection) {
+      requestAnimationFrame(() => {
+        updateLineSelectionToolbar();
+      });
+    }
+  }
+
+  function clearLineSelection() {
+    lineSelection = null;
+    isSelecting = false;
+    commentingOnLines = null;
+    lineCommentEditorStyle = null;
+  }
+
+  // Track toolbar position for line selection
+  let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
+
+  function updateLineSelectionToolbar() {
+    if (!selectedLineRange || !diffViewerEl) {
+      lineSelectionToolbarStyle = null;
+      return;
+    }
+
+    const pane = selectedLineRange.pane === 'before' ? beforePane : afterPane;
+    if (!pane) {
+      lineSelectionToolbarStyle = null;
+      return;
+    }
+
+    // Position at the first selected line
+    const lineEl = pane.querySelectorAll('.line')[selectedLineRange.start] as HTMLElement | null;
+    if (!lineEl) {
+      lineSelectionToolbarStyle = null;
+      return;
+    }
+
+    const lineRect = lineEl.getBoundingClientRect();
+    const viewerRect = diffViewerEl.getBoundingClientRect();
+
+    lineSelectionToolbarStyle = {
+      top: lineRect.top - viewerRect.top,
+      left: lineRect.left - viewerRect.left,
+    };
+  }
+
+  function handleStartLineComment() {
+    if (!selectedLineRange) return;
+
+    commentingOnLines = { ...selectedLineRange };
+    updateLineCommentEditorPosition();
+  }
+
+  function updateLineCommentEditorPosition() {
+    if (!commentingOnLines || !diffViewerEl) {
+      lineCommentEditorStyle = null;
+      return;
+    }
+
+    const pane = commentingOnLines.pane === 'before' ? beforePane : afterPane;
+    if (!pane) {
+      lineCommentEditorStyle = null;
+      return;
+    }
+
+    const viewerRect = diffViewerEl.getBoundingClientRect();
+    const paneRect = pane.getBoundingClientRect();
+
+    // Position below the last selected line
+    const lastLineEl = pane.querySelectorAll('.line')[commentingOnLines.end] as HTMLElement | null;
+    if (!lastLineEl) {
+      lineCommentEditorStyle = null;
+      return;
+    }
+
+    const lineRect = lastLineEl.getBoundingClientRect();
+    const top = lineRect.bottom - viewerRect.top;
+
+    // Check visibility
+    const editorHeight = 120;
+    const paneContentTop = paneRect.top - viewerRect.top;
+    const paneContentBottom = paneRect.bottom - viewerRect.top;
+    const visible = top + editorHeight > paneContentTop && top < paneContentBottom;
+
+    lineCommentEditorStyle = {
+      top,
+      left: paneRect.left - viewerRect.left + 12,
+      width: paneRect.width - 24,
+      visible,
+    };
+  }
+
+  async function handleLineCommentSubmit(content: string) {
+    if (!commentingOnLines || !currentFilePath) return;
+
+    // Create selection based on whether it's a single line or range
+    const selection: Selection =
+      commentingOnLines.start === commentingOnLines.end
+        ? { type: 'line', line: commentingOnLines.start }
+        : {
+            type: 'range',
+            span: { start: commentingOnLines.start, end: commentingOnLines.end + 1 },
+          };
+
+    await addComment(currentFilePath, selection, content);
+    clearLineSelection();
+  }
+
+  function handleLineCommentCancel() {
+    commentingOnLines = null;
+    lineCommentEditorStyle = null;
+  }
+
+  // Update toolbar position on scroll
+  $effect(() => {
+    if (selectedLineRange && !commentingOnLines) {
+      // Re-run when scroll happens (tracked via beforePane/afterPane scroll)
+      updateLineSelectionToolbar();
+    }
+  });
+
+  // Update line comment editor position on scroll
+  $effect(() => {
+    if (commentingOnLines) {
+      updateLineCommentEditorPosition();
+    }
+  });
+
+  // Global mouseup handler to end selection even if mouse leaves the pane
+  function handleGlobalMouseUp() {
+    if (isSelecting) {
+      handleLineMouseUp();
+    }
+  }
+
+  // Handle click outside to clear selection
+  function handleGlobalClick(event: MouseEvent) {
+    // Skip the click event that fires immediately after finishing a drag selection
+    if (justFinishedSelecting) {
+      justFinishedSelecting = false;
+      return;
+    }
+
+    // Don't clear if clicking on toolbar or comment editor
+    const target = event.target as HTMLElement;
+    if (
+      target.closest('.line-selection-toolbar') ||
+      target.closest('.line-comment-editor') ||
+      target.closest('.line')
+    ) {
+      return;
+    }
+
+    // Clear selection if clicking elsewhere
+    if (lineSelection && !isSelecting) {
+      clearLineSelection();
+    }
+  }
+
+  /**
    * Handle copy event to properly include newlines between lines.
    * The browser's default copy doesn't add newlines between div elements.
+   * Also handles copying our custom line selection.
    */
   function handleCopy(event: ClipboardEvent) {
+    // If we have a line selection, use that
+    if (selectedLineRange) {
+      event.preventDefault();
+      const pane = selectedLineRange.pane === 'before' ? beforePane : afterPane;
+      if (!pane) return;
+
+      const lines: string[] = [];
+      const lineElements = pane.querySelectorAll('.line');
+
+      for (let i = selectedLineRange.start; i <= selectedLineRange.end; i++) {
+        const lineEl = lineElements[i];
+        if (lineEl) {
+          const contentEl = lineEl.querySelector('.line-content');
+          if (contentEl) {
+            lines.push(contentEl.textContent || '');
+          }
+        }
+      }
+
+      if (lines.length > 0) {
+        const text = lines.join('\n');
+        event.clipboardData?.setData('text/plain', text);
+      }
+      return;
+    }
+
+    // Fall back to browser selection
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed) return;
 
@@ -772,10 +1054,17 @@
     // Copy handler for proper newline handling
     document.addEventListener('copy', handleCopy);
 
+    // Global mouse handlers for line selection
+    document.addEventListener('mouseup', handleGlobalMouseUp);
+    document.addEventListener('click', handleGlobalClick);
+
     return () => {
       cleanupSpaceKey();
       cleanupKeyboardNav?.();
       document.removeEventListener('copy', handleCopy);
+      document.removeEventListener('mouseup', handleGlobalMouseUp);
+      document.removeEventListener('click', handleGlobalClick);
+      document.removeEventListener('mousemove', handleDragMove);
     };
   });
 </script>
@@ -817,6 +1106,7 @@
               {@const isInHoveredRange =
                 hoveredRangeIndex !== null && beforeLineToAlignment.get(i) === hoveredRangeIndex}
               {@const isChanged = showRangeMarkers && isLineInChangedAlignment('before', i)}
+              {@const isSelected = isLineSelected('before', i)}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="line"
@@ -824,8 +1114,10 @@
                 class:range-end={boundary.isEnd}
                 class:range-hovered={isInHoveredRange}
                 class:content-changed={isChanged}
+                class:line-selected={isSelected}
                 onmouseenter={() => handleLineMouseEnter('before', i)}
                 onmouseleave={handleLineMouseLeave}
+                onmousedown={(e) => handleLineMouseDown('before', i, e)}
               >
                 <span class="line-content">
                   {#each getBeforeTokens(i) as token}
@@ -878,6 +1170,7 @@
               {@const isInHoveredRange =
                 hoveredRangeIndex !== null && afterLineToAlignment.get(i) === hoveredRangeIndex}
               {@const isChanged = showRangeMarkers && isLineInChangedAlignment('after', i)}
+              {@const isSelected = isLineSelected('after', i)}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="line"
@@ -885,8 +1178,10 @@
                 class:range-end={boundary.isEnd}
                 class:range-hovered={isInHoveredRange}
                 class:content-changed={isChanged}
+                class:line-selected={isSelected}
                 onmouseenter={() => handleLineMouseEnter('after', i)}
                 onmouseleave={handleLineMouseLeave}
+                onmousedown={(e) => handleLineMouseDown('after', i, e)}
               >
                 <span class="line-content">
                   {#each getAfterTokens(i) as token}
@@ -977,6 +1272,60 @@
               <Trash2 size={12} />
             </button>
           {/if}
+        </div>
+      </div>
+    {/if}
+
+    <!-- Line selection toolbar (floating) -->
+    {#if selectedLineRange && lineSelectionToolbarStyle && !commentingOnLines}
+      <div
+        class="line-selection-toolbar"
+        style="top: {lineSelectionToolbarStyle.top}px; left: {lineSelectionToolbarStyle.left}px;"
+      >
+        <span class="selection-info">
+          {selectedLineRange.end - selectedLineRange.start + 1} line{selectedLineRange.end !==
+          selectedLineRange.start
+            ? 's'
+            : ''}
+        </span>
+        <button class="range-btn comment-btn" onclick={handleStartLineComment} title="Add comment">
+          <MessageSquarePlus size={12} />
+        </button>
+        <button class="range-btn" onclick={clearLineSelection} title="Clear selection">
+          <X size={12} />
+        </button>
+      </div>
+    {/if}
+
+    <!-- Line comment editor -->
+    {#if commentingOnLines && lineCommentEditorStyle}
+      <div
+        class="comment-editor line-comment-editor"
+        class:comment-editor-hidden={!lineCommentEditorStyle.visible}
+        style="top: {lineCommentEditorStyle.top}px; left: {lineCommentEditorStyle.left}px; width: {lineCommentEditorStyle.width}px;"
+      >
+        <textarea
+          class="comment-textarea"
+          placeholder="Add a comment on {commentingOnLines.end -
+            commentingOnLines.start +
+            1} line{commentingOnLines.end !== commentingOnLines.start ? 's' : ''}..."
+          onkeydown={(e) => {
+            if (e.key === 'Escape') {
+              handleLineCommentCancel();
+            } else if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              const content = (e.target as HTMLTextAreaElement).value.trim();
+              if (content) {
+                handleLineCommentSubmit(content);
+              } else {
+                handleLineCommentCancel();
+              }
+            }
+          }}
+          use:autoFocus
+        ></textarea>
+        <div class="comment-editor-hint">
+          <span>Enter to save · Esc to cancel</span>
         </div>
       </div>
     {/if}
@@ -1206,6 +1555,17 @@
     background-color: var(--bg-hover);
   }
 
+  /* Line selection highlight */
+  .line.line-selected {
+    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.15));
+  }
+
+  /* Selection takes precedence over other highlights */
+  .line.line-selected.content-changed,
+  .line.line-selected.range-hovered {
+    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.15));
+  }
+
   .empty-state,
   .binary-notice {
     display: flex;
@@ -1341,5 +1701,32 @@
   .delete-comment-btn:hover {
     color: var(--status-deleted);
     background-color: var(--bg-hover);
+  }
+
+  /* Line selection toolbar */
+  .line-selection-toolbar {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    transform: translateY(-100%);
+    z-index: 100;
+    background-color: var(--bg-elevated);
+    border: 1px solid var(--border-muted);
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    padding: 0 4px;
+  }
+
+  .selection-info {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+    padding: 4px 4px;
+    white-space: nowrap;
+  }
+
+  /* Prevent text selection during line drag */
+  .code-container {
+    user-select: none;
   }
 </style>

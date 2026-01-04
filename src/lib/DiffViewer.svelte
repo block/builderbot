@@ -8,6 +8,8 @@
   
   The spine is always present - it shows bezier connectors for two-pane diffs,
   and comment highlights for all modes.
+  
+  Uses custom scroll implementation for frame-perfect sync between panes.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -29,8 +31,11 @@
     prepareLanguage,
     type Token,
   } from './services/highlighter';
-  import { createScrollSync } from './services/scrollSync';
-  import { drawConnectors, type CommentHighlightInfo } from './diffConnectors';
+  import { createScrollController } from './services/scrollController.svelte';
+  import {
+    ConnectorRendererCanvas,
+    type CommentHighlightInfo,
+  } from './services/connectorRendererCanvas';
   import {
     getLineBoundary,
     getLanguageFromDiff,
@@ -41,7 +46,7 @@
   import { setupKeyboardNav } from './diffKeyboard';
   import { WORKDIR } from './stores/diffSelection.svelte';
   import CommentEditor from './CommentEditor.svelte';
-  import ScrollbarMarkers from './ScrollbarMarkers.svelte';
+  import Scrollbar from './Scrollbar.svelte';
 
   // ==========================================================================
   // Constants
@@ -84,7 +89,7 @@
 
   let beforePane: HTMLDivElement | null = $state(null);
   let afterPane: HTMLDivElement | null = $state(null);
-  let connectorSvg: SVGSVGElement | null = $state(null);
+  let connectorCanvas: HTMLCanvasElement | null = $state(null);
   let diffViewerEl: HTMLDivElement | null = $state(null);
 
   // ==========================================================================
@@ -230,15 +235,83 @@
   });
 
   // ==========================================================================
-  // Scroll sync
+  // Custom scroll controller (frame-perfect sync)
   // ==========================================================================
 
-  const scrollSync = createScrollSync();
+  const scrollController = createScrollController();
 
-  // Update scroll sync with active alignments
+  // Update scroll controller with active alignments
   $effect(() => {
-    scrollSync.setAlignments(activeAlignments);
+    scrollController.setAlignments(activeAlignments);
   });
+
+  // Measure line height from DOM
+  function measureLineHeight(pane: HTMLElement | null): number {
+    if (!pane) return 20;
+    const firstLine = pane.querySelector('.line') as HTMLElement | null;
+    return firstLine ? firstLine.getBoundingClientRect().height : 20;
+  }
+
+  // Update dimensions when panes are available or content changes
+  $effect(() => {
+    if (beforePane && beforeLines.length > 0) {
+      const lineHeight = measureLineHeight(beforePane);
+      scrollController.setDimensions('before', {
+        viewportHeight: beforePane.clientHeight,
+        contentHeight: beforeLines.length * lineHeight,
+        lineHeight,
+      });
+    }
+  });
+
+  $effect(() => {
+    if (afterPane && afterLines.length > 0) {
+      const lineHeight = measureLineHeight(afterPane);
+      scrollController.setDimensions('after', {
+        viewportHeight: afterPane.clientHeight,
+        contentHeight: afterLines.length * lineHeight,
+        lineHeight,
+      });
+    }
+  });
+
+  // Scrollbar marker computation
+  let beforeMarkers = $derived.by(() => {
+    if (beforeLines.length === 0) return [];
+    return changedAlignments.map(({ alignment }) => {
+      const span = alignment.before;
+      const startPercent = (span.start / beforeLines.length) * 100;
+      const rangeSize = span.end - span.start;
+      const heightPercent = Math.max(0.5, (rangeSize / beforeLines.length) * 100);
+      return { top: startPercent, height: heightPercent, type: 'change' as const };
+    });
+  });
+
+  let afterMarkers = $derived.by(() => {
+    if (afterLines.length === 0) return [];
+    const changeMarkers = changedAlignments.map(({ alignment }) => {
+      const span = alignment.after;
+      const startPercent = (span.start / afterLines.length) * 100;
+      const rangeSize = span.end - span.start;
+      const heightPercent = Math.max(0.5, (rangeSize / afterLines.length) * 100);
+      return { top: startPercent, height: heightPercent, type: 'change' as const };
+    });
+
+    const commentMarkers = currentFileComments
+      .filter((c) => c.span.start !== 0 || c.span.end !== 0)
+      .map((comment) => {
+        const startPercent = (comment.span.start / afterLines.length) * 100;
+        const rangeSize = Math.max(1, comment.span.end - comment.span.start);
+        const heightPercent = Math.max(0.5, (rangeSize / afterLines.length) * 100);
+        return { top: startPercent, height: heightPercent, type: 'comment' as const };
+      });
+
+    return [...changeMarkers, ...commentMarkers];
+  });
+
+  // Content dimensions for scrollbars
+  let beforeContentHeight = $derived(beforeLines.length * (measureLineHeight(beforePane) || 20));
+  let afterContentHeight = $derived(afterLines.length * (measureLineHeight(afterPane) || 20));
 
   // ==========================================================================
   // Progressive alignment loading
@@ -280,9 +353,9 @@
 
   // Initialize on diff change
   $effect(() => {
-    // Clear SVG immediately when diff changes to prevent ghost elements
-    if (connectorSvg) {
-      connectorSvg.innerHTML = '';
+    // Clear renderer when diff changes to prevent ghost elements
+    if (connectorRenderer) {
+      connectorRenderer.clear();
     }
 
     if (diff) {
@@ -337,6 +410,52 @@
   });
 
   // ==========================================================================
+  // Connector Renderer (high-performance Canvas rendering)
+  // ==========================================================================
+
+  let connectorRenderer: ConnectorRendererCanvas | null = null;
+
+  // Initialize renderer when Canvas is available
+  $effect(() => {
+    if (connectorCanvas && !connectorRenderer) {
+      connectorRenderer = new ConnectorRendererCanvas(connectorCanvas, {
+        onCommentClick: handleCommentHighlightClick,
+      });
+    }
+  });
+
+  // Update renderer alignments when they change
+  $effect(() => {
+    if (connectorRenderer) {
+      // In single-pane mode, pass empty alignments (no curves) but still draw comments
+      const alignmentsForRenderer = isTwoPaneMode ? activeAlignments : [];
+      connectorRenderer.setAlignments(alignmentsForRenderer);
+    }
+  });
+
+  // Update renderer comments when they change
+  $effect(() => {
+    if (connectorRenderer) {
+      connectorRenderer.setComments(currentFileComments);
+    }
+  });
+
+  // Update renderer hover state
+  $effect(() => {
+    if (connectorRenderer) {
+      connectorRenderer.setHoveredIndex(hoveredRangeIndex);
+    }
+  });
+
+  // Update renderer colors when theme changes
+  $effect(() => {
+    const _version = syntaxThemeVersion;
+    if (connectorRenderer) {
+      connectorRenderer.updateColors();
+    }
+  });
+
+  // ==========================================================================
   // Connector drawing
   // ==========================================================================
 
@@ -345,39 +464,30 @@
   function scheduleConnectorRedraw() {
     if (connectorRedrawPending) return;
     connectorRedrawPending = true;
-    queueMicrotask(() => {
+    requestAnimationFrame(() => {
       connectorRedrawPending = false;
       redrawConnectorsImpl();
     });
   }
 
   function redrawConnectorsImpl() {
-    if (!connectorSvg || !afterPane || !diff) return;
+    if (!connectorRenderer || !afterPane || !diff) return;
 
     // For single-pane modes, we still draw comment highlights
     const sourcePane = beforePane ?? afterPane;
     const firstLine = sourcePane.querySelector('.line') as HTMLElement | null;
     const lineHeight = firstLine ? firstLine.getBoundingClientRect().height : 20;
 
-    const svgRect = connectorSvg.getBoundingClientRect();
+    const canvasRect = connectorCanvas?.getBoundingClientRect();
     const containerRect = afterPane.getBoundingClientRect();
-    const verticalOffset = containerRect.top - svgRect.top;
+    const verticalOffset = canvasRect ? containerRect.top - canvasRect.top : 0;
 
-    // In single-pane mode, pass empty alignments (no curves) but still draw comments
-    const alignmentsForDraw = isTwoPaneMode ? activeAlignments : [];
-
-    drawConnectors(
-      connectorSvg,
-      alignmentsForDraw,
-      beforePane?.scrollTop ?? 0,
-      afterPane.scrollTop,
-      {
-        lineHeight,
-        verticalOffset,
-        hoveredIndex: hoveredRangeIndex,
-        comments: currentFileComments,
-        onCommentClick: handleCommentHighlightClick,
-      }
+    // Use scroll controller positions (not native scrollTop since we use transform)
+    connectorRenderer.render(
+      scrollController.beforeScrollY,
+      scrollController.afterScrollY,
+      lineHeight,
+      verticalOffset
     );
   }
 
@@ -420,7 +530,7 @@
       sizeBase,
     ];
 
-    if (diff && connectorSvg && afterPane) {
+    if (diff && connectorCanvas && afterPane) {
       requestAnimationFrame(() => {
         scheduleConnectorRedraw();
       });
@@ -510,13 +620,14 @@
   }
 
   // ==========================================================================
-  // Scroll handlers
+  // Scroll handlers (custom scroll via wheel events)
   // ==========================================================================
 
-  function handleBeforeScroll(e: Event) {
-    if (!diff || !isTwoPaneMode) return;
-    const target = e.target as HTMLDivElement;
-    scrollSync.onScroll('before', target, afterPane);
+  function handleWheel(side: 'before' | 'after', e: WheelEvent) {
+    e.preventDefault();
+    scrollController.scrollBy(side, e.deltaY);
+
+    // Trigger UI updates
     redrawConnectors();
     updateToolbarPosition();
     updateCommentEditorPosition();
@@ -524,18 +635,45 @@
     updateLineCommentEditorPosition();
   }
 
-  function handleAfterScroll(e: Event) {
+  function handleBeforeWheel(e: WheelEvent) {
     if (!diff) return;
-    const target = e.target as HTMLDivElement;
-    if (isTwoPaneMode) {
-      scrollSync.onScroll('after', target, beforePane);
-    }
+    // Allow scrolling in two-pane mode and deleted file mode
+    if (!isTwoPaneMode && !isDeletedFile) return;
+    handleWheel('before', e);
+  }
+
+  function handleAfterWheel(e: WheelEvent) {
+    if (!diff) return;
+    handleWheel('after', e);
+  }
+
+  // Handle scrollbar callbacks
+  function handleBeforeScrollbarScroll(deltaY: number) {
+    scrollController.scrollBy('before', deltaY);
     redrawConnectors();
     updateToolbarPosition();
     updateCommentEditorPosition();
     updateLineSelectionToolbar();
     updateLineCommentEditorPosition();
   }
+
+  function handleAfterScrollbarScroll(deltaY: number) {
+    scrollController.scrollBy('after', deltaY);
+    redrawConnectors();
+    updateToolbarPosition();
+    updateCommentEditorPosition();
+    updateLineSelectionToolbar();
+    updateLineCommentEditorPosition();
+  }
+
+  // Redraw connectors when scroll positions change
+  $effect(() => {
+    const _before = scrollController.beforeScrollY;
+    const _after = scrollController.afterScrollY;
+    if (diff && connectorCanvas && afterPane) {
+      scheduleConnectorRedraw();
+    }
+  });
 
   // ==========================================================================
   // Range hover handling
@@ -609,7 +747,6 @@
     const alignmentData = changedAlignments[hoveredRangeIndex];
     if (!alignmentData) return;
 
-    console.log('Discard alignment:', alignmentData.alignment);
     hoveredRangeIndex = null;
     rangeToolbarStyle = null;
     onRangeDiscard?.();
@@ -1058,6 +1195,11 @@
       document.removeEventListener('mouseup', handleGlobalMouseUp);
       document.removeEventListener('click', handleGlobalClick);
       document.removeEventListener('mousemove', handleDragMove);
+      // Clean up connector renderer
+      if (connectorRenderer) {
+        connectorRenderer.destroy();
+        connectorRenderer = null;
+      }
     };
   });
 </script>
@@ -1097,15 +1239,20 @@
             </span>
             <span class="pane-path" title={beforePath}>{beforePath ?? 'No file'}</span>
           </div>
-          <div class="code-area">
-            <ScrollbarMarkers
-              alignments={activeAlignments}
-              comments={[]}
-              totalLines={beforeLines.length}
-              side="before"
+          <div class="code-area" onwheel={handleBeforeWheel}>
+            <Scrollbar
+              scrollY={scrollController.beforeScrollY}
+              contentHeight={beforeContentHeight}
+              viewportHeight={beforePane?.clientHeight ?? 0}
+              side="left"
+              onScroll={handleBeforeScrollbarScroll}
+              markers={beforeMarkers}
             />
-            <div class="code-container" bind:this={beforePane} onscroll={handleBeforeScroll}>
-              <div class="lines-wrapper">
+            <div class="code-container" bind:this={beforePane}>
+              <div
+                class="lines-wrapper"
+                style="transform: translateY(-{scrollController.beforeScrollY}px)"
+              >
                 {#each beforeLines as line, i}
                   {@const boundary = showRangeMarkers
                     ? getLineBoundary(activeAlignments, 'before', i)
@@ -1150,17 +1297,30 @@
             </span>
             <span class="pane-path" title={beforePath}>{beforePath ?? 'No file'}</span>
           </div>
-          <div class="code-container" bind:this={beforePane}>
-            <div class="lines-wrapper">
-              {#each beforeLines as line, i}
-                <div class="line">
-                  <span class="line-content">
-                    {#each getBeforeTokens(i) as token}
-                      <span style="color: {token.color}">{token.content}</span>
-                    {/each}
-                  </span>
-                </div>
-              {/each}
+          <div class="code-area" onwheel={handleBeforeWheel}>
+            <Scrollbar
+              scrollY={scrollController.beforeScrollY}
+              contentHeight={beforeContentHeight}
+              viewportHeight={beforePane?.clientHeight ?? 0}
+              side="left"
+              onScroll={handleBeforeScrollbarScroll}
+              markers={[]}
+            />
+            <div class="code-container" bind:this={beforePane}>
+              <div
+                class="lines-wrapper"
+                style="transform: translateY(-{scrollController.beforeScrollY}px)"
+              >
+                {#each beforeLines as line, i}
+                  <div class="line">
+                    <span class="line-content">
+                      {#each getBeforeTokens(i) as token}
+                        <span style="color: {token.color}">{token.content}</span>
+                      {/each}
+                    </span>
+                  </div>
+                {/each}
+              </div>
             </div>
           </div>
         </div>
@@ -1168,7 +1328,7 @@
 
       <!-- Spine (always present) -->
       <div class="spine">
-        <svg class="spine-connector" bind:this={connectorSvg}></svg>
+        <canvas class="spine-connector" bind:this={connectorCanvas}></canvas>
       </div>
 
       <!-- After pane (two-pane mode or created file) -->
@@ -1188,9 +1348,12 @@
             </span>
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
           </div>
-          <div class="code-area">
-            <div class="code-container" bind:this={afterPane} onscroll={handleAfterScroll}>
-              <div class="lines-wrapper">
+          <div class="code-area" onwheel={handleAfterWheel}>
+            <div class="code-container" bind:this={afterPane}>
+              <div
+                class="lines-wrapper"
+                style="transform: translateY(-{scrollController.afterScrollY}px)"
+              >
                 {#each afterLines as line, i}
                   {@const boundary = showRangeMarkers
                     ? getLineBoundary(activeAlignments, 'after', i)
@@ -1224,11 +1387,13 @@
                 {/if}
               </div>
             </div>
-            <ScrollbarMarkers
-              alignments={activeAlignments}
-              comments={currentFileComments}
-              totalLines={afterLines.length}
-              side="after"
+            <Scrollbar
+              scrollY={scrollController.afterScrollY}
+              contentHeight={afterContentHeight}
+              viewportHeight={afterPane?.clientHeight ?? 0}
+              side="right"
+              onScroll={handleAfterScrollbarScroll}
+              markers={afterMarkers}
             />
           </div>
         </div>
@@ -1243,29 +1408,42 @@
             </span>
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
           </div>
-          <div class="code-container" bind:this={afterPane} onscroll={handleAfterScroll}>
-            <div class="lines-wrapper">
-              {#each afterLines as line, i}
-                {@const isSelected = isLineSelected('after', i)}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                  class="line"
-                  class:line-selected={isSelected}
-                  onmousedown={(e) => handleLineMouseDown('after', i, e)}
-                >
-                  <span class="line-content">
-                    {#each getAfterTokens(i) as token}
-                      <span style="color: {token.color}">{token.content}</span>
-                    {/each}
-                  </span>
-                </div>
-              {/each}
-              {#if afterLines.length === 0}
-                <div class="empty-pane-notice">
-                  <span class="empty-pane-label">Empty file</span>
-                </div>
-              {/if}
+          <div class="code-area" onwheel={handleAfterWheel}>
+            <div class="code-container" bind:this={afterPane}>
+              <div
+                class="lines-wrapper"
+                style="transform: translateY(-{scrollController.afterScrollY}px)"
+              >
+                {#each afterLines as line, i}
+                  {@const isSelected = isLineSelected('after', i)}
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <div
+                    class="line"
+                    class:line-selected={isSelected}
+                    onmousedown={(e) => handleLineMouseDown('after', i, e)}
+                  >
+                    <span class="line-content">
+                      {#each getAfterTokens(i) as token}
+                        <span style="color: {token.color}">{token.content}</span>
+                      {/each}
+                    </span>
+                  </div>
+                {/each}
+                {#if afterLines.length === 0}
+                  <div class="empty-pane-notice">
+                    <span class="empty-pane-label">Empty file</span>
+                  </div>
+                {/if}
+              </div>
             </div>
+            <Scrollbar
+              scrollY={scrollController.afterScrollY}
+              contentHeight={afterContentHeight}
+              viewportHeight={afterPane?.clientHeight ?? 0}
+              side="right"
+              onScroll={handleAfterScrollbarScroll}
+              markers={[]}
+            />
           </div>
         </div>
       {/if}
@@ -1550,45 +1728,22 @@
     flex-direction: column;
   }
 
-  /* Code container */
+  /* Code container - custom scroll via transform */
   .code-container {
     flex: 1;
-    overflow: auto;
+    overflow: hidden;
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
     font-size: var(--size-md);
     line-height: 1.5;
     min-width: 0;
     user-select: none;
-    scrollbar-width: thin;
-    scrollbar-color: var(--scrollbar-thumb) transparent;
     position: relative;
-    z-index: 2;
   }
-
-  .code-container::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-
-  .code-container::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .code-container::-webkit-scrollbar-thumb {
-    background: var(--scrollbar-thumb);
-    border-radius: 4px;
-  }
-
-  .code-container::-webkit-scrollbar-thumb:hover {
-    background: var(--scrollbar-thumb-hover);
-  }
-
-  /* Left-side scrollbar for before pane - not currently possible without side effects */
-  /* Markers are positioned on the left via ScrollbarMarkers component */
 
   .lines-wrapper {
     display: inline-block;
     min-width: 100%;
+    will-change: transform;
   }
 
   .line {

@@ -71,6 +71,8 @@ export interface Theme {
   scrollbar: {
     thumb: string;
     thumbHover: string;
+    thumbTransparent: string;
+    thumbHoverTransparent: string;
   };
 
   // Shadows and overlays (for modals, dropdowns, etc.)
@@ -360,6 +362,8 @@ export function createAdaptiveTheme(
     scrollbar: {
       thumb: borderBase,
       thumbHover: mix(primaryBg, syntaxFg, 0.25),
+      thumbTransparent: overlay(syntaxFg, isDark ? 0.15 : 0.12),
+      thumbHoverTransparent: overlay(syntaxFg, isDark ? 0.25 : 0.2),
     },
 
     shadow: {
@@ -416,6 +420,8 @@ export function themeToCssVars(t: Theme): string {
 
     --scrollbar-thumb: ${t.scrollbar.thumb};
     --scrollbar-thumb-hover: ${t.scrollbar.thumbHover};
+    --scrollbar-thumb-transparent: ${t.scrollbar.thumbTransparent};
+    --scrollbar-thumb-hover-transparent: ${t.scrollbar.thumbHoverTransparent};
 
     --shadow-overlay: ${t.shadow.overlay};
     --shadow-elevated: ${t.shadow.elevated};

@@ -273,6 +273,7 @@ const SUPPORTED_LANGUAGES: BundledLanguage[] = [
   'graphql',
   'terraform',
   'prisma',
+  'ini',
 
   // Blockchain
   'solidity',
@@ -589,13 +590,89 @@ export function getTheme(): HighlighterTheme | null {
  * Detect language from file path/extension.
  * Returns null for unknown extensions.
  */
-export function detectLanguage(filePath: string): BundledLanguage | null {
-  // Handle special filenames
-  const filename = filePath.split('/').pop()?.toLowerCase() || '';
-  if (filename === 'dockerfile') return 'dockerfile';
-  if (filename === 'makefile' || filename === 'gnumakefile') return 'make';
-  if (filename === 'cmakelists.txt') return 'cmake';
+// Map special filenames (case-insensitive) to languages
+const FILENAME_MAP: Record<string, BundledLanguage> = {
+  // Docker
+  dockerfile: 'dockerfile',
+  'dockerfile.dev': 'dockerfile',
+  'dockerfile.prod': 'dockerfile',
+  containerfile: 'dockerfile',
 
+  // Make
+  makefile: 'make',
+  gnumakefile: 'make',
+  justfile: 'make', // Just uses make-like syntax
+
+  // CMake
+  'cmakelists.txt': 'cmake',
+
+  // Shell configs
+  '.bashrc': 'bash',
+  '.bash_profile': 'bash',
+  '.bash_login': 'bash',
+  '.bash_logout': 'bash',
+  '.bash_aliases': 'bash',
+  '.zshrc': 'bash',
+  '.zshenv': 'bash',
+  '.zprofile': 'bash',
+  '.zlogin': 'bash',
+  '.zlogout': 'bash',
+  '.profile': 'bash',
+  '.shrc': 'bash',
+  '.kshrc': 'bash',
+
+  // Git configs
+  '.gitconfig': 'ini',
+  '.gitignore': 'ini', // Simple comment-based format
+  '.gitattributes': 'ini',
+  '.gitmodules': 'ini',
+
+  // Editor configs
+  '.editorconfig': 'ini',
+  '.prettierrc': 'json',
+  '.eslintrc': 'json',
+
+  // Other dotfiles
+  '.npmrc': 'ini',
+  '.yarnrc': 'yaml',
+  '.nvmrc': 'bash',
+  '.env': 'bash',
+  '.env.local': 'bash',
+  '.env.development': 'bash',
+  '.env.production': 'bash',
+  '.env.example': 'bash',
+
+  // Ruby
+  gemfile: 'ruby',
+  rakefile: 'ruby',
+  guardfile: 'ruby',
+  vagrantfile: 'ruby',
+
+  // Config files
+  'package.json': 'json',
+  'tsconfig.json': 'json',
+  'cargo.toml': 'toml',
+  'pyproject.toml': 'toml',
+  'go.mod': 'go',
+  'go.sum': 'go',
+};
+
+export function detectLanguage(filePath: string): BundledLanguage | null {
+  // Get the filename (last path component)
+  const filename = filePath.split('/').pop() || '';
+  const filenameLower = filename.toLowerCase();
+
+  // Check special filenames first (case-insensitive)
+  if (FILENAME_MAP[filenameLower]) {
+    return FILENAME_MAP[filenameLower];
+  }
+
+  // Check if filename starts with a dot (dotfile) - try the lowercase version
+  if (filename.startsWith('.') && FILENAME_MAP[filename.toLowerCase()]) {
+    return FILENAME_MAP[filename.toLowerCase()];
+  }
+
+  // Fall back to extension-based detection
   const ext = filePath.split('.').pop()?.toLowerCase() || '';
   return EXTENSION_MAP[ext] || null;
 }

@@ -3,7 +3,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import DiffViewer from './lib/DiffViewer.svelte';
   import TopBar from './lib/TopBar.svelte';
-  import { getRepoInfo, getRefs } from './lib/services/git';
+  import { getRefs } from './lib/services/git';
   import type { GitRef, DiffSpec } from './lib/types';
   import {
     subscribeToFileChanges,
@@ -34,15 +34,19 @@
     resetState,
   } from './lib/stores/diffState.svelte';
   import { loadComments, setCurrentPath } from './lib/stores/comments.svelte';
+  import { repoState, initRepoState } from './lib/stores/repoState.svelte';
 
   // UI State
   let sidebarRef: Sidebar | null = $state(null);
   let unsubscribe: Unsubscribe | null = null;
-  let repoName = $state('Loading...');
 
   // Diff Loading
   async function loadAllDiffs() {
-    await loadDiffs(diffSelection.spec.base, diffSelection.spec.head);
+    await loadDiffs(
+      diffSelection.spec.base,
+      diffSelection.spec.head,
+      repoState.currentPath ?? undefined
+    );
     await loadComments(diffSelection.spec.base, diffSelection.spec.head);
     sidebarRef?.setDiffs(diffState.diffs);
   }
@@ -56,7 +60,11 @@
   async function handleFilesChanged() {
     if (diffSelection.spec.head !== WORKDIR) return;
     // Use refreshDiffs to avoid loading flicker - keeps content visible during fetch
-    await refreshDiffs(diffSelection.spec.base, diffSelection.spec.head);
+    await refreshDiffs(
+      diffSelection.spec.base,
+      diffSelection.spec.head,
+      repoState.currentPath ?? undefined
+    );
     // Reload comments - they may have changed after a commit
     await loadComments(diffSelection.spec.base, diffSelection.spec.head);
     sidebarRef?.setDiffs(diffState.diffs);
@@ -76,10 +84,37 @@
     await loadAllDiffs();
   }
 
-  // Repo selection (placeholder for now)
-  function handleRepoSelect() {
-    // TODO: Implement repo selection
-    console.log('Repo select clicked');
+  // Repo change - reload everything
+  async function handleRepoChange() {
+    // Stop watching old repo
+    await stopWatching().catch(() => {});
+    unsubscribe?.();
+
+    // Reset state
+    resetState();
+
+    if (repoState.currentPath && !repoState.error) {
+      // Load refs and detect default branch for new repo
+      try {
+        const refs = await getRefs(repoState.currentPath);
+        const defaultBranch = detectDefaultBranch(refs);
+        setDefaultBranch(defaultBranch);
+      } catch (e) {
+        console.error('Failed to load refs:', e);
+      }
+
+      // Re-init diff selection and load diffs
+      await initDiffSelection();
+      await loadAllDiffs();
+
+      // Start watching new repo
+      try {
+        await startWatching(repoState.currentPath);
+        unsubscribe = await subscribeToFileChanges(handleFilesChanged);
+      } catch (e) {
+        console.error('Failed to start watcher:', e);
+      }
+    }
   }
 
   /**
@@ -100,17 +135,6 @@
     return branchNames[0] ?? 'main';
   }
 
-  /**
-   * Extract repo name from path (last directory component)
-   */
-  function extractRepoName(repoPath: string): string {
-    // Remove trailing slash if present
-    const cleanPath = repoPath.replace(/\/$/, '');
-    // Get last component
-    const parts = cleanPath.split('/');
-    return parts[parts.length - 1] || 'Repository';
-  }
-
   let currentDiff = $derived(getCurrentDiff());
 
   // Lifecycle
@@ -121,29 +145,30 @@
     (async () => {
       await loadSavedSyntaxTheme();
 
-      // Load refs for autocomplete and detect default branch
-      try {
-        const refs = await getRefs();
-        const defaultBranch = detectDefaultBranch(refs);
-        setDefaultBranch(defaultBranch);
-      } catch (e) {
-        console.error('Failed to load refs:', e);
-      }
+      // Initialize repo state (loads recent repos, tries current directory)
+      const hasRepo = await initRepoState();
 
-      await initDiffSelection();
-      await loadAllDiffs();
-
-      try {
-        const info = await getRepoInfo();
-        if (info?.repo_path) {
-          repoName = extractRepoName(info.repo_path);
-          await startWatching(info.repo_path);
+      if (hasRepo && repoState.currentPath) {
+        // Load refs for autocomplete and detect default branch
+        try {
+          const refs = await getRefs(repoState.currentPath);
+          const defaultBranch = detectDefaultBranch(refs);
+          setDefaultBranch(defaultBranch);
+        } catch (e) {
+          console.error('Failed to load refs:', e);
         }
-      } catch (e) {
-        console.error('Failed to start watcher:', e);
-      }
 
-      unsubscribe = await subscribeToFileChanges(handleFilesChanged);
+        await initDiffSelection();
+        await loadAllDiffs();
+
+        // Start file watcher
+        try {
+          await startWatching(repoState.currentPath);
+          unsubscribe = await subscribeToFileChanges(handleFilesChanged);
+        } catch (e) {
+          console.error('Failed to start watcher:', e);
+        }
+      }
     })();
   });
 
@@ -156,15 +181,19 @@
 
 <main>
   <TopBar
-    {repoName}
     onDiffSelect={handleDiffSelect}
     onCustomDiff={handleCustomDiff}
-    onRepoSelect={handleRepoSelect}
+    onRepoChange={handleRepoChange}
   />
 
   <div class="app-container">
     <section class="main-content">
-      {#if diffState.loading}
+      {#if !repoState.currentPath || repoState.error}
+        <div class="empty-state">
+          <p>{repoState.error ?? 'No repository selected'}</p>
+          <p class="empty-hint">Use the repository selector to open a git repository</p>
+        </div>
+      {:else if diffState.loading}
         <div class="loading-state">
           <p>Loading...</p>
         </div>
@@ -243,6 +272,22 @@
     height: 100%;
     color: var(--text-muted);
     font-size: var(--size-lg);
+  }
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: var(--size-lg);
+  }
+
+  .empty-hint {
+    font-size: var(--size-sm);
+    color: var(--text-faint);
+    margin-top: 8px;
   }
 
   .error-state {

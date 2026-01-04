@@ -9,6 +9,8 @@
     FolderGit2,
     Settings2,
     GitCompareArrows,
+    FolderOpen,
+    X,
   } from 'lucide-svelte';
   import DiffSelectorModal from './DiffSelectorModal.svelte';
   import type { DiffSpec } from './types';
@@ -23,19 +25,26 @@
     copyCommentsToClipboard,
     deleteAllComments,
   } from './stores/comments.svelte';
+  import {
+    repoState,
+    openRepoPicker,
+    openRepo,
+    removeFromRecent,
+    type RepoEntry,
+  } from './stores/repoState.svelte';
 
   interface Props {
-    repoName: string;
     onDiffSelect: (spec: DiffSpec) => void;
     onCustomDiff: (base: string, head: string) => void;
-    onRepoSelect?: () => void;
+    onRepoChange?: () => void;
   }
 
-  let { repoName, onDiffSelect, onCustomDiff, onRepoSelect }: Props = $props();
+  let { onDiffSelect, onCustomDiff, onRepoChange }: Props = $props();
 
   // Dropdown states
   let diffDropdownOpen = $state(false);
   let themeDropdownOpen = $state(false);
+  let repoDropdownOpen = $state(false);
 
   // Modal state
   let showCustomModal = $state(false);
@@ -87,9 +96,46 @@
     }
   }
 
+  // Repo selection handlers
+  async function handleOpenRepo() {
+    repoDropdownOpen = false;
+    const success = await openRepoPicker();
+    if (success) {
+      onRepoChange?.();
+    }
+  }
+
+  async function handleRecentRepoSelect(entry: RepoEntry) {
+    repoDropdownOpen = false;
+    const success = await openRepo(entry.path);
+    if (success) {
+      onRepoChange?.();
+    }
+  }
+
+  function handleRemoveRecent(event: MouseEvent, path: string) {
+    event.stopPropagation();
+    removeFromRecent(path);
+  }
+
+  /**
+   * Shorten a path by replacing home directory with ~
+   */
+  function shortenPath(path: string): string {
+    // Try to detect home directory and replace with ~
+    const homeDir = path.match(/^(\/Users\/[^/]+|\/home\/[^/]+)/)?.[0];
+    if (homeDir) {
+      return path.replace(homeDir, '~');
+    }
+    return path;
+  }
+
   // Close dropdowns when clicking outside
   function handleClickOutside(event: MouseEvent) {
     const target = event.target as HTMLElement;
+    if (!target.closest('.repo-selector-container')) {
+      repoDropdownOpen = false;
+    }
     if (!target.closest('.diff-selector')) {
       diffDropdownOpen = false;
     }
@@ -104,10 +150,53 @@
 <header class="top-bar">
   <!-- Left section: Repo selector + Diff selector -->
   <div class="section section-left">
-    <button class="repo-selector" onclick={onRepoSelect} title="Select repository">
-      <FolderGit2 size={14} />
-      <span class="repo-name">{repoName}</span>
-    </button>
+    <div class="repo-selector-container">
+      <button
+        class="repo-selector"
+        onclick={() => (repoDropdownOpen = !repoDropdownOpen)}
+        class:open={repoDropdownOpen}
+        title="Select repository"
+      >
+        <FolderGit2 size={14} />
+        <span class="repo-name">{repoState.currentName}</span>
+        <ChevronDown size={12} />
+      </button>
+
+      {#if repoDropdownOpen}
+        <div class="dropdown repo-dropdown">
+          {#if repoState.recentRepos.length > 0}
+            {#each repoState.recentRepos as entry (entry.path)}
+              <div
+                class="dropdown-item repo-item"
+                class:active={entry.path === repoState.currentPath}
+                role="button"
+                tabindex="0"
+                onclick={() => handleRecentRepoSelect(entry)}
+                onkeydown={(e) => e.key === 'Enter' && handleRecentRepoSelect(entry)}
+              >
+                <FolderGit2 size={14} />
+                <div class="repo-item-content">
+                  <span class="repo-item-name">{entry.name}</span>
+                  <span class="repo-item-path">{shortenPath(entry.path)}</span>
+                </div>
+                <button
+                  class="remove-btn"
+                  onclick={(e) => handleRemoveRecent(e, entry.path)}
+                  title="Remove from recent"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            {/each}
+            <div class="dropdown-divider"></div>
+          {/if}
+          <button class="dropdown-item open-item" onclick={handleOpenRepo}>
+            <FolderOpen size={12} />
+            <span>Open...</span>
+          </button>
+        </div>
+      {/if}
+    </div>
 
     <div class="diff-selector">
       <button
@@ -124,12 +213,15 @@
         <div class="dropdown diff-dropdown">
           {#each getPresets() as preset}
             <button
-              class="dropdown-item"
+              class="dropdown-item diff-item"
               class:active={isPresetSelected(preset)}
               onclick={() => handlePresetSelect(preset)}
             >
-              <span class="preset-label">{preset.label}</span>
-              <span class="preset-spec">{preset.base}..{preset.head}</span>
+              <GitCompareArrows size={14} />
+              <div class="diff-item-content">
+                <span class="diff-item-label">{preset.label}</span>
+                <span class="diff-item-spec">{preset.base}..{preset.head}</span>
+              </div>
             </button>
           {/each}
           <div class="dropdown-divider"></div>
@@ -237,6 +329,10 @@
   }
 
   /* Repo selector */
+  .repo-selector-container {
+    position: relative;
+  }
+
   .repo-selector {
     display: flex;
     align-items: center;
@@ -252,7 +348,8 @@
     max-width: 200px;
   }
 
-  .repo-selector:hover {
+  .repo-selector:hover,
+  .repo-selector.open {
     background: var(--bg-hover);
   }
 
@@ -261,10 +358,94 @@
     flex-shrink: 0;
   }
 
+  .repo-selector :global(svg:last-child) {
+    transition: transform 0.15s;
+  }
+
+  .repo-selector.open :global(svg:last-child) {
+    transform: rotate(180deg);
+  }
+
   .repo-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .repo-dropdown {
+    left: 0;
+    width: 290px;
+    padding-bottom: 4px;
+  }
+
+  .repo-item {
+    position: relative;
+    padding-right: 32px;
+    align-items: flex-start;
+  }
+
+  .repo-item :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .repo-item-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .repo-item-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .repo-item-path {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: calc(var(--size-xs) - 1px);
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    unicode-bidi: plaintext;
+  }
+
+  .remove-btn {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-faint);
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 0.1s,
+      color 0.1s;
+  }
+
+  .repo-item:hover .remove-btn {
+    opacity: 1;
+  }
+
+  .remove-btn:hover {
+    color: var(--status-deleted);
+  }
+
+  .open-item {
+    color: var(--text-muted);
+  }
+
+  .open-item :global(svg) {
+    color: var(--text-muted);
   }
 
   /* Diff selector */
@@ -327,7 +508,39 @@
 
   .diff-dropdown {
     left: 0;
-    min-width: 240px;
+    width: 290px;
+    padding-bottom: 4px;
+  }
+
+  .diff-item {
+    align-items: flex-start;
+  }
+
+  .diff-item :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .diff-item-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .diff-item-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .diff-item-spec {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: calc(var(--size-xs) - 1px);
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .theme-dropdown {
@@ -358,16 +571,6 @@
 
   .dropdown-item.active {
     background-color: var(--bg-primary);
-  }
-
-  .preset-label {
-    flex: 1;
-  }
-
-  .preset-spec {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: var(--size-xs);
-    color: var(--text-muted);
   }
 
   .dropdown-divider {

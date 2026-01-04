@@ -68,12 +68,12 @@ function updateSelection(): void {
  * Load all diffs for the given base..head.
  * Shows loading state - use for initial load or spec changes.
  */
-export async function loadDiffs(base: string, head: string): Promise<void> {
+export async function loadDiffs(base: string, head: string, repoPath?: string): Promise<void> {
   diffState.loading = true;
   diffState.error = null;
 
   try {
-    diffState.diffs = await getDiff(base, head);
+    diffState.diffs = await getDiff(base, head, repoPath);
     updateSelection();
   } catch (e) {
     diffState.error = e instanceof Error ? e.message : String(e);
@@ -87,9 +87,9 @@ export async function loadDiffs(base: string, head: string): Promise<void> {
  * Refresh diffs without showing loading state.
  * Use for file watcher updates - keeps existing content visible during fetch.
  */
-export async function refreshDiffs(base: string, head: string): Promise<void> {
+export async function refreshDiffs(base: string, head: string, repoPath?: string): Promise<void> {
   try {
-    diffState.diffs = await getDiff(base, head);
+    diffState.diffs = await getDiff(base, head, repoPath);
     updateSelection();
   } catch (e) {
     // On refresh errors, keep existing state (don't disrupt UI)

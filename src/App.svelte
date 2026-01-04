@@ -128,6 +128,8 @@
     if (diffSelection.spec.head !== WORKDIR) return;
     // Use refreshDiffs to avoid loading flicker - keeps content visible during fetch
     await refreshDiffs(diffSelection.spec.base, diffSelection.spec.head);
+    // Reload comments - they may have changed after a commit
+    await loadComments(diffSelection.spec.base, diffSelection.spec.head);
     sidebarRef?.setDiffs(diffState.diffs);
   }
 

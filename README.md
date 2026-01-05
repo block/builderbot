@@ -1,6 +1,16 @@
 # Staged
 
-A standalone git diff viewer inspired by IntelliJ's diff UI. Built with Tauri (Rust backend) + Svelte (TypeScript frontend) for a fast, native desktop experience with side-by-side diffs and integrated staging.
+A desktop diff viewer for git repositories. View any diff between refs, review changes, and prepare commits. Built with Tauri (Rust + libgit2) and Svelte.
+
+## What It Does
+
+**Staged** lets you view diffs between any two git refs—branches, commits, tags, or the working tree. Select a base and head ref, browse changed files, and see side-by-side diffs with syntax highlighting.
+
+Key concepts:
+- **Flexible diffs**: Compare any ref to any ref (e.g., `main..HEAD`, `HEAD..@` for uncommitted changes)
+- **`@` = working tree**: Use `@` as a ref to include uncommitted changes
+- **Review sessions**: Mark files as reviewed, add comments (coming soon)
+- **File watching**: Auto-refresh when files change on disk
 
 ## Development
 
@@ -35,10 +45,28 @@ just install    # Install all dependencies
 just clean      # Remove build artifacts
 ```
 
-## Features
+## Architecture
 
-- File tree with staged, unstaged, and untracked sections
-- Side-by-side diff viewer with line numbers
-- Stage/unstage individual files
-- Discard changes with confirmation
-- Current branch display
+```
+src-tauri/src/
+├── diff/           # Core diff engine
+│   ├── git.rs      # Git operations (libgit2)
+│   ├── types.rs    # Data structures
+│   ├── actions.rs  # File actions (stage, discard, etc.)
+│   ├── review.rs   # Review session storage
+│   └── watcher.rs  # File system watching
+├── lib.rs          # Tauri commands (API surface)
+└── refresh.rs      # Debounced refresh coordination
+
+src/
+├── App.svelte              # Main app shell
+└── lib/
+    ├── Sidebar.svelte      # File list with status indicators
+    ├── DiffViewer.svelte   # Side-by-side diff display
+    ├── DiffSelectorModal.svelte  # Ref picker UI
+    └── services/           # Frontend services
+```
+
+## License
+
+MIT

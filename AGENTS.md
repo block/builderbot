@@ -2,48 +2,83 @@
 
 ## Overview
 
-**Staged** is a desktop git diff viewer. Tauri app with Rust backend (git2 for git ops) and Svelte/TypeScript frontend.
+**Staged** is a desktop git diff viewer. Tauri app with Rust backend (libgit2) and Svelte/TypeScript frontend.
 
 ## Architecture
 
 Frontend calls Rust via Tauri's `invoke()`. All git operations happen in Rust using libgit2.
 
+### Core Concepts
+
+- **DiffId**: A diff is identified by `base..head` refs (e.g., `main..HEAD`, `HEAD..@`)
+- **`@` = working tree**: Special ref representing uncommitted changes on disk
+- **Review sessions**: Stored per DiffId, contain comments, edits, and reviewed file markers
+
+### Backend Structure
+
+```
+src-tauri/src/
+├── diff/           # Core module
+│   ├── git.rs      # Git operations: compute_diff, get_refs, resolve_ref
+│   ├── types.rs    # FileDiff, LinePair, Alignment, GitRef, etc.
+│   ├── actions.rs  # stage_file, unstage_file, discard_file, etc.
+│   ├── review.rs   # ReviewStore, Review, Comment, Edit persistence
+│   └── watcher.rs  # File system watcher for auto-refresh
+├── lib.rs          # Tauri command handlers (thin layer over diff module)
+└── refresh.rs      # Debounced refresh controller
+```
+
+### Frontend Structure
+
+```
+src/
+├── App.svelte                  # Main shell, state management
+└── lib/
+    ├── Sidebar.svelte          # File list with review status
+    ├── DiffViewer.svelte       # Side-by-side diff with syntax highlighting
+    ├── DiffSelectorModal.svelte # Ref autocomplete picker
+    ├── types.ts                # TypeScript types mirroring Rust
+    ├── theme.ts                # Color definitions
+    └── services/
+        ├── git.ts              # Tauri invoke wrappers
+        ├── review.ts           # Review session API
+        ├── highlighter.ts      # Syntax highlighting (Shiki)
+        ├── scrollSync.ts       # Synchronized scroll for diff panels
+        └── statusEvents.ts     # File watcher event handling
+```
+
 ### Design Principles
 
-- **Stateless**: Git is the state. All Rust functions are pure - they discover the repo fresh each call.
-- **Rebuildable features**: Design features as self-contained modules with clear boundaries and minimal tendrils into the rest of the codebase. If a feature needs to be completely rewritten, it should be possible to delete and rebuild it without surgery across multiple files. See `refresh.rs` as an example.
-- **Horizontal space is precious**: Side-by-side diff viewing means every pixel of width matters. Features should minimize horizontal footprint - prefer overlays over dedicated columns, hide chrome when possible, avoid adding new horizontal elements.
+- **Stateless backend**: Git is the source of truth. Rust functions discover repo state fresh each call—no cached state that can drift.
+- **Rebuildable features**: Self-contained modules with clear boundaries. Features can be deleted and rebuilt without surgery across the codebase.
+- **Horizontal space is precious**: Side-by-side diffs need width. Minimize chrome, prefer overlays, hide UI when possible.
 
 ### Theming
 
-Colors are centralized in `src/lib/theme.ts` and applied via CSS custom properties in `app.css`.
-All components use `var(--*)` CSS variables for colors.
+Colors defined in `src/lib/theme.ts`, applied via CSS custom properties in `app.css`.
+All components use `var(--*)` for colors—no hardcoded values.
 
 ## Commands
 
-Use `just` for all dev tasks:
-
 ```bash
-just dev        # Run with hot-reload (human runs this, not you)
-just fmt        # Format all code (cargo fmt + prettier)
+just dev        # Run with hot-reload (human runs this)
+just fmt        # Format all code
 just lint       # Clippy for Rust
 just typecheck  # Type check everything
 just check-all  # All checks before submitting
 ```
 
-**Note:** The human always runs the dev server. Don't start it yourself.
+**Note:** The human runs the dev server. Don't start it yourself.
 
 ## Code Quality
 
-**Always format and lint your work before finishing:**
+Before finishing work:
 ```bash
 just fmt        # Auto-format Rust + TypeScript/Svelte
 just check-all  # Verify everything passes
 ```
 
-- Rust: `cargo fmt` + `cargo clippy`
-- TypeScript/Svelte: `prettier`
-
 ## Git Workflow
 
-**Do not** create branches, commit, or push unless explicitly asked. The human manages git operations.
+**Do not** create branches, commit, or push unless explicitly asked.
+**Do not** include AGENTS.md/README.md in commits for now

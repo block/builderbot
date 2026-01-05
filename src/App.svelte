@@ -23,6 +23,7 @@
     selectDiffSpec,
     selectCustomDiff,
     initDiffSelection,
+    resetDiffSelection,
     setDefaultBranch,
   } from './lib/stores/diffSelection.svelte';
   import {
@@ -103,8 +104,8 @@
         console.error('Failed to load refs:', e);
       }
 
-      // Re-init diff selection and load diffs
-      await initDiffSelection();
+      // Reset diff selection to "Uncommitted" and load diffs
+      await resetDiffSelection();
       await loadAllDiffs();
 
       // Start watching new repo

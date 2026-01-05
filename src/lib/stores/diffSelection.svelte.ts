@@ -149,3 +149,14 @@ export async function selectCustomDiff(base: string, head: string, label?: strin
 export async function initDiffSelection(): Promise<void> {
   await updateResolvedShas();
 }
+
+/**
+ * Reset diff selection to "Uncommitted" (first preset).
+ * Call when switching repositories.
+ */
+export async function resetDiffSelection(): Promise<void> {
+  diffSelection.spec = presetStore.presets[0];
+  diffSelection.resolvedBaseSha = null;
+  diffSelection.resolvedHeadSha = null;
+  await updateResolvedShas();
+}

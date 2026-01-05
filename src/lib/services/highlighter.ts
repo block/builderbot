@@ -37,52 +37,74 @@ let currentTheme: HighlighterTheme | null = null;
 let currentThemeName: string = 'laserwave';
 let initPromise: Promise<void> | null = null;
 
-// Available syntax themes (all Shiki bundled themes)
+// Available syntax themes (all Shiki bundled themes, alphabetically sorted)
 export const SYNTAX_THEMES = [
-  // Dark themes
   'andromeeda',
   'aurora-x',
   'ayu-dark',
   'catppuccin-frappe',
+  'catppuccin-latte',
   'catppuccin-macchiato',
   'catppuccin-mocha',
   'dark-plus',
   'dracula',
   'dracula-soft',
   'everforest-dark',
+  'everforest-light',
   'github-dark',
   'github-dark-default',
   'github-dark-dimmed',
   'github-dark-high-contrast',
+  'github-light',
+  'github-light-default',
+  'github-light-high-contrast',
   'gruvbox-dark-hard',
   'gruvbox-dark-medium',
   'gruvbox-dark-soft',
+  'gruvbox-light-hard',
+  'gruvbox-light-medium',
+  'gruvbox-light-soft',
   'houston',
   'kanagawa-dragon',
+  'kanagawa-lotus',
   'kanagawa-wave',
   'laserwave',
+  'light-plus',
   'material-theme',
   'material-theme-darker',
+  'material-theme-lighter',
   'material-theme-ocean',
   'material-theme-palenight',
   'min-dark',
+  'min-light',
   'monokai',
   'night-owl',
   'nord',
   'one-dark-pro',
+  'one-light',
   'plastic',
   'poimandres',
   'red',
   'rose-pine',
+  'rose-pine-dawn',
   'rose-pine-moon',
   'slack-dark',
+  'slack-ochin',
+  'snazzy-light',
   'solarized-dark',
+  'solarized-light',
   'synthwave-84',
   'tokyo-night',
   'vesper',
   'vitesse-black',
   'vitesse-dark',
-  // Light themes
+  'vitesse-light',
+] as const;
+
+export type SyntaxThemeName = (typeof SYNTAX_THEMES)[number];
+
+// Light themes (all others are dark)
+const LIGHT_THEMES: Set<SyntaxThemeName> = new Set([
   'catppuccin-latte',
   'everforest-light',
   'github-light',
@@ -101,74 +123,118 @@ export const SYNTAX_THEMES = [
   'snazzy-light',
   'solarized-light',
   'vitesse-light',
-] as const;
+]);
 
-export type SyntaxThemeName = (typeof SYNTAX_THEMES)[number];
+// Custom themes loaded from ~/.config/staged/themes/
+// Maps theme name -> { isLight, path }
+const customThemes = new Map<string, { isLight: boolean; path: string }>();
+
+/**
+ * Check if a theme is a light theme.
+ * Works for both bundled and custom themes.
+ */
+export function isLightTheme(themeName: string): boolean {
+  // Check custom themes first
+  const custom = customThemes.get(themeName);
+  if (custom) {
+    return custom.isLight;
+  }
+  // Fall back to bundled themes
+  return LIGHT_THEMES.has(themeName as SyntaxThemeName);
+}
+
+/**
+ * Check if a theme name is a custom theme.
+ */
+export function isCustomTheme(themeName: string): boolean {
+  return customThemes.has(themeName);
+}
+
+/**
+ * Register a custom theme (called after discovering themes from backend).
+ */
+export function registerCustomTheme(name: string, isLight: boolean, path: string): void {
+  customThemes.set(name, { isLight, path });
+}
+
+/**
+ * Clear all registered custom themes.
+ */
+export function clearCustomThemes(): void {
+  customThemes.clear();
+}
+
+/**
+ * Get all registered custom theme names.
+ */
+export function getCustomThemeNames(): string[] {
+  return Array.from(customThemes.keys()).sort((a, b) =>
+    a.toLowerCase().localeCompare(b.toLowerCase())
+  );
+}
 
 // Static theme imports (Vite can't handle dynamic imports for these)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const themeImports: Record<SyntaxThemeName, () => Promise<any>> = {
-  // Dark themes
   andromeeda: () => import('shiki/themes/andromeeda.mjs'),
   'aurora-x': () => import('shiki/themes/aurora-x.mjs'),
   'ayu-dark': () => import('shiki/themes/ayu-dark.mjs'),
   'catppuccin-frappe': () => import('shiki/themes/catppuccin-frappe.mjs'),
+  'catppuccin-latte': () => import('shiki/themes/catppuccin-latte.mjs'),
   'catppuccin-macchiato': () => import('shiki/themes/catppuccin-macchiato.mjs'),
   'catppuccin-mocha': () => import('shiki/themes/catppuccin-mocha.mjs'),
   'dark-plus': () => import('shiki/themes/dark-plus.mjs'),
   dracula: () => import('shiki/themes/dracula.mjs'),
   'dracula-soft': () => import('shiki/themes/dracula-soft.mjs'),
   'everforest-dark': () => import('shiki/themes/everforest-dark.mjs'),
+  'everforest-light': () => import('shiki/themes/everforest-light.mjs'),
   'github-dark': () => import('shiki/themes/github-dark.mjs'),
   'github-dark-default': () => import('shiki/themes/github-dark-default.mjs'),
   'github-dark-dimmed': () => import('shiki/themes/github-dark-dimmed.mjs'),
   'github-dark-high-contrast': () => import('shiki/themes/github-dark-high-contrast.mjs'),
+  'github-light': () => import('shiki/themes/github-light.mjs'),
+  'github-light-default': () => import('shiki/themes/github-light-default.mjs'),
+  'github-light-high-contrast': () => import('shiki/themes/github-light-high-contrast.mjs'),
   'gruvbox-dark-hard': () => import('shiki/themes/gruvbox-dark-hard.mjs'),
   'gruvbox-dark-medium': () => import('shiki/themes/gruvbox-dark-medium.mjs'),
   'gruvbox-dark-soft': () => import('shiki/themes/gruvbox-dark-soft.mjs'),
+  'gruvbox-light-hard': () => import('shiki/themes/gruvbox-light-hard.mjs'),
+  'gruvbox-light-medium': () => import('shiki/themes/gruvbox-light-medium.mjs'),
+  'gruvbox-light-soft': () => import('shiki/themes/gruvbox-light-soft.mjs'),
   houston: () => import('shiki/themes/houston.mjs'),
   'kanagawa-dragon': () => import('shiki/themes/kanagawa-dragon.mjs'),
+  'kanagawa-lotus': () => import('shiki/themes/kanagawa-lotus.mjs'),
   'kanagawa-wave': () => import('shiki/themes/kanagawa-wave.mjs'),
   laserwave: () => import('shiki/themes/laserwave.mjs'),
+  'light-plus': () => import('shiki/themes/light-plus.mjs'),
   'material-theme': () => import('shiki/themes/material-theme.mjs'),
   'material-theme-darker': () => import('shiki/themes/material-theme-darker.mjs'),
+  'material-theme-lighter': () => import('shiki/themes/material-theme-lighter.mjs'),
   'material-theme-ocean': () => import('shiki/themes/material-theme-ocean.mjs'),
   'material-theme-palenight': () => import('shiki/themes/material-theme-palenight.mjs'),
   'min-dark': () => import('shiki/themes/min-dark.mjs'),
+  'min-light': () => import('shiki/themes/min-light.mjs'),
   monokai: () => import('shiki/themes/monokai.mjs'),
   'night-owl': () => import('shiki/themes/night-owl.mjs'),
   nord: () => import('shiki/themes/nord.mjs'),
   'one-dark-pro': () => import('shiki/themes/one-dark-pro.mjs'),
+  'one-light': () => import('shiki/themes/one-light.mjs'),
   plastic: () => import('shiki/themes/plastic.mjs'),
   poimandres: () => import('shiki/themes/poimandres.mjs'),
   red: () => import('shiki/themes/red.mjs'),
   'rose-pine': () => import('shiki/themes/rose-pine.mjs'),
+  'rose-pine-dawn': () => import('shiki/themes/rose-pine-dawn.mjs'),
   'rose-pine-moon': () => import('shiki/themes/rose-pine-moon.mjs'),
   'slack-dark': () => import('shiki/themes/slack-dark.mjs'),
+  'slack-ochin': () => import('shiki/themes/slack-ochin.mjs'),
+  'snazzy-light': () => import('shiki/themes/snazzy-light.mjs'),
   'solarized-dark': () => import('shiki/themes/solarized-dark.mjs'),
+  'solarized-light': () => import('shiki/themes/solarized-light.mjs'),
   'synthwave-84': () => import('shiki/themes/synthwave-84.mjs'),
   'tokyo-night': () => import('shiki/themes/tokyo-night.mjs'),
   vesper: () => import('shiki/themes/vesper.mjs'),
   'vitesse-black': () => import('shiki/themes/vitesse-black.mjs'),
   'vitesse-dark': () => import('shiki/themes/vitesse-dark.mjs'),
-  // Light themes
-  'catppuccin-latte': () => import('shiki/themes/catppuccin-latte.mjs'),
-  'everforest-light': () => import('shiki/themes/everforest-light.mjs'),
-  'github-light': () => import('shiki/themes/github-light.mjs'),
-  'github-light-default': () => import('shiki/themes/github-light-default.mjs'),
-  'github-light-high-contrast': () => import('shiki/themes/github-light-high-contrast.mjs'),
-  'gruvbox-light-hard': () => import('shiki/themes/gruvbox-light-hard.mjs'),
-  'gruvbox-light-medium': () => import('shiki/themes/gruvbox-light-medium.mjs'),
-  'gruvbox-light-soft': () => import('shiki/themes/gruvbox-light-soft.mjs'),
-  'kanagawa-lotus': () => import('shiki/themes/kanagawa-lotus.mjs'),
-  'light-plus': () => import('shiki/themes/light-plus.mjs'),
-  'material-theme-lighter': () => import('shiki/themes/material-theme-lighter.mjs'),
-  'min-light': () => import('shiki/themes/min-light.mjs'),
-  'one-light': () => import('shiki/themes/one-light.mjs'),
-  'rose-pine-dawn': () => import('shiki/themes/rose-pine-dawn.mjs'),
-  'slack-ochin': () => import('shiki/themes/slack-ochin.mjs'),
-  'snazzy-light': () => import('shiki/themes/snazzy-light.mjs'),
-  'solarized-light': () => import('shiki/themes/solarized-light.mjs'),
   'vitesse-light': () => import('shiki/themes/vitesse-light.mjs'),
 };
 
@@ -796,7 +862,7 @@ export function getSyntaxThemeName(): string {
 }
 
 /**
- * Switch to a different syntax theme.
+ * Switch to a different syntax theme (bundled).
  * Loads the theme if not already loaded, then updates currentTheme.
  */
 export async function setSyntaxTheme(themeName: SyntaxThemeName): Promise<void> {
@@ -821,6 +887,53 @@ export async function setSyntaxTheme(themeName: SyntaxThemeName): Promise<void> 
   const gitColors = extractGitColors(theme.colors as Record<string, string> | undefined);
   currentTheme = {
     name: themeName,
+    bg: theme.bg || '#1e1e1e',
+    fg,
+    comment: extractCommentColor(theme.settings as ThemeSetting[], fg),
+    ...gitColors,
+  };
+
+  // Notify listeners
+  themeChangeListeners.forEach((listener) => listener(currentTheme!));
+}
+
+/**
+ * Load and switch to a custom theme from JSON content.
+ * The theme JSON should be in VS Code theme format.
+ */
+export async function setCustomSyntaxTheme(themeName: string, themeJson: string): Promise<void> {
+  if (!highlighter) {
+    // Initialize with a default theme first, then load custom
+    await initHighlighter('github-dark');
+  }
+
+  // Parse the theme JSON
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let themeData: any;
+  try {
+    themeData = JSON.parse(themeJson);
+  } catch {
+    throw new Error(`Invalid theme JSON for "${themeName}"`);
+  }
+
+  // Ensure the theme has a name (use provided name if not in JSON)
+  if (!themeData.name) {
+    themeData.name = themeName;
+  }
+
+  // Load the theme into Shiki
+  const loadedThemes = highlighter!.getLoadedThemes();
+  if (!loadedThemes.includes(themeData.name)) {
+    await highlighter!.loadTheme(themeData);
+  }
+
+  // Update current theme
+  currentThemeName = themeData.name;
+  const theme = highlighter!.getTheme(themeData.name);
+  const fg = theme.fg || '#d4d4d4';
+  const gitColors = extractGitColors(theme.colors as Record<string, string> | undefined);
+  currentTheme = {
+    name: themeData.name,
     bg: theme.bg || '#1e1e1e',
     fg,
     comment: extractCommentColor(theme.settings as ThemeSetting[], fg),

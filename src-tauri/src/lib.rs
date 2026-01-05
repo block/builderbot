@@ -1,5 +1,6 @@
 pub mod diff;
 mod refresh;
+mod themes;
 mod watcher;
 
 use diff::{
@@ -226,6 +227,63 @@ fn clear_review(base: String, head: String) -> Result<(), String> {
 }
 
 // =============================================================================
+// Theme Commands
+// =============================================================================
+
+/// Get list of custom themes from ~/.config/staged/themes/
+#[tauri::command]
+fn get_custom_themes() -> Vec<themes::CustomTheme> {
+    themes::discover_custom_themes()
+}
+
+/// Read the full JSON content of a custom theme file.
+#[tauri::command]
+fn read_custom_theme(path: String) -> Result<String, String> {
+    themes::read_theme_file(&path)
+}
+
+/// Get the path to the themes directory (creates it if needed).
+#[tauri::command]
+fn get_themes_dir() -> Result<String, String> {
+    themes::ensure_themes_dir().map(|p| p.to_string_lossy().to_string())
+}
+
+/// Open the themes directory in the system file manager.
+#[tauri::command]
+fn open_themes_dir() -> Result<(), String> {
+    let dir = themes::ensure_themes_dir()?;
+    open::that(&dir).map_err(|e| format!("Failed to open themes directory: {}", e))
+}
+
+/// Validate a theme JSON string without installing.
+#[tauri::command]
+fn validate_theme(content: String) -> themes::ThemeValidation {
+    themes::validate_theme(&content)
+}
+
+/// Install a theme from JSON content.
+#[tauri::command]
+fn install_theme(content: String, filename: String) -> Result<themes::CustomTheme, String> {
+    themes::install_theme(&content, &filename)
+}
+
+/// Read a JSON file from disk (for file picker).
+/// Only allows .json files for security.
+#[tauri::command]
+fn read_json_file(path: String) -> Result<String, String> {
+    use std::path::Path;
+
+    let path = Path::new(&path);
+
+    // Security: only allow .json files
+    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        return Err("Only .json files are allowed".to_string());
+    }
+
+    std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))
+}
+
+// =============================================================================
 // Watcher Commands
 // =============================================================================
 
@@ -308,6 +366,14 @@ pub fn run() {
             record_edit,
             export_review_markdown,
             clear_review,
+            // Theme commands
+            get_custom_themes,
+            read_custom_theme,
+            get_themes_dir,
+            open_themes_dir,
+            validate_theme,
+            install_theme,
+            read_json_file,
             // Watcher commands
             start_watching,
             stop_watching,

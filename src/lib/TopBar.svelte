@@ -17,12 +17,8 @@
   import DiffSelectorModal from './DiffSelectorModal.svelte';
   import PRSelectorModal from './PRSelectorModal.svelte';
   import CommitModal from './CommitModal.svelte';
+  import ThemeSelectorModal from './ThemeSelectorModal.svelte';
   import type { DiffSpec, FileDiff } from './types';
-  import {
-    preferences,
-    getAvailableSyntaxThemes,
-    selectSyntaxTheme,
-  } from './stores/preferences.svelte';
   import { getPresets, diffSelection, WORKDIR } from './stores/diffSelection.svelte';
   import {
     commentsState,
@@ -49,13 +45,13 @@
 
   // Dropdown states
   let diffDropdownOpen = $state(false);
-  let themeDropdownOpen = $state(false);
   let repoDropdownOpen = $state(false);
 
   // Modal state
   let showCustomModal = $state(false);
   let showPRModal = $state(false);
   let showCommitModal = $state(false);
+  let showThemeModal = $state(false);
 
   // Copy feedback
   let copiedFeedback = $state(false);
@@ -106,11 +102,6 @@
   function handleCustomSubmit(base: string, head: string) {
     showCustomModal = false;
     onCustomDiff(base, head);
-  }
-
-  function handleThemeSelect(theme: string) {
-    themeDropdownOpen = false;
-    selectSyntaxTheme(theme as any);
   }
 
   async function handleCopyComments() {
@@ -165,9 +156,6 @@
     }
     if (!target.closest('.diff-selector')) {
       diffDropdownOpen = false;
-    }
-    if (!target.closest('.theme-picker')) {
-      themeDropdownOpen = false;
     }
   }
 </script>
@@ -302,25 +290,15 @@
     <div class="theme-picker">
       <button
         class="icon-btn theme-btn"
-        onclick={() => (themeDropdownOpen = !themeDropdownOpen)}
-        title="Syntax theme"
-        class:open={themeDropdownOpen}
+        onclick={() => (showThemeModal = !showThemeModal)}
+        class:open={showThemeModal}
+        title="Select theme"
       >
         <Palette size={14} />
       </button>
 
-      {#if themeDropdownOpen}
-        <div class="dropdown theme-dropdown">
-          {#each getAvailableSyntaxThemes() as theme}
-            <button
-              class="dropdown-item"
-              class:active={theme === preferences.syntaxTheme}
-              onclick={() => handleThemeSelect(theme)}
-            >
-              {theme}
-            </button>
-          {/each}
-        </div>
+      {#if showThemeModal}
+        <ThemeSelectorModal onClose={() => (showThemeModal = false)} />
       {/if}
     </div>
   </div>
@@ -599,13 +577,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .theme-dropdown {
-    right: 0;
-    min-width: 210px;
-    max-height: 360px;
-    overflow-y: auto;
   }
 
   .dropdown-item {

@@ -11,9 +11,19 @@
 import {
   SYNTAX_THEMES,
   setSyntaxTheme,
+  setCustomSyntaxTheme,
   getTheme,
+  isLightTheme,
+  isCustomTheme,
+  registerCustomTheme,
+  clearCustomThemes,
+  getCustomThemeNames,
   type SyntaxThemeName,
 } from '../services/highlighter';
+import { getCustomThemes, readCustomTheme } from '../services/customThemes';
+
+// Re-export for convenience
+export { isLightTheme };
 import { createAdaptiveTheme, themeToCssVars } from '../theme';
 
 // =============================================================================
@@ -81,10 +91,24 @@ function applyAdaptiveTheme() {
 // =============================================================================
 
 /**
- * Get all available syntax themes.
+ * Theme entry for the theme picker (bundled or custom).
  */
-export function getAvailableSyntaxThemes(): readonly SyntaxThemeName[] {
-  return SYNTAX_THEMES;
+export interface ThemeEntry {
+  name: string;
+  isCustom: boolean;
+}
+
+/**
+ * Get all available syntax themes (bundled + custom), sorted alphabetically.
+ */
+export function getAvailableSyntaxThemes(): ThemeEntry[] {
+  const bundled: ThemeEntry[] = SYNTAX_THEMES.map((name) => ({ name, isCustom: false }));
+  const custom: ThemeEntry[] = getCustomThemeNames().map((name) => ({ name, isCustom: true }));
+
+  // Merge and sort alphabetically
+  return [...bundled, ...custom].sort((a, b) =>
+    a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+  );
 }
 
 // =============================================================================
@@ -141,34 +165,81 @@ export function loadSavedSize(): void {
 // =============================================================================
 
 /**
- * Select a syntax theme by name.
+ * Select a syntax theme by name (bundled or custom).
  */
-export async function selectSyntaxTheme(name: SyntaxThemeName): Promise<void> {
-  preferences.syntaxTheme = name;
-  await setSyntaxTheme(name);
+export async function selectSyntaxTheme(name: string): Promise<void> {
+  // Check if it's a custom theme
+  if (isCustomTheme(name)) {
+    // Load custom theme JSON from backend
+    const customThemes = await getCustomThemes();
+    const theme = customThemes.find((t) => t.name === name);
+    if (theme) {
+      const themeJson = await readCustomTheme(theme.path);
+      await setCustomSyntaxTheme(name, themeJson);
+    }
+  } else {
+    // Bundled theme
+    await setSyntaxTheme(name as SyntaxThemeName);
+  }
+
+  // Update state (cast to any since custom themes aren't in the type)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  preferences.syntaxTheme = name as any;
   localStorage.setItem(SYNTAX_THEME_STORAGE_KEY, name);
   preferences.syntaxThemeVersion++;
   applyAdaptiveTheme();
 }
 
 /**
- * Cycle to the next syntax theme.
+ * Cycle to the next syntax theme (bundled only for simplicity).
  */
 export async function cycleSyntaxTheme(): Promise<void> {
-  const currentIndex = SYNTAX_THEMES.indexOf(preferences.syntaxTheme);
-  const nextIndex = (currentIndex + 1) % SYNTAX_THEMES.length;
+  const currentIndex = SYNTAX_THEMES.indexOf(preferences.syntaxTheme as SyntaxThemeName);
+  const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % SYNTAX_THEMES.length : 0;
   await selectSyntaxTheme(SYNTAX_THEMES[nextIndex]);
 }
 
 /**
+ * Discover and register custom themes from the backend.
+ */
+export async function loadCustomThemes(): Promise<void> {
+  try {
+    clearCustomThemes();
+    const themes = await getCustomThemes();
+    for (const theme of themes) {
+      registerCustomTheme(theme.name, theme.is_light, theme.path);
+    }
+  } catch (e) {
+    // Custom themes are optional - don't fail if backend unavailable
+    console.warn('Failed to load custom themes:', e);
+  }
+}
+
+/**
  * Load saved syntax theme and apply it.
- * Also initializes the adaptive chrome theme.
+ * Also initializes the adaptive chrome theme and discovers custom themes.
  */
 export async function loadSavedSyntaxTheme(): Promise<void> {
+  // First, discover custom themes
+  await loadCustomThemes();
+
   const saved = localStorage.getItem(SYNTAX_THEME_STORAGE_KEY);
-  if (saved && SYNTAX_THEMES.includes(saved as SyntaxThemeName)) {
-    preferences.syntaxTheme = saved as SyntaxThemeName;
+
+  if (saved) {
+    // Check if it's a custom theme
+    if (isCustomTheme(saved)) {
+      try {
+        await selectSyntaxTheme(saved);
+        return;
+      } catch {
+        // Fall back to default if custom theme fails to load
+        console.warn(`Failed to load custom theme "${saved}", using default`);
+      }
+    } else if (SYNTAX_THEMES.includes(saved as SyntaxThemeName)) {
+      preferences.syntaxTheme = saved as SyntaxThemeName;
+    }
   }
+
   await setSyntaxTheme(preferences.syntaxTheme);
   applyAdaptiveTheme();
 }

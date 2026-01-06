@@ -45,13 +45,19 @@ export async function createCommit(
 
 /**
  * Get the full diff between two refs.
- * Returns all changed files with their content and alignments.
+ * If `useMergeBase` is true, diffs from the merge-base instead of base directly.
  */
-export async function getDiff(base: string, head: string, repoPath?: string): Promise<FileDiff[]> {
+export async function getDiff(
+  base: string,
+  head: string,
+  repoPath?: string,
+  useMergeBase?: boolean
+): Promise<FileDiff[]> {
   return invoke<FileDiff[]>('get_diff', {
     repoPath: repoPath ?? null,
     base,
     head,
+    useMergeBase: useMergeBase ?? false,
   });
 }
 

@@ -52,15 +52,17 @@ fn make_diff_id(repo_path: Option<&str>, base: &str, head: &str) -> Result<DiffI
 // =============================================================================
 
 /// Get the full diff between two refs.
-/// Returns all changed files with their content and alignments.
+///
+/// If `use_merge_base` is true, diffs from the merge-base instead of base directly.
 #[tauri::command]
 fn get_diff(
     repo_path: Option<String>,
     base: String,
     head: String,
+    use_merge_base: Option<bool>,
 ) -> Result<Vec<diff::FileDiff>, String> {
     let repo = open_repo_from_path(repo_path.as_deref())?;
-    diff::compute_diff(&repo, &base, &head).map_err(|e| e.0)
+    diff::compute_diff(&repo, &base, &head, use_merge_base.unwrap_or(false)).map_err(|e| e.0)
 }
 
 /// Get list of refs (branches, tags, special) with type info for autocomplete.

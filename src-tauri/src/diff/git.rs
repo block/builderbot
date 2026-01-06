@@ -395,8 +395,32 @@ struct Hunk {
 
 /// Compute the diff between two refs.
 ///
-/// Returns a list of FileDiff objects with full content and alignments.
-pub fn compute_diff(repo: &Repository, before_ref: &str, after_ref: &str) -> Result<Vec<FileDiff>> {
+/// If `use_merge_base` is true, diffs from the merge-base instead of `before_ref` directly.
+pub fn compute_diff(
+    repo: &Repository,
+    before_ref: &str,
+    after_ref: &str,
+    use_merge_base: bool,
+) -> Result<Vec<FileDiff>> {
+    let effective_before = if use_merge_base {
+        let head_for_merge = if after_ref == WORKDIR {
+            "HEAD"
+        } else {
+            after_ref
+        };
+        get_merge_base(repo, before_ref, head_for_merge).unwrap_or_else(|_| before_ref.to_string())
+    } else {
+        before_ref.to_string()
+    };
+
+    compute_diff_inner(repo, &effective_before, after_ref)
+}
+
+fn compute_diff_inner(
+    repo: &Repository,
+    before_ref: &str,
+    after_ref: &str,
+) -> Result<Vec<FileDiff>> {
     // Validate: WORKDIR can only be used as the "after" ref
     if before_ref == WORKDIR {
         return Err(GitError(

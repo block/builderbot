@@ -32,7 +32,7 @@ export const WORKDIR = 'WORKDIR';
 export const presetStore = $state({
   presets: [
     { base: 'HEAD', head: WORKDIR, label: 'Uncommitted' },
-    { base: 'main', head: WORKDIR, label: 'Branch Changes' },
+    { base: 'main', head: WORKDIR, label: 'Branch Changes', useMergeBase: true },
     { base: 'HEAD~1', head: 'HEAD', label: 'Last Commit' },
   ] as DiffSpec[],
 });

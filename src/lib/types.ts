@@ -90,6 +90,8 @@ export interface DiffSpec {
   base: string;
   head: string;
   label: string;
+  /** If true, use merge-base of base and head instead of base directly */
+  useMergeBase?: boolean;
 }
 
 /** A comment attached to a specific location in a file */

@@ -47,7 +47,8 @@
     await loadDiffs(
       diffSelection.spec.base,
       diffSelection.spec.head,
-      repoState.currentPath ?? undefined
+      repoState.currentPath ?? undefined,
+      diffSelection.spec.useMergeBase
     );
     await loadComments(diffSelection.spec.base, diffSelection.spec.head);
     sidebarRef?.setDiffs(diffState.diffs);
@@ -65,7 +66,8 @@
     await refreshDiffs(
       diffSelection.spec.base,
       diffSelection.spec.head,
-      repoState.currentPath ?? undefined
+      repoState.currentPath ?? undefined,
+      diffSelection.spec.useMergeBase
     );
     // Reload comments - they may have changed after a commit
     await loadComments(diffSelection.spec.base, diffSelection.spec.head);

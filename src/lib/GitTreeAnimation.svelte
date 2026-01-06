@@ -15,22 +15,22 @@
   const CONFIG = {
     // Timing
     commitInterval: 600, // ms between new commits
-    
+
     // Sizing
     circleRadius: 6,
     lineWidth: 2,
     laneSpacing: 28,
     commitSpacing: 44,
-    
+
     // Tree behavior
     maxDepth: 4, // maximum branch nesting depth (0 = main only)
-    branchProbability: 0.20, // chance to create a new branch
+    branchProbability: 0.2, // chance to create a new branch
     branchUpProbability: 0.25, // when branching, chance to go up instead of down
     minBranchLength: 2, // minimum commits before a branch can merge
     maxBranchLength: 6, // force merge after this many commits
     workOnBranchProbability: 0.6, // prefer working on branches over main
   };
-  
+
   // Calculate scroll speed to match commit rate
   const SCROLL_SPEED = (CONFIG.commitSpacing / CONFIG.commitInterval) * (1000 / 60) * 1.1;
 
@@ -85,22 +85,24 @@
 
   function initializeBranches() {
     // Start with just main (lane 0)
-    branches = [{
-      lane: 0,
-      active: true,
-      headCommitId: null,
-      commitCount: 0,
-      parentBranchLane: -1, // main has no parent
-      depth: 0,
-    }];
+    branches = [
+      {
+        lane: 0,
+        active: true,
+        headCommitId: null,
+        commitCount: 0,
+        parentBranchLane: -1, // main has no parent
+        depth: 0,
+      },
+    ];
   }
 
   function getActiveBranches(): Branch[] {
-    return branches.filter(b => b.active);
+    return branches.filter((b) => b.active);
   }
 
   function getBranchByLane(lane: number): Branch | undefined {
-    return branches.find(b => b.lane === lane);
+    return branches.find((b) => b.lane === lane);
   }
 
   function getLaneY(lane: number, height: number): number {
@@ -119,32 +121,38 @@
   function findAvailableLane(parentLane: number): number | null {
     // Find an available lane for a new branch
     // Stack discipline: only branch to adjacent lanes, prefer going down
-    const usedLanes = new Set(branches.filter(b => b.active).map(b => b.lane));
-    
+    const usedLanes = new Set(branches.filter((b) => b.active).map((b) => b.lane));
+
     // Usually go down (next lane below parent)
     const laneBelow = parentLane + 1;
     if (laneBelow <= CONFIG.maxDepth && !usedLanes.has(laneBelow)) {
       // Occasionally go up instead for visual interest
       const laneAbove = parentLane - 1;
-      if (laneAbove >= 0 && !usedLanes.has(laneAbove) && Math.random() < CONFIG.branchUpProbability) {
+      if (
+        laneAbove >= 0 &&
+        !usedLanes.has(laneAbove) &&
+        Math.random() < CONFIG.branchUpProbability
+      ) {
         return laneAbove;
       }
       return laneBelow;
     }
-    
+
     // If can't go down, try going up one lane
     const laneAbove = parentLane - 1;
     if (laneAbove >= 0 && !usedLanes.has(laneAbove)) {
       return laneAbove;
     }
-    
+
     return null;
   }
 
   function canBranchFrom(branch: Branch): boolean {
     // A branch can only spawn a new branch if it's a leaf (has no active children)
     const activeBranches = getActiveBranches();
-    const hasActiveChildren = activeBranches.some(other => other.parentBranchLane === branch.lane);
+    const hasActiveChildren = activeBranches.some(
+      (other) => other.parentBranchLane === branch.lane
+    );
     return !hasActiveChildren && branch.depth < CONFIG.maxDepth;
   }
 
@@ -152,7 +160,9 @@
     // A branch can only merge if it's a leaf (has no active children)
     if (branch.depth === 0) return false; // main can't merge
     const activeBranches = getActiveBranches();
-    const hasActiveChildren = activeBranches.some(other => other.parentBranchLane === branch.lane);
+    const hasActiveChildren = activeBranches.some(
+      (other) => other.parentBranchLane === branch.lane
+    );
     return !hasActiveChildren;
   }
 
@@ -173,7 +183,7 @@
         mergeParentLane = mergeParent.lane;
       }
     }
-    
+
     const commit: Commit = {
       id: nextCommitId++,
       lane,
@@ -186,23 +196,23 @@
       branchFromLane: options.branchFromLane ?? null,
     };
     commits.push(commit);
-    
+
     const branch = getBranchByLane(lane);
     if (branch) {
       branch.headCommitId = commit.id;
       branch.commitCount++;
     }
-    
+
     return commit;
   }
 
   function createBranch(sourceBranch: Branch): boolean {
     const newLane = findAvailableLane(sourceBranch.lane);
     if (newLane === null) return false;
-    
+
     const sourceHead = sourceBranch.headCommitId;
     if (sourceHead === null) return false;
-    
+
     // Create or reactivate branch at this lane
     let branch = getBranchByLane(newLane);
     if (!branch) {
@@ -221,44 +231,44 @@
       branch.parentBranchLane = sourceBranch.lane;
       branch.depth = sourceBranch.depth + 1;
     }
-    
+
     // First commit on new branch - connects back to source
     addCommit(newLane, null, {
       branchFromId: sourceHead,
       branchFromLane: sourceBranch.lane,
     });
-    
+
     return true;
   }
 
   function mergeBranch(branch: Branch): boolean {
     const parentBranch = getBranchByLane(branch.parentBranchLane);
     if (!parentBranch || !parentBranch.active) return false;
-    
+
     const branchHead = branch.headCommitId;
     const parentHead = parentBranch.headCommitId;
     if (branchHead === null) return false;
-    
+
     // Create merge commit on parent branch
     // It has two parents: the parent branch's head AND the merging branch's head
     addCommit(parentBranch.lane, parentHead, {
       mergeParentId: branchHead,
     });
-    
+
     // Deactivate the merged branch
     branch.active = false;
     branch.headCommitId = null;
     branch.commitCount = 0;
-    
+
     return true;
   }
 
   function generateNextCommit() {
     const activeBranches = getActiveBranches();
-    
+
     // Find all leaf branches (branches that can merge or branch)
-    const leafBranches = activeBranches.filter(b => canMerge(b) || canBranchFrom(b));
-    
+    const leafBranches = activeBranches.filter((b) => canMerge(b) || canBranchFrom(b));
+
     // Check for branches that must merge (hit max length)
     for (const branch of leafBranches) {
       if (canMerge(branch) && branch.commitCount >= CONFIG.maxBranchLength) {
@@ -268,15 +278,16 @@
         }
       }
     }
-    
+
     // Check for branches ready to merge (probabilistic)
     for (const branch of leafBranches) {
       if (canMerge(branch) && branch.commitCount >= CONFIG.minBranchLength) {
         // Higher merge probability as branch gets longer
-        const lengthFactor = (branch.commitCount - CONFIG.minBranchLength) / 
-                            (CONFIG.maxBranchLength - CONFIG.minBranchLength);
+        const lengthFactor =
+          (branch.commitCount - CONFIG.minBranchLength) /
+          (CONFIG.maxBranchLength - CONFIG.minBranchLength);
         const mergeProb = 0.15 + lengthFactor * 0.4; // 15% to 55%
-        
+
         if (Math.random() < mergeProb) {
           if (mergeBranch(branch)) {
             nextCommitX += CONFIG.commitSpacing;
@@ -285,21 +296,22 @@
         }
       }
     }
-    
+
     // Maybe create a new branch (from any leaf branch that can branch)
-    const branchableBranches = leafBranches.filter(b => canBranchFrom(b));
+    const branchableBranches = leafBranches.filter((b) => canBranchFrom(b));
     if (branchableBranches.length > 0 && Math.random() < CONFIG.branchProbability) {
-      const sourceBranch = branchableBranches[Math.floor(Math.random() * branchableBranches.length)];
+      const sourceBranch =
+        branchableBranches[Math.floor(Math.random() * branchableBranches.length)];
       if (createBranch(sourceBranch)) {
         nextCommitX += CONFIG.commitSpacing;
         return;
       }
     }
-    
+
     // Regular commit on an active branch
     // Any active branch can receive commits - pick one randomly with bias toward deeper branches
     const targetBranch = pickRandomBranch(activeBranches);
-    
+
     addCommit(targetBranch.lane, targetBranch.headCommitId);
     nextCommitX += CONFIG.commitSpacing;
   }
@@ -307,9 +319,9 @@
   function pickRandomBranch(activeBranches: Branch[]): Branch {
     // Weight branches by depth - deeper branches are more likely to get commits
     // This simulates "working on feature branches" while still allowing parent branches to progress
-    const weights = activeBranches.map(b => 1 + b.depth * CONFIG.workOnBranchProbability);
+    const weights = activeBranches.map((b) => 1 + b.depth * CONFIG.workOnBranchProbability);
     const totalWeight = weights.reduce((a, b) => a + b, 0);
-    
+
     let random = Math.random() * totalWeight;
     for (let i = 0; i < activeBranches.length; i++) {
       random -= weights[i];
@@ -323,7 +335,7 @@
   function pruneOldCommits() {
     // Before pruning, freeze parent positions for any commits that will lose their parent
     const cutoff = scrollOffset - CONFIG.circleRadius;
-    
+
     for (const commit of commits) {
       // Check if parent is about to be pruned
       if (commit.parentId !== null && commit.frozenParentX === undefined) {
@@ -332,7 +344,7 @@
           commit.frozenParentX = parent.x;
         }
       }
-      
+
       // Check if merge parent is about to be pruned
       if (commit.mergeParentId !== null && commit.frozenMergeParentX === undefined) {
         const mergeParent = getCommitById(commit.mergeParentId);
@@ -340,7 +352,7 @@
           commit.frozenMergeParentX = mergeParent.x;
         }
       }
-      
+
       // Check if branch source is about to be pruned
       if (commit.branchFromId !== null && commit.frozenBranchFromX === undefined) {
         const branchFrom = getCommitById(commit.branchFromId);
@@ -349,7 +361,7 @@
         }
       }
     }
-    
+
     // Now prune
     commits = commits.filter((c) => c.x > cutoff);
   }
@@ -363,10 +375,10 @@
     progress: number
   ) {
     if (progress <= 0) return;
-    
+
     ctx.beginPath();
     ctx.moveTo(fromX, fromY);
-    
+
     if (fromY === toY) {
       // Same lane - straight line
       const endX = fromX + (toX - fromX) * progress;
@@ -378,40 +390,40 @@
       const endY = fromY + (toY - fromY) * progress;
       ctx.bezierCurveTo(midX, fromY, midX, endY, endX, endY);
     }
-    
+
     ctx.stroke();
   }
 
   function draw(ctx: CanvasRenderingContext2D, width: number, height: number) {
     ctx.clearRect(0, 0, width, height);
-    
+
     // Update appearance animations
     for (const commit of commits) {
       if (commit.appearProgress < 1) {
         commit.appearProgress = Math.min(1, commit.appearProgress + 0.08);
       }
     }
-    
+
     // Draw connections first (behind circles)
     ctx.strokeStyle = strokeColor;
     ctx.lineWidth = CONFIG.lineWidth;
     ctx.lineCap = 'round';
     ctx.globalAlpha = 0.5;
-    
+
     for (const commit of commits) {
       const commitScreenX = commit.x - scrollOffset;
       const commitY = getLaneY(commit.lane, height);
-      
+
       // Skip if commit is off the right side
       if (commitScreenX > width + CONFIG.commitSpacing) continue;
-      
+
       const progress = Math.min(1, commit.appearProgress / 0.7);
-      
+
       // Draw primary parent connection (same lane continuation)
       if (commit.parentId !== null) {
         const parent = getCommitById(commit.parentId);
         let parentScreenX: number;
-        
+
         if (commit.frozenParentX !== undefined) {
           parentScreenX = commit.frozenParentX - scrollOffset;
         } else if (parent) {
@@ -419,16 +431,16 @@
         } else {
           parentScreenX = -CONFIG.commitSpacing;
         }
-        
+
         const parentY = parent ? getLaneY(parent.lane, height) : commitY;
         drawCurve(ctx, parentScreenX, parentY, commitScreenX, commitY, progress);
       }
-      
+
       // Draw merge parent connection (branch being merged in)
       if (commit.mergeParentId !== null && commit.mergeParentLane !== null) {
         const mergeParent = getCommitById(commit.mergeParentId);
         let mergeParentScreenX: number;
-        
+
         if (commit.frozenMergeParentX !== undefined) {
           mergeParentScreenX = commit.frozenMergeParentX - scrollOffset;
         } else if (mergeParent) {
@@ -436,16 +448,16 @@
         } else {
           mergeParentScreenX = -CONFIG.commitSpacing;
         }
-        
+
         const mergeParentY = getLaneY(commit.mergeParentLane, height);
         drawCurve(ctx, mergeParentScreenX, mergeParentY, commitScreenX, commitY, progress);
       }
-      
+
       // Draw branch-from connection (first commit on a new branch)
       if (commit.branchFromId !== null && commit.branchFromLane !== null) {
         const branchFrom = getCommitById(commit.branchFromId);
         let branchFromScreenX: number;
-        
+
         if (commit.frozenBranchFromX !== undefined) {
           branchFromScreenX = commit.frozenBranchFromX - scrollOffset;
         } else if (branchFrom) {
@@ -453,39 +465,39 @@
         } else {
           branchFromScreenX = -CONFIG.commitSpacing;
         }
-        
+
         const branchFromY = getLaneY(commit.branchFromLane, height);
         drawCurve(ctx, branchFromScreenX, branchFromY, commitScreenX, commitY, progress);
       }
     }
-    
+
     // Draw circles on top (hollow/outline style)
     ctx.lineWidth = CONFIG.lineWidth;
-    
+
     for (const commit of commits) {
       const screenX = commit.x - scrollOffset;
       const y = getLaneY(commit.lane, height);
-      
+
       // Skip if off screen
       if (screenX < -CONFIG.circleRadius || screenX > width + CONFIG.circleRadius) {
         continue;
       }
-      
+
       if (commit.appearProgress === 0) continue;
-      
+
       const scale = commit.appearProgress;
       const radius = CONFIG.circleRadius * scale;
-      
+
       ctx.globalAlpha = commit.appearProgress * 0.8;
       ctx.strokeStyle = strokeColor;
       ctx.fillStyle = bgColor;
-      
+
       ctx.beginPath();
       ctx.arc(screenX, y, radius, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     }
-    
+
     ctx.globalAlpha = 1;
   }
 
@@ -500,12 +512,12 @@
     nextCommitId = 0;
     scrollOffset = 0;
     initializeBranches();
-    
+
     // Start with initial commit positioned on screen
     nextCommitX = CONFIG.commitSpacing;
     addCommit(0, null);
     nextCommitX += CONFIG.commitSpacing;
-    
+
     lastCommitTime = performance.now();
 
     function animate(currentTime: number) {
@@ -528,17 +540,17 @@
         generateNextCommit();
         lastCommitTime = currentTime;
       }
-      
+
       // Scroll left to keep the newest commit at ~3/4 of the screen width
       const rightmostCommitX = nextCommitX - CONFIG.commitSpacing;
       const targetX = canvasWidth * 0.75; // commits should appear at 3/4 across
       const targetScrollOffset = Math.max(0, rightmostCommitX - targetX);
-      
+
       // Smooth constant scroll - speed is calculated to match commit rate
       if (scrollOffset < targetScrollOffset) {
         scrollOffset = Math.min(targetScrollOffset, scrollOffset + SCROLL_SPEED);
       }
-      
+
       // Prune old commits that have scrolled off
       pruneOldCommits();
 

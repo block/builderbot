@@ -237,75 +237,58 @@ pub fn create_commit(repo: &Repository, paths: &[String], message: &str) -> Resu
 ///
 /// Returns the merge-base SHA between base_ref and head_ref, which should be used
 /// as the base for PR diffs (to show only the PR's changes, not changes on the base branch).
-pub fn fetch_pr_branch(repo: &Repository, base_ref: &str, head_ref: &str) -> Result<String> {
+/// Fetch a PR and compute the merge-base for diffing.
+///
+/// Uses GitHub's PR refs (`refs/pull/{number}/head`) which works for both
+/// same-repo PRs and fork PRs.
+pub fn fetch_pr_branch(repo: &Repository, base_ref: &str, pr_number: u32) -> Result<String> {
     use std::process::Command;
 
     let workdir = repo
         .workdir()
         .ok_or_else(|| GitError("Bare repository".into()))?;
 
+    // The local ref we'll store the PR head at
+    let local_ref = format!("refs/pull/{}/head", pr_number);
     let origin_base = format!("origin/{}", base_ref);
 
     // Fast path: try to compute merge-base without fetching
-    // This works if both branches are already available locally
-    if let Ok(merge_base) = get_merge_base(repo, &origin_base, head_ref) {
+    // This works if the PR ref is already available locally
+    if let Ok(merge_base) = get_merge_base(repo, &origin_base, &local_ref) {
         log::info!(
             "Merge-base found without fetching: {} between {} and {}",
             &merge_base[..8.min(merge_base.len())],
             origin_base,
-            head_ref
+            local_ref
         );
         return Ok(merge_base);
     }
 
-    // Need to fetch - branches aren't available locally
+    // Need to fetch - PR ref isn't available locally
     log::info!(
-        "Merge-base not found locally, fetching branches for PR: {} -> {}",
-        base_ref,
-        head_ref
+        "Fetching PR #{} (base: {}) from origin",
+        pr_number,
+        base_ref
     );
 
-    // Fetch the head branch
-    if repo.find_branch(head_ref, git2::BranchType::Local).is_ok() {
-        // Branch exists, fetch to update it
-        log::info!("Branch '{}' exists locally, fetching updates", head_ref);
+    let remote_ref = format!("refs/pull/{}/head", pr_number);
+    let refspec = format!("{}:{}", remote_ref, local_ref);
 
-        let output = Command::new("git")
-            .args(["fetch", "origin", &format!("{}:{}", head_ref, head_ref)])
-            .current_dir(workdir)
-            .output()
-            .map_err(|e| GitError(format!("Failed to run git fetch: {}", e)))?;
+    let output = Command::new("git")
+        .args(["fetch", "origin", &refspec])
+        .current_dir(workdir)
+        .output()
+        .map_err(|e| GitError(format!("Failed to run git fetch: {}", e)))?;
 
-        if !output.status.success() {
-            // Fetch might fail if the branch is checked out, which is fine
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.contains("cannot be resolved to branch")
-                && !stderr.contains("refusing to fetch into branch")
-            {
-                log::warn!("git fetch warning: {}", stderr);
-            }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("couldn't find remote ref") {
+            return Err(GitError(format!(
+                "PR #{} not found on remote. It may have been closed or deleted.",
+                pr_number
+            )));
         }
-    } else {
-        // Branch doesn't exist locally, fetch and create it
-        log::info!("Fetching branch '{}' from origin", head_ref);
-
-        let output = Command::new("git")
-            .args(["fetch", "origin", &format!("{}:{}", head_ref, head_ref)])
-            .current_dir(workdir)
-            .output()
-            .map_err(|e| GitError(format!("Failed to run git fetch: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // If the remote branch doesn't exist, that's an error
-            if stderr.contains("couldn't find remote ref") {
-                return Err(GitError(format!(
-                    "Branch '{}' not found on remote. It may have been deleted.",
-                    head_ref
-                )));
-            }
-            return Err(GitError(format!("Failed to fetch branch: {}", stderr)));
-        }
+        return Err(GitError(format!("Failed to fetch PR: {}", stderr)));
     }
 
     // Also fetch the base branch to ensure we have the latest
@@ -315,11 +298,8 @@ pub fn fetch_pr_branch(repo: &Repository, base_ref: &str, head_ref: &str) -> Res
         .current_dir(workdir)
         .output();
 
-    // Compute merge-base between origin/base and head
-    // Use origin/base_ref to get the remote's version of the base branch,
-    // since the PR is based on the remote, not the local branch
-    let origin_base = format!("origin/{}", base_ref);
-    let merge_base = get_merge_base(repo, &origin_base, head_ref)?;
+    // Compute merge-base between origin/base and the PR head
+    let merge_base = get_merge_base(repo, &origin_base, &local_ref)?;
     Ok(merge_base)
 }
 

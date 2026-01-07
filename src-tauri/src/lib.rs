@@ -152,10 +152,10 @@ async fn list_pull_requests(
 fn fetch_pr_branch(
     repo_path: Option<String>,
     base_ref: String,
-    head_ref: String,
+    pr_number: u32,
 ) -> Result<String, String> {
     let repo = open_repo_from_path(repo_path.as_deref())?;
-    diff::fetch_pr_branch(&repo, &base_ref, &head_ref).map_err(|e| e.0)
+    diff::fetch_pr_branch(&repo, &base_ref, pr_number).map_err(|e| e.0)
 }
 
 // =============================================================================

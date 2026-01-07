@@ -65,16 +65,18 @@
   }
 
   async function selectPR(pr: PullRequest) {
-    // Fetch the branch first to ensure it's available locally
+    // Fetch the PR using GitHub's PR refs (works for both same-repo and fork PRs)
     // This also returns the merge-base SHA to use for the diff
     fetching = true;
     error = null;
 
     try {
-      const mergeBase = await fetchPRBranch(pr.base_ref, pr.head_ref, repoPath ?? undefined);
+      const mergeBase = await fetchPRBranch(pr.base_ref, pr.number, repoPath ?? undefined);
       // Use merge-base as the base ref so we show only the PR's changes,
       // not changes that happened on the base branch since the PR was created
-      onSubmit(mergeBase, pr.head_ref, `PR #${pr.number}`);
+      // Use the PR ref as head (refs/pull/{number}/head is fetched locally)
+      const prRef = `refs/pull/${pr.number}/head`;
+      onSubmit(mergeBase, prRef, `PR #${pr.number}`);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       fetching = false;

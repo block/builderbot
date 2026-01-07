@@ -113,12 +113,12 @@ export async function listPullRequests(
  */
 export async function fetchPRBranch(
   baseRef: string,
-  headRef: string,
+  prNumber: number,
   repoPath?: string
 ): Promise<string> {
   return invoke<string>('fetch_pr_branch', {
     repoPath: repoPath ?? null,
     baseRef,
-    headRef,
+    prNumber,
   });
 }

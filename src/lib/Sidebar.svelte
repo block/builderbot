@@ -1,7 +1,7 @@
 <!--
-  Sidebar.svelte - File list with review workflow
+  Sidebar.svelte - File tree with review workflow
   
-  Shows files changed in the current diff (base..head).
+  Shows files changed in the current diff (base..head) as a collapsible tree.
   Files needing review appear above the divider.
   Reviewed files appear below the divider.
   Review state comes from the shared commentsState store (single source of truth).
@@ -18,6 +18,9 @@
     CircleX,
     Check,
     RotateCcw,
+    ChevronRight,
+    ChevronDown,
+    Folder,
   } from 'lucide-svelte';
   import { commentsState, toggleReviewed as toggleReviewedAction } from './stores/comments.svelte';
   import type { FileDiff } from './types';
@@ -28,6 +31,14 @@
     status: 'added' | 'deleted' | 'modified' | 'renamed';
     isReviewed: boolean;
     commentCount: number;
+  }
+
+  interface TreeNode {
+    name: string;
+    path: string;
+    isDir: boolean;
+    children: TreeNode[];
+    file?: FileEntry;
   }
 
   interface Props {
@@ -45,6 +56,7 @@
 
   let diffs: FileDiff[] = $state([]);
   let loading = $state(true);
+  let collapsedDirs = $state(new Set<string>());
 
   // Is this viewing the working tree?
   let isWorkingTree = $derived(diffHead === '@');
@@ -88,6 +100,79 @@
   }
 
   /**
+   * Build a tree structure from a flat list of files.
+   */
+  function buildTree(files: FileEntry[]): TreeNode[] {
+    const root: TreeNode[] = [];
+
+    for (const file of files) {
+      const parts = file.path.split('/');
+      let currentLevel = root;
+
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        const isLast = i === parts.length - 1;
+        const pathSoFar = parts.slice(0, i + 1).join('/');
+
+        let existing = currentLevel.find((n) => n.name === part);
+
+        if (!existing) {
+          existing = {
+            name: part,
+            path: pathSoFar,
+            isDir: !isLast,
+            children: [],
+            file: isLast ? file : undefined,
+          };
+          currentLevel.push(existing);
+        }
+
+        if (!isLast) {
+          currentLevel = existing.children;
+        }
+      }
+    }
+
+    // Sort: directories first, then alphabetically
+    function sortTree(nodes: TreeNode[]): TreeNode[] {
+      nodes.sort((a, b) => {
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      for (const node of nodes) {
+        if (node.children.length > 0) {
+          sortTree(node.children);
+        }
+      }
+      return nodes;
+    }
+
+    return sortTree(root);
+  }
+
+  /**
+   * Flatten single-child directory chains into combined paths.
+   * e.g., src/lib/components becomes a single "src/lib/components" node if each has one child.
+   */
+  function compactTree(nodes: TreeNode[]): TreeNode[] {
+    return nodes.map((node) => {
+      if (node.isDir && node.children.length === 1 && node.children[0].isDir) {
+        // Merge with single child
+        const child = compactTree(node.children)[0];
+        return {
+          ...child,
+          name: node.name + '/' + child.name,
+          path: child.path,
+        };
+      }
+      return {
+        ...node,
+        children: node.isDir ? compactTree(node.children) : [],
+      };
+    });
+  }
+
+  /**
    * Set diffs from external source (App.svelte).
    */
   export function setDiffs(newDiffs: FileDiff[]) {
@@ -100,6 +185,10 @@
   let needsReview = $derived(files.filter((f) => !f.isReviewed));
   let reviewed = $derived(files.filter((f) => f.isReviewed));
 
+  // Build trees for each section
+  let needsReviewTree = $derived(compactTree(buildTree(needsReview)));
+  let reviewedTree = $derived(compactTree(buildTree(reviewed)));
+
   function selectFile(file: FileEntry) {
     onFileSelect?.(file.path);
   }
@@ -109,16 +198,18 @@
     await toggleReviewedAction(file.path);
   }
 
-  function getFileName(path: string): string {
-    return path.split('/').pop() || path;
+  function toggleDir(path: string) {
+    const newSet = new Set(collapsedDirs);
+    if (newSet.has(path)) {
+      newSet.delete(path);
+    } else {
+      newSet.add(path);
+    }
+    collapsedDirs = newSet;
   }
 
-  function getFileDir(path: string): string {
-    const parts = path.split('/');
-    if (parts.length > 1) {
-      return parts.slice(0, -1).join('/') + '/';
-    }
-    return '';
+  function isCollapsed(path: string): boolean {
+    return collapsedDirs.has(path);
   }
 
   /**
@@ -149,6 +240,96 @@
   });
 </script>
 
+{#snippet fileIcon(file: FileEntry, showReviewedSection: boolean)}
+  <span
+    class="status-icon"
+    onclick={(e) => toggleReviewed(e, file)}
+    onkeydown={(e) => e.key === 'Enter' && toggleReviewed(e, file)}
+    role="button"
+    tabindex="0"
+    title={showReviewedSection ? 'Mark as needs review' : 'Mark as reviewed'}
+  >
+    <!-- Default icon (hidden on hover) -->
+    <span class="icon-default">
+      {#if file.status === 'added'}
+        {#if isWorkingTree}
+          <CircleFadingPlus size={16} />
+        {:else}
+          <CirclePlus size={16} />
+        {/if}
+      {:else if file.status === 'deleted'}
+        {#if isWorkingTree}
+          <CircleX size={16} />
+        {:else}
+          <CircleMinus size={16} />
+        {/if}
+      {:else if isWorkingTree}
+        <CircleFadingArrowUp size={16} />
+      {:else}
+        <CircleArrowUp size={16} />
+      {/if}
+    </span>
+    <!-- Hover icon -->
+    <span class="icon-hover" class:icon-hover-unreview={showReviewedSection}>
+      {#if showReviewedSection}
+        <RotateCcw size={16} />
+      {:else}
+        <Check size={16} />
+      {/if}
+    </span>
+  </span>
+{/snippet}
+
+{#snippet treeNodes(nodes: TreeNode[], depth: number, showReviewedSection: boolean)}
+  {#each nodes as node (node.path)}
+    {#if node.isDir}
+      <!-- Directory node -->
+      <li class="tree-item-wrapper">
+        <button
+          class="tree-item dir-item"
+          style="padding-left: {8 + depth * 12}px"
+          onclick={() => toggleDir(node.path)}
+        >
+          <span class="dir-chevron">
+            {#if isCollapsed(node.path)}
+              <ChevronRight size={14} />
+            {:else}
+              <ChevronDown size={14} />
+            {/if}
+          </span>
+          <span class="dir-icon">
+            <Folder size={14} />
+          </span>
+          <span class="dir-name">{node.name}</span>
+        </button>
+        {#if !isCollapsed(node.path)}
+          <ul class="tree-children">
+            {@render treeNodes(node.children, depth + 1, showReviewedSection)}
+          </ul>
+        {/if}
+      </li>
+    {:else if node.file}
+      <!-- File node -->
+      <li class="tree-item-wrapper">
+        <button
+          class="tree-item file-item"
+          class:selected={selectedFile === node.file.path}
+          style="padding-left: {8 + depth * 12}px"
+          onclick={() => selectFile(node.file!)}
+        >
+          {@render fileIcon(node.file, showReviewedSection)}
+          <span class="file-name">{node.name}</span>
+          {#if node.file.commentCount > 0}
+            <span class="comment-indicator">
+              <MessageSquare size={12} />
+            </span>
+          {/if}
+        </button>
+      </li>
+    {/if}
+  {/each}
+{/snippet}
+
 <div class="sidebar-content">
   {#if loading}
     <div class="loading">Loading...</div>
@@ -165,64 +346,8 @@
     <div class="file-list">
       <!-- Needs Review section -->
       {#if needsReview.length > 0}
-        <ul class="file-section">
-          {#each needsReview as file (file.path)}
-            <li class="file-item-wrapper">
-              <button
-                class="file-item"
-                class:selected={selectedFile === file.path}
-                onclick={() => selectFile(file)}
-              >
-                <!-- Status icon - clickable to toggle reviewed -->
-                <span
-                  class="status-icon"
-                  onclick={(e) => toggleReviewed(e, file)}
-                  onkeydown={(e) => e.key === 'Enter' && toggleReviewed(e, file)}
-                  role="button"
-                  tabindex="0"
-                  title="Mark as reviewed"
-                >
-                  <!-- Default icon (hidden on hover) -->
-                  <span class="icon-default">
-                    {#if file.status === 'added'}
-                      {#if isWorkingTree}
-                        <CircleFadingPlus size={16} />
-                      {:else}
-                        <CirclePlus size={16} />
-                      {/if}
-                    {:else if file.status === 'deleted'}
-                      {#if isWorkingTree}
-                        <CircleX size={16} />
-                      {:else}
-                        <CircleMinus size={16} />
-                      {/if}
-                    {:else if isWorkingTree}
-                      <CircleFadingArrowUp size={16} />
-                    {:else}
-                      <CircleArrowUp size={16} />
-                    {/if}
-                  </span>
-                  <!-- Hover icon (checkmark for "mark as reviewed") -->
-                  <span class="icon-hover">
-                    <Check size={16} />
-                  </span>
-                </span>
-
-                <!-- File path -->
-                <span class="file-path">
-                  <span class="file-dir">{getFileDir(file.path)}</span>
-                  <span class="file-name">{getFileName(file.path)}</span>
-                </span>
-
-                <!-- Comment indicator -->
-                {#if file.commentCount > 0}
-                  <span class="comment-indicator">
-                    <MessageSquare size={12} />
-                  </span>
-                {/if}
-              </button>
-            </li>
-          {/each}
+        <ul class="tree-section">
+          {@render treeNodes(needsReviewTree, 0, false)}
         </ul>
       {/if}
 
@@ -235,63 +360,8 @@
 
       <!-- Reviewed section -->
       {#if reviewed.length > 0}
-        <ul class="file-section reviewed-section">
-          {#each reviewed as file (file.path)}
-            <li class="file-item-wrapper">
-              <button
-                class="file-item"
-                class:selected={selectedFile === file.path}
-                onclick={() => selectFile(file)}
-              >
-                <!-- Status icon - clickable to toggle reviewed -->
-                <span
-                  class="status-icon"
-                  onclick={(e) => toggleReviewed(e, file)}
-                  onkeydown={(e) => e.key === 'Enter' && toggleReviewed(e, file)}
-                  role="button"
-                  tabindex="0"
-                  title="Mark as needs review"
-                >
-                  <!-- Default icon (hidden on hover) -->
-                  <span class="icon-default">
-                    {#if file.status === 'added'}
-                      {#if isWorkingTree}
-                        <CircleFadingPlus size={16} />
-                      {:else}
-                        <CirclePlus size={16} />
-                      {/if}
-                    {:else if file.status === 'deleted'}
-                      {#if isWorkingTree}
-                        <CircleX size={16} />
-                      {:else}
-                        <CircleMinus size={16} />
-                      {/if}
-                    {:else if isWorkingTree}
-                      <CircleFadingArrowUp size={16} />
-                    {:else}
-                      <CircleArrowUp size={16} />
-                    {/if}
-                  </span>
-                  <!-- Hover icon (rotate for "unmark as reviewed") -->
-                  <span class="icon-hover icon-hover-unreview">
-                    <RotateCcw size={16} />
-                  </span>
-                </span>
-
-                <span class="file-path">
-                  <span class="file-dir">{getFileDir(file.path)}</span>
-                  <span class="file-name">{getFileName(file.path)}</span>
-                </span>
-
-                <!-- Comment indicator -->
-                {#if file.commentCount > 0}
-                  <span class="comment-indicator">
-                    <MessageSquare size={12} />
-                  </span>
-                {/if}
-              </button>
-            </li>
-          {/each}
+        <ul class="tree-section reviewed-section">
+          {@render treeNodes(reviewedTree, 0, true)}
         </ul>
       {/if}
     </div>
@@ -328,7 +398,13 @@
     padding: 8px 0;
   }
 
-  .file-section {
+  .tree-section {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .tree-children {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -362,18 +438,18 @@
     opacity: 0.7;
   }
 
-  .file-item-wrapper {
+  .tree-item-wrapper {
     margin: 0;
     padding: 0;
   }
 
-  .file-item {
+  .tree-item {
     display: flex;
     align-items: center;
     width: 100%;
     padding: 3px 8px;
     font-size: var(--size-md);
-    gap: 6px;
+    gap: 4px;
     cursor: pointer;
     position: relative;
     border-radius: 6px;
@@ -388,17 +464,58 @@
       box-shadow 0.1s;
   }
 
-  .file-item:hover {
+  .tree-item:hover {
     background-color: var(--bg-hover);
   }
 
-  .file-item.selected {
+  .tree-item.selected {
     background-color: var(--bg-primary);
   }
 
-  .file-item:focus-visible {
+  .tree-item:focus-visible {
     outline: 2px solid var(--text-accent);
     outline-offset: -2px;
+  }
+
+  /* Directory styling */
+  .dir-item {
+    color: var(--text-muted);
+  }
+
+  .dir-chevron {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 14px;
+  }
+
+  .dir-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+
+  .dir-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* File styling */
+  .file-item {
+    gap: 6px;
+  }
+
+  .file-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    color: var(--text-primary);
   }
 
   /* Status icon as interactive span */
@@ -450,26 +567,8 @@
   }
 
   /* Unreview hover icon uses muted color instead of green */
-  .status-icon:hover .icon-hover-unreview {
+  .icon-hover-unreview {
     color: var(--text-muted);
-  }
-
-  .file-path {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    direction: rtl;
-    text-align: left;
-  }
-
-  .file-dir {
-    color: var(--text-muted);
-  }
-
-  .file-name {
-    color: var(--text-primary);
   }
 
   /* Comment indicator - must not shrink, file path will truncate instead */

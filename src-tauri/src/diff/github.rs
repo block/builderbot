@@ -120,20 +120,51 @@ pub fn invalidate_cache(repo: &GitHubRepo) {
 // GitHub CLI Integration
 // =============================================================================
 
+/// Common paths where `gh` might be installed.
+/// GUI apps on macOS don't inherit the shell's PATH, so we check these explicitly.
+const GH_SEARCH_PATHS: &[&str] = &[
+    "/opt/homebrew/bin",              // Homebrew on Apple Silicon
+    "/usr/local/bin",                 // Homebrew on Intel Mac, common Linux location
+    "/usr/bin",                       // System binaries
+    "/home/linuxbrew/.linuxbrew/bin", // Linuxbrew
+];
+
+/// Find the `gh` CLI executable.
+///
+/// First tries the bare command (works if already in PATH), then checks common locations.
+fn find_gh_command() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    // First, check if `gh` is directly available (e.g., already in PATH)
+    if let Ok(output) = Command::new("gh").arg("--version").output() {
+        if output.status.success() {
+            return Some(PathBuf::from("gh"));
+        }
+    }
+
+    // Check common installation paths
+    for dir in GH_SEARCH_PATHS {
+        let path = PathBuf::from(dir).join("gh");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
 /// Get the GitHub token from `gh auth token`.
 ///
 /// Returns the token if authenticated, or an error with setup instructions.
 pub fn get_github_token() -> Result<String> {
-    let output = Command::new("gh")
+    let gh_path = find_gh_command().ok_or_else(|| {
+        GitHubError("GitHub CLI not found. Install it with: brew install gh".to_string())
+    })?;
+
+    let output = Command::new(&gh_path)
         .args(["auth", "token"])
         .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                GitHubError("GitHub CLI not found. Install it with: brew install gh".to_string())
-            } else {
-                GitHubError(format!("Failed to run gh: {}", e))
-            }
-        })?;
+        .map_err(|e| GitHubError(format!("Failed to run gh: {}", e)))?;
 
     if output.status.success() {
         let token = String::from_utf8_lossy(&output.stdout).trim().to_string();

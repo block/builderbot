@@ -21,6 +21,8 @@
     ChevronRight,
     ChevronDown,
     Folder,
+    List,
+    FolderTree,
   } from 'lucide-svelte';
   import { commentsState, toggleReviewed as toggleReviewedAction } from './stores/comments.svelte';
   import type { FileDiff } from './types';
@@ -57,6 +59,7 @@
   let diffs: FileDiff[] = $state([]);
   let loading = $state(true);
   let collapsedDirs = $state(new Set<string>());
+  let treeView = $state(true);
 
   // Is this viewing the working tree?
   let isWorkingTree = $derived(diffHead === '@');
@@ -330,6 +333,27 @@
   {/each}
 {/snippet}
 
+{#snippet flatFileList(fileList: FileEntry[], showReviewedSection: boolean)}
+  {#each fileList as file (file.path)}
+    <li class="tree-item-wrapper">
+      <button
+        class="tree-item file-item"
+        class:selected={selectedFile === file.path}
+        style="padding-left: 8px"
+        onclick={() => selectFile(file)}
+      >
+        {@render fileIcon(file, showReviewedSection)}
+        <span class="file-name">{file.path}</span>
+        {#if file.commentCount > 0}
+          <span class="comment-indicator">
+            <MessageSquare size={12} />
+          </span>
+        {/if}
+      </button>
+    </li>
+  {/each}
+{/snippet}
+
 <div class="sidebar-content">
   {#if loading}
     <div class="loading">Loading...</div>
@@ -346,22 +370,59 @@
     <div class="file-list">
       <!-- Needs Review section -->
       {#if needsReview.length > 0}
+        <div class="section-header">
+          <button
+            class="view-toggle"
+            onclick={() => (treeView = !treeView)}
+            title={treeView ? 'Switch to flat list' : 'Switch to tree view'}
+          >
+            {#if treeView}
+              <List size={12} />
+            {:else}
+              <FolderTree size={12} />
+            {/if}
+          </button>
+          <div class="section-divider">
+            <span class="divider-label">CHANGED ({needsReview.length})</span>
+          </div>
+        </div>
         <ul class="tree-section">
-          {@render treeNodes(needsReviewTree, 0, false)}
+          {#if treeView}
+            {@render treeNodes(needsReviewTree, 0, false)}
+          {:else}
+            {@render flatFileList(needsReview, false)}
+          {/if}
         </ul>
       {/if}
 
       <!-- Divider with REVIEWED label -->
       {#if reviewed.length > 0}
-        <div class="section-divider">
-          <span class="divider-label">REVIEWED</span>
+        <div class="section-header">
+          <button
+            class="view-toggle"
+            onclick={() => (treeView = !treeView)}
+            title={treeView ? 'Switch to flat list' : 'Switch to tree view'}
+          >
+            {#if treeView}
+              <List size={12} />
+            {:else}
+              <FolderTree size={12} />
+            {/if}
+          </button>
+          <div class="section-divider">
+            <span class="divider-label">REVIEWED ({reviewed.length})</span>
+          </div>
         </div>
       {/if}
 
       <!-- Reviewed section -->
       {#if reviewed.length > 0}
         <ul class="tree-section reviewed-section">
-          {@render treeNodes(reviewedTree, 0, true)}
+          {#if treeView}
+            {@render treeNodes(reviewedTree, 0, true)}
+          {:else}
+            {@render flatFileList(reviewed, true)}
+          {/if}
         </ul>
       {/if}
     </div>
@@ -392,6 +453,31 @@
     margin-top: 4px !important;
   }
 
+  .view-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    background: none;
+    border: none;
+    border-radius: 3px;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      color 0.1s;
+  }
+
+  .view-toggle:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-muted);
+  }
+
+  .view-toggle:focus-visible {
+    outline: 2px solid var(--text-accent);
+    outline-offset: -2px;
+  }
+
   .file-list {
     flex: 1;
     overflow-y: auto;
@@ -411,10 +497,17 @@
   }
 
   /* Divider with REVIEWED label */
-  .section-divider {
+  .section-header {
     display: flex;
     align-items: center;
     margin: 8px 12px;
+    gap: 6px;
+  }
+
+  .section-divider {
+    display: flex;
+    align-items: center;
+    flex: 1;
     gap: 8px;
   }
 

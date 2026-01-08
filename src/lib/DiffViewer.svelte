@@ -507,6 +507,9 @@
     function animateUpdate() {
       redrawConnectors();
       updateToolbarPosition();
+      updateCommentEditorPosition();
+      updateLineSelectionToolbar();
+      updateLineCommentEditorPosition();
 
       if (performance.now() - startTime < PANEL_TRANSITION_MS) {
         rafId = requestAnimationFrame(animateUpdate);

@@ -41,6 +41,16 @@ pub struct GitRef {
     pub ref_type: RefType,
 }
 
+/// Result of fetching a PR branch.
+/// Contains the SHAs needed to view the PR diff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PRFetchResult {
+    /// The merge-base SHA (use as diff base to show only PR changes)
+    pub merge_base: String,
+    /// The PR head commit SHA
+    pub head_sha: String,
+}
+
 /// The type of a git reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -241,7 +251,10 @@ pub fn create_commit(repo: &Repository, paths: &[String], message: &str) -> Resu
 ///
 /// Uses GitHub's PR refs (`refs/pull/{number}/head`) which works for both
 /// same-repo PRs and fork PRs.
-pub fn fetch_pr_branch(repo: &Repository, base_ref: &str, pr_number: u32) -> Result<String> {
+///
+/// Returns both the merge-base SHA and the PR head SHA, so the frontend
+/// can use stable SHAs for the diff (avoiding ref resolution issues).
+pub fn fetch_pr_branch(repo: &Repository, base_ref: &str, pr_number: u32) -> Result<PRFetchResult> {
     use std::process::Command;
 
     let workdir = repo
@@ -252,16 +265,28 @@ pub fn fetch_pr_branch(repo: &Repository, base_ref: &str, pr_number: u32) -> Res
     let local_ref = format!("refs/pull/{}/head", pr_number);
     let origin_base = format!("origin/{}", base_ref);
 
+    // Helper to resolve a ref to its full SHA
+    let resolve_to_sha = |ref_str: &str| -> Result<String> {
+        let obj = repo
+            .revparse_single(ref_str)
+            .map_err(|e| GitError(format!("Cannot resolve '{}': {}", ref_str, e)))?;
+        Ok(obj.id().to_string())
+    };
+
     // Fast path: try to compute merge-base without fetching
     // This works if the PR ref is already available locally
     if let Ok(merge_base) = get_merge_base(repo, &origin_base, &local_ref) {
+        let head_sha = resolve_to_sha(&local_ref)?;
         log::info!(
             "Merge-base found without fetching: {} between {} and {}",
             &merge_base[..8.min(merge_base.len())],
             origin_base,
             local_ref
         );
-        return Ok(merge_base);
+        return Ok(PRFetchResult {
+            merge_base,
+            head_sha,
+        });
     }
 
     // Need to fetch - PR ref isn't available locally
@@ -300,7 +325,12 @@ pub fn fetch_pr_branch(repo: &Repository, base_ref: &str, pr_number: u32) -> Res
 
     // Compute merge-base between origin/base and the PR head
     let merge_base = get_merge_base(repo, &origin_base, &local_ref)?;
-    Ok(merge_base)
+    let head_sha = resolve_to_sha(&local_ref)?;
+
+    Ok(PRFetchResult {
+        merge_base,
+        head_sha,
+    })
 }
 
 /// Compute the merge-base between two refs.

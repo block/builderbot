@@ -4,8 +4,8 @@ mod themes;
 mod watcher;
 
 use diff::{
-    Comment, DiffId, Edit, GitHubAuthStatus, GitRef, NewComment, NewEdit, PullRequest, RepoInfo,
-    Review,
+    Comment, DiffId, Edit, GitHubAuthStatus, GitRef, NewComment, NewEdit, PRFetchResult,
+    PullRequest, RepoInfo, Review,
 };
 use refresh::RefreshController;
 use std::path::PathBuf;
@@ -26,10 +26,18 @@ fn open_repo_from_path(repo_path: Option<&str>) -> Result<git2::Repository, Stri
 
 /// Resolve a ref to a full SHA for use as a stable storage key.
 /// WORKDIR is kept as-is (represents working tree).
+/// Full SHAs (40 hex chars) are kept as-is - they're already stable.
 /// All other refs are resolved to their full SHA.
 fn resolve_for_storage(repo: &git2::Repository, ref_str: &str) -> Result<String, String> {
     if ref_str == diff::WORKDIR {
         return Ok(diff::WORKDIR.to_string());
+    }
+
+    // If it's already a full SHA, use it directly.
+    // This handles cases where the SHA might be from a fetched PR ref
+    // that isn't reachable from local branches.
+    if is_full_sha(ref_str) {
+        return Ok(ref_str.to_string());
     }
 
     let obj = repo
@@ -37,6 +45,11 @@ fn resolve_for_storage(repo: &git2::Repository, ref_str: &str) -> Result<String,
         .map_err(|e| format!("Cannot resolve '{}': {}", ref_str, e))?;
 
     Ok(obj.id().to_string())
+}
+
+/// Check if a string is a full 40-character SHA.
+fn is_full_sha(s: &str) -> bool {
+    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Create a DiffId with resolved SHAs for stable storage.
@@ -147,13 +160,13 @@ async fn list_pull_requests(
 /// Fetch a PR branch from the remote and set up locally.
 ///
 /// This is idempotent - if the branch already exists, it will be updated.
-/// Returns the merge-base SHA to use as the base for the PR diff.
+/// Returns both the merge-base SHA and head SHA for stable diff identification.
 #[tauri::command]
 fn fetch_pr_branch(
     repo_path: Option<String>,
     base_ref: String,
     pr_number: u32,
-) -> Result<String, String> {
+) -> Result<PRFetchResult, String> {
     let repo = open_repo_from_path(repo_path.as_deref())?;
     diff::fetch_pr_branch(&repo, &base_ref, pr_number).map_err(|e| e.0)
 }

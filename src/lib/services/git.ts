@@ -1,5 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { RepoInfo, GitRef, FileDiff, PullRequest, GitHubAuthStatus } from '../types';
+import type {
+  RepoInfo,
+  GitRef,
+  FileDiff,
+  PullRequest,
+  GitHubAuthStatus,
+  PRFetchResult,
+} from '../types';
 
 // =============================================================================
 // Repository Info
@@ -109,14 +116,14 @@ export async function listPullRequests(
 /**
  * Fetch a PR branch from the remote and set up locally.
  * This is idempotent - if the branch already exists, it will be updated.
- * Returns the merge-base SHA to use as the base for the PR diff.
+ * Returns both the merge-base SHA and head SHA for stable diff identification.
  */
 export async function fetchPRBranch(
   baseRef: string,
   prNumber: number,
   repoPath?: string
-): Promise<string> {
-  return invoke<string>('fetch_pr_branch', {
+): Promise<PRFetchResult> {
+  return invoke<PRFetchResult>('fetch_pr_branch', {
     repoPath: repoPath ?? null,
     baseRef,
     prNumber,

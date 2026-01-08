@@ -75,6 +75,14 @@ export interface GitHubAuthStatus {
   setup_hint: string | null;
 }
 
+/** Result of fetching a PR branch */
+export interface PRFetchResult {
+  /** The merge-base SHA (use as diff base to show only PR changes) */
+  merge_base: string;
+  /** The PR head commit SHA */
+  head_sha: string;
+}
+
 // =============================================================================
 // Review types
 // =============================================================================

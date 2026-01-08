@@ -66,17 +66,16 @@
 
   async function selectPR(pr: PullRequest) {
     // Fetch the PR using GitHub's PR refs (works for both same-repo and fork PRs)
-    // This also returns the merge-base SHA to use for the diff
+    // This returns both the merge-base SHA and head SHA for stable identification
     fetching = true;
     error = null;
 
     try {
-      const mergeBase = await fetchPRBranch(pr.base_ref, pr.number, repoPath ?? undefined);
+      const result = await fetchPRBranch(pr.base_ref, pr.number, repoPath ?? undefined);
       // Use merge-base as the base ref so we show only the PR's changes,
       // not changes that happened on the base branch since the PR was created
-      // Use the PR ref as head (refs/pull/{number}/head is fetched locally)
-      const prRef = `refs/pull/${pr.number}/head`;
-      onSubmit(mergeBase, prRef, `PR #${pr.number}`);
+      // Use the head SHA directly (not the ref) for stable review storage
+      onSubmit(result.merge_base, result.head_sha, `PR #${pr.number}`);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       fetching = false;

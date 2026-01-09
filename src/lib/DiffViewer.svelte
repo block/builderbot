@@ -45,6 +45,7 @@
   } from './diffUtils';
   import { setupKeyboardNav } from './diffKeyboard';
   import { WORKDIR } from './stores/diffSelection.svelte';
+  import { diffState, clearScrollTarget } from './stores/diffState.svelte';
   import CommentEditor from './CommentEditor.svelte';
   import Scrollbar from './Scrollbar.svelte';
 
@@ -181,6 +182,11 @@
   let isDeletedFile = $derived(diff !== null && diff.after === null);
   let isTwoPaneMode = $derived(!isNewFile && !isDeletedFile);
   let isBinary = $derived(diff !== null && isBinaryDiff(diff));
+
+  // Check if alignment loading is complete
+  let alignmentsFullyLoaded = $derived(
+    diff !== null && activeAlignmentCount >= diff.alignments.length
+  );
 
   // Discard is only available when viewing the working tree
   let canDiscard = $derived(diffHead === WORKDIR);
@@ -1204,6 +1210,19 @@
         connectorRenderer = null;
       }
     };
+  });
+
+  // Handle external scroll target requests (e.g., from sidebar comment clicks)
+  $effect(() => {
+    const targetLine = diffState.scrollTargetLine;
+    // Wait until alignments are fully loaded before scrolling
+    if (targetLine !== null && afterPane && diff && alignmentsFullyLoaded) {
+      // Use requestAnimationFrame to ensure DOM is painted after alignment load
+      requestAnimationFrame(() => {
+        scrollToLine(targetLine);
+        clearScrollTarget();
+      });
+    }
   });
 </script>
 

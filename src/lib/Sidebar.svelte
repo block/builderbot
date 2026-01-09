@@ -44,8 +44,8 @@
   }
 
   interface Props {
-    /** Called when user selects a file to view */
-    onFileSelect?: (path: string) => void;
+    /** Called when user selects a file to view, optionally scrolling to a line */
+    onFileSelect?: (path: string, scrollToLine?: number) => void;
     /** Currently selected file path */
     selectedFile?: string | null;
     /** Base ref for the diff (controlled by parent) */
@@ -216,6 +216,32 @@
   }
 
   /**
+   * Get just the filename from a full path.
+   */
+  function getFileName(path: string): string {
+    return path.split('/').pop() || path;
+  }
+
+  /**
+   * Format line range for display.
+   */
+  function formatLineRange(span: { start: number; end: number }): string {
+    if (span.end === span.start + 1) {
+      return `L${span.start + 1}`;
+    }
+    return `L${span.start + 1}-${span.end}`;
+  }
+
+  /**
+   * Truncate text for preview.
+   */
+  function truncateText(text: string, maxLength = 40): string {
+    const singleLine = text.replace(/\n/g, ' ').trim();
+    if (singleLine.length <= maxLength) return singleLine;
+    return singleLine.slice(0, maxLength).trim() + '...';
+  }
+
+  /**
    * Handle CMD+C to copy selected file path to clipboard.
    */
   function handleKeydown(event: KeyboardEvent) {
@@ -354,6 +380,29 @@
   {/each}
 {/snippet}
 
+{#snippet commentList()}
+  {#each commentsState.comments as comment (comment.id)}
+    <li class="tree-item-wrapper">
+      <button
+        class="tree-item comment-item"
+        style="padding-left: 8px"
+        onclick={() => onFileSelect?.(comment.path, comment.span.start)}
+      >
+        <span class="comment-icon">
+          <MessageSquare size={12} />
+        </span>
+        <span class="comment-details">
+          <span class="comment-location">
+            <span class="comment-file">{getFileName(comment.path)}</span>
+            <span class="comment-line">{formatLineRange(comment.span)}</span>
+          </span>
+          <span class="comment-preview">{truncateText(comment.content)}</span>
+        </span>
+      </button>
+    </li>
+  {/each}
+{/snippet}
+
 <div class="sidebar-content">
   {#if loading}
     <div class="loading">Loading...</div>
@@ -424,6 +473,20 @@
             {@render flatFileList(reviewed, true)}
           {/if}
         </ul>
+      {/if}
+
+      <!-- Comments section -->
+      <div class="section-header comments-header">
+        <div class="section-divider">
+          <span class="divider-label">COMMENTS ({commentsState.comments.length})</span>
+        </div>
+      </div>
+      {#if commentsState.comments.length > 0}
+        <ul class="tree-section comments-section">
+          {@render commentList()}
+        </ul>
+      {:else}
+        <div class="comments-empty">No comments yet</div>
       {/if}
     </div>
   {/if}
@@ -672,5 +735,75 @@
     flex-shrink: 0;
     margin-left: auto;
     padding-left: 4px;
+  }
+
+  /* Comments section */
+  .comments-header {
+    margin-top: 8px;
+  }
+
+  .comments-section {
+    margin-bottom: 8px;
+  }
+
+  .comment-item {
+    position: relative;
+    flex-direction: column;
+    align-items: flex-start !important;
+    gap: 2px !important;
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+    padding-left: 28px !important;
+  }
+
+  .comment-icon {
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    color: var(--text-faint);
+  }
+
+  .comment-details {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .comment-location {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--size-xs);
+  }
+
+  .comment-file {
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .comment-line {
+    flex-shrink: 0;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: calc(var(--size-xs) - 1px);
+    color: var(--text-faint);
+  }
+
+  .comment-preview {
+    font-size: calc(var(--size-xs) - 1px);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .comments-empty {
+    padding: 12px;
+    text-align: center;
+    font-size: var(--size-xs);
+    color: var(--text-faint);
   }
 </style>

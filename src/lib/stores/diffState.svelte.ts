@@ -24,6 +24,8 @@ export const diffState = $state({
   error: null as string | null,
   /** Currently selected file path */
   selectedFile: null as string | null,
+  /** Target line to scroll to after file selection (0-indexed, null = no scroll) */
+  scrollTargetLine: null as number | null,
 });
 
 // =============================================================================
@@ -108,10 +110,18 @@ export async function refreshDiffs(
 }
 
 /**
- * Select a file by path.
+ * Select a file by path, optionally scrolling to a specific line.
  */
-export function selectFile(path: string | null): void {
+export function selectFile(path: string | null, scrollToLine?: number): void {
   diffState.selectedFile = path;
+  diffState.scrollTargetLine = scrollToLine ?? null;
+}
+
+/**
+ * Clear the scroll target (called after scrolling completes).
+ */
+export function clearScrollTarget(): void {
+  diffState.scrollTargetLine = null;
 }
 
 /**

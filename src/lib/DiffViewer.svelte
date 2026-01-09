@@ -781,27 +781,8 @@
   }
 
   function scrollToLine(lineIndex: number) {
-    if (!afterPane) return;
-
-    const lineElements = afterPane.querySelectorAll('.line');
-    const lineEl = lineElements[lineIndex] as HTMLElement | null;
-    if (!lineEl) return;
-
-    const paneRect = afterPane.getBoundingClientRect();
-    const lineRect = lineEl.getBoundingClientRect();
-
-    if (lineRect.top >= paneRect.top && lineRect.bottom <= paneRect.bottom) {
-      return;
-    }
-
-    const lineTop = lineEl.offsetTop;
-    const paneHeight = afterPane.clientHeight;
-    const targetScroll = lineTop - paneHeight / 2;
-
-    afterPane.scrollTo({
-      top: Math.max(0, targetScroll),
-      behavior: 'smooth',
-    });
+    // Use the scroll controller which manages scrolling via CSS transforms
+    scrollController.scrollToRow(lineIndex, 'after');
   }
 
   // ==========================================================================

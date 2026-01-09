@@ -12,6 +12,25 @@ Key concepts:
 - **Review sessions**: Mark files as reviewed, add comments (coming soon)
 - **File watching**: Auto-refresh when files change on disk
 
+## Installation
+
+### Quick Install (macOS)
+
+Install with a single command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/baxen/staged/main/install.sh | bash
+```
+
+The installer will:
+- Clone the repository
+- Set up the Hermit development environment
+- Install dependencies
+- Build the application
+- Install to `/Applications/staged.app`
+
+**Note**: This will build from source, which takes a few minutes. Requires git to be installed.
+
 ## Development
 
 ### Prerequisites

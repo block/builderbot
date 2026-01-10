@@ -176,16 +176,21 @@ fn fetch_pr_branch(
 // =============================================================================
 
 #[tauri::command]
-fn get_review(base: String, head: String) -> Result<Review, String> {
+fn get_review(base: String, head: String, repo_path: Option<String>) -> Result<Review, String> {
     let store = diff::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(None, &base, &head)?;
+    let id = make_diff_id(repo_path.as_deref(), &base, &head)?;
     store.get_or_create(&id).map_err(|e| e.0)
 }
 
 #[tauri::command]
-fn add_comment(base: String, head: String, comment: NewComment) -> Result<Comment, String> {
+fn add_comment(
+    base: String,
+    head: String,
+    comment: NewComment,
+    repo_path: Option<String>,
+) -> Result<Comment, String> {
     let store = diff::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(None, &base, &head)?;
+    let id = make_diff_id(repo_path.as_deref(), &base, &head)?;
     let comment = Comment::new(comment.path, comment.span, comment.content);
     store.add_comment(&id, &comment).map_err(|e| e.0)?;
     Ok(comment)

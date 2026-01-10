@@ -50,7 +50,7 @@
       repoState.currentPath ?? undefined,
       diffSelection.spec.useMergeBase
     );
-    await loadComments(diffSelection.spec.base, diffSelection.spec.head);
+    await loadComments(diffSelection.spec.base, diffSelection.spec.head, repoState.currentPath ?? undefined);
     sidebarRef?.setDiffs(diffState.diffs);
   }
 
@@ -70,7 +70,7 @@
       diffSelection.spec.useMergeBase
     );
     // Reload comments - they may have changed after a commit
-    await loadComments(diffSelection.spec.base, diffSelection.spec.head);
+    await loadComments(diffSelection.spec.base, diffSelection.spec.head, repoState.currentPath ?? undefined);
     sidebarRef?.setDiffs(diffState.diffs);
   }
 

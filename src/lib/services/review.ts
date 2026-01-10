@@ -5,9 +5,10 @@ import type { Review, Comment, Edit, NewComment, NewEdit } from '../types';
  * Get or create a review for a diff.
  * @param base - Base ref (SHA)
  * @param head - Head ref (SHA or "WORKDIR" for working tree)
+ * @param repoPath - Optional repository path
  */
-export async function getReview(base: string, head: string): Promise<Review> {
-  return invoke<Review>('get_review', { base, head });
+export async function getReview(base: string, head: string, repoPath?: string): Promise<Review> {
+  return invoke<Review>('get_review', { base, head, repoPath: repoPath ?? null });
 }
 
 /**
@@ -16,9 +17,10 @@ export async function getReview(base: string, head: string): Promise<Review> {
 export async function addComment(
   base: string,
   head: string,
-  comment: NewComment
+  comment: NewComment,
+  repoPath?: string
 ): Promise<Comment> {
-  return invoke<Comment>('add_comment', { base, head, comment });
+  return invoke<Comment>('add_comment', { base, head, comment, repoPath: repoPath ?? null });
 }
 
 /**

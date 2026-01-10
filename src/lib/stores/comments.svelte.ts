@@ -33,6 +33,8 @@ interface CommentsState {
   /** Diff refs for API calls */
   diffBase: string | null;
   diffHead: string | null;
+  /** Repository path for API calls */
+  repoPath: string | null;
   /** Loading state */
   loading: boolean;
 }
@@ -43,6 +45,7 @@ export const commentsState: CommentsState = $state({
   currentPath: null,
   diffBase: null,
   diffHead: null,
+  repoPath: null,
   loading: false,
 });
 
@@ -116,13 +119,14 @@ export function getTotalCommentCount(): number {
  * Load review data (comments and reviewed paths) for a diff.
  * This is the single API call for all review data.
  */
-export async function loadComments(base: string, head: string): Promise<void> {
+export async function loadComments(base: string, head: string, repoPath?: string): Promise<void> {
   commentsState.loading = true;
   commentsState.diffBase = base;
   commentsState.diffHead = head;
+  commentsState.repoPath = repoPath ?? null;
 
   try {
-    const review = await getReview(base, head);
+    const review = await getReview(base, head, repoPath);
     commentsState.comments = review.comments;
     commentsState.reviewedPaths = review.reviewed;
   } catch (e) {
@@ -189,7 +193,12 @@ export async function addComment(
 
   try {
     const newComment: NewComment = { path, span, content };
-    const comment = await apiAddComment(commentsState.diffBase, commentsState.diffHead, newComment);
+    const comment = await apiAddComment(
+      commentsState.diffBase,
+      commentsState.diffHead,
+      newComment,
+      commentsState.repoPath ?? undefined
+    );
     commentsState.comments = [...commentsState.comments, comment];
     return comment;
   } catch (e) {
@@ -277,5 +286,6 @@ export function clearComments(): void {
   commentsState.currentPath = null;
   commentsState.diffBase = null;
   commentsState.diffHead = null;
+  commentsState.repoPath = null;
   commentsState.loading = false;
 }

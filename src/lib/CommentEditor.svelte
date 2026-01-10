@@ -39,19 +39,31 @@
     onDelete,
   }: Props = $props();
 
-  let textareaValue = $state('');
+  // Track current input value - use $state for reactivity with initial value
+  let currentValue = $state(existingComment?.content ?? '');
 
-  // Update value when existingComment changes
+  // Update value when existingComment changes (for editing mode)
   $effect(() => {
-    textareaValue = existingComment?.content ?? '';
+    currentValue = existingComment?.content ?? '';
   });
+
+  function handleInput(e: Event) {
+    const target = e.target as HTMLTextAreaElement;
+    currentValue = target.value;
+  }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
       onCancel();
     } else if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      const content = textareaValue.trim();
+      e.stopPropagation();
+      // Get value directly from event target as fallback
+      const target = e.target as HTMLTextAreaElement;
+      const content = (currentValue || target.value || '').trim();
+
       if (content) {
         onSubmit(content);
       } else {
@@ -73,14 +85,15 @@
 </script>
 
 <div
-  class="comment-editor"
+  class="comment-editor line-comment-editor"
   class:comment-editor-hidden={!visible}
   style="top: {top}px; left: {left}px; width: {width}px;"
 >
   <textarea
     class="comment-textarea"
     {placeholder}
-    bind:value={textareaValue}
+    value={currentValue}
+    oninput={handleInput}
     onkeydown={handleKeydown}
     use:autoFocus
   ></textarea>

@@ -86,7 +86,6 @@ fn set_cached_prs(repo: &Path, prs: Vec<PullRequest>) {
 }
 
 /// Clear the cache for a specific repo, forcing a fresh fetch.
-#[allow(dead_code)]
 pub fn invalidate_cache(repo: &Path) {
     let key = repo.to_string_lossy().to_string();
     if let Ok(mut cache) = PR_CACHE.write() {

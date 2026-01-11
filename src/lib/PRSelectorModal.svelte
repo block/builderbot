@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { X, AlertCircle, RefreshCw, GitPullRequest, ExternalLink } from 'lucide-svelte';
-  import { checkGitHubAuth, listPullRequests, fetchPR } from './services/git';
+  import { checkGitHubAuth, listPullRequests, fetchPR, invalidatePRCache } from './services/git';
   import type { PullRequest, GitHubAuthStatus, DiffSpec } from './types';
 
   interface Props {
@@ -61,7 +61,8 @@
     }
   }
 
-  function handleRefresh() {
+  async function handleRefresh() {
+    await invalidatePRCache(repoPath ?? undefined);
     loadPRs();
   }
 

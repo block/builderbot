@@ -98,6 +98,15 @@ export async function listPullRequests(repoPath?: string): Promise<PullRequest[]
 }
 
 /**
+ * Invalidate the PR list cache, forcing a fresh fetch on next request.
+ */
+export async function invalidatePRCache(repoPath?: string): Promise<void> {
+  return invoke<void>('invalidate_pr_cache', {
+    repoPath: repoPath ?? null,
+  });
+}
+
+/**
  * Fetch PR refs and compute merge-base.
  * Returns DiffSpec with concrete SHAs.
  */

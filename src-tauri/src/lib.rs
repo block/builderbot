@@ -116,6 +116,13 @@ fn check_github_auth() -> GitHubAuthStatus {
     git::check_github_auth()
 }
 
+/// Invalidate the PR list cache, forcing a fresh fetch on next request.
+#[tauri::command(rename_all = "camelCase")]
+fn invalidate_pr_cache(repo_path: Option<String>) {
+    let path = get_repo_path(repo_path.as_deref());
+    git::invalidate_pr_cache(path);
+}
+
 /// List open pull requests for the repo.
 #[tauri::command(rename_all = "camelCase")]
 async fn list_pull_requests(repo_path: Option<String>) -> Result<Vec<PullRequest>, String> {
@@ -385,6 +392,7 @@ pub fn run() {
             list_pull_requests,
             fetch_pr,
             sync_review_to_github,
+            invalidate_pr_cache,
             // Review commands
             get_review,
             add_comment,

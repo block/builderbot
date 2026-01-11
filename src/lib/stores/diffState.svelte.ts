@@ -131,16 +131,22 @@ export async function refreshFiles(spec: DiffSpec, repoPath?: string): Promise<v
   try {
     const newFiles = await listDiffFiles(spec, repoPath);
 
-    // Clear cache - file contents may have changed since last refresh
-    diffState.diffCache = new Map();
-
     diffState.files = newFiles;
     diffState.currentSpec = spec;
     diffState.currentRepoPath = repoPath ?? null;
-    const pathToLoad = updateSelection();
-    // Load the diff for the selected file
-    if (pathToLoad) {
-      await loadFileDiff(pathToLoad);
+
+    // updateSelection() handles auto-select and checks if selected file still exists
+    updateSelection();
+
+    // Reload the selected file's diff if it exists
+    // Don't clear cache first - fetch new diff, then swap atomically to avoid flicker
+    if (diffState.selectedFile) {
+      const diff = await getFileDiff(spec, diffState.selectedFile, repoPath);
+      const newCache = new Map<string, FileDiff>();
+      newCache.set(diffState.selectedFile, diff);
+      diffState.diffCache = newCache;
+    } else {
+      diffState.diffCache = new Map();
     }
   } catch (e) {
     // On refresh errors, keep existing state

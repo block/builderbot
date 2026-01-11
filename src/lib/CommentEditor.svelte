@@ -39,8 +39,8 @@
     onDelete,
   }: Props = $props();
 
-  // Track current input value - use $state for reactivity with initial value
-  let currentValue = $state(existingComment?.content ?? '');
+  // Track current input value - initialized by effect when existingComment changes
+  let currentValue = $state('');
 
   // Update value when existingComment changes (for editing mode)
   $effect(() => {

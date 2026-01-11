@@ -18,41 +18,129 @@ struct Hunk {
 }
 
 /// List files changed in a diff (for sidebar)
-/// Uses `git diff --name-status` for speed - no content loading
+///
+/// For working tree diffs: uses `git status --porcelain -z` which leverages fsmonitor
+/// for fast performance on large repos.
+///
+/// For commit..commit diffs: uses `git diff --name-status -z` since status doesn't
+/// support arbitrary commit ranges.
 pub fn list_diff_files(repo: &Path, spec: &DiffSpec) -> Result<Vec<FileDiffSummary>, GitError> {
-    let mut args = vec!["diff", "--name-status", "-z"];
-
-    // Build the diff range
-    // For WorkingTree head, we diff against base (staged or HEAD)
-    // For commit..commit, we use base..head
-    let is_working_tree = matches!(spec.head, GitRef::WorkingTree);
-
     match (&spec.base, &spec.head) {
         (GitRef::Rev(base), GitRef::WorkingTree) => {
-            args.push(base.as_str());
+            // Working tree diff - use git status for fsmonitor support
+            list_working_tree_changes(repo, base)
         }
         (GitRef::Rev(base), GitRef::Rev(head)) => {
-            args.push(base.as_str());
-            args.push(head.as_str());
+            // Commit range - use git diff
+            let args = ["diff", "--name-status", "-z", base.as_str(), head.as_str()];
+            let output = cli::run(repo, &args)?;
+            parse_name_status(&output)
         }
-        (GitRef::WorkingTree, _) => {
-            return Err(GitError::CommandFailed(
-                "Cannot use working tree as base".to_string(),
-            ));
-        }
+        (GitRef::WorkingTree, _) => Err(GitError::CommandFailed(
+            "Cannot use working tree as base".to_string(),
+        )),
+    }
+}
+
+/// List working tree changes using `git status --porcelain -z`.
+/// This uses fsmonitor when available, making it fast on large repos.
+///
+/// When base is HEAD, we show all uncommitted changes (staged + unstaged + untracked).
+/// When base is another ref, we show what would change if you committed now and compared to that ref.
+fn list_working_tree_changes(repo: &Path, base: &str) -> Result<Vec<FileDiffSummary>, GitError> {
+    // Get status (includes staged, unstaged, and untracked)
+    let output = cli::run(repo, &["status", "--porcelain", "-z"])?;
+    let status_files = parse_porcelain_status(&output);
+
+    // If base is HEAD, status gives us exactly what we need
+    if base == "HEAD" {
+        return Ok(status_files);
     }
 
-    let output = cli::run(repo, &args)?;
-    let mut results = parse_name_status(&output)?;
+    // For other bases (e.g., main), we need to combine:
+    // 1. Files changed between base and HEAD (committed changes)
+    // 2. Files with uncommitted changes (from status)
+    let diff_output = cli::run(repo, &["diff", "--name-status", "-z", base, "HEAD"])?;
+    let committed_files = parse_name_status(&diff_output)?;
 
-    // For working tree diffs, also include untracked files
-    // git diff doesn't show untracked files, so we get them separately
-    if is_working_tree {
-        let untracked = list_untracked_files(repo)?;
-        results.extend(untracked);
+    // Merge: status files take precedence (they reflect current working tree state)
+    let mut result_map = std::collections::HashMap::new();
+
+    // Add committed changes first
+    for file in committed_files {
+        let path = file.after.clone().or(file.before.clone()).unwrap();
+        result_map.insert(path, file);
     }
 
-    Ok(results)
+    // Override with status (current state)
+    for file in status_files {
+        let path = file.after.clone().or(file.before.clone()).unwrap();
+        result_map.insert(path, file);
+    }
+
+    Ok(result_map.into_values().collect())
+}
+
+/// Parse `git status --porcelain -z` output.
+/// Format: XY PATH\0 (or XY OLD\0NEW\0 for renames)
+/// X = index status, Y = worktree status
+fn parse_porcelain_status(output: &str) -> Vec<FileDiffSummary> {
+    let mut results = Vec::new();
+    let mut chars = output.chars().peekable();
+
+    while chars.peek().is_some() {
+        // Read XY status (2 chars)
+        let x = chars.next().unwrap_or(' ');
+        let y = chars.next().unwrap_or(' ');
+
+        // Skip the space after XY
+        if chars.peek() == Some(&' ') {
+            chars.next();
+        }
+
+        // Read path until null
+        let path: String = chars.by_ref().take_while(|&c| c != '\0').collect();
+        if path.is_empty() {
+            continue;
+        }
+
+        // Handle renames/copies - they have a second path
+        let (old_path, new_path) = if x == 'R' || x == 'C' {
+            let new: String = chars.by_ref().take_while(|&c| c != '\0').collect();
+            (Some(path), if new.is_empty() { None } else { Some(new) })
+        } else {
+            (None, Some(path))
+        };
+
+        // Determine file status from XY
+        // We care about the combined effect: is the file added, deleted, modified, or renamed?
+        let summary = match (x, y) {
+            ('?', '?') => FileDiffSummary {
+                before: None,
+                after: new_path.map(Into::into),
+            },
+            ('A', _) | (_, 'A') => FileDiffSummary {
+                before: None,
+                after: new_path.map(Into::into),
+            },
+            ('D', _) | (_, 'D') => FileDiffSummary {
+                before: new_path.map(Into::into),
+                after: None,
+            },
+            ('R', _) | ('C', _) => FileDiffSummary {
+                before: old_path.map(Into::into),
+                after: new_path.map(Into::into),
+            },
+            _ => FileDiffSummary {
+                before: new_path.clone().map(Into::into),
+                after: new_path.map(Into::into),
+            },
+        };
+
+        results.push(summary);
+    }
+
+    results
 }
 
 /// Parse `git diff --name-status -z` output
@@ -112,24 +200,6 @@ fn parse_name_status(output: &str) -> Result<Vec<FileDiffSummary>, GitError> {
             }
         }
     }
-
-    Ok(results)
-}
-
-/// List untracked files in the working directory
-/// Uses `git ls-files --others --exclude-standard` to get files not tracked by git
-fn list_untracked_files(repo: &Path) -> Result<Vec<FileDiffSummary>, GitError> {
-    let args = ["ls-files", "--others", "--exclude-standard", "-z"];
-    let output = cli::run(repo, &args)?;
-
-    let results = output
-        .split('\0')
-        .filter(|s| !s.is_empty())
-        .map(|path| FileDiffSummary {
-            before: None,
-            after: Some(path.into()),
-        })
-        .collect();
 
     Ok(results)
 }
@@ -470,6 +540,59 @@ mod tests {
     fn test_parse_name_status_multiple() {
         let output = "A\0added.txt\0M\0modified.txt\0D\0deleted.txt\0";
         let result = parse_name_status(output).unwrap();
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_porcelain_untracked() {
+        let output = "?? untracked.txt\0";
+        let result = parse_porcelain_status(output);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_added());
+        assert_eq!(
+            result[0].after.as_ref().unwrap().to_str(),
+            Some("untracked.txt")
+        );
+    }
+
+    #[test]
+    fn test_parse_porcelain_modified() {
+        let output = " M modified.txt\0";
+        let result = parse_porcelain_status(output);
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].is_added());
+        assert!(!result[0].is_deleted());
+    }
+
+    #[test]
+    fn test_parse_porcelain_staged() {
+        let output = "M  staged.txt\0";
+        let result = parse_porcelain_status(output);
+        assert_eq!(result.len(), 1);
+        assert!(!result[0].is_added());
+        assert!(!result[0].is_deleted());
+    }
+
+    #[test]
+    fn test_parse_porcelain_added() {
+        let output = "A  new_file.txt\0";
+        let result = parse_porcelain_status(output);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_added());
+    }
+
+    #[test]
+    fn test_parse_porcelain_deleted() {
+        let output = " D deleted.txt\0";
+        let result = parse_porcelain_status(output);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_deleted());
+    }
+
+    #[test]
+    fn test_parse_porcelain_multiple() {
+        let output = "?? untracked.txt\0 M modified.txt\0A  added.txt\0";
+        let result = parse_porcelain_status(output);
         assert_eq!(result.len(), 3);
     }
 }

@@ -66,13 +66,20 @@ fn resolve_ref(repo_path: Option<String>, reference: String) -> Result<String, S
 }
 
 /// List files changed in a diff (for sidebar).
+/// Runs on a blocking thread to avoid freezing the UI on large repos.
 #[tauri::command(rename_all = "camelCase")]
-fn list_diff_files(
+async fn list_diff_files(
     repo_path: Option<String>,
     spec: DiffSpec,
 ) -> Result<Vec<FileDiffSummary>, String> {
-    let path = get_repo_path(repo_path.as_deref());
-    git::list_diff_files(path, &spec).map_err(|e| e.to_string())
+    let path = repo_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    tokio::task::spawn_blocking(move || {
+        git::list_diff_files(&path, &spec).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Get full diff content for a single file.

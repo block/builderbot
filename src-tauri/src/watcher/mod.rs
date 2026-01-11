@@ -133,11 +133,13 @@ impl WatcherManager for NotifyWatcher {
     }
 
     fn stop(&mut self) {
-        if let Some(mut debouncer) = self.debouncer.take() {
-            if let Some(ref path) = self.repo_path {
-                let _ = debouncer.unwatch(path);
-            }
-            log::info!("Stopped watching repository");
+        if let Some(debouncer) = self.debouncer.take() {
+            // Drop the debouncer in a background thread to avoid blocking the UI.
+            // FSEvents cleanup on large repos can take 10+ seconds.
+            std::thread::spawn(move || {
+                drop(debouncer);
+            });
+            log::info!("Stopped watching repository (cleanup in background)");
         }
         self.repo_path = None;
     }

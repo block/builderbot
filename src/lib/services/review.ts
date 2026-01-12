@@ -71,3 +71,25 @@ export async function exportReviewMarkdown(spec: DiffSpec, repoPath?: string): P
 export async function clearReview(spec: DiffSpec, repoPath?: string): Promise<void> {
   return invoke('clear_review', { repoPath: repoPath ?? null, spec });
 }
+
+/**
+ * Add a reference file path to a review.
+ */
+export async function addReferenceFilePath(
+  spec: DiffSpec,
+  path: string,
+  repoPath?: string
+): Promise<void> {
+  return invoke('add_reference_file', { repoPath: repoPath ?? null, spec, path });
+}
+
+/**
+ * Remove a reference file path from a review.
+ */
+export async function removeReferenceFilePath(
+  spec: DiffSpec,
+  path: string,
+  repoPath?: string
+): Promise<void> {
+  return invoke('remove_reference_file', { repoPath: repoPath ?? null, spec, path });
+}

@@ -23,9 +23,13 @@
     Folder,
     List,
     FolderTree,
+    Eye,
+    X,
+    Plus,
   } from 'lucide-svelte';
   import { commentsState, toggleReviewed as toggleReviewedAction } from './stores/comments.svelte';
   import { registerShortcuts } from './services/keyboard';
+  import { referenceFilesState } from './stores/referenceFiles.svelte';
   import type { FileDiffSummary } from './types';
 
   interface FileEntry {
@@ -54,6 +58,10 @@
     selectedFile?: string | null;
     /** Whether we're viewing the working tree */
     isWorkingTree?: boolean;
+    /** Called when user wants to add a reference file */
+    onAddReferenceFile?: () => void;
+    /** Called when user wants to remove a reference file */
+    onRemoveReferenceFile?: (path: string) => void;
   }
 
   let {
@@ -62,6 +70,8 @@
     onFileSelect,
     selectedFile = null,
     isWorkingTree = true,
+    onAddReferenceFile,
+    onRemoveReferenceFile,
   }: Props = $props();
 
   let collapsedDirs = $state(new Set<string>());
@@ -518,6 +528,55 @@
         </ul>
       {/if}
 
+      <!-- Reference Files section -->
+      <div class="section-header">
+        <button
+          class="add-file-btn"
+          onclick={() => onAddReferenceFile?.()}
+          title="Add reference file (Cmd+O)"
+        >
+          <Plus size={12} />
+        </button>
+        <div class="section-divider">
+          <span class="divider-label">REFERENCE ({referenceFilesState.files.length})</span>
+        </div>
+      </div>
+      {#if referenceFilesState.files.length > 0}
+        <ul class="tree-section reference-section">
+          {#each referenceFilesState.files as refFile (refFile.path)}
+            <li class="tree-item-wrapper">
+              <div
+                class="tree-item file-item reference-item"
+                class:selected={selectedFile === refFile.path}
+                style="padding-left: 8px"
+                role="button"
+                tabindex="0"
+                onclick={() => onFileSelect?.(refFile.path)}
+                onkeydown={(e) => e.key === 'Enter' && onFileSelect?.(refFile.path)}
+              >
+                <span class="reference-icon">
+                  <Eye size={16} />
+                </span>
+                <span class="file-name">{refFile.path}</span>
+                <button
+                  class="remove-btn"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    onRemoveReferenceFile?.(refFile.path);
+                  }}
+                  onkeydown={(e) => e.key === 'Enter' && e.stopPropagation()}
+                  title="Remove reference file"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {:else}
+        <div class="reference-empty">Click + to add files</div>
+      {/if}
+
       <!-- Comments section -->
       <div class="section-header comments-header">
         <div class="section-divider">
@@ -844,6 +903,83 @@
   }
 
   .comments-empty {
+    padding: 12px;
+    text-align: center;
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+  }
+
+  /* Reference files section */
+  .add-file-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    background: none;
+    border: none;
+    border-radius: 3px;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      color 0.1s;
+  }
+
+  .add-file-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-muted);
+  }
+
+  .add-file-btn:focus-visible {
+    outline: 2px solid var(--text-accent);
+    outline-offset: -2px;
+  }
+
+  .reference-section {
+    opacity: 0.85;
+  }
+
+  .reference-item {
+    position: relative;
+  }
+
+  .reference-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+
+  .remove-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    background: none;
+    border: none;
+    border-radius: 3px;
+    color: var(--text-faint);
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 0.1s,
+      background-color 0.1s,
+      color 0.1s;
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .reference-item:hover .remove-btn {
+    opacity: 1;
+  }
+
+  .remove-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .reference-empty {
     padding: 12px;
     text-align: center;
     font-size: var(--size-xs);

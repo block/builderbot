@@ -117,6 +117,23 @@ export function getTotalCommentCount(): number {
  * Load review data (comments and reviewed paths) for a diff.
  * This is the single API call for all review data.
  */
+/**
+ * Callback to load reference files after review is loaded.
+ * Set by App.svelte to avoid circular imports.
+ */
+let onReferenceFilesLoaded:
+  | ((paths: string[], refName: string, repoPath?: string) => Promise<void>)
+  | null = null;
+
+/**
+ * Register a callback to load reference files when a review is loaded.
+ */
+export function setReferenceFilesLoader(
+  loader: (paths: string[], refName: string, repoPath?: string) => Promise<void>
+): void {
+  onReferenceFilesLoaded = loader;
+}
+
 export async function loadComments(spec: DiffSpec, repoPath?: string): Promise<void> {
   commentsState.loading = true;
   commentsState.currentSpec = spec;
@@ -126,6 +143,15 @@ export async function loadComments(spec: DiffSpec, repoPath?: string): Promise<v
     const review = await getReview(spec, repoPath);
     commentsState.comments = review.comments;
     commentsState.reviewedPaths = review.reviewed;
+
+    // Load reference files if any were persisted
+    if (review.reference_files.length > 0 && onReferenceFilesLoaded) {
+      const refName = spec.head.type === 'WorkingTree' ? 'HEAD' : spec.head.value;
+      // Don't await - let it load in background
+      onReferenceFilesLoaded(review.reference_files, refName, repoPath ?? undefined).catch((e) => {
+        console.error('Failed to load reference files:', e);
+      });
+    }
   } catch (e) {
     console.error('Failed to load review:', e);
     commentsState.comments = [];

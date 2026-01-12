@@ -181,6 +181,7 @@ export interface Review {
   reviewed: string[];
   comments: Comment[];
   edits: Edit[];
+  reference_files: string[];
 }
 
 /** Input for creating a new comment */

@@ -68,10 +68,19 @@
     syntaxThemeVersion?: number;
     /** Whether a new file is loading (show subtle indicator, keep old content) */
     loading?: boolean;
+    /** Whether this is a reference file (not part of the diff) */
+    isReferenceFile?: boolean;
     onRangeDiscard?: () => void;
   }
 
-  let { diff, sizeBase, syntaxThemeVersion = 0, loading = false, onRangeDiscard }: Props = $props();
+  let {
+    diff,
+    sizeBase,
+    syntaxThemeVersion = 0,
+    loading = false,
+    isReferenceFile = false,
+    onRangeDiscard,
+  }: Props = $props();
 
   // Get diff spec from store for display and logic
   let isWorkingTree = $derived(diffSelection.spec.head.type === 'WorkingTree');
@@ -1194,8 +1203,12 @@
     </div>
   {:else}
     <div class="diff-content" class:single-pane={!isTwoPaneMode}>
-      <!-- Created file: label on left -->
-      {#if isNewFile}
+      <!-- Created/Reference file: label on left -->
+      {#if isReferenceFile}
+        <div class="status-label reference">
+          <span class="status-text">Reference</span>
+        </div>
+      {:else if isNewFile}
         <div class="status-label created">
           <span class="status-text">Created</span>
         </div>
@@ -1625,6 +1638,16 @@
 
   .status-label.deleted .status-text {
     color: var(--status-deleted);
+  }
+
+  .status-label.reference {
+    justify-content: flex-end;
+    padding-right: 12px;
+  }
+
+  .status-label.reference .status-text {
+    transform: rotate(180deg);
+    color: var(--text-muted);
   }
 
   /* Pane header */

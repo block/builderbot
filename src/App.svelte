@@ -93,7 +93,11 @@
     setCurrentPath(path);
   });
 
-  async function handleFilesChanged() {
+  async function handleFilesChanged(changedRepoPath: string) {
+    // Only refresh if this is the active tab's repo
+    const activeTab = getActiveTab();
+    if (!activeTab || activeTab.repoPath !== changedRepoPath) return;
+
     // Only refresh if viewing working tree
     if (diffSelection.spec.head.type !== 'WorkingTree') return;
 
@@ -327,30 +331,25 @@
 
   /**
    * Handle tab switching.
+   * Watcher is already running for the repo - no restart needed.
    */
-  async function handleTabSwitch(index: number) {
+  function handleTabSwitch(index: number) {
     console.log(`Switching to tab ${index}`);
 
     // Save current tab state before switching
     syncGlobalToTab();
 
-    // Switch to new tab
-    await switchTab(index);
+    // Switch to new tab (synchronous - no watcher restart)
+    switchTab(index);
     console.log(`Active tab after switch:`, getActiveTab()?.repoName);
 
     // Load new tab state
     syncTabToGlobal();
 
-    // Watch the new tab's repo and initialize if needed
+    // Initialize tab if it hasn't been loaded yet (e.g., restored from storage)
     const tab = getActiveTab();
-    if (tab) {
-      console.log(`Watching repo: ${tab.repoPath}`);
-      await watchRepo(tab.repoPath);
-
-      // Initialize tab if it hasn't been loaded yet (e.g., restored from storage)
-      if (tab.diffState.currentSpec === null) {
-        await initializeNewTab(tab);
-      }
+    if (tab && tab.diffState.currentSpec === null) {
+      initializeNewTab(tab);
     }
   }
 
@@ -366,6 +365,9 @@
 
     const repoName = extractRepoName(repoPath);
     addTab(repoPath, repoName, createDiffState, createCommentsState, createDiffSelection);
+
+    // Start watching the new repo (idempotent - won't restart if already watching)
+    watchRepo(repoPath);
 
     // Sync to the new tab
     syncTabToGlobal();
@@ -464,6 +466,11 @@
       // Initialize watcher listener once (handles all repos)
       unsubscribeWatcher = await initWatcher(handleFilesChanged);
 
+      // Start watchers for all restored tabs (idempotent - dedupes same repos)
+      for (const tab of windowState.tabs) {
+        watchRepo(tab.repoPath);
+      }
+
       // Register menu event listeners
       unsubscribeMenuOpenFolder = await listen('menu:open-folder', handleMenuOpenFolder);
       unsubscribeMenuCloseTab = await listen('menu:close-tab', handleMenuCloseTab);
@@ -513,7 +520,10 @@
     onPresetSelect={handlePresetSelect}
     onCustomDiff={handleCustomDiff}
     onRepoChange={handleRepoChange}
-    onCommit={handleFilesChanged}
+    onCommit={() => {
+      const tab = getActiveTab();
+      if (tab) handleFilesChanged(tab.repoPath);
+    }}
   />
 
   <div class="app-container">

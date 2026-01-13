@@ -898,13 +898,6 @@
     white-space: nowrap;
   }
 
-  .comments-empty {
-    padding: 12px;
-    text-align: center;
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-  }
-
   /* Reference files section */
   .add-file-btn {
     display: flex;
@@ -973,12 +966,5 @@
   .remove-btn:hover {
     background-color: var(--bg-hover);
     color: var(--text-primary);
-  }
-
-  .reference-empty {
-    padding: 12px;
-    text-align: center;
-    font-size: var(--size-xs);
-    color: var(--text-faint);
   }
 </style>

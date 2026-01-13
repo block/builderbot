@@ -1,13 +1,15 @@
 //! File system watcher for detecting repository changes.
 //!
-//! Architecture: A dedicated background thread owns the watcher exclusively.
+//! Architecture: A dedicated background thread manages multiple watchers (one per repo).
 //! Commands are sent via channel, so the main thread never blocks on watcher
-//! setup/teardown. Events include a generation counter so the frontend can
-//! ignore stale notifications from old repos.
+//! setup/teardown. Events include a watch ID so the frontend can identify which
+//! repo changed. Watchers are only dropped when explicitly unwatched (e.g., when
+//! closing a tab with no other tabs using that repo).
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebouncedEvent, Debouncer, RecommendedCache};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
@@ -27,8 +29,17 @@ struct FilesChangedPayload {
 
 /// Commands sent to the watcher background thread
 enum WatcherCommand {
-    /// Switch to watching a new repository
-    Switch { path: PathBuf, watch_id: u64 },
+    /// Start watching a repository (idempotent - no-op if already watching)
+    Watch { path: PathBuf, watch_id: u64 },
+    /// Stop watching a repository
+    Unwatch { path: PathBuf },
+}
+
+/// Active watcher entry
+struct WatcherEntry {
+    watch_id: u64,
+    #[allow(dead_code)] // Dropping this stops the watcher
+    debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
 }
 
 /// Handle to the watcher background thread.
@@ -43,31 +54,54 @@ impl WatcherHandle {
         let (tx, rx) = mpsc::channel();
 
         thread::spawn(move || {
-            let mut watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>> = None;
+            let mut watchers: HashMap<PathBuf, WatcherEntry> = HashMap::new();
 
             for cmd in rx {
                 match cmd {
-                    WatcherCommand::Switch { path, watch_id } => {
-                        // Drop old watcher synchronously - blocking is fine here
-                        // since we're on a dedicated thread
-                        if watcher.is_some() {
-                            log::info!("Dropping old watcher for repo switch");
+                    WatcherCommand::Watch { path, watch_id } => {
+                        // Skip if already watching this path
+                        if watchers.contains_key(&path) {
+                            log::debug!(
+                                "Already watching {} (watch_id {})",
+                                path.display(),
+                                watchers.get(&path).map(|e| e.watch_id).unwrap_or(0)
+                            );
+                            continue;
                         }
-                        watcher = None;
 
                         // Setup new watcher
                         match create_watcher(&path, watch_id, &app_handle) {
-                            Ok(w) => {
-                                watcher = Some(w);
+                            Ok(debouncer) => {
+                                watchers.insert(
+                                    path.clone(),
+                                    WatcherEntry {
+                                        watch_id,
+                                        debouncer,
+                                    },
+                                );
                                 log::info!(
-                                    "Started watching {} (watch_id {})",
+                                    "Started watching {} (watch_id {}), total watchers: {}",
                                     path.display(),
-                                    watch_id
+                                    watch_id,
+                                    watchers.len()
                                 );
                             }
                             Err(e) => {
-                                log::error!("Failed to create watcher: {}", e);
+                                log::error!(
+                                    "Failed to create watcher for {}: {}",
+                                    path.display(),
+                                    e
+                                );
                             }
+                        }
+                    }
+                    WatcherCommand::Unwatch { path } => {
+                        if watchers.remove(&path).is_some() {
+                            log::info!(
+                                "Stopped watching {}, total watchers: {}",
+                                path.display(),
+                                watchers.len()
+                            );
                         }
                     }
                 }
@@ -77,10 +111,16 @@ impl WatcherHandle {
         Self { tx }
     }
 
-    /// Switch to watching a new repository.
+    /// Start watching a repository (idempotent).
     /// Returns immediately - actual setup happens on background thread.
-    pub fn switch(&self, path: PathBuf, watch_id: u64) {
-        let _ = self.tx.send(WatcherCommand::Switch { path, watch_id });
+    pub fn watch(&self, path: PathBuf, watch_id: u64) {
+        let _ = self.tx.send(WatcherCommand::Watch { path, watch_id });
+    }
+
+    /// Stop watching a repository.
+    /// Returns immediately - actual teardown happens on background thread.
+    pub fn unwatch(&self, path: PathBuf) {
+        let _ = self.tx.send(WatcherCommand::Unwatch { path });
     }
 }
 

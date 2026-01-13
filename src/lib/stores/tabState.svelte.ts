@@ -5,7 +5,7 @@
  * Each tab maintains isolated state for its repository (diffs, comments, selection).
  */
 
-import { watchRepo } from '../services/statusEvents';
+import { unwatchRepo } from '../services/statusEvents';
 import type { DiffState } from './diffState.svelte';
 import type { CommentsState } from './comments.svelte';
 import type { DiffSelection } from './diffSelection.svelte';
@@ -107,12 +107,22 @@ export function addTab(
 /**
  * Close a tab by ID.
  * Closes the window if it's the last tab.
+ * Stops watching the repo if no other tabs use it.
  */
 export function closeTab(tabId: string): void {
   const index = windowState.tabs.findIndex((t) => t.id === tabId);
   if (index === -1) return;
 
+  const closedTab = windowState.tabs[index];
   windowState.tabs.splice(index, 1);
+
+  // Stop watching if no other tab uses this repo
+  if (closedTab) {
+    const stillUsed = windowState.tabs.some((t) => t.repoPath === closedTab.repoPath);
+    if (!stillUsed) {
+      unwatchRepo(closedTab.repoPath);
+    }
+  }
 
   // Adjust active index if needed
   if (windowState.activeTabIndex >= windowState.tabs.length) {
@@ -120,28 +130,16 @@ export function closeTab(tabId: string): void {
   }
 
   saveTabsToStorage();
-
-  // Close window if no tabs left (will be handled by caller)
-  if (windowState.tabs.length === 0) {
-    // Window close will be handled in App.svelte
-  }
 }
 
 /**
  * Switch to a tab by index.
- * Also switches the file watcher to the new tab's repo.
+ * Watcher is already running for the repo (started when tab was created).
  */
-export async function switchTab(index: number): Promise<void> {
+export function switchTab(index: number): void {
   if (index < 0 || index >= windowState.tabs.length) return;
 
   windowState.activeTabIndex = index;
-
-  // Switch file watcher to new tab's repo
-  const tab = windowState.tabs[index];
-  if (tab) {
-    await watchRepo(tab.repoPath);
-  }
-
   saveTabsToStorage();
 }
 

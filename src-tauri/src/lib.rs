@@ -376,11 +376,18 @@ fn read_json_file(path: String) -> Result<String, String> {
 // Watcher Commands
 // =============================================================================
 
-/// Switch to watching a new repository.
+/// Start watching a repository (idempotent - no-op if already watching).
 /// Fire-and-forget: returns immediately, actual setup happens on background thread.
 #[tauri::command(rename_all = "camelCase")]
 fn watch_repo(repo_path: String, watch_id: u64, state: State<WatcherHandle>) {
-    state.switch(PathBuf::from(repo_path), watch_id);
+    state.watch(PathBuf::from(repo_path), watch_id);
+}
+
+/// Stop watching a repository.
+/// Fire-and-forget: returns immediately, actual teardown happens on background thread.
+#[tauri::command(rename_all = "camelCase")]
+fn unwatch_repo(repo_path: String, state: State<WatcherHandle>) {
+    state.unwatch(PathBuf::from(repo_path));
 }
 
 // =============================================================================
@@ -513,6 +520,7 @@ pub fn run() {
             read_json_file,
             // Watcher commands
             watch_repo,
+            unwatch_repo,
             // Window commands
             get_window_label,
         ])

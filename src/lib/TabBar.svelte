@@ -5,7 +5,7 @@
 
   interface Props {
     onNewTab: () => void;
-    onSwitchTab: (index: number) => Promise<void>;
+    onSwitchTab: (index: number) => void;
   }
 
   let { onNewTab, onSwitchTab }: Props = $props();
@@ -25,9 +25,9 @@
     }
   });
 
-  async function handleSwitchTab(index: number) {
+  function handleSwitchTab(index: number) {
     console.log(`TabBar: Switching to tab ${index}`);
-    await onSwitchTab(index);
+    onSwitchTab(index);
   }
 
   async function handleCloseTab(tabId: string, event: MouseEvent | KeyboardEvent) {

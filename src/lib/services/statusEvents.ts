@@ -1,15 +1,16 @@
 /**
  * File watcher event subscription service.
  *
- * Uses a generation counter to ignore stale events from old repos.
- * All watcher commands are fire-and-forget (no awaiting backend).
+ * Manages multiple watchers (one per repo). Each repo gets a unique watch ID
+ * so the frontend can identify which repo changed. Watchers are only stopped
+ * when explicitly unwatched (e.g., when closing a tab with no other tabs using that repo).
  */
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 
 /** Callback for file change notifications */
-export type FilesChangedCallback = () => void;
+export type FilesChangedCallback = (repoPath: string) => void;
 
 /** Cleanup function returned by subscribe */
 export type Unsubscribe = () => void;
@@ -19,8 +20,14 @@ interface FilesChangedPayload {
   watchId: number;
 }
 
-// Current watch ID - incremented on each repo switch
-let currentWatchId = 0;
+// Track watched repos: path -> watchId
+const watchedRepos = new Map<string, number>();
+
+// Reverse lookup: watchId -> path
+const watchIdToPath = new Map<number, string>();
+
+// Next watch ID to assign
+let nextWatchId = 0;
 
 // Active listener
 let filesChangedUnlisten: UnlistenFn | null = null;
@@ -28,9 +35,9 @@ let filesChangedUnlisten: UnlistenFn | null = null;
 /**
  * Initialize the watcher event listener.
  * Call once on app startup. The callback is invoked when files change
- * in the currently watched repo (stale events are filtered out).
+ * in any watched repo, with the repo path as argument.
  *
- * @param onFilesChanged - Called when files in the current repo change
+ * @param onFilesChanged - Called when files in a watched repo change
  * @returns Cleanup function to unsubscribe
  */
 export async function initWatcher(onFilesChanged: FilesChangedCallback): Promise<Unsubscribe> {
@@ -40,9 +47,10 @@ export async function initWatcher(onFilesChanged: FilesChangedCallback): Promise
   }
 
   filesChangedUnlisten = await listen<FilesChangedPayload>('files-changed', ({ payload }) => {
-    // Ignore events from old repos
-    if (payload.watchId === currentWatchId) {
-      onFilesChanged();
+    // Look up which repo this event is for
+    const repoPath = watchIdToPath.get(payload.watchId);
+    if (repoPath) {
+      onFilesChanged(repoPath);
     }
   });
 
@@ -55,19 +63,52 @@ export async function initWatcher(onFilesChanged: FilesChangedCallback): Promise
 }
 
 /**
- * Switch to watching a new repository.
+ * Start watching a repository (idempotent).
  * Fire-and-forget: returns immediately, actual setup happens on backend thread.
  *
  * @param repoPath - Absolute path to the repository
  */
 export function watchRepo(repoPath: string): void {
-  currentWatchId++;
-  invoke('watch_repo', { repoPath, watchId: currentWatchId });
+  // Already watching this repo
+  if (watchedRepos.has(repoPath)) {
+    return;
+  }
+
+  const watchId = nextWatchId++;
+  watchedRepos.set(repoPath, watchId);
+  watchIdToPath.set(watchId, repoPath);
+
+  invoke('watch_repo', { repoPath, watchId });
 }
 
 /**
- * Get the current watch ID (for testing/debugging).
+ * Stop watching a repository.
+ * Fire-and-forget: returns immediately, actual teardown happens on backend thread.
+ *
+ * @param repoPath - Absolute path to the repository
  */
-export function getWatchId(): number {
-  return currentWatchId;
+export function unwatchRepo(repoPath: string): void {
+  const watchId = watchedRepos.get(repoPath);
+  if (watchId === undefined) {
+    return;
+  }
+
+  watchedRepos.delete(repoPath);
+  watchIdToPath.delete(watchId);
+
+  invoke('unwatch_repo', { repoPath });
+}
+
+/**
+ * Check if a repo is currently being watched.
+ */
+export function isWatching(repoPath: string): boolean {
+  return watchedRepos.has(repoPath);
+}
+
+/**
+ * Get the number of active watchers (for debugging).
+ */
+export function getWatcherCount(): number {
+  return watchedRepos.size;
 }

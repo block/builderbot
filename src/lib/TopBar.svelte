@@ -316,7 +316,7 @@
         class="action-btn"
         class:disabled={!canCommit}
         onclick={() => canCommit && (showCommitModal = true)}
-        title={canCommit ? 'Commit' : 'No changes to commit'}
+        title={canCommit ? '⌘K' : 'No staged or unstaged changes'}
         disabled={!canCommit}
       >
         <GitCommitHorizontal size={14} />

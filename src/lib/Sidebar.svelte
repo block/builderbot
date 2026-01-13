@@ -573,8 +573,6 @@
             </li>
           {/each}
         </ul>
-      {:else}
-        <div class="reference-empty">Click + to add files</div>
       {/if}
 
       <!-- Comments section -->
@@ -587,8 +585,6 @@
         <ul class="tree-section comments-section">
           {@render commentList()}
         </ul>
-      {:else}
-        <div class="comments-empty">No comments yet</div>
       {/if}
     </div>
   {/if}

@@ -280,14 +280,6 @@ export function registerPreferenceShortcuts(): () => void {
       category: 'view',
       handler: resetSize,
     },
-    {
-      id: 'pref-cycle-theme',
-      keys: ['t'],
-      modifiers: { meta: true },
-      description: 'Cycle themes',
-      category: 'view',
-      handler: () => cycleSyntaxTheme(),
-    },
   ];
 
   return registerShortcuts(shortcuts);

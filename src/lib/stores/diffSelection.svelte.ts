@@ -10,7 +10,7 @@
 import { DiffSpec } from '../types';
 
 // =============================================================================
-// Presets
+// Type Definitions
 // =============================================================================
 
 /** Preset diff specifications */
@@ -20,16 +20,72 @@ export interface DiffPreset {
 }
 
 /**
- * Preset store - wrapped in object because Svelte doesn't allow exporting
- * reassignable $state. Access via `presetStore.presets`.
+ * Diff selection state type for factory pattern.
  */
-export const presetStore = $state({
-  presets: [
+export interface DiffSelection {
+  /** Current diff specification */
+  spec: DiffSpec;
+  /** Label for current selection (preset name or custom) */
+  label: string;
+  /** PR number if this diff is for a GitHub PR */
+  prNumber: number | undefined;
+}
+
+/**
+ * Preset store type.
+ */
+export interface PresetStore {
+  presets: DiffPreset[];
+}
+
+// =============================================================================
+// Factory Functions
+// =============================================================================
+
+/**
+ * Create default presets.
+ */
+function createDefaultPresets(): DiffPreset[] {
+  return [
     { spec: DiffSpec.uncommitted(), label: 'Uncommitted' },
     { spec: DiffSpec.uncommitted(), label: 'Branch Changes' }, // Base updated on init
     { spec: DiffSpec.lastCommit(), label: 'Last Commit' },
-  ] as DiffPreset[],
-});
+  ];
+}
+
+/**
+ * Create a new preset store instance.
+ * Returns a plain object - caller should wrap with $state() if needed.
+ */
+export function createPresetStore(): PresetStore {
+  return {
+    presets: createDefaultPresets(),
+  };
+}
+
+/**
+ * Create a new isolated diff selection state instance.
+ * Used by the tab system to create per-tab state.
+ * Returns a plain object - caller should wrap with $state() if needed.
+ */
+export function createDiffSelection(): DiffSelection {
+  const presets = createDefaultPresets();
+  return {
+    spec: presets[0].spec,
+    label: presets[0].label,
+    prNumber: undefined,
+  };
+}
+
+// =============================================================================
+// Reactive State (Singleton)
+// =============================================================================
+
+/**
+ * Preset store - wrapped in object because Svelte doesn't allow exporting
+ * reassignable $state. Access via `presetStore.presets`.
+ */
+export const presetStore = $state(createPresetStore());
 
 /** Convenience getter for presets */
 export function getPresets(): readonly DiffPreset[] {
@@ -55,22 +111,12 @@ export function setDefaultBranch(branch: string): void {
   });
 }
 
-// =============================================================================
-// Reactive State
-// =============================================================================
-
 /**
  * Diff selection state object.
  * Use this directly in components - it's reactive!
+ * Will be replaced by activeTab.diffSelection in Phase 4.
  */
-export const diffSelection = $state({
-  /** Current diff specification */
-  spec: presetStore.presets[0].spec as DiffSpec,
-  /** Label for current selection (preset name or custom) */
-  label: presetStore.presets[0].label as string,
-  /** PR number if this diff is for a GitHub PR */
-  prNumber: undefined as number | undefined,
-});
+export const diffSelection = $state(createDiffSelection());
 
 // =============================================================================
 // Derived State (as getters)

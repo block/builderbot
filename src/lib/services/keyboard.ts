@@ -129,12 +129,17 @@ function modifiersMatch(event: KeyboardEvent, mods?: Modifiers): boolean {
   if (wantAlt && !event.altKey) return false;
 
   // Check unwanted modifiers aren't pressed
-  // (but be lenient with shift since it affects the key value)
   if (!wantMeta && metaKey) return false;
   if (!wantCtrl && ctrlKey) return false;
   if (!wantAlt && event.altKey) return false;
-  // Note: we don't check shift here - if the shortcut key is '+',
-  // shift will naturally be pressed to type it
+
+  // For shift, only be lenient with certain keys that require shift to type
+  // (like '+' which needs Shift+= on most keyboards)
+  const shiftTypedKeys = ['+', '=', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_'];
+  const isShiftTypedKey = shiftTypedKeys.includes(event.key);
+
+  // If shift is not wanted and shift is pressed, only allow if it's needed to type the key
+  if (!wantShift && event.shiftKey && !isShiftTypedKey) return false;
 
   return true;
 }

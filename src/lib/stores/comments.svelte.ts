@@ -20,10 +20,13 @@ import {
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 // =============================================================================
-// State
+// Type Definitions
 // =============================================================================
 
-interface CommentsState {
+/**
+ * Comments state type for factory pattern.
+ */
+export interface CommentsState {
   /** All comments for the current diff */
   comments: Comment[];
   /** Paths that have been marked as reviewed */
@@ -38,14 +41,35 @@ interface CommentsState {
   loading: boolean;
 }
 
-export const commentsState: CommentsState = $state({
-  comments: [],
-  reviewedPaths: [],
-  currentPath: null,
-  currentSpec: null,
-  currentRepoPath: null,
-  loading: false,
-});
+// =============================================================================
+// Factory Function
+// =============================================================================
+
+/**
+ * Create a new isolated comments state instance.
+ * Used by the tab system to create per-tab state.
+ * Returns a plain object - caller should wrap with $state() if needed.
+ */
+export function createCommentsState(): CommentsState {
+  return {
+    comments: [],
+    reviewedPaths: [],
+    currentPath: null,
+    currentSpec: null,
+    currentRepoPath: null,
+    loading: false,
+  };
+}
+
+// =============================================================================
+// Reactive State (Singleton)
+// =============================================================================
+
+/**
+ * Module-level singleton state (for backwards compatibility).
+ * Will be replaced by activeTab.commentsState in Phase 4.
+ */
+export const commentsState = $state(createCommentsState());
 
 // =============================================================================
 // Derived

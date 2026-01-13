@@ -9,6 +9,7 @@
   import {
     getAllShortcuts,
     formatShortcutKeys,
+    isMac,
     type Shortcut,
     type FormattedKey,
   } from './services/keyboard';
@@ -43,6 +44,15 @@
   // Create a unique string key for deduplication
   function keyToString(k: FormattedKey): string {
     return k.modifiers.join('') + k.key;
+  }
+
+  // Menu shortcuts handled by Tauri (not in keyboard service, but should show here)
+  function getMenuShortcuts(): DisplayShortcut[] {
+    const cmdKey = isMac() ? '⌘' : 'Ctrl';
+    return [
+      { description: 'New tab', keys: [{ modifiers: [cmdKey], key: 'T' }] },
+      { description: 'Close tab', keys: [{ modifiers: [cmdKey], key: 'W' }] },
+    ];
   }
 
   // Get shortcuts grouped by category, with duplicate descriptions merged
@@ -81,6 +91,11 @@
           return true;
         });
         displayShortcuts.push({ description, keys: uniqueKeys });
+      }
+
+      // Add menu shortcuts to the 'view' category
+      if (category === 'view') {
+        displayShortcuts.push(...getMenuShortcuts());
       }
 
       groups.push({

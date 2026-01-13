@@ -186,7 +186,7 @@
 
   // Register keyboard shortcuts
   onMount(() => {
-    const unregister = registerShortcut({
+    const unregisterCopy = registerShortcut({
       id: 'copy-comments',
       keys: ['c'],
       description: 'Copy all comments',
@@ -198,8 +198,20 @@
       },
     });
 
+    const unregisterTheme = registerShortcut({
+      id: 'open-theme-picker',
+      keys: ['p'],
+      modifiers: { meta: true },
+      description: 'Theme picker',
+      category: 'view',
+      handler: () => {
+        showThemeModal = !showThemeModal;
+      },
+    });
+
     return () => {
-      unregister();
+      unregisterCopy();
+      unregisterTheme();
     };
   });
 </script>

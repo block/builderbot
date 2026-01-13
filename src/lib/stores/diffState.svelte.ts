@@ -16,29 +16,65 @@ import { listDiffFiles, getFileDiff } from '../services/git';
 import type { DiffSpec, FileDiffSummary, FileDiff } from '../types';
 
 // =============================================================================
-// Reactive State
+// Type Definitions
 // =============================================================================
 
-export const diffState = $state({
+/**
+ * Diff state type for factory pattern.
+ */
+export interface DiffState {
   /** Current diff spec (needed for on-demand loading) */
-  currentSpec: null as DiffSpec | null,
+  currentSpec: DiffSpec | null;
   /** Current repo path */
-  currentRepoPath: null as string | null,
+  currentRepoPath: string | null;
   /** File summaries for the sidebar */
-  files: [] as FileDiffSummary[],
+  files: FileDiffSummary[];
   /** Cached full diffs by path */
-  diffCache: new Map<string, FileDiff>(),
+  diffCache: Map<string, FileDiff>;
   /** Currently selected file path */
-  selectedFile: null as string | null,
+  selectedFile: string | null;
   /** Target line to scroll to after file selection (0-indexed, null = no scroll) */
-  scrollTargetLine: null as number | null,
+  scrollTargetLine: number | null;
   /** Whether file list is loading */
-  loading: true,
+  loading: boolean;
   /** Whether a specific file diff is loading */
-  loadingFile: null as string | null,
+  loadingFile: string | null;
   /** Error message if loading failed */
-  error: null as string | null,
-});
+  error: string | null;
+}
+
+// =============================================================================
+// Factory Function
+// =============================================================================
+
+/**
+ * Create a new isolated diff state instance.
+ * Used by the tab system to create per-tab state.
+ * Returns a plain object - caller should wrap with $state() if needed.
+ */
+export function createDiffState(): DiffState {
+  return {
+    currentSpec: null,
+    currentRepoPath: null,
+    files: [],
+    diffCache: new Map<string, FileDiff>(),
+    selectedFile: null,
+    scrollTargetLine: null,
+    loading: true,
+    loadingFile: null,
+    error: null,
+  };
+}
+
+// =============================================================================
+// Reactive State (Singleton)
+// =============================================================================
+
+/**
+ * Module-level singleton state (for backwards compatibility).
+ * Will be replaced by activeTab.diffState in Phase 4.
+ */
+export const diffState = $state(createDiffState());
 
 // =============================================================================
 // Helpers

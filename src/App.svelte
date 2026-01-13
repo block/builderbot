@@ -1,12 +1,28 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { AlertCircle } from 'lucide-svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import DiffViewer from './lib/DiffViewer.svelte';
   import EmptyState from './lib/EmptyState.svelte';
   import TopBar from './lib/TopBar.svelte';
   import FileSearchModal from './lib/FileSearchModal.svelte';
+  import TabBar from './lib/TabBar.svelte';
   import { listRefs } from './lib/services/git';
+  import { getWindowLabel } from './lib/services/window';
+  import {
+    windowState,
+    addTab,
+    closeTab,
+    switchTab,
+    setWindowLabel,
+    loadTabsFromStorage,
+    getActiveTab,
+  } from './lib/stores/tabState.svelte';
+  import { createDiffState } from './lib/stores/diffState.svelte';
+  import { createCommentsState } from './lib/stores/comments.svelte';
+  import { createDiffSelection } from './lib/stores/diffSelection.svelte';
   import { DiffSpec, inferRefType } from './lib/types';
   import type { DiffSpec as DiffSpecType } from './lib/types';
   import { initWatcher, watchRepo, type Unsubscribe } from './lib/services/statusEvents';
@@ -43,16 +59,25 @@
     resetState,
   } from './lib/stores/diffState.svelte';
   import {
+    commentsState,
     loadComments,
     setCurrentPath,
     clearComments,
     setReferenceFilesLoader,
   } from './lib/stores/comments.svelte';
-  import { repoState, initRepoState, setCurrentRepo } from './lib/stores/repoState.svelte';
+  import {
+    repoState,
+    initRepoState,
+    setCurrentRepo,
+    openRepoPicker,
+  } from './lib/stores/repoState.svelte';
 
   // UI State
   let unsubscribeWatcher: Unsubscribe | null = null;
   let showFileSearch = $state(false);
+  let unsubscribeMenuOpenFolder: Unsubscribe | null = null;
+  let unsubscribeMenuCloseTab: Unsubscribe | null = null;
+  let unsubscribeMenuCloseWindow: Unsubscribe | null = null;
 
   // Load files and comments for current spec
   async function loadAll() {
@@ -75,6 +100,9 @@
     await refreshFiles(diffSelection.spec, repoState.currentPath ?? undefined);
     // Reload comments - they may have changed after a commit
     await loadComments(diffSelection.spec);
+
+    // Save updated state back to tab
+    syncGlobalToTab();
   }
 
   // Preset selection
@@ -83,6 +111,9 @@
     clearReferenceFiles();
     selectPreset(preset);
     await loadAll();
+
+    // Save updated state back to tab
+    syncGlobalToTab();
   }
 
   // Custom diff selection (from DiffSelectorModal or PRSelectorModal)
@@ -91,6 +122,9 @@
     clearReferenceFiles();
     selectCustomDiff(spec, label, prNumber);
     await loadAll();
+
+    // Save updated state back to tab
+    syncGlobalToTab();
   }
 
   // Repo change - reload everything
@@ -127,7 +161,46 @@
       // Reset diff selection to "Uncommitted" and load
       resetDiffSelection();
       await loadAll();
+
+      // Save updated state back to tab
+      syncGlobalToTab();
     }
+  }
+
+  // Menu Event Handlers
+  async function handleMenuOpenFolder() {
+    // Add a new tab for the selected repo
+    await handleNewTab();
+  }
+
+  function handleMenuCloseTab() {
+    // Close the active tab
+    const activeTab = getActiveTab();
+    if (!activeTab) return;
+
+    closeTab(activeTab.id);
+
+    // Close window if no tabs left
+    if (windowState.tabs.length === 0) {
+      const window = getCurrentWindow();
+      window.close();
+      return;
+    }
+
+    // Sync the new active tab's state to global
+    syncTabToGlobal();
+
+    // Watch the new active tab's repo (fire-and-forget)
+    const newTab = getActiveTab();
+    if (newTab) {
+      watchRepo(newTab.repoPath);
+    }
+  }
+
+  async function handleMenuCloseWindow() {
+    // Close the current window
+    const window = getCurrentWindow();
+    await window.close();
   }
 
   /**
@@ -147,6 +220,161 @@
 
     // Fallback to first branch, or 'main' if no branches
     return branchNames[0] ?? 'main';
+  }
+
+  /**
+   * Extract repository name from path.
+   */
+  function extractRepoName(path: string): string {
+    const parts = path.split('/');
+    return parts[parts.length - 1] || path;
+  }
+
+  /**
+   * Sync active tab's state to global singletons.
+   * This allows existing components to work without changes.
+   */
+  function syncTabToGlobal() {
+    const tab = getActiveTab();
+    if (!tab) return;
+
+    console.log(`Syncing tab "${tab.repoName}" to global state`);
+
+    // Copy active tab's state to global singletons (property by property for reactivity)
+    diffState.currentSpec = tab.diffState.currentSpec;
+    diffState.currentRepoPath = tab.diffState.currentRepoPath;
+    diffState.files = tab.diffState.files;
+    diffState.diffCache = tab.diffState.diffCache;
+    diffState.selectedFile = tab.diffState.selectedFile;
+    diffState.scrollTargetLine = tab.diffState.scrollTargetLine;
+    diffState.loading = tab.diffState.loading;
+    diffState.loadingFile = tab.diffState.loadingFile;
+    diffState.error = tab.diffState.error;
+
+    commentsState.comments = tab.commentsState.comments;
+    commentsState.reviewedPaths = tab.commentsState.reviewedPaths;
+    commentsState.currentPath = tab.commentsState.currentPath;
+    commentsState.currentSpec = tab.commentsState.currentSpec;
+    commentsState.currentRepoPath = tab.commentsState.currentRepoPath;
+    commentsState.loading = tab.commentsState.loading;
+
+    diffSelection.spec = tab.diffSelection.spec;
+    diffSelection.label = tab.diffSelection.label;
+    diffSelection.prNumber = tab.diffSelection.prNumber;
+
+    // Update repo state
+    setCurrentRepo(tab.repoPath);
+  }
+
+  /**
+   * Sync global singletons back to active tab.
+   * Called after state changes to preserve tab state.
+   */
+  function syncGlobalToTab() {
+    const tab = getActiveTab();
+    if (!tab) return;
+
+    console.log(`Saving global state to tab "${tab.repoName}"`);
+
+    // Copy global state back to active tab
+    tab.diffState.currentSpec = diffState.currentSpec;
+    tab.diffState.currentRepoPath = diffState.currentRepoPath;
+    tab.diffState.files = diffState.files;
+    tab.diffState.diffCache = diffState.diffCache;
+    tab.diffState.selectedFile = diffState.selectedFile;
+    tab.diffState.scrollTargetLine = diffState.scrollTargetLine;
+    tab.diffState.loading = diffState.loading;
+    tab.diffState.loadingFile = diffState.loadingFile;
+    tab.diffState.error = diffState.error;
+
+    tab.commentsState.comments = commentsState.comments;
+    tab.commentsState.reviewedPaths = commentsState.reviewedPaths;
+    tab.commentsState.currentPath = commentsState.currentPath;
+    tab.commentsState.currentSpec = commentsState.currentSpec;
+    tab.commentsState.currentRepoPath = commentsState.currentRepoPath;
+    tab.commentsState.loading = commentsState.loading;
+
+    tab.diffSelection.spec = diffSelection.spec;
+    tab.diffSelection.label = diffSelection.label;
+    tab.diffSelection.prNumber = diffSelection.prNumber;
+  }
+
+  /**
+   * Initialize a newly created tab with data.
+   */
+  async function initializeNewTab(tab: any) {
+    try {
+      // Load refs and detect default branch
+      const refs = await listRefs(tab.repoPath);
+      const defaultBranch = detectDefaultBranch(refs);
+      setDefaultBranch(defaultBranch);
+
+      // Reset to uncommitted preset
+      resetDiffSelection();
+
+      // Load files and comments
+      await loadFiles(diffSelection.spec, tab.repoPath);
+      await loadComments(diffSelection.spec, tab.repoPath);
+
+      // Save state back to tab
+      syncGlobalToTab();
+    } catch (e) {
+      console.error('Failed to initialize tab:', e);
+      diffState.error = e instanceof Error ? e.message : String(e);
+      diffState.loading = false;
+    }
+  }
+
+  /**
+   * Handle tab switching.
+   */
+  async function handleTabSwitch(index: number) {
+    console.log(`Switching to tab ${index}`);
+
+    // Save current tab state before switching
+    syncGlobalToTab();
+
+    // Switch to new tab
+    await switchTab(index);
+    console.log(`Active tab after switch:`, getActiveTab()?.repoName);
+
+    // Load new tab state
+    syncTabToGlobal();
+
+    // Watch the new tab's repo and initialize if needed
+    const tab = getActiveTab();
+    if (tab) {
+      console.log(`Watching repo: ${tab.repoPath}`);
+      await watchRepo(tab.repoPath);
+
+      // Initialize tab if it hasn't been loaded yet (e.g., restored from storage)
+      if (tab.diffState.currentSpec === null) {
+        await initializeNewTab(tab);
+      }
+    }
+  }
+
+  /**
+   * Handle new tab creation.
+   */
+  async function handleNewTab() {
+    const repoPath = await openRepoPicker();
+    if (!repoPath) return;
+
+    // Save current tab state before creating new one
+    syncGlobalToTab();
+
+    const repoName = extractRepoName(repoPath);
+    addTab(repoPath, repoName, createDiffState, createCommentsState, createDiffSelection);
+
+    // Sync to the new tab
+    syncTabToGlobal();
+
+    // Initialize the new tab
+    const newTab = getActiveTab();
+    if (newTab) {
+      await initializeNewTab(newTab);
+    }
   }
 
   // Get current diff - check reference files first
@@ -226,26 +454,41 @@
     (async () => {
       await loadSavedSyntaxTheme();
 
+      // Get window label and initialize tab state
+      const label = await getWindowLabel();
+      setWindowLabel(label);
+
+      // Load tabs from storage (if any)
+      loadTabsFromStorage(createDiffState, createCommentsState, createDiffSelection);
+
       // Initialize watcher listener once (handles all repos)
       unsubscribeWatcher = await initWatcher(handleFilesChanged);
+
+      // Register menu event listeners
+      unsubscribeMenuOpenFolder = await listen('menu:open-folder', handleMenuOpenFolder);
+      unsubscribeMenuCloseTab = await listen('menu:close-tab', handleMenuCloseTab);
+      unsubscribeMenuCloseWindow = await listen('menu:close-window', handleMenuCloseWindow);
 
       // Initialize repo state (resolves canonical path, adds to recent repos)
       const repoPath = await initRepoState();
 
       if (repoPath) {
-        watchRepo(repoPath);
+        // Create initial tab if no tabs loaded from storage
+        if (windowState.tabs.length === 0) {
+          const repoName = extractRepoName(repoPath);
+          addTab(repoPath, repoName, createDiffState, createCommentsState, createDiffSelection);
+        }
 
-        // Load refs for autocomplete and detect default branch
-        try {
-          const refs = await listRefs(repoPath);
-          const defaultBranch = detectDefaultBranch(refs);
-          setDefaultBranch(defaultBranch);
+        // Sync the active tab to global state
+        syncTabToGlobal();
 
-          await loadAll();
-        } catch (e) {
-          // Initial load failed - not a git repo or other error
-          diffState.loading = false;
-          console.error('Failed to load refs:', e);
+        // Watch the active tab's repo
+        const tab = getActiveTab();
+        if (tab) {
+          await watchRepo(tab.repoPath);
+
+          // Initialize the active tab
+          await initializeNewTab(tab);
         }
       }
     })();
@@ -255,10 +498,17 @@
     unregisterPreferenceShortcuts?.();
     unregisterFileSearchShortcut?.();
     unsubscribeWatcher?.();
+    unsubscribeMenuOpenFolder?.();
+    unsubscribeMenuCloseTab?.();
+    unsubscribeMenuCloseWindow?.();
   });
 </script>
 
 <main>
+  {#if windowState.tabs.length > 0}
+    <TabBar onNewTab={handleNewTab} onSwitchTab={handleTabSwitch} />
+  {/if}
+
   <TopBar
     onPresetSelect={handlePresetSelect}
     onCustomDiff={handleCustomDiff}
@@ -338,7 +588,7 @@
     flex-direction: column;
     height: 100vh;
     overflow: hidden;
-    background-color: var(--bg-chrome);
+    background-color: var(--bg-primary);
   }
 
   .app-container {

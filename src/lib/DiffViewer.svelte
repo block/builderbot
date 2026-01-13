@@ -1595,7 +1595,7 @@
     min-width: 0;
     position: relative;
     border-radius: 12px;
-    background-color: var(--bg-primary);
+    background-color: var(--bg-elevated);
   }
 
   /* Single pane mode */

@@ -39,6 +39,9 @@ export interface Shortcut {
 /** Registered shortcuts */
 const shortcuts: Map<string, Shortcut> = new Map();
 
+/** Default bindings (stored when first registered) */
+const defaultBindings: Map<string, { keys: string[]; modifiers?: Modifiers }> = new Map();
+
 /** Track if listener is attached */
 let listenerAttached = false;
 
@@ -188,6 +191,15 @@ function ensureListener(): void {
  */
 export function registerShortcut(shortcut: Shortcut): () => void {
   ensureListener();
+
+  // Store default binding on first registration
+  if (!defaultBindings.has(shortcut.id)) {
+    defaultBindings.set(shortcut.id, {
+      keys: [...shortcut.keys],
+      modifiers: shortcut.modifiers ? { ...shortcut.modifiers } : undefined,
+    });
+  }
+
   shortcuts.set(shortcut.id, shortcut);
 
   return () => {
@@ -202,4 +214,111 @@ export function registerShortcut(shortcut: Shortcut): () => void {
 export function registerShortcuts(shortcutList: Shortcut[]): () => void {
   const unregisters = shortcutList.map((s) => registerShortcut(s));
   return () => unregisters.forEach((fn) => fn());
+}
+
+// =============================================================================
+// Binding Management
+// =============================================================================
+
+/**
+ * Get the default binding for a shortcut.
+ */
+export function getDefaultBinding(
+  id: string
+): { keys: string[]; modifiers?: Modifiers } | undefined {
+  return defaultBindings.get(id);
+}
+
+/**
+ * Check if a shortcut has been customized from its default.
+ */
+export function isCustomized(id: string): boolean {
+  const shortcut = shortcuts.get(id);
+  const defaultBinding = defaultBindings.get(id);
+  if (!shortcut || !defaultBinding) return false;
+
+  // Compare keys
+  if (shortcut.keys.length !== defaultBinding.keys.length) return true;
+  if (!shortcut.keys.every((k, i) => k === defaultBinding.keys[i])) return true;
+
+  // Compare modifiers
+  const sMod = shortcut.modifiers || {};
+  const dMod = defaultBinding.modifiers || {};
+  if (!!sMod.ctrl !== !!dMod.ctrl) return true;
+  if (!!sMod.meta !== !!dMod.meta) return true;
+  if (!!sMod.shift !== !!dMod.shift) return true;
+  if (!!sMod.alt !== !!dMod.alt) return true;
+
+  return false;
+}
+
+/**
+ * Update a shortcut's binding at runtime.
+ */
+export function updateBinding(id: string, keys: string[], modifiers?: Modifiers): boolean {
+  const shortcut = shortcuts.get(id);
+  if (!shortcut) return false;
+
+  shortcut.keys = keys;
+  shortcut.modifiers = modifiers;
+  return true;
+}
+
+/**
+ * Reset a shortcut to its default binding.
+ */
+export function resetBinding(id: string): boolean {
+  const shortcut = shortcuts.get(id);
+  const defaultBinding = defaultBindings.get(id);
+  if (!shortcut || !defaultBinding) return false;
+
+  shortcut.keys = [...defaultBinding.keys];
+  shortcut.modifiers = defaultBinding.modifiers ? { ...defaultBinding.modifiers } : undefined;
+  return true;
+}
+
+/**
+ * Check if a binding conflicts with existing shortcuts.
+ * Returns the ID of the conflicting shortcut, or null if no conflict.
+ */
+export function hasConflict(
+  keys: string[],
+  modifiers?: Modifiers,
+  excludeId?: string
+): string | null {
+  for (const [id, shortcut] of shortcuts) {
+    if (id === excludeId) continue;
+
+    // Check if any key matches
+    const keyMatches = keys.some((k) =>
+      shortcut.keys.some((sk) => sk.toLowerCase() === k.toLowerCase())
+    );
+    if (!keyMatches) continue;
+
+    // Check if modifiers match
+    const sMod = shortcut.modifiers || {};
+    const tMod = modifiers || {};
+    const modifiersMatch =
+      !!sMod.ctrl === !!tMod.ctrl &&
+      !!sMod.meta === !!tMod.meta &&
+      !!sMod.shift === !!tMod.shift &&
+      !!sMod.alt === !!tMod.alt;
+
+    if (modifiersMatch) {
+      return id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Load and apply custom bindings from storage.
+ * Call this after all shortcuts are registered.
+ */
+export function loadCustomBindings(
+  bindings: Record<string, { keys: string[]; modifiers?: Modifiers }>
+): void {
+  for (const [id, binding] of Object.entries(bindings)) {
+    updateBinding(id, binding.keys, binding.modifiers);
+  }
 }

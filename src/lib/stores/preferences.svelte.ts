@@ -37,7 +37,23 @@ const SIZE_DEFAULT = 13;
 
 const SIZE_STORAGE_KEY = 'staged-size-base';
 const SYNTAX_THEME_STORAGE_KEY = 'staged-syntax-theme';
+const SIDEBAR_POSITION_STORAGE_KEY = 'staged-sidebar-position';
+const KEYBOARD_BINDINGS_STORAGE_KEY = 'staged-keyboard-bindings';
 const DEFAULT_SYNTAX_THEME: SyntaxThemeName = 'laserwave';
+const DEFAULT_SIDEBAR_POSITION: SidebarPosition = 'right';
+
+export type SidebarPosition = 'left' | 'right';
+
+/** Custom keyboard binding (keys + modifiers) */
+export interface KeyboardBinding {
+  keys: string[];
+  modifiers?: {
+    ctrl?: boolean;
+    meta?: boolean;
+    shift?: boolean;
+    alt?: boolean;
+  };
+}
 
 // =============================================================================
 // Reactive State
@@ -54,6 +70,8 @@ export const preferences = $state({
   syntaxTheme: DEFAULT_SYNTAX_THEME as SyntaxThemeName,
   /** Version counter for triggering re-renders on theme change */
   syntaxThemeVersion: 0,
+  /** Sidebar position (left or right) */
+  sidebarPosition: DEFAULT_SIDEBAR_POSITION as SidebarPosition,
 });
 
 // =============================================================================
@@ -242,6 +260,79 @@ export async function loadSavedSyntaxTheme(): Promise<void> {
 
   await setSyntaxTheme(preferences.syntaxTheme);
   applyAdaptiveTheme();
+}
+
+// =============================================================================
+// Sidebar Position Actions
+// =============================================================================
+
+/**
+ * Set sidebar position.
+ */
+export function setSidebarPosition(position: SidebarPosition): void {
+  preferences.sidebarPosition = position;
+  localStorage.setItem(SIDEBAR_POSITION_STORAGE_KEY, position);
+}
+
+/**
+ * Toggle sidebar position.
+ */
+export function toggleSidebarPosition(): void {
+  setSidebarPosition(preferences.sidebarPosition === 'left' ? 'right' : 'left');
+}
+
+/**
+ * Load saved sidebar position.
+ */
+export function loadSavedSidebarPosition(): void {
+  const saved = localStorage.getItem(SIDEBAR_POSITION_STORAGE_KEY);
+  if (saved === 'left' || saved === 'right') {
+    preferences.sidebarPosition = saved;
+  }
+}
+
+// =============================================================================
+// Keyboard Bindings Storage
+// =============================================================================
+
+/**
+ * Get all custom keyboard bindings from localStorage.
+ */
+export function getCustomKeyboardBindings(): Record<string, KeyboardBinding> {
+  const saved = localStorage.getItem(KEYBOARD_BINDINGS_STORAGE_KEY);
+  if (saved) {
+    try {
+      return JSON.parse(saved);
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+/**
+ * Save a custom keyboard binding.
+ */
+export function saveCustomKeyboardBinding(id: string, binding: KeyboardBinding): void {
+  const bindings = getCustomKeyboardBindings();
+  bindings[id] = binding;
+  localStorage.setItem(KEYBOARD_BINDINGS_STORAGE_KEY, JSON.stringify(bindings));
+}
+
+/**
+ * Remove a custom keyboard binding (revert to default).
+ */
+export function removeCustomKeyboardBinding(id: string): void {
+  const bindings = getCustomKeyboardBindings();
+  delete bindings[id];
+  localStorage.setItem(KEYBOARD_BINDINGS_STORAGE_KEY, JSON.stringify(bindings));
+}
+
+/**
+ * Reset all custom keyboard bindings.
+ */
+export function resetAllKeyboardBindings(): void {
+  localStorage.removeItem(KEYBOARD_BINDINGS_STORAGE_KEY);
 }
 
 // =============================================================================

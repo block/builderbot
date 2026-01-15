@@ -1149,6 +1149,11 @@
       getCurrentScrollY: () => scrollController.afterScrollY,
       getLineHeight: () => scrollController.getDimensions('after').lineHeight,
       getViewportHeight: () => scrollController.getDimensions('after').viewportHeight,
+      startCommentOnHunk: (hunkIndex) => {
+        commentingOnRange = hunkIndex;
+        commentPositionPreference = decideCommentPosition();
+        updateCommentEditorPosition();
+      },
     });
 
     document.addEventListener('copy', handleCopy);

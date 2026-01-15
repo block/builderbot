@@ -41,6 +41,18 @@ export async function resolveRef(reference: string, repoPath?: string): Promise<
 }
 
 /**
+ * Compute the merge-base between two refs.
+ * Returns the SHA of the common ancestor.
+ */
+export async function getMergeBase(ref1: string, ref2: string, repoPath?: string): Promise<string> {
+  return invoke<string>('get_merge_base', {
+    repoPath: repoPath ?? null,
+    ref1,
+    ref2,
+  });
+}
+
+/**
  * List files changed in a diff (for sidebar).
  */
 export async function listDiffFiles(spec: DiffSpec, repoPath?: string): Promise<FileDiffSummary[]> {

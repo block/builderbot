@@ -92,11 +92,20 @@ export function getPresets(): readonly DiffPreset[] {
   return presetStore.presets;
 }
 
+/** Detected default branch for merge-base computation */
+let defaultBranch = 'origin/main';
+
+/** Get the detected default branch */
+export function getDefaultBranch(): string {
+  return defaultBranch;
+}
+
 /**
  * Update the "Branch Changes" preset to use the detected default branch.
  * Called during app initialization.
  */
 export function setDefaultBranch(branch: string): void {
+  defaultBranch = branch;
   presetStore.presets = presetStore.presets.map((preset) => {
     if (preset.label === 'Branch Changes') {
       return {

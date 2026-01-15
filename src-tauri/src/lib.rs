@@ -93,6 +93,14 @@ fn resolve_ref(repo_path: Option<String>, reference: String) -> Result<String, S
     git::resolve_ref(path, &reference).map_err(|e| e.to_string())
 }
 
+/// Compute the merge-base between two refs.
+/// Returns the SHA of the common ancestor.
+#[tauri::command(rename_all = "camelCase")]
+fn get_merge_base(repo_path: Option<String>, ref1: String, ref2: String) -> Result<String, String> {
+    let path = get_repo_path(repo_path.as_deref());
+    git::merge_base(path, &ref1, &ref2).map_err(|e| e.to_string())
+}
+
 /// List files changed in a diff (for sidebar).
 /// Runs on a blocking thread to avoid freezing the UI on large repos.
 #[tauri::command(rename_all = "camelCase")]
@@ -489,6 +497,7 @@ pub fn run() {
             get_repo_root,
             list_refs,
             resolve_ref,
+            get_merge_base,
             list_diff_files,
             get_file_diff,
             commit,

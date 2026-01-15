@@ -598,7 +598,7 @@
     flex-direction: column;
     height: 100vh;
     overflow: hidden;
-    background-color: var(--bg-primary);
+    background-color: var(--bg-chrome);
   }
 
   .app-container {

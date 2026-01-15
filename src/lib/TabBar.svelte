@@ -94,7 +94,7 @@
     align-items: center;
     gap: 8px;
     padding: 4px 8px 0 8px;
-    background: var(--bg-chrome);
+    background: var(--bg-deepest);
     /* border-bottom: 1px solid var(--border-subtle); */
   }
 
@@ -115,7 +115,7 @@
     position: absolute;
     top: 0;
     bottom: 0;
-    background: var(--bg-primary);
+    background: var(--bg-chrome);
     border-radius: 6px 6px 0 0;
     transition:
       left 0.2s ease,
@@ -132,19 +132,19 @@
     bottom: 0;
     width: 12px;
     height: 12px;
-    background: var(--bg-chrome);
+    background: var(--bg-deepest);
   }
 
   .tab-indicator::before {
     left: -12px;
     border-bottom-right-radius: 8px;
-    box-shadow: 6px 0 0 0 var(--bg-primary);
+    box-shadow: 6px 0 0 0 var(--bg-chrome);
   }
 
   .tab-indicator::after {
     right: -12px;
     border-bottom-left-radius: 8px;
-    box-shadow: -6px 0 0 0 var(--bg-primary);
+    box-shadow: -6px 0 0 0 var(--bg-chrome);
   }
 
   .tab {
@@ -205,7 +205,7 @@
     display: flex;
     align-items: center;
     padding: 6px;
-    background: var(--bg-primary);
+    background: transparent;
     margin-bottom: 3px;
     border: none;
     border-radius: 6px;

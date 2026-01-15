@@ -21,6 +21,7 @@ export interface Theme {
   bg: {
     primary: string; // Main background (same as syntax theme) - used for editor islands
     chrome: string; // Unified chrome background (header, sidebar, spine)
+    deepest: string; // Deepest level (tab bar) - pure black/white
     elevated: string; // Floating elements (dropdowns, tooltips)
     hover: string; // Hover states
   };
@@ -173,6 +174,7 @@ function overlay(hex: string, alpha: number): string {
  */
 interface ChromeColors {
   chrome: string;
+  deepest: string;
   primary: string; // May be adjusted from original if needed for contrast
 }
 
@@ -236,21 +238,29 @@ function calculateLumDiff(bgLum: number): number {
 function calculateChromeColors(syntaxBg: string): ChromeColors {
   const bgLum = luminance(syntaxBg);
 
-  // Calculate target luminance difference
+  // Calculate target luminance difference for chrome
   const lumDiff = calculateLumDiff(bgLum);
   const targetChromeLum = bgLum - lumDiff;
 
-  // Can we achieve this? (chrome luminance must be >= 0)
+  // Deepest is 2x the chrome difference (darker still)
+  const deepestLumDiff = lumDiff * 2;
+  const targetDeepestLum = bgLum - deepestLumDiff;
+
+  // Can we achieve chrome luminance? (must be >= 0)
   if (targetChromeLum >= 0) {
     return {
       chrome: findColorWithLuminance(syntaxBg, targetChromeLum),
+      // Deepest goes as dark as possible, clamped to 0
+      deepest: findColorWithLuminance(syntaxBg, Math.max(0, targetDeepestLum)),
       primary: syntaxBg,
     };
   }
 
   // Theme is too dark - chrome goes black, lighten primary
+  // Deepest also goes black (can't go darker than 0 luminance)
   return {
-    chrome: '#000000',
+    chrome: findColorWithLuminance(syntaxBg, 0),
+    deepest: findColorWithLuminance(syntaxBg, 0),
     primary: findColorWithLuminance(syntaxBg, lumDiff),
   };
 }
@@ -282,8 +292,12 @@ export function createAdaptiveTheme(
 ): Theme {
   const isDark = luminance(syntaxBg) < 0.5;
 
-  // Calculate chrome and potentially adjusted primary
-  const { chrome: chromeColor, primary: primaryBg } = calculateChromeColors(syntaxBg);
+  // Calculate chrome, deepest, and potentially adjusted primary
+  const {
+    chrome: chromeColor,
+    deepest: deepestColor,
+    primary: primaryBg,
+  } = calculateChromeColors(syntaxBg);
 
   // Direction multiplier: +1 for dark (lighten), -1 for light (darken)
   const dir = isDark ? 1 : -1;
@@ -313,6 +327,7 @@ export function createAdaptiveTheme(
     bg: {
       primary: primaryBg, // Editor islands - may be adjusted from syntax theme for contrast
       chrome: chromeColor, // Calculated for consistent contrast ratio
+      deepest: deepestColor, // Darker than chrome (2x the luminance diff)
       elevated: elevate(0.08), // Floating elements (dropdowns, tooltips)
       hover: elevate(0.06), // Hover state
     },
@@ -388,6 +403,7 @@ export function themeToCssVars(t: Theme): string {
 
     --bg-primary: ${t.bg.primary};
     --bg-chrome: ${t.bg.chrome};
+    --bg-deepest: ${t.bg.deepest};
     --bg-elevated: ${t.bg.elevated};
     --bg-hover: ${t.bg.hover};
 

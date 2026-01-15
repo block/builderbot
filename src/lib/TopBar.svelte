@@ -224,11 +224,10 @@
         class="action-btn"
         class:disabled={!canCommit}
         onclick={() => canCommit && (showCommitModal = true)}
-        title={canCommit ? '⌘K' : 'No staged or unstaged changes'}
+        title={canCommit ? 'Commit' : 'No staged or unstaged changes'}
         disabled={!canCommit}
       >
         <GitCommitHorizontal size={14} />
-        <span class="action-label">Commit</span>
       </button>
     {/if}
 
@@ -639,13 +638,5 @@
 
   .action-btn :global(svg) {
     flex-shrink: 0;
-  }
-
-  .action-label {
-    display: none;
-  }
-
-  .action-btn:hover:not(:disabled) .action-label {
-    display: inline;
   }
 </style>

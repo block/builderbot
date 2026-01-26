@@ -546,7 +546,26 @@ fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> 
         ],
     )?;
 
+    // Edit menu is required for standard text editing shortcuts (Cmd+A, Cmd+C, etc.)
+    // to work in input fields. Without this, the shortcuts get swallowed at the
+    // native menu level and never reach the webview.
+    let edit_menu = Submenu::with_items(
+        app,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
     menu.append(&file_menu)?;
+    menu.append(&edit_menu)?;
     Ok(menu)
 }
 

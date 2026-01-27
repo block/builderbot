@@ -8,6 +8,7 @@
  */
 
 import type { Comment, Span, NewComment, DiffSpec } from '../types';
+import { gitRefName } from '../types';
 import {
   getReview,
   addComment as apiAddComment,
@@ -170,7 +171,7 @@ export async function loadComments(spec: DiffSpec, repoPath?: string): Promise<v
 
     // Load reference files if any were persisted
     if (review.reference_files.length > 0 && onReferenceFilesLoaded) {
-      const refName = spec.head.type === 'WorkingTree' ? 'HEAD' : spec.head.value;
+      const refName = gitRefName(spec.head);
       // Don't await - let it load in background
       onReferenceFilesLoaded(review.reference_files, refName, repoPath ?? undefined).catch((e) => {
         console.error('Failed to load reference files:', e);

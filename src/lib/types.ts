@@ -3,7 +3,24 @@
 // =============================================================================
 
 /** A reference to a point in git history (or working tree) */
-export type GitRef = { type: 'WorkingTree' } | { type: 'Rev'; value: string };
+export type GitRef =
+  | { type: 'WorkingTree' }
+  | { type: 'Rev'; value: string }
+  | { type: 'MergeBase' };
+
+/** Get display string for a GitRef */
+export function gitRefDisplay(ref: GitRef): string {
+  if (ref.type === 'WorkingTree') return '@';
+  if (ref.type === 'MergeBase') return 'merge-base';
+  return ref.value;
+}
+
+/** Get a ref name suitable for git commands (e.g., for loading reference files) */
+export function gitRefName(ref: GitRef): string {
+  if (ref.type === 'WorkingTree') return 'HEAD';
+  if (ref.type === 'MergeBase') return 'HEAD'; // For file loading, use HEAD
+  return ref.value;
+}
 
 /** Inferred type of a ref string for display purposes */
 export type RefType = 'branch' | 'tag' | 'remote' | 'special';
@@ -53,6 +70,14 @@ export const DiffSpec = {
     };
   },
 
+  /** Branch changes: merge-base(defaultBranch, HEAD)..WorkingTree */
+  branchChanges(): DiffSpec {
+    return {
+      base: { type: 'MergeBase' },
+      head: { type: 'WorkingTree' },
+    };
+  },
+
   /** Custom range */
   custom(base: GitRef, head: GitRef): DiffSpec {
     return { base, head };
@@ -68,9 +93,12 @@ export const DiffSpec = {
 
   /** Display as "base..head" */
   display(spec: DiffSpec): string {
-    const baseStr = spec.base.type === 'WorkingTree' ? '@' : spec.base.value;
-    const headStr = spec.head.type === 'WorkingTree' ? '@' : spec.head.value;
-    return `${baseStr}..${headStr}`;
+    const formatRef = (ref: GitRef): string => {
+      if (ref.type === 'WorkingTree') return '@';
+      if (ref.type === 'MergeBase') return 'merge-base';
+      return ref.value;
+    };
+    return `${formatRef(spec.base)}..${formatRef(spec.head)}`;
   },
 };
 

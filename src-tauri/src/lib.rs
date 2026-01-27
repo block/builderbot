@@ -34,6 +34,12 @@ fn make_diff_id(repo: &Path, spec: &DiffSpec) -> Result<DiffId, String> {
         match r {
             GitRef::WorkingTree => Ok("@".to_string()),
             GitRef::Rev(rev) => git::resolve_ref(repo, rev).map_err(|e| e.to_string()),
+            GitRef::MergeBase => {
+                // Resolve merge-base to a concrete SHA for stable storage key
+                let default_branch =
+                    git::detect_default_branch(repo).map_err(|e| e.to_string())?;
+                git::merge_base(repo, &default_branch, "HEAD").map_err(|e| e.to_string())
+            }
         }
     };
 

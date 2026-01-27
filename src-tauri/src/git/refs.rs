@@ -37,3 +37,30 @@ pub fn resolve_ref(repo: &Path, reference: &str) -> Result<String, GitError> {
     let output = cli::run(repo, &["rev-parse", reference])?;
     Ok(output.trim().to_string())
 }
+
+/// Detect the default branch for this repository.
+/// Checks for common default branch names in order of preference.
+/// Returns the remote-tracking branch (e.g., "origin/main") if available,
+/// otherwise falls back to local branch name.
+pub fn detect_default_branch(repo: &Path) -> Result<String, GitError> {
+    let refs = list_refs(repo)?;
+
+    // Check for remote-tracking branches first (preferred for merge-base)
+    let remote_candidates = ["origin/main", "origin/master", "origin/develop", "origin/trunk"];
+    for candidate in remote_candidates {
+        if refs.iter().any(|r| r == candidate) {
+            return Ok(candidate.to_string());
+        }
+    }
+
+    // Fall back to local branches
+    let local_candidates = ["main", "master", "develop", "trunk"];
+    for candidate in local_candidates {
+        if refs.iter().any(|r| r == candidate) {
+            return Ok(candidate.to_string());
+        }
+    }
+
+    // Last resort: use "main"
+    Ok("main".to_string())
+}

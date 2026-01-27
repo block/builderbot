@@ -25,7 +25,7 @@
   import KeyboardShortcutsModal from './KeyboardShortcutsModal.svelte';
   import SettingsModal from './SettingsModal.svelte';
   import SmartDiffModal from './SmartDiffModal.svelte';
-  import { DiffSpec } from './types';
+  import { DiffSpec, gitRefDisplay } from './types';
   import type { DiffSpec as DiffSpecType } from './types';
   import {
     getPresets,
@@ -202,14 +202,14 @@
    * Get initial base string for the custom modal
    */
   function getInitialBase(): string {
-    return diffSelection.spec.base.type === 'WorkingTree' ? '@' : diffSelection.spec.base.value;
+    return gitRefDisplay(diffSelection.spec.base);
   }
 
   /**
    * Get initial head string for the custom modal
    */
   function getInitialHead(): string {
-    return diffSelection.spec.head.type === 'WorkingTree' ? '@' : diffSelection.spec.head.value;
+    return gitRefDisplay(diffSelection.spec.head);
   }
 
   // Close dropdowns when clicking outside

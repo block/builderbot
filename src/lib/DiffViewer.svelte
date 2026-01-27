@@ -46,7 +46,7 @@
   import { setupDiffKeyboardNav } from './diffKeyboard';
   import { diffSelection } from './stores/diffSelection.svelte';
   import { diffState, clearScrollTarget } from './stores/diffState.svelte';
-  import { DiffSpec } from './types';
+  import { DiffSpec, gitRefDisplay } from './types';
   import CommentEditor from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import { smartDiffState, setAnnotationsRevealed } from './stores/smartDiff.svelte';
@@ -86,11 +86,11 @@
 
   // Get diff spec from store for display and logic
   let isWorkingTree = $derived(diffSelection.spec.head.type === 'WorkingTree');
-  let diffBaseDisplay = $derived(
-    diffSelection.spec.base.type === 'WorkingTree' ? '@' : diffSelection.spec.base.value
-  );
+  let diffBaseDisplay = $derived(gitRefDisplay(diffSelection.spec.base));
   let diffHeadDisplay = $derived(
-    diffSelection.spec.head.type === 'WorkingTree' ? 'Working Tree' : diffSelection.spec.head.value
+    diffSelection.spec.head.type === 'WorkingTree'
+      ? 'Working Tree'
+      : gitRefDisplay(diffSelection.spec.head)
   );
 
   // ==========================================================================

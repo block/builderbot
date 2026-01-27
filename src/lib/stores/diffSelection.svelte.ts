@@ -48,7 +48,7 @@ export interface PresetStore {
 function createDefaultPresets(): DiffPreset[] {
   return [
     { spec: DiffSpec.uncommitted(), label: 'Uncommitted' },
-    { spec: DiffSpec.uncommitted(), label: 'Branch Changes' }, // Base updated on init
+    { spec: DiffSpec.branchChanges(), label: 'Branch Changes' },
     { spec: DiffSpec.lastCommit(), label: 'Last Commit' },
   ];
 }
@@ -92,33 +92,7 @@ export function getPresets(): readonly DiffPreset[] {
   return presetStore.presets;
 }
 
-/** Detected default branch for merge-base computation */
-let defaultBranch = 'origin/main';
 
-/** Get the detected default branch */
-export function getDefaultBranch(): string {
-  return defaultBranch;
-}
-
-/**
- * Update the "Branch Changes" preset to use the detected default branch.
- * Called during app initialization.
- */
-export function setDefaultBranch(branch: string): void {
-  defaultBranch = branch;
-  presetStore.presets = presetStore.presets.map((preset) => {
-    if (preset.label === 'Branch Changes') {
-      return {
-        ...preset,
-        spec: {
-          base: { type: 'Rev', value: branch },
-          head: { type: 'WorkingTree' },
-        },
-      };
-    }
-    return preset;
-  });
-}
 
 /**
  * Diff selection state object.

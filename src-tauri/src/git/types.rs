@@ -35,23 +35,29 @@ pub enum GitRef {
     WorkingTree,
     /// Anything that resolves to a commit: SHA, branch, tag, origin/main, HEAD~3, etc.
     Rev(String),
+    /// Merge-base between the default branch and HEAD.
+    /// Resolved dynamically at diff-time to handle branch switches.
+    MergeBase,
 }
 
 impl GitRef {
     /// String representation for git commands
     /// WorkingTree is represented as empty string (git uses working tree by default)
+    /// MergeBase should be resolved before calling this
     pub fn as_git_arg(&self) -> Option<&str> {
         match self {
             GitRef::WorkingTree => None,
             GitRef::Rev(s) => Some(s),
+            GitRef::MergeBase => panic!("MergeBase must be resolved before use"),
         }
     }
 
-    /// Display representation (@ for working tree)
+    /// Display representation (@ for working tree, merge-base for MergeBase)
     pub fn display(&self) -> &str {
         match self {
             GitRef::WorkingTree => "@",
             GitRef::Rev(s) => s,
+            GitRef::MergeBase => "merge-base",
         }
     }
 }

@@ -44,6 +44,7 @@ check-all: fmt-check lint typecheck
 
 # Install dependencies
 install:
+    rustup default stable
     npm install
     cd src-tauri && cargo fetch
 

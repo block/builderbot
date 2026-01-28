@@ -702,7 +702,7 @@
   .tree-item {
     display: flex;
     align-items: center;
-    width: 100%;
+    width: calc(100% - 8px);
     padding: 3px 8px;
     font-size: var(--size-md);
     gap: 4px;

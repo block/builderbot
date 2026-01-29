@@ -15,6 +15,23 @@ export async function getWindowLabel(): Promise<string> {
 }
 
 /**
+ * Get the initial repository path from CLI arguments.
+ * Returns null if no valid path was provided.
+ */
+export async function getInitialPath(): Promise<string | null> {
+  return invoke<string | null>('get_initial_path');
+}
+
+/**
+ * Install the CLI command to /usr/local/bin.
+ * Returns the install path on success.
+ * Throws an error with a message on failure.
+ */
+export async function installCli(): Promise<string> {
+  return invoke<string>('install_cli');
+}
+
+/**
  * Get the current window instance.
  */
 export { getCurrentWindow };

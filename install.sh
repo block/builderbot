@@ -163,6 +163,27 @@ install_to_system() {
     fi
 }
 
+# Install CLI command
+install_cli() {
+    if [ "$OS" = "macos" ]; then
+        CLI_PATH="bin/staged"
+        INSTALL_PATH="/usr/local/bin/staged"
+
+        print_info "Installing CLI to $INSTALL_PATH..."
+
+        # Create /usr/local/bin if it doesn't exist
+        if [ ! -d "/usr/local/bin" ]; then
+            sudo mkdir -p /usr/local/bin
+        fi
+
+        if sudo cp "$CLI_PATH" "$INSTALL_PATH" && sudo chmod +x "$INSTALL_PATH"; then
+            print_success "CLI installed to $INSTALL_PATH"
+        else
+            print_warning "Failed to install CLI (you can manually copy bin/staged to your PATH)"
+        fi
+    fi
+}
+
 # Cleanup
 cleanup() {
     if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
@@ -188,6 +209,7 @@ main() {
     install_deps
     build_app
     install_to_system
+    install_cli
     cleanup
 
     echo ""
@@ -196,7 +218,9 @@ main() {
 
     if [ "$OS" = "macos" ]; then
         echo "You can now launch Staged from your Applications folder,"
-        echo "or run it from the command line with: open -a staged"
+        echo "or from the command line:"
+        echo "  staged          # opens in current directory"
+        echo "  staged /path    # opens in specified directory"
     fi
 
     echo ""

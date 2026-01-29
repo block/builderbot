@@ -28,8 +28,22 @@ The installer will:
 - Install dependencies
 - Build the application
 - Install to `/Applications/staged.app`
+- Install the `staged` CLI to `/usr/local/bin`
 
 **Note**: This will build from source, which takes a few minutes. Requires git to be installed.
+
+### Command Line Usage
+
+After installation, you can launch Staged from the terminal:
+
+```bash
+staged              # Open in current directory
+staged /path/to/repo  # Open in specified directory
+```
+
+Each invocation opens a new window, so you can have multiple repos open simultaneously.
+
+If you installed manually (not via the install script), copy `bin/staged` to somewhere in your PATH (e.g., `/usr/local/bin`).
 
 ## Development
 

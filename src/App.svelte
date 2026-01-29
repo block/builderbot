@@ -11,7 +11,7 @@
   import FolderPickerModal from './lib/FolderPickerModal.svelte';
   import TabBar from './lib/TabBar.svelte';
   import { listRefs } from './lib/services/git';
-  import { getWindowLabel } from './lib/services/window';
+  import { getWindowLabel, installCli } from './lib/services/window';
   import {
     windowState,
     addTab,
@@ -92,6 +92,7 @@
   let unsubscribeMenuOpenFolder: Unsubscribe | null = null;
   let unsubscribeMenuCloseTab: Unsubscribe | null = null;
   let unsubscribeMenuCloseWindow: Unsubscribe | null = null;
+  let unsubscribeMenuInstallCli: Unsubscribe | null = null;
 
   // Sidebar resize state
   let isDraggingSidebar = $state(false);
@@ -279,6 +280,20 @@
     // Close the current window
     const window = getCurrentWindow();
     await window.close();
+  }
+
+  async function handleMenuInstallCli() {
+    try {
+      const path = await installCli();
+      alert(
+        `CLI installed successfully!\n\nYou can now run:\n  staged          # open current directory\n  staged /path    # open specific directory\n\nInstalled to: ${path}`
+      );
+    } catch (e) {
+      const error = e as Error;
+      alert(
+        `Failed to install CLI:\n\n${error.message || error}\n\nYou may need to run manually:\n  sudo cp /path/to/staged/bin/staged /usr/local/bin/`
+      );
+    }
   }
 
   /**
@@ -553,13 +568,20 @@
       unsubscribeMenuOpenFolder = await listen('menu:open-folder', handleMenuOpenFolder);
       unsubscribeMenuCloseTab = await listen('menu:close-tab', handleMenuCloseTab);
       unsubscribeMenuCloseWindow = await listen('menu:close-window', handleMenuCloseWindow);
+      unsubscribeMenuInstallCli = await listen('menu:install-cli', handleMenuInstallCli);
 
       // Initialize repo state (resolves canonical path, adds to recent repos)
       const repoPath = await initRepoState();
 
       if (repoPath) {
-        // Create initial tab if no tabs loaded from storage
-        if (windowState.tabs.length === 0) {
+        // Check if we already have a tab for this repo
+        const existingTabIndex = windowState.tabs.findIndex((t) => t.repoPath === repoPath);
+
+        if (existingTabIndex >= 0) {
+          // Switch to existing tab for this repo
+          switchTab(existingTabIndex);
+        } else {
+          // Create new tab for the CLI path
           const repoName = extractRepoName(repoPath);
           addTab(repoPath, repoName, createDiffState, createCommentsState, createDiffSelection);
         }
@@ -575,6 +597,18 @@
           // Initialize the active tab
           await initializeNewTab(tab);
         }
+      } else if (windowState.tabs.length > 0) {
+        // No CLI path but we have restored tabs - use them
+        syncTabToGlobal();
+
+        const tab = getActiveTab();
+        if (tab) {
+          await watchRepo(tab.repoPath);
+          // Initialize if needed
+          if (tab.diffState.currentSpec === null) {
+            await initializeNewTab(tab);
+          }
+        }
       }
     })();
   });
@@ -586,6 +620,7 @@
     unsubscribeMenuOpenFolder?.();
     unsubscribeMenuCloseTab?.();
     unsubscribeMenuCloseWindow?.();
+    unsubscribeMenuInstallCli?.();
     // Cleanup sidebar resize listeners
     document.removeEventListener('mousemove', handleSidebarResizeMove);
     document.removeEventListener('mouseup', handleSidebarResizeEnd);

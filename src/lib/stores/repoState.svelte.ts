@@ -6,6 +6,7 @@
  */
 
 import { getRepoRoot } from '../services/git';
+import { getInitialPath } from '../services/window';
 
 // =============================================================================
 // Constants
@@ -84,15 +85,24 @@ function extractRepoName(repoPath: string): string {
 // =============================================================================
 
 /**
- * Initialize repo state - load recent repos and resolve current directory to canonical path.
+ * Initialize repo state - load recent repos and resolve initial path.
+ * Priority: CLI argument > current directory
  * Returns the canonical repo path, or null if not in a git repo.
  */
 export async function initRepoState(): Promise<string | null> {
   repoState.recentRepos = loadRecentRepos();
 
-  // Resolve current directory to canonical path
+  // Check for CLI argument first (e.g., `staged /path/to/repo`)
+  let initialPath = await getInitialPath();
+
+  // Fall back to current directory if no CLI argument
+  if (!initialPath) {
+    initialPath = '.';
+  }
+
+  // Resolve to canonical path and validate it's a git repo
   try {
-    const canonicalPath = await getRepoRoot('.');
+    const canonicalPath = await getRepoRoot(initialPath);
 
     // Check if this path is already in recent repos
     const existing = repoState.recentRepos.find((r) => r.path === canonicalPath);

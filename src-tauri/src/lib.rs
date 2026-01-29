@@ -1,6 +1,7 @@
 //! Tauri commands for the Staged diff viewer.
 //!
 //! This module provides the bridge between the frontend and the git/github modules.
+//! Supports CLI arguments: `staged [path]` opens the app with the specified directory.
 
 pub mod ai;
 pub mod git;
@@ -781,6 +782,161 @@ fn get_window_label(window: tauri::Window) -> String {
     window.label().to_string()
 }
 
+/// Get the initial repository path from CLI arguments.
+/// Returns the canonicalized path if a valid directory was provided, otherwise None.
+#[tauri::command]
+fn get_initial_path() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Skip the binary name, look for a path argument (not starting with -)
+    for arg in args.iter().skip(1) {
+        if arg.starts_with('-') {
+            continue;
+        }
+
+        // Try to canonicalize the path
+        let path = std::path::Path::new(arg);
+        if let Ok(canonical) = path.canonicalize() {
+            if canonical.is_dir() {
+                return canonical.to_str().map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Install the CLI command to /usr/local/bin using a helper script with sudo.
+/// Returns Ok(path) on success, Err(message) on failure.
+#[tauri::command]
+fn install_cli() -> Result<String, String> {
+    let install_path = Path::new("/usr/local/bin/staged");
+    install_cli_to(install_path, true)
+}
+
+fn install_cli_to(install_path: &Path, use_admin: bool) -> Result<String, String> {
+    let cli_script = include_str!("../../bin/staged");
+
+    // Write script to a temp file first
+    let temp_path = std::env::temp_dir().join("staged-cli-install");
+    std::fs::write(&temp_path, cli_script)
+        .map_err(|e| format!("Failed to write temp file: {}", e))?;
+
+    if use_admin {
+        #[cfg(target_os = "macos")]
+        {
+            let script = format!(
+                r#"do shell script "cp '{}' '{}' && chmod +x '{}'" with administrator privileges"#,
+                temp_path.display(),
+                install_path.display(),
+                install_path.display()
+            );
+
+            let output = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(&script)
+                .output()
+                .map_err(|e| format!("Failed to run installer: {}", e))?;
+
+            let _ = std::fs::remove_file(&temp_path);
+
+            if output.status.success() {
+                Ok(install_path.display().to_string())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("User canceled") || stderr.contains("(-128)") {
+                    Err("Installation cancelled".to_string())
+                } else {
+                    Err(format!("Installation failed: {}", stderr))
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(
+                "CLI installation is only supported on macOS. Copy bin/staged to your PATH manually."
+                    .to_string(),
+            )
+        }
+    } else {
+        // Non-admin install: direct copy (for testing or user-writable paths)
+        std::fs::copy(&temp_path, install_path)
+            .map_err(|e| format!("Failed to copy CLI script: {}", e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(install_path)
+                .map_err(|e| format!("Failed to get permissions: {}", e))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(install_path, perms)
+                .map_err(|e| format!("Failed to set permissions: {}", e))?;
+        }
+
+        let _ = std::fs::remove_file(&temp_path);
+        Ok(install_path.display().to_string())
+    }
+}
+
+#[cfg(test)]
+mod install_cli_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_install_cli_writes_executable_script() {
+        let temp_dir = tempdir().unwrap();
+        let install_path = temp_dir.path().join("staged");
+
+        let result = install_cli_to(&install_path, false);
+        assert!(result.is_ok(), "install_cli_to failed: {:?}", result);
+        assert!(install_path.exists(), "CLI script was not created");
+
+        let content = fs::read_to_string(&install_path).unwrap();
+        assert!(content.contains("#!/bin/bash"), "Script missing shebang");
+        assert!(
+            content.contains("staged.app"),
+            "Script missing app reference"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_install_cli_sets_executable_permission() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempdir().unwrap();
+        let install_path = temp_dir.path().join("staged");
+
+        install_cli_to(&install_path, false).unwrap();
+
+        let perms = fs::metadata(&install_path).unwrap().permissions();
+        let mode = perms.mode();
+        assert!(mode & 0o111 != 0, "Script is not executable: {:o}", mode);
+    }
+
+    #[test]
+    fn test_install_cli_returns_install_path() {
+        let temp_dir = tempdir().unwrap();
+        let install_path = temp_dir.path().join("staged");
+
+        let result = install_cli_to(&install_path, false).unwrap();
+        assert_eq!(result, install_path.display().to_string());
+    }
+
+    #[test]
+    fn test_install_cli_fails_on_invalid_path() {
+        let install_path = Path::new("/nonexistent/directory/staged");
+
+        let result = install_cli_to(install_path, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to copy"));
+    }
+}
+
 // =============================================================================
 // Menu System
 // =============================================================================
@@ -791,13 +947,21 @@ fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> 
 
     // macOS app menu (required for Cmd+Q, Cmd+H, etc.)
     #[cfg(target_os = "macos")]
-    {
-        let app_menu = Submenu::with_items(
+    let app_menu = {
+        Submenu::with_items(
             app,
             "Staged",
             true,
             &[
                 &PredefinedMenuItem::about(app, Some("About Staged"), None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(
+                    app,
+                    "install-cli",
+                    "Install CLI Command...",
+                    true,
+                    None::<&str>,
+                )?,
                 &PredefinedMenuItem::separator(app)?,
                 &PredefinedMenuItem::services(app, None)?,
                 &PredefinedMenuItem::separator(app)?,
@@ -807,9 +971,28 @@ fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> 
                 &PredefinedMenuItem::separator(app)?,
                 &PredefinedMenuItem::quit(app, None)?,
             ],
-        )?;
-        menu.append(&app_menu)?;
-    }
+        )?
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let app_menu = {
+        Submenu::with_items(
+            app,
+            "Staged",
+            true,
+            &[
+                &MenuItem::with_id(
+                    app,
+                    "install-cli",
+                    "Install CLI Command...",
+                    true,
+                    None::<&str>,
+                )?,
+                &PredefinedMenuItem::separator(app)?,
+                &PredefinedMenuItem::quit(app, None)?,
+            ],
+        )?
+    };
 
     let file_menu = Submenu::with_items(
         app,
@@ -847,6 +1030,7 @@ fn build_menu(app: &AppHandle) -> Result<Menu<Wry>, Box<dyn std::error::Error>> 
         ],
     )?;
 
+    menu.append(&app_menu)?;
     menu.append(&file_menu)?;
     menu.append(&edit_menu)?;
     Ok(menu)
@@ -863,6 +1047,9 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
         }
         "close-window" => {
             let _ = app.emit("menu:close-window", ());
+        }
+        "install-cli" => {
+            let _ = app.emit("menu:install-cli", ());
         }
         _ => {}
     }
@@ -960,6 +1147,9 @@ pub fn run() {
             unwatch_repo,
             // Window commands
             get_window_label,
+            // CLI commands
+            get_initial_path,
+            install_cli,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

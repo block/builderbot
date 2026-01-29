@@ -107,6 +107,43 @@ fn verify_command(path: &Path) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+/// Information about an available ACP provider
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AcpProviderInfo {
+    pub id: String,
+    pub label: String,
+}
+
+/// Discover all available ACP providers on the system
+pub fn discover_acp_providers() -> Vec<AcpProviderInfo> {
+    let mut providers = Vec::new();
+
+    if find_agent("goose", AcpAgent::Goose).is_some() {
+        providers.push(AcpProviderInfo {
+            id: "goose".to_string(),
+            label: "Goose".to_string(),
+        });
+    }
+
+    if find_agent("claude-code-acp", AcpAgent::Claude).is_some() {
+        providers.push(AcpProviderInfo {
+            id: "claude".to_string(),
+            label: "Claude Code".to_string(),
+        });
+    }
+
+    providers
+}
+
+/// Find a specific ACP agent by provider ID
+pub fn find_acp_agent_by_id(provider_id: &str) -> Option<AcpAgent> {
+    match provider_id {
+        "goose" => find_agent("goose", AcpAgent::Goose),
+        "claude" => find_agent("claude-code-acp", AcpAgent::Claude),
+        _ => None,
+    }
+}
+
 /// Find an ACP-compatible AI agent
 /// Prefers Goose if available, falls back to Claude
 pub fn find_acp_agent() -> Option<AcpAgent> {

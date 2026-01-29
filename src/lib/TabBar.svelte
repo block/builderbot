@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { X, Plus, FolderGit2 } from 'lucide-svelte';
+  import { X, Plus, FolderGit2, Loader2 } from 'lucide-svelte';
   import { windowState, closeTab } from './stores/tabState.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -65,7 +65,11 @@
         onclick={() => handleSwitchTab(index)}
         title={tab.repoPath}
       >
-        <FolderGit2 size={14} />
+        {#if tab.agentState?.loading}
+          <Loader2 size={14} class="tab-spinner" />
+        {:else}
+          <FolderGit2 size={14} />
+        {/if}
         <span class="tab-name">{tab.repoName}</span>
         {#if windowState.tabs.length > 1}
           <div
@@ -250,5 +254,20 @@
   .new-tab-btn:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* Spinner animation for agent loading */
+  :global(.tab-spinner) {
+    animation: spin 1s linear infinite;
+    color: var(--text-accent);
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

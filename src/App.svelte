@@ -26,6 +26,7 @@
   import { createDiffState } from './lib/stores/diffState.svelte';
   import { createCommentsState } from './lib/stores/comments.svelte';
   import { createDiffSelection } from './lib/stores/diffSelection.svelte';
+  import { createAgentState } from './lib/stores/agent.svelte';
   import { DiffSpec, gitRefName } from './lib/types';
   import type { DiffSpec as DiffSpecType } from './lib/types';
   import { initWatcher, watchRepo, type Unsubscribe } from './lib/services/statusEvents';
@@ -310,6 +311,7 @@
   /**
    * Sync active tab's state to global singletons.
    * This allows existing components to work without changes.
+   * Note: Agent state is passed directly as a prop, not synced through global singletons.
    */
   function syncTabToGlobal() {
     const tab = getActiveTab();
@@ -346,6 +348,7 @@
   /**
    * Sync global singletons back to active tab.
    * Called after state changes to preserve tab state.
+   * Note: Agent state is passed directly as a prop, not synced through global singletons.
    */
   function syncGlobalToTab() {
     const tab = getActiveTab();
@@ -454,7 +457,14 @@
     syncGlobalToTab();
 
     const repoName = extractRepoName(repoPath);
-    addTab(repoPath, repoName, createDiffState, createCommentsState, createDiffSelection);
+    addTab(
+      repoPath,
+      repoName,
+      createDiffState,
+      createCommentsState,
+      createDiffSelection,
+      createAgentState
+    );
 
     // Start watching the new repo (idempotent - won't restart if already watching)
     watchRepo(repoPath);
@@ -563,7 +573,12 @@
       setWindowLabel(label);
 
       // Load tabs from storage (if any)
-      loadTabsFromStorage(createDiffState, createCommentsState, createDiffSelection);
+      loadTabsFromStorage(
+        createDiffState,
+        createCommentsState,
+        createDiffSelection,
+        createAgentState
+      );
 
       // Initialize watcher listener once (handles all repos)
       unsubscribeWatcher = await initWatcher(handleFilesChanged);
@@ -592,7 +607,14 @@
         } else {
           // Create new tab for the CLI path
           const repoName = extractRepoName(repoPath);
-          addTab(repoPath, repoName, createDiffState, createCommentsState, createDiffSelection);
+          addTab(
+            repoPath,
+            repoName,
+            createDiffState,
+            createCommentsState,
+            createDiffSelection,
+            createAgentState
+          );
         }
 
         // Sync the active tab to global state
@@ -651,14 +673,16 @@
   />
 
   <div class="app-container" class:sidebar-left={preferences.sidebarPosition === 'left'}>
-    {#if showEmptyState}
-      <!-- Full-width empty state -->
+    {#if showEmptyState && !preferences.features.agentPanel}
+      <!-- Full-width empty state (only when agent panel disabled) -->
       <section class="main-content full-width">
         <EmptyState />
       </section>
     {:else}
       <section class="main-content">
-        {#if diffState.loading}
+        {#if showEmptyState}
+          <EmptyState />
+        {:else if diffState.loading}
           <div class="loading-state">
             <p>Loading...</p>
           </div>
@@ -674,6 +698,7 @@
             syntaxThemeVersion={preferences.syntaxThemeVersion}
             loading={diffState.loadingFile !== null}
             isReferenceFile={isCurrentFileReference}
+            agentState={getActiveTab()?.agentState}
           />
         {/if}
       </section>
@@ -699,6 +724,7 @@
           onAddReferenceFile={() => (showFileSearch = true)}
           onRemoveReferenceFile={handleRemoveReferenceFile}
           repoPath={repoState.currentPath}
+          agentState={getActiveTab()?.agentState}
         />
       </aside>
     {/if}

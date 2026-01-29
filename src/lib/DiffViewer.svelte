@@ -59,7 +59,7 @@
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
   import { smartDiffState, setAnnotationsRevealed } from './stores/smartDiff.svelte';
-  import { agentState } from './stores/agent.svelte';
+  import type { AgentState } from './stores/agent.svelte';
   import { sendAgentPrompt } from './services/ai';
   import { repoState } from './stores/repoState.svelte';
   import { preferences } from './stores/preferences.svelte';
@@ -85,6 +85,8 @@
     loading?: boolean;
     /** Whether this is a reference file (not part of the diff) */
     isReferenceFile?: boolean;
+    /** Agent state for this tab's chat session (optional, for agent prompt feature) */
+    agentState?: AgentState | null;
     onRangeDiscard?: () => void;
   }
 
@@ -94,6 +96,7 @@
     syntaxThemeVersion = 0,
     loading = false,
     isReferenceFile = false,
+    agentState = null,
     onRangeDiscard,
   }: Props = $props();
 
@@ -1113,7 +1116,7 @@
   }
 
   async function handleAgentPromptSubmit(instruction: string) {
-    if (!agentPromptOnLines || !diff) return;
+    if (!agentPromptOnLines || !diff || !agentState) return;
 
     const filePath = getFilePath(diff);
     if (!filePath) return;

@@ -2,16 +2,17 @@
  * Tab State Store
  *
  * Manages multiple repository tabs within each window.
- * Each tab maintains isolated state for its repository (diffs, comments, selection).
+ * Each tab maintains isolated state for its repository (diffs, comments, selection, agent chat).
  */
 
 import { unwatchRepo } from '../services/statusEvents';
 import type { DiffState } from './diffState.svelte';
 import type { CommentsState } from './comments.svelte';
 import type { DiffSelection } from './diffSelection.svelte';
+import type { AgentState } from './agent.svelte';
 
 // Re-export types for convenience
-export type { DiffState, CommentsState, DiffSelection };
+export type { DiffState, CommentsState, DiffSelection, AgentState };
 
 /**
  * State for a single tab
@@ -28,6 +29,7 @@ export interface TabState {
   diffState: DiffState;
   commentsState: CommentsState;
   diffSelection: DiffSelection;
+  agentState: AgentState;
 
   /** True if files changed while this tab was not active (needs refresh on switch) */
   needsRefresh: boolean;
@@ -80,7 +82,8 @@ export function addTab(
   repoName: string,
   createDiffState: () => DiffState,
   createCommentsState: () => CommentsState,
-  createDiffSelection: () => DiffSelection
+  createDiffSelection: () => DiffSelection,
+  createAgentState: () => AgentState
 ): void {
   // Check if tab already exists
   const existingIndex = windowState.tabs.findIndex((t) => t.id === repoPath);
@@ -99,6 +102,7 @@ export function addTab(
     diffState: createDiffState(),
     commentsState: createCommentsState(),
     diffSelection: createDiffSelection(),
+    agentState: createAgentState(),
     needsRefresh: false,
   };
 
@@ -204,7 +208,8 @@ function saveTabsToStorage(): void {
 export function loadTabsFromStorage(
   createDiffState: () => DiffState,
   createCommentsState: () => CommentsState,
-  createDiffSelection: () => DiffSelection
+  createDiffSelection: () => DiffSelection,
+  createAgentState: () => AgentState
 ): void {
   const key = `${STORAGE_KEY_PREFIX}${windowState.windowLabel}-tabs`;
   const stored = localStorage.getItem(key);
@@ -221,6 +226,7 @@ export function loadTabsFromStorage(
         diffState: createDiffState(),
         commentsState: createCommentsState(),
         diffSelection: createDiffSelection(),
+        agentState: createAgentState(),
         needsRefresh: false,
       }));
       windowState.activeTabIndex = data.activeTabIndex;

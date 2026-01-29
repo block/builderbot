@@ -502,7 +502,14 @@ async fn sync_review_to_github(
 // AI Commands
 // =============================================================================
 
-use ai::{ChangesetAnalysis, ChangesetSummary, SmartDiffResult};
+use ai::{AcpProviderInfo, ChangesetAnalysis, ChangesetSummary, SmartDiffResult};
+
+/// Discover available ACP providers on the system.
+/// Returns a list of providers that are installed and working.
+#[tauri::command]
+fn discover_acp_providers() -> Vec<AcpProviderInfo> {
+    ai::discover_acp_providers()
+}
 
 /// Check if an AI agent is available (via ACP).
 #[tauri::command(rename_all = "camelCase")]
@@ -541,15 +548,28 @@ struct AgentPromptResponse {
 /// Accepts an optional session_id to resume an existing session. Returns both
 /// the response and the session_id for future resumption. Sessions are persisted
 /// in the agent's database, so context is maintained across prompts.
+///
+/// The provider parameter specifies which ACP provider to use (e.g., "goose" or "claude").
+/// If not specified, defaults to the first available provider.
 #[tauri::command(rename_all = "camelCase")]
 async fn send_agent_prompt(
     repo_path: Option<String>,
     prompt: String,
     session_id: Option<String>,
+    provider: Option<String>,
 ) -> Result<AgentPromptResponse, String> {
-    let agent = ai::find_acp_agent().ok_or_else(|| {
-        "No AI agent found. Install Goose: https://github.com/block/goose".to_string()
-    })?;
+    let agent = if let Some(provider_id) = provider {
+        ai::find_acp_agent_by_id(&provider_id).ok_or_else(|| {
+            format!(
+                "Provider '{}' not found. Run discover_acp_providers to see available providers.",
+                provider_id
+            )
+        })?
+    } else {
+        ai::find_acp_agent().ok_or_else(|| {
+            "No AI agent found. Install Goose: https://github.com/block/goose".to_string()
+        })?
+    };
 
     let path = get_repo_path(repo_path.as_deref()).to_path_buf();
 
@@ -1163,6 +1183,7 @@ pub fn run() {
             // AI commands
             analyze_diff,
             check_ai_available,
+            discover_acp_providers,
             send_agent_prompt,
             // AI persistence commands
             save_changeset_summary,

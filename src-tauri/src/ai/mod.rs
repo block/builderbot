@@ -9,7 +9,8 @@ mod runner;
 mod types;
 
 pub use acp_client::{
-    find_acp_agent, run_acp_prompt, run_acp_prompt_with_session, AcpAgent, AcpPromptResult,
+    discover_acp_providers, find_acp_agent, find_acp_agent_by_id, run_acp_prompt,
+    run_acp_prompt_with_session, AcpAgent, AcpPromptResult, AcpProviderInfo,
 };
 pub use runner::analyze_diff;
 pub use types::{ChangesetAnalysis, ChangesetSummary, SmartDiffAnnotation, SmartDiffResult};

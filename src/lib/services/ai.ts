@@ -91,6 +91,22 @@ export async function deleteAllAnalyses(repoPath: string | null, spec: DiffSpec)
 // =============================================================================
 
 /**
+ * Information about an available ACP provider.
+ */
+export interface AcpProviderInfo {
+  id: string;
+  label: string;
+}
+
+/**
+ * Discover available ACP providers on the system.
+ * Returns a list of providers that are installed and working.
+ */
+export async function discoverAcpProviders(): Promise<AcpProviderInfo[]> {
+  return invoke<AcpProviderInfo[]>('discover_acp_providers');
+}
+
+/**
  * Response from the AI agent including session ID for continuity.
  */
 export interface AgentPromptResponse {
@@ -105,16 +121,19 @@ export interface AgentPromptResponse {
  * @param repoPath - Path to the repository (null for current directory)
  * @param prompt - The prompt to send to the agent
  * @param sessionId - Optional session ID to resume an existing session
+ * @param provider - Optional provider ID (e.g., 'goose' or 'claude')
  * @returns The agent's response and session ID for future resumption
  */
 export async function sendAgentPrompt(
   repoPath: string | null,
   prompt: string,
-  sessionId?: string | null
+  sessionId?: string | null,
+  provider?: string | null
 ): Promise<AgentPromptResponse> {
   return invoke<AgentPromptResponse>('send_agent_prompt', {
     repoPath,
     prompt,
     sessionId: sessionId ?? null,
+    provider: provider ?? null,
   });
 }

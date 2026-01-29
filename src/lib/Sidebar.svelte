@@ -26,17 +26,14 @@
     Eye,
     X,
     Plus,
-    Send,
-    Bot,
-    Loader2,
   } from 'lucide-svelte';
   import { commentsState, toggleReviewed as toggleReviewedAction } from './stores/comments.svelte';
   import { registerShortcuts } from './services/keyboard';
   import { referenceFilesState } from './stores/referenceFiles.svelte';
-  import { sendAgentPrompt } from './services/ai';
-  import { agentState } from './stores/agent.svelte';
   import { preferences } from './stores/preferences.svelte';
+  import AgentPanel from './features/agent/AgentPanel.svelte';
   import type { FileDiffSummary } from './types';
+  import type { AgentState } from './stores/agent.svelte';
 
   interface FileEntry {
     path: string;
@@ -70,6 +67,8 @@
     onRemoveReferenceFile?: (path: string) => void;
     /** Repository path for AI agent */
     repoPath?: string | null;
+    /** Agent state for this tab's chat session */
+    agentState?: AgentState | null;
   }
 
   let {
@@ -81,6 +80,7 @@
     onAddReferenceFile,
     onRemoveReferenceFile,
     repoPath = null,
+    agentState = null,
   }: Props = $props();
 
   let collapsedDirs = $state(new Set<string>());
@@ -289,59 +289,7 @@
     onFileSelect?.(paths[prevIndex]);
   }
 
-  // Build context-aware prompt with file information
-  function buildPromptWithContext(userPrompt: string, isNewSession: boolean): string {
-    let context = '';
-
-    // For new sessions, include changeset overview (up to 5 files)
-    if (isNewSession && files.length > 0) {
-      const fileNames = files.slice(0, 5).map((f) => getFilePath(f));
-      const moreCount = files.length > 5 ? ` (+${files.length - 5} more)` : '';
-      context += `[Changeset: ${fileNames.join(', ')}${moreCount}]\n`;
-    }
-
-    // Always include current file context
-    if (selectedFile) {
-      context += `[Viewing: ${selectedFile}]\n`;
-    }
-
-    return context ? context + '\n' + userPrompt : userPrompt;
-  }
-
-  // Send prompt to AI agent
-  async function handleAgentSubmit() {
-    const userPrompt = agentState.input.trim();
-    if (!userPrompt || agentState.loading) return;
-
-    agentState.loading = true;
-    agentState.error = '';
-    agentState.response = '';
-    const inputToSend = agentState.input;
-    agentState.input = '';
-
-    try {
-      const isNewSession = !agentState.sessionId;
-      const promptWithContext = buildPromptWithContext(inputToSend, isNewSession);
-      const result = await sendAgentPrompt(repoPath, promptWithContext, agentState.sessionId);
-      agentState.response = result.response;
-      agentState.sessionId = result.sessionId;
-    } catch (e) {
-      agentState.error = e instanceof Error ? e.message : String(e);
-    } finally {
-      agentState.loading = false;
-    }
-  }
-
-  // Handle Enter key in agent input
-  function handleAgentKeydown(event: KeyboardEvent) {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      handleAgentSubmit();
-    }
-  }
-
   // Register keyboard shortcuts
-
   onMount(() => {
     const unregister = registerShortcuts([
       {
@@ -520,7 +468,7 @@
     <div class="loading-state">
       <p>Loading...</p>
     </div>
-  {:else if files.length === 0}
+  {:else if files.length === 0 && !preferences.features.agentPanel}
     <div class="empty-state">
       <p>No changes</p>
       {#if isWorkingTree}
@@ -648,60 +596,17 @@
           {@render commentList()}
         </ul>
       {/if}
-
-      <!-- Agent Chat section (feature-gated) -->
-      {#if preferences.features.agentPanel}
-        <div class="section-header agent-header">
-          <div class="section-divider">
-            <span class="divider-label">AGENT</span>
-          </div>
-        </div>
-        <div class="agent-section">
-          <div class="agent-input-wrapper">
-            <input
-              type="text"
-              class="agent-input"
-              placeholder="Ask the agent..."
-              bind:value={agentState.input}
-              onkeydown={handleAgentKeydown}
-              disabled={agentState.loading}
-            />
-            <button
-              class="agent-send-btn"
-              onclick={handleAgentSubmit}
-              disabled={agentState.loading || !agentState.input.trim()}
-              title="Send to agent"
-            >
-              {#if agentState.loading}
-                <Loader2 size={14} class="spinning" />
-              {:else}
-                <Send size={14} />
-              {/if}
-            </button>
-          </div>
-          {#if agentState.error}
-            <div class="agent-error">
-              {agentState.error}
-            </div>
-          {/if}
-          {#if agentState.loading || agentState.response}
-            <div class="agent-response">
-              <div class="agent-response-header">
-                <Bot size={12} />
-                <span>Agent</span>
-              </div>
-              <div class="agent-response-content" class:loading={agentState.loading}>
-                {#if agentState.loading}
-                  <Loader2 size={14} class="spinning" /> Thinking...
-                {:else}
-                  {agentState.response}
-                {/if}
-              </div>
-            </div>
-          {/if}
-        </div>
-      {/if}
     </div>
+
+    <!-- Agent Chat section (feature-gated) - outside file-list for flex layout -->
+    {#if preferences.features.agentPanel && agentState}
+      <div class="section-header agent-header">
+        <div class="section-divider">
+          <span class="divider-label">AGENT</span>
+        </div>
+      </div>
+      <AgentPanel {repoPath} {files} {selectedFile} {agentState} />
+    {/if}
   {/if}
 </div>
 
@@ -755,7 +660,7 @@
   }
 
   .file-list {
-    flex: 1;
+    flex-shrink: 0;
     overflow-y: auto;
     padding: 8px 0;
   }
@@ -1100,134 +1005,8 @@
     color: var(--text-primary);
   }
 
-  /* Agent section */
+  /* Agent section header */
   .agent-header {
     margin-top: 8px;
-  }
-
-  .agent-section {
-    padding: 0 12px 12px;
-  }
-
-  .agent-input-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    padding: 4px 8px;
-    transition: border-color 0.1s;
-  }
-
-  .agent-input-wrapper:focus-within {
-    border-color: var(--text-accent);
-  }
-
-  .agent-input {
-    flex: 1;
-    background: none;
-    border: none;
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-family: inherit;
-    padding: 4px 0;
-    outline: none;
-    min-width: 0;
-  }
-
-  .agent-input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .agent-input:disabled {
-    opacity: 0.6;
-  }
-
-  .agent-send-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition:
-      background-color 0.1s,
-      color 0.1s;
-    flex-shrink: 0;
-  }
-
-  .agent-send-btn:hover:not(:disabled) {
-    background-color: var(--bg-hover);
-    color: var(--text-accent);
-  }
-
-  .agent-send-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .agent-send-btn :global(.spinning) {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  .agent-error {
-    margin-top: 8px;
-    padding: 8px;
-    background: var(--ui-danger-bg);
-    border-radius: 4px;
-    color: var(--ui-danger);
-    font-size: var(--size-xs);
-    word-break: break-word;
-  }
-
-  .agent-response {
-    margin-top: 8px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-
-  .agent-response-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    background: var(--bg-hover);
-    border-bottom: 1px solid var(--border-subtle);
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-weight: 500;
-  }
-
-  .agent-response-content {
-    padding: 10px;
-    font-size: var(--size-sm);
-    color: var(--text-primary);
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 200px;
-    overflow-y: auto;
-  }
-
-  .agent-response-content.loading {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-muted);
-    font-style: italic;
   }
 </style>

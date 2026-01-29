@@ -16,6 +16,7 @@
     "@sveltejs/vite-plugin-svelte": "^6.2.1",
     "@tauri-apps/cli": "^2.9.6",
     "@tsconfig/svelte": "^5.0.6",
+    "@types/dompurify": "^3.0.5",
     "@types/node": "^24.10.1",
     "prettier": "^3.7.4",
     "prettier-plugin-svelte": "^3.4.1",
@@ -28,7 +29,9 @@
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@tauri-apps/plugin-dialog": "^2.4.2",
+    "dompurify": "^3.3.1",
     "lucide-svelte": "^0.562.0",
+    "marked": "^17.0.1",
     "shiki": "^3.20.0"
   }
 }

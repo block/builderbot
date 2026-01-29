@@ -8,13 +8,22 @@
   - Arrow keys to navigate, Enter to open/select
 -->
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { Folder, X, ChevronRight, Home, Clock, Search, Loader2, GitBranch } from 'lucide-svelte';
-  import { listDirectory, getHomeDir, searchDirectories, type DirEntry } from './services/files';
+  import {
+    listDirectory,
+    getHomeDir,
+    searchDirectories,
+    type DirEntry,
+    type RecentRepo,
+  } from './services/files';
   import type { RepoEntry } from './stores/repoState.svelte';
 
   interface Props {
     /** List of recent repositories */
     recentRepos: RepoEntry[];
+    /** List of suggested repositories (pre-loaded from Spotlight) */
+    suggestedRepos?: RecentRepo[];
     /** Called when a folder is selected */
     onSelect: (path: string) => void;
     /** Called when modal is closed */
@@ -23,7 +32,13 @@
     currentPath?: string | null;
   }
 
-  let { recentRepos, onSelect, onClose, currentPath = null }: Props = $props();
+  let {
+    recentRepos,
+    suggestedRepos: suggestedReposProp = [],
+    onSelect,
+    onClose,
+    currentPath = null,
+  }: Props = $props();
 
   // State
   let query = $state('');
@@ -41,8 +56,14 @@
   // Are we in search mode (user has typed something)?
   let isSearching = $derived(query.length > 0);
 
-  // Initialize
-  $effect(() => {
+  // Filter suggested repos to exclude ones already in recentRepos
+  let suggestedRepos = $derived.by(() => {
+    const recentPaths = new Set(recentRepos.map((r) => r.path));
+    return suggestedReposProp.filter((r) => !recentPaths.has(r.path));
+  });
+
+  // Initialize on mount (runs once)
+  onMount(() => {
     getHomeDir().then((dir) => {
       homeDir = dir;
       currentDir = dir;
@@ -127,19 +148,32 @@
       .slice(0, 5);
   });
 
+  // Filter suggested repos by query
+  let filteredSuggested = $derived.by(() => {
+    if (!query) return suggestedRepos.slice(0, 5);
+    const q = query.toLowerCase();
+    return suggestedRepos
+      .filter((r) => r.name.toLowerCase().includes(q) || r.path.toLowerCase().includes(q))
+      .slice(0, 5);
+  });
+
   // Combined list for selection
   let allItems = $derived.by(() => {
     if (isSearching) {
-      // When searching: recents first, then search results
+      // When searching: suggested first, then recents, then search results
       return [
+        ...filteredSuggested.map((r) => ({ type: 'suggested' as const, ...r })),
         ...filteredRecents.map((r) => ({ type: 'recent' as const, ...r })),
         ...searchResults.map((e) => ({ type: 'search' as const, ...e })),
       ];
     } else {
-      // When browsing: recents (if at home), then directory entries
-      const showRecents = currentDir === homeDir;
+      // When browsing: suggested (if at home), recents, then directory entries
+      const showSpecial = currentDir === homeDir;
       return [
-        ...(showRecents ? filteredRecents.map((r) => ({ type: 'recent' as const, ...r })) : []),
+        ...(showSpecial
+          ? filteredSuggested.map((r) => ({ type: 'suggested' as const, ...r }))
+          : []),
+        ...(showSpecial ? filteredRecents.map((r) => ({ type: 'recent' as const, ...r })) : []),
         ...entries.map((e) => ({ type: 'entry' as const, ...e })),
       ];
     }
@@ -181,7 +215,7 @@
       if (item) {
         // Recent repos and search results are always repos - select them
         // For directory entries, only select if it's a repo, otherwise drill in
-        if (item.type === 'recent' || item.type === 'search') {
+        if (item.type === 'recent' || item.type === 'suggested' || item.type === 'search') {
           if (item.path !== currentPath) {
             onSelect(item.path);
           }
@@ -210,7 +244,7 @@
     } else if (event.key === 'ArrowRight' || event.key === 'Tab') {
       // Arrow right or Tab drills into the folder
       const item = allItems[selectedIndex];
-      if (item && item.type !== 'recent') {
+      if (item && item.type !== 'recent' && item.type !== 'suggested') {
         event.preventDefault();
         navigateTo(item.path);
       } else if (event.key === 'Tab') {
@@ -281,9 +315,18 @@
     return crumbs;
   }
 
-  // Track index where entries/search results start (after recents)
+  // Track index where recents start (after suggested)
+  let firstRecentsIndex = $derived(
+    isSearching ? filteredSuggested.length : currentDir === homeDir ? filteredSuggested.length : 0
+  );
+
+  // Track index where entries/search results start (after suggested and recents)
   let firstNonRecentIndex = $derived(
-    isSearching ? filteredRecents.length : currentDir === homeDir ? filteredRecents.length : 0
+    isSearching
+      ? filteredSuggested.length + filteredRecents.length
+      : currentDir === homeDir
+        ? filteredSuggested.length + filteredRecents.length
+        : 0
   );
 </script>
 
@@ -354,6 +397,39 @@
         <div class="empty-state error">{error}</div>
       {:else}
         <!-- Recent repos section -->
+        <!-- Suggested repos section (recently active repos) - shown first -->
+        {#if filteredSuggested.length > 0 && (isSearching || currentDir === homeDir)}
+          <div class="section-header">
+            <GitBranch size={12} />
+            <span>Suggested</span>
+          </div>
+          {#each filteredSuggested as repo, i (repo.path)}
+            {@const isCurrent = repo.path === currentPath}
+            {@const isSelected = i === selectedIndex}
+            <button
+              class="result suggested-result"
+              class:selected={isSelected}
+              class:current={isCurrent}
+              onclick={() => !isCurrent && onSelect(repo.path)}
+              disabled={isCurrent}
+              onmouseenter={() => (selectedIndex = i)}
+            >
+              <GitBranch size={16} class="suggested-icon" />
+              <div class="result-info">
+                <span class="result-name">{@html highlightMatch(repo.name, query)}</span>
+                <span class="result-path">{@html highlightMatch(formatPath(repo.path), query)}</span
+                >
+              </div>
+              {#if isCurrent}
+                <span class="badge">Current</span>
+              {:else}
+                <ChevronRight size={14} class="action-hint" />
+              {/if}
+            </button>
+          {/each}
+        {/if}
+
+        <!-- Recent repos section -->
         {#if filteredRecents.length > 0 && (isSearching || currentDir === homeDir)}
           <div class="section-header">
             <Clock size={12} />
@@ -361,14 +437,14 @@
           </div>
           {#each filteredRecents as repo, i (repo.path)}
             {@const isCurrent = repo.path === currentPath}
-            {@const isSelected = i === selectedIndex}
+            {@const isSelected = i + firstRecentsIndex === selectedIndex}
             <button
               class="result recent-result"
               class:selected={isSelected}
               class:current={isCurrent}
               onclick={() => !isCurrent && onSelect(repo.path)}
               disabled={isCurrent}
-              onmouseenter={() => (selectedIndex = i)}
+              onmouseenter={() => (selectedIndex = i + firstRecentsIndex)}
             >
               <Folder size={16} />
               <div class="result-info">
@@ -662,6 +738,10 @@
   }
 
   .result.is-repo :global(.repo-icon) {
+    color: var(--text-accent);
+  }
+
+  .result.suggested-result :global(.suggested-icon) {
     color: var(--text-accent);
   }
 

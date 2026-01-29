@@ -51,6 +51,26 @@ export async function getHomeDir(): Promise<string> {
 }
 
 // =============================================================================
+// Recent Repos API
+// =============================================================================
+
+/**
+ * A recently active git repository.
+ */
+export interface RecentRepo {
+  name: string;
+  path: string;
+}
+
+/**
+ * Find git repositories that have been recently active.
+ * Uses macOS Spotlight to find files modified within the last `hoursAgo` hours.
+ */
+export async function findRecentRepos(hoursAgo?: number, limit?: number): Promise<RecentRepo[]> {
+  return invoke<RecentRepo[]>('find_recent_repos', { hoursAgo, limit });
+}
+
+// =============================================================================
 // File Browsing API
 // =============================================================================
 

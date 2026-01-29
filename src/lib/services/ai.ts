@@ -85,3 +85,36 @@ export async function getAllFileAnalyses(
 export async function deleteAllAnalyses(repoPath: string | null, spec: DiffSpec): Promise<void> {
   return invoke('delete_all_analyses', { repoPath, spec });
 }
+
+// =============================================================================
+// Agent Chat
+// =============================================================================
+
+/**
+ * Response from the AI agent including session ID for continuity.
+ */
+export interface AgentPromptResponse {
+  response: string;
+  sessionId: string;
+}
+
+/**
+ * Send a prompt to the AI agent and get a response.
+ * Supports session continuity by accepting and returning a session ID.
+ *
+ * @param repoPath - Path to the repository (null for current directory)
+ * @param prompt - The prompt to send to the agent
+ * @param sessionId - Optional session ID to resume an existing session
+ * @returns The agent's response and session ID for future resumption
+ */
+export async function sendAgentPrompt(
+  repoPath: string | null,
+  prompt: string,
+  sessionId?: string | null
+): Promise<AgentPromptResponse> {
+  return invoke<AgentPromptResponse>('send_agent_prompt', {
+    repoPath,
+    prompt,
+    sessionId: sessionId ?? null,
+  });
+}

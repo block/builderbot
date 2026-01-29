@@ -1,8 +1,8 @@
 //! ACP Client - handles communication with AI agents via Agent Client Protocol
 //!
 //! This module spawns agent processes and communicates with them using ACP,
-//! a JSON-RPC based protocol over stdio. Unlike builderbot which maintains
-//! persistent sessions, Staged uses one-shot requests for diff analysis.
+//! a JSON-RPC based protocol over stdio. Supports both one-shot requests
+//! (for diff analysis) and persistent sessions (for interactive chat).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, Implementation,
-    InitializeRequest, NewSessionRequest, PermissionOptionId, PromptRequest, ProtocolVersion,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    Result as AcpResult, SelectedPermissionOutcome, SessionNotification, TextContent,
+    InitializeRequest, LoadSessionRequest, NewSessionRequest, PermissionOptionId, PromptRequest,
+    ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    Result as AcpResult, SelectedPermissionOutcome, SessionId, SessionNotification, TextContent,
 };
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -44,7 +44,9 @@ impl AcpAgent {
     /// Get the arguments to start ACP mode
     pub fn acp_args(&self) -> Vec<&str> {
         match self {
-            AcpAgent::Goose(_) => vec!["acp"],
+            // Include developer extension for file/shell access, and extensionmanager
+            // to allow discovering/enabling additional extensions as needed
+            AcpAgent::Goose(_) => vec!["acp", "--with-builtin", "developer,extensionmanager"],
             AcpAgent::Claude(_) => vec![], // claude-code-acp runs in ACP mode by default
         }
     }
@@ -195,10 +197,19 @@ impl agent_client_protocol::Client for StagedAcpClient {
     }
 }
 
+/// Result of running an ACP prompt with session support
+pub struct AcpPromptResult {
+    /// The agent's response text
+    pub response: String,
+    /// The session ID (can be used to resume this session later)
+    pub session_id: String,
+}
+
 /// Run a one-shot prompt through ACP and return the response
 ///
 /// This spawns the agent, initializes ACP, sends the prompt, collects the
-/// response, and shuts down. Designed for Staged's single-request use case.
+/// response, and shuts down. Designed for Staged's single-request use case
+/// (e.g., diff analysis).
 ///
 /// Runs in a dedicated thread with its own LocalSet to handle !Send futures.
 pub async fn run_acp_prompt(
@@ -206,11 +217,30 @@ pub async fn run_acp_prompt(
     working_dir: &Path,
     prompt: &str,
 ) -> Result<String, String> {
+    let result = run_acp_prompt_with_session(agent, working_dir, prompt, None).await?;
+    Ok(result.response)
+}
+
+/// Run a prompt through ACP with optional session resumption
+///
+/// If `session_id` is provided, attempts to load and resume that session.
+/// Otherwise, creates a new session. Returns both the response and the
+/// session ID for future resumption.
+///
+/// Sessions are persisted in Goose's SQLite database, so they survive
+/// process restarts.
+pub async fn run_acp_prompt_with_session(
+    agent: &AcpAgent,
+    working_dir: &Path,
+    prompt: &str,
+    session_id: Option<&str>,
+) -> Result<AcpPromptResult, String> {
     let agent_path = agent.path().to_path_buf();
     let agent_name = agent.name().to_string();
     let agent_args: Vec<String> = agent.acp_args().iter().map(|s| s.to_string()).collect();
     let working_dir = working_dir.to_path_buf();
     let prompt = prompt.to_string();
+    let session_id = session_id.map(|s| s.to_string());
 
     // Run the ACP session in a blocking task with its own runtime
     // This is needed because ACP uses !Send futures (LocalSet)
@@ -224,8 +254,15 @@ pub async fn run_acp_prompt(
         // Run the ACP session on a LocalSet
         let local = tokio::task::LocalSet::new();
         local.block_on(&rt, async move {
-            run_acp_session_inner(&agent_path, &agent_name, &agent_args, &working_dir, &prompt)
-                .await
+            run_acp_session_inner(
+                &agent_path,
+                &agent_name,
+                &agent_args,
+                &working_dir,
+                &prompt,
+                session_id.as_deref(),
+            )
+            .await
         })
     })
     .await
@@ -239,7 +276,8 @@ async fn run_acp_session_inner(
     agent_args: &[String],
     working_dir: &Path,
     prompt: &str,
-) -> Result<String, String> {
+    existing_session_id: Option<&str>,
+) -> Result<AcpPromptResult, String> {
     // Spawn the agent process with ACP mode
     let mut cmd = Command::new(agent_path);
     cmd.args(agent_args)
@@ -307,17 +345,49 @@ async fn run_acp_session_inner(
         );
     }
 
-    // Create a new session
-    let session_response = connection
-        .new_session(NewSessionRequest::new(working_dir.to_path_buf()))
-        .await
-        .map_err(|e| format!("Failed to create ACP session: {:?}", e))?;
+    // Get or create session
+    let session_id: SessionId = if let Some(existing_id) = existing_session_id {
+        // Try to load existing session
+        log::info!("Attempting to load session: {}", existing_id);
+        let load_request =
+            LoadSessionRequest::new(SessionId::new(existing_id), working_dir.to_path_buf());
 
-    let session_id = session_response.session_id;
+        match connection.load_session(load_request).await {
+            Ok(_) => {
+                log::info!("Resumed session: {}", existing_id);
+                SessionId::new(existing_id)
+            }
+            Err(e) => {
+                // Session not found or error - create a new one
+                log::warn!(
+                    "Failed to load session {}: {:?}, creating new session",
+                    existing_id,
+                    e
+                );
+                let session_response = connection
+                    .new_session(NewSessionRequest::new(working_dir.to_path_buf()))
+                    .await
+                    .map_err(|e| format!("Failed to create ACP session: {:?}", e))?;
+                session_response.session_id
+            }
+        }
+    } else {
+        // Create new session
+        let session_response = connection
+            .new_session(NewSessionRequest::new(working_dir.to_path_buf()))
+            .await
+            .map_err(|e| format!("Failed to create ACP session: {:?}", e))?;
+        log::info!("Created new session: {}", session_response.session_id.0);
+        session_response.session_id
+    };
+
+    // Clear any accumulated content from loading session history
+    // (load_session may replay old messages as AgentMessageChunk notifications)
+    collector.accumulated_content.lock().await.clear();
 
     // Send the prompt
     let prompt_request = PromptRequest::new(
-        session_id,
+        session_id.clone(),
         vec![AcpContentBlock::Text(TextContent::new(prompt.to_string()))],
     );
 
@@ -332,7 +402,10 @@ async fn run_acp_session_inner(
     // Get the accumulated response
     let response = collector.accumulated_content.lock().await.clone();
 
-    Ok(response)
+    Ok(AcpPromptResult {
+        response,
+        session_id: session_id.0.to_string(),
+    })
 }
 
 #[cfg(test)]

@@ -698,6 +698,7 @@
           {isWorkingTree}
           onAddReferenceFile={() => (showFileSearch = true)}
           onRemoveReferenceFile={handleRemoveReferenceFile}
+          repoPath={repoState.currentPath}
         />
       </aside>
     {/if}

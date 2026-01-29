@@ -528,6 +528,40 @@ async fn analyze_diff(
     ai::analyze_diff(&path, &spec).await
 }
 
+/// Response from send_agent_prompt including session ID for continuity.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentPromptResponse {
+    response: String,
+    session_id: String,
+}
+
+/// Send a prompt to the AI agent and get a response.
+///
+/// Accepts an optional session_id to resume an existing session. Returns both
+/// the response and the session_id for future resumption. Sessions are persisted
+/// in the agent's database, so context is maintained across prompts.
+#[tauri::command(rename_all = "camelCase")]
+async fn send_agent_prompt(
+    repo_path: Option<String>,
+    prompt: String,
+    session_id: Option<String>,
+) -> Result<AgentPromptResponse, String> {
+    let agent = ai::find_acp_agent().ok_or_else(|| {
+        "No AI agent found. Install Goose: https://github.com/block/goose".to_string()
+    })?;
+
+    let path = get_repo_path(repo_path.as_deref()).to_path_buf();
+
+    let result =
+        ai::run_acp_prompt_with_session(&agent, &path, &prompt, session_id.as_deref()).await?;
+
+    Ok(AgentPromptResponse {
+        response: result.response,
+        session_id: result.session_id,
+    })
+}
+
 // =============================================================================
 // AI Analysis Persistence Commands
 // =============================================================================
@@ -1129,6 +1163,7 @@ pub fn run() {
             // AI commands
             analyze_diff,
             check_ai_available,
+            send_agent_prompt,
             // AI persistence commands
             save_changeset_summary,
             get_changeset_summary,

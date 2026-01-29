@@ -13,7 +13,15 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { X, GitBranch, MessageSquarePlus, MessageSquare, Trash2 } from 'lucide-svelte';
+  import {
+    X,
+    GitBranch,
+    MessageSquarePlus,
+    MessageSquare,
+    Trash2,
+    Wand2,
+    Loader2,
+  } from 'lucide-svelte';
   import type { FileDiff, Alignment, Comment, Span } from './types';
   import {
     commentsState,
@@ -51,6 +59,10 @@
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
   import { smartDiffState, setAnnotationsRevealed } from './stores/smartDiff.svelte';
+  import { agentState } from './stores/agent.svelte';
+  import { sendAgentPrompt } from './services/ai';
+  import { repoState } from './stores/repoState.svelte';
+  import { preferences } from './stores/preferences.svelte';
   import Scrollbar from './Scrollbar.svelte';
 
   // ==========================================================================
@@ -172,6 +184,16 @@
   } | null = $state(null);
   let editingCommentId: string | null = $state(null);
   let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
+
+  // Agent prompt on lines (similar to commenting)
+  let agentPromptOnLines: { pane: 'before' | 'after'; start: number; end: number } | null =
+    $state(null);
+  let agentPromptEditorStyle: {
+    top: number;
+    left: number;
+    width: number;
+    visible: boolean;
+  } | null = $state(null);
 
   // ==========================================================================
   // Derived state
@@ -1041,6 +1063,89 @@
     updateLineCommentEditorPosition();
   }
 
+  function handleAskAgent() {
+    if (!selectedLineRange) return;
+    agentPromptOnLines = { ...selectedLineRange };
+    updateAgentPromptEditorPosition();
+  }
+
+  function updateAgentPromptEditorPosition() {
+    if (!agentPromptOnLines || !diffViewerEl) {
+      agentPromptEditorStyle = null;
+      return;
+    }
+
+    const pane = agentPromptOnLines.pane === 'before' ? beforePane : afterPane;
+    if (!pane) {
+      agentPromptEditorStyle = null;
+      return;
+    }
+
+    const viewerRect = diffViewerEl.getBoundingClientRect();
+    const paneRect = pane.getBoundingClientRect();
+
+    const lastLineEl = pane.querySelectorAll('.line')[agentPromptOnLines.end] as HTMLElement | null;
+    if (!lastLineEl) {
+      agentPromptEditorStyle = null;
+      return;
+    }
+
+    const lineRect = lastLineEl.getBoundingClientRect();
+    const top = lineRect.bottom - viewerRect.top;
+
+    const editorHeight = 120;
+    const paneContentTop = paneRect.top - viewerRect.top;
+    const paneContentBottom = paneRect.bottom - viewerRect.top;
+    const visible = top + editorHeight > paneContentTop && top < paneContentBottom;
+
+    agentPromptEditorStyle = {
+      top,
+      left: paneRect.left - viewerRect.left + 12,
+      width: paneRect.width - 24,
+      visible,
+    };
+  }
+
+  function handleAgentPromptCancel() {
+    agentPromptOnLines = null;
+    agentPromptEditorStyle = null;
+    clearLineSelection();
+  }
+
+  async function handleAgentPromptSubmit(instruction: string) {
+    if (!agentPromptOnLines || !diff) return;
+
+    const filePath = getFilePath(diff);
+    if (!filePath) return;
+
+    const lineRange =
+      agentPromptOnLines.start === agentPromptOnLines.end
+        ? `line ${agentPromptOnLines.start + 1}`
+        : `lines ${agentPromptOnLines.start + 1}-${agentPromptOnLines.end + 1}`;
+
+    const prompt = `[${filePath}:${lineRange}] ${instruction}`;
+
+    // Close the editor
+    agentPromptOnLines = null;
+    agentPromptEditorStyle = null;
+    clearLineSelection();
+
+    // Send to agent
+    agentState.loading = true;
+    agentState.error = '';
+    agentState.response = '';
+
+    try {
+      const result = await sendAgentPrompt(repoState.currentPath, prompt, agentState.sessionId);
+      agentState.response = result.response;
+      agentState.sessionId = result.sessionId;
+    } catch (e) {
+      agentState.error = e instanceof Error ? e.message : String(e);
+    } finally {
+      agentState.loading = false;
+    }
+  }
+
   function updateLineCommentEditorPosition() {
     if (!commentingOnLines || !diffViewerEl) {
       lineCommentEditorStyle = null;
@@ -1107,6 +1212,17 @@
       updateLineCommentEditorPosition();
     }
   });
+
+  $effect(() => {
+    if (agentPromptOnLines) {
+      updateAgentPromptEditorPosition();
+    }
+  });
+
+  // Svelte action to auto-focus input
+  function autoFocusInput(node: HTMLInputElement) {
+    node.focus();
+  }
 
   // ==========================================================================
   // Global event handlers
@@ -1742,6 +1858,11 @@
         >
           <MessageSquarePlus size={12} />
         </button>
+        {#if preferences.features.agentPanel}
+          <button class="range-btn agent-btn" onclick={handleAskAgent} title="Ask agent about this">
+            <Wand2 size={12} />
+          </button>
+        {/if}
         <button class="range-btn" onclick={clearLineSelection} title="Clear selection (Esc)">
           <X size={12} />
         </button>
@@ -1776,6 +1897,40 @@
             }
           : undefined}
       />
+    {/if}
+
+    <!-- Agent prompt editor (feature-gated) -->
+    {#if preferences.features.agentPanel && agentPromptOnLines && agentPromptEditorStyle}
+      {@const lineCount = agentPromptOnLines.end - agentPromptOnLines.start + 1}
+      <div
+        class="agent-prompt-editor"
+        class:agent-prompt-editor-hidden={!agentPromptEditorStyle.visible}
+        style="top: {agentPromptEditorStyle.top}px; left: {agentPromptEditorStyle.left}px; width: {agentPromptEditorStyle.width}px;"
+      >
+        <input
+          type="text"
+          class="agent-prompt-input"
+          placeholder="Ask agent about {lineCount} line{lineCount !== 1 ? 's' : ''}..."
+          onkeydown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              handleAgentPromptCancel();
+            } else if (e.key === 'Enter') {
+              e.preventDefault();
+              const input = e.target as HTMLInputElement;
+              const value = input.value.trim();
+              if (value) {
+                handleAgentPromptSubmit(value);
+              }
+            }
+          }}
+          use:autoFocusInput
+        />
+        <div class="agent-prompt-hint">
+          <Wand2 size={10} />
+          <span>Enter to send · Esc to cancel</span>
+        </div>
+      </div>
     {/if}
   {/if}
 </div>
@@ -2134,5 +2289,50 @@
     -webkit-backdrop-filter: blur(6px);
     background: rgba(var(--ui-accent-rgb, 59, 130, 246), 0.08);
     pointer-events: none;
+  }
+
+  /* Agent prompt editor */
+  .agent-prompt-editor {
+    position: absolute;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    background-color: var(--bg-chrome);
+    border-radius: 8px;
+    overflow: hidden;
+    transition: opacity 0.15s ease;
+  }
+
+  .agent-prompt-editor-hidden {
+    opacity: 0.3;
+    pointer-events: none;
+  }
+
+  .agent-prompt-input {
+    width: 100%;
+    padding: 10px 12px;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: var(--size-sm);
+    line-height: 1.5;
+  }
+
+  .agent-prompt-input:focus {
+    outline: none;
+  }
+
+  .agent-prompt-input::placeholder {
+    color: var(--text-faint);
+  }
+
+  .agent-prompt-hint {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px 8px;
+    font-size: var(--size-xs);
+    color: var(--text-faint);
   }
 </style>

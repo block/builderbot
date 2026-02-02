@@ -38,8 +38,24 @@
   import { referenceFilesState } from './stores/referenceFiles.svelte';
   import { preferences } from './stores/preferences.svelte';
   import AgentPanel from './features/agent/AgentPanel.svelte';
-  import type { DiffSpec, FileDiffSummary } from './types';
+  import type { DiffSpec, FileDiffSummary, FileDiff } from './types';
   import type { AgentState } from './stores/agent.svelte';
+  import CrossFileSearchBar from './CrossFileSearchBar.svelte';
+  import SearchResultItem from './SearchResultItem.svelte';
+  import {
+    globalSearchState,
+    openSearch,
+    goToNextResult,
+    goToPrevResult,
+    isCurrentResult,
+    getGlobalIndex,
+    setCurrentResult,
+    expandFileResults,
+    collapseFileResults,
+    getFlattenedResults,
+  } from './stores/globalSearch.svelte';
+  import { diffState, loadFileDiff } from './stores/diffState.svelte';
+  import { getTextLines } from './diffUtils';
 
   interface FileEntry {
     path: string;
@@ -93,6 +109,7 @@
   }: Props = $props();
 
   let collapsedDirs = $state(new Set<string>());
+  let collapsedSearchResults = $state(new Set<string>());
   let treeView = $state(false);
 
   /**
@@ -224,7 +241,73 @@
   let needsReviewTree = $derived(compactTree(buildTree(needsReview)));
   let reviewedTree = $derived(compactTree(buildTree(reviewed)));
 
-  function selectFile(file: FileEntry) {
+  /**
+   * Extract files from tree nodes in display order (depth-first).
+   */
+  function extractFilesFromTree(nodes: TreeNode[]): FileEntry[] {
+    const result: FileEntry[] = [];
+    for (const node of nodes) {
+      if (node.isDir) {
+        result.push(...extractFilesFromTree(node.children));
+      } else if (node.file) {
+        result.push(node.file);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Get files in the order they're displayed in the sidebar.
+   */
+  let displayOrderedFiles = $derived.by(() => {
+    if (treeView) {
+      // In tree view, extract files from trees in display order
+      return [...extractFilesFromTree(needsReviewTree), ...extractFilesFromTree(reviewedTree)];
+    } else {
+      // In flat view, use the existing order
+      return [...needsReview, ...reviewed];
+    }
+  });
+
+  /**
+   * Get FileDiffSummary array in display order for search navigation.
+   */
+  let displayOrderedFileSummaries = $derived.by(() => {
+    const orderedPaths = displayOrderedFiles.map((f) => f.path);
+    // Create a map for quick lookup
+    const fileMap = new Map(files.map((f) => [getFilePath(f), f]));
+    // Return files in display order
+    return orderedPaths.map((path) => fileMap.get(path)).filter(Boolean) as FileDiffSummary[];
+  });
+
+  async function selectFile(file: FileEntry) {
+    // If search is active and file has results, jump to first result
+    if (globalSearchState.isOpen && globalSearchState.query) {
+      const fileResult = globalSearchState.fileResults.get(file.path);
+      if (fileResult && fileResult.matches.length > 0) {
+        // Get the first match in this file
+        const firstMatch = fileResult.matches[0];
+
+        // Find the global index for this match
+        const globalIndex = getGlobalIndex(displayOrderedFileSummaries, file.path, 0);
+
+        // Set as current result
+        if (globalIndex !== -1) {
+          setCurrentResult(globalIndex);
+        }
+
+        // Auto-expand search results if collapsed
+        if (areSearchResultsCollapsed(file.path)) {
+          await toggleSearchResults(file.path);
+        }
+
+        // Select file and scroll to the first match
+        onFileSelect?.(file.path, firstMatch.lineIndex);
+        return;
+      }
+    }
+
+    // Normal file selection (no search or no results)
     onFileSelect?.(file.path);
   }
 
@@ -252,6 +335,27 @@
     return collapsedDirs.has(path);
   }
 
+  async function toggleSearchResults(path: string) {
+    const newSet = new Set(collapsedSearchResults);
+    if (newSet.has(path)) {
+      // Expanding - load diff if not cached for snippet generation
+      newSet.delete(path);
+
+      // Ensure diff is loaded so getMatchSnippet can access it
+      if (!diffState.diffCache.has(path)) {
+        await loadFileDiff(path);
+      }
+    } else {
+      // Collapsing
+      newSet.add(path);
+    }
+    collapsedSearchResults = newSet;
+  }
+
+  function areSearchResultsCollapsed(path: string): boolean {
+    return collapsedSearchResults.has(path);
+  }
+
   /**
    * Get just the filename from a full path.
    */
@@ -277,6 +381,108 @@
     if (singleLine.length <= maxLength) return singleLine;
     return singleLine.slice(0, maxLength).trim() + '...';
   }
+
+  // ==========================================================================
+  // Search-related helpers
+  // ==========================================================================
+
+  /**
+   * Get a snippet of text around a search match.
+   */
+  function getMatchSnippet(
+    match: import('./services/diffSearch').SearchMatch,
+    filePath: string
+  ): string {
+    const diff = diffState.diffCache.get(filePath);
+    if (!diff) return '';
+
+    const afterLines = getTextLines(diff, 'after');
+
+    // Search only looks at right/after side
+    const line = afterLines[match.lineIndex];
+    const location = match.right;
+
+    if (!line || !location) return '';
+
+    // Extract context around match
+    const start = Math.max(0, location.startCol - 20);
+    const end = Math.min(line.length, location.endCol + 30);
+
+    let snippet = line.slice(start, end).trim();
+    if (start > 0) snippet = '...' + snippet;
+    if (end < line.length) snippet = snippet + '...';
+
+    return snippet;
+  }
+
+  /**
+   * Handle clicking a search result.
+   */
+  async function handleSearchResultClick(
+    filePath: string,
+    match: import('./services/diffSearch').SearchMatch,
+    globalIndex: number
+  ) {
+    // Update current result index
+    setCurrentResult(globalIndex);
+
+    // Auto-expand search results for this file
+    if (areSearchResultsCollapsed(filePath)) {
+      await toggleSearchResults(filePath);
+    }
+
+    // Select the file and scroll to the match
+    onFileSelect?.(filePath, match.lineIndex);
+  }
+
+  /**
+   * Navigate to next search result.
+   */
+  async function handleNextResult() {
+    if (!globalSearchState.isOpen || globalSearchState.totalMatches === 0) return;
+
+    const result = await goToNextResult(displayOrderedFileSummaries, loadFileDiff);
+    if (result) {
+      // Auto-expand search results for this file
+      if (areSearchResultsCollapsed(result.filePath)) {
+        await toggleSearchResults(result.filePath);
+      }
+      onFileSelect?.(result.filePath, result.match.lineIndex);
+    }
+  }
+
+  /**
+   * Navigate to previous search result.
+   */
+  async function handlePrevResult() {
+    if (!globalSearchState.isOpen || globalSearchState.totalMatches === 0) return;
+
+    const result = await goToPrevResult(displayOrderedFileSummaries, loadFileDiff);
+    if (result) {
+      // Auto-expand search results for this file
+      if (areSearchResultsCollapsed(result.filePath)) {
+        await toggleSearchResults(result.filePath);
+      }
+      onFileSelect?.(result.filePath, result.match.lineIndex);
+    }
+  }
+
+  // Initialize all search results as collapsed when search completes, except the first result's file
+  $effect(() => {
+    if (globalSearchState.isOpen && globalSearchState.fileResults.size > 0) {
+      const flattened = getFlattenedResults(displayOrderedFileSummaries);
+      const firstResultPath = flattened.length > 0 ? flattened[0].filePath : null;
+
+      const newCollapsed = new Set<string>();
+      for (const filePath of globalSearchState.fileResults.keys()) {
+        // Collapse all except the first result's file
+        if (filePath !== firstResultPath) {
+          newCollapsed.add(filePath);
+        }
+      }
+      collapsedSearchResults = newCollapsed;
+    }
+  });
 
   // Get flat list of file paths in display order
   function getFilePaths(): string[] {
@@ -335,6 +541,33 @@
         description: 'Previous file',
         category: 'files',
         handler: goToPrevFile,
+      },
+      {
+        id: 'global-search-open',
+        keys: ['f'],
+        modifiers: { meta: true },
+        description: 'Open search',
+        category: 'search',
+        allowInInputs: true,
+        handler: () => openSearch(),
+      },
+      {
+        id: 'global-search-next',
+        keys: ['g'],
+        modifiers: { meta: true },
+        description: 'Next search result',
+        category: 'search',
+        allowInInputs: true,
+        handler: handleNextResult,
+      },
+      {
+        id: 'global-search-prev',
+        keys: ['g'],
+        modifiers: { meta: true, shift: true },
+        description: 'Previous search result',
+        category: 'search',
+        allowInInputs: true,
+        handler: handlePrevResult,
       },
     ]);
 
@@ -416,9 +649,39 @@
         <button
           class="tree-item file-item"
           class:selected={selectedFile === node.file.path}
+          class:has-search-results={globalSearchState.isOpen &&
+            globalSearchState.fileResults.has(node.file.path)}
           style="padding-left: {8 + depth * 12}px"
           onclick={() => selectFile(node.file!)}
         >
+          {#if globalSearchState.isOpen}
+            {#if globalSearchState.fileResults.has(node.file.path)}
+              <span
+                class="dir-chevron"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  toggleSearchResults(node.file!.path);
+                }}
+                role="button"
+                tabindex="0"
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    toggleSearchResults(node.file!.path);
+                  }
+                }}
+              >
+                {#if areSearchResultsCollapsed(node.file.path)}
+                  <ChevronRight size={14} />
+                {:else}
+                  <ChevronDown size={14} />
+                {/if}
+              </span>
+            {:else}
+              <span class="search-spacer"></span>
+            {/if}
+          {/if}
           {@render fileIcon(node.file, showReviewedSection)}
           <span class="file-name">{node.name}</span>
           {#if node.file.commentCount > 0}
@@ -426,7 +689,51 @@
               <MessageSquare size={12} />
             </span>
           {/if}
+          {#if globalSearchState.isOpen && globalSearchState.fileResults.has(node.file.path)}
+            {@const resultCount =
+              globalSearchState.fileResults.get(node.file.path)?.matches.length ?? 0}
+            <span
+              class="search-result-count"
+              title="{resultCount} search result{resultCount !== 1 ? 's' : ''}"
+            >
+              {resultCount}
+            </span>
+          {/if}
         </button>
+
+        <!-- Search results (if search is active and this file has matches) -->
+        {#if globalSearchState.isOpen && globalSearchState.fileResults.has(node.file.path) && !areSearchResultsCollapsed(node.file.path)}
+          {@const fileResult = globalSearchState.fileResults.get(node.file.path)}
+          {#if fileResult}
+            <div class="search-results-container" style="margin-left: {8 + (depth + 1) * 12}px">
+              {#each fileResult.matches.slice(0, fileResult.displayLimit) as match, i}
+                {@const snippet = getMatchSnippet(match, node.file.path)}
+                {@const isCurrent = isCurrentResult(displayOrderedFileSummaries, node.file.path, i)}
+                {@const globalIndex = getGlobalIndex(
+                  displayOrderedFileSummaries,
+                  node.file.path,
+                  i
+                )}
+                <SearchResultItem
+                  {match}
+                  {snippet}
+                  {isCurrent}
+                  onclick={() => handleSearchResultClick(node.file!.path, match, globalIndex)}
+                />
+              {/each}
+
+              {#if fileResult.matches.length > fileResult.displayLimit}
+                <button class="show-more-btn" onclick={() => expandFileResults(node.file!.path)}>
+                  Show {fileResult.matches.length - fileResult.displayLimit} more
+                </button>
+              {:else if fileResult.displayLimit > 5}
+                <button class="show-less-btn" onclick={() => collapseFileResults(node.file!.path)}>
+                  Show less
+                </button>
+              {/if}
+            </div>
+          {/if}
+        {/if}
       </li>
     {/if}
   {/each}
@@ -438,10 +745,40 @@
       <button
         class="tree-item file-item"
         class:selected={selectedFile === file.path}
+        class:has-search-results={globalSearchState.isOpen &&
+          globalSearchState.fileResults.has(file.path)}
         style="padding-left: 8px"
         onclick={() => selectFile(file)}
         title={file.path}
       >
+        {#if globalSearchState.isOpen}
+          {#if globalSearchState.fileResults.has(file.path)}
+            <span
+              class="dir-chevron"
+              onclick={(e) => {
+                e.stopPropagation();
+                toggleSearchResults(file.path);
+              }}
+              role="button"
+              tabindex="0"
+              onkeydown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  toggleSearchResults(file.path);
+                }
+              }}
+            >
+              {#if areSearchResultsCollapsed(file.path)}
+                <ChevronRight size={14} />
+              {:else}
+                <ChevronDown size={14} />
+              {/if}
+            </span>
+          {:else}
+            <span class="search-spacer"></span>
+          {/if}
+        {/if}
         {@render fileIcon(file, showReviewedSection)}
         <span class="file-name truncate-start">{file.path}</span>
         {#if file.commentCount > 0}
@@ -449,7 +786,46 @@
             <MessageSquare size={12} />
           </span>
         {/if}
+        {#if globalSearchState.isOpen && globalSearchState.fileResults.has(file.path)}
+          {@const resultCount = globalSearchState.fileResults.get(file.path)?.matches.length ?? 0}
+          <span
+            class="search-result-count"
+            title="{resultCount} search result{resultCount !== 1 ? 's' : ''}"
+          >
+            {resultCount}
+          </span>
+        {/if}
       </button>
+
+      <!-- Search results (if search is active and this file has matches) -->
+      {#if globalSearchState.isOpen && globalSearchState.fileResults.has(file.path) && !areSearchResultsCollapsed(file.path)}
+        {@const fileResult = globalSearchState.fileResults.get(file.path)}
+        {#if fileResult}
+          <div class="search-results-container" style="margin-left: 20px">
+            {#each fileResult.matches.slice(0, fileResult.displayLimit) as match, i}
+              {@const snippet = getMatchSnippet(match, file.path)}
+              {@const isCurrent = isCurrentResult(displayOrderedFileSummaries, file.path, i)}
+              {@const globalIndex = getGlobalIndex(displayOrderedFileSummaries, file.path, i)}
+              <SearchResultItem
+                {match}
+                {snippet}
+                {isCurrent}
+                onclick={() => handleSearchResultClick(file.path, match, globalIndex)}
+              />
+            {/each}
+
+            {#if fileResult.matches.length > fileResult.displayLimit}
+              <button class="show-more-btn" onclick={() => expandFileResults(file.path)}>
+                Show {fileResult.matches.length - fileResult.displayLimit} more
+              </button>
+            {:else if fileResult.displayLimit > 5}
+              <button class="show-less-btn" onclick={() => collapseFileResults(file.path)}>
+                Show less
+              </button>
+            {/if}
+          </div>
+        {/if}
+      {/if}
     </li>
   {/each}
 {/snippet}
@@ -496,6 +872,9 @@
 {/snippet}
 
 <div class="sidebar-content">
+  <!-- Search bar -->
+  <CrossFileSearchBar {files} {loadFileDiff} />
+
   {#if loading}
     <div class="loading-state">
       <p>Loading...</p>
@@ -806,6 +1185,12 @@
     width: 14px;
   }
 
+  .search-spacer {
+    display: inline-block;
+    flex-shrink: 0;
+    width: 14px;
+  }
+
   .dir-icon {
     display: flex;
     align-items: center;
@@ -1104,5 +1489,50 @@
   /* Agent section header - inside file-list, no extra margin needed */
   .agent-header {
     margin-bottom: 0;
+  }
+
+  /* Search results */
+  .search-results-container {
+    display: flex;
+    flex-direction: column;
+    background-color: var(--bg-secondary);
+    border-left: 2px solid var(--border-subtle);
+    margin-left: 8px;
+  }
+
+  .show-more-btn,
+  .show-less-btn {
+    display: block;
+    width: 100%;
+    padding: 4px 12px;
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    font-size: var(--size-xs);
+    text-align: center;
+    cursor: pointer;
+    transition: background-color 0.1s;
+  }
+
+  .show-more-btn:hover,
+  .show-less-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-muted);
+  }
+
+  .search-result-count {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 16px;
+    padding: 0 4px;
+    margin-left: auto;
+    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.15));
+    color: var(--accent-primary);
+    border-radius: 8px;
+    font-size: var(--size-xs);
+    font-weight: 500;
+    flex-shrink: 0;
   }
 </style>

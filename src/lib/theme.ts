@@ -59,6 +59,12 @@ export interface Theme {
     commentHighlight: string; // Highlight color for commented regions in spine
   };
 
+  // Search highlight colors
+  search: {
+    matchBg: string; // Background for search matches
+    currentMatchBg: string; // Background for current/focused match
+  };
+
   // AI annotation overlays
   annotation: {
     overlayBg: string; // Semi-transparent background for blur overlay
@@ -371,6 +377,13 @@ export function createAdaptiveTheme(
       commentHighlight: overlay(accentBlue, isDark ? 0.5 : 0.4),
     },
 
+    search: {
+      // Yellow-ish highlight for search matches - visible but not overwhelming
+      matchBg: isDark ? 'rgba(250, 200, 50, 0.35)' : 'rgba(250, 200, 50, 0.5)',
+      // Orange-ish highlight for current match - more prominent
+      currentMatchBg: isDark ? 'rgba(255, 150, 50, 0.5)' : 'rgba(255, 150, 50, 0.6)',
+    },
+
     annotation: {
       // Semi-transparent background for blur overlay - darker for readability
       overlayBg: isDark ? 'rgba(0, 0, 0, 0.5)' : 'rgba(255, 255, 255, 0.6)',
@@ -440,6 +453,9 @@ export function themeToCssVars(t: Theme): string {
     --diff-changed-bg: ${t.diff.changedBg};
     --diff-range-border: ${t.diff.rangeBorder};
     --diff-comment-highlight: ${t.diff.commentHighlight};
+
+    --search-match-bg: ${t.search.matchBg};
+    --search-current-match-bg: ${t.search.currentMatchBg};
 
     --annotation-overlay-bg: ${t.annotation.overlayBg};
     --annotation-border: ${t.annotation.border};

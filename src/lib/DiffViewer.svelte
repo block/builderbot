@@ -52,6 +52,7 @@
     getTextLines,
   } from './diffUtils';
   import { setupDiffKeyboardNav } from './diffKeyboard';
+  import { registerShortcut } from './services/keyboard';
   import { diffSelection } from './stores/diffSelection.svelte';
   import {
     diffState,
@@ -68,6 +69,9 @@
   import { repoState } from './stores/repoState.svelte';
   import { preferences } from './stores/preferences.svelte';
   import Scrollbar from './Scrollbar.svelte';
+  import { globalSearchState, getFlattenedResults } from './stores/globalSearch.svelte';
+  import type { SearchMatch } from './services/diffSearch';
+  import type { MatchLocation } from './services/diffSearch';
 
   // ==========================================================================
   // Constants
@@ -607,6 +611,168 @@
 
   function getAfterTokens(index: number): Token[] {
     return afterTokens[index] || [{ content: '', color: 'inherit' }];
+  }
+
+  // ==========================================================================
+  // Search highlight helpers
+  // ==========================================================================
+
+  /** A token segment that may be highlighted as a search match */
+  interface HighlightedSegment {
+    content: string;
+    color: string;
+    isMatch: boolean;
+    isCurrent: boolean;
+  }
+
+  /**
+   * Get all match locations for a specific line and side.
+   * Returns array of { location, isCurrent } for each match on this line/side.
+   *
+   * Uses windowed highlighting: only highlights 30 matches before + 30 after current match
+   * for performance optimization with large result sets.
+   *
+   * Note: Search only looks at right/after side, so left side will never have matches.
+   */
+  function getSearchMatchesForLine(
+    lineIndex: number,
+    side: 'left' | 'right'
+  ): Array<{ location: MatchLocation; isCurrent: boolean }> {
+    // Search only looks at right side
+    if (side === 'left') return [];
+
+    if (!globalSearchState.isOpen || globalSearchState.totalMatches === 0) {
+      return [];
+    }
+
+    // Get current file's results
+    const currentPath = afterPath ?? beforePath ?? '';
+    const fileResult = globalSearchState.fileResults.get(currentPath);
+    if (!fileResult) return [];
+
+    // Find the current match's local index within this file
+    const flattened = getFlattenedResults(diffState.files);
+    const currentGlobal = flattened[globalSearchState.currentResultIndex];
+    if (!currentGlobal || currentGlobal.filePath !== currentPath) {
+      // Current match is not in this file, don't highlight anything
+      return [];
+    }
+
+    const currentLocalIndex = currentGlobal.localIndex;
+
+    // Calculate window: 30 before and 30 after current match
+    const windowStart = Math.max(0, currentLocalIndex - 30);
+    const windowEnd = Math.min(fileResult.matches.length, currentLocalIndex + 31);
+
+    // Get matches in window that are on this line
+    const results: Array<{ location: MatchLocation; isCurrent: boolean }> = [];
+
+    for (let i = windowStart; i < windowEnd; i++) {
+      const match = fileResult.matches[i];
+      if (match.lineIndex !== lineIndex) continue;
+
+      const location = match.right;
+      if (location) {
+        results.push({
+          location,
+          isCurrent: i === currentLocalIndex,
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Split tokens at search match boundaries to enable inline highlighting.
+   * Returns segments with isMatch/isCurrent flags for styling.
+   */
+  function applySearchHighlights(
+    tokens: Token[],
+    matches: Array<{ location: MatchLocation; isCurrent: boolean }>
+  ): HighlightedSegment[] {
+    if (matches.length === 0) {
+      // No matches - return tokens as-is
+      return tokens.map((t) => ({
+        content: t.content,
+        color: t.color,
+        isMatch: false,
+        isCurrent: false,
+      }));
+    }
+
+    const segments: HighlightedSegment[] = [];
+    let charIndex = 0;
+
+    for (const token of tokens) {
+      const tokenStart = charIndex;
+      const tokenEnd = charIndex + token.content.length;
+      let pos = 0;
+
+      while (pos < token.content.length) {
+        const absPos = tokenStart + pos;
+
+        // Find if we're inside any match
+        let inMatch: { location: MatchLocation; isCurrent: boolean } | null = null;
+        for (const m of matches) {
+          if (absPos >= m.location.startCol && absPos < m.location.endCol) {
+            inMatch = m;
+            break;
+          }
+        }
+
+        if (inMatch) {
+          // We're inside a match - find how much of this token is in the match
+          const matchEndInToken = Math.min(
+            token.content.length,
+            inMatch.location.endCol - tokenStart
+          );
+          const matchContent = token.content.slice(pos, matchEndInToken);
+
+          if (matchContent) {
+            segments.push({
+              content: matchContent,
+              color: token.color,
+              isMatch: true,
+              isCurrent: inMatch.isCurrent,
+            });
+          }
+          pos = matchEndInToken;
+        } else {
+          // Not in a match - find next match start or end of token
+          let nextBoundary = token.content.length;
+          for (const m of matches) {
+            if (m.location.startCol > absPos && m.location.startCol < tokenStart + nextBoundary) {
+              nextBoundary = m.location.startCol - tokenStart;
+            }
+          }
+
+          const normalContent = token.content.slice(pos, nextBoundary);
+          if (normalContent) {
+            segments.push({
+              content: normalContent,
+              color: token.color,
+              isMatch: false,
+              isCurrent: false,
+            });
+          }
+          pos = nextBoundary;
+        }
+      }
+
+      charIndex = tokenEnd;
+    }
+
+    return segments;
+  }
+
+  /**
+   * Get tokens for a line with search highlighting applied.
+   */
+  function getHighlightedTokens(lineIndex: number, side: 'left' | 'right'): HighlightedSegment[] {
+    const tokens = side === 'left' ? getBeforeTokens(lineIndex) : getAfterTokens(lineIndex);
+    const matches = getSearchMatchesForLine(lineIndex, side);
+    return applySearchHighlights(tokens, matches);
   }
 
   // ==========================================================================
@@ -1414,7 +1580,6 @@
     document.addEventListener('keydown', handleLineSelectionKeydown);
     document.addEventListener('keydown', handleAnnotationRevealKeydown);
     document.addEventListener('keyup', handleAnnotationRevealKeyup);
-
     return () => {
       cleanupKeyboardNav?.();
       document.removeEventListener('copy', handleCopy);
@@ -1516,6 +1681,7 @@
       <span class="loading-text">Loading...</span>
     </div>
   {/if}
+
   {#if diff === null}
     <div class="empty-state">
       <p>Select a file to view changes</p>
@@ -1581,8 +1747,12 @@
                     onmouseleave={handleLineMouseLeave}
                   >
                     <span class="line-content">
-                      {#each getBeforeTokens(i) as token}
-                        <span style="color: {token.color}">{token.content}</span>
+                      {#each getHighlightedTokens(i, 'left') as segment}
+                        <span
+                          style="color: {segment.color}"
+                          class:search-match={segment.isMatch}
+                          class:search-current={segment.isCurrent}>{segment.content}</span
+                        >
                       {/each}
                     </span>
                   </div>
@@ -1644,8 +1814,12 @@
                 {#each beforeLines as line, i}
                   <div class="line">
                     <span class="line-content">
-                      {#each getBeforeTokens(i) as token}
-                        <span style="color: {token.color}">{token.content}</span>
+                      {#each getHighlightedTokens(i, 'left') as segment}
+                        <span
+                          style="color: {segment.color}"
+                          class:search-match={segment.isMatch}
+                          class:search-current={segment.isCurrent}>{segment.content}</span
+                        >
                       {/each}
                     </span>
                   </div>
@@ -1707,8 +1881,12 @@
                     onmousedown={(e) => handleLineMouseDown('after', i, e)}
                   >
                     <span class="line-content">
-                      {#each getAfterTokens(i) as token}
-                        <span style="color: {token.color}">{token.content}</span>
+                      {#each getHighlightedTokens(i, 'right') as segment}
+                        <span
+                          style="color: {segment.color}"
+                          class:search-match={segment.isMatch}
+                          class:search-current={segment.isCurrent}>{segment.content}</span
+                        >
                       {/each}
                     </span>
                   </div>
@@ -1775,8 +1953,12 @@
                     onmousedown={(e) => handleLineMouseDown('after', i, e)}
                   >
                     <span class="line-content">
-                      {#each getAfterTokens(i) as token}
-                        <span style="color: {token.color}">{token.content}</span>
+                      {#each getHighlightedTokens(i, 'right') as segment}
+                        <span
+                          style="color: {segment.color}"
+                          class:search-match={segment.isMatch}
+                          class:search-current={segment.isCurrent}>{segment.content}</span
+                        >
                       {/each}
                     </span>
                   </div>
@@ -2378,5 +2560,16 @@
     padding: 4px 12px 8px;
     font-size: var(--size-xs);
     color: var(--text-faint);
+  }
+
+  /* Search match highlighting */
+  .search-match {
+    background-color: var(--search-match-bg);
+    border-radius: 2px;
+  }
+
+  .search-current {
+    background-color: var(--search-current-match-bg);
+    border-radius: 2px;
   }
 </style>

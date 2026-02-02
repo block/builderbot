@@ -31,9 +31,11 @@ export interface Shortcut {
   /** Human-readable description for the shortcuts modal */
   description: string;
   /** Category for grouping in the modal */
-  category: 'navigation' | 'view' | 'comments' | 'files';
+  category: 'navigation' | 'view' | 'comments' | 'files' | 'search';
   /** Handler function */
   handler: () => void;
+  /** If true, this shortcut works even when focus is in an input/textarea */
+  allowInInputs?: boolean;
 }
 
 /** Registered shortcuts */
@@ -151,14 +153,16 @@ function modifiersMatch(event: KeyboardEvent, mods?: Modifiers): boolean {
  * Handle keydown events.
  */
 function handleKeydown(event: KeyboardEvent): void {
-  // Skip if in input/textarea
   const target = event.target as HTMLElement;
-  if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
-    return;
-  }
+  const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
 
   // Find matching shortcut
   for (const shortcut of shortcuts.values()) {
+    // Skip if in input/textarea unless explicitly allowed
+    if (inInput && !shortcut.allowInInputs) {
+      continue;
+    }
+
     // Check if key matches
     const keyMatches = shortcut.keys.some(
       (k) => k.toLowerCase() === event.key.toLowerCase() || k === event.key
@@ -169,6 +173,7 @@ function handleKeydown(event: KeyboardEvent): void {
     if (!modifiersMatch(event, shortcut.modifiers)) continue;
 
     // Found a match!
+    console.log('[keyboard] shortcut matched:', shortcut.id, 'key:', event.key);
     event.preventDefault();
     shortcut.handler();
     return;

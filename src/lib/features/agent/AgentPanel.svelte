@@ -192,6 +192,22 @@
     }
   });
 
+  // Auto-select new artifacts added externally (e.g., from AI analysis in Sidebar)
+  $effect(() => {
+    const artifactIds = agentState.artifacts.map((a) => a.id);
+    let added = false;
+    for (const id of artifactIds) {
+      if (!selectedArtifactIds.has(id)) {
+        selectedArtifactIds.add(id);
+        added = true;
+      }
+    }
+    // Trigger reactivity if we added any
+    if (added) {
+      selectedArtifactIds = new Set(selectedArtifactIds);
+    }
+  });
+
   function selectProvider(provider: AcpProvider) {
     agentState.provider = provider;
     showProviderDropdown = false;
@@ -572,10 +588,7 @@
             {/if}
           </button>
           <MessageSquare size={12} />
-          <span class="artifact-title">
-            All {totalCommentsCount}
-            {totalCommentsCount === 1 ? 'comment' : 'comments'}
-          </span>
+          <span class="artifact-title">All comments ({totalCommentsCount})</span>
         </div>
       </div>
     {/if}
@@ -748,6 +761,7 @@
 
   .agent-top {
     flex-shrink: 0;
+    padding-top: 8px;
   }
 
   .agent-bottom {

@@ -69,6 +69,7 @@
     checkAi,
     runAnalysis,
     clearResults as clearSmartDiffState,
+    toggleAnnotations,
   } from './stores/smartDiff.svelte';
   import { saveArtifact } from './services/review';
   import CrossFileSearchBar from './CrossFileSearchBar.svelte';
@@ -132,12 +133,6 @@
      * @param repoPath - The repo path
      */
     onReloadCommentsForTab?: (spec: DiffSpecType, repoPath: string | null) => Promise<void>;
-    /**
-     * Callback when an artifact is saved (to update the tab's artifact list).
-     * @param artifact - The saved artifact
-     * @param repoPath - The repo path where the artifact belongs
-     */
-    onArtifactSaved?: (artifact: Artifact, repoPath: string | null) => void;
     /** Called when user selects a preset diff */
     onPresetSelect?: (preset: DiffPreset) => void;
     /** Called when user selects a custom diff (from modal or PR selector) */
@@ -157,7 +152,6 @@
     agentState = null,
     onCommit,
     onReloadCommentsForTab,
-    onArtifactSaved,
     onPresetSelect,
     onCustomDiff,
   }: Props = $props();
@@ -235,6 +229,8 @@
   // AI analysis state
   let isAiLoading = $derived(smartDiffState.loading);
   let canRunAi = $derived(files.length > 0 && !loading);
+  let hasFileAnnotations = $derived(smartDiffState.results.size > 0);
+  let showAnnotations = $derived(smartDiffState.showAnnotations);
 
   /**
    * Get the primary path for a file summary.
@@ -728,19 +724,14 @@
         // Reload comments for the tab where analysis was started
         await onReloadCommentsForTab?.(capturedSpec, capturedRepoPath);
 
-        // Create and save artifact from the summary
-        const artifact = createArtifactFromSummary(result);
-
-        try {
+        // Auto-save artifact if there's a changeset summary
+        if (smartDiffState.changesetSummary && capturedAgentState) {
+          const artifact = createArtifactFromSummary(smartDiffState.changesetSummary);
+          // Save to database
           await saveArtifact(capturedSpec, artifact, capturedRepoPath ?? undefined);
-          // Notify the tab to update its artifact list
-          onArtifactSaved?.(artifact, capturedRepoPath);
-        } catch (e) {
-          console.error('Failed to save artifact:', e);
+          // Add to UI immediately
+          capturedAgentState.artifacts.push(artifact);
         }
-
-        // Clear the in-memory analysis results (they're saved as artifact now)
-        clearSmartDiffState();
       }
     } catch (e) {
       console.error('Analysis failed:', e);
@@ -1369,6 +1360,30 @@
             <span class="divider-label">AGENT</span>
           </div>
           <div class="section-right">
+            {#if hasFileAnnotations}
+              <button
+                class="view-ai-btn"
+                class:active={showAnnotations && smartDiffState.annotationsRevealed}
+                onclick={() => {
+                  // Toggle both showAnnotations and annotationsRevealed together
+                  // so clicking the eye directly shows/hides the overlay
+                  const newState = !smartDiffState.annotationsRevealed;
+                  if (newState) {
+                    // Turn on: ensure both flags are true
+                    if (!smartDiffState.showAnnotations) toggleAnnotations();
+                    smartDiffState.annotationsRevealed = true;
+                  } else {
+                    // Turn off: just hide the reveal
+                    smartDiffState.annotationsRevealed = false;
+                  }
+                }}
+                title={smartDiffState.annotationsRevealed
+                  ? 'Hide AI annotations'
+                  : 'Show AI annotations'}
+              >
+                <Eye size={12} />
+              </button>
+            {/if}
             <button
               class="ai-btn"
               class:loading={isAiLoading}
@@ -1926,14 +1941,14 @@
   /* Delete button for comments */
   .comment-delete-btn {
     position: absolute;
-    right: 8px;
+    right: 12px;
     top: 50%;
     transform: translateY(-50%);
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 4px;
-    background: var(--bg-chrome);
+    background: none;
     border: none;
     border-radius: 4px;
     color: var(--text-faint);
@@ -1952,7 +1967,7 @@
 
   .comment-delete-btn:hover {
     color: var(--status-deleted);
-    background-color: var(--bg-hover);
+    background-color: var(--bg-primary);
   }
 
   /* AI comment styling */
@@ -2135,6 +2150,37 @@
   }
 
   .delete-all-btn:focus-visible {
+    outline: 2px solid var(--text-accent);
+    outline-offset: -2px;
+  }
+
+  /* View AI Analysis button in agent section header */
+  .view-ai-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    background: none;
+    border: none;
+    border-radius: 3px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      color 0.1s;
+  }
+
+  .view-ai-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .view-ai-btn.active {
+    background-color: var(--bg-primary);
+    color: var(--text-accent);
+  }
+
+  .view-ai-btn:focus-visible {
     outline: 2px solid var(--text-accent);
     outline-offset: -2px;
   }

@@ -756,6 +756,10 @@
         agentState={getActiveTab()?.agentState}
         onPresetSelect={handlePresetSelect}
         onCustomDiff={handleCustomDiff}
+        onReloadCommentsForTab={async (spec, repoPath) => {
+          await loadComments(spec, repoPath ?? undefined);
+          syncGlobalToTab();
+        }}
       />
     </aside>
   </div>

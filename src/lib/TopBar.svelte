@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
     ChevronDown,
     Palette,
@@ -110,6 +111,17 @@
     }
   }
 
+  // Start window drag from non-interactive areas
+  function startDrag(e: PointerEvent) {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    const isInteractive = target.closest('button, a, input, [role="button"], .dropdown');
+    if (!isInteractive) {
+      e.preventDefault();
+      getCurrentWindow().startDragging();
+    }
+  }
+
   // Register keyboard shortcuts
   onMount(() => {
     const unregisterTheme = registerShortcut({
@@ -143,7 +155,7 @@
 
 <svelte:window onclick={handleClickOutside} />
 
-<header class="top-bar">
+<header class="top-bar" onpointerdown={startDrag}>
   <!-- Left section: Diff selector -->
   <div class="section section-left">
     <div class="diff-selector">
@@ -277,6 +289,13 @@
     background-color: transparent;
     flex-shrink: 0;
     gap: 12px;
+    -webkit-app-region: drag;
+  }
+
+  /* Make all interactive elements non-draggable */
+  .top-bar button,
+  .top-bar .dropdown {
+    -webkit-app-region: no-drag;
   }
 
   .section {

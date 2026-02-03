@@ -3,6 +3,21 @@
   import { windowState, closeTab } from './stores/tabState.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
+  function startDrag(e: PointerEvent) {
+    // Only start drag on left mouse button
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    // Allow drag from elements with drag-region class, or the tab-bar itself
+    // but not from interactive elements
+    const isInteractive = target.closest('button, a, input, [role="button"]');
+    const isDragRegion =
+      target.classList.contains('drag-region') || target.classList.contains('tab-bar');
+    if (!isInteractive && isDragRegion) {
+      e.preventDefault();
+      getCurrentWindow().startDragging();
+    }
+  }
+
   interface Props {
     onNewTab: () => void;
     onSwitchTab: (index: number) => void;
@@ -54,7 +69,8 @@
   }
 </script>
 
-<div class="tab-bar">
+<div class="tab-bar drag-region" onpointerdown={startDrag}>
+  <div class="traffic-light-spacer drag-region" data-tauri-drag-region></div>
   <div class="tabs">
     <div class="tab-indicator" style={indicatorStyle}></div>
     {#each windowState.tabs as tab, index (tab.id)}
@@ -90,6 +106,7 @@
   <button class="new-tab-btn" onclick={handleNewTab} title="Open folder in new tab">
     <Plus size={16} />
   </button>
+  <div class="drag-spacer drag-region" data-tauri-drag-region></div>
 </div>
 
 <style>
@@ -97,9 +114,31 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 4px 8px 0 8px;
+    padding: 8px 8px 0 8px;
     background: var(--bg-deepest);
     /* border-bottom: 1px solid var(--border-subtle); */
+    -webkit-app-region: drag;
+  }
+
+  .traffic-light-spacer {
+    width: 70px;
+    flex-shrink: 0;
+    align-self: stretch;
+    -webkit-app-region: drag;
+  }
+
+  .drag-spacer {
+    flex: 1;
+    align-self: stretch;
+    min-width: 20px;
+    -webkit-app-region: drag;
+  }
+
+  /* Make interactive elements non-draggable */
+  .tab,
+  .new-tab-btn,
+  .close-btn {
+    -webkit-app-region: no-drag;
   }
 
   .tabs {

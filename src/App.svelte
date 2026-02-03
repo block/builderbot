@@ -27,7 +27,7 @@
   import { createDiffState } from './lib/stores/diffState.svelte';
   import { createCommentsState } from './lib/stores/comments.svelte';
   import { createDiffSelection } from './lib/stores/diffSelection.svelte';
-  import { createAgentState, agentGlobalState } from './lib/stores/agent.svelte';
+  import { createAgentState, agentGlobalState, type Artifact } from './lib/stores/agent.svelte';
   import { discoverAcpProviders } from './lib/services/ai';
   import { DiffSpec, gitRefName } from './lib/types';
   import type { DiffSpec as DiffSpecType } from './lib/types';
@@ -701,6 +701,9 @@
 <main>
   {#if windowState.tabs.length > 0}
     <TabBar onNewTab={handleNewTab} onSwitchTab={handleTabSwitch} />
+  {:else}
+    <!-- Spacer for traffic light buttons when no tabs -->
+    <div class="titlebar-spacer" data-tauri-drag-region></div>
   {/if}
 
   <TopBar onPresetSelect={handlePresetSelect} onCustomDiff={handleCustomDiff} />
@@ -726,48 +729,6 @@
           loading={diffState.loadingFile !== null}
           isReferenceFile={isCurrentFileReference}
           agentState={getActiveTab()?.agentState}
-          onCommit={() => {
-            const tab = getActiveTab();
-            if (tab) handleFilesChanged(tab.repoPath);
-          }}
-          onReloadCommentsForTab={async (spec, repoPath) => {
-            // Find the tab that matches this spec/repoPath
-            const targetTab = windowState.tabs.find((t) => t.repoPath === repoPath);
-            if (!targetTab) {
-              console.warn('Could not find tab for repoPath:', repoPath);
-              return;
-            }
-
-            // Load comments from the database
-            const review = await import('./lib/services/review').then((m) =>
-              m.getReview(spec, repoPath ?? undefined)
-            );
-
-            // Update the target tab's comments state directly
-            targetTab.commentsState.comments = review.comments;
-            targetTab.commentsState.reviewedPaths = review.reviewed;
-            targetTab.commentsState.currentSpec = spec;
-            targetTab.commentsState.currentRepoPath = repoPath;
-
-            // Check if this is still the active tab
-            const activeTab = getActiveTab();
-            const isStillActive = activeTab?.id === targetTab.id;
-
-            if (isStillActive) {
-              // Sync to global state so UI updates immediately
-              commentsState.comments = review.comments;
-              commentsState.reviewedPaths = review.reviewed;
-              commentsState.currentSpec = spec;
-              commentsState.currentRepoPath = repoPath;
-            }
-          }}
-          onArtifactSaved={(artifact, repoPath) => {
-            // Find the tab that matches this repoPath and add the artifact
-            const targetTab = windowState.tabs.find((t) => t.repoPath === repoPath);
-            if (targetTab) {
-              targetTab.agentState.artifacts.push(artifact);
-            }
-          }}
         />
       {/if}
     </section>
@@ -844,6 +805,13 @@
     height: 100vh;
     overflow: hidden;
     background-color: var(--bg-chrome);
+  }
+
+  .titlebar-spacer {
+    height: 28px;
+    flex-shrink: 0;
+    background: var(--bg-chrome);
+    -webkit-app-region: drag;
   }
 
   .app-container {

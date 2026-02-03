@@ -32,6 +32,8 @@
   import { initWatcher, watchRepo, type Unsubscribe } from './lib/services/statusEvents';
   import { referenceFileAsDiff } from './lib/diffUtils';
   import {
+    referenceFilesState,
+    createReferenceFilesState,
     addReferenceFile,
     removeReferenceFile,
     loadReferenceFiles,
@@ -341,6 +343,10 @@
     diffSelection.label = tab.diffSelection.label;
     diffSelection.prNumber = tab.diffSelection.prNumber;
 
+    referenceFilesState.files = tab.referenceFilesState.files;
+    referenceFilesState.loading = tab.referenceFilesState.loading;
+    referenceFilesState.error = tab.referenceFilesState.error;
+
     // Update repo state
     setCurrentRepo(tab.repoPath);
   }
@@ -377,6 +383,10 @@
     tab.diffSelection.spec = diffSelection.spec;
     tab.diffSelection.label = diffSelection.label;
     tab.diffSelection.prNumber = diffSelection.prNumber;
+
+    tab.referenceFilesState.files = referenceFilesState.files;
+    tab.referenceFilesState.loading = referenceFilesState.loading;
+    tab.referenceFilesState.error = referenceFilesState.error;
   }
 
   /**
@@ -463,7 +473,8 @@
       createDiffState,
       createCommentsState,
       createDiffSelection,
-      createAgentState
+      createAgentState,
+      createReferenceFilesState
     );
 
     // Start watching the new repo (idempotent - won't restart if already watching)
@@ -577,7 +588,8 @@
         createDiffState,
         createCommentsState,
         createDiffSelection,
-        createAgentState
+        createAgentState,
+        createReferenceFilesState
       );
 
       // Initialize watcher listener once (handles all repos)
@@ -613,7 +625,8 @@
             createDiffState,
             createCommentsState,
             createDiffSelection,
-            createAgentState
+            createAgentState,
+            createReferenceFilesState
           );
         }
 

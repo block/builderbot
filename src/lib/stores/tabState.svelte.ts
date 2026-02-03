@@ -10,9 +10,10 @@ import type { DiffState } from './diffState.svelte';
 import type { CommentsState } from './comments.svelte';
 import type { DiffSelection } from './diffSelection.svelte';
 import type { AgentState } from './agent.svelte';
+import type { ReferenceFilesState } from './referenceFiles.svelte';
 
 // Re-export types for convenience
-export type { DiffState, CommentsState, DiffSelection, AgentState };
+export type { DiffState, CommentsState, DiffSelection, AgentState, ReferenceFilesState };
 
 /**
  * State for a single tab
@@ -30,6 +31,7 @@ export interface TabState {
   commentsState: CommentsState;
   diffSelection: DiffSelection;
   agentState: AgentState;
+  referenceFilesState: ReferenceFilesState;
 
   /** True if files changed while this tab was not active (needs refresh on switch) */
   needsRefresh: boolean;
@@ -83,7 +85,8 @@ export function addTab(
   createDiffState: () => DiffState,
   createCommentsState: () => CommentsState,
   createDiffSelection: () => DiffSelection,
-  createAgentState: () => AgentState
+  createAgentState: () => AgentState,
+  createReferenceFilesState: () => ReferenceFilesState
 ): void {
   // Check if tab already exists
   const existingIndex = windowState.tabs.findIndex((t) => t.id === repoPath);
@@ -103,6 +106,7 @@ export function addTab(
     commentsState: createCommentsState(),
     diffSelection: createDiffSelection(),
     agentState: createAgentState(),
+    referenceFilesState: createReferenceFilesState(),
     needsRefresh: false,
   };
 
@@ -209,7 +213,8 @@ export function loadTabsFromStorage(
   createDiffState: () => DiffState,
   createCommentsState: () => CommentsState,
   createDiffSelection: () => DiffSelection,
-  createAgentState: () => AgentState
+  createAgentState: () => AgentState,
+  createReferenceFilesState: () => ReferenceFilesState
 ): void {
   const key = `${STORAGE_KEY_PREFIX}${windowState.windowLabel}-tabs`;
   const stored = localStorage.getItem(key);
@@ -227,6 +232,7 @@ export function loadTabsFromStorage(
         commentsState: createCommentsState(),
         diffSelection: createDiffSelection(),
         agentState: createAgentState(),
+        referenceFilesState: createReferenceFilesState(),
         needsRefresh: false,
       }));
       windowState.activeTabIndex = data.activeTabIndex;

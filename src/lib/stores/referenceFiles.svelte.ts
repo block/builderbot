@@ -24,13 +24,26 @@ export interface ReferenceFile {
   content: FileContent;
 }
 
-interface ReferenceFilesState {
+export interface ReferenceFilesState {
   /** Pinned reference files with loaded content */
   files: ReferenceFile[];
   /** Loading state for file fetching */
   loading: boolean;
   /** Error message if loading failed */
   error: string | null;
+}
+
+/**
+ * Create a new reference files state instance.
+ * Used to create isolated state per tab.
+ * Returns a plain object - reactivity comes from being stored in windowState.tabs.
+ */
+export function createReferenceFilesState(): ReferenceFilesState {
+  return {
+    files: [],
+    loading: false,
+    error: null,
+  };
 }
 
 export const referenceFilesState: ReferenceFilesState = $state({

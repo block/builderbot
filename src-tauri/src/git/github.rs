@@ -263,6 +263,28 @@ pub fn list_pull_requests(repo: &Path) -> Result<Vec<PullRequest>, GitError> {
     Ok(prs)
 }
 
+/// Search for pull requests on GitHub using a query string.
+/// Uses GitHub's search syntax via `gh pr list --search`.
+/// Does not use caching since search queries vary.
+pub fn search_pull_requests(repo: &Path, query: &str) -> Result<Vec<PullRequest>, GitError> {
+    let output = run_gh(
+        repo,
+        &[
+            "pr",
+            "list",
+            "--state=open",
+            "--limit=50",
+            &format!("--search={}", query),
+            "--json=number,title,author,baseRefName,headRefName,isDraft,updatedAt",
+        ],
+    )?;
+
+    let items: Vec<GhPrListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
+}
+
 /// Fetch PR refs and compute merge-base
 ///
 /// - Fetches refs/pull/{number}/head

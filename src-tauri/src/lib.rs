@@ -449,6 +449,23 @@ async fn list_pull_requests(repo_path: Option<String>) -> Result<Vec<PullRequest
         .map_err(|e| e.to_string())?
 }
 
+/// Search for pull requests on GitHub using a query string.
+#[tauri::command(rename_all = "camelCase")]
+async fn search_pull_requests(
+    repo_path: Option<String>,
+    query: String,
+) -> Result<Vec<PullRequest>, String> {
+    let path = repo_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    // Run on blocking thread pool to avoid blocking the UI
+    tokio::task::spawn_blocking(move || {
+        git::search_pull_requests(&path, &query).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Fetch PR refs and compute merge-base.
 /// Returns DiffSpec with concrete SHAs.
 #[tauri::command(rename_all = "camelCase")]
@@ -1265,6 +1282,7 @@ pub fn run() {
             // GitHub commands
             check_github_auth,
             list_pull_requests,
+            search_pull_requests,
             fetch_pr,
             sync_review_to_github,
             invalidate_pr_cache,

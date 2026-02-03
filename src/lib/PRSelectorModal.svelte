@@ -1,7 +1,13 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { X, AlertCircle, RefreshCw, GitPullRequest, ExternalLink } from 'lucide-svelte';
-  import { checkGitHubAuth, listPullRequests, fetchPR, invalidatePRCache } from './services/git';
+  import { X, AlertCircle, RefreshCw, GitPullRequest, ExternalLink, Search } from 'lucide-svelte';
+  import {
+    checkGitHubAuth,
+    listPullRequests,
+    searchPullRequests,
+    fetchPR,
+    invalidatePRCache,
+  } from './services/git';
   import type { PullRequest, GitHubAuthStatus, DiffSpec } from './types';
 
   interface Props {
@@ -21,9 +27,18 @@
   let selectedIndex = $state(0);
   let fetchingStatus = $state<'idle' | 'fetching' | 'loading'>('idle');
 
-  // Filtered PRs based on search
-  let filteredPRs = $derived.by(() => {
+  // Search state
+  let searchResults = $state<PullRequest[] | null>(null);
+  let searching = $state(false);
+  let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Display PRs: search results if searching, otherwise filtered local list
+  let displayedPRs = $derived.by(() => {
+    if (searchResults !== null) {
+      return searchResults;
+    }
     if (!searchQuery.trim()) return pullRequests;
+    // Local filtering for instant feedback while typing
     const query = searchQuery.toLowerCase();
     return pullRequests.filter(
       (pr) =>
@@ -90,22 +105,53 @@
     if (event.key === 'Escape') {
       onClose();
       event.preventDefault();
-    } else if (event.key === 'Enter' && filteredPRs.length > 0 && fetchingStatus === 'idle') {
-      selectPR(filteredPRs[selectedIndex]);
+    } else if (event.key === 'Enter' && displayedPRs.length > 0 && fetchingStatus === 'idle') {
+      selectPR(displayedPRs[selectedIndex]);
       event.preventDefault();
     } else if (event.key === 'ArrowDown') {
       event.preventDefault();
-      selectedIndex = Math.min(selectedIndex + 1, filteredPRs.length - 1);
+      selectedIndex = Math.min(selectedIndex + 1, displayedPRs.length - 1);
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();
       selectedIndex = Math.max(selectedIndex - 1, 0);
     }
   }
 
-  // Reset selection when search changes
+  // Debounced GitHub search when query changes
   $effect(() => {
-    const _ = searchQuery;
+    const query = searchQuery.trim();
     selectedIndex = 0;
+
+    // Clear previous timer
+    if (searchDebounceTimer) {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = null;
+    }
+
+    // If query is empty, reset to showing cached list
+    if (!query) {
+      searchResults = null;
+      searching = false;
+      return;
+    }
+
+    // Debounce: wait 300ms before searching GitHub
+    searchDebounceTimer = setTimeout(async () => {
+      searching = true;
+      try {
+        const results = await searchPullRequests(query, repoPath ?? undefined);
+        // Only update if query hasn't changed
+        if (searchQuery.trim() === query) {
+          searchResults = results;
+        }
+      } catch (e) {
+        // On error, fall back to local filtering (searchResults stays null)
+        console.error('GitHub search failed:', e);
+        searchResults = null;
+      } finally {
+        searching = false;
+      }
+    }, 300);
   });
 
   function handleBackdropClick(event: MouseEvent) {
@@ -200,18 +246,25 @@
         </div>
       {:else}
         <div class="search-container">
-          <!-- svelte-ignore a11y_autofocus -->
-          <input
-            type="text"
-            class="search-input"
-            placeholder="Search PRs by title, number, or author..."
-            bind:value={searchQuery}
-            autofocus
-          />
+          <div class="search-input-wrapper">
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              type="text"
+              class="search-input"
+              placeholder="Search GitHub PRs..."
+              bind:value={searchQuery}
+              autofocus
+            />
+            {#if searching}
+              <div class="search-indicator">
+                <RefreshCw size={14} class="spinner" />
+              </div>
+            {/if}
+          </div>
         </div>
 
         <div class="pr-list">
-          {#each filteredPRs as pr, i}
+          {#each displayedPRs as pr, i}
             <button
               class="pr-item"
               class:selected={i === selectedIndex}
@@ -232,8 +285,8 @@
             </button>
           {/each}
 
-          {#if filteredPRs.length === 0 && searchQuery}
-            <div class="no-results">No PRs match "{searchQuery}"</div>
+          {#if displayedPRs.length === 0 && searchQuery && !searching}
+            <div class="no-results">No PRs found for "{searchQuery}"</div>
           {/if}
         </div>
       {/if}
@@ -470,9 +523,16 @@
     flex-shrink: 0;
   }
 
+  .search-input-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
   .search-input {
     width: 100%;
     padding: 10px 12px;
+    padding-right: 36px;
     background: var(--bg-primary);
     border: 1px solid var(--border-muted);
     border-radius: 6px;
@@ -492,6 +552,19 @@
     outline: none;
     border-color: var(--border-emphasis);
     background-color: var(--bg-hover);
+  }
+
+  .search-indicator {
+    position: absolute;
+    right: 10px;
+    display: flex;
+    align-items: center;
+    color: var(--text-muted);
+  }
+
+  .search-indicator :global(.spinner) {
+    animation: spin 1s linear infinite;
+    transform-origin: center;
   }
 
   /* PR list */

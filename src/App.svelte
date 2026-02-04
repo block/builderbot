@@ -98,6 +98,8 @@
   // View mode: 'branches' = branch workflow, 'diff' = traditional diff viewer
   type ViewMode = 'branches' | 'diff';
   let viewMode = $state<ViewMode>('diff');
+  /** True when we navigated to diff mode from BranchHome — enables back button */
+  let cameFromBranches = $state(false);
 
   // UI State
   let unsubscribeWatcher: Unsubscribe | null = null;
@@ -222,6 +224,35 @@
 
     // Save updated state back to tab
     syncGlobalToTab();
+  }
+
+  // Open diff viewer from BranchHome — sets up the worktree tab and custom spec
+  async function handleViewDiffFromBranches(repoPath: string, spec: DiffSpecType, label: string) {
+    syncGlobalToTab();
+
+    openRepo(repoPath);
+    const repoName = extractRepoName(repoPath);
+    addTab(
+      repoPath,
+      repoName,
+      createDiffState,
+      createCommentsState,
+      createDiffSelection,
+      createAgentState,
+      createReferenceFilesState
+    );
+    watchRepo(repoPath);
+    syncTabToGlobal();
+
+    resetState();
+    clearReferenceFiles();
+    clearSmartDiffResults();
+    selectCustomDiff(spec, label);
+    await loadAll();
+    syncGlobalToTab();
+
+    cameFromBranches = true;
+    viewMode = 'diff';
   }
 
   // Repo change - reload everything
@@ -569,6 +600,7 @@
       if (konamiIndex === konamiSequence.length) {
         konamiIndex = 0;
         viewMode = viewMode === 'branches' ? 'diff' : 'branches';
+        if (viewMode === 'branches') cameFromBranches = false;
       }
     } else {
       konamiIndex = e.key === konamiSequence[0] ? 1 : 0;
@@ -737,11 +769,20 @@
 <main>
   {#if viewMode === 'branches'}
     <!-- Branch-based workflow view -->
-    <BranchHome />
+    <BranchHome onViewDiff={handleViewDiffFromBranches} />
   {:else}
     <!-- Traditional diff viewer -->
     {#if windowState.tabs.length > 0}
-      <TabBar onNewTab={handleNewTab} onSwitchTab={handleTabSwitch} />
+      <TabBar
+        onNewTab={handleNewTab}
+        onSwitchTab={handleTabSwitch}
+        onBack={cameFromBranches
+          ? () => {
+              viewMode = 'branches';
+              cameFromBranches = false;
+            }
+          : undefined}
+      />
     {:else}
       <!-- Spacer for traffic light buttons when no tabs -->
       <div class="titlebar-spacer" data-tauri-drag-region></div>

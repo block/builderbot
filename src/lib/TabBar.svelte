@@ -1,6 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { X, Plus, FolderGit2, Loader2, Settings2, Keyboard, Palette } from 'lucide-svelte';
+  import {
+    X,
+    Plus,
+    FolderGit2,
+    Loader2,
+    Settings2,
+    Keyboard,
+    Palette,
+    ChevronLeft,
+  } from 'lucide-svelte';
   import { windowState, closeTab } from './stores/tabState.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import ThemeSelectorModal from './ThemeSelectorModal.svelte';
@@ -26,9 +35,10 @@
   interface Props {
     onNewTab: () => void;
     onSwitchTab: (index: number) => void;
+    onBack?: () => void;
   }
 
-  let { onNewTab, onSwitchTab }: Props = $props();
+  let { onNewTab, onSwitchTab, onBack }: Props = $props();
 
   // Modal state
   let showThemeModal = $state(false);
@@ -111,41 +121,48 @@
 
 <div class="tab-bar drag-region" onpointerdown={startDrag}>
   <div class="traffic-light-spacer drag-region" data-tauri-drag-region></div>
-  <div class="tabs">
-    <div class="tab-indicator" style={indicatorStyle}></div>
-    {#each windowState.tabs as tab, index (tab.id)}
-      <button
-        bind:this={tabRefs[index]}
-        class="tab"
-        class:active={index === windowState.activeTabIndex}
-        onclick={() => handleSwitchTab(index)}
-        title={tab.repoPath}
-      >
-        {#if tab.agentState?.loading}
-          <Loader2 size={14} class="tab-spinner" />
-        {:else}
-          <FolderGit2 size={14} />
-        {/if}
-        <span class="tab-name">{tab.repoName}</span>
-        {#if windowState.tabs.length > 1}
-          <div
-            class="close-btn"
-            onclick={(e) => handleCloseTab(tab.id, e)}
-            onkeydown={(e) => handleCloseTabKeydown(tab.id, e)}
-            title="Close tab"
-            role="button"
-            tabindex="0"
-          >
-            <X size={12} />
-          </div>
-        {/if}
-      </button>
-    {/each}
-  </div>
+  {#if onBack}
+    <button class="back-btn" onclick={onBack}>
+      <ChevronLeft size={16} />
+      Branches
+    </button>
+  {:else}
+    <div class="tabs">
+      <div class="tab-indicator" style={indicatorStyle}></div>
+      {#each windowState.tabs as tab, index (tab.id)}
+        <button
+          bind:this={tabRefs[index]}
+          class="tab"
+          class:active={index === windowState.activeTabIndex}
+          onclick={() => handleSwitchTab(index)}
+          title={tab.repoPath}
+        >
+          {#if tab.agentState?.loading}
+            <Loader2 size={14} class="tab-spinner" />
+          {:else}
+            <FolderGit2 size={14} />
+          {/if}
+          <span class="tab-name">{tab.repoName}</span>
+          {#if windowState.tabs.length > 1}
+            <div
+              class="close-btn"
+              onclick={(e) => handleCloseTab(tab.id, e)}
+              onkeydown={(e) => handleCloseTabKeydown(tab.id, e)}
+              title="Close tab"
+              role="button"
+              tabindex="0"
+            >
+              <X size={12} />
+            </div>
+          {/if}
+        </button>
+      {/each}
+    </div>
 
-  <button class="new-tab-btn" onclick={handleNewTab} title="Open folder in new tab">
-    <Plus size={16} />
-  </button>
+    <button class="new-tab-btn" onclick={handleNewTab} title="Open folder in new tab">
+      <Plus size={16} />
+    </button>
+  {/if}
 
   <!-- Spacer pushes action buttons to the right -->
   <div class="drag-spacer drag-region" data-tauri-drag-region></div>
@@ -216,8 +233,30 @@
   .tab,
   .new-tab-btn,
   .close-btn,
-  .icon-btn {
+  .icon-btn,
+  .back-btn {
     -webkit-app-region: no-drag;
+  }
+
+  .back-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 8px;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+    cursor: pointer;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
+  }
+
+  .back-btn:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-hover);
   }
 
   /* Tab bar action buttons */

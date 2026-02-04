@@ -34,11 +34,19 @@
     /** Increment to force a data refresh */
     refreshKey?: number;
     onViewDiff?: () => void;
+    onViewCommitDiff?: (sha: string) => void;
     onDelete?: () => void;
     onBranchUpdated?: (branch: Branch) => void;
   }
 
-  let { branch, refreshKey = 0, onViewDiff, onDelete, onBranchUpdated }: Props = $props();
+  let {
+    branch,
+    refreshKey = 0,
+    onViewDiff,
+    onViewCommitDiff,
+    onDelete,
+    onBranchUpdated,
+  }: Props = $props();
 
   // Timeline item types
   type TimelineItem =
@@ -441,8 +449,8 @@
                   </div>
                 </div>
               </div>
-              {#if item.isHead}
-                <div class="timeline-actions">
+              <div class="timeline-actions">
+                {#if item.isHead}
                   <button
                     class="action-btn"
                     onclick={(e) => {
@@ -453,8 +461,18 @@
                     <Play size={12} />
                     Continue
                   </button>
-                </div>
-              {/if}
+                {/if}
+                <button
+                  class="action-btn action-btn-icon"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    onViewCommitDiff?.(item.commit.sha);
+                  }}
+                  title="View diff"
+                >
+                  <Eye size={12} />
+                </button>
+              </div>
             </div>
           {:else if item.type === 'note'}
             <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -963,6 +981,15 @@
     border-color: var(--ui-accent);
     color: var(--ui-accent);
     background-color: var(--bg-hover);
+  }
+
+  .action-btn-icon {
+    padding: 4px 6px;
+    opacity: 0;
+  }
+
+  .commit-row:hover .action-btn-icon {
+    opacity: 1;
   }
 
   .note-delete {

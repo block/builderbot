@@ -18,6 +18,13 @@
   import { confirm } from '@tauri-apps/plugin-dialog';
   import BranchCard from './BranchCard.svelte';
   import NewBranchModal from './NewBranchModal.svelte';
+  import { DiffSpec } from './types';
+
+  interface Props {
+    onViewDiff?: (repoPath: string, spec: DiffSpec, label: string) => void;
+  }
+
+  let { onViewDiff }: Props = $props();
 
   // State
   let branches = $state<Branch[]>([]);
@@ -123,8 +130,19 @@
   }
 
   function handleViewDiff(branch: Branch) {
-    // TODO: Open diff viewer with base..branch-tip
-    console.log('View diff for branch:', branch.branchName);
+    onViewDiff?.(
+      branch.worktreePath,
+      DiffSpec.fromRevs(branch.baseBranch, branch.branchName),
+      `${branch.baseBranch}..${branch.branchName}`
+    );
+  }
+
+  function handleViewCommitDiff(branch: Branch, commitSha: string) {
+    onViewDiff?.(
+      branch.worktreePath,
+      DiffSpec.fromRevs(`${commitSha}~1`, commitSha),
+      commitSha.slice(0, 7)
+    );
   }
 
   // Keyboard shortcuts
@@ -200,6 +218,7 @@
                   {branch}
                   {refreshKey}
                   onViewDiff={() => handleViewDiff(branch)}
+                  onViewCommitDiff={(sha) => handleViewCommitDiff(branch, sha)}
                   onDelete={() => handleDeleteBranch(branch.id)}
                 />
               {/each}

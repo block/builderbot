@@ -26,6 +26,60 @@ pub fn list_refs(repo: &Path) -> Result<Vec<String>, GitError> {
     Ok(refs)
 }
 
+/// A branch reference with metadata for display
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchRef {
+    /// Short name (e.g., "main", "origin/main")
+    pub name: String,
+    /// Whether this is a remote-tracking branch
+    pub is_remote: bool,
+    /// The remote name if this is a remote branch (e.g., "origin")
+    pub remote: Option<String>,
+}
+
+/// List branches (local and remote) for base branch selection.
+/// Returns branches sorted with local first, then remote.
+/// Filters out HEAD references.
+pub fn list_branches(repo: &Path) -> Result<Vec<BranchRef>, GitError> {
+    let output = cli::run(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )?;
+
+    let mut branches: Vec<BranchRef> = output
+        .lines()
+        .filter(|s| !s.is_empty() && !s.ends_with("/HEAD"))
+        .map(|name| {
+            let is_remote = name.contains('/');
+            let remote = if is_remote {
+                name.split('/').next().map(String::from)
+            } else {
+                None
+            };
+            BranchRef {
+                name: name.to_string(),
+                is_remote,
+                remote,
+            }
+        })
+        .collect();
+
+    // Sort: local branches first, then remote (alphabetically within each group)
+    branches.sort_by(|a, b| match (a.is_remote, b.is_remote) {
+        (false, true) => std::cmp::Ordering::Less,
+        (true, false) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
+
+    Ok(branches)
+}
+
 /// Compute the merge-base between two refs
 pub fn merge_base(repo: &Path, ref1: &str, ref2: &str) -> Result<String, GitError> {
     let output = cli::run(repo, &["merge-base", ref1, ref2])?;

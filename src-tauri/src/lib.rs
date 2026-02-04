@@ -5,17 +5,23 @@
 
 pub mod ai;
 pub mod git;
+pub mod project;
 mod recent_repos;
 pub mod review;
+pub mod store;
 mod themes;
 mod watcher;
 
+use ai::analysis::ChangesetAnalysis;
+use ai::{SessionManager, SessionStatus};
 use git::{
     DiffId, DiffSpec, File, FileDiff, FileDiffSummary, GitHubAuthStatus, GitHubSyncResult, GitRef,
     PullRequest,
 };
-use review::{Artifact, Comment, Edit, NewComment, NewEdit, Review};
+use review::{Comment, Edit, NewComment, NewEdit, Review};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use store::{now_timestamp, SessionFull, Store};
 use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, State, Wry};
 use watcher::WatcherHandle;
@@ -519,9 +525,7 @@ async fn sync_review_to_github(
 // AI Commands
 // =============================================================================
 
-use ai::{
-    AcpProviderInfo, ChangesetAnalysis, ChangesetSummary, SmartDiffAnnotation, SmartDiffResult,
-};
+use ai::AcpProviderInfo;
 
 /// Discover available ACP providers on the system.
 /// Returns a list of providers that are installed and working.
@@ -558,7 +562,7 @@ async fn analyze_diff(
     let path = get_repo_path(repo_path.as_deref()).to_path_buf();
 
     // analyze_diff is now async (uses ACP)
-    ai::analyze_diff(&path, &spec, provider.as_deref()).await
+    ai::analysis::analyze_diff(&path, &spec, provider.as_deref()).await
 }
 
 /// Response from send_agent_prompt including session ID for continuity.
@@ -608,136 +612,113 @@ async fn send_agent_prompt(
     })
 }
 
+/// Send a prompt to the AI agent with real-time streaming events.
+///
+/// Similar to send_agent_prompt but emits Tauri events during execution:
+/// - "session-update": SessionNotification from the ACP SDK (streaming chunks, tool calls)
+/// - "session-complete": Finalized transcript when done
+/// - "session-error": Error information if the session fails
+///
+/// Returns the same response as send_agent_prompt for compatibility.
+#[tauri::command(rename_all = "camelCase")]
+async fn send_agent_prompt_streaming(
+    app_handle: AppHandle,
+    repo_path: Option<String>,
+    prompt: String,
+    session_id: Option<String>,
+    provider: Option<String>,
+) -> Result<AgentPromptResponse, String> {
+    let agent = if let Some(provider_id) = provider {
+        ai::find_acp_agent_by_id(&provider_id).ok_or_else(|| {
+            format!(
+                "Provider '{}' not found. Run discover_acp_providers to see available providers.",
+                provider_id
+            )
+        })?
+    } else {
+        ai::find_acp_agent().ok_or_else(|| {
+            "No AI agent found. Install Goose: https://github.com/block/goose".to_string()
+        })?
+    };
+
+    let path = get_repo_path(repo_path.as_deref()).to_path_buf();
+
+    // Legacy path: no internal session ID, use ACP session ID or "legacy" as fallback
+    let internal_id = session_id.as_deref().unwrap_or("legacy");
+    let result = ai::run_acp_prompt_streaming(
+        &agent,
+        &path,
+        &prompt,
+        session_id.as_deref(),
+        internal_id,
+        app_handle,
+    )
+    .await?;
+
+    Ok(AgentPromptResponse {
+        response: result.response,
+        session_id: result.session_id,
+    })
+}
+
 // =============================================================================
-// AI Analysis Persistence Commands
+// Chat Session Commands (new architecture)
 // =============================================================================
 
-/// Save a changeset summary to the database.
+/// Create a new session.
+/// Returns the session ID.
 #[tauri::command(rename_all = "camelCase")]
-fn save_changeset_summary(
-    repo_path: Option<String>,
-    spec: DiffSpec,
-    summary: ChangesetSummary,
+async fn create_session(
+    state: State<'_, Arc<SessionManager>>,
+    working_dir: String,
+    agent_id: Option<String>,
+) -> Result<String, String> {
+    state
+        .create_session(PathBuf::from(working_dir), agent_id.as_deref())
+        .await
+}
+
+/// Get full session with all messages.
+#[tauri::command(rename_all = "camelCase")]
+fn get_session(
+    state: State<'_, Arc<Store>>,
+    session_id: String,
+) -> Result<Option<SessionFull>, String> {
+    state
+        .get_session_full(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Get session status (idle, processing, error).
+#[tauri::command(rename_all = "camelCase")]
+async fn get_session_status(
+    state: State<'_, Arc<SessionManager>>,
+    session_id: String,
+) -> Result<SessionStatus, String> {
+    state.get_session_status(&session_id).await
+}
+
+/// Send a prompt to a session.
+/// Streams response via events, persists to database on completion.
+#[tauri::command(rename_all = "camelCase")]
+async fn send_prompt(
+    state: State<'_, Arc<SessionManager>>,
+    session_id: String,
+    prompt: String,
 ) -> Result<(), String> {
-    let path = get_repo_path(repo_path.as_deref());
-    let store = review::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(path, &spec)?;
-    store.save_changeset_summary(&id, &summary).map_err(|e| e.0)
+    state.send_prompt(&session_id, prompt).await
 }
 
-/// Get a saved changeset summary from the database.
+/// Update session title.
 #[tauri::command(rename_all = "camelCase")]
-fn get_changeset_summary(
-    repo_path: Option<String>,
-    spec: DiffSpec,
-) -> Result<Option<ChangesetSummary>, String> {
-    let path = get_repo_path(repo_path.as_deref());
-    let store = review::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(path, &spec)?;
-    store.get_changeset_summary(&id).map_err(|e| e.0)
-}
-
-/// Save a file analysis to the database.
-#[tauri::command(rename_all = "camelCase")]
-fn save_file_analysis(
-    repo_path: Option<String>,
-    spec: DiffSpec,
-    file_path: String,
-    result: SmartDiffResult,
+fn update_session_title(
+    state: State<'_, Arc<Store>>,
+    session_id: String,
+    title: String,
 ) -> Result<(), String> {
-    let path = get_repo_path(repo_path.as_deref());
-    let store = review::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(path, &spec)?;
-    store
-        .save_file_analysis(&id, &file_path, &result)
-        .map_err(|e| e.0)
-}
-
-/// Get a saved file analysis from the database.
-#[tauri::command(rename_all = "camelCase")]
-fn get_file_analysis(
-    repo_path: Option<String>,
-    spec: DiffSpec,
-    file_path: String,
-) -> Result<Option<SmartDiffResult>, String> {
-    let path = get_repo_path(repo_path.as_deref());
-    let store = review::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(path, &spec)?;
-    store.get_file_analysis(&id, &file_path).map_err(|e| e.0)
-}
-
-/// Get all saved file analyses for a diff.
-#[tauri::command(rename_all = "camelCase")]
-fn get_all_file_analyses(
-    repo_path: Option<String>,
-    spec: DiffSpec,
-) -> Result<Vec<(String, SmartDiffResult)>, String> {
-    let path = get_repo_path(repo_path.as_deref());
-    let store = review::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(path, &spec)?;
-    store.get_all_file_analyses(&id).map_err(|e| e.0)
-}
-
-/// Delete all AI analyses for a diff (used when refreshing).
-#[tauri::command(rename_all = "camelCase")]
-fn delete_all_analyses(repo_path: Option<String>, spec: DiffSpec) -> Result<(), String> {
-    let path = get_repo_path(repo_path.as_deref());
-    let store = review::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(path, &spec)?;
-    store.delete_all_analyses(&id).map_err(|e| e.0)
-}
-
-/// Convert AI annotations to comments and save them to the database.
-/// Only converts actionable annotations (warnings and suggestions).
-/// Informational annotations (explanations and context) remain as blur overlays.
-#[tauri::command(rename_all = "camelCase")]
-fn save_ai_comments(
-    repo_path: Option<String>,
-    spec: DiffSpec,
-    annotations: Vec<SmartDiffAnnotation>,
-) -> Result<Vec<Comment>, String> {
-    use ai::AnnotationCategory;
-    use review::CommentAuthor;
-
-    let path = get_repo_path(repo_path.as_deref());
-    let store = review::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(path, &spec)?;
-
-    let mut comments = Vec::new();
-
-    for ann in annotations {
-        // Only convert warnings and suggestions to comments
-        // Keep explanations and context as blur overlays
-        let is_actionable = matches!(
-            ann.category,
-            AnnotationCategory::Warning | AnnotationCategory::Suggestion
-        );
-
-        if !is_actionable {
-            continue;
-        }
-
-        // Only create comments for annotations with after_span (target new code)
-        if let (Some(file_path), Some(after_span)) = (ann.file_path, ann.after_span) {
-            let comment = Comment {
-                id: uuid::Uuid::new_v4().to_string(),
-                path: file_path,
-                span: git::Span::new(
-                    after_span.start.try_into().unwrap_or(0),
-                    after_span.end.try_into().unwrap_or(0),
-                ),
-                content: ann.content,
-                author: CommentAuthor::Ai,
-                category: Some(format!("{:?}", ann.category).to_lowercase()),
-                created_at: Some(chrono::Utc::now().to_rfc3339()),
-            };
-
-            store.add_comment(&id, &comment).map_err(|e| e.0)?;
-            comments.push(comment);
-        }
-    }
-
-    Ok(comments)
+    state
+        .update_session_title(&session_id, &title)
+        .map_err(|e| e.to_string())
 }
 
 // =============================================================================
@@ -846,36 +827,1081 @@ fn remove_reference_file(
 }
 
 // =============================================================================
-// Artifact Commands
+// Legacy Artifact Commands (DiffSpec-based, used by AgentPanel/Sidebar)
 // =============================================================================
 
-/// Save an artifact to the database.
+/// Simple artifact shape expected by the frontend (review.ts).
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyArtifact {
+    id: String,
+    title: String,
+    content: String,
+    created_at: String,
+}
+
+/// Derive a deterministic project ID from a DiffSpec for legacy artifact storage.
+fn diff_spec_project_id(repo: &Path, spec: &DiffSpec) -> Result<String, String> {
+    let diff_id = make_diff_id(repo, spec)?;
+    Ok(format!("diff:{}..{}", diff_id.before, diff_id.after))
+}
+
+/// Ensure a project exists for the given DiffSpec, creating one if needed.
+fn ensure_diff_project(store: &Store, repo: &Path, spec: &DiffSpec) -> Result<String, String> {
+    let diff_id = make_diff_id(repo, spec)?;
+    let project_id = format!("diff:{}..{}", diff_id.before, diff_id.after);
+    if store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        let project = Project {
+            id: project_id.clone(),
+            name: format!("{}..{}", diff_id.before, diff_id.after),
+            created_at: now_timestamp(),
+            updated_at: now_timestamp(),
+        };
+        store.create_project(&project).map_err(|e| e.to_string())?;
+    }
+    Ok(project_id)
+}
+
 #[tauri::command(rename_all = "camelCase")]
-fn save_artifact(
+fn get_artifacts(
+    state: State<'_, Arc<Store>>,
     repo_path: Option<String>,
     spec: DiffSpec,
-    artifact: Artifact,
+) -> Result<Vec<LegacyArtifact>, String> {
+    let repo = get_repo_path(repo_path.as_deref());
+    let project_id = diff_spec_project_id(repo, &spec)?;
+
+    // If no project exists yet, just return empty
+    if state
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Ok(vec![]);
+    }
+
+    let artifacts = state
+        .list_artifacts(&project_id)
+        .map_err(|e| e.to_string())?;
+    Ok(artifacts
+        .into_iter()
+        .filter_map(|a| {
+            if let ArtifactData::Markdown { content } = a.data {
+                Some(LegacyArtifact {
+                    id: a.id,
+                    title: a.title,
+                    content,
+                    created_at: a.created_at.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn save_artifact(
+    state: State<'_, Arc<Store>>,
+    repo_path: Option<String>,
+    spec: DiffSpec,
+    artifact: LegacyArtifact,
 ) -> Result<(), String> {
-    let path = get_repo_path(repo_path.as_deref());
-    let store = review::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(path, &spec)?;
-    store.save_artifact(&id, &artifact).map_err(|e| e.0)
+    let repo = get_repo_path(repo_path.as_deref());
+    let project_id = ensure_diff_project(&state, repo, &spec)?;
+    let now = now_timestamp();
+
+    let store_artifact = ProjectArtifact {
+        id: artifact.id,
+        project_id,
+        title: artifact.title,
+        data: ArtifactData::Markdown {
+            content: artifact.content,
+        },
+        created_at: now,
+        updated_at: now,
+        parent_artifact_id: None,
+        status: ArtifactStatus::Complete,
+        error_message: None,
+        session_id: None,
+    };
+
+    state
+        .create_artifact(&store_artifact)
+        .map_err(|e| e.to_string())
 }
 
-/// Get all artifacts for a diff.
+// =============================================================================
+// Project Commands (artifact-centric model)
+// =============================================================================
+
+use project::{Artifact as ProjectArtifact, ArtifactData, ArtifactStatus, Project};
+
+/// Create a new project.
 #[tauri::command(rename_all = "camelCase")]
-fn get_artifacts(repo_path: Option<String>, spec: DiffSpec) -> Result<Vec<Artifact>, String> {
-    let path = get_repo_path(repo_path.as_deref());
-    let store = review::get_store().map_err(|e| e.0)?;
-    let id = make_diff_id(path, &spec)?;
-    store.get_artifacts(&id).map_err(|e| e.0)
+fn create_project(state: State<'_, Arc<Store>>, name: String) -> Result<Project, String> {
+    let project = Project::new(name);
+    state.create_project(&project).map_err(|e| e.to_string())?;
+    Ok(project)
 }
 
-/// Delete an artifact by ID.
+/// Get a project by ID.
 #[tauri::command(rename_all = "camelCase")]
-fn delete_artifact(artifact_id: String) -> Result<(), String> {
-    let store = review::get_store().map_err(|e| e.0)?;
-    store.delete_artifact(&artifact_id).map_err(|e| e.0)
+fn get_project(
+    state: State<'_, Arc<Store>>,
+    project_id: String,
+) -> Result<Option<Project>, String> {
+    state.get_project(&project_id).map_err(|e| e.to_string())
+}
+
+/// List all projects.
+#[tauri::command(rename_all = "camelCase")]
+fn list_projects(state: State<'_, Arc<Store>>) -> Result<Vec<Project>, String> {
+    state.list_projects().map_err(|e| e.to_string())
+}
+
+/// Update a project's name.
+#[tauri::command(rename_all = "camelCase")]
+fn update_project(
+    state: State<'_, Arc<Store>>,
+    project_id: String,
+    name: String,
+) -> Result<(), String> {
+    state
+        .update_project(&project_id, &name)
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a project and all its artifacts.
+#[tauri::command(rename_all = "camelCase")]
+fn delete_project(state: State<'_, Arc<Store>>, project_id: String) -> Result<(), String> {
+    state.delete_project(&project_id).map_err(|e| e.to_string())
+}
+
+/// Create a new artifact.
+#[tauri::command(rename_all = "camelCase")]
+fn create_artifact(
+    state: State<'_, Arc<Store>>,
+    project_id: String,
+    title: String,
+    data: ArtifactData,
+) -> Result<ProjectArtifact, String> {
+    let now = now_timestamp();
+    let artifact = ProjectArtifact {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_id,
+        title,
+        created_at: now,
+        updated_at: now,
+        parent_artifact_id: None,
+        data,
+        status: ArtifactStatus::Complete,
+        error_message: None,
+        session_id: None,
+    };
+    state
+        .create_artifact(&artifact)
+        .map_err(|e| e.to_string())?;
+    Ok(artifact)
+}
+
+/// Get an artifact by ID.
+#[tauri::command(rename_all = "camelCase")]
+fn get_artifact(
+    state: State<'_, Arc<Store>>,
+    artifact_id: String,
+) -> Result<Option<ProjectArtifact>, String> {
+    state.get_artifact(&artifact_id).map_err(|e| e.to_string())
+}
+
+/// List artifacts in a project.
+#[tauri::command(rename_all = "camelCase")]
+fn list_artifacts(
+    state: State<'_, Arc<Store>>,
+    project_id: String,
+) -> Result<Vec<ProjectArtifact>, String> {
+    state.list_artifacts(&project_id).map_err(|e| e.to_string())
+}
+
+/// Update an artifact.
+#[tauri::command(rename_all = "camelCase")]
+fn update_artifact(
+    state: State<'_, Arc<Store>>,
+    artifact_id: String,
+    title: Option<String>,
+    data: Option<ArtifactData>,
+) -> Result<(), String> {
+    state
+        .update_artifact(&artifact_id, title.as_deref(), data.as_ref())
+        .map_err(|e| e.to_string())
+}
+
+/// Delete an artifact from a project.
+#[tauri::command(rename_all = "camelCase")]
+fn delete_artifact(state: State<'_, Arc<Store>>, artifact_id: String) -> Result<(), String> {
+    state
+        .delete_artifact(&artifact_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Add context links to an artifact (which artifacts were used as input).
+#[tauri::command(rename_all = "camelCase")]
+fn add_artifact_context(
+    state: State<'_, Arc<Store>>,
+    artifact_id: String,
+    context_artifact_ids: Vec<String>,
+) -> Result<(), String> {
+    for context_id in context_artifact_ids {
+        state
+            .add_context(&artifact_id, &context_id)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Get the artifacts that were used as context when creating an artifact.
+#[tauri::command(rename_all = "camelCase")]
+fn get_artifact_context(
+    state: State<'_, Arc<Store>>,
+    artifact_id: String,
+) -> Result<Vec<String>, String> {
+    state
+        .get_context_artifacts(&artifact_id)
+        .map_err(|e| e.to_string())
+}
+
+/// System prompt for artifact generation.
+/// Instructs the AI that only its final message becomes the artifact.
+const ARTIFACT_SYSTEM_PROMPT: &str = r#"You are an AI assistant helping create research documents, plans, and analysis artifacts.
+
+IMPORTANT: Only your FINAL message will become the artifact. Any intermediate reasoning, tool calls, or exploratory work you do will NOT be shown to the user. The artifact must be completely self-contained.
+
+Guidelines for your final response:
+- Write in well-structured Markdown
+- Use clear headings (##, ###) to organize content
+- Include code blocks with language tags when showing code
+- Be thorough but concise
+- The document should stand alone without needing the conversation context
+
+"#;
+
+/// Generate a new artifact using AI.
+///
+/// Creates a placeholder artifact immediately and runs AI generation in the background.
+/// Emits events as the artifact is updated:
+/// - `artifact-updated`: When the artifact content/status changes
+#[tauri::command(rename_all = "camelCase")]
+async fn generate_artifact(
+    app_handle: AppHandle,
+    state: State<'_, Arc<Store>>,
+    project_id: String,
+    prompt: String,
+    context_artifact_ids: Vec<String>,
+) -> Result<ProjectArtifact, String> {
+    // Create a placeholder title from the prompt
+    let placeholder_title = if prompt.len() > 50 {
+        format!("{}...", &prompt[..47])
+    } else {
+        prompt.clone()
+    };
+
+    // Create the artifact in "generating" state
+    let artifact = ProjectArtifact::new_generating(&project_id, &placeholder_title);
+
+    // Save to database
+    state
+        .create_artifact(&artifact)
+        .map_err(|e| e.to_string())?;
+
+    // Add context links
+    for context_id in &context_artifact_ids {
+        state
+            .add_context(&artifact.id, context_id)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Clone what we need for the background task
+    let artifact_for_task = artifact.clone();
+    let store_clone = state.inner().clone();
+
+    // Spawn background task to run AI generation
+    tauri::async_runtime::spawn(async move {
+        run_artifact_generation(
+            app_handle,
+            store_clone,
+            artifact_for_task,
+            prompt,
+            context_artifact_ids,
+        )
+        .await;
+    });
+
+    Ok(artifact)
+}
+
+/// Background task to run AI generation and update the artifact.
+async fn run_artifact_generation(
+    app_handle: AppHandle,
+    store: Arc<Store>,
+    artifact: ProjectArtifact,
+    prompt: String,
+    context_artifact_ids: Vec<String>,
+) {
+    // Find an AI agent
+    let agent = match ai::find_acp_agent() {
+        Some(a) => a,
+        None => {
+            // Update artifact with error
+            let _ = store.update_artifact_status(
+                &artifact.id,
+                ArtifactStatus::Error,
+                Some("No AI agent found. Install Goose: https://github.com/block/goose"),
+                None,
+                None,
+            );
+            let _ = emit_artifact_updated(&app_handle, &artifact.id);
+            return;
+        }
+    };
+
+    // Use current directory as working dir (artifacts aren't repo-specific)
+    let working_dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = store.update_artifact_status(
+                &artifact.id,
+                ArtifactStatus::Error,
+                Some(&format!("Failed to get working directory: {}", e)),
+                None,
+                None,
+            );
+            let _ = emit_artifact_updated(&app_handle, &artifact.id);
+            return;
+        }
+    };
+
+    // Create a session for this artifact generation
+    let session_id = store::generate_session_id();
+    let now = store::now_timestamp();
+    let session = store::Session {
+        id: session_id.clone(),
+        working_dir: working_dir.to_string_lossy().to_string(),
+        agent_id: agent.name().to_string(),
+        title: Some(format!("Artifact: {}", artifact.title)),
+        created_at: now,
+        updated_at: now,
+    };
+
+    if let Err(e) = store.create_session(&session) {
+        log::error!("Failed to create session for artifact: {}", e);
+        // Continue without session - artifact will still work, just no session view
+    } else {
+        // Link session to artifact
+        let _ = store.set_artifact_session(&artifact.id, &session_id);
+    }
+
+    // Build the full prompt with context
+    let mut full_prompt = String::from(ARTIFACT_SYSTEM_PROMPT);
+
+    // Add context artifacts if any
+    if !context_artifact_ids.is_empty() {
+        full_prompt
+            .push_str("\n## Context\n\nThe following artifacts have been provided as context:\n\n");
+
+        for artifact_id in &context_artifact_ids {
+            if let Ok(Some(ctx_artifact)) = store.get_artifact(artifact_id) {
+                full_prompt.push_str(&format!("### {}\n\n", ctx_artifact.title));
+                if let ArtifactData::Markdown { content } = &ctx_artifact.data {
+                    full_prompt.push_str(content);
+                    full_prompt.push_str("\n\n---\n\n");
+                }
+            }
+        }
+    }
+
+    // Add the user's request
+    full_prompt.push_str("## Request\n\n");
+    full_prompt.push_str(&prompt);
+    full_prompt.push_str("\n\nPlease create a comprehensive artifact addressing this request. Remember: only your final message becomes the artifact, so make it complete and self-contained.");
+
+    // Store the user message in the session
+    let _ = store.add_message(&session_id, store::MessageRole::User, &full_prompt);
+
+    // Call the AI with streaming (emits session-update events)
+    match ai::run_acp_prompt_streaming(
+        &agent,
+        &working_dir,
+        &full_prompt,
+        None,
+        &session_id,
+        app_handle.clone(),
+    )
+    .await
+    {
+        Ok(result) => {
+            // Store the assistant response in the session
+            let _ = store.add_assistant_turn(&session_id, &result.segments);
+
+            // Extract a title from the response
+            let title = extract_title_from_markdown(&result.response, &prompt);
+            let data = ArtifactData::Markdown {
+                content: result.response.clone(),
+            };
+
+            // Update artifact with success
+            let _ = store.update_artifact_status(
+                &artifact.id,
+                ArtifactStatus::Complete,
+                None,
+                Some(&title),
+                Some(&data),
+            );
+        }
+        Err(e) => {
+            // Update artifact with error
+            let _ = store.update_artifact_status(
+                &artifact.id,
+                ArtifactStatus::Error,
+                Some(&format!("AI generation failed: {}", e)),
+                None,
+                None,
+            );
+        }
+    }
+
+    let _ = emit_artifact_updated(&app_handle, &artifact.id);
+}
+
+/// Emit an artifact-updated event to the frontend.
+fn emit_artifact_updated(app_handle: &AppHandle, artifact_id: &str) -> Result<(), String> {
+    app_handle
+        .emit("artifact-updated", artifact_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Extract a title from markdown content.
+/// Looks for the first # heading, or falls back to first line or prompt.
+fn extract_title_from_markdown(content: &str, fallback_prompt: &str) -> String {
+    // Look for first heading
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix("# ") {
+            return heading.trim().to_string();
+        }
+    }
+
+    // Fall back to first non-empty line
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            let title = trimmed.trim_start_matches('#').trim();
+            if title.len() > 60 {
+                return format!("{}...", &title[..57]);
+            }
+            return title.to_string();
+        }
+    }
+
+    // Fall back to prompt
+    let prompt_title = fallback_prompt.trim();
+    if prompt_title.len() > 60 {
+        format!("{}...", &prompt_title[..57])
+    } else {
+        prompt_title.to_string()
+    }
+}
+
+// =============================================================================
+// Branch Commands (git-integrated workflow)
+// =============================================================================
+
+use store::{Branch, BranchNote, BranchSession};
+
+/// Commit info for frontend display.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommitInfo {
+    sha: String,
+    short_sha: String,
+    subject: String,
+    author: String,
+    timestamp: i64,
+}
+
+impl From<git::CommitInfo> for CommitInfo {
+    fn from(c: git::CommitInfo) -> Self {
+        Self {
+            sha: c.sha,
+            short_sha: c.short_sha,
+            subject: c.subject,
+            author: c.author,
+            timestamp: c.timestamp,
+        }
+    }
+}
+
+/// Create a new branch with a worktree.
+/// If base_branch is not provided, uses the detected default branch (e.g., origin/main).
+#[tauri::command(rename_all = "camelCase")]
+fn create_branch(
+    state: State<'_, Arc<Store>>,
+    repo_path: String,
+    branch_name: String,
+    base_branch: Option<String>,
+) -> Result<Branch, String> {
+    let repo = Path::new(&repo_path);
+
+    // Use provided base branch or detect the default
+    let base_branch = match base_branch {
+        Some(b) if !b.is_empty() => b,
+        _ => git::detect_default_branch(repo).map_err(|e| e.to_string())?,
+    };
+
+    // Create the worktree (this will fail atomically if branch already exists)
+    let worktree_path = git::create_worktree(repo, &branch_name, &base_branch).map_err(|e| {
+        // Provide user-friendly error for common case
+        let msg = e.to_string();
+        if msg.contains("already exists") {
+            format!("Branch '{}' already exists", branch_name)
+        } else {
+            msg
+        }
+    })?;
+
+    // Create the branch record
+    let branch = Branch::new(
+        &repo_path,
+        &branch_name,
+        worktree_path.to_string_lossy().to_string(),
+        &base_branch,
+    );
+
+    // If DB insert fails, clean up the worktree
+    if let Err(e) = state.create_branch(&branch) {
+        let _ = git::remove_worktree(repo, &worktree_path); // Best-effort cleanup
+        return Err(e.to_string());
+    }
+
+    Ok(branch)
+}
+
+/// List git branches (local and remote) for base branch selection.
+#[tauri::command(rename_all = "camelCase")]
+fn list_git_branches(repo_path: String) -> Result<Vec<git::BranchRef>, String> {
+    let repo = Path::new(&repo_path);
+    git::list_branches(repo).map_err(|e| e.to_string())
+}
+
+/// Detect the default branch for a repository.
+#[tauri::command(rename_all = "camelCase")]
+fn detect_default_branch(repo_path: String) -> Result<String, String> {
+    let repo = Path::new(&repo_path);
+    git::detect_default_branch(repo).map_err(|e| e.to_string())
+}
+
+/// Get a branch by ID.
+#[tauri::command(rename_all = "camelCase")]
+fn get_branch(state: State<'_, Arc<Store>>, branch_id: String) -> Result<Option<Branch>, String> {
+    state.get_branch(&branch_id).map_err(|e| e.to_string())
+}
+
+/// List all branches.
+#[tauri::command(rename_all = "camelCase")]
+fn list_branches(state: State<'_, Arc<Store>>) -> Result<Vec<Branch>, String> {
+    state.list_branches().map_err(|e| e.to_string())
+}
+
+/// List branches for a specific repository.
+#[tauri::command(rename_all = "camelCase")]
+fn list_branches_for_repo(
+    state: State<'_, Arc<Store>>,
+    repo_path: String,
+) -> Result<Vec<Branch>, String> {
+    state
+        .list_branches_for_repo(&repo_path)
+        .map_err(|e| e.to_string())
+}
+
+/// Update a branch's base branch.
+#[tauri::command(rename_all = "camelCase")]
+fn update_branch_base(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+    base_branch: String,
+) -> Result<(), String> {
+    state
+        .update_branch_base(&branch_id, &base_branch)
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a branch and its worktree.
+#[tauri::command(rename_all = "camelCase")]
+fn delete_branch(state: State<'_, Arc<Store>>, branch_id: String) -> Result<(), String> {
+    // Get the branch first
+    let branch = state
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch '{}' not found", branch_id))?;
+
+    // Remove the worktree
+    let repo = Path::new(&branch.repo_path);
+    let worktree = Path::new(&branch.worktree_path);
+    if worktree.exists() {
+        git::remove_worktree(repo, worktree).map_err(|e| e.to_string())?;
+    }
+
+    // Delete from database
+    state.delete_branch(&branch_id).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Get commits for a branch since it diverged from base.
+#[tauri::command(rename_all = "camelCase")]
+fn get_branch_commits(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+) -> Result<Vec<CommitInfo>, String> {
+    let branch = state
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch '{}' not found", branch_id))?;
+
+    let worktree = Path::new(&branch.worktree_path);
+    let commits =
+        git::get_commits_since_base(worktree, &branch.base_branch).map_err(|e| e.to_string())?;
+
+    Ok(commits.into_iter().map(Into::into).collect())
+}
+
+/// Get sessions for a branch.
+#[tauri::command(rename_all = "camelCase")]
+fn list_branch_sessions(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+) -> Result<Vec<BranchSession>, String> {
+    state
+        .list_branch_sessions(&branch_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Get the session associated with a specific commit.
+#[tauri::command(rename_all = "camelCase")]
+fn get_session_for_commit(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+    commit_sha: String,
+) -> Result<Option<BranchSession>, String> {
+    state
+        .get_session_for_commit(&branch_id, &commit_sha)
+        .map_err(|e| e.to_string())
+}
+
+/// Get the currently running session for a branch (if any).
+#[tauri::command(rename_all = "camelCase")]
+fn get_running_session(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+) -> Result<Option<BranchSession>, String> {
+    state
+        .get_running_session(&branch_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Response from starting a branch session
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartBranchSessionResponse {
+    branch_session_id: String,
+    ai_session_id: String,
+}
+
+/// Start a new session on a branch.
+/// Creates an AI session, then a branch_session record linking to it, and sends the prompt.
+#[tauri::command(rename_all = "camelCase")]
+async fn start_branch_session(
+    state: State<'_, Arc<Store>>,
+    session_manager: State<'_, Arc<SessionManager>>,
+    branch_id: String,
+    prompt: String,
+) -> Result<StartBranchSessionResponse, String> {
+    // Get the branch to find the worktree path
+    let branch = state
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch '{}' not found", branch_id))?;
+
+    // Check if there's already a running session
+    if let Some(running) = state
+        .get_running_session(&branch_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "Branch already has a running session: {}",
+            running.id
+        ));
+    }
+
+    // Create an AI session in the worktree directory FIRST
+    // This way we have the ai_session_id to store in the branch session
+    let worktree_path = std::path::PathBuf::from(&branch.worktree_path);
+    let ai_session_id = session_manager
+        .create_session(worktree_path, None)
+        .await
+        .map_err(|e| format!("Failed to create AI session: {}", e))?;
+
+    // Create the branch session record with the AI session ID
+    let branch_session = BranchSession::new_running(&branch_id, &ai_session_id, &prompt);
+    state
+        .create_branch_session(&branch_session)
+        .map_err(|e| format!("Failed to create branch session: {}", e))?;
+
+    // Send the prompt (this runs async in background)
+    if let Err(e) = session_manager.send_prompt(&ai_session_id, prompt).await {
+        // Clean up on failure
+        let _ = state.delete_branch_session(&branch_session.id);
+        return Err(format!("Failed to send prompt: {}", e));
+    }
+
+    Ok(StartBranchSessionResponse {
+        branch_session_id: branch_session.id,
+        ai_session_id,
+    })
+}
+
+/// Mark a branch session as completed with a commit SHA.
+#[tauri::command(rename_all = "camelCase")]
+fn complete_branch_session(
+    state: State<'_, Arc<Store>>,
+    branch_session_id: String,
+    commit_sha: String,
+) -> Result<(), String> {
+    state
+        .update_branch_session_completed(&branch_session_id, &commit_sha)
+        .map_err(|e| e.to_string())
+}
+
+/// Mark a branch session as failed with an error message.
+#[tauri::command(rename_all = "camelCase")]
+fn fail_branch_session(
+    state: State<'_, Arc<Store>>,
+    branch_session_id: String,
+    error_message: String,
+) -> Result<(), String> {
+    state
+        .update_branch_session_error(&branch_session_id, &error_message)
+        .map_err(|e| e.to_string())
+}
+
+/// Cancel a running branch session (deletes the record).
+/// Used to recover from stuck sessions.
+#[tauri::command(rename_all = "camelCase")]
+fn cancel_branch_session(
+    state: State<'_, Arc<Store>>,
+    branch_session_id: String,
+) -> Result<(), String> {
+    state
+        .delete_branch_session(&branch_session_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Recover orphaned sessions for a branch.
+/// If there's a "running" session but no live AI session, check if commits were made
+/// and mark the session as completed or errored accordingly.
+#[tauri::command(rename_all = "camelCase")]
+fn recover_orphaned_session(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+) -> Result<Option<BranchSession>, String> {
+    // Check if there's a running session
+    let running = state
+        .get_running_session(&branch_id)
+        .map_err(|e| e.to_string())?;
+
+    let Some(session) = running else {
+        return Ok(None);
+    };
+
+    // Get the branch to check for commits
+    let branch = state
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch '{}' not found", branch_id))?;
+
+    // Get HEAD commit in the worktree
+    let worktree_path = std::path::Path::new(&branch.worktree_path);
+    let head_sha = git::get_head_sha(worktree_path).map_err(|e| e.to_string())?;
+
+    // Get commits since base to see if there are any new ones
+    let commits = git::get_commits_since_base(worktree_path, &branch.base_branch)
+        .map_err(|e| e.to_string())?;
+
+    if !commits.is_empty() {
+        // There are commits - mark session as completed with the HEAD commit
+        state
+            .update_branch_session_completed(&session.id, &head_sha)
+            .map_err(|e| e.to_string())?;
+
+        // Return the updated session
+        state
+            .get_branch_session(&session.id)
+            .map_err(|e| e.to_string())
+    } else {
+        // No commits - mark as error (session ran but produced nothing)
+        state
+            .update_branch_session_error(&session.id, "Session ended without creating a commit")
+            .map_err(|e| e.to_string())?;
+
+        state
+            .get_branch_session(&session.id)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Get a branch session by its AI session ID.
+/// Used by the frontend to look up branch sessions when AI session status changes.
+#[tauri::command(rename_all = "camelCase")]
+fn get_branch_session_by_ai_session(
+    state: State<'_, Arc<Store>>,
+    ai_session_id: String,
+) -> Result<Option<BranchSession>, String> {
+    state
+        .get_branch_session_by_ai_session(&ai_session_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Get the HEAD commit SHA for a branch's worktree.
+#[tauri::command(rename_all = "camelCase")]
+fn get_branch_head(state: State<'_, Arc<Store>>, branch_id: String) -> Result<String, String> {
+    let branch = state
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch '{}' not found", branch_id))?;
+
+    let worktree = Path::new(&branch.worktree_path);
+    git::get_head_sha(worktree).map_err(|e| e.to_string())
+}
+
+// =============================================================================
+// Branch Note Commands
+// =============================================================================
+
+/// Response from starting a branch note generation.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartBranchNoteResponse {
+    branch_note_id: String,
+    ai_session_id: String,
+}
+
+/// Start generating a new note on a branch.
+/// Creates an AI session, then a branch_note record, and sends the prompt.
+#[tauri::command(rename_all = "camelCase")]
+async fn start_branch_note(
+    state: State<'_, Arc<Store>>,
+    session_manager: State<'_, Arc<SessionManager>>,
+    branch_id: String,
+    title: String,
+    prompt: String,
+) -> Result<StartBranchNoteResponse, String> {
+    // Get the branch to find the worktree path
+    let branch = state
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch '{}' not found", branch_id))?;
+
+    // Check if there's already a generating note
+    if let Some(generating) = state
+        .get_generating_note(&branch_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "Branch already has a note being generated: {}",
+            generating.id
+        ));
+    }
+
+    // Create an AI session in the worktree directory
+    let worktree_path = std::path::PathBuf::from(&branch.worktree_path);
+    let ai_session_id = session_manager
+        .create_session(worktree_path, None)
+        .await
+        .map_err(|e| format!("Failed to create AI session: {}", e))?;
+
+    // Create the branch note record
+    let branch_note = BranchNote::new_generating(&branch_id, &ai_session_id, &title, &prompt);
+    state
+        .create_branch_note(&branch_note)
+        .map_err(|e| format!("Failed to create branch note: {}", e))?;
+
+    // Send the prompt (this runs async in background)
+    if let Err(e) = session_manager.send_prompt(&ai_session_id, prompt).await {
+        // Clean up on failure
+        let _ = state.delete_branch_note(&branch_note.id);
+        return Err(format!("Failed to send prompt: {}", e));
+    }
+
+    Ok(StartBranchNoteResponse {
+        branch_note_id: branch_note.id,
+        ai_session_id,
+    })
+}
+
+/// List all notes for a branch.
+#[tauri::command(rename_all = "camelCase")]
+fn list_branch_notes(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+) -> Result<Vec<BranchNote>, String> {
+    state
+        .list_branch_notes(&branch_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Get a branch note by ID.
+#[tauri::command(rename_all = "camelCase")]
+fn get_branch_note(
+    state: State<'_, Arc<Store>>,
+    note_id: String,
+) -> Result<Option<BranchNote>, String> {
+    state.get_branch_note(&note_id).map_err(|e| e.to_string())
+}
+
+/// Get the currently generating note for a branch (if any).
+#[tauri::command(rename_all = "camelCase")]
+fn get_generating_note(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+) -> Result<Option<BranchNote>, String> {
+    state
+        .get_generating_note(&branch_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Get a branch note by its AI session ID.
+#[tauri::command(rename_all = "camelCase")]
+fn get_branch_note_by_ai_session(
+    state: State<'_, Arc<Store>>,
+    ai_session_id: String,
+) -> Result<Option<BranchNote>, String> {
+    state
+        .get_branch_note_by_ai_session(&ai_session_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Mark a branch note as completed with content.
+#[tauri::command(rename_all = "camelCase")]
+fn complete_branch_note(
+    state: State<'_, Arc<Store>>,
+    note_id: String,
+    content: String,
+) -> Result<(), String> {
+    state
+        .update_branch_note_completed(&note_id, &content)
+        .map_err(|e| e.to_string())
+}
+
+/// Mark a branch note as failed with an error message.
+#[tauri::command(rename_all = "camelCase")]
+fn fail_branch_note(
+    state: State<'_, Arc<Store>>,
+    note_id: String,
+    error_message: String,
+) -> Result<(), String> {
+    state
+        .update_branch_note_error(&note_id, &error_message)
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a branch note.
+#[tauri::command(rename_all = "camelCase")]
+fn delete_branch_note(state: State<'_, Arc<Store>>, note_id: String) -> Result<(), String> {
+    state
+        .delete_branch_note(&note_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Recover an orphaned note for a branch.
+/// If there's a "generating" note but the AI session is idle, extracts the final
+/// message content and marks the note as complete.
+#[tauri::command(rename_all = "camelCase")]
+fn recover_orphaned_note(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+) -> Result<Option<BranchNote>, String> {
+    // Check if there's a generating note
+    let generating = state
+        .get_generating_note(&branch_id)
+        .map_err(|e| e.to_string())?;
+
+    let Some(note) = generating else {
+        return Ok(None);
+    };
+
+    // Get the AI session to extract the final message
+    let Some(ai_session_id) = &note.ai_session_id else {
+        // No AI session - mark as error
+        state
+            .update_branch_note_error(&note.id, "No AI session associated with note")
+            .map_err(|e| e.to_string())?;
+        return state.get_branch_note(&note.id).map_err(|e| e.to_string());
+    };
+
+    // Get the session messages
+    let session = state
+        .get_session_full(ai_session_id)
+        .map_err(|e| e.to_string())?;
+
+    let Some(session) = session else {
+        state
+            .update_branch_note_error(&note.id, "AI session not found")
+            .map_err(|e| e.to_string())?;
+        return state.get_branch_note(&note.id).map_err(|e| e.to_string());
+    };
+
+    // Find the last assistant message and extract text content
+    let content = session
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == store::MessageRole::Assistant)
+        .map(|m| extract_text_from_assistant_content(&m.content))
+        .unwrap_or_default();
+
+    if content.is_empty() {
+        state
+            .update_branch_note_error(&note.id, "AI session produced no content")
+            .map_err(|e| e.to_string())?;
+    } else {
+        state
+            .update_branch_note_completed(&note.id, &content)
+            .map_err(|e| e.to_string())?;
+    }
+
+    state.get_branch_note(&note.id).map_err(|e| e.to_string())
+}
+
+/// Extract text content from an assistant message (which is JSON-encoded segments).
+fn extract_text_from_assistant_content(content: &str) -> String {
+    // Assistant content is stored as JSON array of segments
+    // Each segment is either { "type": "text", "text": "..." } or { "type": "toolCall", ... }
+    let segments: Vec<serde_json::Value> = serde_json::from_str(content).unwrap_or_default();
+
+    segments
+        .iter()
+        .filter_map(|seg| {
+            if seg.get("type")?.as_str()? == "text" {
+                seg.get("text")?.as_str().map(String::from)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("")
 }
 
 // =============================================================================
@@ -1254,6 +2280,20 @@ pub fn run() {
             // Initialize the review store with app data directory
             review::init_store(app.handle()).map_err(|e| e.0)?;
 
+            // Initialize the unified store (sessions, projects, artifacts)
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("Cannot get app data dir: {}", e))?;
+            let db_path = app_data_dir.join("data.db");
+            let store =
+                Arc::new(Store::open(db_path).map_err(|e| format!("Failed to open store: {}", e))?);
+            app.manage(store.clone());
+
+            // Initialize the session manager
+            let session_manager = Arc::new(SessionManager::new(app.handle().clone(), store));
+            app.manage(session_manager);
+
             // Initialize the watcher handle (spawns background thread)
             let watcher = WatcherHandle::new(app.handle().clone());
             app.manage(watcher);
@@ -1268,6 +2308,7 @@ pub fn run() {
             });
 
             if cfg!(debug_assertions) {
+                app.handle().plugin(tauri_plugin_mcp_bridge::init())?;
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
@@ -1299,19 +2340,18 @@ pub fn run() {
             fetch_pr,
             sync_review_to_github,
             invalidate_pr_cache,
-            // AI commands
-            analyze_diff,
+            // AI commands (analysis)
             check_ai_available,
             discover_acp_providers,
+            analyze_diff,
             send_agent_prompt,
-            // AI persistence commands
-            save_changeset_summary,
-            get_changeset_summary,
-            save_file_analysis,
-            get_file_analysis,
-            get_all_file_analyses,
-            delete_all_analyses,
-            save_ai_comments,
+            send_agent_prompt_streaming,
+            // Session commands
+            create_session,
+            get_session,
+            get_session_status,
+            send_prompt,
+            update_session_title,
             // Review commands
             get_review,
             add_comment,
@@ -1324,10 +2364,53 @@ pub fn run() {
             clear_review,
             add_reference_file,
             remove_reference_file,
-            // Artifact commands
-            save_artifact,
+            // Legacy artifact commands (DiffSpec-based, used by AgentPanel/Sidebar)
             get_artifacts,
+            save_artifact,
+            // Project commands (artifact-centric model)
+            create_project,
+            get_project,
+            list_projects,
+            update_project,
+            delete_project,
+            create_artifact,
+            get_artifact,
+            list_artifacts,
+            update_artifact,
             delete_artifact,
+            add_artifact_context,
+            get_artifact_context,
+            generate_artifact,
+            // Branch commands (git-integrated workflow)
+            create_branch,
+            get_branch,
+            list_branches,
+            list_branches_for_repo,
+            list_git_branches,
+            detect_default_branch,
+            delete_branch,
+            update_branch_base,
+            get_branch_commits,
+            list_branch_sessions,
+            get_session_for_commit,
+            get_running_session,
+            start_branch_session,
+            complete_branch_session,
+            fail_branch_session,
+            cancel_branch_session,
+            recover_orphaned_session,
+            get_branch_session_by_ai_session,
+            get_branch_head,
+            // Branch note commands
+            start_branch_note,
+            list_branch_notes,
+            get_branch_note,
+            get_generating_note,
+            get_branch_note_by_ai_session,
+            complete_branch_note,
+            fail_branch_note,
+            delete_branch_note,
+            recover_orphaned_note,
             // Theme commands
             get_custom_themes,
             read_custom_theme,

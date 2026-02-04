@@ -23,7 +23,13 @@
     CheckCircle2,
     MessageSquare,
   } from 'lucide-svelte';
-  import { sendAgentPrompt, discoverAcpProviders, type AcpProviderInfo } from '../../services/ai';
+  import {
+    sendAgentPromptStreaming,
+    discoverAcpProviders,
+    type AcpProviderInfo,
+  } from '../../services/ai';
+  import { liveSessionStore } from '../../stores/liveSession.svelte';
+  import LiveSessionView from '../../LiveSessionView.svelte';
   import {
     saveArtifact,
     getArtifacts,
@@ -98,6 +104,24 @@
   let renderedResponse = $derived(
     agentState.response ? DOMPurify.sanitize(marked.parse(agentState.response) as string) : ''
   );
+
+  // Get the live session for streaming display
+  // When loading, we may not have the session ID yet, so check most recent streaming session
+  let liveSession = $derived.by(() => {
+    // If we have a session ID, look it up directly
+    if (agentState.sessionId) {
+      const session = liveSessionStore.get(agentState.sessionId);
+      if (session?.isStreaming) return session;
+    }
+    // If loading but no session ID yet, check for most recent streaming session
+    if (agentState.loading) {
+      return liveSessionStore.getMostRecentStreaming();
+    }
+    return undefined;
+  });
+
+  // Check if we're actively streaming (have a live session that's still streaming)
+  let isStreaming = $derived(liveSession?.isStreaming ?? false);
 
   /**
    * Load artifacts from the database for the current diff spec.
@@ -284,10 +308,7 @@
               ? `line ${comment.span.start + 1}`
               : `lines ${comment.span.start + 1}-${comment.span.end}`;
 
-          const authorLabel = comment.author === 'ai' ? '[AI]' : '[User]';
-          const categoryLabel = comment.category ? ` (${comment.category})` : '';
-
-          context += `  ${authorLabel}${categoryLabel} @ ${lineInfo}: ${comment.content}\n`;
+          context += `  @ ${lineInfo}: ${comment.content}\n`;
         }
         context += '\n';
       }
@@ -324,25 +345,28 @@
     tabState.loading = true;
     tabState.error = '';
     tabState.response = '';
-    responseExpanded = false; // Collapse while loading
+    responseExpanded = true; // Keep expanded to show streaming
     const inputToSend = tabState.input;
     tabState.input = '';
 
     try {
       const promptWithContext = buildPromptWithContext(inputToSend, isNewSession);
-      const result = await sendAgentPrompt(
-        repoPath,
-        promptWithContext,
-        tabState.sessionId,
-        tabState.provider
-      );
-      // Write response to the captured tab state, not the current prop
+
+      // Use streaming API - events will be handled by liveSessionStore
+      const result = await sendAgentPromptStreaming(promptWithContext, {
+        repoPath: repoPath ?? undefined,
+        sessionId: tabState.sessionId ?? undefined,
+        provider: tabState.provider,
+      });
+
+      // Write final response to the captured tab state
       tabState.response = result.response;
       tabState.sessionId = result.sessionId;
-      responseExpanded = true; // Expand when done
+
+      // Clear the live session now that we have the final response
+      liveSessionStore.clear(result.sessionId);
     } catch (e) {
       tabState.error = e instanceof Error ? e.message : String(e);
-      responseExpanded = true; // Show error expanded
     } finally {
       tabState.loading = false;
     }
@@ -596,8 +620,22 @@
 
   <!-- Bottom area: current response + input (anchored at bottom) -->
   <div class="agent-bottom">
-    <!-- Current response area -->
-    {#if agentState.loading || agentState.response}
+    <!-- Live streaming view (shown during active streaming) -->
+    {#if isStreaming && liveSession}
+      <div class="agent-response">
+        <div class="agent-response-header" class:disabled={true}>
+          <span class="response-chevron">
+            <Loader2 size={12} class="spinning" />
+          </span>
+          <Bot size={12} />
+          <span class="response-label">Working on it...</span>
+        </div>
+        <div class="agent-response-content">
+          <LiveSessionView session={liveSession} />
+        </div>
+      </div>
+      <!-- Static response view (shown when not streaming and have response) -->
+    {:else if agentState.loading || agentState.response}
       <div class="agent-response">
         <div
           class="agent-response-header"

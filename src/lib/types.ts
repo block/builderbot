@@ -194,10 +194,6 @@ export interface Comment {
   /** The line range this comment applies to (0-indexed, exclusive end) */
   span: Span;
   content: string;
-  /** Who authored this comment */
-  author: 'user' | 'ai';
-  /** Category (only for AI comments) */
-  category?: AnnotationCategory;
   /** When the comment was created (ISO timestamp) */
   created_at?: string;
 }
@@ -232,7 +228,7 @@ export interface NewEdit {
 }
 
 // =============================================================================
-// Smart Diff (AI) types
+// AI Analysis types
 // =============================================================================
 
 /** A span of lines for AI annotations (0-indexed, exclusive end) */

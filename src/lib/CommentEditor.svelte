@@ -42,9 +42,6 @@
   // Track current input value - initialized by effect when existingComment changes
   let currentValue = $state('');
 
-  // Check if this is an AI comment (read-only)
-  let isAiComment = $derived(existingComment?.author === 'ai');
-
   // Update value when existingComment changes (for editing mode)
   $effect(() => {
     currentValue = existingComment?.content ?? '';
@@ -90,41 +87,24 @@
 <div
   class="comment-editor line-comment-editor"
   class:comment-editor-hidden={!visible}
-  class:ai-comment-editor={isAiComment}
   style="top: {top}px; left: {left}px; width: {width}px;"
 >
-  {#if isAiComment}
-    <!-- Read-only view for AI comments -->
-    <div class="comment-readonly">
-      {currentValue}
-    </div>
-    <div class="comment-editor-hint">
-      <span>AI-generated feedback (read-only) · Esc to close</span>
-      {#if onDelete}
-        <button class="delete-comment-btn" onclick={handleDelete} title="Dismiss AI comment">
-          <Trash2 size={12} />
-        </button>
-      {/if}
-    </div>
-  {:else}
-    <!-- Editable textarea for user comments -->
-    <textarea
-      class="comment-textarea"
-      {placeholder}
-      value={currentValue}
-      oninput={handleInput}
-      onkeydown={handleKeydown}
-      use:autoFocus
-    ></textarea>
-    <div class="comment-editor-hint">
-      <span>Enter to save · Esc to cancel</span>
-      {#if existingComment && onDelete}
-        <button class="delete-comment-btn" onclick={handleDelete} title="Delete comment">
-          <Trash2 size={12} />
-        </button>
-      {/if}
-    </div>
-  {/if}
+  <textarea
+    class="comment-textarea"
+    {placeholder}
+    value={currentValue}
+    oninput={handleInput}
+    onkeydown={handleKeydown}
+    use:autoFocus
+  ></textarea>
+  <div class="comment-editor-hint">
+    <span>Enter to save · Esc to cancel</span>
+    {#if existingComment && onDelete}
+      <button class="delete-comment-btn" onclick={handleDelete} title="Delete comment">
+        <Trash2 size={12} />
+      </button>
+    {/if}
+  </div>
 </div>
 
 <style>
@@ -193,23 +173,5 @@
   .delete-comment-btn:hover {
     color: var(--status-deleted);
     background-color: var(--bg-hover);
-  }
-
-  /* Read-only AI comment view */
-  .comment-readonly {
-    width: 100%;
-    min-height: 84px;
-    padding: 10px 12px;
-    background: transparent;
-    color: var(--text-primary);
-    font-family: inherit;
-    font-size: var(--size-sm);
-    line-height: 1.5;
-    white-space: pre-wrap;
-    overflow-y: auto;
-  }
-
-  .ai-comment-editor {
-    border: 1px solid var(--text-accent);
   }
 </style>

@@ -6,7 +6,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import DiffViewer from './lib/DiffViewer.svelte';
   import EmptyState from './lib/EmptyState.svelte';
-
+  import BranchHome from './lib/BranchHome.svelte';
   import FileSearchModal from './lib/FileSearchModal.svelte';
   import FolderPickerModal from './lib/FolderPickerModal.svelte';
   import AgentSetupModal from './lib/AgentSetupModal.svelte';
@@ -27,7 +27,8 @@
   import { createDiffState } from './lib/stores/diffState.svelte';
   import { createCommentsState } from './lib/stores/comments.svelte';
   import { createDiffSelection } from './lib/stores/diffSelection.svelte';
-  import { createAgentState, agentGlobalState, type Artifact } from './lib/stores/agent.svelte';
+  import { createAgentState, agentGlobalState } from './lib/stores/agent.svelte';
+  import { liveSessionStore } from './lib/stores/liveSession.svelte';
   import { discoverAcpProviders } from './lib/services/ai';
   import { DiffSpec, gitRefName } from './lib/types';
   import type { DiffSpec as DiffSpecType } from './lib/types';
@@ -93,6 +94,10 @@
     clearResults as clearSmartDiffResults,
     loadAnalysisFromDb,
   } from './lib/stores/smartDiff.svelte';
+
+  // View mode: 'branches' = branch workflow, 'diff' = traditional diff viewer
+  type ViewMode = 'branches' | 'diff';
+  let viewMode = $state<ViewMode>('diff');
 
   // UI State
   let unsubscribeWatcher: Unsubscribe | null = null;
@@ -544,11 +549,38 @@
 
   let isWorkingTree = $derived(diffSelection.spec.head.type === 'WorkingTree');
 
+  // Konami code: toggle between branch home and diff viewer
+  const konamiSequence = [
+    'ArrowUp',
+    'ArrowUp',
+    'ArrowDown',
+    'ArrowDown',
+    'ArrowLeft',
+    'ArrowRight',
+    'ArrowLeft',
+    'ArrowRight',
+    'b',
+    'a',
+  ];
+  let konamiIndex = 0;
+  function handleKonamiKey(e: KeyboardEvent) {
+    if (e.key === konamiSequence[konamiIndex]) {
+      konamiIndex++;
+      if (konamiIndex === konamiSequence.length) {
+        konamiIndex = 0;
+        viewMode = viewMode === 'branches' ? 'diff' : 'branches';
+      }
+    } else {
+      konamiIndex = e.key === konamiSequence[0] ? 1 : 0;
+    }
+  }
+
   // Lifecycle
   let unregisterPreferenceShortcuts: (() => void) | null = null;
   let unregisterFileSearchShortcut: (() => void) | null = null;
 
   onMount(() => {
+    document.addEventListener('keydown', handleKonamiKey);
     loadSavedSize();
     loadSavedSidebarPosition();
     loadSavedSidebarWidth();
@@ -560,6 +592,9 @@
     if (!hasAgent) {
       showAgentSetupModal = true;
     }
+
+    // Initialize live session store for streaming AI sessions
+    liveSessionStore.init();
 
     // Pre-load suggested repos (Spotlight search runs in background)
     findRecentRepos(24, 10).then((repos) => {
@@ -684,6 +719,7 @@
   });
 
   onDestroy(() => {
+    document.removeEventListener('keydown', handleKonamiKey);
     unregisterPreferenceShortcuts?.();
     unregisterFileSearchShortcut?.();
     unsubscribeWatcher?.();
@@ -699,70 +735,76 @@
 </script>
 
 <main>
-  {#if windowState.tabs.length > 0}
-    <TabBar onNewTab={handleNewTab} onSwitchTab={handleTabSwitch} />
+  {#if viewMode === 'branches'}
+    <!-- Branch-based workflow view -->
+    <BranchHome />
   {:else}
-    <!-- Spacer for traffic light buttons when no tabs -->
-    <div class="titlebar-spacer" data-tauri-drag-region></div>
-  {/if}
+    <!-- Traditional diff viewer -->
+    {#if windowState.tabs.length > 0}
+      <TabBar onNewTab={handleNewTab} onSwitchTab={handleTabSwitch} />
+    {:else}
+      <!-- Spacer for traffic light buttons when no tabs -->
+      <div class="titlebar-spacer" data-tauri-drag-region></div>
+    {/if}
 
-  <div class="app-container" class:sidebar-left={preferences.sidebarPosition === 'left'}>
-    <section class="main-content">
-      {#if showEmptyState}
-        <EmptyState />
-      {:else if diffState.loading}
-        <div class="loading-state">
-          <p>Loading...</p>
+    <div class="app-container" class:sidebar-left={preferences.sidebarPosition === 'left'}>
+      <section class="main-content">
+        {#if showEmptyState}
+          <EmptyState />
+        {:else if diffState.loading}
+          <div class="loading-state">
+            <p>Loading...</p>
+          </div>
+        {:else if diffState.error}
+          <div class="error-state">
+            <AlertCircle size={18} />
+            <p class="error-message">{diffState.error}</p>
+          </div>
+        {:else}
+          <DiffViewer
+            diff={currentDiff}
+            sizeBase={preferences.sizeBase}
+            syntaxThemeVersion={preferences.syntaxThemeVersion}
+            loading={diffState.loadingFile !== null}
+            isReferenceFile={isCurrentFileReference}
+            agentState={getActiveTab()?.agentState}
+          />
+        {/if}
+      </section>
+      <aside class="sidebar" style="--sidebar-width: {preferences.sidebarWidth}">
+        <!-- Resize handle -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="sidebar-resize-handle"
+          class:left={preferences.sidebarPosition === 'left'}
+          class:dragging={isDraggingSidebar}
+          onmousedown={handleSidebarResizeStart}
+          ondblclick={handleSidebarResizeDoubleClick}
+        >
+          <div class="resize-handle-bar"></div>
         </div>
-      {:else if diffState.error}
-        <div class="error-state">
-          <AlertCircle size={18} />
-          <p class="error-message">{diffState.error}</p>
-        </div>
-      {:else}
-        <DiffViewer
-          diff={currentDiff}
-          sizeBase={preferences.sizeBase}
-          syntaxThemeVersion={preferences.syntaxThemeVersion}
-          loading={diffState.loadingFile !== null}
-          isReferenceFile={isCurrentFileReference}
+
+        <Sidebar
+          files={diffState.files}
+          loading={diffState.loading}
+          onFileSelect={selectFile}
+          selectedFile={diffState.selectedFile}
+          {isWorkingTree}
+          onAddReferenceFile={() => (showFileSearch = true)}
+          onRemoveReferenceFile={handleRemoveReferenceFile}
+          repoPath={repoState.currentPath}
+          spec={diffSelection.spec}
           agentState={getActiveTab()?.agentState}
+          onPresetSelect={handlePresetSelect}
+          onCustomDiff={handleCustomDiff}
+          onReloadCommentsForTab={async (spec, repoPath) => {
+            await loadComments(spec, repoPath ?? undefined);
+            syncGlobalToTab();
+          }}
         />
-      {/if}
-    </section>
-    <aside class="sidebar" style="--sidebar-width: {preferences.sidebarWidth}">
-      <!-- Resize handle -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="sidebar-resize-handle"
-        class:left={preferences.sidebarPosition === 'left'}
-        class:dragging={isDraggingSidebar}
-        onmousedown={handleSidebarResizeStart}
-        ondblclick={handleSidebarResizeDoubleClick}
-      >
-        <div class="resize-handle-bar"></div>
-      </div>
-
-      <Sidebar
-        files={diffState.files}
-        loading={diffState.loading}
-        onFileSelect={selectFile}
-        selectedFile={diffState.selectedFile}
-        {isWorkingTree}
-        onAddReferenceFile={() => (showFileSearch = true)}
-        onRemoveReferenceFile={handleRemoveReferenceFile}
-        repoPath={repoState.currentPath}
-        spec={diffSelection.spec}
-        agentState={getActiveTab()?.agentState}
-        onPresetSelect={handlePresetSelect}
-        onCustomDiff={handleCustomDiff}
-        onReloadCommentsForTab={async (spec, repoPath) => {
-          await loadComments(spec, repoPath ?? undefined);
-          syncGlobalToTab();
-        }}
-      />
-    </aside>
-  </div>
+      </aside>
+    </div>
+  {/if}
 </main>
 
 {#if showFileSearch}

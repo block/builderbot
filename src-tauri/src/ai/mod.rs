@@ -1,18 +1,34 @@
-//! AI-powered diff analysis via ACP (Agent Client Protocol).
+//! AI integration via ACP (Agent Client Protocol).
 //!
-//! Communicates with ACP-compatible agents like Goose to generate contextual
-//! annotations for code changes.
+//! This module provides AI chat functionality with persistent sessions.
+//!
+//! ## Architecture
+//!
+//! - `session.rs` - SessionManager for live agent connections + streaming
+//! - `client.rs` - Core ACP client implementation (agent discovery, protocol)
+//! - `analysis/` - Structured diff analysis: prompts, runner, and types for "Analyze with AI"
+//!
+//! Session/message persistence is handled by the unified Store (see `crate::store`).
+//!
+//! ## Data Flow
+//!
+//! 1. Frontend calls `create_session` → creates in SQLite + live session
+//! 2. Frontend calls `send_prompt` → stores user message, streams response
+//! 3. On turn complete → assistant message persisted to SQLite
+//! 4. Frontend can `get_session` to load full history from SQLite
+//!
+//! Live sessions (agent connections) are ephemeral. History survives app restart.
 
-mod acp_client;
-mod prompt;
-mod runner;
-mod types;
+pub mod analysis;
+mod client;
+pub mod session;
 
-pub use acp_client::{
+// Re-export core ACP client functionality
+pub use client::{
     discover_acp_providers, find_acp_agent, find_acp_agent_by_id, run_acp_prompt,
-    run_acp_prompt_with_session, AcpAgent, AcpPromptResult, AcpProviderInfo,
+    run_acp_prompt_streaming, run_acp_prompt_with_session, AcpAgent, AcpPromptResult,
+    AcpProviderInfo,
 };
-pub use runner::analyze_diff;
-pub use types::{
-    AnnotationCategory, ChangesetAnalysis, ChangesetSummary, SmartDiffAnnotation, SmartDiffResult,
-};
+
+// Re-export session manager types
+pub use session::{LiveSessionInfo, SessionManager, SessionStatus, SessionStatusEvent};

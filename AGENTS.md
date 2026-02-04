@@ -81,4 +81,12 @@ just check-all  # Verify everything passes
 ## Git Workflow
 
 **Do not** create branches, commit, or push unless explicitly asked.
-**Do not** include AGENTS.md/README.md in commits for now
+
+## Iterative Development Workflow
+
+When working on complex changes with the human:
+
+- **`.artifacts/` directory**: Store markdown artifacts (research, plans, design docs) here. Gitignored.
+- **Documents**: When asked for a document, create/update markdown in `.artifacts/`
+- **Code changes**: When asked for code changes, make a commit (after running `just fmt` and `just check-all`)
+- **Amend vs new**: Keep amending the same commit / revising the same artifact until the human indicates we're moving to a new step

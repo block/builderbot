@@ -76,7 +76,7 @@ async fn test_real_diff(range: &str, repo_path: &str) {
     // Run analysis - the backend handles file listing and content loading
     println!("Analyzing diff with AI via ACP (this may take a few seconds)...\n");
 
-    match ai::analyze_diff(repo, &spec, None).await {
+    match ai::analysis::analyze_diff(repo, &spec, None).await {
         Ok(result) => {
             println!("═══════════════════════════════════════════════════════════════");
             println!("                     CHANGESET ANALYSIS");
@@ -105,12 +105,17 @@ async fn test_real_diff(range: &str, repo_path: &str) {
                 } else {
                     println!("{}:", path);
                     for ann in annotations {
-                        println!("\n  [{}] {:?}", ann.id, ann.category);
-                        if let Some(ref span) = ann.before_span {
-                            println!("    Before: lines {}-{}", span.start, span.end);
-                        }
-                        if let Some(ref span) = ann.after_span {
-                            println!("    After: lines {}-{}", span.start, span.end);
+                        let span_info = match (&ann.before_span, &ann.after_span) {
+                            (Some(b), Some(a)) => {
+                                format!("before {}-{}, after {}-{}", b.start, b.end, a.start, a.end)
+                            }
+                            (None, Some(a)) => format!("lines {}-{}", a.start, a.end),
+                            (Some(b), None) => format!("before {}-{}", b.start, b.end),
+                            (None, None) => "general".to_string(),
+                        };
+                        println!("\n  [{:?}] ({}) {}", ann.category, span_info, ann.id);
+                        if let Some(ref desc) = ann.before_description {
+                            println!("    Was: {}", desc);
                         }
                         println!("    {}", ann.content);
                     }

@@ -1,23 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import {
-    X,
-    Plus,
-    FolderGit2,
-    Loader2,
-    Eye,
-    EyeOff,
-    Settings2,
-    Keyboard,
-    Palette,
-  } from 'lucide-svelte';
+  import { X, Plus, FolderGit2, Loader2, Settings2, Keyboard, Palette } from 'lucide-svelte';
   import { windowState, closeTab } from './stores/tabState.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import ThemeSelectorModal from './ThemeSelectorModal.svelte';
   import KeyboardShortcutsModal from './KeyboardShortcutsModal.svelte';
   import SettingsModal from './SettingsModal.svelte';
   import { registerShortcut } from './services/keyboard';
-  import { smartDiffState, setAnnotationsRevealed } from './stores/smartDiff.svelte';
 
   function startDrag(e: PointerEvent) {
     // Only start drag on left mouse button
@@ -45,10 +34,6 @@
   let showThemeModal = $state(false);
   let showShortcutsModal = $state(false);
   let showSettingsModal = $state(false);
-
-  // Smart diff state (for annotations reveal toggle)
-  let annotationsRevealed = $derived(smartDiffState.annotationsRevealed);
-  let hasFileAnnotations = $derived(smartDiffState.results.size > 0);
 
   let tabRefs: (HTMLButtonElement | undefined)[] = $state([]);
   let indicatorStyle = $state('');
@@ -167,27 +152,12 @@
 
   <!-- Action buttons (right side) -->
   <div class="tab-bar-actions">
-    {#if hasFileAnnotations}
-      <button
-        class="icon-btn reveal-btn"
-        class:active={annotationsRevealed}
-        onclick={() => setAnnotationsRevealed(!annotationsRevealed)}
-        title="Hold A to show explanation view"
-      >
-        {#if annotationsRevealed}
-          <Eye size={14} />
-        {:else}
-          <EyeOff size={14} />
-        {/if}
-      </button>
-    {/if}
-
     <button class="icon-btn" onclick={() => (showSettingsModal = true)} title="Settings (⌘,)">
       <Settings2 size={14} />
     </button>
 
     <button
-      class="icon-btn"
+      class="icon-btn shortcuts-btn"
       onclick={() => (showShortcutsModal = !showShortcutsModal)}
       title="Keyboard shortcuts"
     >
@@ -195,27 +165,27 @@
     </button>
 
     <button
-      class="icon-btn"
+      class="icon-btn theme-btn"
       onclick={() => (showThemeModal = !showThemeModal)}
       title="Select theme (⌘P)"
     >
       <Palette size={14} />
     </button>
+
+    <!-- Modals (inside tab-bar-actions for correct absolute positioning) -->
+    {#if showThemeModal}
+      <ThemeSelectorModal onClose={() => (showThemeModal = false)} />
+    {/if}
+
+    {#if showShortcutsModal}
+      <KeyboardShortcutsModal onClose={() => (showShortcutsModal = false)} />
+    {/if}
+
+    {#if showSettingsModal}
+      <SettingsModal onClose={() => (showSettingsModal = false)} />
+    {/if}
   </div>
 </div>
-
-<!-- Modals -->
-{#if showThemeModal}
-  <ThemeSelectorModal onClose={() => (showThemeModal = false)} />
-{/if}
-
-{#if showShortcutsModal}
-  <KeyboardShortcutsModal onClose={() => (showShortcutsModal = false)} />
-{/if}
-
-{#if showSettingsModal}
-  <SettingsModal onClose={() => (showSettingsModal = false)} />
-{/if}
 
 <style>
   .tab-bar {
@@ -252,6 +222,7 @@
 
   /* Tab bar action buttons */
   .tab-bar-actions {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -278,20 +249,16 @@
     background-color: var(--bg-hover);
   }
 
-  .reveal-btn.active {
-    color: var(--ui-accent);
-  }
-
-  .reveal-btn.active:hover {
-    color: var(--ui-accent);
-  }
-
   .tabs {
     position: relative;
     display: flex;
     gap: 2px;
     overflow-x: auto;
+    overflow-y: visible;
     scrollbar-width: none; /* Firefox */
+    /* Padding to accommodate curved corners on active tab */
+    padding: 0 12px;
+    margin: 0 -12px;
   }
 
   .tabs::-webkit-scrollbar {

@@ -42,11 +42,6 @@ interface ThemeColors {
   strokeColor: string;
   commentColor: string;
   commentHoverColor: string;
-  // AI comment colors by category
-  aiCommentWarningColor: string;
-  aiCommentSuggestionColor: string;
-  aiCommentExplanationColor: string;
-  aiCommentContextColor: string;
 }
 
 /** Stored comment hit region for click detection */
@@ -93,11 +88,6 @@ function readThemeColors(): ThemeColors {
     strokeColor: getCssVar('--diff-range-border', 'rgba(128, 128, 128, 0.2)'),
     commentColor: getCssVar('--diff-comment-highlight', 'rgba(88, 166, 255, 0.5)'),
     commentHoverColor: getCssVar('--diff-comment-highlight', 'rgba(88, 166, 255, 0.8)'),
-    // AI comment colors by category
-    aiCommentWarningColor: getCssVar('--orange-9', 'rgba(255, 136, 0, 0.5)'),
-    aiCommentSuggestionColor: getCssVar('--green-9', 'rgba(0, 200, 83, 0.5)'),
-    aiCommentExplanationColor: getCssVar('--blue-9', 'rgba(0, 122, 255, 0.5)'),
-    aiCommentContextColor: getCssVar('--text-faint', 'rgba(128, 128, 128, 0.3)'),
   };
 }
 
@@ -508,30 +498,8 @@ export class ConnectorRendererCanvas {
       const isHovered = this.hoveredCommentId === comment.id;
       const rectWidth = isHovered ? COMMENT_WIDTH + 1 : COMMENT_WIDTH;
 
-      // Determine color based on comment author and category
-      let fillColor: string;
-      if (comment.author === 'ai') {
-        // AI comment - use category-based color
-        switch (comment.category) {
-          case 'warning':
-            fillColor = this.colors.aiCommentWarningColor;
-            break;
-          case 'suggestion':
-            fillColor = this.colors.aiCommentSuggestionColor;
-            break;
-          case 'explanation':
-            fillColor = this.colors.aiCommentExplanationColor;
-            break;
-          case 'context':
-            fillColor = this.colors.aiCommentContextColor;
-            break;
-          default:
-            fillColor = this.colors.commentColor;
-        }
-      } else {
-        // User comment - use default color
-        fillColor = isHovered ? this.colors.commentHoverColor : this.colors.commentColor;
-      }
+      // Determine color
+      const fillColor = isHovered ? this.colors.commentHoverColor : this.colors.commentColor;
 
       // Draw rectangle
       ctx.fillStyle = fillColor;

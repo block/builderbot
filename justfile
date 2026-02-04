@@ -2,7 +2,15 @@
 
 # Run the app in development mode (optionally point to another repo)
 dev repo="":
-    {{ if repo != "" { "STAGED_REPO=" + repo + " " } else { "" } }}npm run tauri:dev
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Pick a free port so multiple worktrees can run simultaneously
+    VITE_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')
+    export VITE_PORT
+    TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\"}}"
+    echo "Starting dev server on port ${VITE_PORT}"
+    {{ if repo != "" { "export STAGED_REPO=" + repo } else { "" } }}
+    npx tauri dev --config "$TAURI_CONFIG"
 
 # Build the app for production
 build:

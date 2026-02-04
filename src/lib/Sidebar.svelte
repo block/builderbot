@@ -34,6 +34,7 @@
     GitCompareArrows,
     GitPullRequest,
     Settings2,
+    AlertCircle,
   } from 'lucide-svelte';
   import {
     commentsState,
@@ -70,6 +71,7 @@
     runAnalysis,
     clearResults as clearSmartDiffState,
     toggleAnnotations,
+    clearAnalysisError,
   } from './stores/smartDiff.svelte';
   import { saveArtifact } from './services/review';
   import CrossFileSearchBar from './CrossFileSearchBar.svelte';
@@ -652,7 +654,10 @@
     // Check AI availability first
     const available = await checkAi();
     if (!available) {
-      console.error('AI not available:', smartDiffState.aiError);
+      // Ensure error is shown (might have been dismissed from previous attempt)
+      if (!smartDiffState.aiError) {
+        smartDiffState.aiError = 'No AI tool available. Please install Claude CLI or Goose.';
+      }
       return;
     }
 
@@ -1434,6 +1439,52 @@
     onSubmit={handlePRSubmit}
     onClose={() => (showPRModal = false)}
   />
+{/if}
+
+{#if smartDiffState.analysisError || smartDiffState.aiError}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <!-- svelte-ignore a11y_interactive_supports_focus -->
+  <div
+    class="error-modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="error-dialog-title"
+    onclick={(e) => {
+      if (e.target === e.currentTarget) {
+        clearAnalysisError();
+        smartDiffState.aiError = null;
+      }
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') {
+        clearAnalysisError();
+        smartDiffState.aiError = null;
+      }
+    }}
+  >
+    <div class="error-modal">
+      <header class="error-modal-header">
+        <h2 id="error-dialog-title">
+          <AlertCircle size={18} />
+          AI Analysis Failed
+        </h2>
+      </header>
+      <div class="error-modal-body">
+        <p class="error-message">{smartDiffState.analysisError || smartDiffState.aiError}</p>
+      </div>
+      <footer class="error-modal-footer">
+        <button
+          class="btn btn-primary"
+          onclick={() => {
+            clearAnalysisError();
+            smartDiffState.aiError = null;
+          }}
+        >
+          OK
+        </button>
+      </footer>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -2279,5 +2330,67 @@
     font-size: var(--size-xs);
     font-weight: 500;
     flex-shrink: 0;
+  }
+
+  /* Error Modal */
+  .error-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--shadow-overlay);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .error-modal {
+    background: var(--bg-chrome);
+    border-radius: 12px;
+    box-shadow: var(--shadow-elevated);
+    width: 420px;
+    max-width: 90vw;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .error-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .error-modal-header h2 {
+    margin: 0;
+    font-size: var(--size-base);
+    font-weight: 600;
+    color: var(--ui-danger);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .error-modal-body {
+    padding: 20px;
+    overflow-y: auto;
+  }
+
+  .error-message {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: var(--size-sm);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .error-modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding: 12px 20px;
+    border-top: 1px solid var(--border-subtle);
   }
 </style>

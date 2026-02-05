@@ -79,14 +79,20 @@ pub fn create_worktree(
     Ok(worktree_path)
 }
 
-/// Remove a worktree.
+/// Remove a worktree and its associated branch.
 ///
-/// Removes both the worktree directory and the git worktree reference.
+/// Removes the worktree directory, git worktree reference, and the local git branch.
 /// Handles various edge cases:
 /// - Normal case: directory exists and git knows about it
 /// - Directory deleted: just prune stale git references
 /// - Git references deleted: just remove the orphaned directory
+///
+/// The branch_name parameter is optional - if provided, the local branch will be deleted.
+/// This is important for allowing the branch to be recreated later.
 pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError> {
+    // First, get the branch name from the worktree before removing it
+    let branch_name = get_worktree_branch(repo, worktree_path);
+
     if worktree_path.exists() {
         // Worktree directory exists on disk - try to remove it normally
         let worktree_str = worktree_path
@@ -117,7 +123,35 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError
         cli::run(repo, &["worktree", "prune"])?;
     }
 
+    // Delete the local branch if we found one
+    // Use -D (force delete) since the branch may not be fully merged
+    if let Some(branch) = branch_name {
+        // Ignore errors - branch may already be deleted or may be checked out elsewhere
+        let _ = cli::run(repo, &["branch", "-D", &branch]);
+    }
+
     Ok(())
+}
+
+/// Get the branch name associated with a worktree.
+/// Returns None if the worktree doesn't exist or has no branch (detached HEAD).
+fn get_worktree_branch(repo: &Path, worktree_path: &Path) -> Option<String> {
+    let output = cli::run(repo, &["worktree", "list", "--porcelain"]).ok()?;
+
+    let worktree_str = worktree_path.to_str()?;
+    let mut in_target_worktree = false;
+
+    for line in output.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            in_target_worktree = path == worktree_str;
+        } else if in_target_worktree {
+            if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+                return Some(branch.to_string());
+            }
+        }
+    }
+
+    None
 }
 
 /// List all worktrees for a repository.

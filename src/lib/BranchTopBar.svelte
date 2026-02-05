@@ -73,7 +73,7 @@
     </button>
 
     <button
-      class="icon-btn"
+      class="icon-btn shortcuts-btn"
       onclick={() => (showShortcutsModal = !showShortcutsModal)}
       title="Keyboard shortcuts"
     >
@@ -81,7 +81,7 @@
     </button>
 
     <button
-      class="icon-btn"
+      class="icon-btn theme-btn"
       onclick={() => (showThemeModal = !showThemeModal)}
       title="Select theme (⌘P)"
     >

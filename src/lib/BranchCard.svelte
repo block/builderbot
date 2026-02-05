@@ -9,7 +9,7 @@
   import { onMount } from 'svelte';
   import {
     GitBranch,
-    Eye,
+    FileDiff,
     Plus,
     Trash2,
     Loader2,
@@ -412,6 +412,23 @@
       </button>
     </div>
     <div class="header-actions">
+      <div class="more-menu-container">
+        <button class="more-button" onclick={toggleMoreMenu} title="More options">
+          <MoreVertical size={16} />
+        </button>
+        {#if showMoreMenu}
+          <div class="more-menu">
+            <button class="more-menu-item" onclick={handleViewDiff}>
+              <FileDiff size={14} />
+              View Diff
+            </button>
+            <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
+              <Trash2 size={14} />
+              Delete
+            </button>
+          </div>
+        {/if}
+      </div>
       <!-- Open in... button -->
       {#if openerApps.length > 0}
         <div class="open-in-container">
@@ -431,24 +448,6 @@
           {/if}
         </div>
       {/if}
-      <div class="more-menu-container">
-        <button class="more-button" onclick={toggleMoreMenu} title="More options">
-          <MoreVertical size={16} />
-        </button>
-        {#if showMoreMenu}
-          <div class="more-menu">
-            <button class="more-menu-item" onclick={handleViewDiff}>
-              <Eye size={14} />
-              View Diff
-            </button>
-            <div class="menu-separator"></div>
-            <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
-              <Trash2 size={14} />
-              Delete
-            </button>
-          </div>
-        {/if}
-      </div>
     </div>
   </div>
 
@@ -517,19 +516,7 @@
               </div>
             </button>
           {:else if item.type === 'commit'}
-            <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-            <div
-              class="timeline-row commit-row"
-              class:is-head={item.isHead}
-              class:has-session={!!item.session}
-              onclick={() => {
-                if (confirmingDeleteCommitSha === item.commit.sha) {
-                  cancelDeleteCommit();
-                } else if (item.session) {
-                  handleViewSession(item.session);
-                }
-              }}
-            >
+            <div class="timeline-row commit-row" class:is-head={item.isHead}>
               <div class="timeline-marker">
                 {#if item.isHead}
                   <div class="head-marker"></div>
@@ -559,59 +546,50 @@
                       <span class="delete-warning">Will delete {commitsToDeleteCount} commits</span>
                     {/if}
                     <button
-                      class="delete-confirm-btn"
+                      class="action-btn action-btn-danger"
                       disabled={deletingCommit}
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteCommit();
-                      }}
+                      onclick={() => handleDeleteCommit()}
                     >
                       {deletingCommit ? 'Deleting...' : 'Delete'}
                     </button>
                     <button
-                      class="delete-cancel-btn"
+                      class="action-btn"
                       disabled={deletingCommit}
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        cancelDeleteCommit();
-                      }}
+                      onclick={() => cancelDeleteCommit()}
                     >
                       Cancel
                     </button>
                   </div>
                 {:else}
-                  {#if item.isHead}
+                  {#if item.session}
                     <button
-                      class="action-btn"
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        handleContinue();
-                      }}
+                      class="action-btn action-btn-icon action-btn-hover"
+                      onclick={() => item.session && handleViewSession(item.session)}
+                      title="View session"
                     >
-                      <Play size={12} />
-                      Continue
+                      <MessageSquare size={12} />
                     </button>
                   {/if}
                   <button
-                    class="action-btn action-btn-icon"
-                    onclick={(e) => {
-                      e.stopPropagation();
-                      onViewCommitDiff?.(item.commit.sha);
-                    }}
+                    class="action-btn action-btn-icon action-btn-hover"
+                    onclick={() => onViewCommitDiff?.(item.commit.sha)}
                     title="View diff"
                   >
-                    <Eye size={12} />
+                    <FileDiff size={12} />
                   </button>
                   {#if item.session}
                     <button
-                      class="action-btn action-btn-icon commit-delete"
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        startDeleteCommit(item.commit.sha);
-                      }}
+                      class="action-btn action-btn-icon action-btn-hover commit-delete"
+                      onclick={() => startDeleteCommit(item.commit.sha)}
                       title="Delete commit"
                     >
                       <Trash2 size={12} />
+                    </button>
+                  {/if}
+                  {#if item.isHead}
+                    <button class="action-btn action-btn-hover" onclick={() => handleContinue()}>
+                      <Play size={12} />
+                      Continue
                     </button>
                   {/if}
                 {/if}
@@ -662,7 +640,7 @@
                 {#if confirmingDeleteNoteId === item.note.id}
                   <div class="delete-confirm">
                     <button
-                      class="delete-confirm-btn"
+                      class="action-btn action-btn-danger"
                       onclick={(e) => {
                         e.stopPropagation();
                         handleDeleteNote(item.note.id);
@@ -671,7 +649,7 @@
                       Delete
                     </button>
                     <button
-                      class="delete-cancel-btn"
+                      class="action-btn"
                       onclick={(e) => {
                         e.stopPropagation();
                         confirmingDeleteNoteId = null;
@@ -682,7 +660,7 @@
                   </div>
                 {:else}
                   <button
-                    class="note-delete"
+                    class="action-btn action-btn-icon action-btn-hover"
                     onclick={(e) => {
                       e.stopPropagation();
                       confirmingDeleteNoteId = item.note.id;
@@ -979,12 +957,6 @@
     color: var(--ui-danger);
   }
 
-  .menu-separator {
-    height: 1px;
-    background-color: var(--border-subtle);
-    margin: 4px 0;
-  }
-
   /* Content */
   .card-content {
     padding: 12px 16px;
@@ -1027,13 +999,11 @@
     transition: background-color 0.15s ease;
   }
 
-  .timeline-row.commit-row.has-session,
   .timeline-row.note-row,
   .timeline-row.skeleton-row {
     cursor: pointer;
   }
 
-  .timeline-row.commit-row.has-session:hover,
   .timeline-row.note-row:hover,
   .timeline-row.skeleton-row:hover {
     background-color: var(--bg-hover);
@@ -1202,39 +1172,26 @@
     opacity: 0;
   }
 
-  .commit-row:hover .action-btn-icon {
-    opacity: 1;
-  }
-
-  .note-delete {
-    position: absolute;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-faint);
-    cursor: pointer;
+  .action-btn-hover {
     opacity: 0;
-    transition:
-      opacity 0.15s ease,
-      background-color 0.15s ease,
-      color 0.15s ease;
   }
 
-  .note-row:hover .note-delete {
+  .commit-row:hover .action-btn-icon,
+  .commit-row:hover .action-btn-hover,
+  .note-row:hover .action-btn-icon,
+  .note-row:hover .action-btn-hover {
     opacity: 1;
   }
 
-  .note-delete:hover {
-    background-color: var(--bg-hover);
+  .action-btn-danger {
+    border-color: var(--ui-danger);
     color: var(--ui-danger);
+  }
+
+  .action-btn-danger:hover {
+    background-color: var(--ui-danger);
+    border-color: var(--ui-danger);
+    color: white;
   }
 
   .commit-delete:hover {
@@ -1253,41 +1210,6 @@
     font-size: var(--size-xs);
     color: var(--ui-danger);
     margin-right: 4px;
-  }
-
-  .delete-confirm-btn {
-    padding: 2px 8px;
-    background: var(--ui-danger);
-    border: none;
-    border-radius: 3px;
-    color: white;
-    font-size: var(--size-xs);
-    font-family: inherit;
-    cursor: pointer;
-    transition: background-color 0.1s;
-  }
-
-  .delete-confirm-btn:hover {
-    background: var(--ui-danger-hover, #c53030);
-  }
-
-  .delete-cancel-btn {
-    padding: 2px 8px;
-    background: none;
-    border: none;
-    border-radius: 3px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-family: inherit;
-    cursor: pointer;
-    transition:
-      background-color 0.1s,
-      color 0.1s;
-  }
-
-  .delete-cancel-btn:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
   }
 
   .watch-button {

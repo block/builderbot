@@ -433,15 +433,14 @@
 
 <style>
   .theme-dropdown {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    margin-top: 4px;
+    position: fixed;
+    top: 40px;
+    right: 8px;
+    z-index: 1000;
     background: var(--bg-chrome);
     border: 1px solid var(--border-muted);
     border-radius: 8px;
     box-shadow: var(--shadow-elevated);
-    z-index: 100;
     width: 260px;
     display: flex;
     flex-direction: column;

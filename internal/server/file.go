@@ -62,6 +62,9 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Strip YAML frontmatter
+	content = stripFrontmatter(content)
+
 	var buf bytes.Buffer
 	if err := md.Convert(content, &buf); err != nil {
 		http.Error(w, err.Error(), 500)
@@ -90,4 +93,22 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		Raw:        string(content),
 	}
 	s.tmpl.ExecuteTemplate(w, "file.html", data)
+}
+
+func stripFrontmatter(content []byte) []byte {
+	s := string(content)
+	if !strings.HasPrefix(s, "---") {
+		return content
+	}
+
+	// Find the closing ---
+	rest := s[3:]
+	idx := strings.Index(rest, "\n---")
+	if idx == -1 {
+		return content
+	}
+
+	// Return everything after the closing ---
+	afterFrontmatter := rest[idx+4:]
+	return []byte(strings.TrimLeft(afterFrontmatter, "\n"))
 }

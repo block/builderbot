@@ -79,6 +79,19 @@
         .content a {
             color: #0066cc;
         }
+        /* Style metadata paragraphs (those with bold labels like Date:, Researcher:) */
+        .content > p:first-of-type strong {
+            display: inline-block;
+            min-width: 100px;
+        }
+        .content > p:first-of-type {
+            background: #f8f9fa;
+            padding: 12px 16px;
+            border-radius: 6px;
+            font-size: 0.85em;
+            color: #666;
+            line-height: 2;
+        }
         /* Syntax highlighting - keep dark for code blocks */
         .content .chroma { background: #282a36; }
     </style>

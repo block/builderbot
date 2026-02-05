@@ -29,29 +29,56 @@ dev:
         brew install fswatch
     fi
 
+    PIDFILE=".birdseye.pid"
+
+    # Kill previous birdseye dev server if running
+    if [ -f "$PIDFILE" ]; then
+        OLD_PID=$(cat "$PIDFILE")
+        if kill -0 "$OLD_PID" 2>/dev/null; then
+            echo "Stopping previous birdseye server (PID $OLD_PID)..."
+            kill "$OLD_PID" 2>/dev/null
+            sleep 0.5
+        fi
+        rm -f "$PIDFILE"
+    fi
+
+    # Find an available port starting from 8080
+    PORT=8080
+    while lsof -ti:$PORT >/dev/null 2>&1; do
+        echo "Port $PORT is in use by another process, trying next..."
+        PORT=$((PORT + 1))
+    done
+
     cleanup() {
         echo "Stopping server..."
         kill $PID 2>/dev/null
+        rm -f "$PIDFILE"
         exit 0
     }
     trap cleanup INT TERM
 
-    go build -o birdseye . && ./birdseye &
+    go build -o birdseye . && ./birdseye -port $PORT &
     PID=$!
+    echo $PID > "$PIDFILE"
 
     # Wait for server to be ready before opening browser
     echo "Waiting for server..."
-    until curl -s http://localhost:8080/ > /dev/null 2>&1; do
+    until curl -s http://localhost:$PORT/ > /dev/null 2>&1; do
         sleep 0.2
     done
-    open "http://localhost:8080"
+    open "http://localhost:$PORT"
 
     echo "Watching for changes... (Ctrl+C to stop)"
     fswatch -o -r --include='\.go$' --include='\.html$' --exclude='.*' . | while read; do
         echo "Change detected, rebuilding..."
         kill $PID 2>/dev/null
-        go build -o birdseye . && ./birdseye &
+        # Wait for port to be released
+        while lsof -ti:$PORT >/dev/null 2>&1; do
+            sleep 0.1
+        done
+        go build -o birdseye . && ./birdseye -port $PORT &
         PID=$!
+        echo $PID > "$PIDFILE"
     done
 
 # Clean build artifacts

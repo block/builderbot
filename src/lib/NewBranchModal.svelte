@@ -3,7 +3,7 @@
 
   Two-step flow:
   1. Pick a repository (with search)
-  2. Enter branch name
+  2. Enter branch title (auto-generates sanitized branch name)
 
   The branch is created with an isolated worktree, defaulting to the
   repository's default branch (e.g., origin/main) as the base.
@@ -53,7 +53,35 @@
   type Step = 'repo' | 'name';
   let step = $state<Step>('repo');
   let selectedRepo = $state<string | null>(null);
-  let branchName = $state('');
+  let branchTitle = $state('');
+
+  /**
+   * Sanitize a branch title into a valid git branch name.
+   * - Converts to lowercase
+   * - Replaces spaces and underscores with hyphens
+   * - Removes characters not allowed in git branch names
+   * - Collapses multiple hyphens into one
+   * - Removes leading/trailing hyphens and dots
+   */
+  function sanitizeBranchName(title: string): string {
+    return (
+      title
+        .toLowerCase()
+        // Replace spaces and underscores with hyphens
+        .replace(/[\s_]+/g, '-')
+        // Remove characters not allowed in git branch names
+        // Git disallows: space, ~, ^, :, ?, *, [, \, control chars
+        // Also remove other special chars that are problematic
+        .replace(/[~^:?*\[\]\\@{}"'`!#$%&()|<>=+;,]/g, '')
+        // Collapse multiple hyphens/dots into single hyphen
+        .replace(/[-.]+/g, '-')
+        // Remove leading/trailing hyphens and dots
+        .replace(/^[-.]+|[-.]+$/g, '')
+    );
+  }
+
+  // Auto-generate branch name from title
+  let branchName = $derived(sanitizeBranchName(branchTitle));
 
   // Repo picker state
   let query = $state('');
@@ -217,7 +245,7 @@
       selectedRepo = null;
       detectedDefaultBranch = null;
       selectedBaseBranch = null;
-      branchName = '';
+      branchTitle = '';
     }
   }
 
@@ -483,24 +511,30 @@
           </div>
         {:else}
           <div class="input-group">
-            <label for="branch-name">Branch name</label>
+            <label for="branch-title">Branch name</label>
             <input
               bind:this={branchInputEl}
-              bind:value={branchName}
-              id="branch-name"
+              bind:value={branchTitle}
+              id="branch-title"
               type="text"
-              placeholder="feature/my-feature"
+              placeholder="Fix login issue"
               class="branch-input"
               autocomplete="off"
               autocorrect="off"
               autocapitalize="off"
               spellcheck="false"
             />
+            {#if branchTitle && branchName !== branchTitle.toLowerCase()}
+              <div class="branch-preview">
+                <GitBranch size={12} />
+                <span>{branchName || '...'}</span>
+              </div>
+            {/if}
           </div>
 
           <div class="actions">
             <button class="cancel-button" onclick={goBack}>Cancel</button>
-            <button class="create-button" onclick={handleCreate} disabled={!branchName.trim()}>
+            <button class="create-button" onclick={handleCreate} disabled={!branchName}>
               Create Branch
             </button>
           </div>
@@ -867,6 +901,25 @@
 
   .branch-input::placeholder {
     color: var(--text-faint);
+  }
+
+  .branch-preview {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: var(--size-sm);
+    color: var(--text-muted);
+  }
+
+  .branch-preview :global(svg) {
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+
+  .branch-preview span {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    color: var(--text-secondary);
   }
 
   .actions {

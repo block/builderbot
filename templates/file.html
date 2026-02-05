@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.FileName}} - Birdseye</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        a { color: #00d4ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .breadcrumb { margin-bottom: 20px; color: #888; font-size: 0.9em; }
+        .breadcrumb a { color: #888; }
+        .breadcrumb a:hover { color: #00d4ff; }
+        .content {
+            background: #16213e;
+            padding: 24px 32px;
+            border-radius: 8px;
+            line-height: 1.7;
+        }
+        .content h1, .content h2, .content h3, .content h4 { color: #00d4ff; }
+        .content h1 { border-bottom: 1px solid #0f3460; padding-bottom: 8px; }
+        .content h2 { border-bottom: 1px solid #0f3460; padding-bottom: 6px; }
+        .content code {
+            background: #0f3460;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        .content pre {
+            background: #0d1b2a;
+            padding: 16px;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+        .content pre code {
+            background: none;
+            padding: 0;
+        }
+        .content ul, .content ol { padding-left: 24px; }
+        .content li { margin-bottom: 4px; }
+        .content blockquote {
+            border-left: 3px solid #00d4ff;
+            margin-left: 0;
+            padding-left: 16px;
+            color: #aaa;
+        }
+        .content table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 16px 0;
+        }
+        .content th, .content td {
+            border: 1px solid #0f3460;
+            padding: 8px 12px;
+            text-align: left;
+        }
+        .content th {
+            background: #0f3460;
+        }
+        .content hr {
+            border: none;
+            border-top: 1px solid #0f3460;
+            margin: 24px 0;
+        }
+        .content img {
+            max-width: 100%;
+        }
+        .content a {
+            color: #00d4ff;
+        }
+        /* Syntax highlighting overrides */
+        .content .chroma { background: #0d1b2a; }
+    </style>
+</head>
+<body>
+    <div class="breadcrumb">
+        <a href="/">← All Projects</a>
+        / <a href="/project/{{.Project.Name}}">{{.Project.Name}}</a>
+        {{if .ParentPath}}
+        / <a href="/project/{{.Project.Name}}/{{.ParentPath}}">{{.ParentPath}}</a>
+        {{end}}
+        / {{.FileName}}
+    </div>
+
+    <div class="content">
+        {{.Content}}
+    </div>
+</body>
+</html>

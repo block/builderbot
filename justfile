@@ -12,13 +12,11 @@ run: build
     PID=$!
 
     # Wait for server to be ready
-    for i in {1..30}; do
-        if curl -s http://localhost:8080/ > /dev/null 2>&1; then
-            open "http://localhost:8080"
-            break
-        fi
-        sleep 0.1
+    echo "Waiting for server..."
+    until curl -s http://localhost:8080/ > /dev/null 2>&1; do
+        sleep 0.2
     done
+    open "http://localhost:8080"
 
     wait $PID
 
@@ -42,13 +40,11 @@ dev:
     PID=$!
 
     # Wait for server to be ready before opening browser
-    for i in {1..30}; do
-        if curl -s http://localhost:8080/ > /dev/null 2>&1; then
-            open "http://localhost:8080"
-            break
-        fi
-        sleep 0.1
+    echo "Waiting for server..."
+    until curl -s http://localhost:8080/ > /dev/null 2>&1; do
+        sleep 0.2
     done
+    open "http://localhost:8080"
 
     echo "Watching for changes... (Ctrl+C to stop)"
     fswatch -o -r --include='\.go$' --include='\.html$' --exclude='.*' . | while read; do

@@ -1296,16 +1296,7 @@
   .skeleton-meta {
     font-size: var(--size-xs);
     color: var(--text-faint);
-    background: linear-gradient(
-      90deg,
-      var(--bg-hover) 25%,
-      var(--bg-primary) 50%,
-      var(--bg-hover) 75%
-    );
-    background-size: 200% 100%;
-    animation: shimmer 1.5s infinite;
-    border-radius: 4px;
-    padding: 0 4px;
+    animation: pulse 2s ease-in-out infinite;
   }
 
   .timeline-actions {
@@ -1613,12 +1604,13 @@
     }
   }
 
-  @keyframes shimmer {
-    0% {
-      background-position: 200% 0;
-    }
+  @keyframes pulse {
+    0%,
     100% {
-      background-position: -200% 0;
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
     }
   }
 </style>

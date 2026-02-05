@@ -20,6 +20,7 @@
         .breadcrumb a { color: #666; }
         .breadcrumb a:hover { color: #0066cc; }
         h1 { color: #333; font-weight: 600; }
+        h2 { color: #555; margin: 24px 0 16px 0; font-size: 1em; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
         input[type="search"] {
             width: 100%;
             padding: 12px 16px;
@@ -37,25 +38,212 @@
         }
         input[type="search"]::placeholder { color: #999; }
         .stats { color: #888; margin-bottom: 16px; }
-        .result {
-            background: #fff;
-            padding: 12px 16px;
-            margin-bottom: 8px;
-            border-radius: 6px;
-            border: 1px solid #e8e8e8;
+
+        /* Project cards */
+        .projects {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 12px;
+            margin-bottom: 24px;
         }
-        .result:hover { border-color: #ccc; }
-        .result-header { margin-bottom: 4px; }
-        .result-file { font-weight: 500; }
-        .result-line { color: #888; font-size: 0.85em; }
-        .result-context {
-            font-family: "SF Mono", Menlo, Monaco, monospace;
-            font-size: 0.85em;
+        .project {
+            background: #fff;
+            border-radius: 8px;
+            padding: 14px 18px;
+            border: 1px solid #e8e8e8;
+            transition: border-color 0.15s, box-shadow 0.15s;
+            position: relative;
+        }
+        .project:hover {
+            border-color: #ccc;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        }
+        .project-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+        .project-name {
+            font-weight: 600;
+            font-size: 1.05em;
+            margin-bottom: 4px;
+        }
+        .project-meta {
+            font-size: 0.8em;
+            color: #888;
+            margin-bottom: 6px;
+        }
+        .project-summary {
+            font-size: 0.9em;
             color: #666;
+            line-height: 1.4;
+        }
+        .branch { color: #2da44e; }
+        .dirty { color: #cf222e; }
+
+        /* Project result group */
+        .project-group {
+            margin-bottom: 16px;
+            background: #fff;
+            border: 1px solid #e8e8e8;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .project-group-header {
+            background: #f8f8f8;
+            padding: 12px 16px;
+            border-bottom: 1px solid #e8e8e8;
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .project-group-header a {
+            color: #333;
+        }
+
+        /* File rows */
+        .file {
+            padding: 10px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #f0f0f0;
+            transition: background-color 0.15s;
+        }
+        .file:last-child { border-bottom: none; }
+        .file:hover { background: #fafafa; }
+        .file.selected {
+            background: #f0f7ff;
+        }
+        .file-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+            flex: 1;
+        }
+        .file-checkbox {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .file-name {
+            font-weight: 500;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        .file-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+        .file-type {
+            font-size: 0.7em;
+            font-weight: 500;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 3px;
+            flex-shrink: 0;
+        }
+        .file-type.research {
+            background: #ddf4ff;
+            color: #0969da;
+        }
+        .file-type.plan {
+            background: #dafbe1;
+            color: #1a7f37;
+        }
+        .match-type {
+            font-size: 0.7em;
+            font-weight: 500;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 3px;
+            flex-shrink: 0;
+            background: #ddf4ff;
+            color: #0969da;
+        }
+        .copy-btn {
+            background: none;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 0.75em;
+            color: #666;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.15s, background-color 0.15s, border-color 0.15s;
+        }
+        .file:hover .copy-btn,
+        .project:hover .copy-btn,
+        .project-group-header:hover .copy-btn {
+            opacity: 1;
+        }
+        .copy-btn:hover {
+            background: #f5f5f5;
+            border-color: #ccc;
+            color: #333;
+        }
+        .copy-btn.copied {
+            opacity: 1;
+            background: #dafbe1;
+            border-color: #1a7f37;
+            color: #1a7f37;
+        }
+
+        /* Selection bar */
+        .selection-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: #333;
+            color: #fff;
+            padding: 12px 24px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 16px;
+            transform: translateY(-100%);
+            transition: transform 0.2s ease-out;
+            z-index: 1000;
+        }
+        .selection-bar.visible {
+            transform: translateY(0);
+        }
+        .selection-bar .count {
+            font-size: 0.9em;
+        }
+        .selection-bar button {
+            background: #0066cc;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 16px;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: background-color 0.15s;
+        }
+        .selection-bar button:hover {
+            background: #0052a3;
+        }
+        .selection-bar button.copied {
+            background: #1a7f37;
+        }
+        .selection-bar .clear-btn {
+            background: transparent;
+            border: 1px solid #666;
+            color: #ccc;
+        }
+        .selection-bar .clear-btn:hover {
+            background: #444;
+            border-color: #888;
+        }
+
         .no-results { color: #888; font-style: italic; }
     </style>
 </head>
@@ -66,22 +254,147 @@
 
     <h1>Search</h1>
     <form method="GET" action="/search">
-        <input type="search" name="q" placeholder="Search all thoughts..." value="{{.Query}}" autofocus>
+        <input type="search" name="q" placeholder="Search projects and thoughts..." value="{{.Query}}" autofocus>
     </form>
 
-    {{if .Results}}
-    <p class="stats">{{len .Results}} results{{if ge (len .Results) 100}} (limited to 100){{end}}</p>
-    {{range .Results}}
-    <div class="result">
-        <div class="result-header">
-            <a class="result-file" href="/file/{{.Project}}/{{.FilePath}}">{{.Project}}/{{.FilePath}}</a>
-            <span class="result-line">:{{.Line}}</span>
-        </div>
-        <div class="result-context">{{.Context}}</div>
+    {{if .Query}}
+        {{if or .MatchingProjects .ProjectResults}}
+            <p class="stats">{{if .MatchingProjects}}{{len .MatchingProjects}} project{{if gt (len .MatchingProjects) 1}}s{{end}}{{if .ProjectResults}}, {{end}}{{end}}{{if .ProjectResults}}{{.TotalFiles}} file{{if gt .TotalFiles 1}}s{{end}}{{if ge .TotalFiles 100}} (limited to 100){{end}}{{end}}</p>
+
+            {{if .MatchingProjects}}
+            <h2>Projects</h2>
+            <div class="projects">
+                {{range .MatchingProjects}}
+                <div class="project" data-path="{{.Name}}/thoughts">
+                    <div class="project-header">
+                        <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a></div>
+                        <button class="copy-btn" onclick="copyItemPath(this, event)">Copy</button>
+                    </div>
+                    {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
+                    {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
+                </div>
+                {{end}}
+            </div>
+            {{end}}
+
+            {{if .ProjectResults}}
+            <h2>Thoughts</h2>
+            {{range .ProjectResults}}
+            {{$proj := .Project}}
+            <div class="project-group">
+                <div class="project-group-header" data-path="{{$proj}}/thoughts">
+                    <a href="/project/{{$proj}}">{{$proj}}</a>
+                    <button class="copy-btn" onclick="copyItemPath(this, event)">Copy</button>
+                </div>
+                {{range .Files}}
+                <div class="file" data-path="{{$proj}}/thoughts/{{.Path}}">
+                    <div class="file-left">
+                        <input type="checkbox" class="file-checkbox" />
+                        {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
+                        {{if .NameMatch}}<span class="match-type">name</span>{{end}}
+                        <span class="file-name"><a href="/file/{{$proj}}/{{.Path}}">{{.Name}}</a></span>
+                    </div>
+                    <div class="file-right">
+                        <button class="copy-btn" onclick="copyItemPath(this, event)">Copy</button>
+                    </div>
+                </div>
+                {{end}}
+            </div>
+            {{end}}
+            {{end}}
+        {{else}}
+            <p class="no-results">No results found for "{{.Query}}"</p>
+        {{end}}
+    {{end}}
+
+    <div class="selection-bar" id="selectionBar">
+        <span class="count"><span id="selectedCount">0</span> selected</span>
+        <button onclick="copySelected()">Copy paths</button>
+        <button class="clear-btn" onclick="clearSelection()">Clear</button>
     </div>
-    {{end}}
-    {{else if .Query}}
-    <p class="no-results">No results found for "{{.Query}}"</p>
-    {{end}}
+
+    <script>
+        function copyItemPath(btn, event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const el = btn.closest('[data-path]');
+            const path = '@' + el.dataset.path;
+            navigator.clipboard.writeText(path);
+
+            btn.textContent = 'Copied!';
+            btn.classList.add('copied');
+            setTimeout(() => {
+                btn.textContent = 'Copy';
+                btn.classList.remove('copied');
+            }, 1500);
+        }
+
+        function updateSelectionBar() {
+            const checkboxes = document.querySelectorAll('.file-checkbox:checked');
+            const bar = document.getElementById('selectionBar');
+            const count = document.getElementById('selectedCount');
+
+            count.textContent = checkboxes.length;
+
+            if (checkboxes.length > 0) {
+                bar.classList.add('visible');
+            } else {
+                bar.classList.remove('visible');
+            }
+
+            document.querySelectorAll('.file').forEach(file => {
+                const checkbox = file.querySelector('.file-checkbox');
+                if (checkbox && checkbox.checked) {
+                    file.classList.add('selected');
+                } else {
+                    file.classList.remove('selected');
+                }
+            });
+        }
+
+        function copySelected() {
+            const checkboxes = document.querySelectorAll('.file-checkbox:checked');
+            const paths = Array.from(checkboxes).map(cb => {
+                const file = cb.closest('.file');
+                return '@' + file.dataset.path;
+            });
+
+            navigator.clipboard.writeText(paths.join('\n'));
+
+            const btn = document.querySelector('.selection-bar button:not(.clear-btn)');
+            const originalText = btn.textContent;
+            btn.textContent = 'Copied!';
+            btn.classList.add('copied');
+            setTimeout(() => {
+                btn.textContent = originalText;
+                btn.classList.remove('copied');
+            }, 1500);
+        }
+
+        function clearSelection() {
+            document.querySelectorAll('.file-checkbox:checked').forEach(cb => {
+                cb.checked = false;
+            });
+            updateSelectionBar();
+        }
+
+        // Event listeners
+        document.querySelectorAll('.file-checkbox').forEach(checkbox => {
+            checkbox.addEventListener('change', updateSelectionBar);
+        });
+
+        document.querySelectorAll('.file').forEach(file => {
+            file.addEventListener('click', (e) => {
+                if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON' || e.target.type === 'checkbox') {
+                    return;
+                }
+                const checkbox = file.querySelector('.file-checkbox');
+                if (checkbox) {
+                    checkbox.checked = !checkbox.checked;
+                    updateSelectionBar();
+                }
+            });
+        });
+    </script>
 </body>
 </html>

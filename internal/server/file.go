@@ -50,13 +50,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	filePath := parts[1]
 
 	// Find project
-	var project *discovery.Project
-	for i := range s.projects {
-		if s.projects[i].Name == projectName {
-			project = &s.projects[i]
-			break
-		}
-	}
+	project := s.cache.FindProject(projectName)
 	if project == nil {
 		http.NotFound(w, r)
 		return
@@ -92,6 +86,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		FilePath   string
 		FileName   string
 		ParentPath string
+		FileType   string
 		Content    template.HTML
 		Headings   []Heading
 		Raw        string
@@ -100,6 +95,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		FilePath:   filePath,
 		FileName:   filepath.Base(filePath),
 		ParentPath: parentPath,
+		FileType:   classifyFile(filePath),
 		Content:    template.HTML(htmlContent),
 		Headings:   headings,
 		Raw:        string(content),

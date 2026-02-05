@@ -68,10 +68,40 @@
             border-color: #ccc;
             box-shadow: 0 2px 8px rgba(0,0,0,0.04);
         }
+        .project-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
         .project-name {
             font-weight: 600;
             font-size: 1.05em;
             margin-bottom: 4px;
+        }
+        .copy-btn {
+            background: none;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 0.75em;
+            color: #666;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.15s, background-color 0.15s, border-color 0.15s;
+        }
+        .project:hover .copy-btn {
+            opacity: 1;
+        }
+        .copy-btn:hover {
+            background: #f5f5f5;
+            border-color: #ccc;
+            color: #333;
+        }
+        .copy-btn.copied {
+            opacity: 1;
+            background: #dafbe1;
+            border-color: #1a7f37;
+            color: #1a7f37;
         }
         .project-meta {
             font-size: 0.8em;
@@ -105,12 +135,68 @@
     <h2>Projects ({{len .Projects}})</h2>
     <div class="projects">
         {{range .Projects}}
-        <div class="project">
-            <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a></div>
+        <div class="project" data-path="{{.Name}}/thoughts">
+            <div class="project-header">
+                <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a></div>
+                <button class="copy-btn" onclick="copyProjectPath(this, event)">Copy</button>
+            </div>
             {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
             {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
         </div>
         {{end}}
     </div>
+
+    <script>
+        function copyProjectPath(btn, event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const el = btn.closest('[data-path]');
+            const path = '@' + el.dataset.path;
+            navigator.clipboard.writeText(path);
+
+            btn.textContent = 'Copied!';
+            btn.classList.add('copied');
+            setTimeout(() => {
+                btn.textContent = 'Copy';
+                btn.classList.remove('copied');
+            }, 1500);
+        }
+
+        // Live updates via SSE
+        const events = new EventSource('/events');
+
+        events.addEventListener('change', function(e) {
+            const data = JSON.parse(e.data);
+            if (data.type === 'projects' || data.type === 'files') {
+                refreshProjects();
+            }
+        });
+
+        events.addEventListener('error', function(e) {
+            console.log('SSE connection lost, will reconnect...');
+        });
+
+        async function refreshProjects() {
+            try {
+                const response = await fetch('/api/projects');
+                const projects = await response.json();
+                const container = document.querySelector('.projects');
+                container.innerHTML = projects.map(p => `
+                    <div class="project" data-path="${p.name}/thoughts">
+                        <div class="project-header">
+                            <div class="project-name"><a href="/project/${p.name}">${p.name}</a></div>
+                            <button class="copy-btn" onclick="copyProjectPath(this, event)">Copy</button>
+                        </div>
+                        ${p.branch ? `<div class="project-meta"><span class="branch">${p.branch}${p.dirty ? '<span class="dirty">*</span>' : ''}</span></div>` : ''}
+                        ${p.summary ? `<div class="project-summary">${p.summary}</div>` : ''}
+                    </div>
+                `).join('');
+                // Update count
+                document.querySelector('h2').textContent = `Projects (${projects.length})`;
+            } catch (err) {
+                console.error('Failed to refresh projects:', err);
+            }
+        }
+    </script>
 </body>
 </html>

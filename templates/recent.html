@@ -57,6 +57,7 @@
     <h1>Recent Files</h1>
     <p class="subtitle">50 most recently modified files</p>
 
+    <div id="files-container">
     {{range .Files}}
     <div class="file">
         <div class="file-info">
@@ -66,5 +67,41 @@
         <span class="file-time">{{.ModTime.Format "Jan 2, 2006 3:04 PM"}}</span>
     </div>
     {{end}}
+    </div>
+
+    <script>
+        // Live updates via SSE
+        const events = new EventSource('/events');
+
+        events.addEventListener('change', function(e) {
+            const data = JSON.parse(e.data);
+            if (data.type === 'files') {
+                refreshRecent();
+            }
+        });
+
+        events.addEventListener('error', function(e) {
+            console.log('SSE connection lost, will reconnect...');
+        });
+
+        async function refreshRecent() {
+            try {
+                const response = await fetch('/api/recent');
+                const files = await response.json();
+                const container = document.getElementById('files-container');
+                container.innerHTML = files.map(f => `
+                    <div class="file">
+                        <div class="file-info">
+                            <div class="file-name"><a href="/file/${f.project}/${f.path}">${f.name}</a></div>
+                            <div class="file-project">${f.project}/${f.path}</div>
+                        </div>
+                        <span class="file-time">${f.age}</span>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('Failed to refresh recent:', err);
+            }
+        }
+    </script>
 </body>
 </html>

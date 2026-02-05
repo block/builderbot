@@ -352,3 +352,34 @@ export async function deleteBranchNote(noteId: string): Promise<void> {
 export async function recoverOrphanedNote(branchId: string): Promise<BranchNote | null> {
   return invoke<BranchNote | null>('recover_orphaned_note', { branchId });
 }
+
+// =============================================================================
+// Open In... Operations
+// =============================================================================
+
+/** An application that can open a directory */
+export interface OpenerApp {
+  /** Unique identifier (e.g., "vscode", "terminal", "warp") */
+  id: string;
+  /** Display name (e.g., "VS Code", "Terminal") */
+  name: string;
+}
+
+/**
+ * Get the list of supported apps that are currently installed.
+ * Results are cached for the lifetime of the app.
+ */
+let cachedOpeners: OpenerApp[] | null = null;
+
+export async function getAvailableOpeners(): Promise<OpenerApp[]> {
+  if (cachedOpeners !== null) return cachedOpeners;
+  cachedOpeners = await invoke<OpenerApp[]>('get_available_openers');
+  return cachedOpeners;
+}
+
+/**
+ * Open a directory path in a specific application.
+ */
+export async function openInApp(path: string, appId: string): Promise<void> {
+  return invoke<void>('open_in_app', { path, appId });
+}

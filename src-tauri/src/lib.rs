@@ -2001,6 +2001,105 @@ fn open_url(url: &str) -> Result<(), String> {
     open::that(url).map_err(|e| e.to_string())
 }
 
+// =============================================================================
+// Open In... Commands
+// =============================================================================
+
+/// An application that can open a directory.
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OpenerApp {
+    /// Unique identifier (e.g., "vscode", "terminal", "warp")
+    id: String,
+    /// Display name (e.g., "VS Code", "Terminal")
+    name: String,
+}
+
+/// Known apps we can detect and open directories in.
+/// Each entry: (id, display_name, macOS_bundle_id, open_command_args)
+#[cfg(target_os = "macos")]
+const KNOWN_OPENERS: &[(&str, &str, &str)] = &[
+    ("terminal", "Terminal", "com.apple.Terminal"),
+    ("warp", "Warp", "dev.warp.Warp-Stable"),
+    ("iterm", "iTerm", "com.googlecode.iterm2"),
+    ("ghostty", "Ghostty", "com.mitchellh.ghostty"),
+    ("vscode", "VS Code", "com.microsoft.VSCode"),
+    ("cursor", "Cursor", "com.todesktop.230313mzl4w4u92"),
+    ("windsurf", "Windsurf", "com.codeium.windsurf"),
+    (
+        "github-desktop",
+        "GitHub Desktop",
+        "com.github.GitHubClient",
+    ),
+    ("finder", "Finder", "com.apple.finder"),
+];
+
+/// Get the list of supported apps that are currently installed.
+/// Uses macOS `mdfind` to check for bundle IDs.
+#[tauri::command]
+fn get_available_openers() -> Vec<OpenerApp> {
+    #[cfg(target_os = "macos")]
+    {
+        KNOWN_OPENERS
+            .iter()
+            .filter(|(_, _, bundle_id)| {
+                std::process::Command::new("mdfind")
+                    .args(["kMDItemCFBundleIdentifier", "=", bundle_id])
+                    .output()
+                    .map(|o| {
+                        o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty()
+                    })
+                    .unwrap_or(false)
+            })
+            .map(|(id, name, _)| OpenerApp {
+                id: id.to_string(),
+                name: name.to_string(),
+            })
+            .collect()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec![]
+    }
+}
+
+/// Open a directory path in a specific application.
+#[tauri::command(rename_all = "camelCase")]
+fn open_in_app(path: String, app_id: String) -> Result<(), String> {
+    let dir = Path::new(&path);
+    if !dir.exists() {
+        return Err(format!("Directory does not exist: {}", path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let bundle_id = KNOWN_OPENERS
+            .iter()
+            .find(|(id, _, _)| *id == app_id)
+            .map(|(_, _, bid)| *bid)
+            .ok_or_else(|| format!("Unknown app: {}", app_id))?;
+
+        let output = std::process::Command::new("open")
+            .args(["-b", bundle_id, &path])
+            .output()
+            .map_err(|e| format!("Failed to launch app: {}", e))?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!("Failed to open in {}: {}", app_id, stderr.trim()))
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (dir, app_id);
+        Err("Open in app is only supported on macOS".to_string())
+    }
+}
+
 /// Get the initial repository path from CLI arguments.
 /// Returns the canonicalized path if a valid directory was provided, otherwise None.
 #[tauri::command]
@@ -2433,6 +2532,9 @@ pub fn run() {
             // Window commands
             get_window_label,
             open_url,
+            // Open in... commands
+            get_available_openers,
+            open_in_app,
             // CLI commands
             get_initial_path,
             install_cli,

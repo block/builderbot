@@ -20,8 +20,9 @@
     ChevronDown,
     ChevronsUpDown,
     MoreVertical,
+    ExternalLink,
   } from 'lucide-svelte';
-  import type { Branch, CommitInfo, BranchSession, BranchNote } from './services/branch';
+  import type { Branch, CommitInfo, BranchSession, BranchNote, OpenerApp } from './services/branch';
   import * as branchService from './services/branch';
   import SessionViewerModal from './SessionViewerModal.svelte';
   import NewSessionModal from './NewSessionModal.svelte';
@@ -135,12 +136,24 @@
   let showNewDropdown = $state(false);
   let showMoreMenu = $state(false);
 
+  // Open in... button state
+  let openerApps = $state<OpenerApp[]>([]);
+  let openersLoaded = $state(false);
+  let showOpenInDropdown = $state(false);
+
   // Delete note confirmation state
   let confirmingDeleteNoteId = $state<string | null>(null);
 
   // Load commits and running session on mount
   onMount(async () => {
     await loadData();
+    // Load available openers (shared across all cards via cache)
+    if (!openersLoaded) {
+      branchService.getAvailableOpeners().then((apps) => {
+        openerApps = apps;
+        openersLoaded = true;
+      });
+    }
   });
 
   // Reload when refreshKey changes
@@ -284,6 +297,9 @@
     if (!target.closest('.more-menu-container')) {
       showMoreMenu = false;
     }
+    if (!target.closest('.open-in-container')) {
+      showOpenInDropdown = false;
+    }
   }
 
   function toggleMoreMenu(e: MouseEvent) {
@@ -299,6 +315,20 @@
   function handleDeleteFromMenu() {
     showMoreMenu = false;
     onDelete?.();
+  }
+
+  async function handleOpenInApp(appId: string) {
+    showOpenInDropdown = false;
+    try {
+      await branchService.openInApp(branch.worktreePath, appId);
+    } catch (e) {
+      console.error('Failed to open in app:', e);
+    }
+  }
+
+  function toggleOpenInDropdown(e: MouseEvent) {
+    e.stopPropagation();
+    showOpenInDropdown = !showOpenInDropdown;
   }
 
   // Handle base branch change
@@ -334,22 +364,44 @@
         <ChevronsUpDown size={12} class="base-branch-chevron" />
       </button>
     </div>
-    <div class="more-menu-container">
-      <button class="more-button" onclick={toggleMoreMenu} title="More options">
-        <MoreVertical size={16} />
-      </button>
-      {#if showMoreMenu}
-        <div class="more-menu">
-          <button class="more-menu-item" onclick={handleViewDiff}>
-            <Eye size={14} />
-            View Diff
+    <div class="header-actions">
+      <!-- Open in... button -->
+      {#if openerApps.length > 0}
+        <div class="open-in-container">
+          <button class="open-button" onclick={toggleOpenInDropdown} title="Open in...">
+            <ExternalLink size={13} />
+            Open
+            <ChevronDown size={12} />
           </button>
-          <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
-            <Trash2 size={14} />
-            Delete
-          </button>
+          {#if showOpenInDropdown}
+            <div class="open-in-dropdown">
+              {#each openerApps as app (app.id)}
+                <button class="open-in-item" onclick={() => handleOpenInApp(app.id)}>
+                  {app.name}
+                </button>
+              {/each}
+            </div>
+          {/if}
         </div>
       {/if}
+      <div class="more-menu-container">
+        <button class="more-button" onclick={toggleMoreMenu} title="More options">
+          <MoreVertical size={16} />
+        </button>
+        {#if showMoreMenu}
+          <div class="more-menu">
+            <button class="more-menu-item" onclick={handleViewDiff}>
+              <Eye size={14} />
+              View Diff
+            </button>
+            <div class="menu-separator"></div>
+            <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
+              <Trash2 size={14} />
+              Delete
+            </button>
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 
@@ -638,7 +690,6 @@
     flex-direction: column;
     background-color: var(--bg-primary);
     border-radius: 8px;
-    overflow: hidden;
   }
 
   /* Header */
@@ -698,6 +749,72 @@
 
   .base-branch-name:hover :global(.base-branch-chevron) {
     color: var(--text-muted);
+  }
+
+  /* Header actions */
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* Open in... button */
+  .open-in-container {
+    position: relative;
+  }
+
+  .open-button {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .open-button:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-hover);
+  }
+
+  .open-in-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background-color: var(--bg-elevated);
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+    z-index: 100;
+    min-width: 140px;
+  }
+
+  .open-in-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 14px;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .open-in-item:hover {
+    background-color: var(--bg-hover);
   }
 
   /* More menu */
@@ -769,6 +886,12 @@
 
   .more-menu-item.danger:hover :global(svg) {
     color: var(--ui-danger);
+  }
+
+  .menu-separator {
+    height: 1px;
+    background-color: var(--border-subtle);
+    margin: 4px 0;
   }
 
   /* Content */

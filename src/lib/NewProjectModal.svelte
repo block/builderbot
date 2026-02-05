@@ -185,7 +185,10 @@
 
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      subpathSelectedIndex = Math.min(subpathSelectedIndex + 1, filteredSubpathSuggestions.length - 1);
+      subpathSelectedIndex = Math.min(
+        subpathSelectedIndex + 1,
+        filteredSubpathSuggestions.length - 1
+      );
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       subpathSelectedIndex = Math.max(subpathSelectedIndex - 1, 0);
@@ -263,10 +266,7 @@
 
     try {
       const normalizedSubpath = subpath.trim().replace(/^\/+|\/+$/g, '') || undefined;
-      const project = await branchService.createGitProject(
-        selectedRepo,
-        normalizedSubpath
-      );
+      const project = await branchService.createGitProject(selectedRepo, normalizedSubpath);
       onCreated(project);
     } catch (e) {
       // Extract error message from various error formats

@@ -341,13 +341,20 @@ export interface StartBranchNoteResponse {
  * @param branchId - The branch to create the note on
  * @param title - The title for the note
  * @param description - What the note should cover (user's description)
+ * @param agentId - Optional AI agent/provider to use (e.g., "goose", "claude")
  */
 export async function startBranchNote(
   branchId: string,
   title: string,
-  description: string
+  description: string,
+  agentId?: string
 ): Promise<StartBranchNoteResponse> {
-  return invoke<StartBranchNoteResponse>('start_branch_note', { branchId, title, description });
+  return invoke<StartBranchNoteResponse>('start_branch_note', {
+    branchId,
+    title,
+    description,
+    agentId,
+  });
 }
 
 /**
@@ -447,10 +454,7 @@ export async function openInApp(path: string, appId: string): Promise<void> {
  * Create a new git project.
  * If a project already exists for the repo_path, returns an error.
  */
-export async function createGitProject(
-  repoPath: string,
-  subpath?: string
-): Promise<GitProject> {
+export async function createGitProject(repoPath: string, subpath?: string): Promise<GitProject> {
   return invoke<GitProject>('create_git_project', { repoPath, subpath });
 }
 
@@ -479,10 +483,7 @@ export async function listGitProjects(): Promise<GitProject[]> {
  * Update a git project's subpath.
  * Pass null for subpath to clear it.
  */
-export async function updateGitProject(
-  projectId: string,
-  subpath: string | null
-): Promise<void> {
+export async function updateGitProject(projectId: string, subpath: string | null): Promise<void> {
   return invoke<void>('update_git_project', { projectId, subpath });
 }
 

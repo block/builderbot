@@ -216,6 +216,18 @@
     }
   });
 
+  // Sync provider when preferences.aiAgent changes (e.g., from Settings modal)
+  $effect(() => {
+    const savedAgent = preferences.aiAgent;
+    if (
+      savedAgent &&
+      agentGlobalState.availableProviders.some((p) => p.id === savedAgent) &&
+      isValidProvider(savedAgent)
+    ) {
+      agentState.provider = savedAgent as AcpProvider;
+    }
+  });
+
   // Auto-select new artifacts added externally (e.g., from AI analysis in Sidebar)
   $effect(() => {
     const artifactIds = agentState.artifacts.map((a) => a.id);

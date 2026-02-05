@@ -46,7 +46,8 @@
     onClose: () => void;
   }
 
-  let { initialRepoPath, projectId, onCreating, onCreated, onCreateFailed, onClose }: Props = $props();
+  let { initialRepoPath, projectId, onCreating, onCreated, onCreateFailed, onClose }: Props =
+    $props();
 
   // State
   type Step = 'repo' | 'name';
@@ -253,7 +254,8 @@
 
     try {
       // If no project ID was provided, get or create one for this repo
-      const effectiveProjectId = projectId || (await branchService.getOrCreateGitProject(selectedRepo)).id;
+      const effectiveProjectId =
+        projectId || (await branchService.getOrCreateGitProject(selectedRepo)).id;
 
       const pending: PendingBranch = {
         projectId: effectiveProjectId,

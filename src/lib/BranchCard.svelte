@@ -280,8 +280,8 @@
     loadData();
   }
 
-  function handleNoteStarted(branchNoteId: string, aiSessionId: string) {
-    console.log('Note started:', { branchNoteId, aiSessionId });
+  function handleNoteStarted(branchNoteId: string, aiSessionId: string, provider: string) {
+    console.log('Note started:', { branchNoteId, aiSessionId, provider });
     showNewNoteModal = false;
     loadData();
   }

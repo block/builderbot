@@ -231,7 +231,12 @@
   }
 
   // Open diff viewer from BranchHome — sets up the worktree tab and custom spec
-  async function handleViewDiffFromBranches(projectId: string, repoPath: string, spec: DiffSpecType, label: string) {
+  async function handleViewDiffFromBranches(
+    projectId: string,
+    repoPath: string,
+    spec: DiffSpecType,
+    label: string
+  ) {
     syncGlobalToTab();
 
     openRepo(repoPath);

@@ -8,11 +8,14 @@
   import { X, FileText, Loader2 } from 'lucide-svelte';
   import type { Branch } from './services/branch';
   import * as branchService from './services/branch';
+  import AgentSelector from './AgentSelector.svelte';
+  import type { AcpProvider } from './stores/agent.svelte';
+  import { preferences } from './stores/preferences.svelte';
 
   interface Props {
     branch: Branch;
     onClose: () => void;
-    onNoteStarted: (branchNoteId: string, aiSessionId: string) => void;
+    onNoteStarted: (branchNoteId: string, aiSessionId: string, provider: AcpProvider) => void;
   }
 
   let { branch, onClose, onNoteStarted }: Props = $props();
@@ -21,6 +24,7 @@
   let description = $state('');
   let submitting = $state(false);
   let error = $state<string | null>(null);
+  let selectedProvider = $state<AcpProvider>((preferences.aiAgent as AcpProvider) || 'goose');
 
   async function handleSubmit(e: Event) {
     e.preventDefault();
@@ -38,9 +42,10 @@
       const response = await branchService.startBranchNote(
         branch.id,
         title.trim(),
-        description.trim()
+        description.trim(),
+        selectedProvider
       );
-      onNoteStarted(response.branchNoteId, response.aiSessionId);
+      onNoteStarted(response.branchNoteId, response.aiSessionId, selectedProvider);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       submitting = false;
@@ -104,17 +109,20 @@
       {/if}
 
       <div class="form-actions">
-        <button type="button" class="cancel-btn" onclick={onClose} disabled={submitting}>
-          Cancel
-        </button>
-        <button type="submit" class="submit-btn" disabled={submitting || !title.trim()}>
-          {#if submitting}
-            <Loader2 size={14} class="spinning" />
-            Generating...
-          {:else}
-            Generate Note
-          {/if}
-        </button>
+        <AgentSelector bind:provider={selectedProvider} disabled={submitting} />
+        <div class="action-buttons">
+          <button type="button" class="cancel-btn" onclick={onClose} disabled={submitting}>
+            Cancel
+          </button>
+          <button type="submit" class="submit-btn" disabled={submitting || !title.trim()}>
+            {#if submitting}
+              <Loader2 size={14} class="spinning" />
+              Generating...
+            {:else}
+              Generate Note
+            {/if}
+          </button>
+        </div>
       </div>
     </form>
   </div>
@@ -243,9 +251,15 @@
 
   .form-actions {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
     gap: 10px;
     margin-top: 8px;
+  }
+
+  .action-buttons {
+    display: flex;
+    gap: 10px;
   }
 
   .cancel-btn,

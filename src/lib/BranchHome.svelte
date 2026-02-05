@@ -10,14 +10,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    Plus,
-    Sparkles,
-    Folder,
-    GitBranch,
-    Loader2,
-    X,
-  } from 'lucide-svelte';
+  import { Plus, Sparkles, Folder, GitBranch, Loader2, X } from 'lucide-svelte';
   import type { Branch, GitProject } from './services/branch';
   import * as branchService from './services/branch';
   import { listenToSessionStatus, type SessionStatusEvent } from './services/ai';
@@ -101,7 +94,9 @@
   });
 
   // Show the main list when there's anything to display
-  let hasContent = $derived(branches.length > 0 || pendingBranches.length > 0 || projects.length > 0);
+  let hasContent = $derived(
+    branches.length > 0 || pendingBranches.length > 0 || projects.length > 0
+  );
 
   // Generate a unique key for a pending branch
   function pendingKey(pending: PendingBranch): string {
@@ -452,7 +447,6 @@
             </div>
           </div>
         {/each}
-
       </div>
     {/if}
   </div>

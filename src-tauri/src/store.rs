@@ -821,13 +821,11 @@ impl Store {
 
         if !has_project_id {
             // Add project_id column
-            conn.execute(
-                "ALTER TABLE branches ADD COLUMN project_id TEXT",
-                [],
-            )?;
+            conn.execute("ALTER TABLE branches ADD COLUMN project_id TEXT", [])?;
 
             // For each existing branch, get or create a project for its repo_path
-            let mut stmt = conn.prepare("SELECT id, repo_path FROM branches WHERE project_id IS NULL")?;
+            let mut stmt =
+                conn.prepare("SELECT id, repo_path FROM branches WHERE project_id IS NULL")?;
             let branch_repos: Vec<(String, String)> = stmt
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
@@ -1832,22 +1830,18 @@ impl Store {
         // Use explicit NULL check or equality depending on subpath value
         // This avoids potential issues with the IS operator and bound parameters
         let result = match subpath {
-            None => {
-                conn.query_row(
-                    "SELECT id, repo_path, subpath, created_at, updated_at
+            None => conn.query_row(
+                "SELECT id, repo_path, subpath, created_at, updated_at
                      FROM git_projects WHERE repo_path = ?1 AND subpath IS NULL",
-                    params![repo_path],
-                    GitProject::from_row,
-                )
-            }
-            Some(sp) => {
-                conn.query_row(
-                    "SELECT id, repo_path, subpath, created_at, updated_at
+                params![repo_path],
+                GitProject::from_row,
+            ),
+            Some(sp) => conn.query_row(
+                "SELECT id, repo_path, subpath, created_at, updated_at
                      FROM git_projects WHERE repo_path = ?1 AND subpath = ?2",
-                    params![repo_path, sp],
-                    GitProject::from_row,
-                )
-            }
+                params![repo_path, sp],
+                GitProject::from_row,
+            ),
         };
 
         result.optional().map_err(Into::into)
@@ -1867,11 +1861,7 @@ impl Store {
     }
 
     /// Update a git project's subpath
-    pub fn update_git_project(
-        &self,
-        id: &str,
-        subpath: Option<&str>,
-    ) -> Result<()> {
+    pub fn update_git_project(&self, id: &str, subpath: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
         conn.execute(

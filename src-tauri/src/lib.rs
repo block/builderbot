@@ -2118,6 +2118,7 @@ struct StartBranchNoteResponse {
 ///
 /// - `title`: The title for the note
 /// - `description`: What the note should cover (user's description)
+/// - `agent_id`: Optional AI agent/provider to use (e.g., "goose", "claude")
 #[tauri::command(rename_all = "camelCase")]
 async fn start_branch_note(
     state: State<'_, Arc<Store>>,
@@ -2125,6 +2126,7 @@ async fn start_branch_note(
     branch_id: String,
     title: String,
     description: String,
+    agent_id: Option<String>,
 ) -> Result<StartBranchNoteResponse, String> {
     // Get the branch to find the worktree path
     let branch = state
@@ -2149,7 +2151,7 @@ async fn start_branch_note(
     // Create an AI session in the worktree directory (with subpath if configured)
     let working_dir = get_branch_working_dir(&state, &branch)?;
     let ai_session_id = session_manager
-        .create_session(working_dir, None)
+        .create_session(working_dir, agent_id.as_deref())
         .await
         .map_err(|e| format!("Failed to create AI session: {}", e))?;
 
@@ -2366,10 +2368,7 @@ fn create_git_project(
                 "A project already exists for {} with subpath '{}'",
                 repo_name, sp
             ),
-            None => format!(
-                "A project already exists for {} with no subpath",
-                repo_name
-            ),
+            None => format!("A project already exists for {} with no subpath", repo_name),
         });
     }
 

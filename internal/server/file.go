@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/loganj/birdseye/internal/discovery"
@@ -15,6 +16,12 @@ import (
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
 )
+
+type Heading struct {
+	Level int
+	ID    string
+	Text  string
+}
 
 var md = goldmark.New(
 	goldmark.WithExtensions(
@@ -71,6 +78,9 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	htmlContent := buf.String()
+	headings := extractHeadings(htmlContent)
+
 	// Get parent directory path for back navigation
 	parentPath := filepath.Dir(filePath)
 	if parentPath == "." {
@@ -83,13 +93,15 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		FileName   string
 		ParentPath string
 		Content    template.HTML
+		Headings   []Heading
 		Raw        string
 	}{
 		Project:    project,
 		FilePath:   filePath,
 		FileName:   filepath.Base(filePath),
 		ParentPath: parentPath,
-		Content:    template.HTML(buf.String()),
+		Content:    template.HTML(htmlContent),
+		Headings:   headings,
 		Raw:        string(content),
 	}
 	s.tmpl.ExecuteTemplate(w, "file.html", data)
@@ -111,4 +123,25 @@ func stripFrontmatter(content []byte) []byte {
 	// Return everything after the closing ---
 	afterFrontmatter := rest[idx+4:]
 	return []byte(strings.TrimLeft(afterFrontmatter, "\n"))
+}
+
+var headingRegex = regexp.MustCompile(`<h([1-3]) id="([^"]+)"[^>]*>([^<]+)</h[1-3]>`)
+
+func extractHeadings(html string) []Heading {
+	matches := headingRegex.FindAllStringSubmatch(html, -1)
+	var headings []Heading
+	for _, m := range matches {
+		level := 1
+		if m[1] == "2" {
+			level = 2
+		} else if m[1] == "3" {
+			level = 3
+		}
+		headings = append(headings, Heading{
+			Level: level,
+			ID:    m[2],
+			Text:  strings.TrimSpace(m[3]),
+		})
+	}
+	return headings
 }

@@ -6,19 +6,73 @@
     <title>{{.FileName}} - Birdseye</title>
     <style>
         * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 24px;
+            margin: 0;
+            padding: 0;
             background: #fafafa;
             color: #333;
         }
         a { color: #0066cc; text-decoration: none; }
         a:hover { text-decoration: underline; }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 220px 1fr;
+            min-height: 100vh;
+        }
+
+        .sidebar {
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            overflow-y: auto;
+            padding: 24px 16px;
+            border-right: 1px solid #e8e8e8;
+            background: #fff;
+        }
+        .sidebar-title {
+            font-size: 0.7em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #888;
+            margin-bottom: 12px;
+        }
+        .sidebar-nav {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .sidebar-nav li {
+            margin-bottom: 4px;
+        }
+        .sidebar-nav a {
+            display: block;
+            padding: 4px 8px;
+            font-size: 0.85em;
+            color: #555;
+            border-radius: 4px;
+            text-decoration: none;
+            line-height: 1.4;
+        }
+        .sidebar-nav a:hover {
+            background: #f0f0f0;
+            text-decoration: none;
+        }
+        .sidebar-nav .level-2 { padding-left: 16px; }
+        .sidebar-nav .level-3 { padding-left: 28px; font-size: 0.8em; color: #777; }
+
+        .main {
+            padding: 24px 40px;
+            max-width: 900px;
+        }
+
         .breadcrumb { margin-bottom: 20px; color: #888; font-size: 0.9em; }
         .breadcrumb a { color: #666; }
         .breadcrumb a:hover { color: #0066cc; }
+
         .content {
             background: #fff;
             padding: 32px 40px;
@@ -79,7 +133,7 @@
         .content a {
             color: #0066cc;
         }
-        /* Style metadata paragraphs (those with bold labels like Date:, Researcher:) */
+        /* Style metadata paragraphs */
         .content > p:first-of-type strong {
             display: inline-block;
             min-width: 100px;
@@ -92,22 +146,43 @@
             color: #666;
             line-height: 2;
         }
-        /* Syntax highlighting - keep dark for code blocks */
         .content .chroma { background: #282a36; }
+
+        @media (max-width: 800px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                display: none;
+            }
+            .main {
+                padding: 24px;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="breadcrumb">
-        <a href="/">← All Projects</a>
-        / <a href="/project/{{.Project.Name}}">{{.Project.Name}}</a>
-        {{if .ParentPath}}
-        / <a href="/project/{{.Project.Name}}/{{.ParentPath}}">{{.ParentPath}}</a>
-        {{end}}
-        / {{.FileName}}
-    </div>
+    <div class="layout">
+        <div class="sidebar">
+            <div class="sidebar-title">On this page</div>
+            <ul class="sidebar-nav">
+                {{range .Headings}}
+                <li><a href="#{{.ID}}" class="level-{{.Level}}">{{.Text}}</a></li>
+                {{end}}
+            </ul>
+        </div>
 
-    <div class="content">
-        {{.Content}}
+        <div class="main">
+            <div class="breadcrumb">
+                <a href="/">← All Projects</a>
+                / <a href="/project/{{.Project.Name}}">{{.Project.Name}}</a>
+                / {{.FileName}}
+            </div>
+
+            <div class="content">
+                {{.Content}}
+            </div>
+        </div>
     </div>
 </body>
 </html>

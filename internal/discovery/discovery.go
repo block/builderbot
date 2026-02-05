@@ -51,7 +51,7 @@ func FindProjects(root string) ([]Project, error) {
 		}
 		project.Git = GetGitInfo(projectPath)
 		project.FileCount = countMdFiles(thoughtsPath)
-		project.Summary = generateSummary(projectPath, thoughtsPath)
+		project.Summary = GenerateSummary(projectPath, thoughtsPath)
 		project.LastModified = getLastModified(thoughtsPath)
 
 		projects = append(projects, project)
@@ -74,6 +74,61 @@ func FindProjects(root string) ([]Project, error) {
 
 	sort.Slice(projects, func(i, j int) bool {
 		// Put (root) first, then sort alphabetically
+		if projects[i].Name == "(root)" {
+			return true
+		}
+		if projects[j].Name == "(root)" {
+			return false
+		}
+		return strings.ToLower(projects[i].Name) < strings.ToLower(projects[j].Name)
+	})
+
+	return projects, nil
+}
+
+// FindProjectsFast discovers projects by only checking directory structure.
+// No git commands, file counting, or summary generation - just checks which
+// projects have a thoughts/ subdirectory. Use cache.RefreshAllProjects() after
+// to populate file lists, counts, and mod times.
+func FindProjectsFast(root string) ([]Project, error) {
+	var projects []Project
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name()[0] == '.' {
+			continue
+		}
+
+		projectPath := filepath.Join(root, entry.Name())
+		thoughtsPath := filepath.Join(projectPath, "thoughts")
+
+		info, err := os.Stat(thoughtsPath)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+
+		projects = append(projects, Project{
+			Name:         entry.Name(),
+			Path:         projectPath,
+			ThoughtsPath: thoughtsPath,
+		})
+	}
+
+	// Also check for thoughts/ directly in root
+	rootThoughts := filepath.Join(root, "thoughts")
+	if info, err := os.Stat(rootThoughts); err == nil && info.IsDir() {
+		projects = append(projects, Project{
+			Name:         "(root)",
+			Path:         root,
+			ThoughtsPath: rootThoughts,
+		})
+	}
+
+	sort.Slice(projects, func(i, j int) bool {
 		if projects[i].Name == "(root)" {
 			return true
 		}
@@ -110,7 +165,8 @@ func getLastModified(thoughtsPath string) time.Time {
 	return latest
 }
 
-func generateSummary(projectPath, thoughtsPath string) string {
+// GenerateSummary generates a summary from recent thoughts files.
+func GenerateSummary(projectPath, thoughtsPath string) string {
 	// Generate summary from thoughts files
 	files := getRecentThoughtsFiles(thoughtsPath, 5)
 	if len(files) == 0 {

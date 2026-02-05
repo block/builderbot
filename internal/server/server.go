@@ -1,31 +1,35 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/birdseye/internal/watcher"
 	"github.com/loganj/birdseye/templates"
 )
 
 type Server struct {
-	root     string
-	projects []discovery.Project
+	cache    *cache.Cache
+	watcher  *watcher.Watcher
 	mux      *http.ServeMux
 	tmpl     *template.Template
+	loadOnce sync.Once
 }
 
-func New(root string, projects []discovery.Project) *Server {
+func New(c *cache.Cache, w *watcher.Watcher) *Server {
 	s := &Server{
-		root:     root,
-		projects: projects,
-		mux:      http.NewServeMux(),
+		cache:   c,
+		watcher: w,
+		mux:     http.NewServeMux(),
 	}
 
 	// Parse templates from embedded filesystem
@@ -36,7 +40,53 @@ func New(root string, projects []discovery.Project) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.ensureLoaded()
 	s.mux.ServeHTTP(w, r)
+}
+
+// ensureLoaded does fast project discovery on first request, then enriches in background.
+func (s *Server) ensureLoaded() {
+	s.loadOnce.Do(func() {
+		root := s.cache.Root()
+		projects, err := discovery.FindProjectsFast(root)
+		if err != nil {
+			log.Printf("Error discovering projects: %v", err)
+			return
+		}
+
+		log.Printf("Found %d projects with thoughts/ directories", len(projects))
+
+		s.cache.SetProjects(projects)
+		s.cache.RefreshAllProjects()
+
+		if err := s.watcher.Start(); err != nil {
+			log.Printf("Warning: file watcher failed to start: %v", err)
+		}
+
+		go s.enrichProjects()
+	})
+}
+
+// enrichProjects fills in git info and summaries in the background.
+func (s *Server) enrichProjects() {
+	for _, p := range s.cache.Projects() {
+		var git *discovery.GitInfo
+		if p.Name != "(root)" {
+			git = discovery.GetGitInfo(p.Path)
+		}
+
+		var summary string
+		if p.Name == "(root)" {
+			summary = "Cross-project notes and research"
+		} else {
+			summary = discovery.GenerateSummary(p.Path, p.ThoughtsPath)
+		}
+
+		s.cache.EnrichProject(p.Name, git, summary)
+	}
+
+	log.Printf("Background enrichment complete (git info + summaries)")
+	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 }
 
 func (s *Server) routes() {
@@ -45,6 +95,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/file/", s.handleFile)
 	s.mux.HandleFunc("/search", s.handleSearch)
 	s.mux.HandleFunc("/recent", s.handleRecent)
+	s.mux.HandleFunc("/events", s.handleEvents)
+	// API endpoints for dynamic updates
+	s.mux.HandleFunc("/api/projects", s.handleAPIProjects)
+	s.mux.HandleFunc("/api/project/", s.handleAPIProjectFiles)
+	s.mux.HandleFunc("/api/recent", s.handleAPIRecent)
 }
 
 type IndexFile struct {
@@ -61,41 +116,21 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Collect all files
-	var files []IndexFile
-	for _, project := range s.projects {
-		filepath.Walk(project.ThoughtsPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
-				return nil
-			}
-			relPath, _ := filepath.Rel(project.ThoughtsPath, path)
-			files = append(files, IndexFile{
-				Project:  project.Name,
-				FilePath: relPath,
-				FileName: filepath.Base(path),
-				ModTime:  info.ModTime(),
-				Age:      formatAge(info.ModTime()),
-			})
-			return nil
-		})
+	// Get files from cache
+	allFiles := s.cache.AllFiles(100)
+	files := make([]IndexFile, len(allFiles))
+	for i, f := range allFiles {
+		files[i] = IndexFile{
+			Project:  f.Project,
+			FilePath: f.Path,
+			FileName: f.Name,
+			ModTime:  f.ModTime,
+			Age:      formatAge(f.ModTime),
+		}
 	}
 
-	// Sort by modification time
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].ModTime.After(files[j].ModTime)
-	})
-
-	// Limit to 100 most recent
-	if len(files) > 100 {
-		files = files[:100]
-	}
-
-	// Sort projects by last modified
-	sortedProjects := make([]discovery.Project, len(s.projects))
-	copy(sortedProjects, s.projects)
-	sort.Slice(sortedProjects, func(i, j int) bool {
-		return sortedProjects[i].LastModified.After(sortedProjects[j].LastModified)
-	})
+	// Get projects sorted by last modified
+	sortedProjects := s.cache.ProjectsSortedByModTime()
 
 	data := struct {
 		Projects []discovery.Project
@@ -141,48 +176,24 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	projectName = strings.TrimSuffix(projectName, "/")
 
 	// Find project
-	var project *discovery.Project
-	for i := range s.projects {
-		if s.projects[i].Name == projectName {
-			project = &s.projects[i]
-			break
-		}
-	}
+	project := s.cache.FindProject(projectName)
 	if project == nil {
 		http.NotFound(w, r)
 		return
 	}
 
-	// Collect all markdown files recursively
-	var files []ProjectFile
-	filepath.Walk(project.ThoughtsPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
-			return nil
+	// Get files from cache
+	cachedFiles := s.cache.ProjectFiles(projectName)
+	files := make([]ProjectFile, len(cachedFiles))
+	for i, f := range cachedFiles {
+		files[i] = ProjectFile{
+			Name:     f.Name,
+			Path:     f.Path,
+			ModTime:  f.ModTime,
+			Age:      formatAge(f.ModTime),
+			FileType: f.FileType,
 		}
-		relPath, _ := filepath.Rel(project.ThoughtsPath, path)
-
-		// Determine file type based on path
-		fileType := "other"
-		if strings.Contains(relPath, "research") {
-			fileType = "research"
-		} else if strings.Contains(relPath, "plan") {
-			fileType = "plan"
-		}
-
-		files = append(files, ProjectFile{
-			Name:     filepath.Base(path),
-			Path:     relPath,
-			ModTime:  info.ModTime(),
-			Age:      formatAge(info.ModTime()),
-			FileType: fileType,
-		})
-		return nil
-	})
-
-	// Sort by modification time, newest first
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].ModTime.After(files[j].ModTime)
-	})
+	}
 
 	data := struct {
 		Project *discovery.Project
@@ -192,4 +203,131 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		Files:   files,
 	}
 	s.tmpl.ExecuteTemplate(w, "project.html", data)
+}
+
+// handleEvents is the SSE endpoint for live updates
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	// Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Subscribe to events
+	events := s.watcher.Subscribe()
+	defer s.watcher.Unsubscribe(events)
+
+	// Send initial connected event
+	fmt.Fprintf(w, "event: connected\ndata: {}\n\n")
+	flusher.Flush()
+
+	// Listen for events or client disconnect
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case evt, ok := <-events:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(evt)
+			fmt.Fprintf(w, "event: change\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
+}
+
+// API handlers for dynamic updates
+
+type APIProject struct {
+	Name         string `json:"name"`
+	Branch       string `json:"branch,omitempty"`
+	Dirty        bool   `json:"dirty,omitempty"`
+	FileCount    int    `json:"fileCount"`
+	Summary      string `json:"summary,omitempty"`
+	LastModified string `json:"lastModified"`
+}
+
+func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	projects := s.cache.ProjectsSortedByModTime()
+	result := make([]APIProject, len(projects))
+	for i, p := range projects {
+		result[i] = APIProject{
+			Name:         p.Name,
+			FileCount:    p.FileCount,
+			Summary:      p.Summary,
+			LastModified: p.LastModified.Format(time.RFC3339),
+		}
+		if p.Git != nil {
+			result[i].Branch = p.Git.Branch
+			result[i].Dirty = p.Git.Dirty
+		}
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+type APIFile struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Project  string `json:"project,omitempty"`
+	Age      string `json:"age"`
+	FileType string `json:"fileType,omitempty"`
+}
+
+func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	projectName := strings.TrimPrefix(r.URL.Path, "/api/project/")
+	projectName = strings.TrimSuffix(projectName, "/")
+
+	files := s.cache.ProjectFiles(projectName)
+	result := make([]APIFile, len(files))
+	for i, f := range files {
+		result[i] = APIFile{
+			Name:     f.Name,
+			Path:     f.Path,
+			Age:      formatAge(f.ModTime),
+			FileType: f.FileType,
+		}
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) handleAPIRecent(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	files := s.cache.AllFiles(50)
+	result := make([]APIFile, len(files))
+	for i, f := range files {
+		result[i] = APIFile{
+			Name:    f.Name,
+			Path:    f.Path,
+			Project: f.Project,
+			Age:     formatAge(f.ModTime),
+		}
+	}
+	json.NewEncoder(w).Encode(result)
+}
+
+// Helper for templates - kept for backward compat
+func (s *Server) projects() []discovery.Project {
+	return s.cache.Projects()
+}
+
+// sortProjectsByModTime is used by handleIndex
+func sortProjectsByModTime(projects []discovery.Project) []discovery.Project {
+	sorted := make([]discovery.Project, len(projects))
+	copy(sorted, projects)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].LastModified.After(sorted[j].LastModified)
+	})
+	return sorted
 }

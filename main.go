@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
-	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/server"
+	"github.com/loganj/birdseye/internal/watcher"
 )
 
 func main() {
@@ -26,24 +31,37 @@ func main() {
 		rootDir = filepath.Join(home, "Development")
 	}
 
-	fmt.Printf("Scanning %s for projects with thoughts/ directories...\n", rootDir)
+	c := cache.New(rootDir)
 
-	projects, err := discovery.FindProjects(rootDir)
+	w, err := watcher.New(c)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Failed to create watcher: %v", err)
 	}
+	defer w.Stop()
 
-	fmt.Printf("Found %d projects\n", len(projects))
-	for _, p := range projects {
-		if p.Git != nil {
-			fmt.Printf("  - %s (%s, %d files)\n", p.Name, p.Git.Branch, p.FileCount)
-		} else {
-			fmt.Printf("  - %s (%d files)\n", p.Name, p.FileCount)
-		}
-	}
-
-	srv := server.New(rootDir, projects)
+	srv := server.New(c, w)
 	addr := fmt.Sprintf(":%d", *port)
-	fmt.Printf("\nStarting server at http://localhost%s\n", addr)
-	log.Fatal(http.ListenAndServe(addr, srv))
+
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: srv,
+	}
+
+	// Graceful shutdown on SIGINT/SIGTERM
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		fmt.Printf("\nStarting server at http://localhost%s\n", addr)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	<-done
+	fmt.Println("\nShutting down...")
+	w.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	httpServer.Shutdown(ctx)
 }

@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -69,22 +70,46 @@ func (s *Server) ensureLoaded() {
 
 // enrichProjects fills in git info and summaries in the background.
 func (s *Server) enrichProjects() {
-	for _, p := range s.cache.Projects() {
-		var git *discovery.GitInfo
-		if p.Name != "(root)" {
-			git = discovery.GetGitInfo(p.Path)
-		}
+	projects := s.cache.Projects()
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8) // bound concurrency to avoid fork-bombing
 
-		var summary string
-		if p.Name == "(root)" {
-			summary = "Cross-project notes and research"
-		} else {
-			summary = discovery.GenerateSummary(p.Path, p.ThoughtsPath)
-		}
+	for _, p := range projects {
+		wg.Add(1)
+		go func(p discovery.Project) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
-		s.cache.EnrichProject(p.Name, git, summary)
+			var git *discovery.GitInfo
+			if p.Name != "(root)" {
+				git = discovery.GetGitInfo(p.Path)
+			}
+
+			var summary string
+			if p.Name == "(root)" {
+				summary = "Cross-project notes and research"
+			} else {
+				// Use cached file list to avoid re-walking the directory
+				cachedFiles := s.cache.ProjectFiles(p.Name)
+				if len(cachedFiles) > 0 {
+					limit := 5
+					if len(cachedFiles) < limit {
+						limit = len(cachedFiles)
+					}
+					filePaths := make([]string, limit)
+					for i, f := range cachedFiles[:limit] {
+						filePaths[i] = filepath.Join(p.ThoughtsPath, f.Path)
+					}
+					summary = discovery.GenerateSummaryFromFiles(filePaths)
+				}
+			}
+
+			s.cache.EnrichProject(p.Name, git, summary)
+		}(p)
 	}
 
+	wg.Wait()
 	log.Printf("Background enrichment complete (git info + summaries)")
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 }
@@ -195,12 +220,16 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	gitStatus := discovery.GetGitStatus(project.Path)
+
 	data := struct {
-		Project *discovery.Project
-		Files   []ProjectFile
+		Project   *discovery.Project
+		Files     []ProjectFile
+		GitStatus *discovery.GitStatus
 	}{
-		Project: project,
-		Files:   files,
+		Project:   project,
+		Files:     files,
+		GitStatus: gitStatus,
 	}
 	s.tmpl.ExecuteTemplate(w, "project.html", data)
 }

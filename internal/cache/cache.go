@@ -146,9 +146,16 @@ func (c *Cache) RefreshProject(projectName string) {
 
 // RefreshAllProjects rescans all projects' files and updates metadata
 func (c *Cache) RefreshAllProjects() {
-	for _, p := range c.Projects() {
-		c.RefreshProject(p.Name)
+	projects := c.Projects()
+	var wg sync.WaitGroup
+	for _, p := range projects {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			c.RefreshProject(name)
+		}(p.Name)
 	}
+	wg.Wait()
 }
 
 // EnrichProject updates a project's git info and summary without rescanning files
@@ -164,12 +171,29 @@ func (c *Cache) EnrichProject(name string, git *discovery.GitInfo, summary strin
 	}
 }
 
-// RescanProjects rescans the root directory for projects
+// RescanProjects rescans the root directory for projects using the fast path,
+// preserving existing git info and summaries for known projects.
 func (c *Cache) RescanProjects() error {
-	projects, err := discovery.FindProjects(c.root)
+	projects, err := discovery.FindProjectsFast(c.root)
 	if err != nil {
 		return err
 	}
+
+	// Preserve enrichment data (git info, summary) for projects we already know about
+	c.mu.RLock()
+	existing := make(map[string]discovery.Project)
+	for _, p := range c.projects {
+		existing[p.Name] = p
+	}
+	c.mu.RUnlock()
+
+	for i := range projects {
+		if prev, ok := existing[projects[i].Name]; ok {
+			projects[i].Git = prev.Git
+			projects[i].Summary = prev.Summary
+		}
+	}
+
 	c.SetProjects(projects)
 	c.RefreshAllProjects()
 	return nil

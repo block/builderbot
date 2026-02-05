@@ -173,19 +173,34 @@ func GenerateSummary(projectPath, thoughtsPath string) string {
 		return ""
 	}
 
+	filePaths := make([]string, len(files))
+	for i, f := range files {
+		filePaths[i] = f.path
+	}
+	return GenerateSummaryFromFiles(filePaths)
+}
+
+// GenerateSummaryFromFiles generates a summary from pre-sorted file paths.
+// Use this when you already have the recent files list (e.g. from cache)
+// to avoid re-walking the directory.
+func GenerateSummaryFromFiles(filePaths []string) string {
+	if len(filePaths) == 0 {
+		return ""
+	}
+
 	// Try to extract meaningful content from recent files
 	var topics []string
 	datePrefix := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-?`)
 
-	for _, f := range files {
+	for _, path := range filePaths {
 		// Try to get the h1 title from the file
-		if title := extractFileTitle(f.path); title != "" {
+		if title := extractFileTitle(path); title != "" {
 			topics = append(topics, title)
 			continue
 		}
 
 		// Fall back to humanized filename
-		name := strings.TrimSuffix(filepath.Base(f.path), ".md")
+		name := strings.TrimSuffix(filepath.Base(path), ".md")
 		name = datePrefix.ReplaceAllString(name, "")
 		name = strings.ReplaceAll(name, "-", " ")
 		name = strings.TrimSpace(name)

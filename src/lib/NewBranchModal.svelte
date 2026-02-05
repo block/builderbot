@@ -27,20 +27,27 @@
   import { listDirectory, getHomeDir, searchDirectories, type DirEntry } from './services/files';
   import { listRefs } from './services/git';
 
+  /** Info about a branch being created (for showing a placeholder) */
+  export interface PendingBranch {
+    repoPath: string;
+    branchName: string;
+    baseBranch: string;
+  }
+
   interface Props {
+    onCreating: (pending: PendingBranch) => void;
     onCreated: (branch: Branch) => void;
+    onCreateFailed: (pending: PendingBranch, error: string) => void;
     onClose: () => void;
   }
 
-  let { onCreated, onClose }: Props = $props();
+  let { onCreating, onCreated, onCreateFailed, onClose }: Props = $props();
 
   // State
   type Step = 'repo' | 'name';
   let step = $state<Step>('repo');
   let selectedRepo = $state<string | null>(null);
   let branchName = $state('');
-  let creating = $state(false);
-  let error = $state<string | null>(null);
 
   // Repo picker state
   let query = $state('');
@@ -158,7 +165,6 @@
 
   async function selectRepo(path: string) {
     selectedRepo = path;
-    error = null;
 
     // Detect the default branch for display
     try {
@@ -201,7 +207,6 @@
       detectedDefaultBranch = null;
       selectedBaseBranch = null;
       branchName = '';
-      error = null;
     }
   }
 
@@ -236,8 +241,14 @@
   async function handleCreate() {
     if (!selectedRepo || !branchName.trim()) return;
 
-    creating = true;
-    error = null;
+    const pending: PendingBranch = {
+      repoPath: selectedRepo,
+      branchName: branchName.trim(),
+      baseBranch: effectiveBaseBranch,
+    };
+
+    // Notify parent immediately so it can show a placeholder
+    onCreating(pending);
 
     try {
       // Pass selected base branch or undefined to use detected default
@@ -248,9 +259,8 @@
       );
       onCreated(branch);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      creating = false;
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      onCreateFailed(pending, errorMsg);
     }
   }
 
@@ -463,20 +473,9 @@
             />
           </div>
 
-          {#if error}
-            <p class="error">{error}</p>
-          {/if}
-
           <div class="actions">
             <button class="cancel-button" onclick={goBack}>Cancel</button>
-            <button
-              class="create-button"
-              onclick={handleCreate}
-              disabled={!branchName.trim() || creating}
-            >
-              {#if creating}
-                <Loader2 size={14} class="spinner" />
-              {/if}
+            <button class="create-button" onclick={handleCreate} disabled={!branchName.trim()}>
               Create Branch
             </button>
           </div>
@@ -843,15 +842,6 @@
 
   .branch-input::placeholder {
     color: var(--text-faint);
-  }
-
-  .error {
-    margin: 0;
-    padding: 8px 12px;
-    background-color: var(--ui-danger-bg);
-    border-radius: 6px;
-    font-size: var(--size-sm);
-    color: var(--ui-danger);
   }
 
   .actions {

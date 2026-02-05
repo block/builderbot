@@ -1346,47 +1346,57 @@ impl From<git::CommitInfo> for CommitInfo {
 
 /// Create a new branch with a worktree.
 /// If base_branch is not provided, uses the detected default branch (e.g., origin/main).
+/// This runs asynchronously to avoid blocking the UI during slow git operations.
 #[tauri::command(rename_all = "camelCase")]
-fn create_branch(
+async fn create_branch(
     state: State<'_, Arc<Store>>,
     repo_path: String,
     branch_name: String,
     base_branch: Option<String>,
 ) -> Result<Branch, String> {
-    let repo = Path::new(&repo_path);
+    // Clone Arc for move into spawn_blocking
+    let store = state.inner().clone();
 
-    // Use provided base branch or detect the default
-    let base_branch = match base_branch {
-        Some(b) if !b.is_empty() => b,
-        _ => git::detect_default_branch(repo).map_err(|e| e.to_string())?,
-    };
+    // Run blocking git operations on a separate thread
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = Path::new(&repo_path);
 
-    // Create the worktree (this will fail atomically if branch already exists)
-    let worktree_path = git::create_worktree(repo, &branch_name, &base_branch).map_err(|e| {
-        // Provide user-friendly error for common case
-        let msg = e.to_string();
-        if msg.contains("already exists") {
-            format!("Branch '{}' already exists", branch_name)
-        } else {
-            msg
+        // Use provided base branch or detect the default
+        let base_branch = match base_branch {
+            Some(b) if !b.is_empty() => b,
+            _ => git::detect_default_branch(repo).map_err(|e| e.to_string())?,
+        };
+
+        // Create the worktree (this will fail atomically if branch already exists)
+        let worktree_path =
+            git::create_worktree(repo, &branch_name, &base_branch).map_err(|e| {
+                // Provide user-friendly error for common case
+                let msg = e.to_string();
+                if msg.contains("already exists") {
+                    format!("Branch '{}' already exists", branch_name)
+                } else {
+                    msg
+                }
+            })?;
+
+        // Create the branch record
+        let branch = Branch::new(
+            &repo_path,
+            &branch_name,
+            worktree_path.to_string_lossy().to_string(),
+            &base_branch,
+        );
+
+        // If DB insert fails, clean up the worktree
+        if let Err(e) = store.create_branch(&branch) {
+            let _ = git::remove_worktree(repo, &worktree_path); // Best-effort cleanup
+            return Err(e.to_string());
         }
-    })?;
 
-    // Create the branch record
-    let branch = Branch::new(
-        &repo_path,
-        &branch_name,
-        worktree_path.to_string_lossy().to_string(),
-        &base_branch,
-    );
-
-    // If DB insert fails, clean up the worktree
-    if let Err(e) = state.create_branch(&branch) {
-        let _ = git::remove_worktree(repo, &worktree_path); // Best-effort cleanup
-        return Err(e.to_string());
-    }
-
-    Ok(branch)
+        Ok(branch)
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 /// List git branches (local and remote) for base branch selection.
@@ -1439,25 +1449,34 @@ fn update_branch_base(
 }
 
 /// Delete a branch and its worktree.
+/// This runs asynchronously to avoid blocking the UI during slow git operations.
 #[tauri::command(rename_all = "camelCase")]
-fn delete_branch(state: State<'_, Arc<Store>>, branch_id: String) -> Result<(), String> {
-    // Get the branch first
-    let branch = state
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch '{}' not found", branch_id))?;
+async fn delete_branch(state: State<'_, Arc<Store>>, branch_id: String) -> Result<(), String> {
+    // Clone Arc for move into spawn_blocking
+    let store = state.inner().clone();
 
-    // Remove the worktree
-    let repo = Path::new(&branch.repo_path);
-    let worktree = Path::new(&branch.worktree_path);
-    if worktree.exists() {
-        git::remove_worktree(repo, worktree).map_err(|e| e.to_string())?;
-    }
+    // Run blocking git operations on a separate thread
+    tauri::async_runtime::spawn_blocking(move || {
+        // Get the branch first
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch '{}' not found", branch_id))?;
 
-    // Delete from database
-    state.delete_branch(&branch_id).map_err(|e| e.to_string())?;
+        // Remove the worktree
+        let repo = Path::new(&branch.repo_path);
+        let worktree = Path::new(&branch.worktree_path);
+        if worktree.exists() {
+            git::remove_worktree(repo, worktree).map_err(|e| e.to_string())?;
+        }
 
-    Ok(())
+        // Delete from database
+        store.delete_branch(&branch_id).map_err(|e| e.to_string())?;
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {}", e))?
 }
 
 /// Get commits for a branch since it diverged from base.

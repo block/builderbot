@@ -10,13 +10,13 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Plus, Sparkles, Folder } from 'lucide-svelte';
+  import { Plus, Sparkles, Folder, GitBranch, Loader2, X } from 'lucide-svelte';
   import type { Branch } from './services/branch';
   import * as branchService from './services/branch';
   import { listenToSessionStatus, type SessionStatusEvent } from './services/ai';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import BranchCard from './BranchCard.svelte';
-  import NewBranchModal from './NewBranchModal.svelte';
+  import NewBranchModal, { type PendingBranch } from './NewBranchModal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { DiffSpec } from './types';
 
@@ -33,6 +33,16 @@
   let error = $state<string | null>(null);
   let refreshKey = $state(0);
 
+  // Pending branches (being created asynchronously)
+  let pendingBranches = $state<PendingBranch[]>([]);
+  // Failed branch creations (to show error state)
+  let failedBranches = $state<Map<string, string>>(new Map());
+
+  // Branches currently being deleted (show spinner)
+  let deletingBranchIds = $state<Set<string>>(new Set());
+  // Failed branch deletions (to show error state)
+  let deleteErrors = $state<Map<string, string>>(new Map());
+
   // Event listener cleanup
   let unlistenStatus: UnlistenFn | null = null;
 
@@ -47,21 +57,39 @@
     });
   });
 
-  // Group branches by repo path
+  // Group branches by repo path (including pending ones)
   let branchesByRepo = $derived.by(() => {
-    const grouped = new Map<string, Branch[]>();
+    const grouped = new Map<string, { branches: Branch[]; pending: PendingBranch[] }>();
+
+    // Add real branches
     for (const branch of branches) {
-      const existing = grouped.get(branch.repoPath) || [];
-      existing.push(branch);
+      const existing = grouped.get(branch.repoPath) || { branches: [], pending: [] };
+      existing.branches.push(branch);
       grouped.set(branch.repoPath, existing);
     }
+
+    // Add pending branches
+    for (const pending of pendingBranches) {
+      const existing = grouped.get(pending.repoPath) || { branches: [], pending: [] };
+      existing.pending.push(pending);
+      grouped.set(pending.repoPath, existing);
+    }
+
     return grouped;
   });
+
+  // Check if we have any branches or pending branches
+  let hasBranches = $derived(branches.length > 0 || pendingBranches.length > 0);
 
   // Extract repo name from path
   function repoName(path: string): string {
     const parts = path.split('/');
     return parts[parts.length - 1] || path;
+  }
+
+  // Generate a unique key for a pending branch
+  function pendingKey(pending: PendingBranch): string {
+    return `${pending.repoPath}:${pending.branchName}`;
   }
 
   // Load branches on mount and set up session status listener
@@ -118,9 +146,39 @@
     showNewBranchModal = true;
   }
 
-  async function handleBranchCreated(branch: Branch) {
-    branches = [...branches, branch];
+  function handleBranchCreating(pending: PendingBranch) {
+    // Add to pending list and close modal immediately
+    pendingBranches = [...pendingBranches, pending];
+    // Clear any previous failure for this branch
+    const key = pendingKey(pending);
+    if (failedBranches.has(key)) {
+      const newFailed = new Map(failedBranches);
+      newFailed.delete(key);
+      failedBranches = newFailed;
+    }
     showNewBranchModal = false;
+  }
+
+  function handleBranchCreated(branch: Branch) {
+    // Remove from pending and add to real branches
+    pendingBranches = pendingBranches.filter(
+      (p) => !(p.repoPath === branch.repoPath && p.branchName === branch.branchName)
+    );
+    branches = [...branches, branch];
+  }
+
+  function handleBranchCreateFailed(pending: PendingBranch, errorMsg: string) {
+    // Mark as failed (keep in pending list but show error state)
+    const key = pendingKey(pending);
+    failedBranches = new Map(failedBranches).set(key, errorMsg);
+  }
+
+  function dismissFailedBranch(pending: PendingBranch) {
+    const key = pendingKey(pending);
+    pendingBranches = pendingBranches.filter((p) => pendingKey(p) !== key);
+    const newFailed = new Map(failedBranches);
+    newFailed.delete(key);
+    failedBranches = newFailed;
   }
 
   async function handleDeleteBranch(branchId: string) {
@@ -134,14 +192,31 @@
   async function confirmDeleteBranch() {
     if (!branchToDelete) return;
 
+    const id = branchToDelete.id;
+    // Close dialog and show spinner immediately
+    branchToDelete = null;
+    deletingBranchIds = new Set(deletingBranchIds).add(id);
+
     try {
-      await branchService.deleteBranch(branchToDelete.id);
-      branches = branches.filter((b) => b.id !== branchToDelete!.id);
+      await branchService.deleteBranch(id);
+      // Success: remove branch and spinner
+      branches = branches.filter((b) => b.id !== id);
+      const newDeleting = new Set(deletingBranchIds);
+      newDeleting.delete(id);
+      deletingBranchIds = newDeleting;
     } catch (e) {
-      console.error('Failed to delete branch:', e);
-    } finally {
-      branchToDelete = null;
+      // Failure: remove spinner, show error card
+      const newDeleting = new Set(deletingBranchIds);
+      newDeleting.delete(id);
+      deletingBranchIds = newDeleting;
+      deleteErrors = new Map(deleteErrors).set(id, e instanceof Error ? e.message : String(e));
     }
+  }
+
+  function dismissDeleteError(branchId: string) {
+    const newErrors = new Map(deleteErrors);
+    newErrors.delete(branchId);
+    deleteErrors = newErrors;
   }
 
   function handleViewDiff(branch: Branch) {
@@ -206,7 +281,7 @@
       <div class="error-state">
         <p>{error}</p>
       </div>
-    {:else if branches.length === 0}
+    {:else if !hasBranches}
       <div class="empty-state">
         <Sparkles size={48} strokeWidth={1} />
         <h2>Welcome to Staged</h2>
@@ -220,7 +295,7 @@
     {:else}
       <!-- Branches grouped by repo -->
       <div class="repos-list">
-        {#each [...branchesByRepo.entries()] as [repoPath, repoBranches] (repoPath)}
+        {#each [...branchesByRepo.entries()] as [repoPath, { branches: repoBranches, pending: repoPending }] (repoPath)}
           <div class="repo-section">
             <div class="repo-header">
               <Folder size={14} class="repo-icon" />
@@ -229,13 +304,88 @@
             </div>
             <div class="branches-list">
               {#each repoBranches as branch (branch.id)}
-                <BranchCard
-                  {branch}
-                  {refreshKey}
-                  onViewDiff={() => handleViewDiff(branch)}
-                  onViewCommitDiff={(sha) => handleViewCommitDiff(branch, sha)}
-                  onDelete={() => handleDeleteBranch(branch.id)}
-                />
+                {@const isDeleting = deletingBranchIds.has(branch.id)}
+                {@const deleteFailed = deleteErrors.get(branch.id)}
+                {#if isDeleting || deleteFailed}
+                  <div class="pending-branch-card" class:failed={!!deleteFailed}>
+                    <div class="pending-header">
+                      <div class="pending-info">
+                        <GitBranch size={16} class="pending-branch-icon" />
+                        <span class="pending-branch-name">{branch.branchName}</span>
+                        <span class="pending-separator">›</span>
+                        <span class="pending-base-branch">{branch.baseBranch.replace(/^origin\//, '')}</span>
+                      </div>
+                      {#if deleteFailed}
+                        <button
+                          class="dismiss-button"
+                          onclick={() => dismissDeleteError(branch.id)}
+                          title="Dismiss"
+                        >
+                          <X size={14} />
+                        </button>
+                      {/if}
+                    </div>
+                    <div class="pending-content">
+                      {#if deleteFailed}
+                        <div class="pending-error">
+                          <span class="error-label">Failed to delete branch:</span>
+                          <span class="error-message">{deleteFailed}</span>
+                        </div>
+                      {:else}
+                        <div class="pending-status">
+                          <Loader2 size={14} class="spinner" />
+                          <span>Removing worktree...</span>
+                        </div>
+                      {/if}
+                    </div>
+                  </div>
+                {:else}
+                  <BranchCard
+                    {branch}
+                    {refreshKey}
+                    onViewDiff={() => handleViewDiff(branch)}
+                    onViewCommitDiff={(sha) => handleViewCommitDiff(branch, sha)}
+                    onDelete={() => handleDeleteBranch(branch.id)}
+                  />
+                {/if}
+              {/each}
+              <!-- Pending branches (being created) -->
+              {#each repoPending as pending (pendingKey(pending))}
+                {@const failed = failedBranches.get(pendingKey(pending))}
+                <div class="pending-branch-card" class:failed={!!failed}>
+                  <div class="pending-header">
+                    <div class="pending-info">
+                      <GitBranch size={16} class="pending-branch-icon" />
+                      <span class="pending-branch-name">{pending.branchName}</span>
+                      <span class="pending-separator">›</span>
+                      <span class="pending-base-branch"
+                        >{pending.baseBranch.replace(/^origin\//, '')}</span
+                      >
+                    </div>
+                    {#if failed}
+                      <button
+                        class="dismiss-button"
+                        onclick={() => dismissFailedBranch(pending)}
+                        title="Dismiss"
+                      >
+                        <X size={14} />
+                      </button>
+                    {/if}
+                  </div>
+                  <div class="pending-content">
+                    {#if failed}
+                      <div class="pending-error">
+                        <span class="error-label">Failed to create branch:</span>
+                        <span class="error-message">{failed}</span>
+                      </div>
+                    {:else}
+                      <div class="pending-status">
+                        <Loader2 size={14} class="spinner" />
+                        <span>Setting up worktree...</span>
+                      </div>
+                    {/if}
+                  </div>
+                </div>
               {/each}
             </div>
           </div>
@@ -255,7 +405,12 @@
 
 <!-- New branch modal -->
 {#if showNewBranchModal}
-  <NewBranchModal onCreated={handleBranchCreated} onClose={() => (showNewBranchModal = false)} />
+  <NewBranchModal
+    onCreating={handleBranchCreating}
+    onCreated={handleBranchCreated}
+    onCreateFailed={handleBranchCreateFailed}
+    onClose={() => (showNewBranchModal = false)}
+  />
 {/if}
 
 <!-- Delete confirmation dialog -->
@@ -415,5 +570,116 @@
     border-color: var(--ui-accent);
     color: var(--ui-accent);
     background-color: var(--bg-hover);
+  }
+
+  /* Pending branch card */
+  .pending-branch-card {
+    display: flex;
+    flex-direction: column;
+    background-color: var(--bg-primary);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .pending-branch-card.failed {
+    border: 1px solid var(--ui-danger-bg);
+  }
+
+  .pending-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .pending-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  :global(.pending-branch-icon) {
+    color: var(--status-renamed);
+  }
+
+  .pending-branch-name {
+    font-size: var(--size-md);
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .pending-separator {
+    color: var(--text-faint);
+    font-size: var(--size-md);
+  }
+
+  .pending-base-branch {
+    font-size: var(--size-md);
+    font-weight: 500;
+    color: var(--text-muted);
+  }
+
+  .dismiss-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .dismiss-button:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .pending-content {
+    padding: 12px 16px;
+  }
+
+  .pending-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+  }
+
+  .pending-error {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .error-label {
+    font-size: var(--size-sm);
+    color: var(--ui-danger);
+    font-weight: 500;
+  }
+
+  .error-message {
+    font-size: var(--size-sm);
+    color: var(--text-muted);
+  }
+
+  /* Spinner animation */
+  :global(.spinner) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

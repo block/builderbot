@@ -10,13 +10,27 @@ run: build
     #!/usr/bin/env bash
     ./birdseye &
     PID=$!
-    sleep 1
-    open "http://localhost:8080"
+
+    # Wait for server to be ready
+    for i in {1..30}; do
+        if curl -s http://localhost:8080/ > /dev/null 2>&1; then
+            open "http://localhost:8080"
+            break
+        fi
+        sleep 0.1
+    done
+
     wait $PID
 
-# Development mode with hot reload (requires fswatch: brew install fswatch)
+# Development mode with hot reload
 dev:
     #!/usr/bin/env bash
+    # Check for fswatch
+    if ! command -v fswatch &> /dev/null; then
+        echo "fswatch not found. Install with: brew install fswatch"
+        exit 1
+    fi
+
     cleanup() {
         echo "Stopping server..."
         kill $PID 2>/dev/null
@@ -26,8 +40,15 @@ dev:
 
     go build -o birdseye . && ./birdseye &
     PID=$!
-    sleep 1
-    open "http://localhost:8080"
+
+    # Wait for server to be ready before opening browser
+    for i in {1..30}; do
+        if curl -s http://localhost:8080/ > /dev/null 2>&1; then
+            open "http://localhost:8080"
+            break
+        fi
+        sleep 0.1
+    done
 
     echo "Watching for changes... (Ctrl+C to stop)"
     fswatch -o -r --include='\.go$' --include='\.html$' --exclude='.*' . | while read; do

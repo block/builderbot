@@ -360,15 +360,7 @@
             });
 
             navigator.clipboard.writeText(paths.join('\n'));
-
-            const btn = document.querySelector('.selection-bar button:not(.clear-btn)');
-            const originalText = btn.textContent;
-            btn.textContent = 'Copied!';
-            btn.classList.add('copied');
-            setTimeout(() => {
-                btn.textContent = originalText;
-                btn.classList.remove('copied');
-            }, 1500);
+            clearSelection();
         }
 
         function clearSelection() {

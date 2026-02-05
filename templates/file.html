@@ -203,17 +203,20 @@
             color: #0066cc;
         }
         /* Style metadata paragraphs */
-        .content > p:first-of-type strong {
-            display: inline-block;
-            min-width: 100px;
-        }
         .content > p:first-of-type {
             background: #f8f9fa;
             padding: 12px 16px;
             border-radius: 6px;
             font-size: 0.85em;
             color: #666;
-            line-height: 2;
+            line-height: 1.8;
+        }
+        .content > p:first-of-type strong {
+            color: #333;
+        }
+        .content > p:first-of-type strong ~ strong::before {
+            content: '\A';
+            white-space: pre;
         }
         .content .chroma { background: #282a36; }
 

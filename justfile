@@ -25,10 +25,10 @@ run: build
 # Development mode with hot reload
 dev:
     #!/usr/bin/env bash
-    # Check for fswatch
+    # Install fswatch if needed
     if ! command -v fswatch &> /dev/null; then
-        echo "fswatch not found. Install with: brew install fswatch"
-        exit 1
+        echo "Installing fswatch..."
+        brew install fswatch
     fi
 
     cleanup() {

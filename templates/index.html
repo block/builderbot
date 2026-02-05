@@ -8,141 +8,119 @@
         * { box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            margin: 0;
-            padding: 0;
-            background: #1a1a2e;
-            color: #eee;
-        }
-        .layout {
-            display: grid;
-            grid-template-columns: 1fr 320px;
-            min-height: 100vh;
-        }
-        .main {
-            padding: 24px 32px;
-            overflow-y: auto;
-        }
-        .sidebar {
-            background: #16213e;
-            border-left: 1px solid #0f3460;
+            max-width: 1000px;
+            margin: 0 auto;
             padding: 24px;
-            overflow-y: auto;
-            max-height: 100vh;
-            position: sticky;
-            top: 0;
+            background: #fafafa;
+            color: #333;
         }
-        h1 { color: #00d4ff; margin: 0 0 8px 0; font-size: 1.5em; }
-        h2 { color: #00d4ff; margin: 0 0 16px 0; font-size: 1.1em; font-weight: 500; }
-        a { color: #00d4ff; text-decoration: none; }
+        h1 { color: #333; margin: 0 0 8px 0; font-size: 1.5em; font-weight: 600; }
+        h2 { color: #555; margin: 24px 0 16px 0; font-size: 1em; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+        a { color: #0066cc; text-decoration: none; }
         a:hover { text-decoration: underline; }
 
-        .search-box {
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .nav a {
+            margin-left: 20px;
+            color: #666;
+        }
+        .nav a:hover { color: #0066cc; }
+
+        .search-box {
+            margin-bottom: 32px;
         }
         .search-box input {
             width: 100%;
-            padding: 10px 14px;
+            padding: 12px 16px;
             font-size: 1em;
-            background: #16213e;
-            border: 1px solid #0f3460;
-            border-radius: 6px;
-            color: #eee;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            color: #333;
         }
         .search-box input:focus {
             outline: none;
-            border-color: #00d4ff;
+            border-color: #0066cc;
+            box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
         }
-        .search-box input::placeholder { color: #666; }
+        .search-box input::placeholder { color: #999; }
 
-        .file {
-            padding: 12px 16px;
-            background: #16213e;
-            margin-bottom: 8px;
-            border-radius: 6px;
-            border: 1px solid #0f3460;
-            transition: border-color 0.15s;
+        .projects {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 16px;
         }
-        .file:hover { border-color: #00d4ff; }
-        .file-header {
+        .project {
+            background: #fff;
+            border-radius: 8px;
+            padding: 16px 20px;
+            border: 1px solid #e8e8e8;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .project:hover {
+            border-color: #ccc;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        }
+        .project-header {
             display: flex;
             justify-content: space-between;
             align-items: baseline;
-            margin-bottom: 4px;
+            margin-bottom: 8px;
         }
-        .file-name { font-weight: 500; }
-        .file-age { color: #888; font-size: 0.85em; }
-        .file-path { color: #666; font-size: 0.85em; }
-
-        .project {
-            margin-bottom: 16px;
-            padding-bottom: 16px;
-            border-bottom: 1px solid #0f3460;
-        }
-        .project:last-child { border-bottom: none; }
         .project-name {
-            font-weight: 500;
-            margin-bottom: 4px;
+            font-weight: 600;
+            font-size: 1.05em;
         }
         .project-meta {
             font-size: 0.8em;
             color: #888;
-            margin-bottom: 6px;
         }
         .project-summary {
-            font-size: 0.85em;
-            color: #aaa;
-            line-height: 1.4;
+            font-size: 0.9em;
+            color: #666;
+            line-height: 1.5;
         }
-        .branch { color: #7ee787; }
-        .dirty { color: #f85149; }
-
-        @media (max-width: 900px) {
-            .layout {
-                grid-template-columns: 1fr;
-            }
-            .sidebar {
-                position: static;
-                max-height: none;
-                border-left: none;
-                border-top: 1px solid #0f3460;
-            }
-        }
+        .branch { color: #2da44e; }
+        .dirty { color: #cf222e; }
+        .file-count { color: #888; }
     </style>
 </head>
 <body>
-    <div class="layout">
-        <div class="main">
-            <h1>Birdseye</h1>
-            <div class="search-box">
-                <form action="/search" method="GET">
-                    <input type="search" name="q" placeholder="Search all thoughts...">
-                </form>
-            </div>
-
-            <h2>Recent Files</h2>
-            {{range .Files}}
-            <div class="file">
-                <div class="file-header">
-                    <span class="file-name"><a href="/file/{{.Project}}/{{.FilePath}}">{{.FileName}}</a></span>
-                    <span class="file-age">{{.Age}}</span>
-                </div>
-                <div class="file-path">{{.Project}}/{{.FilePath}}</div>
-            </div>
-            {{end}}
+    <div class="header">
+        <h1>Birdseye</h1>
+        <div class="nav">
+            <a href="/recent">Recent</a>
+            <a href="/search">Search</a>
         </div>
+    </div>
 
-        <div class="sidebar">
-            <h2>Projects ({{len .Projects}})</h2>
-            {{range .Projects}}
-            <div class="project">
-                <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a></div>
-                <div class="project-meta">
-                    {{if .Git}}<span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span> · {{end}}{{.FileCount}} files
-                </div>
-                {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
+    <div class="search-box">
+        <form action="/search" method="GET">
+            <input type="search" name="q" placeholder="Search all thoughts...">
+        </form>
+    </div>
+
+    <h2>Projects ({{len .Projects}})</h2>
+    <div class="projects">
+        {{range .Projects}}
+        <div class="project">
+            <div class="project-header">
+                <span class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a></span>
+                <span class="file-count">{{.FileCount}} files</span>
             </div>
-            {{end}}
+            <div class="project-meta">
+                {{if .Git}}<span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span>{{end}}
+            </div>
+            {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
         </div>
+        {{end}}
     </div>
 </body>
 </html>

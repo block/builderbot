@@ -111,62 +111,58 @@ func getLastModified(thoughtsPath string) time.Time {
 }
 
 func generateSummary(projectPath, thoughtsPath string) string {
-	// Try to get description from README first
-	readmePaths := []string{
-		filepath.Join(projectPath, "README.md"),
-		filepath.Join(projectPath, "readme.md"),
-		filepath.Join(projectPath, "README"),
-	}
-
-	for _, readmePath := range readmePaths {
-		if desc := extractReadmeDescription(readmePath); desc != "" {
-			return truncateSummary(desc, 140)
-		}
-	}
-
-	// Fall back to generating from project name and recent file topics
-	name := filepath.Base(projectPath)
-	topics := extractRecentTopics(thoughtsPath)
-
-	if len(topics) > 0 {
-		return truncateSummary(humanizeName(name)+": "+strings.Join(topics, ", "), 140)
-	}
-
-	return humanizeName(name)
-}
-
-func extractReadmeDescription(path string) string {
-	file, err := os.Open(path)
-	if err != nil {
+	// Generate summary from thoughts files
+	files := getRecentThoughtsFiles(thoughtsPath, 5)
+	if len(files) == 0 {
 		return ""
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	var foundHeader bool
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	// Try to extract meaningful content from recent files
+	var topics []string
+	datePrefix := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-?`)
+
+	for _, f := range files {
+		// Try to get the h1 title from the file
+		if title := extractFileTitle(f.path); title != "" {
+			topics = append(topics, title)
 			continue
 		}
-		// Skip the title header
-		if strings.HasPrefix(line, "#") && !foundHeader {
-			foundHeader = true
-			continue
-		}
-		// Skip badges and links at the start
-		if strings.HasPrefix(line, "[") || strings.HasPrefix(line, "!") {
-			continue
-		}
-		// Return first real paragraph line
-		if foundHeader && line != "" {
-			return line
+
+		// Fall back to humanized filename
+		name := strings.TrimSuffix(filepath.Base(f.path), ".md")
+		name = datePrefix.ReplaceAllString(name, "")
+		name = strings.ReplaceAll(name, "-", " ")
+		name = strings.TrimSpace(name)
+		if name != "" && len(name) > 3 {
+			topics = append(topics, name)
 		}
 	}
-	return ""
+
+	if len(topics) == 0 {
+		return ""
+	}
+
+	// Deduplicate and limit
+	seen := make(map[string]bool)
+	var unique []string
+	for _, t := range topics {
+		lower := strings.ToLower(t)
+		if !seen[lower] && len(t) > 3 {
+			seen[lower] = true
+			unique = append(unique, t)
+			if len(unique) >= 3 {
+				break
+			}
+		}
+	}
+
+	return truncateSummary(strings.Join(unique, "; "), 140)
 }
 
-func extractRecentTopics(thoughtsPath string) []string {
+func getRecentThoughtsFiles(thoughtsPath string, limit int) []struct {
+	path    string
+	modTime time.Time
+} {
 	var files []struct {
 		path    string
 		modTime time.Time
@@ -182,35 +178,56 @@ func extractRecentTopics(thoughtsPath string) []string {
 		return nil
 	})
 
-	// Sort by mod time, newest first
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].modTime.After(files[j].modTime)
 	})
 
-	// Extract topics from the 3 most recent files
-	topics := make(map[string]bool)
-	datePrefix := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-?`)
-
-	for i, f := range files {
-		if i >= 3 {
-			break
-		}
-		name := strings.TrimSuffix(filepath.Base(f.path), ".md")
-		// Remove date prefix
-		name = datePrefix.ReplaceAllString(name, "")
-		// Convert kebab-case to words
-		name = strings.ReplaceAll(name, "-", " ")
-		name = strings.TrimSpace(name)
-		if name != "" && len(name) > 3 {
-			topics[name] = true
-		}
+	if len(files) > limit {
+		files = files[:limit]
 	}
+	return files
+}
 
-	var result []string
-	for topic := range topics {
-		result = append(result, topic)
+func extractFileTitle(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
 	}
-	return result
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		// Skip YAML frontmatter
+		if line == "---" {
+			inFrontmatter := true
+			for scanner.Scan() {
+				if strings.TrimSpace(scanner.Text()) == "---" {
+					inFrontmatter = false
+					break
+				}
+			}
+			if inFrontmatter {
+				return ""
+			}
+			continue
+		}
+		// Look for h1
+		if strings.HasPrefix(line, "# ") {
+			title := strings.TrimPrefix(line, "# ")
+			// Clean up common suffixes
+			title = strings.TrimSuffix(title, " Implementation Plan")
+			title = strings.TrimSuffix(title, " Plan")
+			title = strings.TrimSuffix(title, " Research")
+			return title
+		}
+		// If first non-empty line isn't a header, give up
+		return ""
+	}
+	return ""
 }
 
 func humanizeName(name string) string {

@@ -220,16 +220,12 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	gitStatus := discovery.GetGitStatus(project.Path)
-
 	data := struct {
-		Project   *discovery.Project
-		Files     []ProjectFile
-		GitStatus *discovery.GitStatus
+		Project *discovery.Project
+		Files   []ProjectFile
 	}{
-		Project:   project,
-		Files:     files,
-		GitStatus: gitStatus,
+		Project: project,
+		Files:   files,
 	}
 	s.tmpl.ExecuteTemplate(w, "project.html", data)
 }

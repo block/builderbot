@@ -112,50 +112,6 @@
         }
         .empty { color: #888; font-style: italic; }
 
-        /* Git status */
-        .git-status {
-            margin-top: 32px;
-            padding-top: 24px;
-            border-top: 1px solid #e8e8e8;
-        }
-        .git-section + .git-section {
-            margin-top: 20px;
-        }
-        .git-section h3 {
-            font-size: 0.8em;
-            font-weight: 600;
-            color: #666;
-            text-transform: uppercase;
-            letter-spacing: 0.03em;
-            margin: 0 0 8px 0;
-        }
-        .commit-list, .change-list {
-            list-style: none;
-            padding: 0;
-            margin: 0;
-        }
-        .commit-list li, .change-list li {
-            padding: 3px 0;
-            font-size: 0.85em;
-            color: #555;
-            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-        }
-        .commit-hash {
-            color: #0066cc;
-        }
-        .commit-msg {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        }
-        .change-status {
-            display: inline-block;
-            width: 65px;
-            font-size: 0.85em;
-            font-weight: 500;
-        }
-        .change-status.new { color: #1a7f37; }
-        .change-status.deleted { color: #cf222e; }
-        .change-status.modified { color: #9a6700; }
-
         /* Selection bar */
         .selection-bar {
             position: fixed;
@@ -236,31 +192,6 @@
     </ul>
     {{else}}
     <p class="empty">No files yet.</p>
-    {{end}}
-
-    {{if and .GitStatus (or .GitStatus.Commits .GitStatus.Changes)}}
-    <div class="git-status">
-        {{if .GitStatus.Commits}}
-        <div class="git-section">
-            <h3>Unpushed commits ({{len .GitStatus.Commits}})</h3>
-            <ul class="commit-list">
-                {{range .GitStatus.Commits}}
-                <li><span class="commit-hash">{{.Hash}}</span> <span class="commit-msg">{{.Message}}</span></li>
-                {{end}}
-            </ul>
-        </div>
-        {{end}}
-        {{if .GitStatus.Changes}}
-        <div class="git-section">
-            <h3>Uncommitted changes ({{len .GitStatus.Changes}})</h3>
-            <ul class="change-list">
-                {{range .GitStatus.Changes}}
-                <li><span class="change-status {{.Status}}">{{.Status}}</span> {{.Path}}</li>
-                {{end}}
-            </ul>
-        </div>
-        {{end}}
-    </div>
     {{end}}
 
     <div class="selection-bar" id="selectionBar">

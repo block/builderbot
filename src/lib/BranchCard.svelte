@@ -16,6 +16,7 @@
     Play,
     MessageSquare,
     FileText,
+    FileSearch,
     GitCommit,
     ChevronDown,
     ChevronsUpDown,
@@ -36,6 +37,7 @@
   import SessionViewerModal from './SessionViewerModal.svelte';
   import NewSessionModal from './NewSessionModal.svelte';
   import NewNoteModal from './NewNoteModal.svelte';
+  import NewReviewModal from './NewReviewModal.svelte';
   import NoteViewerModal from './NoteViewerModal.svelte';
   import BaseBranchPickerModal from './BaseBranchPickerModal.svelte';
   import CreatePrModal from './CreatePrModal.svelte';
@@ -139,6 +141,9 @@
 
   // New note modal state
   let showNewNoteModal = $state(false);
+
+  // New review modal state
+  let showNewReviewModal = $state(false);
 
   // Base branch picker modal state
   let showBaseBranchPicker = $state(false);
@@ -327,6 +332,16 @@
   function handleNewNote() {
     showNewDropdown = false;
     showNewNoteModal = true;
+  }
+
+  function handleNewReview() {
+    showNewDropdown = false;
+    showNewReviewModal = true;
+  }
+
+  function handleReviewStarted(branchNoteId: string, aiSessionId: string, provider: string) {
+    showNewReviewModal = false;
+    loadData();
   }
 
   async function handleDeleteNote(noteId: string) {
@@ -736,7 +751,11 @@
             >
               <div class="timeline-marker">
                 <div class="timeline-icon note-icon">
-                  <FileText size={12} />
+                  {#if item.note.title.startsWith('Code Review')}
+                    <FileSearch size={12} />
+                  {:else}
+                    <FileText size={12} />
+                  {/if}
                 </div>
                 {#if index < timeline.length - 1}
                   <div class="timeline-line"></div>
@@ -855,6 +874,10 @@
               <FileText size={14} />
               New Note
             </button>
+            <button class="dropdown-item" onclick={handleNewReview}>
+              <FileSearch size={14} />
+              Code Review
+            </button>
           </div>
         {/if}
       </div>
@@ -892,6 +915,15 @@
     {branch}
     onClose={() => (showNewNoteModal = false)}
     onNoteStarted={handleNoteStarted}
+  />
+{/if}
+
+<!-- New review modal -->
+{#if showNewReviewModal}
+  <NewReviewModal
+    {branch}
+    onClose={() => (showNewReviewModal = false)}
+    onReviewStarted={handleReviewStarted}
   />
 {/if}
 

@@ -6,24 +6,10 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    X,
-    FileText,
-    Loader2,
-    AlertCircle,
-    Bot,
-    User,
-    Wrench,
-    MessageSquare,
-  } from 'lucide-svelte';
+  import { X, FileText, Loader2, AlertCircle, MessageSquare } from 'lucide-svelte';
   import type { BranchNote } from './services/branch';
-  import {
-    getSession,
-    parseAssistantContent,
-    type SessionFull,
-    type ContentSegment,
-  } from './services/ai';
-  import type { DisplaySegment } from './types/streaming';
+  import { getSession, type SessionFull } from './services/ai';
+  import { toDisplayMessage, type DisplayMessage } from './types/streaming';
   import {
     connectToSession,
     disconnectFromSession,
@@ -106,6 +92,9 @@
     }
   }
 
+  // Convert session messages to DisplayMessage format for StreamingMessages
+  let sessionMessages = $derived<DisplayMessage[]>(session?.messages.map(toDisplayMessage) ?? []);
+
   function switchToContent() {
     viewMode = 'content';
   }
@@ -113,22 +102,6 @@
   function switchToSession() {
     viewMode = 'session';
     loadSession();
-  }
-
-  function parseSegments(content: string): DisplaySegment[] {
-    const segments = parseAssistantContent(content);
-    return segments.map((seg: ContentSegment) => {
-      if (seg.type === 'text') {
-        return { type: 'text' as const, text: seg.text };
-      } else {
-        return {
-          type: 'tool' as const,
-          id: seg.id,
-          title: seg.title,
-          status: seg.status,
-        };
-      }
-    });
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -230,35 +203,7 @@
               <span>{sessionError}</span>
             </div>
           {:else if session}
-            <div class="messages">
-              {#each session.messages as message}
-                <div class="message" class:user={message.role === 'user'}>
-                  <div class="message-icon">
-                    {#if message.role === 'user'}
-                      <User size={14} />
-                    {:else}
-                      <Bot size={14} />
-                    {/if}
-                  </div>
-                  <div class="message-content">
-                    {#if message.role === 'user'}
-                      <div class="message-text user-text">{message.content}</div>
-                    {:else}
-                      {#each parseSegments(message.content) as segment}
-                        {#if segment.type === 'text'}
-                          <div class="message-text">{segment.text}</div>
-                        {:else}
-                          <div class="tool-call" class:completed={segment.status === 'completed'}>
-                            <Wrench size={12} />
-                            <span class="tool-title">{segment.title}</span>
-                          </div>
-                        {/if}
-                      {/each}
-                    {/if}
-                  </div>
-                </div>
-              {/each}
-            </div>
+            <StreamingMessages messages={sessionMessages} streamingSegments={[]} isActive={false} />
           {/if}
         </div>
       {:else}
@@ -480,94 +425,6 @@
 
   .session-error {
     color: var(--ui-danger);
-  }
-
-  .messages {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .message {
-    display: flex;
-    gap: 10px;
-  }
-
-  .message.user {
-    flex-direction: row-reverse;
-  }
-
-  .message-icon {
-    flex-shrink: 0;
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--bg-primary);
-    border-radius: 50%;
-    color: var(--text-muted);
-  }
-
-  .message.user .message-icon {
-    background: var(--ui-accent);
-    color: var(--bg-primary);
-  }
-
-  .message-content {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .message.user .message-content {
-    align-items: flex-end;
-  }
-
-  .message-text {
-    font-size: var(--size-sm);
-    color: var(--text-primary);
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
-    background: var(--bg-primary);
-    padding: 8px 12px;
-    border-radius: 12px 12px 12px 4px;
-    max-width: 85%;
-  }
-
-  .message-text.user-text {
-    background: var(--ui-accent);
-    color: var(--bg-primary);
-    border-radius: 12px 12px 4px 12px;
-  }
-
-  .tool-call {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--size-xs);
-    color: var(--text-muted);
-    padding: 4px 8px;
-    background: var(--bg-primary);
-    border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-  }
-
-  .tool-call.completed {
-    border-color: var(--ui-accent);
-  }
-
-  .tool-call :global(svg) {
-    flex-shrink: 0;
-  }
-
-  .tool-title {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   /* Markdown content */

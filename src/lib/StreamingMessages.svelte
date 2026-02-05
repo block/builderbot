@@ -6,7 +6,15 @@
 -->
 <script lang="ts">
   import { Bot, User, Loader2, Wrench } from 'lucide-svelte';
+  import { marked } from 'marked';
+  import DOMPurify from 'dompurify';
   import type { DisplayMessage, DisplaySegment } from './types/streaming';
+
+  // Configure marked for safe rendering
+  marked.setOptions({
+    breaks: true,
+    gfm: true,
+  });
 
   interface Props {
     /** Persisted messages from the database */
@@ -20,6 +28,11 @@
   }
 
   let { messages, streamingSegments, isActive, waitingText = 'Thinking...' }: Props = $props();
+
+  // Render markdown content safely
+  function renderMarkdown(content: string): string {
+    return DOMPurify.sanitize(marked.parse(content) as string);
+  }
 </script>
 
 {#each messages as message}
@@ -37,7 +50,9 @@
       {:else}
         {#each message.segments as segment}
           {#if segment.type === 'text'}
-            <div class="message-text">{segment.text}</div>
+            <div class="message-text markdown-content">
+              {@html renderMarkdown(segment.text)}
+            </div>
           {:else}
             <div class="tool-call" class:completed={segment.status === 'completed'}>
               <Wrench size={12} />
@@ -59,7 +74,7 @@
     <div class="message-content">
       {#each streamingSegments as segment, i}
         {#if segment.type === 'text'}
-          <div class="message-text">
+          <div class="message-text streaming-text">
             {segment.text}{#if i === streamingSegments.length - 1}<span class="cursor">▋</span>{/if}
           </div>
         {:else}
@@ -136,8 +151,12 @@
     font-size: var(--size-sm);
     color: var(--text-primary);
     line-height: 1.5;
-    white-space: pre-wrap;
     word-break: break-word;
+  }
+
+  /* Streaming text keeps pre-wrap for live updates */
+  .message-text.streaming-text {
+    white-space: pre-wrap;
   }
 
   .message.user .message-text {
@@ -218,5 +237,100 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  /* Markdown content styles */
+  .markdown-content :global(p) {
+    margin: 0 0 0.5em 0;
+  }
+
+  .markdown-content :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .markdown-content :global(h1),
+  .markdown-content :global(h2),
+  .markdown-content :global(h3),
+  .markdown-content :global(h4) {
+    margin: 0.75em 0 0.5em 0;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  .markdown-content :global(h1:first-child),
+  .markdown-content :global(h2:first-child),
+  .markdown-content :global(h3:first-child),
+  .markdown-content :global(h4:first-child) {
+    margin-top: 0;
+  }
+
+  .markdown-content :global(h1) {
+    font-size: 1.25em;
+  }
+
+  .markdown-content :global(h2) {
+    font-size: 1.15em;
+  }
+
+  .markdown-content :global(h3) {
+    font-size: 1.05em;
+  }
+
+  .markdown-content :global(ul),
+  .markdown-content :global(ol) {
+    margin: 0.5em 0;
+    padding-left: 1.5em;
+  }
+
+  .markdown-content :global(li) {
+    margin: 0.25em 0;
+  }
+
+  .markdown-content :global(code) {
+    font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
+    font-size: 0.9em;
+    background: var(--bg-hover);
+    padding: 0.15em 0.35em;
+    border-radius: 3px;
+  }
+
+  .markdown-content :global(pre) {
+    margin: 0.5em 0;
+    padding: 0.75em;
+    background: var(--bg-hover);
+    border-radius: 4px;
+    overflow-x: auto;
+  }
+
+  .markdown-content :global(pre code) {
+    background: none;
+    padding: 0;
+    font-size: 0.85em;
+  }
+
+  .markdown-content :global(blockquote) {
+    margin: 0.5em 0;
+    padding-left: 0.75em;
+    border-left: 3px solid var(--border-muted);
+    color: var(--text-muted);
+  }
+
+  .markdown-content :global(a) {
+    color: var(--text-accent);
+    text-decoration: none;
+  }
+
+  .markdown-content :global(a:hover) {
+    text-decoration: underline;
+  }
+
+  .markdown-content :global(strong) {
+    font-weight: 600;
+  }
+
+  .markdown-content :global(hr) {
+    margin: 0.75em 0;
+    border: none;
+    border-top: 1px solid var(--border-subtle);
   }
 </style>

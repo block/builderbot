@@ -45,7 +45,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// ensureLoaded does fast project discovery on first request, then enriches in background.
+// ensureLoaded does fast project discovery on first request, then populates in background.
 func (s *Server) ensureLoaded() {
 	s.loadOnce.Do(func() {
 		root := s.cache.Root()
@@ -58,18 +58,25 @@ func (s *Server) ensureLoaded() {
 		log.Printf("Found %d projects with thoughts/ directories", len(projects))
 
 		s.cache.SetProjects(projects)
-		s.cache.RefreshAllProjects()
 
 		if err := s.watcher.Start(); err != nil {
 			log.Printf("Warning: file watcher failed to start: %v", err)
 		}
 
-		go s.enrichProjects()
+		// Populate file lists and enrichment in background so the first
+		// request isn't blocked. Pages render immediately with whatever
+		// data is available; SSE pushes an update when population completes.
+		go s.populateProjects()
 	})
 }
 
-// enrichProjects fills in git info and summaries in the background.
-func (s *Server) enrichProjects() {
+// populateProjects scans file lists and fills in git info + summaries in the background.
+func (s *Server) populateProjects() {
+	s.cache.RefreshAllProjects()
+	log.Printf("Background file scan complete")
+	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
+
+	// Now enrich with git info and summaries
 	projects := s.cache.Projects()
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8) // bound concurrency to avoid fork-bombing

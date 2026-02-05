@@ -19,8 +19,8 @@
         .breadcrumb { margin-bottom: 20px; color: #888; font-size: 0.9em; }
         .breadcrumb a { color: #666; }
         .breadcrumb a:hover { color: #0066cc; }
-        h1 { color: #333; font-weight: 600; }
-        .git-info { color: #666; font-size: 0.9em; margin-bottom: 20px; }
+        h1 { color: #333; font-weight: 600; margin-bottom: 8px; }
+        .git-info { color: #666; font-size: 0.9em; margin-bottom: 24px; }
         .branch { color: #2da44e; }
         .dirty { color: #cf222e; }
         .files { list-style: none; padding: 0; margin: 0; }
@@ -36,24 +36,46 @@
             transition: border-color 0.15s;
         }
         .file:hover { border-color: #ccc; }
-        .file-name { font-weight: 500; }
-        .file-time { color: #888; font-size: 0.85em; }
-        .dir .file-name::before { content: "📁 "; }
-        .md .file-name::before { content: "📄 "; }
+        .file-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+        }
+        .file-name {
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .file-type {
+            font-size: 0.7em;
+            font-weight: 500;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 3px;
+            flex-shrink: 0;
+        }
+        .file-type.research {
+            background: #ddf4ff;
+            color: #0969da;
+        }
+        .file-type.plan {
+            background: #dafbe1;
+            color: #1a7f37;
+        }
+        .file-age {
+            color: #888;
+            font-size: 0.85em;
+            white-space: nowrap;
+            margin-left: 12px;
+        }
         .empty { color: #888; font-style: italic; }
     </style>
 </head>
 <body>
     <div class="breadcrumb">
-        <a href="/">← All Projects</a>
-        {{if .Subpath}}
-         / <a href="/project/{{.Project.Name}}">{{.Project.Name}}</a>
-        {{range .Breadcrumbs}}
-         / <a href="/project/{{$.Project.Name}}/{{.Path}}">{{.Name}}</a>
-        {{end}}
-        {{else}}
-         / {{.Project.Name}}
-        {{end}}
+        <a href="/">← All Projects</a> / {{.Project.Name}}
     </div>
 
     <h1>{{.Project.Name}}</h1>
@@ -66,18 +88,17 @@
     {{if .Files}}
     <ul class="files">
         {{range .Files}}
-        <li class="file {{if .IsDir}}dir{{else}}md{{end}}">
-            {{if .IsDir}}
-            <span class="file-name"><a href="/project/{{$.Project.Name}}/{{.Path}}">{{.Name}}/</a></span>
-            {{else}}
-            <span class="file-name"><a href="/file/{{$.Project.Name}}/{{.Path}}">{{.Name}}</a></span>
-            {{end}}
-            <span class="file-time">{{.ModTime.Format "Jan 2, 2006 3:04 PM"}}</span>
+        <li class="file">
+            <div class="file-left">
+                {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
+                <span class="file-name"><a href="/file/{{$.Project.Name}}/{{.Path}}">{{.Name}}</a></span>
+            </div>
+            <span class="file-age">{{.Age}}</span>
         </li>
         {{end}}
     </ul>
     {{else}}
-    <p class="empty">No files in this directory.</p>
+    <p class="empty">No files yet.</p>
     {{end}}
 </body>
 </html>

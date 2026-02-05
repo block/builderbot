@@ -68,19 +68,15 @@
             border-color: #ccc;
             box-shadow: 0 2px 8px rgba(0,0,0,0.04);
         }
-        .project-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: baseline;
-            margin-bottom: 8px;
-        }
         .project-name {
             font-weight: 600;
             font-size: 1.05em;
+            margin-bottom: 4px;
         }
         .project-meta {
             font-size: 0.8em;
             color: #888;
+            margin-bottom: 8px;
         }
         .project-summary {
             font-size: 0.9em;
@@ -89,7 +85,6 @@
         }
         .branch { color: #2da44e; }
         .dirty { color: #cf222e; }
-        .file-count { color: #888; }
     </style>
 </head>
 <body>
@@ -111,13 +106,8 @@
     <div class="projects">
         {{range .Projects}}
         <div class="project">
-            <div class="project-header">
-                <span class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a></span>
-                <span class="file-count">{{.FileCount}} files</span>
-            </div>
-            <div class="project-meta">
-                {{if .Git}}<span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span>{{end}}
-            </div>
+            <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a></div>
+            {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
             {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
         </div>
         {{end}}

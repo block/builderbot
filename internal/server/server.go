@@ -127,15 +127,18 @@ func formatAge(t time.Time) string {
 	}
 }
 
+type ProjectFile struct {
+	Name     string
+	Path     string
+	ModTime  time.Time
+	Age      string
+	FileType string // "research", "plan", or "other"
+}
+
 func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
-	// Parse /project/{name}[/{subpath}]
-	path := strings.TrimPrefix(r.URL.Path, "/project/")
-	parts := strings.SplitN(path, "/", 2)
-	projectName := parts[0]
-	subpath := ""
-	if len(parts) > 1 {
-		subpath = parts[1]
-	}
+	// Parse /project/{name}
+	projectName := strings.TrimPrefix(r.URL.Path, "/project/")
+	projectName = strings.TrimSuffix(projectName, "/")
 
 	// Find project
 	var project *discovery.Project
@@ -150,49 +153,43 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	files, err := discovery.ListThoughts(project.ThoughtsPath, subpath)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-
-	// Build breadcrumb parts
-	var breadcrumbs []struct {
-		Name string
-		Path string
-	}
-	if subpath != "" {
-		pathParts := strings.Split(subpath, "/")
-		currentPath := ""
-		for _, part := range pathParts {
-			if currentPath == "" {
-				currentPath = part
-			} else {
-				currentPath = currentPath + "/" + part
-			}
-			breadcrumbs = append(breadcrumbs, struct {
-				Name string
-				Path string
-			}{
-				Name: part,
-				Path: currentPath,
-			})
+	// Collect all markdown files recursively
+	var files []ProjectFile
+	filepath.Walk(project.ThoughtsPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
 		}
-	}
+		relPath, _ := filepath.Rel(project.ThoughtsPath, path)
+
+		// Determine file type based on path
+		fileType := "other"
+		if strings.Contains(relPath, "research") {
+			fileType = "research"
+		} else if strings.Contains(relPath, "plan") {
+			fileType = "plan"
+		}
+
+		files = append(files, ProjectFile{
+			Name:     filepath.Base(path),
+			Path:     relPath,
+			ModTime:  info.ModTime(),
+			Age:      formatAge(info.ModTime()),
+			FileType: fileType,
+		})
+		return nil
+	})
+
+	// Sort by modification time, newest first
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].ModTime.After(files[j].ModTime)
+	})
 
 	data := struct {
-		Project     *discovery.Project
-		Subpath     string
-		Files       []discovery.ThoughtFile
-		Breadcrumbs []struct {
-			Name string
-			Path string
-		}
+		Project *discovery.Project
+		Files   []ProjectFile
 	}{
-		Project:     project,
-		Subpath:     subpath,
-		Files:       files,
-		Breadcrumbs: breadcrumbs,
+		Project: project,
+		Files:   files,
 	}
 	s.tmpl.ExecuteTemplate(w, "project.html", data)
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"html/template"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -78,14 +79,14 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		FilePath   string
 		FileName   string
 		ParentPath string
-		Content    string
+		Content    template.HTML
 		Raw        string
 	}{
 		Project:    project,
 		FilePath:   filePath,
 		FileName:   filepath.Base(filePath),
 		ParentPath: parentPath,
-		Content:    buf.String(),
+		Content:    template.HTML(buf.String()),
 		Raw:        string(content),
 	}
 	s.tmpl.ExecuteTemplate(w, "file.html", data)

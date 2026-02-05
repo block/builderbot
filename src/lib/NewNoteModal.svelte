@@ -54,7 +54,16 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
+      e.preventDefault();
       onClose();
+      return;
+    }
+
+    // Cmd+Enter to submit
+    if (e.key === 'Enter' && e.metaKey && title.trim() && !submitting) {
+      e.preventDefault();
+      handleSubmit(e);
+      return;
     }
   }
 </script>
@@ -102,6 +111,7 @@
           rows={4}
           disabled={submitting}
         ></textarea>
+        <p class="hint">Press ⌘Enter to generate</p>
       </div>
 
       {#if error}
@@ -239,6 +249,13 @@
   .form-group textarea {
     resize: vertical;
     min-height: 80px;
+  }
+
+  .hint {
+    margin: 0;
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+    text-align: right;
   }
 
   .error-message {

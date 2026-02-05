@@ -8,9 +8,12 @@
   builds the full prompt with timeline context.
 -->
 <script lang="ts">
-  import { X, GitBranch, Loader2, Send } from 'lucide-svelte';
+  import { X, GitCommitHorizontal, GitBranch, Loader2, Send } from 'lucide-svelte';
   import type { Branch } from './services/branch';
   import { startBranchSession } from './services/branch';
+  import AgentSelector from './AgentSelector.svelte';
+  import type { AcpProvider } from './stores/agent.svelte';
+  import { preferences } from './stores/preferences.svelte';
 
   interface Props {
     branch: Branch;
@@ -24,6 +27,7 @@
   let prompt = $state('');
   let starting = $state(false);
   let error = $state<string | null>(null);
+  let selectedProvider = $state<AcpProvider>((preferences.aiAgent as AcpProvider) || 'goose');
 
   let textareaEl: HTMLTextAreaElement | null = $state(null);
 
@@ -40,7 +44,8 @@
     return parts[parts.length - 1] || path;
   }
 
-  async function handleStart() {
+  async function handleStart(e: Event) {
+    e.preventDefault();
     if (!prompt.trim()) return;
 
     starting = true;
@@ -50,7 +55,7 @@
       const userPrompt = prompt.trim();
 
       // Backend handles all context gathering and prompt building
-      const result = await startBranchSession(branch.id, userPrompt);
+      const result = await startBranchSession(branch.id, userPrompt, selectedProvider);
 
       // Notify parent that session started
       onSessionStarted?.(result.branchSessionId, result.aiSessionId);
@@ -70,64 +75,78 @@
     }
 
     // Cmd+Enter to submit
-    if (e.key === 'Enter' && e.metaKey && prompt.trim()) {
+    if (e.key === 'Enter' && e.metaKey && prompt.trim() && !starting) {
       e.preventDefault();
-      handleStart();
+      handleStart(e);
       return;
     }
   }
 </script>
 
-<div class="modal-backdrop" role="button" tabindex="-1" onclick={onClose} onkeydown={handleKeydown}>
+<svelte:window on:keydown={handleKeydown} />
+
+<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+<div class="modal-backdrop" role="presentation" onclick={onClose}>
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div
     class="modal"
     role="dialog"
+    aria-modal="true"
     tabindex="-1"
-    onkeydown={() => {}}
     onclick={(e) => e.stopPropagation()}
   >
-    <div class="modal-header">
-      <h2>New Session</h2>
-      <button class="close-button" onclick={onClose}>
+    <header class="modal-header">
+      <div class="header-content">
+        <GitCommitHorizontal size={18} />
+        <span class="header-title">New Commit</span>
+      </div>
+      <button class="close-btn" onclick={onClose}>
         <X size={18} />
       </button>
-    </div>
+    </header>
 
-    <div class="modal-content">
+    <form class="modal-content" onsubmit={handleStart}>
       <div class="branch-info">
         <GitBranch size={16} />
         <span class="branch-name">{branch.branchName}</span>
         <span class="repo-name">in {repoName(branch.repoPath)}</span>
       </div>
 
-      <div class="prompt-section">
+      <div class="form-group">
         <label for="prompt">What would you like to work on?</label>
         <textarea
           bind:this={textareaEl}
           bind:value={prompt}
           id="prompt"
           placeholder="Describe the task..."
-          rows="4"
+          rows={4}
+          disabled={starting}
         ></textarea>
         <p class="hint">Press ⌘Enter to start</p>
       </div>
 
       {#if error}
-        <p class="error">{error}</p>
+        <div class="error-message">{error}</div>
       {/if}
-    </div>
 
-    <div class="modal-footer">
-      <button class="cancel-button" onclick={onClose}>Cancel</button>
-      <button class="start-button" onclick={handleStart} disabled={!prompt.trim() || starting}>
-        {#if starting}
-          <Loader2 size={14} class="spinner" />
-        {:else}
-          <Send size={14} />
-        {/if}
-        Start Session
-      </button>
-    </div>
+      <div class="form-actions">
+        <AgentSelector bind:provider={selectedProvider} disabled={starting} />
+        <div class="action-buttons">
+          <button type="button" class="cancel-btn" onclick={onClose} disabled={starting}>
+            Cancel
+          </button>
+          <button type="submit" class="submit-btn" disabled={starting || !prompt.trim()}>
+            {#if starting}
+              <Loader2 size={14} class="spinning" />
+              Starting...
+            {:else}
+              <Send size={14} />
+              Start Session
+            {/if}
+          </button>
+        </div>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -135,61 +154,70 @@
   .modal-backdrop {
     position: fixed;
     inset: 0;
-    background-color: rgba(0, 0, 0, 0.5);
+    background: rgba(0, 0, 0, 0.5);
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: center;
-    padding-top: 15vh;
     z-index: 1000;
   }
 
   .modal {
-    width: 500px;
-    max-width: 90vw;
-    background-color: var(--bg-primary);
-    border-radius: 12px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
     display: flex;
     flex-direction: column;
+    width: 90%;
+    max-width: 500px;
+    background: var(--bg-chrome);
+    border-radius: 12px;
     overflow: hidden;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
   }
 
   .modal-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px;
+    padding: 16px 20px;
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .modal-header h2 {
-    margin: 0;
-    font-size: var(--size-md);
-    font-weight: 500;
+  .header-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     color: var(--text-primary);
   }
 
-  .close-button {
+  .header-content :global(svg) {
+    color: var(--text-accent);
+  }
+
+  .header-title {
+    font-size: var(--size-md);
+    font-weight: 500;
+  }
+
+  .close-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: transparent;
+    padding: 6px;
+    background: none;
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     color: var(--text-muted);
     cursor: pointer;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
   }
 
-  .close-button:hover {
-    background-color: var(--bg-hover);
+  .close-btn:hover {
     color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .modal-content {
-    padding: 16px;
+    padding: 20px;
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -218,35 +246,37 @@
     color: var(--text-muted);
   }
 
-  .prompt-section {
+  .form-group {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
   }
 
-  .prompt-section label {
+  .form-group label {
     font-size: var(--size-sm);
+    font-weight: 500;
     color: var(--text-muted);
   }
 
-  .prompt-section textarea {
-    padding: 12px;
-    background-color: var(--bg-primary);
+  .form-group textarea {
+    padding: 10px 12px;
+    background: var(--bg-primary);
     border: 1px solid var(--border-muted);
     border-radius: 6px;
+    color: var(--text-primary);
     font-size: var(--size-md);
     font-family: inherit;
-    color: var(--text-primary);
     resize: vertical;
-    outline: none;
-    transition: border-color 0.15s;
+    min-height: 80px;
+    transition: border-color 0.15s ease;
   }
 
-  .prompt-section textarea:focus {
+  .form-group textarea:focus {
+    outline: none;
     border-color: var(--ui-accent);
   }
 
-  .prompt-section textarea::placeholder {
+  .form-group textarea::placeholder {
     color: var(--text-faint);
   }
 
@@ -257,65 +287,68 @@
     text-align: right;
   }
 
-  .error {
-    margin: 0;
-    padding: 8px 12px;
-    background-color: var(--ui-danger-bg);
+  .error-message {
+    padding: 10px 12px;
+    background: var(--ui-danger-bg);
     border-radius: 6px;
-    font-size: var(--size-sm);
     color: var(--ui-danger);
-  }
-
-  .modal-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 16px;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .cancel-button {
-    padding: 8px 16px;
-    background: transparent;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    color: var(--text-muted);
     font-size: var(--size-sm);
-    cursor: pointer;
-    transition: all 0.15s;
   }
 
-  .cancel-button:hover {
-    border-color: var(--border-emphasis);
-    color: var(--text-primary);
+  .form-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    margin-top: 8px;
   }
 
-  .start-button {
+  .action-buttons {
+    display: flex;
+    gap: 10px;
+  }
+
+  .cancel-btn,
+  .submit-btn {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 8px 16px;
-    background-color: var(--ui-accent);
-    border: none;
+    padding: 10px 16px;
     border-radius: 6px;
-    color: var(--bg-deepest);
     font-size: var(--size-sm);
     font-weight: 500;
     cursor: pointer;
-    transition: background-color 0.15s;
+    transition: all 0.15s ease;
   }
 
-  .start-button:hover:not(:disabled) {
-    background-color: var(--ui-accent-hover);
+  .cancel-btn {
+    background: transparent;
+    border: 1px solid var(--border-muted);
+    color: var(--text-muted);
   }
 
-  .start-button:disabled {
+  .cancel-btn:hover:not(:disabled) {
+    border-color: var(--text-primary);
+    color: var(--text-primary);
+  }
+
+  .submit-btn {
+    background: var(--ui-accent);
+    border: none;
+    color: var(--bg-deepest);
+  }
+
+  .submit-btn:hover:not(:disabled) {
+    background: var(--ui-accent-hover);
+  }
+
+  .submit-btn:disabled,
+  .cancel-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
 
-  /* Spinner */
-  :global(.spinner) {
+  :global(.spinning) {
     animation: spin 1s linear infinite;
   }
 

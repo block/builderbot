@@ -232,14 +232,17 @@ export interface StartBranchSessionResponse {
  *
  * @param branchId - The branch to start the session on
  * @param userPrompt - The user's task description
+ * @param agentId - Optional AI agent/provider to use (e.g., "goose", "claude")
  */
 export async function startBranchSession(
   branchId: string,
-  userPrompt: string
+  userPrompt: string,
+  agentId?: string
 ): Promise<StartBranchSessionResponse> {
   return invoke<StartBranchSessionResponse>('start_branch_session', {
     branchId,
     userPrompt,
+    agentId,
   });
 }
 

@@ -1647,12 +1647,14 @@ fn get_branch_working_dir(store: &Store, branch: &Branch) -> Result<PathBuf, Str
 /// - Builds the full prompt with timeline context
 ///
 /// - `user_prompt`: The user's task description (stored for display in the UI)
+/// - `agent_id`: Optional AI agent/provider to use (e.g., "goose", "claude")
 #[tauri::command(rename_all = "camelCase")]
 async fn start_branch_session(
     state: State<'_, Arc<Store>>,
     session_manager: State<'_, Arc<SessionManager>>,
     branch_id: String,
     user_prompt: String,
+    agent_id: Option<String>,
 ) -> Result<StartBranchSessionResponse, String> {
     // Get the branch to find the worktree path
     let branch = state
@@ -1678,7 +1680,7 @@ async fn start_branch_session(
     // This way we have the ai_session_id to store in the branch session
     let working_dir = get_branch_working_dir(&state, &branch)?;
     let ai_session_id = session_manager
-        .create_session(working_dir, None)
+        .create_session(working_dir, agent_id.as_deref())
         .await
         .map_err(|e| format!("Failed to create AI session: {}", e))?;
 

@@ -7,6 +7,7 @@
   import DiffViewer from './lib/DiffViewer.svelte';
   import EmptyState from './lib/EmptyState.svelte';
   import BranchHome from './lib/BranchHome.svelte';
+  import BranchTopBar from './lib/BranchTopBar.svelte';
   import FileSearchModal from './lib/FileSearchModal.svelte';
   import FolderPickerModal from './lib/FolderPickerModal.svelte';
   import AgentSetupModal from './lib/AgentSetupModal.svelte';
@@ -769,6 +770,7 @@
 <main>
   {#if viewMode === 'branches'}
     <!-- Branch-based workflow view -->
+    <BranchTopBar />
     <BranchHome onViewDiff={handleViewDiffFromBranches} />
   {:else}
     <!-- Traditional diff viewer -->

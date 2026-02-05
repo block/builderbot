@@ -144,6 +144,11 @@
   // Delete note confirmation state
   let confirmingDeleteNoteId = $state<string | null>(null);
 
+  // Delete commit confirmation state
+  let confirmingDeleteCommitSha = $state<string | null>(null);
+  let commitsToDeleteCount = $state(0);
+  let deletingCommit = $state(false);
+
   // Load commits and running session on mount
   onMount(async () => {
     await loadData();
@@ -282,6 +287,48 @@
       console.error('Failed to delete note:', e);
     }
     confirmingDeleteNoteId = null;
+  }
+
+  // Start delete commit confirmation - calculate how many commits will be removed
+  function startDeleteCommit(commitSha: string) {
+    // Find the index of this commit (commits are newest-first)
+    const commitIndex = commits.findIndex((c) => c.sha === commitSha);
+    if (commitIndex === -1) return;
+
+    // All commits from index 0 to commitIndex (inclusive) will be deleted
+    // because they are newer or equal to the target commit
+    commitsToDeleteCount = commitIndex + 1;
+    confirmingDeleteCommitSha = commitSha;
+  }
+
+  async function handleDeleteCommit() {
+    if (!confirmingDeleteCommitSha) return;
+
+    // Find the session for this commit
+    const session = sessionsByCommit.get(confirmingDeleteCommitSha);
+    if (!session) {
+      console.error('No session found for commit:', confirmingDeleteCommitSha);
+      confirmingDeleteCommitSha = null;
+      return;
+    }
+
+    deletingCommit = true;
+    try {
+      await branchService.deleteBranchSessionAndCommit(session.id);
+      // Reload data to reflect the changes
+      await loadData();
+    } catch (e) {
+      console.error('Failed to delete commit:', e);
+    } finally {
+      deletingCommit = false;
+      confirmingDeleteCommitSha = null;
+      commitsToDeleteCount = 0;
+    }
+  }
+
+  function cancelDeleteCommit() {
+    confirmingDeleteCommitSha = null;
+    commitsToDeleteCount = 0;
   }
 
   function toggleDropdown() {
@@ -476,7 +523,11 @@
               class:is-head={item.isHead}
               class:has-session={!!item.session}
               onclick={() => {
-                if (item.session) handleViewSession(item.session);
+                if (confirmingDeleteCommitSha === item.commit.sha) {
+                  cancelDeleteCommit();
+                } else if (item.session) {
+                  handleViewSession(item.session);
+                }
               }}
             >
               <div class="timeline-marker">
@@ -502,28 +553,68 @@
                 </div>
               </div>
               <div class="timeline-actions">
-                {#if item.isHead}
+                {#if confirmingDeleteCommitSha === item.commit.sha}
+                  <div class="delete-confirm">
+                    {#if commitsToDeleteCount > 1}
+                      <span class="delete-warning">Will delete {commitsToDeleteCount} commits</span>
+                    {/if}
+                    <button
+                      class="delete-confirm-btn"
+                      disabled={deletingCommit}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteCommit();
+                      }}
+                    >
+                      {deletingCommit ? 'Deleting...' : 'Delete'}
+                    </button>
+                    <button
+                      class="delete-cancel-btn"
+                      disabled={deletingCommit}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        cancelDeleteCommit();
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                {:else}
+                  {#if item.isHead}
+                    <button
+                      class="action-btn"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleContinue();
+                      }}
+                    >
+                      <Play size={12} />
+                      Continue
+                    </button>
+                  {/if}
                   <button
-                    class="action-btn"
+                    class="action-btn action-btn-icon"
                     onclick={(e) => {
                       e.stopPropagation();
-                      handleContinue();
+                      onViewCommitDiff?.(item.commit.sha);
                     }}
+                    title="View diff"
                   >
-                    <Play size={12} />
-                    Continue
+                    <Eye size={12} />
                   </button>
+                  {#if item.session}
+                    <button
+                      class="action-btn action-btn-icon commit-delete"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        startDeleteCommit(item.commit.sha);
+                      }}
+                      title="Delete commit"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  {/if}
                 {/if}
-                <button
-                  class="action-btn action-btn-icon"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    onViewCommitDiff?.(item.commit.sha);
-                  }}
-                  title="View diff"
-                >
-                  <Eye size={12} />
-                </button>
               </div>
             </div>
           {:else if item.type === 'note'}
@@ -1146,11 +1237,22 @@
     color: var(--ui-danger);
   }
 
-  /* Delete note confirmation inline */
+  .commit-delete:hover {
+    border-color: var(--ui-danger) !important;
+    color: var(--ui-danger) !important;
+  }
+
+  /* Delete confirmation inline */
   .delete-confirm {
     display: flex;
     align-items: center;
     gap: 4px;
+  }
+
+  .delete-warning {
+    font-size: var(--size-xs);
+    color: var(--ui-danger);
+    margin-right: 4px;
   }
 
   .delete-confirm-btn {

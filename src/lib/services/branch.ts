@@ -254,6 +254,15 @@ export async function cancelBranchSession(branchSessionId: string): Promise<void
 }
 
 /**
+ * Delete a branch session and its associated commit.
+ * This will also delete all commits that came after this one (resets to parent).
+ * Returns the number of commits that were removed.
+ */
+export async function deleteBranchSessionAndCommit(branchSessionId: string): Promise<number> {
+  return invoke<number>('delete_branch_session_and_commit', { branchSessionId });
+}
+
+/**
  * Recover orphaned sessions for a branch.
  * If there's a "running" session but no live AI session, checks if commits were made
  * and marks the session as completed or errored accordingly.

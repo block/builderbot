@@ -181,6 +181,23 @@ pub fn branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
     Ok(result.is_ok())
 }
 
+/// Reset HEAD to a specific commit (hard reset).
+/// This discards all commits after the specified commit.
+pub fn reset_to_commit(worktree: &Path, commit_sha: &str) -> Result<(), GitError> {
+    cli::run(worktree, &["reset", "--hard", commit_sha])?;
+    Ok(())
+}
+
+/// Get the parent commit SHA of a given commit.
+/// Returns None if the commit has no parent (initial commit).
+pub fn get_parent_commit(worktree: &Path, commit_sha: &str) -> Result<Option<String>, GitError> {
+    let result = cli::run(worktree, &["rev-parse", &format!("{}^", commit_sha)]);
+    match result {
+        Ok(output) => Ok(Some(output.trim().to_string())),
+        Err(_) => Ok(None), // No parent (initial commit or invalid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

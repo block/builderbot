@@ -1617,6 +1617,70 @@ fn cancel_branch_session(
         .map_err(|e| e.to_string())
 }
 
+/// Delete a branch session and its associated commit.
+/// This will also delete all commits that came after this one (reset to parent).
+/// Returns the number of commits that were removed.
+#[tauri::command(rename_all = "camelCase")]
+fn delete_branch_session_and_commit(
+    state: State<'_, Arc<Store>>,
+    branch_session_id: String,
+) -> Result<u32, String> {
+    // Get the session to find the commit SHA
+    let session = state
+        .get_branch_session(&branch_session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Session '{}' not found", branch_session_id))?;
+
+    let commit_sha = session
+        .commit_sha
+        .as_ref()
+        .ok_or_else(|| "Session has no associated commit".to_string())?;
+
+    // Get the branch to find the worktree path
+    let branch = state
+        .get_branch(&session.branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch '{}' not found", session.branch_id))?;
+
+    let worktree = Path::new(&branch.worktree_path);
+
+    // Get the parent commit SHA (the commit we'll reset to)
+    let parent_sha = git::get_parent_commit(worktree, commit_sha)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Cannot delete the initial commit".to_string())?;
+
+    // Count how many commits will be removed (from current HEAD to parent)
+    let commits_before =
+        git::get_commits_since_base(worktree, &parent_sha).map_err(|e| e.to_string())?;
+    let commits_removed = commits_before.len() as u32;
+
+    // Get all sessions for this branch to find which ones to delete
+    let all_sessions = state
+        .list_branch_sessions(&session.branch_id)
+        .map_err(|e| e.to_string())?;
+
+    // Find all sessions whose commits will be removed
+    // (commits that are descendants of the commit being deleted)
+    let commits_to_remove: std::collections::HashSet<String> =
+        commits_before.iter().map(|c| c.sha.clone()).collect();
+
+    // Delete sessions for commits that will be removed
+    for s in all_sessions {
+        if let Some(sha) = &s.commit_sha {
+            if commits_to_remove.contains(sha) {
+                state
+                    .delete_branch_session(&s.id)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    // Reset the worktree to the parent commit
+    git::reset_to_commit(worktree, &parent_sha).map_err(|e| e.to_string())?;
+
+    Ok(commits_removed)
+}
+
 /// Recover orphaned sessions for a branch.
 /// If there's a "running" session but no live AI session, check if commits were made
 /// and mark the session as completed or errored accordingly.
@@ -2505,6 +2569,7 @@ pub fn run() {
             complete_branch_session,
             fail_branch_session,
             cancel_branch_session,
+            delete_branch_session_and_commit,
             recover_orphaned_session,
             get_branch_session_by_ai_session,
             get_branch_head,

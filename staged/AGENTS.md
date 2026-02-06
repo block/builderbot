@@ -61,11 +61,15 @@ All components use `var(--*)` for colors—no hardcoded values.
 ## Commands
 
 ```bash
+just install    # First-time setup (deps + git hooks)
 just dev        # Run with hot-reload (human runs this)
-just fmt        # Format all code
+just build      # Production build
+just fmt        # Auto-format all code
 just lint       # Clippy for Rust
-just typecheck  # Type check everything
-just check-all  # All checks before submitting
+just typecheck  # Type-check frontend + backend
+just check-all  # Format + lint + typecheck (run before pushing)
+just ci         # Same checks without modifying files (for CI)
+just clean      # Nuke all build artifacts and dependencies
 ```
 
 **Note:** The human runs the dev server. Don't start it yourself.
@@ -74,8 +78,7 @@ just check-all  # All checks before submitting
 
 Before finishing work:
 ```bash
-just fmt        # Auto-format Rust + TypeScript/Svelte
-just check-all  # Verify everything passes
+just check-all  # Auto-formats, then verifies lint + types pass
 ```
 
 ## Git Workflow

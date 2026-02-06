@@ -27,7 +27,7 @@ jobs:
       # Install hermit (manages node, rust, just)
       - uses: cashapp/activate-hermit@v1
         with:
-          directory: staged
+          working-directory: staged
 
       # Cache Cargo dependencies
       - uses: Swatinem/rust-cache@v2

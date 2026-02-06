@@ -1504,12 +1504,12 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// List all branches, ordered by most recently updated
+    /// List all branches, ordered by oldest first
     pub fn list_branches(&self) -> Result<Vec<Branch>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at
-             FROM branches ORDER BY updated_at DESC",
+             FROM branches ORDER BY created_at ASC",
         )?;
         let branches = stmt
             .query_map([], Branch::from_row)?
@@ -1909,12 +1909,12 @@ impl Store {
         result.optional().map_err(Into::into)
     }
 
-    /// List all git projects, ordered by most recently updated
+    /// List all git projects, ordered by oldest first
     pub fn list_git_projects(&self) -> Result<Vec<GitProject>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, repo_path, subpath, created_at, updated_at
-             FROM git_projects ORDER BY updated_at DESC",
+             FROM git_projects ORDER BY created_at ASC",
         )?;
         let projects = stmt
             .query_map([], GitProject::from_row)?

@@ -171,6 +171,37 @@ func (c *Cache) EnrichProject(name string, git *discovery.GitInfo, summary strin
 	}
 }
 
+// RemoveProject removes a project from the cache
+func (c *Cache) RemoveProject(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.projects {
+		if c.projects[i].Name == name {
+			c.projects = append(c.projects[:i], c.projects[i+1:]...)
+			break
+		}
+	}
+	delete(c.projectFiles, name)
+}
+
+// RefreshProjectGitInfo re-fetches git info (branch, dirty, unstaged mod times,
+// unpushed commit times) for a single project without rescanning files.
+func (c *Cache) RefreshProjectGitInfo(name string) {
+	project := c.FindProject(name)
+	if project == nil || project.Name == "(root)" {
+		return
+	}
+	git := discovery.GetGitInfo(project.Path)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.projects {
+		if c.projects[i].Name == name {
+			c.projects[i].Git = git
+			break
+		}
+	}
+}
+
 // RescanProjects rescans the root directory for projects using the fast path,
 // preserving existing git info and summaries for known projects.
 func (c *Cache) RescanProjects() error {

@@ -201,6 +201,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 	w.debounceRefresh(projectName, func() {
 		w.cache.RefreshProject(projectName)
+		w.cache.RefreshProjectGitInfo(projectName)
 		w.Broadcast(Event{Type: EventFilesChanged, Project: projectName})
 	})
 }

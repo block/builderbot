@@ -119,6 +119,21 @@ pub fn resolve_ref(repo: &Path, reference: &str) -> Result<String, GitError> {
     Ok(output.trim().to_string())
 }
 
+/// Get the current branch name.
+/// Returns an error if in detached HEAD state.
+pub fn get_current_branch(repo: &Path) -> Result<String, GitError> {
+    let output = cli::run(repo, &["branch", "--show-current"])?;
+    let branch_name = output.trim();
+
+    if branch_name.is_empty() {
+        return Err(GitError::CommandFailed(
+            "Not on a branch (detached HEAD)".to_string(),
+        ));
+    }
+
+    Ok(branch_name.to_string())
+}
+
 /// Detect the default branch for this repository.
 /// Checks for common default branch names in order of preference.
 /// Returns the remote-tracking branch (e.g., "origin/main") if available,

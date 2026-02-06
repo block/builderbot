@@ -2871,6 +2871,23 @@ fn create_git_project(
     state
         .create_git_project(&project)
         .map_err(|e| e.to_string())?;
+
+    // Auto-create a branch for the main worktree
+    let repo = Path::new(&repo_path);
+
+    // Get the current branch name
+    let current_branch = git::get_current_branch(repo).map_err(|e| e.to_string())?;
+
+    // Detect the default branch for base
+    let base_branch = git::detect_default_branch(repo).map_err(|e| e.to_string())?;
+
+    // Create the main worktree branch
+    let main_branch =
+        Branch::new_main_worktree(&project.id, &repo_path, &current_branch, &base_branch);
+
+    // Save it to the database (ignore if it already exists)
+    let _ = state.create_branch(&main_branch);
+
     Ok(project)
 }
 

@@ -993,14 +993,16 @@
               {/each}
             {/if}
 
-            <!-- Delete last -->
-            {#if projectActions.length > 0}
-              <div class="menu-separator"></div>
+            <!-- Delete last (only for non-main worktree branches) -->
+            {#if !branch.isMainWorktree}
+              {#if projectActions.length > 0}
+                <div class="menu-separator"></div>
+              {/if}
+              <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
+                <Trash2 size={14} />
+                Delete
+              </button>
             {/if}
-            <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
-              <Trash2 size={14} />
-              Delete
-            </button>
           </div>
         {/if}
       </div>

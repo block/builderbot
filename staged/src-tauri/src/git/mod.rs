@@ -18,8 +18,8 @@ pub use github::{
     CreatePrResult, GitHubAuthStatus, GitHubSyncResult, Issue, PullRequest, PullRequestInfo,
 };
 pub use refs::{
-    detect_default_branch, get_repo_root, list_branches, list_refs, merge_base, resolve_ref,
-    BranchRef,
+    detect_default_branch, get_current_branch, get_repo_root, list_branches, list_refs, merge_base,
+    resolve_ref, BranchRef,
 };
 pub use types::*;
 pub use worktree::{

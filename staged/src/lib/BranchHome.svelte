@@ -272,6 +272,11 @@
     const branch = branches.find((b) => b.id === branchId);
     if (!branch) return;
 
+    // Cannot delete main worktree
+    if (branch.isMainWorktree) {
+      return;
+    }
+
     // Show confirmation dialog
     branchToDelete = branch;
   }

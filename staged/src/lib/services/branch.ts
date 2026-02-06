@@ -85,6 +85,8 @@ export interface Branch {
   baseBranch: string;
   /** The PR number this branch was created from (if any) */
   prNumber: number | null;
+  /** Whether this is the main worktree (cannot be deleted) */
+  isMainWorktree: boolean;
   createdAt: number;
   updatedAt: number;
 }

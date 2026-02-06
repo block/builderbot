@@ -447,6 +447,8 @@ pub struct Branch {
     pub base_branch: String,
     /// PR number if this branch was created from a GitHub PR
     pub pr_number: Option<u64>,
+    /// Whether this is the main worktree (cannot be deleted)
+    pub is_main_worktree: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -468,6 +470,7 @@ impl Branch {
             worktree_path: worktree_path.into(),
             base_branch: base_branch.into(),
             pr_number: None,
+            is_main_worktree: false,
             created_at: now,
             updated_at: now,
         }
@@ -491,6 +494,30 @@ impl Branch {
             worktree_path: worktree_path.into(),
             base_branch: base_branch.into(),
             pr_number: Some(pr_number),
+            is_main_worktree: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Create a new branch for the main worktree.
+    pub fn new_main_worktree(
+        project_id: impl Into<String>,
+        repo_path: impl Into<String>,
+        branch_name: impl Into<String>,
+        base_branch: impl Into<String>,
+    ) -> Self {
+        let repo_path_str = repo_path.into();
+        let now = now_timestamp();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            project_id: project_id.into(),
+            repo_path: repo_path_str.clone(),
+            branch_name: branch_name.into(),
+            worktree_path: repo_path_str, // Main worktree uses the repo path itself
+            base_branch: base_branch.into(),
+            pr_number: None,
+            is_main_worktree: true,
             created_at: now,
             updated_at: now,
         }
@@ -500,6 +527,7 @@ impl Branch {
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
         // pr_number is stored as i64 in SQLite, convert to u64
         let pr_number: Option<i64> = row.get(6)?;
+        let is_main_worktree: i32 = row.get(7).unwrap_or(0);
         Ok(Self {
             id: row.get(0)?,
             project_id: row.get(1)?,
@@ -508,8 +536,9 @@ impl Branch {
             worktree_path: row.get(4)?,
             base_branch: row.get(5)?,
             pr_number: pr_number.map(|n| n as u64),
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
+            is_main_worktree: is_main_worktree != 0,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
         })
     }
 }
@@ -1080,6 +1109,22 @@ impl Store {
             }
         }
 
+        // Check if is_main_worktree column exists on branches, add if not
+        let has_is_main_worktree: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('branches') WHERE name = 'is_main_worktree'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if !has_is_main_worktree {
+            conn.execute(
+                "ALTER TABLE branches ADD COLUMN is_main_worktree INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
         Ok(())
     }
 
@@ -1645,9 +1690,10 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         // Convert pr_number from u64 to i64 for SQLite storage
         let pr_number_i64: Option<i64> = branch.pr_number.map(|n| n as i64);
+        let is_main_worktree_i32: i32 = if branch.is_main_worktree { 1 } else { 0 };
         conn.execute(
-            "INSERT INTO branches (id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO branches (id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, is_main_worktree, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 &branch.id,
                 &branch.project_id,
@@ -1656,6 +1702,7 @@ impl Store {
                 &branch.worktree_path,
                 &branch.base_branch,
                 &pr_number_i64,
+                is_main_worktree_i32,
                 branch.created_at,
                 branch.updated_at,
             ],
@@ -1667,7 +1714,7 @@ impl Store {
     pub fn get_branch(&self, id: &str) -> Result<Option<Branch>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at
+            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, is_main_worktree, created_at, updated_at
              FROM branches WHERE id = ?1",
             params![id],
             Branch::from_row,
@@ -1680,7 +1727,7 @@ impl Store {
     pub fn list_branches(&self) -> Result<Vec<Branch>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at
+            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, is_main_worktree, created_at, updated_at
              FROM branches ORDER BY created_at ASC",
         )?;
         let branches = stmt
@@ -1693,7 +1740,7 @@ impl Store {
     pub fn list_branches_for_repo(&self, repo_path: &str) -> Result<Vec<Branch>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at
+            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, is_main_worktree, created_at, updated_at
              FROM branches WHERE repo_path = ?1 ORDER BY updated_at DESC",
         )?;
         let branches = stmt
@@ -1706,7 +1753,7 @@ impl Store {
     pub fn list_branches_for_project(&self, project_id: &str) -> Result<Vec<Branch>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at
+            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, is_main_worktree, created_at, updated_at
              FROM branches WHERE project_id = ?1 ORDER BY updated_at DESC",
         )?;
         let branches = stmt

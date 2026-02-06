@@ -1,13 +1,21 @@
-name: CI
+name: Staged CI
 
 on:
   pull_request:
     branches: [main]
+    paths:
+      - "staged/**"
   push:
     branches: [main]
+    paths:
+      - "staged/**"
 
 env:
   CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: staged
 
 jobs:
   check:
@@ -18,11 +26,13 @@ jobs:
 
       # Install hermit (manages node, rust, just)
       - uses: cashapp/activate-hermit@v1
+        with:
+          directory: staged
 
       # Cache Cargo dependencies
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: staged/src-tauri
 
       # Install system dependencies for Tauri (Linux)
       - name: Install Tauri dependencies (Linux)

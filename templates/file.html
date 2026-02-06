@@ -585,7 +585,7 @@
     <template id="raw-markdown">{{.Raw}}</template>
 
     <script>
-        const rawMarkdown = document.getElementById('raw-markdown').content.textContent;
+        let rawMarkdown = document.getElementById('raw-markdown').content.textContent;
         const projectName = '{{.Project.Name}}';
         const filePath = '{{.FilePath}}';
 
@@ -905,6 +905,7 @@
                 return r.json();
             })
             .then(() => {
+                hideReplyForm(threadId);
                 refreshComments();
             })
             .catch(err => {
@@ -1425,18 +1426,84 @@
             return result;
         }
 
+        // --- Form state preservation ---
+
+        function saveFormState() {
+            const state = { scrollTop: document.getElementById('comments-panel').scrollTop };
+            // Check for an open reply form
+            document.querySelectorAll('.reply-form').forEach(form => {
+                if (form.style.display !== 'none') {
+                    const threadId = form.id.replace('reply-form-', '');
+                    const textarea = form.querySelector('textarea');
+                    const author = form.querySelector('.author-field');
+                    state.reply = {
+                        threadId: threadId,
+                        body: textarea ? textarea.value : '',
+                        author: author ? author.value : ''
+                    };
+                }
+            });
+            return state;
+        }
+
+        function restoreFormState(state) {
+            if (!state) return;
+            if (state.reply) {
+                const form = document.getElementById('reply-form-' + state.reply.threadId);
+                if (form) {
+                    form.style.display = '';
+                    const textarea = form.querySelector('textarea');
+                    if (textarea) {
+                        textarea.value = state.reply.body;
+                        textarea.focus();
+                    }
+                    const author = form.querySelector('.author-field');
+                    if (author) author.value = state.reply.author;
+                }
+            }
+            document.getElementById('comments-panel').scrollTop = state.scrollTop;
+        }
+
         // --- SSE real-time updates ---
 
         function refreshComments() {
+            const formState = saveFormState();
             fetch('/api/threads?project=' + encodeURIComponent(projectName) + '&path=' + encodeURIComponent(filePath))
                 .then(r => r.json())
                 .then(data => {
                     threads = data;
                     anchorLines = resolveAnchorsToLines(threads, rawMarkdown);
                     renderThreads(threads, anchorLines);
+                    restoreFormState(formState);
                     renderReviewBanner();
                 })
                 .catch(err => console.error('Failed to refresh comments:', err));
+        }
+
+        function refreshDocument() {
+            const contentScroll = window.scrollY;
+            fetch(window.location.href)
+                .then(r => r.text())
+                .then(pageHtml => {
+                    const doc = new DOMParser().parseFromString(pageHtml, 'text/html');
+
+                    const newContent = doc.getElementById('content');
+                    if (newContent) {
+                        document.getElementById('content').innerHTML = newContent.innerHTML;
+                    }
+
+                    const newRaw = doc.getElementById('raw-markdown');
+                    if (newRaw) {
+                        rawMarkdown = newRaw.content.textContent;
+                    }
+
+                    refreshComments();
+                    window.scrollTo(0, contentScroll);
+                })
+                .catch(err => {
+                    console.error('Failed to refresh document:', err);
+                    window.location.reload();
+                });
         }
 
         // Set up SSE
@@ -1449,7 +1516,7 @@
                     refreshReview();
                 }
                 if (data.type === 'files' && data.project === projectName) {
-                    window.location.reload();
+                    refreshDocument();
                 }
             } catch (err) {
                 console.error('SSE parse error:', err);

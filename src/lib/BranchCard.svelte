@@ -1585,7 +1585,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 12px;
+    padding: 4px 12px;
     background: var(--ui-accent);
     border: 1px solid var(--ui-accent);
     border-radius: 6px;
@@ -1593,17 +1593,16 @@
     font-size: var(--size-xs);
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition: filter 0.15s ease;
     white-space: nowrap;
   }
 
   .primary-action-button:hover {
-    opacity: 0.9;
-    transform: translateY(-1px);
+    filter: brightness(1.1);
   }
 
   .primary-action-button:active {
-    transform: translateY(0);
+    filter: brightness(0.95);
   }
 
   .primary-action-button.running {

@@ -1,0 +1,13 @@
+skip_lfs: true
+output:
+  - success
+  - failure
+pre-push:
+  parallel: true
+  commands:
+    fmt-check:
+      run: just fmt-check
+    lint:
+      run: just lint
+    typecheck:
+      run: just typecheck

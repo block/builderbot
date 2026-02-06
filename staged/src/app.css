@@ -1,0 +1,118 @@
+/**
+ * Global styles for Staged
+ *
+ * Uses CSS custom properties defined by the theme system.
+ * See src/lib/theme.ts for the theme definition.
+ *
+ * Design philosophy:
+ * - The code IS the interface - minimize chrome
+ * - Boundaries through subtle contrast, not heavy borders
+ * - Horizontal space is precious - every pixel counts
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  /*
+   * Theme colors - Default: laserwave
+   * 
+   * These are pre-computed from createAdaptiveTheme() for the default syntax theme.
+   * They're immediately overwritten by the adaptive theme system on mount, but
+   * having them here prevents any flash of unstyled content.
+   * 
+   * To regenerate: run the theme through createAdaptiveTheme(bg, fg, comment)
+   * Laserwave: bg=#27212e, fg=#ffffff, comment=#91889b
+   */
+  --theme-is-dark: 1;
+
+  --bg-primary: #27212e;
+  --bg-chrome: #18151d;
+  --bg-deepest: #020203;
+  --bg-elevated: #38333f;
+  --bg-hover: #342e3b;
+
+  --border-subtle: #38333f;
+  --border-muted: #47424d;
+  --border-emphasis: #5d5962;
+
+  --text-primary: #ffffff;
+  --text-muted: #91889b;
+  --text-faint: #5c5565;
+  --text-accent: #58a6ff;
+
+  --status-modified: #d29922;
+  --status-added: #3fb950;
+  --status-deleted: #f85149;
+  --status-renamed: #58a6ff;
+  --status-untracked: #91889b;
+
+  --diff-added-bg: rgba(63, 185, 80, 0.08);
+  --diff-removed-bg: rgba(248, 81, 73, 0.08);
+  --diff-changed-bg: rgba(255, 255, 255, 0.04);
+  --diff-range-border: #524d58;
+
+  --ui-accent: #3fb950;
+  --ui-accent-hover: #2ea043;
+  --ui-danger: #f85149;
+  --ui-danger-bg: rgba(248, 81, 73, 0.1);
+  --ui-selection: rgba(255, 255, 255, 0.08);
+
+  --scrollbar-thumb: #47424d;
+  --scrollbar-thumb-hover: #5d5962;
+
+  --shadow-overlay: rgba(0, 0, 0, 0.6);
+  --shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.1);
+
+  /* 
+   * Size scale - all sizes derive from --size-base
+   * Adjust --size-base to scale the entire UI
+   */
+  --size-base: 13px;
+  --size-xs: calc(var(--size-base) * 0.846); /* ~11px */
+  --size-sm: calc(var(--size-base) * 0.923); /* ~12px */
+  --size-md: var(--size-base); /* 13px */
+  --size-lg: calc(var(--size-base) * 1.077); /* ~14px */
+  --size-xl: calc(var(--size-base) * 1.231); /* ~16px */
+
+  /* Typography */
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  font-size: var(--size-md);
+  line-height: 1.5;
+  font-weight: 400;
+
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+
+/* Minimal scrollbar - track is invisible, just show thumb */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}

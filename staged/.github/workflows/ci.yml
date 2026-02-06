@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install hermit (manages node, rust, just)
+      - uses: cashapp/activate-hermit@v1
+
+      # Cache Cargo dependencies
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Install system dependencies for Tauri (Linux)
+      - name: Install Tauri dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      # Install dependencies
+      - name: Install dependencies
+        run: just install
+
+      # Run all checks
+      - name: Check all (fmt, lint, typecheck)
+        run: just check-all

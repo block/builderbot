@@ -410,7 +410,7 @@
       if (showBasePicker) {
         showBasePicker = false;
         baseSearchQuery = '';
-      } else if (step === 'name') {
+      } else if (step === 'name' && !initialRepoPath) {
         goBack();
       } else {
         onClose();
@@ -474,7 +474,7 @@
     onclick={(e) => e.stopPropagation()}
   >
     <div class="modal-header">
-      {#if step === 'name' || step === 'pr'}
+      {#if (step === 'name' && !initialRepoPath) || step === 'pr'}
         <button class="back-button" onclick={goBack}>
           <ArrowLeft size={16} />
         </button>
@@ -675,7 +675,9 @@
               <span>From Pull Request</span>
             </button>
             <div class="actions-right">
-              <button class="cancel-button" onclick={goBack}>Cancel</button>
+              <button class="cancel-button" onclick={initialRepoPath ? onClose : goBack}
+                >Cancel</button
+              >
               <button class="create-button" onclick={handleCreate} disabled={!branchName}>
                 Create Branch
               </button>

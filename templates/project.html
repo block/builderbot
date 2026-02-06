@@ -88,6 +88,25 @@
         }
         .empty { color: #888; font-style: italic; }
 
+        .review-badge {
+            font-size: 0.7em;
+            font-weight: 500;
+            text-transform: uppercase;
+            padding: 2px 6px;
+            border-radius: 3px;
+            background: #ddf4ff;
+            color: #0969da;
+            flex-shrink: 0;
+        }
+        .review-badge.agent-active {
+            animation: review-badge-pulse 2s infinite;
+        }
+        @keyframes review-badge-pulse {
+            0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.4); }
+            70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
+        }
+
         .agent-banner {
             display: flex;
             align-items: center;
@@ -394,6 +413,7 @@
             const data = JSON.parse(e.data);
             if (data.type === 'files' && data.project === projectName) refreshFiles();
             if (data.type === 'projects') checkIfDeleted();
+            if (data.type === 'comments' && data.project === projectName) refreshReviewBadges();
         });
 
         async function checkIfDeleted() {
@@ -444,6 +464,7 @@
                 `).join('');
                 attachFileListeners();
                 clearSelection();
+                applyReviewBadges();
             } catch (err) {
                 console.error('Failed to refresh files:', err);
             }
@@ -465,6 +486,51 @@
         }
         refreshAgentStatus();
         setInterval(refreshAgentStatus, 30000);
+
+        // Review badges
+        let reviewData = {};
+
+        async function refreshReviewBadges() {
+            try {
+                const response = await fetch('/api/reviews?project=' + encodeURIComponent(projectName));
+                const reviews = await response.json();
+                reviewData = {};
+                reviews.forEach(r => {
+                    reviewData[r.filePath] = r;
+                });
+                applyReviewBadges();
+            } catch (err) {
+                console.error('Failed to refresh review badges:', err);
+            }
+        }
+
+        function applyReviewBadges() {
+            document.querySelectorAll('.file[data-path]').forEach(file => {
+                const path = file.dataset.path;
+                // Remove existing review badge
+                const existing = file.querySelector('.review-badge');
+                if (existing) existing.remove();
+
+                if (reviewData[path]) {
+                    const badge = document.createElement('span');
+                    badge.className = 'review-badge';
+                    if (reviewData[path].agentActive) {
+                        badge.classList.add('agent-active');
+                    }
+                    badge.textContent = 'in review';
+                    // Insert badge in file-left, after the file-type if present
+                    const fileLeft = file.querySelector('.file-left');
+                    const fileName = file.querySelector('.file-name');
+                    if (fileName) {
+                        fileLeft.insertBefore(badge, fileName);
+                    } else {
+                        fileLeft.appendChild(badge);
+                    }
+                }
+            });
+        }
+
+        refreshReviewBadges();
     </script>
 </body>
 </html>

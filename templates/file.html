@@ -19,8 +19,8 @@
 
         .layout {
             display: grid;
-            grid-template-columns: 220px 1fr;
-            min-height: 100vh;
+            grid-template-columns: 220px 1fr 340px;
+            height: 100vh;
         }
 
         .sidebar {
@@ -67,6 +67,8 @@
         .main {
             padding: 24px 40px;
             max-width: 900px;
+            height: 100vh;
+            overflow-y: auto;
         }
 
         .breadcrumb { margin-bottom: 16px; color: #888; font-size: 0.9em; }
@@ -160,6 +162,7 @@
         .dropdown-menu button:hover { background: #f5f5f5; }
 
         .content {
+            position: relative;
             background: #fff;
             padding: 32px 40px;
             border-radius: 8px;
@@ -244,11 +247,275 @@
         }
         .content .chroma { background: #282a36; }
 
+        /* Comments panel */
+        .comments-panel {
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            overflow-y: auto;
+            padding: 16px;
+            border-left: 1px solid #e8e8e8;
+            background: #fff;
+            font-size: 0.85em;
+        }
+        .comments-panel-header {
+            font-size: 0.7em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #888;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .thread-card {
+            border: 1px solid #e8e8e8;
+            border-radius: 6px;
+            margin-bottom: 12px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: border-color 0.15s;
+        }
+        .thread-card:hover { border-color: #ccc; }
+        .thread-card.highlighted { border-color: #0066cc; box-shadow: 0 0 0 1px #0066cc; }
+        .thread-anchor {
+            padding: 8px 12px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e8e8e8;
+            font-size: 0.9em;
+            color: #666;
+            font-style: italic;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .thread-anchor::before { content: '\201C'; }
+        .thread-anchor::after { content: '\201D'; }
+        .thread-comment {
+            padding: 8px 12px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .thread-comment:last-child { border-bottom: none; }
+        .comment-header {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+        .comment-author {
+            font-weight: 600;
+            font-size: 0.9em;
+        }
+        .comment-role {
+            font-size: 0.7em;
+            padding: 1px 5px;
+            border-radius: 3px;
+            text-transform: uppercase;
+        }
+        .comment-role.human { background: #ddf4ff; color: #0969da; }
+        .comment-role.agent { background: #dafbe1; color: #1a7f37; }
+        .comment-time {
+            font-size: 0.8em;
+            color: #999;
+        }
+        .comment-body { line-height: 1.5; }
+        .thread-status {
+            display: inline-block;
+            font-size: 0.7em;
+            padding: 1px 5px;
+            border-radius: 3px;
+            text-transform: uppercase;
+            font-weight: 500;
+        }
+        .thread-status.open { background: #fff3cd; color: #856404; }
+        .thread-status.resolved { background: #d4edda; color: #155724; }
+        .thread-resolved { opacity: 0.6; }
+        .thread-resolved .thread-comment { display: none; }
+        .thread-resolved.expanded .thread-comment { display: block; }
+        #resolved-toggle label:hover { color: #555; }
+        .orphaned-warning {
+            font-size: 0.75em;
+            color: #dc3545;
+            padding: 4px 12px;
+            background: #fff5f5;
+        }
+        /* Comment highlights */
+        .comment-highlight {
+            background: #fff3aa;
+            border-bottom: 2px solid #f5c518;
+            cursor: pointer;
+            border-radius: 2px;
+            transition: background 0.2s;
+        }
+        .comment-highlight:hover {
+            background: #ffe066;
+        }
+        .comment-highlight.resolved {
+            background: transparent;
+            border-bottom-color: transparent;
+            cursor: default;
+        }
+        .comment-highlight.active {
+            background: #ffe066;
+            border-bottom-color: #f5c518;
+            box-shadow: 0 0 0 2px rgba(245, 197, 24, 0.4);
+            cursor: pointer;
+        }
+        /* No comments state */
+        .no-comments {
+            color: #999;
+            text-align: center;
+            padding: 40px 16px;
+        }
+        /* Review banner */
+        .review-banner {
+            background: #ddf4ff;
+            border: 1px solid #b6d4fe;
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin-bottom: 12px;
+            font-size: 0.85em;
+        }
+        .review-banner strong { color: #0969da; }
+        .review-banner.agent-active {
+            animation: review-pulse 2s infinite;
+        }
+        @keyframes review-pulse {
+            0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.3); }
+            70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
+        }
+
+        /* Floating comment button */
+        .comment-btn-float {
+            position: absolute;
+            background: #0066cc;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 4px 10px;
+            font-size: 0.8em;
+            cursor: pointer;
+            z-index: 50;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            white-space: nowrap;
+        }
+        .comment-btn-float:hover { background: #0052a3; }
+
+        /* New thread form */
+        .new-thread-form {
+            border: 1px solid #0066cc;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 12px;
+            background: #f8f9fa;
+        }
+        .new-thread-form .quoted-text {
+            font-style: italic;
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 8px;
+            padding: 6px 10px;
+            border-left: 3px solid #0066cc;
+            background: #fff;
+            max-height: 80px;
+            overflow-y: auto;
+        }
+        .new-thread-form textarea,
+        .reply-form textarea {
+            width: 100%;
+            min-height: 60px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 8px;
+            font-family: inherit;
+            font-size: 0.9em;
+            resize: vertical;
+            margin-bottom: 8px;
+        }
+        .new-thread-form textarea:focus,
+        .reply-form textarea:focus {
+            outline: none;
+            border-color: #0066cc;
+        }
+        .new-thread-form .author-field,
+        .reply-form .author-field {
+            width: 100%;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-family: inherit;
+            font-size: 0.85em;
+            margin-bottom: 8px;
+        }
+        .new-thread-form .author-field:focus,
+        .reply-form .author-field:focus {
+            outline: none;
+            border-color: #0066cc;
+        }
+        .form-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+        .form-actions button {
+            padding: 5px 12px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            cursor: pointer;
+        }
+        .btn-submit {
+            background: #0066cc;
+            color: #fff;
+            border: 1px solid #0066cc;
+        }
+        .btn-submit:hover { background: #0052a3; }
+        .btn-submit:disabled { opacity: 0.5; cursor: default; }
+        .btn-cancel-form {
+            background: #f5f5f5;
+            color: #333;
+            border: 1px solid #ddd;
+        }
+        .btn-cancel-form:hover { background: #eee; }
+
+        /* Reply form */
+        .reply-form {
+            padding: 8px 12px;
+            border-top: 1px solid #e8e8e8;
+        }
+
+        /* Thread action buttons */
+        .thread-actions {
+            display: flex;
+            gap: 6px;
+            padding: 6px 12px;
+            border-top: 1px solid #f0f0f0;
+        }
+        .thread-actions button {
+            font-size: 0.75em;
+            padding: 3px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            border: 1px solid #ddd;
+            background: #f8f9fa;
+            color: #555;
+        }
+        .thread-actions button:hover {
+            background: #eee;
+            border-color: #ccc;
+        }
+        .resolve-btn { }
+        .reopen-btn { }
+
         @media (max-width: 800px) {
             .layout {
                 grid-template-columns: 1fr;
             }
             .sidebar {
+                display: none;
+            }
+            .comments-panel {
                 display: none;
             }
             .main {
@@ -270,7 +537,7 @@
 
         <div class="main">
             <div class="breadcrumb">
-                <a href="/">← All Projects</a>
+                <a href="/">&#8592; All Projects</a>
                 / <a href="/project/{{.Project.Name}}">{{.Project.Name}}</a>
                 / {{.FileName}}
             </div>
@@ -279,7 +546,7 @@
                 {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
                 <span class="toolbar-filename">{{.FileName}}</span>
                 <div class="copy-dropdown">
-                    <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy ▾</button>
+                    <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy &#9662;</button>
                     <div class="dropdown-menu">
                         <button onclick="copyText(this, rawMarkdown)">Markdown</button>
                         <button onclick="copyFileToClipboard(this)">File</button>
@@ -288,16 +555,44 @@
                     </div>
                 </div>
             </div>
-
-            <div class="content">
+            <div class="content" id="content">
                 {{.Content}}
             </div>
+        </div>
+
+        <div class="comments-panel" id="comments-panel">
+            <div class="comments-panel-header">
+                <span>Comments <span id="comments-count"></span></span>
+                <span id="resolved-toggle" style="display:none;">
+                    <label style="cursor:pointer; font-weight:normal; text-transform:none; letter-spacing:normal;">
+                        <input type="checkbox" id="show-resolved-checkbox" onchange="toggleResolved()" style="margin-right:3px; vertical-align:middle;">
+                        <span id="resolved-count"></span>
+                    </label>
+                </span>
+            </div>
+            <div id="review-banner-container"></div>
+            <div id="new-thread-form-container"></div>
+            <div id="threads-container"></div>
         </div>
     </div>
     <template id="raw-markdown">{{.Raw}}</template>
 
     <script>
         const rawMarkdown = document.getElementById('raw-markdown').content.textContent;
+        const projectName = '{{.Project.Name}}';
+        const filePath = '{{.FilePath}}';
+
+        let threads = {{.ThreadsJSON}};
+        let anchorLines = {{.AnchorLines}};
+        let currentReviewAgentActive = false;
+
+        // Author name from localStorage
+        function getSavedAuthor() {
+            return localStorage.getItem('birdseye-author') || '';
+        }
+        function saveAuthor(name) {
+            if (name) localStorage.setItem('birdseye-author', name);
+        }
 
         function toggleDropdown(event) {
             event.preventDefault();
@@ -306,7 +601,11 @@
             document.querySelectorAll('.copy-dropdown.open').forEach(d => { if (d !== dd) d.classList.remove('open'); });
             dd.classList.toggle('open');
         }
-        document.addEventListener('click', () => document.querySelectorAll('.copy-dropdown.open').forEach(d => d.classList.remove('open')));
+        document.addEventListener('click', () => {
+            document.querySelectorAll('.copy-dropdown.open').forEach(d => d.classList.remove('open'));
+            // Remove floating comment button on click elsewhere
+            removeFloatingCommentBtn();
+        });
 
         function flashCopied(btn) {
             const dd = btn.closest('.copy-dropdown');
@@ -314,7 +613,7 @@
             const toggle = dd.querySelector('.dropdown-toggle');
             toggle.textContent = 'Copied!';
             toggle.classList.add('copied');
-            setTimeout(() => { toggle.textContent = 'Copy ▾'; toggle.classList.remove('copied'); }, 1500);
+            setTimeout(() => { toggle.textContent = 'Copy \u25BE'; toggle.classList.remove('copied'); }, 1500);
         }
 
         function copyText(btn, text) {
@@ -323,9 +622,720 @@
         }
 
         function copyFileToClipboard(btn) {
-            fetch(`/api/copy-file?project=${encodeURIComponent('{{.Project.Name}}')}&path=${encodeURIComponent('{{.FilePath}}')}`)
+            fetch(`/api/copy-file?project=${encodeURIComponent(projectName)}&path=${encodeURIComponent(filePath)}`)
                 .then(resp => { if (resp.ok) flashCopied(btn); });
         }
+
+        // --- Comments panel logic ---
+
+        function formatTime(isoStr) {
+            if (!isoStr) return '';
+            const d = new Date(isoStr);
+            const now = new Date();
+            const diffMs = now - d;
+            const diffMins = Math.floor(diffMs / 60000);
+            if (diffMins < 1) return 'just now';
+            if (diffMins < 60) return diffMins + 'm ago';
+            const diffHours = Math.floor(diffMins / 60);
+            if (diffHours < 24) return diffHours + 'h ago';
+            const diffDays = Math.floor(diffHours / 24);
+            if (diffDays < 7) return diffDays + 'd ago';
+            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function truncateText(text, maxLen) {
+            if (!text) return '';
+            return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
+        }
+
+        // --- Review banner (in comments panel) ---
+
+        function renderReviewBanner() {
+            const container = document.getElementById('review-banner-container');
+            const openCount = (threads || []).filter(t => t.status === 'open').length;
+            if (openCount === 0) {
+                container.innerHTML = '';
+                return;
+            }
+            const agentClass = currentReviewAgentActive ? ' agent-active' : '';
+            container.innerHTML = '<div class="review-banner' + agentClass + '"><strong>In review</strong> &mdash; ' +
+                openCount + ' open thread' + (openCount !== 1 ? 's' : '') + '</div>';
+        }
+
+        function refreshReview() {
+            fetch('/api/reviews?project=' + encodeURIComponent(projectName))
+                .then(r => r.json())
+                .then(reviews => {
+                    const myReview = reviews.find(r => r.filePath === filePath);
+                    if (myReview) {
+                        currentReviewAgentActive = myReview.agentActive || false;
+                    } else {
+                        currentReviewAgentActive = false;
+                    }
+                    renderReviewBanner();
+                })
+                .catch(err => console.error('Failed to refresh review:', err));
+        }
+
+        // --- Thread rendering ---
+
+        function renderThreads(threadList, lines) {
+            const container = document.getElementById('threads-container');
+            const countEl = document.getElementById('comments-count');
+
+            // Remove old comment highlights
+            const contentEl = document.getElementById('content');
+            if (contentEl) {
+                contentEl.querySelectorAll('.comment-highlight').forEach(mark => {
+                    const parent = mark.parentNode;
+                    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+                    parent.removeChild(mark);
+                    parent.normalize();
+                });
+            }
+
+            if (!threadList || threadList.length === 0) {
+                container.innerHTML = '<div class="no-comments">No comments yet</div>';
+                countEl.textContent = '';
+                document.getElementById('resolved-toggle').style.display = 'none';
+                return;
+            }
+
+            // Split into open, resolved, and orphaned
+            const openThreads = [];
+            const resolvedThreads = [];
+            const orphanedThreads = [];
+
+            threadList.forEach(t => {
+                const line = lines[t.id];
+                if (t.status === 'resolved') {
+                    resolvedThreads.push(t);
+                } else if (line === -1 || line === undefined) {
+                    orphanedThreads.push(t);
+                } else {
+                    openThreads.push(t);
+                }
+            });
+
+            // Sort by anchor line (top to bottom)
+            const sortByLine = (a, b) => (lines[a.id] || 0) - (lines[b.id] || 0);
+            openThreads.sort(sortByLine);
+            resolvedThreads.sort(sortByLine);
+
+            const openCount = openThreads.length + orphanedThreads.length;
+            countEl.textContent = openCount > 0 ? openCount : '';
+
+            // Update resolved toggle in header
+            const resolvedToggle = document.getElementById('resolved-toggle');
+            const resolvedCountEl = document.getElementById('resolved-count');
+            const showResolvedCheckbox = document.getElementById('show-resolved-checkbox');
+            if (resolvedThreads.length > 0) {
+                resolvedToggle.style.display = '';
+                resolvedCountEl.textContent = resolvedThreads.length + ' resolved';
+            } else {
+                resolvedToggle.style.display = 'none';
+            }
+
+            const showResolved = showResolvedCheckbox && showResolvedCheckbox.checked;
+
+            let html = '';
+
+            // Open threads
+            openThreads.forEach(t => {
+                html += buildThreadCard(t, lines[t.id], false);
+            });
+
+            // Orphaned threads
+            orphanedThreads.forEach(t => {
+                html += buildThreadCard(t, -1, false);
+            });
+
+            // Resolved threads (shown only when checkbox is checked)
+            if (showResolved && resolvedThreads.length > 0) {
+                resolvedThreads.forEach(t => {
+                    html += buildThreadCard(t, lines[t.id], true);
+                });
+            }
+
+            container.innerHTML = html;
+
+            // Highlight commented text
+            addCommentHighlights(threadList, lines);
+        }
+
+        function buildThreadCard(thread, line, isResolved) {
+            const tid = escapeHtml(thread.id);
+            let html = '<div class="thread-card' + (isResolved ? ' thread-resolved' : '') +
+                '" data-thread-id="' + tid + '" data-line="' + (line || -1) +
+                '" onclick="focusThread(\'' + tid + '\')">';
+
+            // Anchor text
+            html += '<div class="thread-anchor">' +
+                '<span class="thread-status ' + thread.status + '">' + thread.status + '</span> ' +
+                escapeHtml(truncateText(thread.anchor.selectedText, 80)) +
+                '</div>';
+
+            // Orphaned warning
+            if (line === -1) {
+                html += '<div class="orphaned-warning">Anchor text not found in document</div>';
+            }
+
+            // Comments
+            thread.comments.forEach(c => {
+                html += '<div class="thread-comment">';
+                html += '<div class="comment-header">';
+                html += '<span class="comment-author">' + escapeHtml(c.author) + '</span>';
+                if (c.role) {
+                    html += '<span class="comment-role ' + c.role + '">' + c.role + '</span>';
+                }
+                html += '<span class="comment-time">' + formatTime(c.createdAt) + '</span>';
+                html += '</div>';
+                html += '<div class="comment-body">' + escapeHtml(c.body) + '</div>';
+                html += '</div>';
+            });
+
+            // Thread actions (resolve/reopen + reply)
+            html += '<div class="thread-actions">';
+            html += '<button onclick="event.stopPropagation(); toggleReplyForm(\'' + tid + '\')">Reply</button>';
+            if (thread.status === 'open') {
+                html += '<button class="resolve-btn" onclick="event.stopPropagation(); resolveThread(\'' + tid + '\')">Resolve</button>';
+            } else {
+                html += '<button class="reopen-btn" onclick="event.stopPropagation(); reopenThread(\'' + tid + '\')">Reopen</button>';
+            }
+            html += '</div>';
+
+            // Reply form (hidden by default)
+            html += '<div class="reply-form" id="reply-form-' + tid + '" style="display:none;">';
+            html += '<textarea placeholder="Write a reply..." onkeydown="handleReplyKeydown(event, \'' + tid + '\')"></textarea>';
+            html += '<input type="text" class="author-field" placeholder="Your name" value="' + escapeHtml(getSavedAuthor()) + '" />';
+            html += '<div class="form-actions">';
+            html += '<button class="btn-cancel-form" onclick="event.stopPropagation(); hideReplyForm(\'' + tid + '\')">Cancel</button>';
+            html += '<button class="btn-submit" onclick="event.stopPropagation(); submitReply(\'' + tid + '\')">Reply</button>';
+            html += '</div>';
+            html += '</div>';
+
+            html += '</div>';
+            return html;
+        }
+
+        // --- Reply form ---
+
+        function toggleReplyForm(threadId) {
+            const form = document.getElementById('reply-form-' + threadId);
+            if (!form) return;
+            const isVisible = form.style.display !== 'none';
+            // Hide all reply forms first
+            document.querySelectorAll('.reply-form').forEach(f => f.style.display = 'none');
+            if (!isVisible) {
+                form.style.display = '';
+                form.querySelector('textarea').focus();
+            }
+        }
+
+        function hideReplyForm(threadId) {
+            const form = document.getElementById('reply-form-' + threadId);
+            if (form) form.style.display = 'none';
+        }
+
+        function handleReplyKeydown(event, threadId) {
+            if (event.key === 'Escape') {
+                hideReplyForm(threadId);
+            }
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                submitReply(threadId);
+            }
+        }
+
+        function submitReply(threadId) {
+            const form = document.getElementById('reply-form-' + threadId);
+            if (!form) return;
+            const textarea = form.querySelector('textarea');
+            const authorInput = form.querySelector('.author-field');
+            const body = textarea.value.trim();
+            const author = authorInput.value.trim();
+
+            if (!body || !author) return;
+            saveAuthor(author);
+
+            const submitBtn = form.querySelector('.btn-submit');
+            submitBtn.disabled = true;
+
+            fetch('/api/threads/' + encodeURIComponent(threadId) + '/comments', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project: projectName,
+                    path: filePath,
+                    author: author,
+                    role: 'human',
+                    body: body
+                })
+            })
+            .then(r => {
+                if (!r.ok) throw new Error('Failed to add reply');
+                return r.json();
+            })
+            .then(() => {
+                refreshComments();
+            })
+            .catch(err => {
+                console.error('Failed to reply:', err);
+                submitBtn.disabled = false;
+            });
+        }
+
+        // --- Resolve / Reopen ---
+
+        function resolveThread(threadId) {
+            const author = getSavedAuthor() || 'anonymous';
+            fetch('/api/threads/' + encodeURIComponent(threadId), {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project: projectName,
+                    path: filePath,
+                    status: 'resolved',
+                    resolvedBy: author
+                })
+            })
+            .then(r => {
+                if (!r.ok) throw new Error('Failed to resolve thread');
+                refreshComments();
+            })
+            .catch(err => console.error('Failed to resolve thread:', err));
+        }
+
+        function reopenThread(threadId) {
+            fetch('/api/threads/' + encodeURIComponent(threadId), {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project: projectName,
+                    path: filePath,
+                    status: 'open'
+                })
+            })
+            .then(r => {
+                if (!r.ok) throw new Error('Failed to reopen thread');
+                refreshComments();
+            })
+            .catch(err => console.error('Failed to reopen thread:', err));
+        }
+
+        function toggleResolved() {
+            renderThreads(threads || [], anchorLines || {});
+        }
+
+        // --- Text selection and comment creation ---
+
+        let pendingAnchor = null;
+
+        function removeFloatingCommentBtn() {
+            const existing = document.querySelector('.comment-btn-float');
+            if (existing) existing.remove();
+        }
+
+        document.getElementById('content').addEventListener('mouseup', function(e) {
+            // Small delay to let the selection finalize
+            setTimeout(() => {
+                const sel = window.getSelection();
+                if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+                    removeFloatingCommentBtn();
+                    return;
+                }
+
+                // Only capture selection within .content
+                const contentEl = document.getElementById('content');
+                if (!contentEl.contains(sel.anchorNode) || !contentEl.contains(sel.focusNode)) {
+                    return;
+                }
+
+                const selectedText = sel.toString().trim();
+                if (!selectedText) return;
+
+                removeFloatingCommentBtn();
+
+                // Position the button near the end of selection
+                const range = sel.getRangeAt(0);
+                const rect = range.getBoundingClientRect();
+                const contentRect = contentEl.getBoundingClientRect();
+
+                const btn = document.createElement('button');
+                btn.className = 'comment-btn-float';
+                btn.textContent = 'Comment';
+                btn.style.top = (rect.bottom - contentRect.top + 4) + 'px';
+                btn.style.left = (rect.right - contentRect.left) + 'px';
+
+                btn.addEventListener('mousedown', function(ev) {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                });
+                btn.addEventListener('click', function(ev) {
+                    ev.stopPropagation();
+                    captureSelectionAndShowForm(sel, selectedText);
+                    removeFloatingCommentBtn();
+                });
+
+                contentEl.appendChild(btn);
+            }, 10);
+        });
+
+        function captureSelectionAndShowForm(sel, selectedText) {
+            // Compute anchor from selection
+            const anchor = computeAnchor(sel, selectedText);
+            pendingAnchor = anchor;
+            showNewThreadForm(selectedText);
+        }
+
+        function computeAnchor(sel, selectedText) {
+            const anchor = {
+                selectedText: selectedText,
+                before: '',
+                after: '',
+                headingPath: ''
+            };
+
+            // Find source line range from data-source-line attributes
+            const contentEl = document.getElementById('content');
+            let startNode = sel.anchorNode;
+            let endNode = sel.focusNode;
+
+            // Walk up to find elements with data-source-line
+            function findSourceLine(node) {
+                let el = node.nodeType === 3 ? node.parentElement : node;
+                while (el && el !== contentEl) {
+                    if (el.hasAttribute && el.hasAttribute('data-source-line')) {
+                        return parseInt(el.getAttribute('data-source-line'), 10);
+                    }
+                    el = el.parentElement;
+                }
+                return -1;
+            }
+
+            const startLine = findSourceLine(startNode);
+            const endLine = findSourceLine(endNode);
+
+            // Search for selectedText in rawMarkdown within the source line range
+            if (startLine > 0) {
+                const lines = rawMarkdown.split('\n');
+                const searchStart = Math.max(0, startLine - 1);
+                const searchEnd = Math.min(lines.length, (endLine > 0 ? endLine : startLine) + 5);
+                const regionText = lines.slice(searchStart, searchEnd).join('\n');
+
+                const idx = regionText.indexOf(selectedText);
+                if (idx !== -1) {
+                    // Compute before/after from the full rawMarkdown
+                    const globalLines = lines.slice(0, searchStart).join('\n');
+                    const globalOffset = globalLines.length > 0 ? globalLines.length + 1 + idx : idx;
+                    const beforeStart = Math.max(0, globalOffset - 80);
+                    anchor.before = rawMarkdown.substring(beforeStart, globalOffset);
+                    const afterEnd = Math.min(rawMarkdown.length, globalOffset + selectedText.length + 80);
+                    anchor.after = rawMarkdown.substring(globalOffset + selectedText.length, afterEnd);
+                } else {
+                    // Fallback: search in entire rawMarkdown
+                    const globalIdx = rawMarkdown.indexOf(selectedText);
+                    if (globalIdx !== -1) {
+                        const beforeStart = Math.max(0, globalIdx - 80);
+                        anchor.before = rawMarkdown.substring(beforeStart, globalIdx);
+                        const afterEnd = Math.min(rawMarkdown.length, globalIdx + selectedText.length + 80);
+                        anchor.after = rawMarkdown.substring(globalIdx + selectedText.length, afterEnd);
+                    }
+                }
+            } else {
+                // Fallback: search entire rawMarkdown
+                const globalIdx = rawMarkdown.indexOf(selectedText);
+                if (globalIdx !== -1) {
+                    const beforeStart = Math.max(0, globalIdx - 80);
+                    anchor.before = rawMarkdown.substring(beforeStart, globalIdx);
+                    const afterEnd = Math.min(rawMarkdown.length, globalIdx + selectedText.length + 80);
+                    anchor.after = rawMarkdown.substring(globalIdx + selectedText.length, afterEnd);
+                }
+            }
+
+            // Compute headingPath by walking up the DOM
+            anchor.headingPath = computeHeadingPath(sel.anchorNode);
+
+            return anchor;
+        }
+
+        function computeHeadingPath(node) {
+            const contentEl = document.getElementById('content');
+            const headings = [];
+            let el = node.nodeType === 3 ? node.parentElement : node;
+
+            // Walk backwards through siblings and parents to find heading ancestors
+            while (el && el !== contentEl) {
+                // Check preceding siblings for headings
+                let sibling = el.previousElementSibling;
+                while (sibling) {
+                    const tag = sibling.tagName;
+                    if (tag && /^H[1-6]$/.test(tag)) {
+                        headings.unshift(sibling.textContent.trim());
+                        break;
+                    }
+                    sibling = sibling.previousElementSibling;
+                }
+                el = el.parentElement;
+            }
+
+            return headings.join(' > ');
+        }
+
+        // --- New thread form ---
+
+        function showNewThreadForm(selectedText) {
+            const container = document.getElementById('new-thread-form-container');
+            container.innerHTML =
+                '<div class="new-thread-form">' +
+                '<div class="quoted-text">' + escapeHtml(truncateText(selectedText, 200)) + '</div>' +
+                '<textarea id="new-thread-body" placeholder="Write a comment..." onkeydown="handleNewThreadKeydown(event)"></textarea>' +
+                '<input type="text" class="author-field" id="new-thread-author" placeholder="Your name" value="' + escapeHtml(getSavedAuthor()) + '" />' +
+                '<div class="form-actions">' +
+                '<button class="btn-cancel-form" onclick="hideNewThreadForm()">Cancel</button>' +
+                '<button class="btn-submit" id="new-thread-submit" onclick="submitNewThread()">Comment</button>' +
+                '</div>' +
+                '</div>';
+            document.getElementById('new-thread-body').focus();
+            // Scroll the comments panel to top
+            document.getElementById('comments-panel').scrollTop = 0;
+        }
+
+        function hideNewThreadForm() {
+            document.getElementById('new-thread-form-container').innerHTML = '';
+            pendingAnchor = null;
+        }
+
+        function handleNewThreadKeydown(event) {
+            if (event.key === 'Escape') {
+                hideNewThreadForm();
+            }
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                submitNewThread();
+            }
+        }
+
+        function submitNewThread() {
+            if (!pendingAnchor) return;
+
+            const body = document.getElementById('new-thread-body').value.trim();
+            const author = document.getElementById('new-thread-author').value.trim();
+
+            if (!body || !author) return;
+            saveAuthor(author);
+
+            const submitBtn = document.getElementById('new-thread-submit');
+            submitBtn.disabled = true;
+
+            fetch('/api/threads', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    project: projectName,
+                    path: filePath,
+                    anchor: pendingAnchor,
+                    author: author,
+                    role: 'human',
+                    body: body
+                })
+            })
+            .then(r => {
+                if (!r.ok) throw new Error('Failed to create thread');
+                return r.json();
+            })
+            .then(() => {
+                hideNewThreadForm();
+                refreshComments();
+                refreshReview();
+            })
+            .catch(err => {
+                console.error('Failed to create thread:', err);
+                submitBtn.disabled = false;
+            });
+        }
+
+        // Escape key to dismiss new thread form
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                hideNewThreadForm();
+                removeFloatingCommentBtn();
+            }
+        });
+
+        // --- Comment text highlighting ---
+
+        function addCommentHighlights(threadList, lines) {
+            const content = document.getElementById('content');
+            if (!content) return;
+
+            // Remove old highlights
+            content.querySelectorAll('.comment-highlight').forEach(mark => {
+                const parent = mark.parentNode;
+                while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+                parent.removeChild(mark);
+                parent.normalize();
+            });
+
+            // Process threads that have anchor text
+            threadList.forEach(t => {
+                const selectedText = t.anchor && t.anchor.selectedText;
+                if (!selectedText) return;
+
+                const line = lines[t.id];
+
+                // Find the block element to search within
+                let scopeEl = null;
+                if (line > 0) {
+                    const elements = content.querySelectorAll('[data-source-line]');
+                    // Try exact match first, then closest
+                    let bestEl = null;
+                    let bestDist = Infinity;
+                    elements.forEach(el => {
+                        const sl = parseInt(el.getAttribute('data-source-line'), 10);
+                        if (sl === line) { bestEl = el; bestDist = 0; }
+                        else if (Math.abs(sl - line) < bestDist) {
+                            bestDist = Math.abs(sl - line);
+                            bestEl = el;
+                        }
+                    });
+                    scopeEl = bestEl;
+                }
+                if (!scopeEl) scopeEl = content;
+
+                highlightTextInElement(scopeEl, selectedText, t.id, t.status);
+            });
+        }
+
+        function highlightTextInElement(root, text, threadId, status) {
+            const treeWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+            const textNodes = [];
+            while (treeWalker.nextNode()) textNodes.push(treeWalker.currentNode);
+
+            // Build concatenated text with node mapping
+            let concat = '';
+            const nodeMap = []; // {node, startIdx, endIdx}
+            textNodes.forEach(node => {
+                const start = concat.length;
+                concat += node.nodeValue;
+                nodeMap.push({ node: node, start: start, end: concat.length });
+            });
+
+            const matchIdx = concat.indexOf(text);
+            if (matchIdx === -1) return;
+
+            const matchEnd = matchIdx + text.length;
+
+            // Find which text nodes are affected
+            for (let i = nodeMap.length - 1; i >= 0; i--) {
+                const entry = nodeMap[i];
+                if (entry.end <= matchIdx || entry.start >= matchEnd) continue;
+
+                const node = entry.node;
+                const nodeStart = Math.max(0, matchIdx - entry.start);
+                const nodeEnd = Math.min(node.nodeValue.length, matchEnd - entry.start);
+
+                // Split the text node and wrap the matched portion
+                const beforeText = node.nodeValue.substring(0, nodeStart);
+                const matchText = node.nodeValue.substring(nodeStart, nodeEnd);
+                const afterText = node.nodeValue.substring(nodeEnd);
+
+                const mark = document.createElement('mark');
+                mark.className = 'comment-highlight ' + status;
+                mark.setAttribute('data-thread-id', threadId);
+                mark.textContent = matchText;
+                mark.onclick = function(e) {
+                    e.stopPropagation();
+                    highlightThread(threadId);
+                };
+
+                const parent = node.parentNode;
+                if (afterText) parent.insertBefore(document.createTextNode(afterText), node.nextSibling);
+                parent.insertBefore(mark, node.nextSibling);
+                if (beforeText) {
+                    node.nodeValue = beforeText;
+                } else {
+                    parent.removeChild(node);
+                }
+            }
+        }
+
+        // Called when clicking a highlight in the doc — scroll to the comment card
+        function highlightThread(threadId) {
+            activateThread(threadId, 'comment');
+        }
+
+        // Called when clicking a comment card — scroll to the highlight in the doc
+        function focusThread(threadId) {
+            activateThread(threadId, 'highlight');
+        }
+
+        function activateThread(threadId, scrollTo) {
+            // Clear previous focus
+            document.querySelectorAll('.thread-card.highlighted').forEach(c => c.classList.remove('highlighted'));
+            document.querySelectorAll('.comment-highlight.active').forEach(m => m.classList.remove('active'));
+
+            // Intensify the text highlight
+            const marks = document.querySelectorAll('.comment-highlight[data-thread-id="' + threadId + '"]');
+            marks.forEach(m => m.classList.add('active'));
+
+            // Highlight the comment card
+            const card = document.querySelector('.thread-card[data-thread-id="' + threadId + '"]');
+            if (card) card.classList.add('highlighted');
+
+            // Scroll to the requested target
+            if (scrollTo === 'comment' && card) {
+                card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } else if (scrollTo === 'highlight' && marks.length > 0) {
+                marks[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+
+            // Clear after 3s
+            setTimeout(() => {
+                marks.forEach(m => m.classList.remove('active'));
+                if (card) card.classList.remove('highlighted');
+            }, 3000);
+        }
+
+        // --- SSE real-time updates ---
+
+        function refreshComments() {
+            fetch('/api/threads?project=' + encodeURIComponent(projectName) + '&path=' + encodeURIComponent(filePath))
+                .then(r => r.json())
+                .then(data => {
+                    threads = data;
+                    renderThreads(threads, anchorLines);
+                    renderReviewBanner();
+                })
+                .catch(err => console.error('Failed to refresh comments:', err));
+        }
+
+        // Set up SSE
+        const evtSource = new EventSource('/events');
+        evtSource.addEventListener('change', function(e) {
+            try {
+                const data = JSON.parse(e.data);
+                if (data.type === 'comments' && data.project === projectName) {
+                    refreshComments();
+                    refreshReview();
+                }
+                if (data.type === 'files' && data.project === projectName) {
+                    window.location.reload();
+                }
+            } catch (err) {
+                console.error('SSE parse error:', err);
+            }
+        });
+
+        // Initial render
+        renderThreads(threads || [], anchorLines || {});
+        renderReviewBanner();
+        // Fetch fresh review state (for agentActive)
+        refreshReview();
     </script>
 </body>
 </html>

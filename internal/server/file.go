@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"html/template"
 	"net/http"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/loganj/birdseye/internal/comments"
 	"github.com/loganj/birdseye/internal/discovery"
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
@@ -29,6 +31,7 @@ var md = goldmark.New(
 		highlighting.NewHighlighting(
 			highlighting.WithStyle("dracula"),
 		),
+		&sourceLineExtension{},
 	),
 	goldmark.WithParserOptions(
 		parser.WithAutoHeadingID(),
@@ -81,24 +84,35 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		parentPath = ""
 	}
 
+	// Load comment threads for this file
+	threads, _ := s.comments.LoadThreads(projectName, filePath)
+	anchorLines := comments.ResolveAnchorsToLines(threads, string(content))
+
+	threadsJSON, _ := json.Marshal(threads)
+	anchorLinesJSON, _ := json.Marshal(anchorLines)
+
 	data := struct {
-		Project    *discovery.Project
-		FilePath   string
-		FileName   string
-		ParentPath string
-		FileType   string
-		Content    template.HTML
-		Headings   []Heading
-		Raw        string
+		Project     *discovery.Project
+		FilePath    string
+		FileName    string
+		ParentPath  string
+		FileType    string
+		Content     template.HTML
+		Headings    []Heading
+		Raw         string
+		ThreadsJSON template.JS
+		AnchorLines template.JS
 	}{
-		Project:    project,
-		FilePath:   filePath,
-		FileName:   filepath.Base(filePath),
-		ParentPath: parentPath,
-		FileType:   classifyFile(filePath),
-		Content:    template.HTML(htmlContent),
-		Headings:   headings,
-		Raw:        string(content),
+		Project:     project,
+		FilePath:    filePath,
+		FileName:    filepath.Base(filePath),
+		ParentPath:  parentPath,
+		FileType:    classifyFile(filePath),
+		Content:     template.HTML(htmlContent),
+		Headings:    headings,
+		Raw:         string(content),
+		ThreadsJSON: template.JS(threadsJSON),
+		AnchorLines: template.JS(anchorLinesJSON),
 	}
 	s.getTemplate().ExecuteTemplate(w, "file.html", data)
 }

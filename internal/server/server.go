@@ -17,6 +17,7 @@ import (
 
 	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
+	"github.com/loganj/birdseye/internal/comments"
 	"github.com/loganj/birdseye/internal/discovery"
 	"github.com/loganj/birdseye/internal/watcher"
 	"github.com/loganj/birdseye/templates"
@@ -25,16 +26,20 @@ import (
 type Server struct {
 	cache       *cache.Cache
 	watcher     *watcher.Watcher
+	comments    *comments.Store
+	mcpHandler  http.Handler
 	mux         *http.ServeMux
 	tmpl        *template.Template
 	loadOnce    sync.Once
 	templateDir string // if set, reload templates from disk on each request
 }
 
-func New(c *cache.Cache, w *watcher.Watcher, templateDir string) *Server {
+func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, templateDir string) *Server {
 	s := &Server{
 		cache:       c,
 		watcher:     w,
+		comments:    cs,
+		mcpHandler:  mcpHandler,
 		mux:         http.NewServeMux(),
 		templateDir: templateDir,
 	}
@@ -153,6 +158,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/copy-file", s.handleCopyFile)
 	s.mux.HandleFunc("/api/project-info", s.handleProjectInfo)
 	s.mux.HandleFunc("/api/delete-project", s.handleDeleteProject)
+	// Comment and review API endpoints
+	s.mux.HandleFunc("/api/threads", s.handleAPIThreads)
+	s.mux.HandleFunc("/api/threads/", s.handleAPIThreadAction)
+	s.mux.HandleFunc("/api/reviews", s.handleAPIListReviews)
+	// MCP (Model Context Protocol) endpoint
+	if s.mcpHandler != nil {
+		s.mux.Handle("/mcp", s.mcpHandler)
+		s.mux.Handle("/mcp/", s.mcpHandler)
+	}
 }
 
 type IndexFile struct {
@@ -392,6 +406,7 @@ type APIProject struct {
 	AgentCount   int      `json:"agentCount,omitempty"`
 	AgentPrompts []string `json:"agentPrompts,omitempty"`
 	Age          string   `json:"age,omitempty"`
+	ReviewCount  int      `json:"reviewCount,omitempty"`
 }
 
 func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
@@ -420,6 +435,10 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 				prompts[j] = a.Prompt
 			}
 			result[i].AgentPrompts = prompts
+		}
+		// Count files in review for this project
+		if reviews, err := s.comments.ListFilesInReview(p.Name); err == nil {
+			result[i].ReviewCount = len(reviews)
 		}
 	}
 	json.NewEncoder(w).Encode(result)

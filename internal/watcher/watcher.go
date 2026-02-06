@@ -18,6 +18,7 @@ type EventType string
 const (
 	EventProjectsChanged EventType = "projects"
 	EventFilesChanged    EventType = "files"
+	EventCommentsChanged EventType = "comments"
 )
 
 // Event represents a change notification
@@ -66,10 +67,16 @@ func (w *Watcher) Start() error {
 		return err
 	}
 
-	// Watch each project's thoughts directory
+	// Watch each project's thoughts directory and .birdseye/comments directory
 	for _, p := range w.cache.Projects() {
 		if err := w.watchDir(p.ThoughtsPath); err != nil {
 			log.Printf("Warning: could not watch %s: %v", p.ThoughtsPath, err)
+		}
+		commentsDir := filepath.Join(p.ThoughtsPath, ".birdseye", "comments")
+		if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
+			if err := w.watchDir(commentsDir); err != nil {
+				log.Printf("Warning: could not watch %s: %v", commentsDir, err)
+			}
 		}
 	}
 
@@ -192,6 +199,14 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
 			w.watcher.Add(path)
 		}
+	}
+
+	// Handle changes in .birdseye/comments/ directories
+	if strings.Contains(path, "/.birdseye/") && strings.HasSuffix(path, ".json") {
+		w.debounceRefresh("comments:"+projectName, func() {
+			w.Broadcast(Event{Type: EventCommentsChanged, Project: projectName})
+		})
+		return
 	}
 
 	// Only care about .md files for file list updates

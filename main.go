@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/loganj/birdseye/internal/cache"
+	"github.com/loganj/birdseye/internal/comments"
+	"github.com/loganj/birdseye/internal/mcpserver"
 	"github.com/loganj/birdseye/internal/server"
 	"github.com/loganj/birdseye/internal/watcher"
 )
@@ -33,6 +36,7 @@ func main() {
 	}
 
 	c := cache.New(rootDir)
+	cs := comments.NewStore(c)
 
 	w, err := watcher.New(c)
 	if err != nil {
@@ -45,8 +49,20 @@ func main() {
 		templateDir = "templates"
 	}
 
-	srv := server.New(c, w, templateDir)
+	mcpHandler := mcpserver.NewHandler(cs, c)
+	srv := server.New(c, w, cs, mcpHandler, templateDir)
 	addr := fmt.Sprintf(":%d", *port)
+
+	// Write .mcp.json for MCP client discovery
+	mcpConfig := map[string]interface{}{
+		"mcpServers": map[string]interface{}{
+			"birdseye": map[string]interface{}{
+				"url": fmt.Sprintf("http://localhost:%d/mcp", *port),
+			},
+		},
+	}
+	mcpJSON, _ := json.MarshalIndent(mcpConfig, "", "  ")
+	os.WriteFile(".mcp.json", mcpJSON, 0644)
 
 	httpServer := &http.Server{
 		Addr:    addr,
@@ -59,6 +75,7 @@ func main() {
 
 	go func() {
 		fmt.Printf("\nStarting server at http://localhost%s\n", addr)
+		fmt.Printf("birdseye MCP server: http://localhost%s/mcp\n", addr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}

@@ -65,6 +65,10 @@ dev:
 
     start_server
 
+    # Symlink skills for global availability
+    mkdir -p ~/.claude/skills
+    ln -sfn "$(pwd)/skills/monitor-reviews" ~/.claude/skills/monitor-reviews
+
     # Wait for server to be ready before opening browser
     echo "Waiting for server..."
     until curl -s http://localhost:$PORT/ > /dev/null 2>&1; do
@@ -100,3 +104,7 @@ test:
 # Tidy dependencies
 tidy:
     go mod tidy
+
+# Install MCP server config globally for Claude
+install-mcp:
+    claude mcp add birdseye --scope user --transport http http://localhost:8080/mcp

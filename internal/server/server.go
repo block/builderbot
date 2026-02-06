@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -150,6 +151,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/project/", s.handleAPIProjectFiles)
 	s.mux.HandleFunc("/api/recent", s.handleAPIRecent)
 	s.mux.HandleFunc("/api/copy-file", s.handleCopyFile)
+	s.mux.HandleFunc("/api/project-info", s.handleProjectInfo)
+	s.mux.HandleFunc("/api/delete-project", s.handleDeleteProject)
 }
 
 type IndexFile struct {
@@ -199,14 +202,21 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	ages := make(map[string]string)
+	for _, p := range sortedProjects {
+		ages[p.Name] = computeProjectAge(p)
+	}
+
 	data := struct {
 		Projects []discovery.Project
 		Files    []IndexFile
 		Agents   map[string]string
+		Ages     map[string]string
 	}{
 		Projects: sortedProjects,
 		Files:    files,
 		Agents:   agentMap,
+		Ages:     ages,
 	}
 	s.getTemplate().ExecuteTemplate(w, "index.html", data)
 }
@@ -229,6 +239,52 @@ func formatAge(t time.Time) string {
 	default:
 		return t.Format("Jan 2")
 	}
+}
+
+func formatAgeMarker(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// computeProjectAge returns an age marker string for the project.
+// Age is the minimum of: most recent unstaged change, most recent thoughts
+// file, and the project directory mod time. For projects older than 24h,
+// unpushed commit age is also considered at 24h granularity.
+func computeProjectAge(p discovery.Project) string {
+	best := time.Time{}
+
+	if p.LastModified.After(best) {
+		best = p.LastModified
+	}
+	if p.Git != nil && p.Git.UnstagedModTime.After(best) {
+		best = p.Git.UnstagedModTime
+	}
+	if info, err := os.Stat(p.Path); err == nil && info.ModTime().After(best) {
+		best = info.ModTime()
+	}
+
+	// For projects older than 24h, also consider unpushed commits at day granularity
+	if !best.IsZero() && time.Since(best) > 24*time.Hour {
+		if p.Git != nil && !p.Git.UnpushedCommitTime.IsZero() {
+			daysSince := int(time.Since(p.Git.UnpushedCommitTime).Hours()) / 24
+			quantized := time.Now().Add(-time.Duration(daysSince) * 24 * time.Hour)
+			if quantized.After(best) {
+				best = quantized
+			}
+		}
+	}
+
+	return formatAgeMarker(best)
 }
 
 type ProjectFile struct {
@@ -335,6 +391,7 @@ type APIProject struct {
 	LastModified string   `json:"lastModified"`
 	AgentCount   int      `json:"agentCount,omitempty"`
 	AgentPrompts []string `json:"agentPrompts,omitempty"`
+	Age          string   `json:"age,omitempty"`
 }
 
 func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +407,7 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 			FileCount:    p.FileCount,
 			Summary:      p.Summary,
 			LastModified: p.LastModified.Format(time.RFC3339),
+			Age:          computeProjectAge(p),
 		}
 		if p.Git != nil {
 			result[i].Branch = p.Git.Branch
@@ -439,6 +497,79 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type ProjectInfo struct {
+	FileCount       int  `json:"fileCount"`
+	Dirty           bool `json:"dirty"`
+	UnpushedCommits int  `json:"unpushedCommits"`
+}
+
+func (s *Server) handleProjectInfo(w http.ResponseWriter, r *http.Request) {
+	projectName := r.URL.Query().Get("name")
+	if projectName == "" {
+		http.Error(w, "missing project name", http.StatusBadRequest)
+		return
+	}
+	project := s.cache.FindProject(projectName)
+	if project == nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+
+	info := ProjectInfo{
+		FileCount: len(s.cache.ProjectFiles(projectName)),
+	}
+
+	// Fresh git status
+	if project.Name != "(root)" {
+		cmd := exec.Command("git", "-C", project.Path, "status", "--porcelain")
+		if out, err := cmd.Output(); err == nil {
+			info.Dirty = len(out) > 0
+		}
+		cmd2 := exec.Command("git", "-C", project.Path, "rev-list", "@{upstream}..HEAD", "--count")
+		if out, err := cmd2.Output(); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil {
+				info.UnpushedCommits = n
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(info)
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	projectName := r.URL.Query().Get("name")
+	if projectName == "" {
+		http.Error(w, "missing project name", http.StatusBadRequest)
+		return
+	}
+	if projectName == "(root)" {
+		http.Error(w, "cannot delete root project", http.StatusForbidden)
+		return
+	}
+
+	project := s.cache.FindProject(projectName)
+	if project == nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+
+	if err := os.RemoveAll(project.Path); err != nil {
+		log.Printf("Failed to delete project %s: %v", projectName, err)
+		http.Error(w, fmt.Sprintf("failed to delete: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Deleted project directory: %s", project.Path)
+	s.cache.RemoveProject(projectName)
+	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 	w.WriteHeader(http.StatusNoContent)
 }
 

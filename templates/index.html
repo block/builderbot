@@ -78,31 +78,91 @@
             font-size: 1.05em;
             margin-bottom: 4px;
         }
-        .copy-btn {
+        .project-dropdown { position: relative; }
+        .dropdown-dots {
             background: none;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 4px 8px;
-            font-size: 0.75em;
-            color: #666;
+            border: none;
+            padding: 2px 6px;
+            font-size: 1.2em;
+            color: #999;
             cursor: pointer;
-            opacity: 0;
-            transition: opacity 0.15s, background-color 0.15s, border-color 0.15s;
+            line-height: 1;
         }
-        .project:hover .copy-btn {
-            opacity: 1;
+        .dropdown-dots:hover { color: #333; }
+        .project-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: calc(100% + 4px);
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            z-index: 100;
+            min-width: 140px;
+            padding: 4px 0;
         }
-        .copy-btn:hover {
-            background: #f5f5f5;
-            border-color: #ccc;
+        .project-dropdown.open .project-menu { display: block; }
+        .project-menu button {
+            display: block;
+            width: 100%;
+            padding: 8px 12px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 0.85em;
             color: #333;
+            text-align: left;
         }
-        .copy-btn.copied {
-            opacity: 1;
-            background: #dafbe1;
-            border-color: #1a7f37;
-            color: #1a7f37;
+        .project-menu button:hover { background: #f5f5f5; }
+        .project-menu button.danger { color: #cf222e; }
+        .project-menu button.danger:hover { background: #fff5f5; }
+
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 200;
+            justify-content: center;
+            align-items: center;
         }
+        .modal-overlay.open { display: flex; }
+        .modal {
+            background: #fff;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 420px;
+            width: 100%;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+        }
+        .modal h3 { margin: 0 0 12px 0; font-size: 1.1em; }
+        .modal-info {
+            margin: 12px 0;
+            padding: 12px;
+            background: #f6f8fa;
+            border-radius: 6px;
+            font-size: 0.9em;
+            line-height: 1.8;
+        }
+        .modal-info .warning { color: #b45309; }
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 20px;
+        }
+        .modal-actions button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 0.9em;
+            cursor: pointer;
+        }
+        .btn-cancel { background: #f5f5f5; border: 1px solid #ddd; color: #333; }
+        .btn-cancel:hover { background: #eee; }
+        .btn-delete { background: #cf222e; border: 1px solid #cf222e; color: #fff; }
+        .btn-delete:hover { background: #a40e26; }
+        .btn-delete:disabled { opacity: 0.6; cursor: default; }
         .project-meta {
             font-size: 0.8em;
             color: #888;
@@ -115,6 +175,18 @@
         }
         .branch { color: #2da44e; }
         .dirty { color: #cf222e; }
+        .project-age { font-size: 0.8em; color: #999; }
+
+        .project.deleting {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+        .deleting-badge {
+            font-size: 0.75em;
+            color: #cf222e;
+            font-weight: 500;
+            margin-left: 8px;
+        }
 
         .agent-dot {
             display: inline-block;
@@ -155,7 +227,16 @@
         <div class="project" data-path="{{.Name}}/thoughts">
             <div class="project-header">
                 <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a>{{if index $.Agents .Name}}<span class="agent-dot" title="{{index $.Agents .Name}}"></span>{{end}}</div>
-                <button class="copy-btn" onclick="copyProjectPath(this, event)">Copy</button>
+                <div style="display:flex;gap:8px;align-items:center">
+                    {{if index $.Ages .Name}}<span class="project-age">{{index $.Ages .Name}}</span>{{end}}
+                    <div class="project-dropdown">
+                        <button class="dropdown-dots" onclick="toggleProjectMenu(event)">&#8942;</button>
+                        <div class="project-menu">
+                            <button onclick="copyProjectPath(this, event)">Copy path</button>
+                            {{if ne .Name "(root)"}}<button class="danger" onclick="showDeleteDialog(this)">Delete</button>{{end}}
+                        </div>
+                    </div>
+                </div>
             </div>
             {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
             {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
@@ -163,7 +244,33 @@
         {{end}}
     </div>
 
+    <div class="modal-overlay" id="deleteModal">
+        <div class="modal">
+            <h3>Delete <span id="deleteProjectName"></span>?</h3>
+            <p style="color:#666;font-size:0.9em;margin:0 0 8px 0">This will permanently delete the entire project directory.</p>
+            <div id="deleteInfo" class="modal-info" style="display:none"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" onclick="closeDeleteDialog()">Cancel</button>
+                <button class="btn-delete" id="confirmDeleteBtn" onclick="confirmDelete()" disabled>Delete</button>
+            </div>
+        </div>
+    </div>
+
     <script>
+        function toggleProjectMenu(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const dd = event.target.closest('.project-dropdown');
+            document.querySelectorAll('.project-dropdown.open').forEach(d => {
+                if (d !== dd) d.classList.remove('open');
+            });
+            dd.classList.toggle('open');
+        }
+
+        document.addEventListener('click', () => {
+            document.querySelectorAll('.project-dropdown.open').forEach(d => d.classList.remove('open'));
+        });
+
         function copyProjectPath(btn, event) {
             event.preventDefault();
             event.stopPropagation();
@@ -171,12 +278,102 @@
             const path = '@' + el.dataset.path;
             navigator.clipboard.writeText(path);
 
-            btn.textContent = 'Copied!';
-            btn.classList.add('copied');
+            const dd = btn.closest('.project-dropdown');
+            dd.classList.remove('open');
+            const toggle = dd.querySelector('.dropdown-dots');
+            toggle.style.color = '#1a7f37';
             setTimeout(() => {
-                btn.textContent = 'Copy';
-                btn.classList.remove('copied');
+                toggle.style.color = '';
             }, 1500);
+        }
+
+        let deleteTarget = '';
+
+        function showDeleteDialog(btn) {
+            const el = btn.closest('[data-path]');
+            deleteTarget = el.dataset.path.replace('/thoughts', '');
+            btn.closest('.project-dropdown').classList.remove('open');
+
+            document.getElementById('deleteProjectName').textContent = deleteTarget;
+            document.getElementById('deleteInfo').style.display = 'none';
+            document.getElementById('deleteInfo').innerHTML = '';
+            document.getElementById('confirmDeleteBtn').disabled = true;
+            document.getElementById('confirmDeleteBtn').textContent = 'Delete';
+            document.getElementById('deleteModal').classList.add('open');
+
+            fetch(`/api/project-info?name=${encodeURIComponent(deleteTarget)}`)
+                .then(r => {
+                    if (!r.ok) throw new Error('Failed to load project info');
+                    return r.json();
+                })
+                .then(info => {
+                    const lines = [];
+                    lines.push(`${info.fileCount} thoughts file${info.fileCount !== 1 ? 's' : ''}`);
+                    if (info.dirty) {
+                        lines.push('<span class="warning">\u26A0 Has unstaged changes</span>');
+                    }
+                    if (info.unpushedCommits > 0) {
+                        lines.push(`<span class="warning">\u26A0 ${info.unpushedCommits} unpushed commit${info.unpushedCommits !== 1 ? 's' : ''}</span>`);
+                    }
+                    const infoEl = document.getElementById('deleteInfo');
+                    infoEl.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+                    infoEl.style.display = 'block';
+                    document.getElementById('confirmDeleteBtn').disabled = false;
+                })
+                .catch(() => {
+                    document.getElementById('confirmDeleteBtn').disabled = false;
+                });
+        }
+
+        const deletingProjects = new Set();
+
+        function confirmDelete() {
+            const name = deleteTarget;
+            closeDeleteDialog();
+            markProjectDeleting(name);
+
+            fetch(`/api/delete-project?name=${encodeURIComponent(name)}`, { method: 'POST' })
+                .then(async r => {
+                    if (!r.ok) throw new Error(await r.text());
+                    refreshProjects();
+                })
+                .catch(err => {
+                    deletingProjects.delete(name);
+                    unmarkProjectDeleting(name);
+                    alert('Failed to delete project: ' + err.message);
+                });
+        }
+
+        function markProjectDeleting(name) {
+            deletingProjects.add(name);
+            const tile = findProjectTile(name);
+            if (!tile) return;
+            tile.classList.add('deleting');
+            const nameEl = tile.querySelector('.project-name');
+            if (nameEl && !nameEl.querySelector('.deleting-badge')) {
+                nameEl.insertAdjacentHTML('beforeend', '<span class="deleting-badge">Deleting\u2026</span>');
+            }
+        }
+
+        function unmarkProjectDeleting(name) {
+            const tile = findProjectTile(name);
+            if (!tile) return;
+            tile.classList.remove('deleting');
+            const badge = tile.querySelector('.deleting-badge');
+            if (badge) badge.remove();
+        }
+
+        function findProjectTile(name) {
+            for (const el of document.querySelectorAll('.project')) {
+                const link = el.querySelector('.project-name a');
+                if (link && link.textContent === name) return el;
+            }
+            return null;
+        }
+
+        function closeDeleteDialog() {
+            document.getElementById('deleteModal').classList.remove('open');
+            deleteTarget = '';
         }
 
         // Live updates via SSE
@@ -202,7 +399,16 @@
                     <div class="project" data-path="${p.name}/thoughts">
                         <div class="project-header">
                             <div class="project-name"><a href="/project/${p.name}">${p.name}</a>${p.agentCount ? `<span class="agent-dot" title="${p.agentCount === 1 ? (p.agentPrompts[0] || 'Agent active').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;') : p.agentCount + ' agents active'}"></span>` : ''}</div>
-                            <button class="copy-btn" onclick="copyProjectPath(this, event)">Copy</button>
+                            <div style="display:flex;gap:8px;align-items:center">
+                                ${p.age ? `<span class="project-age">${p.age}</span>` : ''}
+                                <div class="project-dropdown">
+                                    <button class="dropdown-dots" onclick="toggleProjectMenu(event)">&#8942;</button>
+                                    <div class="project-menu">
+                                        <button onclick="copyProjectPath(this, event)">Copy path</button>
+                                        ${p.name !== '(root)' ? '<button class="danger" onclick="showDeleteDialog(this)">Delete</button>' : ''}
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                         ${p.branch ? `<div class="project-meta"><span class="branch">${p.branch}${p.dirty ? '<span class="dirty">*</span>' : ''}</span></div>` : ''}
                         ${p.summary ? `<div class="project-summary">${p.summary}</div>` : ''}
@@ -210,6 +416,14 @@
                 `).join('');
                 // Update count
                 document.querySelector('h2').textContent = `Projects (${projects.length})`;
+                // Re-apply deleting state to tiles still pending deletion
+                deletingProjects.forEach(name => {
+                    if (!findProjectTile(name)) {
+                        deletingProjects.delete(name);
+                    } else {
+                        markProjectDeleting(name);
+                    }
+                });
             } catch (err) {
                 console.error('Failed to refresh projects:', err);
             }
@@ -244,6 +458,16 @@
                         }
                     } else if (existingDot) {
                         existingDot.remove();
+                    }
+                    // Update age marker
+                    const proj = projects.find(p => p.name === name);
+                    const ageEl = el.querySelector('.project-age');
+                    if (proj && proj.age) {
+                        if (ageEl) {
+                            ageEl.textContent = proj.age;
+                        }
+                    } else if (ageEl) {
+                        ageEl.textContent = '';
                     }
                 });
             } catch (err) {}

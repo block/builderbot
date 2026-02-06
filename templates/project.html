@@ -223,6 +223,29 @@
             background: #444;
             border-color: #888;
         }
+
+        .deleting-banner {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 16px;
+            background: #fff5f5;
+            border: 1px solid #f0c0c0;
+            border-radius: 6px;
+            margin-bottom: 24px;
+            font-size: 0.9em;
+            color: #cf222e;
+            font-weight: 500;
+        }
+        body.project-deleting .files,
+        body.project-deleting .git-info,
+        body.project-deleting .agent-banner,
+        body.project-deleting .selection-bar,
+        body.project-deleting h1,
+        body.project-deleting .empty {
+            opacity: 0.3;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
@@ -370,7 +393,28 @@
         events.addEventListener('change', function(e) {
             const data = JSON.parse(e.data);
             if (data.type === 'files' && data.project === projectName) refreshFiles();
+            if (data.type === 'projects') checkIfDeleted();
         });
+
+        async function checkIfDeleted() {
+            try {
+                const response = await fetch('/api/projects');
+                const projects = await response.json();
+                if (!projects.find(p => p.name === projectName)) {
+                    showDeletingState();
+                }
+            } catch (err) {}
+        }
+
+        function showDeletingState() {
+            if (document.body.classList.contains('project-deleting')) return;
+            document.body.classList.add('project-deleting');
+            const banner = document.createElement('div');
+            banner.className = 'deleting-banner';
+            banner.textContent = 'This project is being deleted\u2026';
+            const breadcrumb = document.querySelector('.breadcrumb');
+            breadcrumb.after(banner);
+        }
 
         async function refreshFiles() {
             try {

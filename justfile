@@ -49,6 +49,12 @@ dev:
         PORT=$((PORT + 1))
     done
 
+    start_server() {
+        go build -o birdseye . && ./birdseye -dev -port $PORT &
+        PID=$!
+        echo $PID > "$PIDFILE"
+    }
+
     cleanup() {
         echo "Stopping server..."
         kill $PID 2>/dev/null
@@ -57,9 +63,7 @@ dev:
     }
     trap cleanup INT TERM
 
-    go build -o birdseye . && ./birdseye -port $PORT &
-    PID=$!
-    echo $PID > "$PIDFILE"
+    start_server
 
     # Wait for server to be ready before opening browser
     echo "Waiting for server..."
@@ -68,17 +72,17 @@ dev:
     done
     open "http://localhost:$PORT"
 
-    echo "Watching for changes... (Ctrl+C to stop)"
-    fswatch -o -r --include='\.go$' --include='\.html$' --exclude='.*' . | while read; do
-        echo "Change detected, rebuilding..."
+    # Only watch .go files — template changes are picked up live via -dev flag
+    echo "Watching for Go changes... (Ctrl+C to stop)"
+    echo "Template changes are live — just reload the browser."
+    fswatch -o -r --include='\.go$' --exclude='.*' . | while read; do
+        echo "Go change detected, rebuilding..."
         kill $PID 2>/dev/null
         # Wait for port to be released
         while lsof -ti:$PORT >/dev/null 2>&1; do
             sleep 0.1
         done
-        go build -o birdseye . && ./birdseye -port $PORT &
-        PID=$!
-        echo $PID > "$PIDFILE"
+        start_server
     done
 
 # Clean build artifacts

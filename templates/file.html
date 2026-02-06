@@ -108,12 +108,10 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
-        .toolbar-actions {
-            display: flex;
-            gap: 6px;
-            flex-shrink: 0;
-        }
-        .copy-btn {
+
+        /* Copy dropdown */
+        .copy-dropdown { position: relative; flex-shrink: 0; }
+        .dropdown-toggle {
             background: none;
             border: 1px solid #ddd;
             border-radius: 4px;
@@ -124,16 +122,42 @@
             transition: background-color 0.15s, border-color 0.15s;
             white-space: nowrap;
         }
-        .copy-btn:hover {
+        .dropdown-toggle:hover {
             background: #f5f5f5;
             border-color: #ccc;
             color: #333;
         }
-        .copy-btn.copied {
+        .dropdown-toggle.copied {
             background: #dafbe1;
             border-color: #1a7f37;
             color: #1a7f37;
         }
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: calc(100% + 4px);
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            z-index: 100;
+            min-width: 160px;
+            padding: 4px 0;
+        }
+        .copy-dropdown.open .dropdown-menu { display: block; }
+        .dropdown-menu button {
+            display: block;
+            width: 100%;
+            text-align: left;
+            padding: 8px 12px;
+            border: none;
+            background: none;
+            font-size: 0.85em;
+            color: #333;
+            cursor: pointer;
+        }
+        .dropdown-menu button:hover { background: #f5f5f5; }
 
         .content {
             background: #fff;
@@ -254,9 +278,14 @@
             <div class="file-toolbar">
                 {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
                 <span class="toolbar-filename">{{.FileName}}</span>
-                <div class="toolbar-actions">
-                    <button class="copy-btn" onclick="copyPath(this, 'relative')">Copy relative</button>
-                    <button class="copy-btn" onclick="copyPath(this, 'absolute')">Copy absolute</button>
+                <div class="copy-dropdown">
+                    <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy ▾</button>
+                    <div class="dropdown-menu">
+                        <button onclick="copyText(this, rawMarkdown)">Markdown</button>
+                        <button onclick="copyFileToClipboard(this)">File</button>
+                        <button onclick="copyText(this, '@thoughts/{{.FilePath}}')">Relative path</button>
+                        <button onclick="copyText(this, '@{{.Project.Name}}/thoughts/{{.FilePath}}')">Absolute path</button>
+                    </div>
                 </div>
             </div>
 
@@ -265,21 +294,37 @@
             </div>
         </div>
     </div>
+    <template id="raw-markdown">{{.Raw}}</template>
 
     <script>
-        const relativePath = 'thoughts/{{.FilePath}}';
-        const absolutePath = '{{.Project.Name}}/thoughts/{{.FilePath}}';
+        const rawMarkdown = document.getElementById('raw-markdown').content.textContent;
 
-        function copyPath(btn, type) {
-            const path = '@' + (type === 'relative' ? relativePath : absolutePath);
-            navigator.clipboard.writeText(path);
+        function toggleDropdown(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const dd = event.target.closest('.copy-dropdown');
+            document.querySelectorAll('.copy-dropdown.open').forEach(d => { if (d !== dd) d.classList.remove('open'); });
+            dd.classList.toggle('open');
+        }
+        document.addEventListener('click', () => document.querySelectorAll('.copy-dropdown.open').forEach(d => d.classList.remove('open')));
 
-            btn.textContent = 'Copied!';
-            btn.classList.add('copied');
-            setTimeout(() => {
-                btn.textContent = type === 'relative' ? 'Copy relative' : 'Copy absolute';
-                btn.classList.remove('copied');
-            }, 1500);
+        function flashCopied(btn) {
+            const dd = btn.closest('.copy-dropdown');
+            dd.classList.remove('open');
+            const toggle = dd.querySelector('.dropdown-toggle');
+            toggle.textContent = 'Copied!';
+            toggle.classList.add('copied');
+            setTimeout(() => { toggle.textContent = 'Copy ▾'; toggle.classList.remove('copied'); }, 1500);
+        }
+
+        function copyText(btn, text) {
+            navigator.clipboard.writeText(text);
+            flashCopied(btn);
+        }
+
+        function copyFileToClipboard(btn) {
+            fetch(`/api/copy-file?project=${encodeURIComponent('{{.Project.Name}}')}&path=${encodeURIComponent('{{.FilePath}}')}`)
+                .then(resp => { if (resp.ok) flashCopied(btn); });
         }
     </script>
 </body>

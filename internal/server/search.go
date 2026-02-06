@@ -37,7 +37,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
 	if query == "" {
-		s.tmpl.ExecuteTemplate(w, "search.html", SearchData{})
+		s.getTemplate().ExecuteTemplate(w, "search.html", SearchData{})
 		return
 	}
 
@@ -136,7 +136,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		ProjectResults:   projectResults,
 		TotalFiles:       totalFiles,
 	}
-	s.tmpl.ExecuteTemplate(w, "search.html", data)
+	s.getTemplate().ExecuteTemplate(w, "search.html", data)
 }
 
 func classifyFile(relPath string) string {

@@ -20,6 +20,7 @@ import (
 func main() {
 	port := flag.Int("port", 8080, "port to listen on")
 	root := flag.String("root", "", "root directory to scan (default: ~/Development)")
+	dev := flag.Bool("dev", false, "development mode: reload templates from disk on each request")
 	flag.Parse()
 
 	rootDir := *root
@@ -39,7 +40,12 @@ func main() {
 	}
 	defer w.Stop()
 
-	srv := server.New(c, w)
+	var templateDir string
+	if *dev {
+		templateDir = "templates"
+	}
+
+	srv := server.New(c, w, templateDir)
 	addr := fmt.Sprintf(":%d", *port)
 
 	httpServer := &http.Server{

@@ -100,7 +100,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		Headings:   headings,
 		Raw:        string(content),
 	}
-	s.tmpl.ExecuteTemplate(w, "file.html", data)
+	s.getTemplate().ExecuteTemplate(w, "file.html", data)
 }
 
 func stripFrontmatter(content []byte) []byte {

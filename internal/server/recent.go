@@ -32,5 +32,5 @@ func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 	}{
 		Files: files,
 	}
-	s.tmpl.ExecuteTemplate(w, "recent.html", data)
+	s.getTemplate().ExecuteTemplate(w, "recent.html", data)
 }

@@ -337,6 +337,8 @@ pub struct Branch {
     pub worktree_path: String,
     /// The branch we forked from (for computing diffs)
     pub base_branch: String,
+    /// PR number if this branch was created from a GitHub PR
+    pub pr_number: Option<u64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -357,6 +359,30 @@ impl Branch {
             branch_name: branch_name.into(),
             worktree_path: worktree_path.into(),
             base_branch: base_branch.into(),
+            pr_number: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Create a new branch that tracks a GitHub PR.
+    pub fn new_from_pr(
+        project_id: impl Into<String>,
+        repo_path: impl Into<String>,
+        branch_name: impl Into<String>,
+        worktree_path: impl Into<String>,
+        base_branch: impl Into<String>,
+        pr_number: u64,
+    ) -> Self {
+        let now = now_timestamp();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            project_id: project_id.into(),
+            repo_path: repo_path.into(),
+            branch_name: branch_name.into(),
+            worktree_path: worktree_path.into(),
+            base_branch: base_branch.into(),
+            pr_number: Some(pr_number),
             created_at: now,
             updated_at: now,
         }
@@ -364,6 +390,8 @@ impl Branch {
 
     /// Create a Branch from a database row.
     fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        // pr_number is stored as i64 in SQLite, convert to u64
+        let pr_number: Option<i64> = row.get(6)?;
         Ok(Self {
             id: row.get(0)?,
             project_id: row.get(1)?,
@@ -371,8 +399,9 @@ impl Branch {
             branch_name: row.get(3)?,
             worktree_path: row.get(4)?,
             base_branch: row.get(5)?,
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
+            pr_number: pr_number.map(|n| n as u64),
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     }
 }
@@ -812,6 +841,19 @@ impl Store {
                 "ALTER TABLE branch_sessions ADD COLUMN ai_session_id TEXT",
                 [],
             )?;
+        }
+
+        // Check if pr_number column exists on branches, add if not
+        let has_pr_number: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('branches') WHERE name = 'pr_number'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+
+        if !has_pr_number {
+            conn.execute("ALTER TABLE branches ADD COLUMN pr_number INTEGER", [])?;
         }
 
         // Check if project_id column exists on branches, add if not
@@ -1429,9 +1471,11 @@ impl Store {
     /// Create a new branch
     pub fn create_branch(&self, branch: &Branch) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+        // Convert pr_number from u64 to i64 for SQLite storage
+        let pr_number_i64: Option<i64> = branch.pr_number.map(|n| n as i64);
         conn.execute(
-            "INSERT INTO branches (id, project_id, repo_path, branch_name, worktree_path, base_branch, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO branches (id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &branch.id,
                 &branch.project_id,
@@ -1439,6 +1483,7 @@ impl Store {
                 &branch.branch_name,
                 &branch.worktree_path,
                 &branch.base_branch,
+                &pr_number_i64,
                 branch.created_at,
                 branch.updated_at,
             ],
@@ -1450,7 +1495,7 @@ impl Store {
     pub fn get_branch(&self, id: &str) -> Result<Option<Branch>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, created_at, updated_at
+            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at
              FROM branches WHERE id = ?1",
             params![id],
             Branch::from_row,
@@ -1463,7 +1508,7 @@ impl Store {
     pub fn list_branches(&self) -> Result<Vec<Branch>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, created_at, updated_at
+            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at
              FROM branches ORDER BY updated_at DESC",
         )?;
         let branches = stmt
@@ -1476,7 +1521,7 @@ impl Store {
     pub fn list_branches_for_repo(&self, repo_path: &str) -> Result<Vec<Branch>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, created_at, updated_at
+            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at
              FROM branches WHERE repo_path = ?1 ORDER BY updated_at DESC",
         )?;
         let branches = stmt
@@ -1489,7 +1534,7 @@ impl Store {
     pub fn list_branches_for_project(&self, project_id: &str) -> Result<Vec<Branch>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, created_at, updated_at
+            "SELECT id, project_id, repo_path, branch_name, worktree_path, base_branch, pr_number, created_at, updated_at
              FROM branches WHERE project_id = ?1 ORDER BY updated_at DESC",
         )?;
         let branches = stmt
@@ -1523,6 +1568,19 @@ impl Store {
         conn.execute(
             "UPDATE branches SET base_branch = ?1, updated_at = ?2 WHERE id = ?3",
             params![base_branch, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update a branch's PR number
+    pub fn update_branch_pr_number(&self, id: &str, pr_number: Option<u64>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        // Convert pr_number from u64 to i64 for SQLite storage
+        let pr_number_i64: Option<i64> = pr_number.map(|n| n as i64);
+        conn.execute(
+            "UPDATE branches SET pr_number = ?1, updated_at = ?2 WHERE id = ?3",
+            params![pr_number_i64, now, id],
         )?;
         Ok(())
     }

@@ -336,6 +336,99 @@ pub fn create_worktree_from_pr(
     Ok((worktree_path, branch_name, base_branch))
 }
 
+/// Result of updating a branch from a PR.
+#[derive(Debug)]
+pub struct UpdateFromPrResult {
+    /// The commit SHA before the update
+    pub old_sha: String,
+    /// The commit SHA after the update (new PR head)
+    pub new_sha: String,
+    /// Number of new commits pulled in
+    pub commits_added: usize,
+}
+
+/// Update a local branch's worktree to match the latest PR head.
+///
+/// This fetches the latest PR head and fast-forwards (or resets) the local branch
+/// to match. Works for both clean fast-forwards and force-pushed PRs.
+///
+/// **Warning**: This will discard any local uncommitted changes and any local
+/// commits that are not in the PR. Use with caution.
+///
+/// Returns information about what changed.
+pub fn update_branch_from_pr(
+    worktree: &Path,
+    pr_number: u64,
+) -> Result<UpdateFromPrResult, GitError> {
+    // Get the current HEAD before update
+    let old_sha = get_head_sha(worktree)?;
+
+    // Fetch the PR head ref
+    let pr_ref = format!("refs/pull/{pr_number}/head");
+    cli::run(worktree, &["fetch", "origin", &pr_ref])?;
+
+    // Get the SHA of the fetched PR head
+    let new_sha = cli::run(worktree, &["rev-parse", "FETCH_HEAD"])?
+        .trim()
+        .to_string();
+
+    // If already up to date, return early
+    if old_sha == new_sha {
+        return Ok(UpdateFromPrResult {
+            old_sha,
+            new_sha,
+            commits_added: 0,
+        });
+    }
+
+    // Check if this is a fast-forward (new_sha is descendant of old_sha)
+    let is_fast_forward = cli::run(
+        worktree,
+        &["merge-base", "--is-ancestor", &old_sha, &new_sha],
+    )
+    .is_ok();
+
+    if is_fast_forward {
+        // Fast-forward: just move HEAD to the new commit
+        cli::run(worktree, &["merge", "--ff-only", "FETCH_HEAD"])?;
+    } else {
+        // Not a fast-forward (PR was force-pushed or rebased)
+        // Hard reset to the new PR head
+        cli::run(worktree, &["reset", "--hard", "FETCH_HEAD"])?;
+    }
+
+    // Count how many commits were added
+    // This counts commits between old and new (may be negative for force-push, but we report 0)
+    let commits_added = if is_fast_forward {
+        let log_output = cli::run(
+            worktree,
+            &["log", "--oneline", &format!("{old_sha}..{new_sha}")],
+        )?;
+        log_output.lines().count()
+    } else {
+        // For force-push/rebase, just count commits from merge-base to new
+        let merge_base = cli::run(worktree, &["merge-base", &old_sha, &new_sha])
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if merge_base.is_empty() {
+            0
+        } else {
+            let log_output = cli::run(
+                worktree,
+                &["log", "--oneline", &format!("{merge_base}..{new_sha}")],
+            )?;
+            log_output.lines().count()
+        }
+    };
+
+    Ok(UpdateFromPrResult {
+        old_sha,
+        new_sha,
+        commits_added,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

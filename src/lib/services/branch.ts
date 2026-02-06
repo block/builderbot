@@ -29,6 +29,8 @@ export interface Branch {
   worktreePath: string;
   /** The branch we forked from (for computing diffs) */
   baseBranch: string;
+  /** The PR number this branch was created from (if any) */
+  prNumber: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -208,6 +210,33 @@ export async function getBranchCommits(branchId: string): Promise<CommitInfo[]> 
  */
 export async function getBranchHead(branchId: string): Promise<string> {
   return invoke<string>('get_branch_head', { branchId });
+}
+
+/** Result of updating a branch from its associated PR */
+export interface UpdateBranchFromPrResult {
+  /** The commit SHA before the update */
+  oldSha: string;
+  /** The commit SHA after the update (new PR head) */
+  newSha: string;
+  /** Number of new commits pulled in */
+  commitsAdded: number;
+  /** Whether the branch was already up to date */
+  alreadyUpToDate: boolean;
+}
+
+/**
+ * Update a branch's worktree to match the latest PR head.
+ *
+ * Fetches the latest commits from the PR and fast-forwards (or resets) the local
+ * branch to match. Works for both clean fast-forwards and force-pushed PRs.
+ *
+ * **Warning**: This will discard any local uncommitted changes and any local
+ * commits that are not in the PR.
+ *
+ * Requires the branch to have an associated PR number (created via createBranchFromPr).
+ */
+export async function updateBranchFromPr(branchId: string): Promise<UpdateBranchFromPrResult> {
+  return invoke<UpdateBranchFromPrResult>('update_branch_from_pr', { branchId });
 }
 
 // =============================================================================

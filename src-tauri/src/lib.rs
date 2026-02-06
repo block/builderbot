@@ -1691,7 +1691,7 @@ async fn create_branch(
 
 /// Create a new branch from an existing GitHub PR.
 /// Fetches the PR's head ref and creates a local branch + worktree at that commit.
-/// Returns the created Branch with the PR's base as the base_branch.
+/// Returns the created Branch with the PR's base as the base_branch and the PR number stored.
 #[tauri::command(rename_all = "camelCase")]
 async fn create_branch_from_pr(
     state: State<'_, Arc<Store>>,
@@ -1719,13 +1719,14 @@ async fn create_branch_from_pr(
                 }
             })?;
 
-        // Create the branch record
-        let branch = Branch::new(
+        // Create the branch record with PR number
+        let branch = Branch::new_from_pr(
             &project_id,
             &repo_path,
             &branch_name,
             worktree_path.to_string_lossy().to_string(),
             &base_branch,
+            pr_number,
         );
 
         // If DB insert fails, clean up the worktree
@@ -2445,6 +2446,71 @@ fn get_branch_head(state: State<'_, Arc<Store>>, branch_id: String) -> Result<St
 
     let worktree = Path::new(&branch.worktree_path);
     git::get_head_sha(worktree).map_err(|e| e.to_string())
+}
+
+/// Result of updating a branch from its associated PR.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateBranchFromPrResult {
+    /// The commit SHA before the update
+    old_sha: String,
+    /// The commit SHA after the update (new PR head)
+    new_sha: String,
+    /// Number of new commits pulled in
+    commits_added: usize,
+    /// Whether the branch was already up to date
+    already_up_to_date: bool,
+}
+
+/// Update a branch's worktree to match the latest PR head.
+///
+/// Fetches the latest commits from the PR and fast-forwards (or resets) the local
+/// branch to match. Works for both clean fast-forwards and force-pushed PRs.
+///
+/// **Warning**: This will discard any local uncommitted changes and any local
+/// commits that are not in the PR.
+///
+/// The PR number can come from:
+/// 1. The `pr_number` parameter (for branches with an existing PR discovered at runtime)
+/// 2. The branch's stored `pr_number` field (for branches created from a PR)
+#[tauri::command(rename_all = "camelCase")]
+async fn update_branch_from_pr(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+    pr_number: Option<u64>,
+) -> Result<UpdateBranchFromPrResult, String> {
+    // Clone Arc for move into spawn_blocking
+    let store = state.inner().clone();
+
+    // Run blocking git operations on a separate thread
+    tauri::async_runtime::spawn_blocking(move || {
+        // Get the branch
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch '{branch_id}' not found"))?;
+
+        // Use provided PR number or fall back to branch's stored PR number
+        let pr_num = pr_number.or(branch.pr_number).ok_or_else(|| {
+            "No PR number provided. This branch is not associated with a PR.".to_string()
+        })?;
+
+        let worktree = Path::new(&branch.worktree_path);
+
+        // Update the branch from the PR
+        let result = git::update_branch_from_pr(worktree, pr_num).map_err(|e| e.to_string())?;
+
+        let already_up_to_date = result.old_sha == result.new_sha;
+
+        Ok(UpdateBranchFromPrResult {
+            old_sha: result.old_sha,
+            new_sha: result.new_sha,
+            commits_added: result.commits_added,
+            already_up_to_date,
+        })
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
 }
 
 // =============================================================================
@@ -3370,6 +3436,7 @@ pub fn run() {
             recover_orphaned_session,
             get_branch_session_by_ai_session,
             get_branch_head,
+            update_branch_from_pr,
             // Branch note commands
             start_branch_note,
             list_branch_notes,

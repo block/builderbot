@@ -1861,6 +1861,10 @@ fn list_branches_for_project(
     state: State<'_, Arc<Store>>,
     project_id: String,
 ) -> Result<Vec<Branch>, String> {
+    // Ensure main worktree branch exists for this project
+    // This handles projects created before the main worktree feature was added
+    ensure_main_worktree_exists(&state, &project_id)?;
+
     state
         .list_branches_for_project(&project_id)
         .map_err(|e| e.to_string())
@@ -2834,6 +2838,50 @@ fn extract_text_from_assistant_content(content: &str) -> String {
 // =============================================================================
 
 use store::GitProject;
+
+/// Ensures that a main worktree branch exists for the given project.
+/// This is used to ensure backward compatibility for projects created before
+/// the main worktree feature was added.
+fn ensure_main_worktree_exists(
+    state: &State<'_, Arc<Store>>,
+    project_id: &str,
+) -> Result<(), String> {
+    // Get the project
+    let project = state
+        .get_git_project(project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", project_id))?;
+
+    // Check if a main worktree branch already exists for this project
+    let branches = state
+        .list_branches_for_project(project_id)
+        .map_err(|e| e.to_string())?;
+
+    let has_main_worktree = branches.iter().any(|b| b.is_main_worktree);
+
+    if !has_main_worktree {
+        // Create the main worktree branch
+        let repo = Path::new(&project.repo_path);
+
+        // Get the current branch name (ignore errors, e.g., detached HEAD)
+        if let Ok(current_branch) = git::get_current_branch(repo) {
+            // Detect the default branch for base (ignore errors)
+            if let Ok(base_branch) = git::detect_default_branch(repo) {
+                let main_branch = Branch::new_main_worktree(
+                    &project.id,
+                    &project.repo_path,
+                    &current_branch,
+                    &base_branch,
+                );
+
+                // Save it to the database (ignore if it already exists)
+                let _ = state.create_branch(&main_branch);
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Create a new git project.
 /// If a project already exists for the repo_path, returns an error.

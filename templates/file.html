@@ -1021,6 +1021,51 @@
             const startLine = findSourceLine(startNode);
             const endLine = findSourceLine(endNode);
 
+            // Determine which occurrence of selectedText the user actually selected
+            // by counting how many times it appears before the selection in the
+            // rendered block element text.
+            let occurrenceIndex = 0;
+            let blockEl = startNode.nodeType === 3 ? startNode.parentElement : startNode;
+            while (blockEl && blockEl !== contentEl && !(blockEl.hasAttribute && blockEl.hasAttribute('data-source-line'))) {
+                blockEl = blockEl.parentElement;
+            }
+            if (blockEl && blockEl !== contentEl) {
+                try {
+                    const range = sel.getRangeAt(0);
+                    const preRange = document.createRange();
+                    preRange.setStart(blockEl, 0);
+                    preRange.setEnd(range.startContainer, range.startOffset);
+                    const textBefore = preRange.toString();
+                    let searchPos = 0;
+                    while (true) {
+                        const found = textBefore.indexOf(selectedText, searchPos);
+                        if (found === -1) break;
+                        occurrenceIndex++;
+                        searchPos = found + 1;
+                    }
+                } catch (e) {
+                    // Range manipulation can fail in edge cases; fall back to 0
+                }
+            }
+
+            function findNthOccurrence(haystack, needle, n) {
+                let pos = 0;
+                for (let i = 0; i <= n; i++) {
+                    const found = haystack.indexOf(needle, pos);
+                    if (found === -1) return -1;
+                    if (i === n) return found;
+                    pos = found + 1;
+                }
+                return -1;
+            }
+
+            function setBeforeAfter(globalOffset) {
+                const beforeStart = Math.max(0, globalOffset - 80);
+                anchor.before = rawMarkdown.substring(beforeStart, globalOffset);
+                const afterEnd = Math.min(rawMarkdown.length, globalOffset + selectedText.length + 80);
+                anchor.after = rawMarkdown.substring(globalOffset + selectedText.length, afterEnd);
+            }
+
             // Search for selectedText in rawMarkdown within the source line range
             if (startLine > 0) {
                 const lines = rawMarkdown.split('\n');
@@ -1028,34 +1073,28 @@
                 const searchEnd = Math.min(lines.length, (endLine > 0 ? endLine : startLine) + 5);
                 const regionText = lines.slice(searchStart, searchEnd).join('\n');
 
-                const idx = regionText.indexOf(selectedText);
+                const idx = findNthOccurrence(regionText, selectedText, occurrenceIndex);
                 if (idx !== -1) {
-                    // Compute before/after from the full rawMarkdown
                     const globalLines = lines.slice(0, searchStart).join('\n');
                     const globalOffset = globalLines.length > 0 ? globalLines.length + 1 + idx : idx;
-                    const beforeStart = Math.max(0, globalOffset - 80);
-                    anchor.before = rawMarkdown.substring(beforeStart, globalOffset);
-                    const afterEnd = Math.min(rawMarkdown.length, globalOffset + selectedText.length + 80);
-                    anchor.after = rawMarkdown.substring(globalOffset + selectedText.length, afterEnd);
+                    setBeforeAfter(globalOffset);
                 } else {
-                    // Fallback: search in entire rawMarkdown
-                    const globalIdx = rawMarkdown.indexOf(selectedText);
-                    if (globalIdx !== -1) {
-                        const beforeStart = Math.max(0, globalIdx - 80);
-                        anchor.before = rawMarkdown.substring(beforeStart, globalIdx);
-                        const afterEnd = Math.min(rawMarkdown.length, globalIdx + selectedText.length + 80);
-                        anchor.after = rawMarkdown.substring(globalIdx + selectedText.length, afterEnd);
+                    // Fallback: try first occurrence in region
+                    const firstIdx = regionText.indexOf(selectedText);
+                    if (firstIdx !== -1) {
+                        const globalLines = lines.slice(0, searchStart).join('\n');
+                        const globalOffset = globalLines.length > 0 ? globalLines.length + 1 + firstIdx : firstIdx;
+                        setBeforeAfter(globalOffset);
+                    } else {
+                        // Fallback: search entire rawMarkdown
+                        const globalIdx = rawMarkdown.indexOf(selectedText);
+                        if (globalIdx !== -1) setBeforeAfter(globalIdx);
                     }
                 }
             } else {
                 // Fallback: search entire rawMarkdown
                 const globalIdx = rawMarkdown.indexOf(selectedText);
-                if (globalIdx !== -1) {
-                    const beforeStart = Math.max(0, globalIdx - 80);
-                    anchor.before = rawMarkdown.substring(beforeStart, globalIdx);
-                    const afterEnd = Math.min(rawMarkdown.length, globalIdx + selectedText.length + 80);
-                    anchor.after = rawMarkdown.substring(globalIdx + selectedText.length, afterEnd);
-                }
+                if (globalIdx !== -1) setBeforeAfter(globalIdx);
             }
 
             // Compute headingPath by walking up the DOM
@@ -1301,6 +1340,68 @@
             }, 3000);
         }
 
+        // --- Client-side anchor resolution ---
+
+        function resolveAnchor(markdown, anchor) {
+            if (!anchor || !anchor.selectedText) return -1;
+            const text = anchor.selectedText;
+
+            let idx = markdown.indexOf(text);
+            if (idx === -1) return -1;
+
+            // Only one occurrence — no ambiguity
+            if (markdown.indexOf(text, idx + 1) === -1) return idx;
+
+            // Multiple occurrences: disambiguate with before/after context
+            if (anchor.before || anchor.after) {
+                let offset = 0;
+                while (true) {
+                    const found = markdown.indexOf(text, offset);
+                    if (found === -1) break;
+
+                    let beforeOk = true;
+                    let afterOk = true;
+
+                    if (anchor.before) {
+                        if (found >= anchor.before.length) {
+                            beforeOk = markdown.substring(found - anchor.before.length, found) === anchor.before;
+                        } else {
+                            beforeOk = false;
+                        }
+                    }
+                    if (anchor.after) {
+                        const aStart = found + text.length;
+                        if (aStart + anchor.after.length <= markdown.length) {
+                            afterOk = markdown.substring(aStart, aStart + anchor.after.length) === anchor.after;
+                        } else {
+                            afterOk = false;
+                        }
+                    }
+
+                    if (beforeOk && afterOk) return found;
+                    offset = found + 1;
+                }
+            }
+            return idx; // fallback to first
+        }
+
+        function resolveAnchorsToLines(threadList, markdown) {
+            const result = {};
+            threadList.forEach(t => {
+                const offset = resolveAnchor(markdown, t.anchor);
+                if (offset < 0) {
+                    result[t.id] = -1;
+                } else {
+                    let line = 1;
+                    for (let i = 0; i < offset && i < markdown.length; i++) {
+                        if (markdown[i] === '\n') line++;
+                    }
+                    result[t.id] = line;
+                }
+            });
+            return result;
+        }
+
         // --- SSE real-time updates ---
 
         function refreshComments() {
@@ -1308,6 +1409,7 @@
                 .then(r => r.json())
                 .then(data => {
                     threads = data;
+                    anchorLines = resolveAnchorsToLines(threads, rawMarkdown);
                     renderThreads(threads, anchorLines);
                     renderReviewBanner();
                 })

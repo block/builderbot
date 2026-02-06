@@ -1,0 +1,39 @@
+{
+  "name": "staged",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json --fail-on-warnings && tsc -p tsconfig.node.json",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "@tauri-apps/cli": "^2.9.6",
+    "@tsconfig/svelte": "^5.0.6",
+    "@types/dompurify": "^3.0.5",
+    "@types/node": "^24.10.1",
+    "prettier": "^3.7.4",
+    "prettier-plugin-svelte": "^3.4.1",
+    "svelte": "^5.46.4",
+    "svelte-check": "^4.3.4",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.4"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
+    "@tauri-apps/plugin-dialog": "^2.4.2",
+    "@tauri-apps/plugin-store": "^2.4.2",
+    "ansi-to-html": "^0.7.2",
+    "dompurify": "^3.3.1",
+    "lucide-svelte": "^0.562.0",
+    "marked": "^17.0.1",
+    "shiki": "^3.20.0"
+  }
+}

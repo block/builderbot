@@ -86,7 +86,43 @@
             font-size: 0.85em;
             white-space: nowrap;
         }
-        .copy-btn {
+        .empty { color: #888; font-style: italic; }
+
+        .agent-banner {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 16px;
+            background: #dafbe1;
+            border: 1px solid #aceebb;
+            border-radius: 6px;
+            margin-bottom: 24px;
+            font-size: 0.9em;
+            color: #1a7f37;
+        }
+        .agent-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #1a7f37;
+            border-radius: 50%;
+            flex-shrink: 0;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(26, 127, 55, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0); }
+        }
+        .agent-prompt {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* Copy dropdown */
+        .copy-dropdown { position: relative; }
+        .dropdown-toggle {
             background: none;
             border: 1px solid #ddd;
             border-radius: 4px;
@@ -97,20 +133,47 @@
             opacity: 0;
             transition: opacity 0.15s, background-color 0.15s, border-color 0.15s;
         }
-        .file:hover .copy-btn {
+        .file:hover .dropdown-toggle,
+        .copy-dropdown.open .dropdown-toggle {
             opacity: 1;
         }
-        .copy-btn:hover {
+        .dropdown-toggle:hover {
             background: #f5f5f5;
             border-color: #ccc;
             color: #333;
         }
-        .copy-btn.copied {
+        .dropdown-toggle.copied {
+            opacity: 1;
             background: #dafbe1;
             border-color: #1a7f37;
             color: #1a7f37;
         }
-        .empty { color: #888; font-style: italic; }
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: calc(100% + 4px);
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            z-index: 100;
+            min-width: 160px;
+            padding: 4px 0;
+        }
+        .copy-dropdown.open .dropdown-menu { display: block; }
+        .dropdown-menu button {
+            display: block;
+            width: 100%;
+            text-align: left;
+            padding: 8px 12px;
+            border: none;
+            background: none;
+            font-size: 0.85em;
+            color: #333;
+            cursor: pointer;
+        }
+        .dropdown-menu button:hover { background: #f5f5f5; }
 
         /* Selection bar */
         .selection-bar {
@@ -174,17 +237,33 @@
     </div>
     {{end}}
 
+    <div id="agentBanners">
+    {{range .AgentPrompts}}
+    <div class="agent-banner">
+        <span class="agent-dot"></span>
+        <span class="agent-prompt">Agent active{{if .}}: {{.}}{{end}}</span>
+    </div>
+    {{end}}
+    </div>
+
     {{if .Files}}
     <ul class="files">
         {{range .Files}}
-        <li class="file" data-path="thoughts/{{.Path}}">
+        <li class="file" data-project="{{$.Project.Name}}" data-path="{{.Path}}">
             <div class="file-left">
                 <input type="checkbox" class="file-checkbox" />
                 {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
                 <span class="file-name"><a href="/file/{{$.Project.Name}}/{{.Path}}">{{.Name}}</a></span>
             </div>
             <div class="file-right">
-                <button class="copy-btn" onclick="copyPath(this, event)">Copy</button>
+                <div class="copy-dropdown">
+                    <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy ▾</button>
+                    <div class="dropdown-menu">
+                        <button onclick="copyFileToClipboard(this)">File</button>
+                        <button onclick="copyRelative(this)">Relative path</button>
+                        <button onclick="copyAbsolute(this)">Absolute path</button>
+                    </div>
+                </div>
                 <span class="file-age">{{.Age}}</span>
             </div>
         </li>
@@ -201,46 +280,60 @@
     </div>
 
     <script>
-        function copyPath(btn, event) {
+        const projectName = '{{.Project.Name}}';
+
+        // Dropdown
+        function toggleDropdown(event) {
             event.preventDefault();
             event.stopPropagation();
-            const file = btn.closest('.file');
-            const path = '@' + file.dataset.path;
-            copyToClipboard(path);
+            const dd = event.target.closest('.copy-dropdown');
+            document.querySelectorAll('.copy-dropdown.open').forEach(d => { if (d !== dd) d.classList.remove('open'); });
+            dd.classList.toggle('open');
+        }
+        document.addEventListener('click', () => document.querySelectorAll('.copy-dropdown.open').forEach(d => d.classList.remove('open')));
 
-            btn.textContent = 'Copied!';
-            btn.classList.add('copied');
-            setTimeout(() => {
-                btn.textContent = 'Copy';
-                btn.classList.remove('copied');
-            }, 1500);
+        function flashCopied(btn) {
+            const dd = btn.closest('.copy-dropdown');
+            dd.classList.remove('open');
+            const toggle = dd.querySelector('.dropdown-toggle');
+            toggle.textContent = 'Copied!';
+            toggle.classList.add('copied');
+            setTimeout(() => { toggle.textContent = 'Copy ▾'; toggle.classList.remove('copied'); }, 1500);
         }
 
-        function copyToClipboard(text) {
-            navigator.clipboard.writeText(text);
+        function getFileData(btn) {
+            const row = btn.closest('[data-project]');
+            return { project: row.dataset.project, path: row.dataset.path };
         }
 
+        function copyRelative(btn) {
+            const d = getFileData(btn);
+            navigator.clipboard.writeText('@thoughts/' + d.path);
+            flashCopied(btn);
+        }
+
+        function copyAbsolute(btn) {
+            const d = getFileData(btn);
+            navigator.clipboard.writeText('@' + d.project + '/thoughts/' + d.path);
+            flashCopied(btn);
+        }
+
+        function copyFileToClipboard(btn) {
+            const d = getFileData(btn);
+            fetch(`/api/copy-file?project=${encodeURIComponent(d.project)}&path=${encodeURIComponent(d.path)}`)
+                .then(resp => { if (resp.ok) flashCopied(btn); });
+        }
+
+        // Selection
         function updateSelectionBar() {
             const checkboxes = document.querySelectorAll('.file-checkbox:checked');
             const bar = document.getElementById('selectionBar');
             const count = document.getElementById('selectedCount');
-
             count.textContent = checkboxes.length;
-
-            if (checkboxes.length > 0) {
-                bar.classList.add('visible');
-            } else {
-                bar.classList.remove('visible');
-            }
-
-            // Update selected styling
+            bar.classList.toggle('visible', checkboxes.length > 0);
             document.querySelectorAll('.file').forEach(file => {
-                const checkbox = file.querySelector('.file-checkbox');
-                if (checkbox.checked) {
-                    file.classList.add('selected');
-                } else {
-                    file.classList.remove('selected');
-                }
+                const cb = file.querySelector('.file-checkbox');
+                file.classList.toggle('selected', cb && cb.checked);
             });
         }
 
@@ -248,51 +341,35 @@
             const checkboxes = document.querySelectorAll('.file-checkbox:checked');
             const paths = Array.from(checkboxes).map(cb => {
                 const file = cb.closest('.file');
-                return '@' + file.dataset.path;
+                return '@' + file.dataset.project + '/thoughts/' + file.dataset.path;
             });
-
-            copyToClipboard(paths.join('\n'));
+            navigator.clipboard.writeText(paths.join('\n'));
             clearSelection();
         }
 
         function clearSelection() {
-            document.querySelectorAll('.file-checkbox:checked').forEach(cb => {
-                cb.checked = false;
-            });
+            document.querySelectorAll('.file-checkbox:checked').forEach(cb => cb.checked = false);
             updateSelectionBar();
         }
 
-        // Add event listeners to all checkboxes
-        document.querySelectorAll('.file-checkbox').forEach(checkbox => {
-            checkbox.addEventListener('change', updateSelectionBar);
-        });
-
-        // Allow clicking anywhere on the file row (except links/buttons) to toggle
-        document.querySelectorAll('.file').forEach(file => {
-            file.addEventListener('click', (e) => {
-                // Don't toggle if clicking on a link, button, or checkbox
-                if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON' || e.target.type === 'checkbox') {
-                    return;
-                }
-                const checkbox = file.querySelector('.file-checkbox');
-                checkbox.checked = !checkbox.checked;
-                updateSelectionBar();
+        function attachFileListeners() {
+            document.querySelectorAll('.file-checkbox').forEach(cb => cb.addEventListener('change', updateSelectionBar));
+            document.querySelectorAll('.file').forEach(file => {
+                file.addEventListener('click', (e) => {
+                    if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON' || e.target.type === 'checkbox') return;
+                    const cb = file.querySelector('.file-checkbox');
+                    cb.checked = !cb.checked;
+                    updateSelectionBar();
+                });
             });
-        });
+        }
+        attachFileListeners();
 
-        // Live updates via SSE
-        const projectName = '{{.Project.Name}}';
+        // SSE
         const events = new EventSource('/events');
-
         events.addEventListener('change', function(e) {
             const data = JSON.parse(e.data);
-            if (data.type === 'files' && data.project === projectName) {
-                refreshFiles();
-            }
-        });
-
-        events.addEventListener('error', function(e) {
-            console.log('SSE connection lost, will reconnect...');
+            if (data.type === 'files' && data.project === projectName) refreshFiles();
         });
 
         async function refreshFiles() {
@@ -300,45 +377,50 @@
                 const response = await fetch(`/api/project/${projectName}`);
                 const files = await response.json();
                 const container = document.querySelector('.files');
-                if (!container) {
-                    // No files container, need to reload for structural change
-                    location.reload();
-                    return;
-                }
+                if (!container) { location.reload(); return; }
                 container.innerHTML = files.map(f => `
-                    <li class="file" data-path="thoughts/${f.path}">
+                    <li class="file" data-project="${projectName}" data-path="${f.path}">
                         <div class="file-left">
                             <input type="checkbox" class="file-checkbox" />
                             ${f.fileType && f.fileType !== 'other' ? `<span class="file-type ${f.fileType}">${f.fileType}</span>` : ''}
                             <span class="file-name"><a href="/file/${projectName}/${f.path}">${f.name}</a></span>
                         </div>
                         <div class="file-right">
-                            <button class="copy-btn" onclick="copyPath(this, event)">Copy</button>
+                            <div class="copy-dropdown">
+                                <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy ▾</button>
+                                <div class="dropdown-menu">
+                                    <button onclick="copyFileToClipboard(this)">File</button>
+                                    <button onclick="copyRelative(this)">Relative path</button>
+                                    <button onclick="copyAbsolute(this)">Absolute path</button>
+                                </div>
+                            </div>
                             <span class="file-age">${f.age}</span>
                         </div>
                     </li>
                 `).join('');
-
-                // Re-attach event listeners
-                document.querySelectorAll('.file-checkbox').forEach(checkbox => {
-                    checkbox.addEventListener('change', updateSelectionBar);
-                });
-                document.querySelectorAll('.file').forEach(file => {
-                    file.addEventListener('click', (e) => {
-                        if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON' || e.target.type === 'checkbox') {
-                            return;
-                        }
-                        const checkbox = file.querySelector('.file-checkbox');
-                        checkbox.checked = !checkbox.checked;
-                        updateSelectionBar();
-                    });
-                });
-
+                attachFileListeners();
                 clearSelection();
             } catch (err) {
                 console.error('Failed to refresh files:', err);
             }
         }
+        async function refreshAgentStatus() {
+            try {
+                const response = await fetch('/api/projects');
+                const projects = await response.json();
+                const project = projects.find(p => p.name === projectName);
+                const container = document.getElementById('agentBanners');
+                if (project && project.agentCount > 0) {
+                    container.innerHTML = project.agentPrompts.map(prompt =>
+                        `<div class="agent-banner"><span class="agent-dot"></span><span class="agent-prompt">Agent active${prompt ? ': ' + prompt.replace(/&/g,'&amp;').replace(/</g,'&lt;') : ''}</span></div>`
+                    ).join('');
+                } else {
+                    container.innerHTML = '';
+                }
+            } catch (err) {}
+        }
+        refreshAgentStatus();
+        setInterval(refreshAgentStatus, 30000);
     </script>
 </body>
 </html>

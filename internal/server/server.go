@@ -6,12 +6,15 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/discovery"
 	"github.com/loganj/birdseye/internal/watcher"
@@ -19,18 +22,20 @@ import (
 )
 
 type Server struct {
-	cache    *cache.Cache
-	watcher  *watcher.Watcher
-	mux      *http.ServeMux
-	tmpl     *template.Template
-	loadOnce sync.Once
+	cache       *cache.Cache
+	watcher     *watcher.Watcher
+	mux         *http.ServeMux
+	tmpl        *template.Template
+	loadOnce    sync.Once
+	templateDir string // if set, reload templates from disk on each request
 }
 
-func New(c *cache.Cache, w *watcher.Watcher) *Server {
+func New(c *cache.Cache, w *watcher.Watcher, templateDir string) *Server {
 	s := &Server{
-		cache:   c,
-		watcher: w,
-		mux:     http.NewServeMux(),
+		cache:       c,
+		watcher:     w,
+		mux:         http.NewServeMux(),
+		templateDir: templateDir,
 	}
 
 	// Parse templates from embedded filesystem
@@ -38,6 +43,18 @@ func New(c *cache.Cache, w *watcher.Watcher) *Server {
 
 	s.routes()
 	return s
+}
+
+func (s *Server) getTemplate() *template.Template {
+	if s.templateDir != "" {
+		t, err := template.ParseGlob(filepath.Join(s.templateDir, "*.html"))
+		if err != nil {
+			log.Printf("Error reloading templates: %v", err)
+			return s.tmpl
+		}
+		return t
+	}
+	return s.tmpl
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +149,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/projects", s.handleAPIProjects)
 	s.mux.HandleFunc("/api/project/", s.handleAPIProjectFiles)
 	s.mux.HandleFunc("/api/recent", s.handleAPIRecent)
+	s.mux.HandleFunc("/api/copy-file", s.handleCopyFile)
 }
 
 type IndexFile struct {
@@ -164,14 +182,33 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// Get projects sorted by last modified
 	sortedProjects := s.cache.ProjectsSortedByModTime()
 
+	// Check for active agents
+	activeAgents := agents.FindActive()
+	agentMap := make(map[string]string)
+	for _, p := range sortedProjects {
+		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
+			if len(agts) == 1 {
+				prompt := agts[0].Prompt
+				if prompt == "" {
+					prompt = "Agent active"
+				}
+				agentMap[p.Name] = prompt
+			} else {
+				agentMap[p.Name] = fmt.Sprintf("%d agents active", len(agts))
+			}
+		}
+	}
+
 	data := struct {
 		Projects []discovery.Project
 		Files    []IndexFile
+		Agents   map[string]string
 	}{
 		Projects: sortedProjects,
 		Files:    files,
+		Agents:   agentMap,
 	}
-	s.tmpl.ExecuteTemplate(w, "index.html", data)
+	s.getTemplate().ExecuteTemplate(w, "index.html", data)
 }
 
 func formatAge(t time.Time) string {
@@ -227,14 +264,26 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	data := struct {
-		Project *discovery.Project
-		Files   []ProjectFile
-	}{
-		Project: project,
-		Files:   files,
+	// Check for active agents
+	var agentPrompts []string
+	activeAgents := agents.FindActive()
+	if agts, ok := activeAgents[project.Path]; ok && len(agts) > 0 {
+		agentPrompts = make([]string, len(agts))
+		for i, a := range agts {
+			agentPrompts[i] = a.Prompt
+		}
 	}
-	s.tmpl.ExecuteTemplate(w, "project.html", data)
+
+	data := struct {
+		Project      *discovery.Project
+		Files        []ProjectFile
+		AgentPrompts []string
+	}{
+		Project:      project,
+		Files:        files,
+		AgentPrompts: agentPrompts,
+	}
+	s.getTemplate().ExecuteTemplate(w, "project.html", data)
 }
 
 // handleEvents is the SSE endpoint for live updates
@@ -278,16 +327,20 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // API handlers for dynamic updates
 
 type APIProject struct {
-	Name         string `json:"name"`
-	Branch       string `json:"branch,omitempty"`
-	Dirty        bool   `json:"dirty,omitempty"`
-	FileCount    int    `json:"fileCount"`
-	Summary      string `json:"summary,omitempty"`
-	LastModified string `json:"lastModified"`
+	Name         string   `json:"name"`
+	Branch       string   `json:"branch,omitempty"`
+	Dirty        bool     `json:"dirty,omitempty"`
+	FileCount    int      `json:"fileCount"`
+	Summary      string   `json:"summary,omitempty"`
+	LastModified string   `json:"lastModified"`
+	AgentCount   int      `json:"agentCount,omitempty"`
+	AgentPrompts []string `json:"agentPrompts,omitempty"`
 }
 
 func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	activeAgents := agents.FindActive()
 
 	projects := s.cache.ProjectsSortedByModTime()
 	result := make([]APIProject, len(projects))
@@ -301,6 +354,14 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 		if p.Git != nil {
 			result[i].Branch = p.Git.Branch
 			result[i].Dirty = p.Git.Dirty
+		}
+		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
+			result[i].AgentCount = len(agts)
+			prompts := make([]string, len(agts))
+			for j, a := range agts {
+				prompts[j] = a.Prompt
+			}
+			result[i].AgentPrompts = prompts
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -347,6 +408,38 @@ func (s *Server) handleAPIRecent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
+	projectName := r.URL.Query().Get("project")
+	filePath := r.URL.Query().Get("path")
+	if projectName == "" || filePath == "" {
+		http.Error(w, "missing project or path", http.StatusBadRequest)
+		return
+	}
+
+	project := s.cache.FindProject(projectName)
+	if project == nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+
+	fullPath := filepath.Join(project.ThoughtsPath, filePath)
+
+	// Verify the file exists and is under the thoughts directory
+	if _, err := os.Stat(fullPath); err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+
+	cmd := exec.Command("osascript", "-e", fmt.Sprintf(`set the clipboard to (POSIX file %q)`, fullPath))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("osascript error: %v, output: %s", err, out)
+		http.Error(w, fmt.Sprintf("failed to copy file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // Helper for templates - kept for backward compat

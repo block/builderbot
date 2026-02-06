@@ -115,6 +115,23 @@
         }
         .branch { color: #2da44e; }
         .dirty { color: #cf222e; }
+
+        .agent-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #2da44e;
+            border-radius: 50%;
+            margin-left: 8px;
+            vertical-align: middle;
+            cursor: default;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(45, 164, 78, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0); }
+        }
     </style>
 </head>
 <body>
@@ -137,7 +154,7 @@
         {{range .Projects}}
         <div class="project" data-path="{{.Name}}/thoughts">
             <div class="project-header">
-                <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a></div>
+                <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a>{{if index $.Agents .Name}}<span class="agent-dot" title="{{index $.Agents .Name}}"></span>{{end}}</div>
                 <button class="copy-btn" onclick="copyProjectPath(this, event)">Copy</button>
             </div>
             {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
@@ -184,7 +201,7 @@
                 container.innerHTML = projects.map(p => `
                     <div class="project" data-path="${p.name}/thoughts">
                         <div class="project-header">
-                            <div class="project-name"><a href="/project/${p.name}">${p.name}</a></div>
+                            <div class="project-name"><a href="/project/${p.name}">${p.name}</a>${p.agentCount ? `<span class="agent-dot" title="${p.agentCount === 1 ? (p.agentPrompts[0] || 'Agent active').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;') : p.agentCount + ' agents active'}"></span>` : ''}</div>
                             <button class="copy-btn" onclick="copyProjectPath(this, event)">Copy</button>
                         </div>
                         ${p.branch ? `<div class="project-meta"><span class="branch">${p.branch}${p.dirty ? '<span class="dirty">*</span>' : ''}</span></div>` : ''}
@@ -197,6 +214,42 @@
                 console.error('Failed to refresh projects:', err);
             }
         }
+        // Poll agent status every 5 seconds (lightweight update, no DOM rebuild)
+        async function refreshAgentStatus() {
+            try {
+                const response = await fetch('/api/projects');
+                const projects = await response.json();
+                const agentMap = {};
+                projects.forEach(p => {
+                    if (p.agentCount) {
+                        agentMap[p.name] = p.agentCount === 1
+                            ? (p.agentPrompts[0] || 'Agent active')
+                            : p.agentCount + ' agents active';
+                    }
+                });
+
+                document.querySelectorAll('.project').forEach(el => {
+                    const link = el.querySelector('.project-name a');
+                    if (!link) return;
+                    const name = link.textContent;
+                    const existingDot = el.querySelector('.agent-dot');
+                    if (agentMap[name]) {
+                        if (!existingDot) {
+                            const dot = document.createElement('span');
+                            dot.className = 'agent-dot';
+                            dot.title = agentMap[name];
+                            el.querySelector('.project-name').appendChild(dot);
+                        } else {
+                            existingDot.title = agentMap[name];
+                        }
+                    } else if (existingDot) {
+                        existingDot.remove();
+                    }
+                });
+            } catch (err) {}
+        }
+        refreshAgentStatus();
+        setInterval(refreshAgentStatus, 30000);
     </script>
 </body>
 </html>

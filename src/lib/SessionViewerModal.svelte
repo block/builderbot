@@ -7,7 +7,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
   import { X, Loader2, AlertCircle } from 'lucide-svelte';
-  import { getSession, getSessionStatus } from './services/ai';
+  import { getSession, getSessionStatus, getBufferedSegments, type ContentSegment } from './services/ai';
   import { toDisplayMessage, type DisplayMessage } from './types/streaming';
   import {
     connectToSession,
@@ -76,13 +76,59 @@
     error = null;
 
     try {
-      const sessionData = await getSession(sessionId);
+      // Load from both sources concurrently
+      const [sessionData, bufferedSegments] = await Promise.all([
+        getSession(sessionId),
+        isLive ? getBufferedSegments(sessionId) : Promise.resolve(null),
+      ]);
+
       if (!sessionData) {
         error = 'Session not found';
         return;
       }
 
-      messages = sessionData.messages.map(toDisplayMessage);
+      // Convert DB messages to display format
+      const dbMessages = sessionData.messages.map(toDisplayMessage);
+
+      // If we have buffered segments, merge them with DB messages
+      if (bufferedSegments && bufferedSegments.length > 0) {
+        // Convert buffered segments to a display message
+        const bufferedMessage: DisplayMessage = {
+          role: 'assistant',
+          content: '',
+          segments: bufferedSegments.map((seg: ContentSegment) => {
+            if (seg.type === 'text') {
+              return { type: 'text' as const, text: seg.text };
+            } else {
+              return {
+                type: 'tool' as const,
+                id: seg.id,
+                title: seg.title,
+                status: seg.status,
+              };
+            }
+          }),
+        };
+
+        // Dedupe: if the last DB message is assistant AND recent (within last 5 seconds),
+        // assume it's the persisted version of the buffered segments
+        const lastDbMessage = dbMessages[dbMessages.length - 1];
+        const lastDbRawMessage = sessionData.messages[sessionData.messages.length - 1];
+        const isRecentAssistant =
+          lastDbMessage?.role === 'assistant' &&
+          lastDbRawMessage &&
+          (Date.now() - lastDbRawMessage.createdAt) < 5000;
+
+        if (isRecentAssistant) {
+          // DB has the persisted version (it's recent), use it (buffered is stale)
+          messages = dbMessages;
+        } else {
+          // No recent assistant message in DB, use buffered
+          messages = [...dbMessages, bufferedMessage];
+        }
+      } else {
+        messages = dbMessages;
+      }
 
       if (isLive) {
         const status = await getSessionStatus(sessionId);

@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::RwLock;
 
 use super::client::{self, AcpAgent, AcpPromptResult};
-use crate::store::{generate_session_id, MessageRole, Session, Store};
+use crate::store::{generate_session_id, ContentSegment, MessageRole, Session, Store};
 
 // =============================================================================
 // Types
@@ -77,6 +77,9 @@ pub struct SessionManager {
     app_handle: AppHandle,
     /// Store for persistence
     store: Arc<Store>,
+    /// In-memory buffer for streaming messages (session_id -> segments)
+    /// Stores messages as they arrive during streaming, before DB persistence
+    streaming_buffer: Arc<RwLock<HashMap<String, Vec<ContentSegment>>>>,
 }
 
 impl SessionManager {
@@ -86,6 +89,7 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             app_handle,
             store,
+            streaming_buffer: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -261,6 +265,20 @@ impl SessionManager {
         let session_id_owned = session_id.to_string();
         let session_arc_clone = session_arc.clone();
         let store = self.store.clone();
+        let streaming_buffer = Arc::clone(&self.streaming_buffer);
+
+        // Create callback to update buffer during streaming
+        let session_id_for_callback = session_id_owned.clone();
+        let buffer_for_callback = Arc::clone(&self.streaming_buffer);
+        let buffer_callback = Arc::new(move |segments: Vec<ContentSegment>| {
+            let session_id = session_id_for_callback.clone();
+            let buffer = Arc::clone(&buffer_for_callback);
+            // Spawn a task to update the buffer asynchronously
+            tokio::spawn(async move {
+                let mut buffer = buffer.write().await;
+                buffer.insert(session_id, segments);
+            });
+        });
 
         tokio::spawn(async move {
             // Run the ACP prompt with streaming
@@ -271,6 +289,7 @@ impl SessionManager {
                 acp_session_id.as_deref(),
                 &session_id_owned,
                 app_handle.clone(),
+                Some(buffer_callback),
             )
             .await;
 
@@ -288,6 +307,11 @@ impl SessionManager {
                         log::error!("Failed to persist assistant turn: {e}");
                     }
 
+                    // Clear buffer after persistence attempt (success or failure)
+                    // The callback has been updating the buffer during streaming
+                    let mut buffer = streaming_buffer.write().await;
+                    buffer.remove(&session_id_owned);
+
                     // Auto-generate title from first user message if not set
                     if let Err(e) = maybe_set_title(&store, &session_id_owned, &prompt) {
                         log::warn!("Failed to set session title: {e}");
@@ -296,6 +320,9 @@ impl SessionManager {
                 Err(e) => {
                     log::error!("Session {session_id_owned} prompt failed: {e}");
                     session.status = SessionStatus::Error { message: e };
+                    // Clear buffer on error too
+                    let mut buffer = streaming_buffer.write().await;
+                    buffer.remove(&session_id_owned);
                 }
             }
 
@@ -316,6 +343,18 @@ impl SessionManager {
             status: status.clone(),
         };
         let _ = self.app_handle.emit("session-status", &event);
+    }
+
+    /// Get buffered streaming segments for a session (before DB persistence).
+    ///
+    /// Returns:
+    /// - Some(segments): Session is actively streaming, these are the latest segments
+    /// - None: No buffered segments (either already persisted or never started)
+    ///
+    /// Note: If None, check the database - segments may have already been persisted.
+    pub async fn get_buffered_segments(&self, session_id: &str) -> Option<Vec<ContentSegment>> {
+        let buffer = self.streaming_buffer.read().await;
+        buffer.get(session_id).cloned()
     }
 }
 

@@ -32,12 +32,12 @@ Requires Go 1.21+ and [just](https://github.com/casey/just). Hot reload requires
 ./birdseye -root /path/to/projects # Custom root directory
 ```
 
-## MCP Integration
+## Claude Code Plugin
 
-Birdseye exposes an MCP server so AI agents can interact with document reviews. Install it for Claude Code:
+Birdseye ships as a Claude Code plugin that bundles an MCP server (for programmatic access to comments and reviews) and the `monitor-reviews` skill. Install it with:
 
 ```bash
-just install-mcp
+just install-claude
 ```
 
-Available tools: `birdseye_list_threads`, `birdseye_read_thread`, `birdseye_reply`, `birdseye_create_thread`, `birdseye_resolve`, `birdseye_request_review`, `birdseye_files_in_review`.
+This registers birdseye as a local plugin marketplace and installs the plugin. The birdseye server must be running for the MCP tools to work.

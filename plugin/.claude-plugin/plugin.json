@@ -1,0 +1,5 @@
+{
+  "name": "birdseye",
+  "description": "Document review tools for markdown files in thoughts/ directories. Browse, comment on, and collaboratively review research, plans, and other documentation with AI agents.",
+  "version": "1.0.0"
+}

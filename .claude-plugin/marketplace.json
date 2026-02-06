@@ -1,0 +1,13 @@
+{
+  "name": "birdseye",
+  "owner": {
+    "name": "Logan Johnson"
+  },
+  "plugins": [
+    {
+      "name": "birdseye",
+      "source": "./plugin",
+      "description": "Document review tools for markdown files in thoughts/ directories."
+    }
+  ]
+}

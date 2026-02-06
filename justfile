@@ -65,10 +65,6 @@ dev:
 
     start_server
 
-    # Symlink skills for global availability
-    mkdir -p ~/.claude/skills
-    ln -sfn "$(pwd)/skills/monitor-reviews" ~/.claude/skills/monitor-reviews
-
     # Wait for server to be ready before opening browser
     echo "Waiting for server..."
     until curl -s http://localhost:$PORT/ > /dev/null 2>&1; do
@@ -105,6 +101,20 @@ test:
 tidy:
     go mod tidy
 
-# Install MCP server config globally for Claude
-install-mcp:
-    claude mcp add birdseye --scope user --transport http http://localhost:8080/mcp
+# Install birdseye as a Claude Code plugin (MCP server + skills)
+install-claude:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Clean up legacy skill symlink if present
+    rm -f ~/.claude/skills/monitor-reviews
+    # Add the birdseye directory as a local marketplace, then install the plugin
+    claude plugin marketplace add "$(pwd)" 2>/dev/null || true
+    claude plugin install birdseye
+    echo "Birdseye plugin installed for Claude Code."
+
+# Uninstall birdseye Claude Code plugin
+uninstall-claude:
+    #!/usr/bin/env bash
+    claude plugin uninstall birdseye 2>/dev/null || true
+    claude plugin marketplace remove birdseye 2>/dev/null || true
+    echo "Birdseye plugin uninstalled."

@@ -4,6 +4,7 @@ import type {
   FileDiffSummary,
   FileDiff,
   PullRequest,
+  Issue,
   GitHubAuthStatus,
   GitHubSyncResult,
 } from '../types';
@@ -159,5 +160,25 @@ export async function syncReviewToGitHub(
     repoPath: repoPath ?? null,
     prNumber,
     spec,
+  });
+}
+
+/**
+ * List open issues for the repo.
+ */
+export async function listIssues(repoPath?: string): Promise<Issue[]> {
+  return invoke<Issue[]>('list_issues', {
+    repoPath: repoPath ?? null,
+  });
+}
+
+/**
+ * Search for issues on GitHub using a query string.
+ * Uses GitHub's search syntax.
+ */
+export async function searchIssues(query: string, repoPath?: string): Promise<Issue[]> {
+  return invoke<Issue[]>('search_issues', {
+    repoPath: repoPath ?? null,
+    query,
   });
 }

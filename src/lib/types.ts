@@ -174,6 +174,15 @@ export interface PullRequest {
   updated_at: string;
 }
 
+/** A GitHub issue (for display in picker) */
+export interface Issue {
+  number: number;
+  title: string;
+  author: string;
+  updated_at: string;
+  labels: string[];
+}
+
 /** GitHub authentication status */
 export interface GitHubAuthStatus {
   authenticated: boolean;

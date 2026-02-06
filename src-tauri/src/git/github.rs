@@ -39,6 +39,16 @@ pub struct PullRequest {
     pub updated_at: String,
 }
 
+/// A GitHub issue (for display in picker)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Issue {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub updated_at: String,
+    pub labels: Vec<String>,
+}
+
 // =============================================================================
 // Cache
 // =============================================================================
@@ -280,6 +290,78 @@ pub fn search_pull_requests(repo: &Path, query: &str) -> Result<Vec<PullRequest>
     )?;
 
     let items: Vec<GhPrListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
+}
+
+// =============================================================================
+// Issues
+// =============================================================================
+
+/// Response from `gh issue list --json`
+#[derive(Debug, Deserialize)]
+struct GhIssueListItem {
+    number: u64,
+    title: String,
+    author: GhAuthor,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+    labels: Vec<GhLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhLabel {
+    name: String,
+}
+
+impl From<GhIssueListItem> for Issue {
+    fn from(item: GhIssueListItem) -> Self {
+        Issue {
+            number: item.number,
+            title: item.title,
+            author: item.author.login,
+            updated_at: item.updated_at,
+            labels: item.labels.into_iter().map(|l| l.name).collect(),
+        }
+    }
+}
+
+/// List open issues for the repo
+pub fn list_issues(repo: &Path) -> Result<Vec<Issue>, GitError> {
+    let output = run_gh(
+        repo,
+        &[
+            "issue",
+            "list",
+            "--state=open",
+            "--limit=50",
+            "--json=number,title,author,updatedAt,labels",
+        ],
+    )?;
+
+    let items: Vec<GhIssueListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
+}
+
+/// Search for issues on GitHub using a query string.
+/// Uses GitHub's search syntax via `gh issue list --search`.
+pub fn search_issues(repo: &Path, query: &str) -> Result<Vec<Issue>, GitError> {
+    let output = run_gh(
+        repo,
+        &[
+            "issue",
+            "list",
+            "--state=open",
+            "--limit=50",
+            &format!("--search={query}"),
+            "--json=number,title,author,updatedAt,labels",
+        ],
+    )?;
+
+    let items: Vec<GhIssueListItem> =
         serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
 
     Ok(items.into_iter().map(Into::into).collect())

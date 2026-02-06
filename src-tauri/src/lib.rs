@@ -477,6 +477,35 @@ async fn search_pull_requests(
     .map_err(|e| e.to_string())?
 }
 
+/// List open issues for the repo.
+#[tauri::command(rename_all = "camelCase")]
+async fn list_issues(repo_path: Option<String>) -> Result<Vec<git::Issue>, String> {
+    let path = repo_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    // Run on blocking thread pool to avoid blocking the UI
+    tokio::task::spawn_blocking(move || git::list_issues(&path).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Search for issues on GitHub using a query string.
+#[tauri::command(rename_all = "camelCase")]
+async fn search_issues(
+    repo_path: Option<String>,
+    query: String,
+) -> Result<Vec<git::Issue>, String> {
+    let path = repo_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    // Run on blocking thread pool to avoid blocking the UI
+    tokio::task::spawn_blocking(move || {
+        git::search_issues(&path, &query).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Fetch PR refs and compute merge-base.
 /// Returns DiffSpec with concrete SHAs.
 #[tauri::command(rename_all = "camelCase")]
@@ -3573,6 +3602,8 @@ pub fn run() {
             check_github_auth,
             list_pull_requests,
             search_pull_requests,
+            list_issues,
+            search_issues,
             fetch_pr,
             sync_review_to_github,
             invalidate_pr_cache,

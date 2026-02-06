@@ -5,6 +5,7 @@
   1. Pick a repository (with search)
   2. Enter branch title (auto-generates sanitized branch name)
      - Option to switch to "From Pull Request" mode
+     - Option to switch to "From Issue" mode
 
   The branch is created with an isolated worktree, defaulting to the
   repository's default branch (e.g., origin/main) as the base.
@@ -17,6 +18,7 @@
     Folder,
     GitBranch,
     GitPullRequest,
+    CircleDot,
     ChevronRight,
     Search,
     Loader2,
@@ -27,8 +29,8 @@
   import type { Branch } from './services/branch';
   import * as branchService from './services/branch';
   import { listDirectory, getHomeDir, searchDirectories, type DirEntry } from './services/files';
-  import { listRefs, listPullRequests } from './services/git';
-  import type { PullRequest } from './types';
+  import { listRefs, listPullRequests, listIssues } from './services/git';
+  import type { PullRequest, Issue } from './types';
 
   /** Info about a branch being created (for showing a placeholder) */
   export interface PendingBranch {
@@ -53,7 +55,7 @@
     $props();
 
   // State
-  type Step = 'repo' | 'name' | 'pr';
+  type Step = 'repo' | 'name' | 'pr' | 'issue';
   let step = $state<Step>('repo');
   let selectedRepo = $state<string | null>(null);
   let branchTitle = $state('');
@@ -65,6 +67,14 @@
   let prSelectedIndex = $state(0);
   let prSearchEl: HTMLInputElement | null = $state(null);
   let creatingFromPR = $state(false);
+
+  // Issue selection state
+  let issues = $state<Issue[]>([]);
+  let loadingIssues = $state(false);
+  let issueSearchQuery = $state('');
+  let issueSelectedIndex = $state(0);
+  let issueSearchEl: HTMLInputElement | null = $state(null);
+  let selectedIssue = $state<Issue | null>(null);
 
   /**
    * Sanitize a branch title into a valid git branch name.
@@ -143,6 +153,15 @@
     );
   });
 
+  // Filtered issues for search
+  let filteredIssues = $derived.by(() => {
+    if (!issueSearchQuery) return issues;
+    const q = issueSearchQuery.toLowerCase();
+    return issues.filter(
+      (issue) => issue.title.toLowerCase().includes(q) || issue.number.toString().includes(q)
+    );
+  });
+
   // Initialize
   onMount(async () => {
     const dir = await getHomeDir();
@@ -163,6 +182,8 @@
       branchInputEl.focus();
     } else if (step === 'pr' && prSearchEl) {
       prSearchEl.focus();
+    } else if (step === 'issue' && issueSearchEl) {
+      issueSearchEl.focus();
     }
   });
 
@@ -265,6 +286,40 @@
     }
   }
 
+  async function switchToIssueMode() {
+    step = 'issue';
+    loadingIssues = true;
+    issueSearchQuery = '';
+    issueSelectedIndex = 0;
+    try {
+      issues = await listIssues(selectedRepo!);
+    } catch (e) {
+      console.error('Failed to load issues:', e);
+      issues = [];
+    } finally {
+      loadingIssues = false;
+    }
+  }
+
+  /**
+   * Generate a branch name from an issue.
+   * Format: {issue-number}-{sanitized-title}
+   * Example: "123-fix-login-bug"
+   */
+  function generateBranchNameFromIssue(issue: Issue): string {
+    const sanitizedTitle = sanitizeBranchName(issue.title);
+    // Limit title portion to avoid overly long branch names
+    const truncatedTitle = sanitizedTitle.slice(0, 50).replace(/-+$/, '');
+    return `${issue.number}-${truncatedTitle}`;
+  }
+
+  function handleSelectIssue(issue: Issue) {
+    selectedIssue = issue;
+    // Pre-fill the branch title with the generated name
+    branchTitle = generateBranchNameFromIssue(issue);
+    step = 'name';
+  }
+
   async function handleSelectPR(pr: PullRequest) {
     if (!selectedRepo || creatingFromPR) return;
     creatingFromPR = true;
@@ -335,8 +390,18 @@
       step = 'name';
       prSearchQuery = '';
       prSelectedIndex = 0;
+    } else if (step === 'issue') {
+      // Go back from issue to name step
+      step = 'name';
+      issueSearchQuery = '';
+      issueSelectedIndex = 0;
     } else if (step === 'name') {
       // Go back from name to repo selection
+      // Clear issue selection if we came from issue picker
+      if (selectedIssue) {
+        selectedIssue = null;
+        branchTitle = '';
+      }
       step = 'repo';
       selectedRepo = null;
       detectedDefaultBranch = null;
@@ -495,7 +560,7 @@
     onclick={(e) => e.stopPropagation()}
   >
     <div class="modal-header">
-      {#if (step === 'name' && !initialRepoPath) || step === 'pr'}
+      {#if (step === 'name' && !initialRepoPath) || step === 'pr' || step === 'issue'}
         <button class="back-button" onclick={goBack}>
           <ArrowLeft size={16} />
         </button>
@@ -505,6 +570,8 @@
           Select Repository
         {:else if step === 'pr'}
           Select Pull Request
+        {:else if step === 'issue'}
+          Select Issue
         {:else}
           New Branch
         {/if}
@@ -619,6 +686,53 @@
           {/each}
         {/if}
       </div>
+    {:else if step === 'issue'}
+      <!-- Issue selection -->
+      <div class="search-container">
+        <Search size={16} class="search-icon" />
+        <input
+          bind:this={issueSearchEl}
+          bind:value={issueSearchQuery}
+          type="text"
+          placeholder="Search issues..."
+          class="search-input"
+        />
+        {#if loadingIssues}
+          <Loader2 size={16} class="spinner" />
+        {/if}
+      </div>
+
+      <div class="issue-list">
+        {#if loadingIssues}
+          <div class="loading">
+            <Loader2 size={16} class="spinner" />
+            <span>Loading issues...</span>
+          </div>
+        {:else if filteredIssues.length === 0}
+          <div class="empty">
+            {issueSearchQuery ? 'No matching issues' : 'No open issues'}
+          </div>
+        {:else}
+          {#each filteredIssues as issue, index (issue.number)}
+            <button
+              class="issue-item"
+              class:selected={index === issueSelectedIndex}
+              onclick={() => handleSelectIssue(issue)}
+            >
+              <CircleDot size={16} class="issue-item-icon" />
+              <div class="issue-item-content">
+                <span class="issue-item-title">{issue.title}</span>
+                <span class="issue-item-meta">
+                  #{issue.number}
+                  {#if issue.labels.length > 0}
+                    · {issue.labels.slice(0, 3).join(', ')}
+                  {/if}
+                </span>
+              </div>
+            </button>
+          {/each}
+        {/if}
+      </div>
     {:else}
       <!-- Branch name input -->
       <div class="name-step">
@@ -691,10 +805,16 @@
           </div>
 
           <div class="actions">
-            <button class="pr-link" onclick={switchToPRMode}>
-              <GitPullRequest size={14} />
-              <span>From Pull Request</span>
-            </button>
+            <div class="actions-left">
+              <button class="source-link" onclick={switchToPRMode}>
+                <GitPullRequest size={14} />
+                <span>From PR</span>
+              </button>
+              <button class="source-link" onclick={switchToIssueMode}>
+                <CircleDot size={14} />
+                <span>From Issue</span>
+              </button>
+            </div>
             <div class="actions-right">
               <button class="cancel-button" onclick={initialRepoPath ? onClose : goBack}
                 >Cancel</button
@@ -1096,12 +1216,17 @@
     margin-top: 8px;
   }
 
+  .actions-left {
+    display: flex;
+    gap: 4px;
+  }
+
   .actions-right {
     display: flex;
     gap: 8px;
   }
 
-  .pr-link {
+  .source-link {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -1115,12 +1240,12 @@
     transition: all 0.15s;
   }
 
-  .pr-link:hover {
+  .source-link:hover {
     background-color: var(--bg-hover);
     color: var(--text-primary);
   }
 
-  .pr-link :global(svg) {
+  .source-link :global(svg) {
     color: var(--status-added);
   }
 
@@ -1232,6 +1357,60 @@
   }
 
   .pr-item-meta {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+    font-family: 'SF Mono', 'Menlo', monospace;
+  }
+
+  /* Issue list */
+  .issue-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+
+  .issue-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 12px;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.1s;
+  }
+
+  .issue-item:hover,
+  .issue-item.selected {
+    background-color: var(--bg-hover);
+  }
+
+  :global(.issue-item-icon) {
+    color: var(--status-added);
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .issue-item-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .issue-item-title {
+    font-size: var(--size-sm);
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .issue-item-meta {
     font-size: var(--size-xs);
     color: var(--text-muted);
     font-family: 'SF Mono', 'Menlo', monospace;

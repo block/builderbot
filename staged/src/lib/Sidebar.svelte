@@ -159,6 +159,7 @@
 
   let collapsedDirs = $state(new Set<string>());
   let collapsedSearchResults = $state(new Set<string>());
+  let collapsedSections = $state(new Set<string>());
   let treeView = $state(false);
   let showCommitModal = $state(false);
   let copiedFeedback = $state(false);
@@ -471,6 +472,20 @@
 
   function isCollapsed(path: string): boolean {
     return collapsedDirs.has(path);
+  }
+
+  function toggleSection(sectionName: string) {
+    const newSet = new Set(collapsedSections);
+    if (newSet.has(sectionName)) {
+      newSet.delete(sectionName);
+    } else {
+      newSet.add(sectionName);
+    }
+    collapsedSections = newSet;
+  }
+
+  function isSectionCollapsed(sectionName: string): boolean {
+    return collapsedSections.has(sectionName);
   }
 
   async function toggleSearchResults(path: string) {
@@ -1175,6 +1190,17 @@
         <div class="section-header">
           <div class="section-left">
             <button
+              class="section-collapse-btn"
+              onclick={() => toggleSection('changed')}
+              title={isSectionCollapsed('changed') ? 'Expand section' : 'Collapse section'}
+            >
+              {#if isSectionCollapsed('changed')}
+                <ChevronRight size={14} />
+              {:else}
+                <ChevronDown size={14} />
+              {/if}
+            </button>
+            <button
               class="view-toggle"
               onclick={() => (treeView = !treeView)}
               title={treeView ? 'Switch to flat list' : 'Switch to tree view'}
@@ -1206,19 +1232,32 @@
             {/if}
           </div>
         </div>
-        <ul class="tree-section">
-          {#if treeView}
-            {@render treeNodes(needsReviewTree, 0, false)}
-          {:else}
-            {@render flatFileList(needsReview, false)}
-          {/if}
-        </ul>
+        {#if !isSectionCollapsed('changed')}
+          <ul class="tree-section">
+            {#if treeView}
+              {@render treeNodes(needsReviewTree, 0, false)}
+            {:else}
+              {@render flatFileList(needsReview, false)}
+            {/if}
+          </ul>
+        {/if}
       {/if}
 
       <!-- Divider with REVIEWED label -->
       {#if reviewed.length > 0}
         <div class="section-header">
           <div class="section-left">
+            <button
+              class="section-collapse-btn"
+              onclick={() => toggleSection('reviewed')}
+              title={isSectionCollapsed('reviewed') ? 'Expand section' : 'Collapse section'}
+            >
+              {#if isSectionCollapsed('reviewed')}
+                <ChevronRight size={14} />
+              {:else}
+                <ChevronDown size={14} />
+              {/if}
+            </button>
             <button
               class="view-toggle"
               onclick={() => (treeView = !treeView)}
@@ -1255,7 +1294,7 @@
       {/if}
 
       <!-- Reviewed section -->
-      {#if reviewed.length > 0}
+      {#if reviewed.length > 0 && !isSectionCollapsed('reviewed')}
         <ul class="tree-section reviewed-section">
           {#if treeView}
             {@render treeNodes(reviewedTree, 0, true)}
@@ -1267,7 +1306,19 @@
 
       <!-- Reference Files section -->
       <div class="section-header">
-        <div class="section-left"></div>
+        <div class="section-left">
+          <button
+            class="section-collapse-btn"
+            onclick={() => toggleSection('reference')}
+            title={isSectionCollapsed('reference') ? 'Expand section' : 'Collapse section'}
+          >
+            {#if isSectionCollapsed('reference')}
+              <ChevronRight size={14} />
+            {:else}
+              <ChevronDown size={14} />
+            {/if}
+          </button>
+        </div>
         <div class="section-divider">
           <span class="divider-label">REFERENCE</span>
           {#if referenceFilesState.files.length > 0}
@@ -1284,7 +1335,7 @@
           </button>
         </div>
       </div>
-      {#if referenceFilesState.files.length > 0}
+      {#if referenceFilesState.files.length > 0 && !isSectionCollapsed('reference')}
         <ul class="tree-section reference-section">
           {#each referenceFilesState.files as refFile (refFile.path)}
             <li class="tree-item-wrapper">
@@ -1321,7 +1372,19 @@
 
       <!-- Comments section -->
       <div class="section-header comments-header">
-        <div class="section-left"></div>
+        <div class="section-left">
+          <button
+            class="section-collapse-btn"
+            onclick={() => toggleSection('comments')}
+            title={isSectionCollapsed('comments') ? 'Expand section' : 'Collapse section'}
+          >
+            {#if isSectionCollapsed('comments')}
+              <ChevronRight size={14} />
+            {:else}
+              <ChevronDown size={14} />
+            {/if}
+          </button>
+        </div>
         <div class="section-divider">
           <span class="divider-label">COMMENTS</span>
           {#if commentsState.comments.length > 0}
@@ -1348,7 +1411,7 @@
           {/if}
         </div>
       </div>
-      {#if commentsState.comments.length > 0}
+      {#if commentsState.comments.length > 0 && !isSectionCollapsed('comments')}
         <ul class="tree-section comments-section">
           {@render commentList()}
         </ul>
@@ -1357,7 +1420,19 @@
       <!-- Agent Chat section -->
       {#if agentState}
         <div class="section-header agent-header">
-          <div class="section-left"></div>
+          <div class="section-left">
+            <button
+              class="section-collapse-btn"
+              onclick={() => toggleSection('agent')}
+              title={isSectionCollapsed('agent') ? 'Expand section' : 'Collapse section'}
+            >
+              {#if isSectionCollapsed('agent')}
+                <ChevronRight size={14} />
+              {:else}
+                <ChevronDown size={14} />
+              {/if}
+            </button>
+          </div>
           <div class="section-divider">
             <span class="divider-label">AGENT</span>
           </div>
@@ -1404,7 +1479,7 @@
     </div>
 
     <!-- Agent Panel outside file-list for flex layout (takes remaining space) -->
-    {#if agentState}
+    {#if agentState && !isSectionCollapsed('agent')}
       <AgentPanel {repoPath} {spec} {files} {selectedFile} {agentState} />
     {/if}
   {/if}
@@ -1643,6 +1718,31 @@
     padding: 20px 16px;
     text-align: center;
     color: var(--text-muted);
+  }
+
+  .section-collapse-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    background: none;
+    border: none;
+    border-radius: 3px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      color 0.1s;
+  }
+
+  .section-collapse-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .section-collapse-btn:focus-visible {
+    outline: 2px solid var(--text-accent);
+    outline-offset: -2px;
   }
 
   .view-toggle {

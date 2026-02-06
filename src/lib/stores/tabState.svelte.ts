@@ -235,22 +235,82 @@ export async function loadTabsFromStorage(
   const data = await loadWindowTabsFromStore(windowState.windowLabel);
 
   if (data) {
+    // Filter out tabs with non-existent worktree paths to prevent errors
+    // when branches have been deleted outside the app
+    const validTabs = await Promise.all(
+      data.tabs.map(async (t) => {
+        // Check if the repo path exists (use Tauri's fs API or simple check)
+        try {
+          // For now, we'll use a simple heuristic: filter out obvious worktree paths
+          // that don't exist. Non-worktree paths (like main repo) should be kept.
+          const isWorktreePath = t.repoPath.includes('/.staged/worktrees/');
+          if (isWorktreePath) {
+            // For worktree paths, verify they exist before restoring the tab
+            const exists = await pathExists(t.repoPath);
+            if (!exists) {
+              console.warn(
+                `[TabState] Skipping tab "${t.repoName}" with non-existent worktree path: ${t.repoPath}`
+              );
+              return null;
+            }
+          }
+          return t;
+        } catch (e) {
+          console.warn(`[TabState] Error checking tab path "${t.repoPath}":`, e);
+          return t; // Keep tab if we can't check (fail open)
+        }
+      })
+    );
+
     // Create tabs with isolated state instances
     // Plain objects are created - the parent windowState.tabs array is already reactive
-    windowState.tabs = data.tabs.map((t) => ({
-      id: t.id || t.projectId, // Fallback for old format
-      projectId: t.projectId || t.id, // Fallback for old format
-      repoPath: t.repoPath,
-      repoName: t.repoName,
-      subpath: t.subpath || null,
-      diffState: createDiffState(),
-      commentsState: createCommentsState(),
-      diffSelection: createDiffSelection(),
-      agentState: createAgentState(),
-      referenceFilesState: createReferenceFilesState(),
-      needsRefresh: false,
-    }));
-    windowState.activeTabIndex = data.activeTabIndex;
+    windowState.tabs = validTabs
+      .filter((t) => t !== null)
+      .map((t) => ({
+        id: t.id || t.projectId, // Fallback for old format
+        projectId: t.projectId || t.id, // Fallback for old format
+        repoPath: t.repoPath,
+        repoName: t.repoName,
+        subpath: t.subpath || null,
+        diffState: createDiffState(),
+        commentsState: createCommentsState(),
+        diffSelection: createDiffSelection(),
+        agentState: createAgentState(),
+        referenceFilesState: createReferenceFilesState(),
+        needsRefresh: false,
+      }));
+
+    // Adjust active tab index if the active tab was filtered out
+    if (windowState.tabs.length > 0 && data.activeTabIndex >= windowState.tabs.length) {
+      windowState.activeTabIndex = 0;
+    } else if (windowState.tabs.length > 0) {
+      windowState.activeTabIndex = Math.min(data.activeTabIndex, windowState.tabs.length - 1);
+    } else {
+      windowState.activeTabIndex = 0;
+    }
+
+    // Save the cleaned-up tabs back to storage to prevent stale tabs from persisting
+    if (validTabs.filter((t) => t !== null).length !== data.tabs.length) {
+      console.log(
+        `[TabState] Removed ${data.tabs.length - windowState.tabs.length} stale tab(s) from storage`
+      );
+      saveTabsToStorage();
+    }
+  }
+}
+
+/**
+ * Check if a path exists by attempting to read it.
+ * Uses the existing listDirectory backend command.
+ */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    // Try to list the directory - if it exists, this will succeed
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('list_directory', { path });
+    return true;
+  } catch {
+    return false;
   }
 }
 

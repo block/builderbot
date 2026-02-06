@@ -20,6 +20,7 @@
   import NewProjectModal from './NewProjectModal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { DiffSpec } from './types';
+  import { windowState, closeTab } from './stores/tabState.svelte';
 
   interface Props {
     onViewDiff?: (projectId: string, repoPath: string, spec: DiffSpec, label: string) => void;
@@ -255,6 +256,7 @@
     if (!branchToDelete) return;
 
     const id = branchToDelete.id;
+    const worktreePath = branchToDelete.worktreePath;
     // Close dialog and show spinner immediately
     branchToDelete = null;
     deletingBranchIds = new Set(deletingBranchIds).add(id);
@@ -266,6 +268,12 @@
       const newDeleting = new Set(deletingBranchIds);
       newDeleting.delete(id);
       deletingBranchIds = newDeleting;
+
+      // Close any tabs that were viewing this branch's worktree
+      const tabsToClose = windowState.tabs.filter((tab) => tab.repoPath === worktreePath);
+      for (const tab of tabsToClose) {
+        closeTab(tab.id);
+      }
     } catch (e) {
       // Failure: remove spinner, show error card
       const newDeleting = new Set(deletingBranchIds);
@@ -279,24 +287,6 @@
     const newErrors = new Map(deleteErrors);
     newErrors.delete(branchId);
     deleteErrors = newErrors;
-  }
-
-  function handleViewDiff(branch: Branch) {
-    onViewDiff?.(
-      branch.projectId,
-      branch.worktreePath,
-      DiffSpec.mergeBaseDiff(branch.baseBranch, branch.branchName),
-      `${branch.baseBranch}..${branch.branchName}`
-    );
-  }
-
-  function handleViewCommitDiff(branch: Branch, commitSha: string) {
-    onViewDiff?.(
-      branch.projectId,
-      branch.worktreePath,
-      DiffSpec.fromRevs(`${commitSha}~1`, commitSha),
-      commitSha.slice(0, 7)
-    );
   }
 
   function handleNewProjectCreated(project: GitProject) {
@@ -443,12 +433,31 @@
                     </div>
                   </div>
                 {:else}
+                  {@const branchId = branch.id}
+                  {@const projectId = branch.projectId}
+                  {@const worktreePath = branch.worktreePath}
+                  {@const baseBranch = branch.baseBranch}
+                  {@const branchName = branch.branchName}
                   <BranchCard
                     {branch}
                     {refreshKey}
-                    onViewDiff={() => handleViewDiff(branch)}
-                    onViewCommitDiff={(sha) => handleViewCommitDiff(branch, sha)}
-                    onDelete={() => handleDeleteBranch(branch.id)}
+                    onViewDiff={() => {
+                      onViewDiff?.(
+                        projectId,
+                        worktreePath,
+                        DiffSpec.mergeBaseDiff(baseBranch, branchName),
+                        `${baseBranch}..${branchName}`
+                      );
+                    }}
+                    onViewCommitDiff={(sha) => {
+                      onViewDiff?.(
+                        projectId,
+                        worktreePath,
+                        DiffSpec.fromRevs(`${sha}~1`, sha),
+                        sha.slice(0, 7)
+                      );
+                    }}
+                    onDelete={() => handleDeleteBranch(branchId)}
                   />
                 {/if}
               {/each}

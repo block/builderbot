@@ -1742,6 +1742,11 @@ async fn run_prerun_actions(
         .list_project_actions_by_type(&branch.project_id, crate::store::ActionType::Prerun)
         .map_err(|e| e.to_string())?;
 
+    // Use the effective working directory (worktree + project subpath)
+    // so actions run from the directory where build files (justfile, etc.) live
+    let working_dir = get_branch_working_dir(&store, &branch)?;
+    let working_dir_str = working_dir.to_string_lossy().to_string();
+
     // Execute each prerun action in order
     for action in prerun_actions {
         if let Err(e) = runner.run_action(
@@ -1749,7 +1754,7 @@ async fn run_prerun_actions(
             store.clone(),
             branch.id.clone(),
             action.id.clone(),
-            branch.worktree_path.clone(),
+            working_dir_str.clone(),
         ) {
             eprintln!("Failed to run prerun action '{}': {}", action.name, e);
             // Continue with other actions even if one fails
@@ -3064,6 +3069,10 @@ fn run_branch_action(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
 
+    // Use the effective working directory (worktree + project subpath)
+    // so actions run from the directory where build files (justfile, etc.) live
+    let working_dir = get_branch_working_dir(&state, &branch)?;
+
     // Run the action
     runner
         .run_action(
@@ -3071,7 +3080,7 @@ fn run_branch_action(
             state.inner().clone(),
             branch_id,
             action_id,
-            branch.worktree_path,
+            working_dir.to_string_lossy().to_string(),
         )
         .map_err(|e| e.to_string())
 }

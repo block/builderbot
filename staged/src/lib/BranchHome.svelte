@@ -329,9 +329,11 @@
     );
   }
 
-  function handleNewProjectCreated(project: GitProject) {
+  async function handleNewProjectCreated(project: GitProject) {
     projects = [...projects, project];
     showNewProjectModal = false;
+    // Reload branches to include the auto-created main worktree branch
+    await loadData();
   }
 
   function handleProjectDetecting(projectId: string, isDetecting: boolean) {

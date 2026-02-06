@@ -243,6 +243,14 @@ export interface NewEdit {
 // AI Analysis types
 // =============================================================================
 
+/** An image attachment for multimodal prompts */
+export interface ImageAttachment {
+  /** Base64-encoded image data */
+  data: string;
+  /** MIME type (e.g., "image/png", "image/jpeg") */
+  mime_type: string;
+}
+
 /** A span of lines for AI annotations (0-indexed, exclusive end) */
 export interface LineSpan {
   start: number;

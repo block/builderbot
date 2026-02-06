@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import type { ImageAttachment } from '../types';
 
 // =============================================================================
 // Types
@@ -284,16 +285,19 @@ export interface StartBranchSessionResponse {
  * @param branchId - The branch to start the session on
  * @param userPrompt - The user's task description
  * @param agentId - Optional AI agent/provider to use (e.g., "goose", "claude")
+ * @param images - Optional image attachments
  */
 export async function startBranchSession(
   branchId: string,
   userPrompt: string,
-  agentId?: string
+  agentId?: string,
+  images?: ImageAttachment[]
 ): Promise<StartBranchSessionResponse> {
   return invoke<StartBranchSessionResponse>('start_branch_session', {
     branchId,
     userPrompt,
     agentId,
+    images: images ?? null,
   });
 }
 
@@ -358,11 +362,13 @@ export async function cancelAiSession(aiSessionId: string): Promise<void> {
  */
 export async function restartBranchSession(
   branchSessionId: string,
-  fullPrompt: string
+  fullPrompt: string,
+  images?: ImageAttachment[]
 ): Promise<StartBranchSessionResponse> {
   return invoke<StartBranchSessionResponse>('restart_branch_session', {
     branchSessionId,
     fullPrompt,
+    images: images ?? null,
   });
 }
 
@@ -404,18 +410,21 @@ export interface StartBranchNoteResponse {
  * @param title - The title for the note
  * @param description - What the note should cover (user's description)
  * @param agentId - Optional AI agent/provider to use (e.g., "goose", "claude")
+ * @param images - Optional image attachments
  */
 export async function startBranchNote(
   branchId: string,
   title: string,
   description: string,
-  agentId?: string
+  agentId?: string,
+  images?: ImageAttachment[]
 ): Promise<StartBranchNoteResponse> {
   return invoke<StartBranchNoteResponse>('start_branch_note', {
     branchId,
     title,
     description,
     agentId,
+    images: images ?? null,
   });
 }
 

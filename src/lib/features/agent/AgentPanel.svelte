@@ -22,6 +22,8 @@
     Circle,
     CheckCircle2,
     MessageSquare,
+    Clipboard,
+    Image as ImageIcon,
   } from 'lucide-svelte';
   import {
     sendAgentPromptStreaming,
@@ -44,7 +46,7 @@
   } from '../../stores/agent.svelte';
   import { commentsState } from '../../stores/comments.svelte';
   import { preferences } from '../../stores/preferences.svelte';
-  import type { DiffSpec, FileDiffSummary } from '../../types';
+  import type { DiffSpec, FileDiffSummary, ImageAttachment } from '../../types';
   import { marked } from 'marked';
   import DOMPurify from 'dompurify';
 
@@ -94,6 +96,74 @@
 
   // Count total comments for display
   let totalCommentsCount = $derived(commentsState.comments.length);
+
+  // Image attachments for the current prompt
+  let attachedImages = $state<ImageAttachment[]>([]);
+  let imageError = $state<string | null>(null);
+  const MAX_IMAGES = 5;
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+  const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'];
+
+  /**
+   * Validate an image file.
+   */
+  function validateImage(file: File): string | null {
+    if (!ALLOWED_MIME_TYPES.includes(file.type)) {
+      return `Unsupported image format. Allowed: PNG, JPEG, GIF, WebP`;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      return `Image too large (max 10MB)`;
+    }
+    return null;
+  }
+
+  /**
+   * Convert a File object to an ImageAttachment.
+   */
+  async function fileToImageAttachment(file: File): Promise<ImageAttachment> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        const base64 = result.split(',')[1];
+        resolve({
+          data: base64,
+          mime_type: file.type,
+        });
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /**
+   * Read an image from the clipboard using ClipboardEvent API.
+   */
+  async function readClipboardImage(): Promise<ImageAttachment | null> {
+    try {
+      const clipboardItems = await navigator.clipboard.read();
+      for (const item of clipboardItems) {
+        for (const type of item.types) {
+          if (type.startsWith('image/')) {
+            const blob = await item.getType(type);
+            const file = new File([blob], 'clipboard-image', { type });
+
+            const validationError = validateImage(file);
+            if (validationError) {
+              imageError = validationError;
+              return null;
+            }
+
+            return await fileToImageAttachment(file);
+          }
+        }
+      }
+      return null;
+    } catch (error) {
+      console.error('Failed to read image from clipboard:', error);
+      return null;
+    }
+  }
 
   /** Type guard to validate provider ID */
   function isValidProvider(id: string): id is AcpProvider {
@@ -369,11 +439,16 @@
         repoPath: repoPath ?? undefined,
         sessionId: tabState.sessionId ?? undefined,
         provider: tabState.provider,
+        images: attachedImages.length > 0 ? attachedImages : undefined,
       });
 
       // Write final response to the captured tab state
       tabState.response = result.response;
       tabState.sessionId = result.sessionId;
+
+      // Clear attached images after successful send
+      attachedImages = [];
+      imageError = null;
 
       // Clear the live session now that we have the final response
       liveSessionStore.clear(result.sessionId);
@@ -392,6 +467,116 @@
       event.preventDefault();
       handleSubmit();
     }
+  }
+
+  /**
+   * Handle clipboard paste button click.
+   */
+  async function handlePasteFromClipboard() {
+    if (attachedImages.length >= MAX_IMAGES) {
+      imageError = `Maximum ${MAX_IMAGES} images allowed`;
+      return;
+    }
+
+    imageError = null;
+    const image = await readClipboardImage();
+
+    if (!image) {
+      imageError = 'No image found in clipboard';
+      return;
+    }
+
+    attachedImages = [...attachedImages, image];
+  }
+
+  /**
+   * Handle file drop for images.
+   */
+  async function handleImageDrop(event: DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (attachedImages.length >= MAX_IMAGES) {
+      imageError = `Maximum ${MAX_IMAGES} images allowed`;
+      return;
+    }
+
+    const files = event.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+
+    imageError = null;
+
+    for (let i = 0; i < files.length && attachedImages.length < MAX_IMAGES; i++) {
+      const file = files[i];
+
+      if (!file.type.startsWith('image/')) {
+        continue;
+      }
+
+      const validationError = validateImage(file);
+      if (validationError) {
+        imageError = validationError;
+        continue;
+      }
+
+      try {
+        const imageAttachment = await fileToImageAttachment(file);
+        attachedImages = [...attachedImages, imageAttachment];
+      } catch (error) {
+        imageError = error instanceof Error ? error.message : 'Failed to load image';
+      }
+    }
+  }
+
+  /**
+   * Handle file input change for images.
+   */
+  async function handleFileSelect(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const files = input.files;
+    if (!files || files.length === 0) return;
+
+    if (attachedImages.length >= MAX_IMAGES) {
+      imageError = `Maximum ${MAX_IMAGES} images allowed`;
+      return;
+    }
+
+    imageError = null;
+
+    for (let i = 0; i < files.length && attachedImages.length < MAX_IMAGES; i++) {
+      const file = files[i];
+      const validationError = validateImage(file);
+
+      if (validationError) {
+        imageError = validationError;
+        continue;
+      }
+
+      try {
+        const imageAttachment = await fileToImageAttachment(file);
+        attachedImages = [...attachedImages, imageAttachment];
+      } catch (error) {
+        imageError = error instanceof Error ? error.message : 'Failed to load image';
+      }
+    }
+
+    input.value = '';
+  }
+
+  /**
+   * Remove an attached image.
+   */
+  function removeImage(index: number) {
+    attachedImages = attachedImages.filter((_, i) => i !== index);
+    imageError = null;
+  }
+
+  /**
+   * Handle drag over event.
+   */
+  function handleDragOver(event: DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
   }
 
   /**
@@ -712,7 +897,35 @@
       </div>
     {/if}
 
-    <div class="agent-input-wrapper">
+    {#if imageError}
+      <div class="image-error">{imageError}</div>
+    {/if}
+
+    {#if attachedImages.length > 0}
+      <div class="image-preview-strip">
+        {#each attachedImages as image, i (i)}
+          <div class="image-preview">
+            <img src={`data:${image.mime_type};base64,${image.data}`} alt="Attachment {i + 1}" />
+            <button
+              class="image-remove-btn"
+              onclick={() => removeImage(i)}
+              title="Remove image"
+              disabled={agentState.loading}
+            >
+              <X size={12} />
+            </button>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    <div
+      class="agent-input-wrapper"
+      ondrop={handleImageDrop}
+      ondragover={handleDragOver}
+      role="region"
+      aria-label="Agent input"
+    >
       <textarea
         class="agent-input"
         placeholder="Ask the agent..."
@@ -723,6 +936,28 @@
         rows="1"
       ></textarea>
       <div class="agent-input-actions">
+        <label class="image-upload-btn" title="Attach image from file">
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/jpg,image/gif,image/webp"
+            multiple
+            onchange={handleFileSelect}
+            disabled={agentState.loading || attachedImages.length >= MAX_IMAGES}
+            style="display: none;"
+          />
+          <ImageIcon size={14} />
+          {#if attachedImages.length > 0}
+            <span class="image-count">{attachedImages.length}</span>
+          {/if}
+        </label>
+        <button
+          class="clipboard-paste-btn"
+          onclick={handlePasteFromClipboard}
+          disabled={agentState.loading || attachedImages.length >= MAX_IMAGES}
+          title="Paste image from clipboard"
+        >
+          <Clipboard size={14} />
+        </button>
         {#if agentGlobalState.availableProviders.length > 0}
           <div class="provider-picker">
             <button
@@ -1398,5 +1633,114 @@
     font-size: var(--size-sm);
     color: var(--text-primary);
     line-height: 1.6;
+  }
+
+  /* Image preview and upload styles */
+  .image-error {
+    padding: 6px 10px;
+    margin: 0 10px 8px;
+    background: var(--error-bg, #fee);
+    color: var(--error-text, #c00);
+    border-radius: 4px;
+    font-size: var(--size-xs);
+  }
+
+  .image-preview-strip {
+    display: flex;
+    gap: 8px;
+    padding: 8px 10px;
+    margin: 0 10px 8px;
+    overflow-x: auto;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+  }
+
+  .image-preview {
+    position: relative;
+    flex-shrink: 0;
+    width: 80px;
+    height: 80px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-secondary);
+  }
+
+  .image-preview img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .image-remove-btn {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    background: rgba(0, 0, 0, 0.6);
+    color: white;
+    border: none;
+    border-radius: 3px;
+    padding: 2px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+
+  .image-preview:hover .image-remove-btn {
+    opacity: 1;
+  }
+
+  .image-remove-btn:hover {
+    background: rgba(0, 0, 0, 0.8);
+  }
+
+  .image-remove-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
+  }
+
+  .image-upload-btn,
+  .clipboard-paste-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 6px 8px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+  }
+
+  .image-upload-btn:hover,
+  .clipboard-paste-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .image-upload-btn:disabled,
+  .clipboard-paste-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .image-count {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    background: var(--accent-primary);
+    color: white;
+    border-radius: 8px;
+    padding: 0 4px;
+    font-size: 10px;
+    font-weight: 600;
+    min-width: 14px;
+    text-align: center;
   }
 </style>

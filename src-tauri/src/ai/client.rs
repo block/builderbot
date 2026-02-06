@@ -557,9 +557,19 @@ pub async fn run_acp_prompt(
     prompt: &str,
 ) -> Result<String, String> {
     // No streaming, no events emitted — internal_session_id is unused
-    let result =
-        run_acp_prompt_internal(agent, working_dir, prompt, None, None, "", true, None, None)
-            .await?;
+    let result = run_acp_prompt_internal(
+        agent,
+        working_dir,
+        prompt,
+        None,
+        None,
+        None,
+        "",
+        true,
+        None,
+        None,
+    )
+    .await?;
     Ok(result.response)
 }
 
@@ -576,6 +586,7 @@ pub async fn run_acp_prompt_raw(
         agent,
         working_dir,
         prompt,
+        None,
         None,
         None,
         "",
@@ -603,6 +614,7 @@ pub async fn run_acp_prompt_with_session(
         agent,
         working_dir,
         prompt,
+        None,
         session_id,
         None,
         "",
@@ -638,6 +650,38 @@ pub async fn run_acp_prompt_streaming(
         agent,
         working_dir,
         prompt,
+        None, // No images
+        acp_session_id,
+        Some(app_handle),
+        internal_session_id,
+        true,
+        buffer_callback,
+        cancellation,
+    )
+    .await
+}
+
+/// Run a prompt with images through ACP with streaming events emitted to frontend
+///
+/// Same as `run_acp_prompt_streaming` but accepts optional image attachments.
+/// Images are sent as ContentBlock::Image in the prompt request.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_acp_prompt_streaming_with_images(
+    agent: &AcpAgent,
+    working_dir: &Path,
+    prompt: &str,
+    images: Option<&[crate::ImageAttachment]>,
+    acp_session_id: Option<&str>,
+    internal_session_id: &str,
+    app_handle: tauri::AppHandle,
+    buffer_callback: Option<Arc<dyn Fn(Vec<crate::store::ContentSegment>) + Send + Sync>>,
+    cancellation: Option<Arc<CancellationHandle>>,
+) -> Result<AcpPromptResult, String> {
+    run_acp_prompt_internal(
+        agent,
+        working_dir,
+        prompt,
+        images,
         acp_session_id,
         Some(app_handle),
         internal_session_id,
@@ -654,6 +698,7 @@ async fn run_acp_prompt_internal(
     agent: &AcpAgent,
     working_dir: &Path,
     prompt: &str,
+    images: Option<&[crate::ImageAttachment]>,
     acp_session_id: Option<&str>,
     app_handle: Option<tauri::AppHandle>,
     internal_session_id: &str,
@@ -666,6 +711,7 @@ async fn run_acp_prompt_internal(
     let agent_args: Vec<String> = agent.acp_args().iter().map(|s| s.to_string()).collect();
     let working_dir = working_dir.to_path_buf();
     let prompt = prompt.to_string();
+    let images_owned: Option<Vec<crate::ImageAttachment>> = images.map(|imgs| imgs.to_vec());
     let acp_session_id = acp_session_id.map(|s| s.to_string());
     let internal_session_id = internal_session_id.to_string();
 
@@ -687,6 +733,7 @@ async fn run_acp_prompt_internal(
                 &agent_args,
                 &working_dir,
                 &prompt,
+                images_owned.as_deref(),
                 acp_session_id.as_deref(),
                 app_handle,
                 &internal_session_id,
@@ -709,6 +756,7 @@ async fn run_acp_session_inner(
     agent_args: &[String],
     working_dir: &Path,
     prompt: &str,
+    images: Option<&[crate::ImageAttachment]>,
     existing_session_id: Option<&str>,
     app_handle: Option<tauri::AppHandle>,
     internal_session_id: &str,
@@ -845,11 +893,20 @@ async fn run_acp_session_inner(
         prompt.to_string()
     };
 
-    // Send the prompt
-    let prompt_request = PromptRequest::new(
-        session_id.clone(),
-        vec![AcpContentBlock::Text(TextContent::new(full_prompt))],
-    );
+    // Build content blocks: text prompt + optional images
+    let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(full_prompt))];
+
+    // Add image blocks if provided
+    if let Some(imgs) = images {
+        for img in imgs {
+            content_blocks.push(AcpContentBlock::Image(
+                agent_client_protocol::ImageContent::new(img.data.clone(), img.mime_type.clone()),
+            ));
+        }
+    }
+
+    // Send the prompt with content blocks
+    let prompt_request = PromptRequest::new(session_id.clone(), content_blocks);
 
     let prompt_result = connection.prompt(prompt_request).await;
 

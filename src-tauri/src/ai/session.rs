@@ -293,7 +293,12 @@ impl SessionManager {
     }
 
     /// Send a prompt to a session
-    pub async fn send_prompt(&self, session_id: &str, prompt: String) -> Result<(), String> {
+    pub async fn send_prompt(
+        &self,
+        session_id: &str,
+        prompt: String,
+        images: Option<Vec<crate::ImageAttachment>>,
+    ) -> Result<(), String> {
         // Get or create live session
         let session_arc = self.get_or_create_live_session(session_id).await?;
 
@@ -347,17 +352,32 @@ impl SessionManager {
 
         tokio::spawn(async move {
             // Run the ACP prompt with streaming
-            let result = client::run_acp_prompt_streaming(
-                &agent,
-                &working_dir,
-                &prompt,
-                acp_session_id.as_deref(),
-                &session_id_owned,
-                app_handle.clone(),
-                Some(buffer_callback),
-                Some(cancellation.clone()),
-            )
-            .await;
+            let result = if let Some(ref imgs) = images {
+                client::run_acp_prompt_streaming_with_images(
+                    &agent,
+                    &working_dir,
+                    &prompt,
+                    Some(imgs.as_slice()),
+                    acp_session_id.as_deref(),
+                    &session_id_owned,
+                    app_handle.clone(),
+                    Some(buffer_callback),
+                    Some(cancellation.clone()),
+                )
+                .await
+            } else {
+                client::run_acp_prompt_streaming(
+                    &agent,
+                    &working_dir,
+                    &prompt,
+                    acp_session_id.as_deref(),
+                    &session_id_owned,
+                    app_handle.clone(),
+                    Some(buffer_callback),
+                    Some(cancellation.clone()),
+                )
+                .await
+            };
 
             // Update session and persist based on result
             let mut session = session_arc_clone.write().await;

@@ -26,8 +26,8 @@ pub mod session;
 // Re-export core ACP client functionality
 pub use client::{
     discover_acp_providers, find_acp_agent, find_acp_agent_by_id, run_acp_prompt,
-    run_acp_prompt_raw, run_acp_prompt_streaming, run_acp_prompt_with_session, AcpAgent,
-    AcpPromptResult, AcpProviderInfo,
+    run_acp_prompt_raw, run_acp_prompt_streaming, run_acp_prompt_streaming_with_images,
+    run_acp_prompt_with_session, AcpAgent, AcpPromptResult, AcpProviderInfo,
 };
 
 // Re-export session manager types

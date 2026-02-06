@@ -7,6 +7,7 @@ import type {
   DiffSpec,
   SmartDiffAnnotation,
   Comment,
+  ImageAttachment,
 } from '../types';
 
 // =============================================================================
@@ -180,8 +181,12 @@ export async function getSessionStatus(sessionId: string): Promise<SessionStatus
  * Send a prompt to a session.
  * Streams response via events, persists on completion.
  */
-export async function sendPrompt(sessionId: string, prompt: string): Promise<void> {
-  return invoke<void>('send_prompt', { sessionId, prompt });
+export async function sendPrompt(
+  sessionId: string,
+  prompt: string,
+  images?: ImageAttachment[]
+): Promise<void> {
+  return invoke<void>('send_prompt', { sessionId, prompt, images: images ?? null });
 }
 
 /**
@@ -254,6 +259,7 @@ export async function sendAgentPromptStreaming(
     repoPath?: string;
     sessionId?: string;
     provider?: string;
+    images?: ImageAttachment[];
   }
 ): Promise<AgentPromptResponse> {
   return invoke<AgentPromptResponse>('send_agent_prompt_streaming', {
@@ -261,6 +267,7 @@ export async function sendAgentPromptStreaming(
     prompt,
     sessionId: options?.sessionId ?? null,
     provider: options?.provider ?? null,
+    images: options?.images ?? null,
   });
 }
 

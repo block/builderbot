@@ -994,7 +994,9 @@
             {/if}
 
             <!-- Delete last -->
-            <div class="menu-separator"></div>
+            {#if projectActions.length > 0}
+              <div class="menu-separator"></div>
+            {/if}
             <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
               <Trash2 size={14} />
               Delete

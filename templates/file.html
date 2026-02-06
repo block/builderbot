@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{.FileName}} - Birdseye</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
     <style>
         * { box-sizing: border-box; }
         html { scroll-behavior: smooth; }
@@ -320,6 +321,14 @@
             color: #999;
         }
         .comment-body { line-height: 1.5; }
+        .comment-body p { margin: 0.25em 0; }
+        .comment-body p:first-child { margin-top: 0; }
+        .comment-body p:last-child { margin-bottom: 0; }
+        .comment-body code { background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.9em; }
+        .comment-body pre { background: #f0f0f0; padding: 0.5em; border-radius: 4px; overflow-x: auto; margin: 0.4em 0; }
+        .comment-body pre code { background: none; padding: 0; }
+        .comment-body ul, .comment-body ol { margin: 0.3em 0; padding-left: 1.5em; }
+        .comment-body blockquote { margin: 0.3em 0; padding-left: 0.8em; border-left: 3px solid #ddd; color: #666; }
         .thread-status {
             display: inline-block;
             font-size: 0.7em;
@@ -647,6 +656,22 @@
             return div.innerHTML;
         }
 
+        function renderCommentMarkdown(text) {
+            if (!text) return '';
+            const html = marked.parse(text, { breaks: true, gfm: true });
+            const tmp = document.createElement('div');
+            tmp.innerHTML = html;
+            tmp.querySelectorAll('script, style, iframe, form, object, embed').forEach(el => el.remove());
+            tmp.querySelectorAll('*').forEach(el => {
+                for (const attr of [...el.attributes]) {
+                    if (attr.name.startsWith('on') || (attr.name === 'href' && attr.value.trimStart().startsWith('javascript:'))) {
+                        el.removeAttribute(attr.name);
+                    }
+                }
+            });
+            return tmp.innerHTML;
+        }
+
         function truncateText(text, maxLen) {
             if (!text) return '';
             return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
@@ -794,7 +819,7 @@
                 }
                 html += '<span class="comment-time">' + formatTime(c.createdAt) + '</span>';
                 html += '</div>';
-                html += '<div class="comment-body">' + escapeHtml(c.body) + '</div>';
+                html += '<div class="comment-body">' + renderCommentMarkdown(c.body) + '</div>';
                 html += '</div>';
             });
 

@@ -14,14 +14,14 @@ name = "staged_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.5.3", features = [] }
+tauri-build = { version = "2.5.5", features = [] }
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.9.5", features = [] }
-tauri-plugin-log = "2"
+tauri = { version = "2.10.2", features = [] }
+tauri-plugin-log = "2.8.0"
 
 # Git integration
 git2 = "0.19"
@@ -36,7 +36,7 @@ ignore = "0.4"
 
 # Syntax highlighting
 syntect = "5.2"
-tauri-plugin-dialog = "2.4.2"
+tauri-plugin-dialog = "2.6.0"
 
 # Review storage
 rusqlite = { version = "0.38", features = ["bundled"] }
@@ -44,7 +44,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 tauri-plugin-clipboard-manager = "2.3.2"
-tauri-plugin-window-state = "2"
+tauri-plugin-window-state = "2.4.1"
 reqwest = { version = "0.13.1", features = ["json"] }
 tokio = { version = "1.49.0", features = ["sync", "process", "io-util", "macros", "rt-multi-thread"] }
 open = "5"
@@ -53,7 +53,7 @@ open = "5"
 agent-client-protocol = "0.9"
 
 # MCP Bridge for automation/testing (debug only)
-tauri-plugin-mcp-bridge = "0.8"
+tauri-plugin-mcp-bridge = "0.8.1"
 async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"

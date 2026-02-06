@@ -54,11 +54,33 @@
   let branchToDelete = $state<Branch | null>(null);
   let showNewProjectModal = $state(false);
 
+  // Scroll position tracking
+  let contentElement: HTMLDivElement | null = null;
+  let savedScrollTop = $state(0);
+  let shouldRestoreScroll = $state(false);
+
   // Expose the add project trigger to parent (top bar "Add Project" button)
   $effect(() => {
     onAddProjectRequest?.(() => {
       showNewProjectModal = true;
     });
+  });
+
+  // Save scroll position when refreshKey changes and set flag for restoration
+  $effect(() => {
+    refreshKey;
+    if (contentElement) {
+      savedScrollTop = contentElement.scrollTop;
+      shouldRestoreScroll = true;
+    }
+  });
+
+  // Restore scroll position after DOM updates
+  $effect(() => {
+    if (shouldRestoreScroll && contentElement) {
+      contentElement.scrollTop = savedScrollTop;
+      shouldRestoreScroll = false;
+    }
   });
 
   // Project to delete (for confirmation dialog)
@@ -333,11 +355,14 @@
   onDestroy(() => {
     window.removeEventListener('keydown', handleKeydown);
     unlistenStatus?.();
+    // Reset scroll state
+    savedScrollTop = 0;
+    shouldRestoreScroll = false;
   });
 </script>
 
 <div class="branch-home">
-  <div class="content">
+  <div class="content" bind:this={contentElement}>
     {#if loading}
       <div class="loading-state">
         <p>Loading...</p>

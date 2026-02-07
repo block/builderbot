@@ -17,6 +17,7 @@ type Store struct {
 	heartMu    sync.RWMutex
 	changed    chan struct{} // closed on every Save, then replaced
 	changedMu  sync.Mutex
+	changeSeq  uint64 // monotonic counter incremented on each change
 }
 
 // FileComments holds all comment threads for a single file.
@@ -77,22 +78,42 @@ func NewStore(c *cache.Cache) *Store {
 func (s *Store) NotifyChange() {
 	s.changedMu.Lock()
 	defer s.changedMu.Unlock()
+	s.changeSeq++
 	close(s.changed)
 	s.changed = make(chan struct{})
 }
 
-// WaitForChange blocks until a comment is created, modified, or resolved,
-// or until the context is cancelled.
-func (s *Store) WaitForChange(ctx context.Context) error {
+// ChangeSeq returns the current change sequence number.
+func (s *Store) ChangeSeq() uint64 {
 	s.changedMu.Lock()
+	defer s.changedMu.Unlock()
+	return s.changeSeq
+}
+
+// WaitForChangeSince blocks until the change sequence advances past sinceSeq,
+// or until the context is cancelled. Returns the current sequence number.
+// If changes already occurred since sinceSeq, returns immediately.
+func (s *Store) WaitForChangeSince(ctx context.Context, sinceSeq uint64) (uint64, error) {
+	s.changedMu.Lock()
+	if s.changeSeq > sinceSeq {
+		seq := s.changeSeq
+		s.changedMu.Unlock()
+		return seq, nil
+	}
 	ch := s.changed
 	s.changedMu.Unlock()
 
 	select {
 	case <-ch:
-		return nil
+		s.changedMu.Lock()
+		seq := s.changeSeq
+		s.changedMu.Unlock()
+		return seq, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		s.changedMu.Lock()
+		seq := s.changeSeq
+		s.changedMu.Unlock()
+		return seq, ctx.Err()
 	}
 }
 

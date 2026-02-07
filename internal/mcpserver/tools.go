@@ -54,7 +54,8 @@ type filesInReviewInput struct {
 }
 
 type waitForChangesInput struct {
-	Project string `json:"project" jsonschema:"Project name"`
+	Project  string `json:"project" jsonschema:"Project name"`
+	SinceSeq uint64 `json:"sinceSeq,omitempty" jsonschema:"Sequence number from previous wait call. Changes since this seq return immediately."`
 }
 
 // textResult returns a CallToolResult containing a single JSON text block.
@@ -266,7 +267,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// birdseye_wait_for_changes
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "birdseye_wait_for_changes",
-		Description: "Block until comment threads change for a project (new thread, reply, resolve, or reopen), or until timeout (30s). Returns the current files in review. Use this in a loop instead of polling birdseye_files_in_review. Also records agent heartbeat.",
+		Description: "Block until comment threads change for a project (new thread, reply, resolve, or reopen), or until timeout (30s). Returns the current files in review. Use this in a loop instead of polling birdseye_files_in_review. Also records agent heartbeat. Pass the `seq` value from the previous response as `sinceSeq` to avoid missing changes between calls.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input waitForChangesInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")
@@ -278,7 +279,8 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 
-		changed := store.WaitForChange(waitCtx) == nil
+		seq, waitErr := store.WaitForChangeSince(waitCtx, input.SinceSeq)
+		changed := waitErr == nil
 
 		// Record heartbeat after waking
 		store.RecordHeartbeat(input.Project, "")
@@ -294,6 +296,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 		result := map[string]any{
 			"changed": changed,
+			"seq":     seq,
 			"files":   files,
 		}
 		res, err := textResult(result)

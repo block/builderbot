@@ -465,6 +465,17 @@ pub fn update_branch_from_pr(
     })
 }
 
+/// Switch a worktree to a different branch.
+///
+/// This checks out the specified branch in the worktree.
+/// The branch must already exist (locally or as a remote tracking branch).
+///
+/// Returns an error if the checkout fails (e.g., uncommitted changes, branch doesn't exist).
+pub fn switch_branch(worktree: &Path, branch_name: &str) -> Result<(), GitError> {
+    cli::run(worktree, &["checkout", branch_name])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

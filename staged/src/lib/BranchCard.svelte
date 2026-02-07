@@ -53,6 +53,7 @@
   import NewNoteModal from './NewNoteModal.svelte';
   import NewReviewModal from './NewReviewModal.svelte';
   import BaseBranchPickerModal from './BaseBranchPickerModal.svelte';
+  import BranchSwitcherModal from './BranchSwitcherModal.svelte';
   import CreatePrModal from './CreatePrModal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { openUrl } from './services/window';
@@ -182,6 +183,9 @@
 
   // Base branch picker modal state
   let showBaseBranchPicker = $state(false);
+
+  // Branch switcher modal state
+  let showBranchSwitcher = $state(false);
 
   // Create PR modal state
   let showCreatePrModal = $state(false);
@@ -736,6 +740,13 @@
     await loadData();
   }
 
+  async function handleBranchSwitched(newBranchName: string) {
+    showBranchSwitcher = false;
+    const updatedBranch = { ...branch, branchName: newBranchName };
+    onBranchUpdated?.(updatedBranch);
+    await loadData();
+  }
+
   // Format base branch for display (strip origin/ prefix if present)
   function formatBaseBranch(baseBranch: string): string {
     return baseBranch.replace(/^origin\//, '');
@@ -847,7 +858,14 @@
   <div class="card-header">
     <div class="branch-info">
       <GitBranch size={16} class="branch-icon" />
-      <span class="branch-name">{branch.branchName}</span>
+      <button
+        class="branch-name"
+        onclick={() => (showBranchSwitcher = true)}
+        title="Switch branch"
+      >
+        {branch.branchName}
+        <ChevronsUpDown size={12} class="branch-name-chevron" />
+      </button>
       <span class="branch-separator">›</span>
       <button
         class="base-branch-name"
@@ -993,14 +1011,16 @@
               {/each}
             {/if}
 
-            <!-- Delete last -->
-            {#if projectActions.length > 0}
-              <div class="menu-separator"></div>
+            <!-- Delete last (only for non-main worktree branches) -->
+            {#if !branch.isMainWorktree}
+              {#if projectActions.length > 0}
+                <div class="menu-separator"></div>
+              {/if}
+              <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
+                <Trash2 size={14} />
+                Delete
+              </button>
             {/if}
-            <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
-              <Trash2 size={14} />
-              Delete
-            </button>
           </div>
         {/if}
       </div>
@@ -1445,6 +1465,15 @@
   />
 {/if}
 
+<!-- Branch switcher modal -->
+{#if showBranchSwitcher}
+  <BranchSwitcherModal
+    {branch}
+    onClose={() => (showBranchSwitcher = false)}
+    onSelected={handleBranchSwitched}
+  />
+{/if}
+
 <!-- Create PR modal -->
 {#if showCreatePrModal}
   <CreatePrModal
@@ -1528,9 +1557,28 @@
   }
 
   .branch-name {
+    display: flex;
+    align-items: center;
+    gap: 4px;
     font-size: var(--size-md);
     font-weight: 500;
     color: var(--text-primary);
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    transition: color 0.15s ease;
+  }
+
+  .branch-name:hover {
+    color: var(--ui-accent);
+  }
+
+  :global(.branch-name-chevron) {
+    color: var(--text-faint);
+    flex-shrink: 0;
+    position: relative;
+    top: 1px;
   }
 
   .branch-separator {

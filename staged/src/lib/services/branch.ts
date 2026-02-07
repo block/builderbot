@@ -85,6 +85,8 @@ export interface Branch {
   baseBranch: string;
   /** The PR number this branch was created from (if any) */
   prNumber: number | null;
+  /** Whether this is the main worktree (cannot be deleted) */
+  isMainWorktree: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -245,6 +247,13 @@ export async function deleteBranch(branchId: string): Promise<void> {
  */
 export async function updateBranchBase(branchId: string, baseBranch: string): Promise<void> {
   return invoke<void>('update_branch_base', { branchId, baseBranch });
+}
+
+export async function switchWorktreeBranch(
+  branchId: string,
+  newBranchName: string
+): Promise<void> {
+  return invoke<void>('switch_worktree_branch', { branchId, newBranchName });
 }
 
 // =============================================================================

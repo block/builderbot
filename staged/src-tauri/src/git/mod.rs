@@ -18,12 +18,13 @@ pub use github::{
     CreatePrResult, GitHubAuthStatus, GitHubSyncResult, Issue, PullRequest, PullRequestInfo,
 };
 pub use refs::{
-    detect_default_branch, get_repo_root, list_branches, list_refs, merge_base, resolve_ref,
-    BranchRef,
+    detect_default_branch, get_current_branch, get_repo_root, list_branches, list_refs, merge_base,
+    resolve_ref, BranchRef,
 };
 pub use types::*;
 pub use worktree::{
     branch_exists, create_worktree, create_worktree_for_existing_branch, create_worktree_from_pr,
     get_commits_since_base, get_head_sha, get_parent_commit, list_worktrees, remove_worktree,
-    reset_to_commit, update_branch_from_pr, worktree_path_for, CommitInfo, UpdateFromPrResult,
+    reset_to_commit, switch_branch, update_branch_from_pr, worktree_path_for, CommitInfo,
+    UpdateFromPrResult,
 };

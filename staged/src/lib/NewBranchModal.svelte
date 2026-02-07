@@ -573,7 +573,7 @@
         {:else if step === 'issue'}
           Select Issue
         {:else}
-          New Branch
+          New Worktree
         {/if}
       </h2>
       <button class="close-button" onclick={onClose}>

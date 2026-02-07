@@ -5,7 +5,7 @@
   Each branch has a worktree for isolated development.
 
   Keyboard shortcuts:
-  - Cmd+N: New branch
+  - Cmd+N: New worktree
   - Escape: Close modals
 -->
 <script lang="ts">
@@ -272,6 +272,11 @@
     const branch = branches.find((b) => b.id === branchId);
     if (!branch) return;
 
+    // Cannot delete main worktree
+    if (branch.isMainWorktree) {
+      return;
+    }
+
     // Show confirmation dialog
     branchToDelete = branch;
   }
@@ -324,9 +329,11 @@
     );
   }
 
-  function handleNewProjectCreated(project: GitProject) {
+  async function handleNewProjectCreated(project: GitProject) {
     projects = [...projects, project];
     showNewProjectModal = false;
+    // Reload branches to include the auto-created main worktree branch
+    await loadData();
   }
 
   function handleProjectDetecting(projectId: string, isDetecting: boolean) {
@@ -362,7 +369,7 @@
       return;
     }
 
-    // Cmd+N - New branch
+    // Cmd+N - New worktree
     if (e.metaKey && e.key === 'n') {
       e.preventDefault();
       handleNewBranch();
@@ -412,7 +419,7 @@
         <p>Create a branch to start working</p>
         <button class="create-button" onclick={() => handleNewBranch()}>
           <Plus size={16} />
-          New Branch
+          New Worktree
         </button>
         <span class="shortcut-hint">or press ⌘N</span>
       </div>
@@ -444,15 +451,13 @@
                 >
                   <Settings size={14} />
                 </button>
-                {#if isEmpty}
-                  <button
-                    class="delete-project-button"
-                    onclick={() => (projectToDelete = project)}
-                    title="Remove project"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                {/if}
+                <button
+                  class="delete-project-button"
+                  onclick={() => (projectToDelete = project)}
+                  title="Delete project"
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
             </div>
             <div class="branches-list">
@@ -501,6 +506,9 @@
                     onViewDiff={() => handleViewDiff(branch)}
                     onViewCommitDiff={(sha) => handleViewCommitDiff(branch, sha)}
                     onDelete={() => handleDeleteBranch(branch.id)}
+                    onBranchUpdated={(updated) => {
+                      branches = branches.map((b) => (b.id === updated.id ? updated : b));
+                    }}
                   />
                 {/if}
               {/each}
@@ -545,7 +553,7 @@
               <!-- Per-project new branch button -->
               <button class="new-branch-button" onclick={() => handleNewBranch(project)}>
                 <Plus size={16} />
-                New Branch
+                New Worktree
               </button>
             </div>
           </div>
@@ -576,6 +584,12 @@
     }}
     onUpdated={(updatedProject) => {
       projects = projects.map((p) => (p.id === updatedProject.id ? updatedProject : p));
+    }}
+    onDeleted={() => {
+      const deletedProjectId = projectToEdit?.id;
+      if (deletedProjectId) {
+        projects = projects.filter((p) => p.id !== deletedProjectId);
+      }
     }}
   />
 {/if}

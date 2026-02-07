@@ -506,6 +506,9 @@
                     onViewDiff={() => handleViewDiff(branch)}
                     onViewCommitDiff={(sha) => handleViewCommitDiff(branch, sha)}
                     onDelete={() => handleDeleteBranch(branch.id)}
+                    onBranchUpdated={(updated) => {
+                      branches = branches.map((b) => (b.id === updated.id ? updated : b));
+                    }}
                   />
                 {/if}
               {/each}

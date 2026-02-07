@@ -21,14 +21,16 @@
   } from 'lucide-svelte';
   import type { GitProject, ProjectAction, ActionType, SuggestedAction } from './services/branch';
   import * as branchService from './services/branch';
+  import ConfirmDialog from './ConfirmDialog.svelte';
 
   interface Props {
     project: GitProject;
     onClose: () => void;
     onUpdated?: (project: GitProject) => void;
+    onDeleted?: () => void;
   }
 
-  let { project, onClose, onUpdated }: Props = $props();
+  let { project, onClose, onUpdated, onDeleted }: Props = $props();
 
   // Actions state
   let actions = $state<ProjectAction[]>([]);
@@ -41,6 +43,7 @@
     actionType: 'run' as ActionType,
     autoCommit: false,
   });
+  let showDeleteConfirm = $state(false);
 
   // Load actions on mount
   onMount(() => {
@@ -217,6 +220,17 @@
       onClose();
     }
   }
+
+  async function confirmDeleteProject() {
+    try {
+      await branchService.deleteGitProject(project.id);
+      showDeleteConfirm = false;
+      onDeleted?.();
+      onClose();
+    } catch (e) {
+      console.error('Failed to delete project:', e);
+    }
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -322,6 +336,13 @@
         {/if}
       </div>
     </div>
+
+    <footer class="modal-footer">
+      <button class="danger-btn" onclick={() => (showDeleteConfirm = true)}>
+        <Trash2 size={14} />
+        Delete Project
+      </button>
+    </footer>
   </div>
 
   <!-- Edit Action Modal (separate overlay) -->
@@ -397,6 +418,18 @@
       </div>
     </div>
   {/if}
+
+  <!-- Delete Project Confirmation Dialog -->
+  {#if showDeleteConfirm}
+    <ConfirmDialog
+      title="Delete Project"
+      message="Remove this project from Staged? Your main worktree branch and git repository will not be deleted."
+      confirmLabel="Delete Project"
+      danger={true}
+      onConfirm={confirmDeleteProject}
+      onCancel={() => (showDeleteConfirm = false)}
+    />
+  {/if}
 </div>
 
 <style>
@@ -465,6 +498,14 @@
     padding: 20px;
   }
 
+  .modal-footer {
+    display: flex;
+    justify-content: flex-start;
+    padding: 16px 20px;
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-primary);
+  }
+
   .content-wrapper {
     display: flex;
     flex-direction: column;
@@ -513,6 +554,26 @@
   .secondary-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  .danger-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    background: var(--bg-primary);
+    color: var(--color-error);
+    border: 1px solid var(--color-error);
+  }
+
+  .danger-btn:hover {
+    background: var(--color-error);
+    color: white;
   }
 
   .actions-header {

@@ -584,6 +584,11 @@
     onUpdated={(updatedProject) => {
       projects = projects.map((p) => (p.id === updatedProject.id ? updatedProject : p));
     }}
+    onDeleted={() => {
+      if (projectToEdit) {
+        projects = projects.filter((p) => p.id !== projectToEdit.id);
+      }
+    }}
   />
 {/if}
 

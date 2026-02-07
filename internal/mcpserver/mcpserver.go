@@ -16,7 +16,7 @@ func NewHandler(store *comments.Store, c *cache.Cache) http.Handler {
 		Name:    "birdseye",
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{
-		Instructions: "Birdseye only operates on markdown files inside thoughts/ directories (research, plans, guides). It is NOT for code review. Use these tools to participate in collaborative document review with humans.",
+		Instructions: "Birdseye operates on markdown files for collaborative document review with humans. File paths are relative to the project root (e.g., thoughts/plans/foo.md). It is NOT for code review.",
 	})
 	registerTools(server, store, c)
 	return mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {

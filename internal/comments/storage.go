@@ -10,13 +10,15 @@ import (
 // commentsPath returns the absolute path to the sidecar JSON file for the
 // given project and file path. The sidecar lives at:
 //
-//	{project.ThoughtsPath}/.birdseye/comments/{filePath}.json
+//	{project.Path}/.birdseye/comments/{filePath}.json
+//
+// filePath is relative to the project root (e.g., "thoughts/shared/plans/foo.md").
 func (s *Store) commentsPath(projectName, filePath string) (string, error) {
 	project := s.cache.FindProject(projectName)
 	if project == nil {
 		return "", fmt.Errorf("project not found: %s", projectName)
 	}
-	return filepath.Join(project.ThoughtsPath, ".birdseye", "comments", filePath+".json"), nil
+	return filepath.Join(project.Path, ".birdseye", "comments", filePath+".json"), nil
 }
 
 // Load reads and parses the sidecar JSON for the given project and file.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
+	"github.com/loganj/birdseye/internal/config"
 	"github.com/loganj/birdseye/internal/mcpserver"
 	"github.com/loganj/birdseye/internal/server"
 	"github.com/loganj/birdseye/internal/watcher"
@@ -34,6 +35,8 @@ func main() {
 		}
 		rootDir = filepath.Join(home, "Development")
 	}
+
+	config.EnsureGlobalGitignore()
 
 	c := cache.New(rootDir)
 	cs := comments.NewStore(c)

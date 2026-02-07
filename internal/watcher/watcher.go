@@ -72,7 +72,7 @@ func (w *Watcher) Start() error {
 		if err := w.watchDir(p.ThoughtsPath); err != nil {
 			log.Printf("Warning: could not watch %s: %v", p.ThoughtsPath, err)
 		}
-		commentsDir := filepath.Join(p.ThoughtsPath, ".birdseye", "comments")
+		commentsDir := filepath.Join(p.Path, ".birdseye", "comments")
 		if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
 			if err := w.watchDir(commentsDir); err != nil {
 				log.Printf("Warning: could not watch %s: %v", commentsDir, err)
@@ -224,7 +224,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 // findProjectForPath finds which project a path belongs to
 func (w *Watcher) findProjectForPath(path string) string {
 	for _, p := range w.cache.Projects() {
-		if strings.HasPrefix(path, p.ThoughtsPath) {
+		if strings.HasPrefix(path, p.ThoughtsPath+"/") || strings.HasPrefix(path, p.Path+"/.birdseye/") {
 			return p.Name
 		}
 	}

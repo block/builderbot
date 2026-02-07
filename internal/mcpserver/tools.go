@@ -18,26 +18,26 @@ import (
 
 type listThreadsInput struct {
 	Project string `json:"project" jsonschema:"Project name"`
-	Path    string `json:"path,omitempty" jsonschema:"File path relative to thoughts dir"`
+	Path    string `json:"path,omitempty" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
 	Status  string `json:"status,omitempty" jsonschema:"Filter by status: open or resolved"`
 }
 
 type readThreadInput struct {
 	Project  string `json:"project" jsonschema:"Project name"`
-	Path     string `json:"path" jsonschema:"File path relative to thoughts dir"`
+	Path     string `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
 	ThreadID string `json:"threadId" jsonschema:"Thread ID"`
 }
 
 type replyInput struct {
 	Project  string `json:"project" jsonschema:"Project name"`
-	Path     string `json:"path" jsonschema:"File path relative to thoughts dir"`
+	Path     string `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
 	ThreadID string `json:"threadId" jsonschema:"Thread ID to reply to"`
 	Body     string `json:"body" jsonschema:"Reply message body"`
 }
 
 type createThreadInput struct {
 	Project      string `json:"project" jsonschema:"Project name"`
-	Path         string `json:"path" jsonschema:"File path relative to thoughts dir"`
+	Path         string `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
 	SelectedText string `json:"selectedText" jsonschema:"The text in the file to anchor the comment to"`
 	Body         string `json:"body" jsonschema:"Comment body"`
 	HeadingPath  string `json:"headingPath,omitempty" jsonschema:"Heading path for context"`
@@ -45,7 +45,7 @@ type createThreadInput struct {
 
 type resolveInput struct {
 	Project  string `json:"project" jsonschema:"Project name"`
-	Path     string `json:"path" jsonschema:"File path relative to thoughts dir"`
+	Path     string `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
 	ThreadID string `json:"threadId" jsonschema:"Thread ID to resolve"`
 }
 
@@ -74,7 +74,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// birdseye_list_threads
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "birdseye_list_threads",
-		Description: "List comment threads on documentation files (research, plans, guides in thoughts/ directories). When path is omitted, returns all open threads across the project. Optionally filter by status (open/resolved).",
+		Description: "List comment threads on documentation files. Paths are relative to the project root (e.g., thoughts/plans/foo.md). When path is omitted, returns all open threads across the project. Optionally filter by status (open/resolved).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input listThreadsInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")
@@ -119,7 +119,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// birdseye_read_thread
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "birdseye_read_thread",
-		Description: "Read a full comment thread on a document in thoughts/. Returns the complete thread JSON with all comments.",
+		Description: "Read a full comment thread on a document. Path is relative to project root (e.g., thoughts/plans/foo.md). Returns the complete thread JSON with all comments.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input readThreadInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" || input.Path == "" || input.ThreadID == "" {
 			return nil, nil, fmt.Errorf("project, path, and threadId are all required")
@@ -164,7 +164,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// birdseye_create_thread
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "birdseye_create_thread",
-		Description: "Create a new comment thread anchored to specific text in a markdown document under thoughts/. The before/after context is computed automatically by finding the selectedText in the file.",
+		Description: "Create a new comment thread anchored to specific text in a markdown document. Path is relative to project root (e.g., thoughts/plans/foo.md). The before/after context is computed automatically by finding the selectedText in the file.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input createThreadInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" || input.Path == "" || input.SelectedText == "" || input.Body == "" {
 			return nil, nil, fmt.Errorf("project, path, selectedText, and body are all required")
@@ -176,7 +176,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project not found: %s", input.Project)
 		}
 
-		fullPath := filepath.Join(project.ThoughtsPath, input.Path)
+		fullPath := filepath.Join(project.Path, input.Path)
 		content, err := os.ReadFile(fullPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading file: %w", err)
@@ -244,7 +244,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// birdseye_files_in_review
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "birdseye_files_in_review",
-		Description: "List all documentation files (in thoughts/) currently in review for a project. Records a heartbeat for each file to signal agent presence in the birdseye UI.",
+		Description: "List all documentation files currently in review for a project. File paths are relative to the project root (e.g., thoughts/plans/foo.md). Records a heartbeat for each file to signal agent presence in the birdseye UI.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input filesInReviewInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")

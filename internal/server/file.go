@@ -84,8 +84,8 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		parentPath = ""
 	}
 
-	// Load comment threads for this file
-	threads, _ := s.comments.LoadThreads(projectName, filePath)
+	// Load comment threads for this file (comment store uses project-relative paths)
+	threads, _ := s.comments.LoadThreads(projectName, "thoughts/"+filePath)
 	anchorLines := comments.ResolveAnchorsToLines(threads, string(content))
 
 	threadsJSON, _ := json.Marshal(threads)

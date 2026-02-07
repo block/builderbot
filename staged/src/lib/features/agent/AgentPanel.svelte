@@ -805,7 +805,7 @@
     display: flex;
     flex-direction: column;
     flex: 1;
-    min-height: 0;
+    min-height: 250px;
     padding: 0 12px;
   }
 
@@ -815,9 +815,11 @@
   }
 
   .agent-bottom {
-    flex-shrink: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     padding: 8px 0 0;
-    margin-top: auto;
   }
 
   .agent-input-wrapper {
@@ -1131,6 +1133,10 @@
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
     overflow: hidden;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
   }
 
   .agent-response-header {
@@ -1227,8 +1233,9 @@
     font-size: var(--size-sm);
     color: var(--text-primary);
     word-break: break-word;
-    max-height: 200px;
+    flex: 1;
     overflow-y: auto;
+    min-height: 0;
   }
 
   /* Markdown content styles */

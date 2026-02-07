@@ -21,19 +21,23 @@
   let inputEl: HTMLInputElement | null = $state(null);
 
   let filteredBranches = $derived.by(() => {
-    const localOnly = gitBranches.filter((b) => !b.isRemote);
-    if (!query) return localOnly;
+    if (!query) return gitBranches;
     const q = query.toLowerCase();
-    return localOnly.filter((b) => b.name.toLowerCase().includes(q));
+    return gitBranches.filter((b) => b.name.toLowerCase().includes(q));
   });
+
+  function checkoutName(branchRef: BranchRef): string {
+    if (branchRef.isRemote && branchRef.remote) {
+      return branchRef.name.slice(branchRef.remote.length + 1);
+    }
+    return branchRef.name;
+  }
 
   onMount(async () => {
     try {
       const branches = await branchService.listGitBranches(branch.repoPath);
       gitBranches = branches;
-      const currentIndex = branches
-        .filter((b) => !b.isRemote)
-        .findIndex((b) => b.name === branch.branchName);
+      const currentIndex = branches.findIndex((b) => b.name === branch.branchName);
       selectedIndex = currentIndex >= 0 ? currentIndex : 0;
     } catch (e) {
       console.error('Failed to load branches:', e);
@@ -55,8 +59,9 @@
     }
   });
 
-  async function selectBranch(branchName: string) {
-    if (branchName === branch.branchName) {
+  async function selectBranch(branchRef: BranchRef) {
+    const name = checkoutName(branchRef);
+    if (name === branch.branchName) {
       onClose();
       return;
     }
@@ -65,8 +70,8 @@
     error = null;
 
     try {
-      await branchService.switchWorktreeBranch(branch.id, branchName);
-      onSelected(branchName);
+      await branchService.switchWorktreeBranch(branch.id, name);
+      onSelected(name);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       switching = false;
@@ -88,7 +93,7 @@
       selectedIndex = Math.max(selectedIndex - 1, 0);
     } else if (e.key === 'Enter' && filteredBranches.length > 0) {
       e.preventDefault();
-      selectBranch(filteredBranches[selectedIndex].name);
+      selectBranch(filteredBranches[selectedIndex]);
     }
   }
 </script>
@@ -142,19 +147,23 @@
         </div>
       {:else if filteredBranches.length === 0}
         <div class="empty">
-          {query ? 'No matching branches' : 'No local branches found'}
+          {query ? 'No matching branches' : 'No branches found'}
         </div>
       {:else}
         {#each filteredBranches as branchRef, index (branchRef.name)}
           <button
             class="branch-item"
             class:selected={index === selectedIndex}
-            class:current={branchRef.name === branch.branchName}
-            onclick={() => selectBranch(branchRef.name)}
+            class:current={checkoutName(branchRef) === branch.branchName}
+            onclick={() => selectBranch(branchRef)}
           >
-            <GitBranch size={16} class="branch-item-icon local-icon" />
+            {#if branchRef.isRemote}
+              <Globe size={16} class="branch-item-icon remote-icon" />
+            {:else}
+              <GitBranch size={16} class="branch-item-icon local-icon" />
+            {/if}
             <span class="branch-item-name">{branchRef.name}</span>
-            {#if branchRef.name === branch.branchName}
+            {#if checkoutName(branchRef) === branch.branchName}
               <Check size={14} class="current-check" />
             {/if}
           </button>
@@ -328,6 +337,10 @@
 
   :global(.local-icon) {
     color: var(--status-renamed);
+  }
+
+  :global(.remote-icon) {
+    color: var(--text-muted);
   }
 
   .branch-item-name {

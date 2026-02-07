@@ -451,15 +451,13 @@
                 >
                   <Settings size={14} />
                 </button>
-                {#if isEmpty}
-                  <button
-                    class="delete-project-button"
-                    onclick={() => (projectToDelete = project)}
-                    title="Remove project"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                {/if}
+                <button
+                  class="delete-project-button"
+                  onclick={() => (projectToDelete = project)}
+                  title="Delete project"
+                >
+                  <Trash2 size={14} />
+                </button>
               </div>
             </div>
             <div class="branches-list">
@@ -585,8 +583,9 @@
       projects = projects.map((p) => (p.id === updatedProject.id ? updatedProject : p));
     }}
     onDeleted={() => {
-      if (projectToEdit) {
-        projects = projects.filter((p) => p.id !== projectToEdit.id);
+      const deletedProjectId = projectToEdit?.id;
+      if (deletedProjectId) {
+        projects = projects.filter((p) => p.id !== deletedProjectId);
       }
     }}
   />

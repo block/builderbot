@@ -1791,6 +1791,16 @@ impl Store {
         Ok(())
     }
 
+    pub fn update_branch_name(&self, id: &str, branch_name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        conn.execute(
+            "UPDATE branches SET branch_name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![branch_name, now, id],
+        )?;
+        Ok(())
+    }
+
     /// Update a branch's PR number
     pub fn update_branch_pr_number(&self, id: &str, pr_number: Option<u64>) -> Result<()> {
         let conn = self.conn.lock().unwrap();

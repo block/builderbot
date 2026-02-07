@@ -1882,6 +1882,33 @@ fn update_branch_base(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn switch_worktree_branch(
+    state: State<'_, Arc<Store>>,
+    branch_id: String,
+    new_branch_name: String,
+) -> Result<(), String> {
+    let store = state.inner().clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch '{branch_id}' not found"))?;
+
+        let worktree = Path::new(&branch.worktree_path);
+        git::switch_branch(worktree, &new_branch_name).map_err(|e| e.to_string())?;
+
+        store
+            .update_branch_name(&branch_id, &new_branch_name)
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Task failed: {e}"))?
+}
+
 /// Delete a branch and its worktree.
 /// This runs asynchronously to avoid blocking the UI during slow git operations.
 #[tauri::command(rename_all = "camelCase")]
@@ -3739,6 +3766,7 @@ pub fn run() {
             detect_default_branch,
             delete_branch,
             update_branch_base,
+            switch_worktree_branch,
             get_branch_commits,
             list_branch_sessions,
             get_session_for_commit,

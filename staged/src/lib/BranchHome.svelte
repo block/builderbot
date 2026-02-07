@@ -5,7 +5,7 @@
   Each branch has a worktree for isolated development.
 
   Keyboard shortcuts:
-  - Cmd+N: New branch
+  - Cmd+N: New worktree
   - Escape: Close modals
 -->
 <script lang="ts">
@@ -369,7 +369,7 @@
       return;
     }
 
-    // Cmd+N - New branch
+    // Cmd+N - New worktree
     if (e.metaKey && e.key === 'n') {
       e.preventDefault();
       handleNewBranch();
@@ -419,7 +419,7 @@
         <p>Create a branch to start working</p>
         <button class="create-button" onclick={() => handleNewBranch()}>
           <Plus size={16} />
-          New Branch
+          New Worktree
         </button>
         <span class="shortcut-hint">or press ⌘N</span>
       </div>
@@ -550,7 +550,7 @@
               <!-- Per-project new branch button -->
               <button class="new-branch-button" onclick={() => handleNewBranch(project)}>
                 <Plus size={16} />
-                New Branch
+                New Worktree
               </button>
             </div>
           </div>

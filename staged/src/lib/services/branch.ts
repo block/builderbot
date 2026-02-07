@@ -249,6 +249,13 @@ export async function updateBranchBase(branchId: string, baseBranch: string): Pr
   return invoke<void>('update_branch_base', { branchId, baseBranch });
 }
 
+export async function switchWorktreeBranch(
+  branchId: string,
+  newBranchName: string
+): Promise<void> {
+  return invoke<void>('switch_worktree_branch', { branchId, newBranchName });
+}
+
 // =============================================================================
 // Commit Operations
 // =============================================================================

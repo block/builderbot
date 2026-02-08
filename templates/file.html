@@ -1211,6 +1211,16 @@
                 var doc = new DOMParser().parseFromString(pageHtml, 'text/html');
                 var newContent = doc.getElementById('content');
                 if (newContent) document.getElementById('content').innerHTML = newContent.innerHTML;
+                var newToc = doc.querySelector('.toc-nav');
+                var oldToc = document.querySelector('.toc-nav');
+                if (newToc && oldToc) {
+                    oldToc.innerHTML = newToc.innerHTML;
+                } else if (newToc && !oldToc) {
+                    var card = doc.querySelector('.toc-nav').closest('.sidebar-card');
+                    if (card) document.querySelector('nav.sidebar').appendChild(card);
+                } else if (!newToc && oldToc) {
+                    oldToc.closest('.sidebar-card').remove();
+                }
                 var newRaw = doc.getElementById('raw-markdown');
                 if (newRaw) rawMarkdown = newRaw.content.textContent;
                 refreshComments();

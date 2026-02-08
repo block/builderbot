@@ -1,0 +1,503 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{block "title" .}}Birdseye{{end}}</title>
+    {{block "head" .}}{{end}}
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #fafafa;
+            color: #333;
+        }
+        a { color: #0066cc; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        /* Layout grid */
+        .app { display: grid; grid-template-columns: 240px 1fr; grid-template-rows: auto 1fr; height: 100vh; }
+        .topbar { grid-column: 1 / -1; display: flex; align-items: center; padding: 10px 16px; border-bottom: 1px solid #e0e0e0; gap: 16px; background: #fff; }
+        .sidebar { grid-row: 2; overflow-y: auto; border-right: 1px solid #e0e0e0; padding: 12px 0; background: #fff; }
+        .main-content { grid-row: 2; overflow-y: auto; padding: 24px; }
+
+        /* Top bar */
+        .topbar-logo { font-weight: 600; font-size: 1.1em; }
+        .topbar-logo a { color: inherit; text-decoration: none; }
+        .topbar-logo a:hover { text-decoration: none; }
+        .topbar-search { flex: 1; max-width: 400px; }
+        .topbar-search input {
+            width: 100%;
+            padding: 7px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.9em;
+            background: #fafafa;
+        }
+        .topbar-search input:focus {
+            outline: none;
+            border-color: #0066cc;
+            box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+            background: #fff;
+        }
+
+        /* Sidebar */
+        .sidebar-section { margin-bottom: 4px; }
+        .sidebar-section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 16px;
+            font-size: 0.75em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #888;
+            cursor: pointer;
+            user-select: none;
+        }
+        .sidebar-section-header:hover { color: #555; }
+        .sidebar-chevron { font-size: 1.1em; transition: transform 0.15s; }
+        .sidebar-section.collapsed .sidebar-chevron { transform: rotate(0deg); }
+        .sidebar-section:not(.collapsed) .sidebar-chevron { transform: rotate(90deg); }
+        .sidebar-section.collapsed .sidebar-items { display: none; }
+        .sidebar-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 16px 5px 28px;
+            font-size: 0.85em;
+            color: #555;
+            text-decoration: none;
+            transition: background 0.1s;
+        }
+        .sidebar-item:hover { background: #f0f0f0; text-decoration: none; color: #333; }
+        .sidebar-item.active { background: #e8f0fe; color: #0066cc; font-weight: 500; }
+        .sidebar-item.deemphasized { opacity: 0.5; }
+        .sidebar-item .agent-dot {
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            background: #2da44e;
+            border-radius: 50%;
+            flex-shrink: 0;
+            animation: sidebar-pulse 2s infinite;
+        }
+        @keyframes sidebar-pulse {
+            0% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0.4); }
+            70% { box-shadow: 0 0 0 4px rgba(45, 164, 78, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0); }
+        }
+        .sidebar-divider { border-top: 1px solid #e8e8e8; margin: 8px 16px; }
+        .sidebar-link {
+            display: block;
+            padding: 6px 16px;
+            font-size: 0.85em;
+            color: #666;
+            text-decoration: none;
+        }
+        .sidebar-link:hover { color: #0066cc; text-decoration: none; background: #f0f0f0; }
+        .sidebar-add {
+            color: #aaa;
+            font-size: 0.85em;
+            padding: 6px 16px;
+            cursor: pointer;
+            text-decoration: none;
+            display: block;
+        }
+        .sidebar-add:hover { color: #666; text-decoration: none; background: #f0f0f0; }
+
+        /* Modals */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 200;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.open { display: flex; }
+        .modal {
+            background: #fff;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 480px;
+            width: 100%;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+        }
+        .modal h3 { margin: 0 0 12px 0; font-size: 1.1em; }
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 20px;
+        }
+        .modal-actions button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 0.9em;
+            cursor: pointer;
+        }
+        .btn-cancel { background: #f5f5f5; border: 1px solid #ddd; color: #333; }
+        .btn-cancel:hover { background: #eee; }
+        .btn-primary { background: #0066cc; border: 1px solid #0066cc; color: #fff; }
+        .btn-primary:hover { background: #0055aa; }
+        .modal-input {
+            width: 100%;
+            padding: 10px 12px;
+            font-size: 0.95em;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            margin-top: 4px;
+        }
+        .modal-input:focus {
+            outline: none;
+            border-color: #0066cc;
+            box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+        }
+        .modal-error {
+            color: #cf222e;
+            font-size: 0.85em;
+            margin-top: 8px;
+            display: none;
+        }
+
+        {{block "pagestyle" .}}{{end}}
+    </style>
+</head>
+<body>
+    <div class="app">
+        <div class="topbar">
+            <div class="topbar-logo"><a href="/">Birdseye</a></div>
+            <div class="topbar-search">
+                <form action="/search" method="GET">
+                    <input type="search" name="q" placeholder="Search all thoughts..." value="{{.Nav.SearchQuery}}">
+                </form>
+            </div>
+        </div>
+
+        <nav class="sidebar">
+            {{range .Nav.Workspaces}}
+            <div class="sidebar-section" data-section="ws:{{.Path}}">
+                <div class="sidebar-section-header" onclick="toggleSection(this)">
+                    <span>{{.Name}}</span>
+                    <span class="sidebar-chevron">&#9656;</span>
+                </div>
+                <div class="sidebar-items">
+                    {{range .Projects}}
+                    <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}{{if eq .FileCount 0}} deemphasized{{end}}"
+                       href="/project/{{.QualifiedName}}">
+                        {{.Name}}
+                        {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
+                    </a>
+                    {{end}}
+                </div>
+            </div>
+            {{end}}
+
+            {{if .Nav.Standalone}}
+            <div class="sidebar-section">
+                <div class="sidebar-section-header" onclick="toggleSection(this)">
+                    <span>Standalone</span>
+                    <span class="sidebar-chevron">&#9656;</span>
+                </div>
+                <div class="sidebar-items">
+                    {{range .Nav.Standalone}}
+                    <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}{{if eq .FileCount 0}} deemphasized{{end}}"
+                       href="/project/{{.QualifiedName}}">
+                        {{.Name}}
+                        {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
+                    </a>
+                    {{end}}
+                </div>
+            </div>
+            {{end}}
+
+            <div class="sidebar-divider"></div>
+            <a class="sidebar-link" href="/recent">Recent</a>
+            <div class="sidebar-add" onclick="showAddDialog(event)">+ Add workspace or project</div>
+        </nav>
+
+        <div class="main-content">
+            {{block "content" .}}{{end}}
+        </div>
+    </div>
+
+    <!-- Add workspace/project modal -->
+    <div class="modal-overlay" id="addModal">
+        <div class="modal">
+            <h3 id="addModalTitle"></h3>
+            <p style="color:#666;font-size:0.9em;margin:0 0 12px 0" id="addModalDesc"></p>
+            <input type="text" class="modal-input" id="addPathInput" placeholder="/path/to/directory">
+            <div class="modal-error" id="addModalError"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" onclick="closeAddDialog()">Cancel</button>
+                <button class="btn-primary" id="addConfirmBtn" onclick="confirmAdd()">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Sidebar section toggle with localStorage persistence ---
+        function toggleSection(header) {
+            var section = header.closest('.sidebar-section');
+            section.classList.toggle('collapsed');
+            saveSidebarState();
+        }
+
+        function saveSidebarState() {
+            var collapsed = [];
+            document.querySelectorAll('.sidebar-section.collapsed').forEach(function(s) {
+                if (s.dataset.section) collapsed.push(s.dataset.section);
+            });
+            localStorage.setItem('birdseye-sidebar-collapsed', JSON.stringify(collapsed));
+        }
+
+        function restoreSidebarState() {
+            try {
+                var collapsed = JSON.parse(localStorage.getItem('birdseye-sidebar-collapsed') || '[]');
+                collapsed.forEach(function(id) {
+                    var section = document.querySelector('.sidebar-section[data-section="' + CSS.escape(id) + '"]');
+                    if (section) section.classList.add('collapsed');
+                });
+            } catch(e) {}
+        }
+        restoreSidebarState();
+
+        // --- Add workspace/project modal ---
+        var addMode = '';
+
+        function showAddDialog(event) {
+            if (event) event.stopPropagation();
+            // Show a choice: workspace or project
+            addMode = '';
+            document.getElementById('addModalTitle').textContent = 'Add to Birdseye';
+            document.getElementById('addModalDesc').innerHTML =
+                '<button class="btn-primary" style="margin-right:8px" onclick="setAddMode(\'workspace\')">Workspace</button>' +
+                '<button class="btn-cancel" onclick="setAddMode(\'project\')">Project</button>';
+            document.getElementById('addPathInput').style.display = 'none';
+            document.getElementById('addModalError').style.display = 'none';
+            document.getElementById('addConfirmBtn').style.display = 'none';
+            document.getElementById('addModal').classList.add('open');
+        }
+
+        function setAddMode(mode) {
+            addMode = mode;
+            document.getElementById('addModalTitle').textContent = mode === 'workspace' ? 'Add Workspace' : 'Add Project';
+            document.getElementById('addModalDesc').textContent = mode === 'workspace'
+                ? 'Enter a directory path. All subdirectories will appear as projects.'
+                : 'Enter a project directory path.';
+            document.getElementById('addPathInput').value = '';
+            document.getElementById('addPathInput').style.display = '';
+            document.getElementById('addConfirmBtn').style.display = '';
+            document.getElementById('addConfirmBtn').disabled = false;
+            document.getElementById('addConfirmBtn').textContent = 'Add';
+            document.getElementById('addModalError').style.display = 'none';
+            setTimeout(function() { document.getElementById('addPathInput').focus(); }, 50);
+        }
+
+        function closeAddDialog() {
+            document.getElementById('addModal').classList.remove('open');
+            addMode = '';
+        }
+
+        function confirmAdd() {
+            var path = document.getElementById('addPathInput').value.trim();
+            if (!path) { showAddError('Please enter a path.'); return; }
+
+            var btn = document.getElementById('addConfirmBtn');
+            btn.disabled = true;
+            btn.textContent = 'Adding...';
+
+            var url = addMode === 'workspace' ? '/api/workspaces' : '/api/projects';
+            fetch(url, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path: path})
+            })
+            .then(function(r) {
+                if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+                closeAddDialog();
+                window.location.reload();
+            })
+            .catch(function(err) {
+                showAddError(err.message);
+                btn.disabled = false;
+                btn.textContent = 'Add';
+            });
+        }
+
+        function showAddError(msg) {
+            var el = document.getElementById('addModalError');
+            el.textContent = msg;
+            el.style.display = 'block';
+        }
+
+        document.getElementById('addPathInput').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') { e.preventDefault(); confirmAdd(); }
+        });
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeAddDialog();
+        });
+
+        // --- Shared utilities ---
+        function escapeHtml(s) {
+            return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        // --- SSE connection management ---
+        var sseHandlers = [];
+        function onSSE(fn) { sseHandlers.push(fn); }
+
+        var events = null;
+        function connectSSE() {
+            if (events) events.close();
+            events = new EventSource('/events');
+            events.addEventListener('change', function(e) {
+                var data = JSON.parse(e.data);
+                sseHandlers.forEach(function(fn) { fn(data); });
+            });
+            events.addEventListener('error', function() {
+                console.log('SSE connection lost, will reconnect...');
+            });
+        }
+        connectSSE();
+        window.addEventListener('beforeunload', function() { if (events) events.close(); });
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                if (events) { events.close(); events = null; }
+            } else {
+                connectSSE();
+            }
+        });
+
+        // --- Debounced refresh helper ---
+        var _pending = {}, _timers = {};
+        function debouncedRefresh(key, fn, delay) {
+            delay = delay || 200;
+            clearTimeout(_timers[key]);
+            _timers[key] = setTimeout(function() {
+                if (_pending[key]) return;
+                _pending[key] = true;
+                Promise.resolve(fn()).finally(function() { _pending[key] = false; });
+            }, delay);
+        }
+
+        // --- Copy dropdown (shared) ---
+        function toggleDropdown(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            var dd = event.target.closest('.copy-dropdown');
+            document.querySelectorAll('.copy-dropdown.open').forEach(function(d) { if (d !== dd) d.classList.remove('open'); });
+            dd.classList.toggle('open');
+        }
+
+        function flashCopied(btn) {
+            var dd = btn.closest('.copy-dropdown');
+            dd.classList.remove('open');
+            var toggle = dd.querySelector('.dropdown-toggle');
+            toggle.textContent = 'Copied!';
+            toggle.classList.add('copied');
+            setTimeout(function() { toggle.textContent = 'Copy \u25BE'; toggle.classList.remove('copied'); }, 1500);
+        }
+
+        function getFileData(btn) {
+            var row = btn.closest('[data-project]');
+            return { project: row.dataset.project, path: row.dataset.path };
+        }
+
+        function copyRelative(btn) {
+            var d = getFileData(btn);
+            navigator.clipboard.writeText('@' + d.path);
+            flashCopied(btn);
+        }
+
+        function copyAbsolute(btn) {
+            var row = btn.closest('[data-project-path]');
+            var d = getFileData(btn);
+            navigator.clipboard.writeText(row.dataset.projectPath + '/' + d.path);
+            flashCopied(btn);
+        }
+
+        function copyFileToClipboard(btn) {
+            var d = getFileData(btn);
+            fetch('/api/copy-file?project=' + encodeURIComponent(d.project) + '&path=' + encodeURIComponent(d.path))
+                .then(function(resp) { if (resp.ok) flashCopied(btn); });
+        }
+
+        // Close dropdowns on outside click
+        document.addEventListener('click', function() {
+            document.querySelectorAll('.copy-dropdown.open').forEach(function(d) { d.classList.remove('open'); });
+        });
+
+        // --- Multi-select (shared) ---
+        function updateSelectionBar() {
+            var checkboxes = document.querySelectorAll('.file-checkbox:checked');
+            var bar = document.getElementById('selectionBar');
+            if (!bar) return;
+            var count = document.getElementById('selectedCount');
+            count.textContent = checkboxes.length;
+            bar.classList.toggle('visible', checkboxes.length > 0);
+            document.querySelectorAll('.file').forEach(function(file) {
+                var cb = file.querySelector('.file-checkbox');
+                file.classList.toggle('selected', cb && cb.checked);
+            });
+        }
+
+        function copySelected() {
+            var checkboxes = document.querySelectorAll('.file-checkbox:checked');
+            var paths = Array.from(checkboxes).map(function(cb) {
+                var file = cb.closest('.file');
+                return file.dataset.projectPath + '/' + file.dataset.path;
+            });
+            navigator.clipboard.writeText(paths.join('\n'));
+            clearSelection();
+        }
+
+        function clearSelection() {
+            document.querySelectorAll('.file-checkbox:checked').forEach(function(cb) { cb.checked = false; });
+            updateSelectionBar();
+        }
+
+        // --- Sidebar SSE refresh ---
+        onSSE(function(data) {
+            if (data.type === 'projects' || data.type === 'files') {
+                debouncedRefresh('sidebar', refreshSidebar);
+            }
+        });
+
+        function refreshSidebar() {
+            fetch('/api/projects')
+                .then(function(r) { return r.json(); })
+                .then(function(projects) {
+                    // Update agent dots and file counts
+                    document.querySelectorAll('.sidebar-item').forEach(function(item) {
+                        var href = item.getAttribute('href');
+                        if (!href) return;
+                        var qn = href.replace('/project/', '');
+                        var proj = projects.find(function(p) { return p.qualifiedName === qn; });
+                        if (!proj) return;
+                        // Update agent dot
+                        var dot = item.querySelector('.agent-dot');
+                        if (proj.agentCount > 0 && !dot) {
+                            item.insertAdjacentHTML('beforeend', ' <span class="agent-dot"></span>');
+                        } else if (proj.agentCount === 0 && dot) {
+                            dot.remove();
+                        }
+                        // Update deemphasized state
+                        item.classList.toggle('deemphasized', proj.fileCount === 0);
+                    });
+                })
+                .catch(function() {});
+        }
+
+        {{block "pagescript" .}}{{end}}
+    </script>
+</body>
+</html>
+{{end}}

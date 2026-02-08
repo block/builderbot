@@ -208,6 +208,80 @@ func (s *Server) routes() {
 	}
 }
 
+// NavData provides the sidebar with project tree data on every page.
+type NavData struct {
+	Workspaces  []NavWorkspace
+	Standalone  []NavProject
+	ActiveQN    string // qualified name of the active project, if any
+	SearchQuery string // pre-fill search box if on search page
+}
+
+type NavWorkspace struct {
+	Name     string
+	Path     string
+	Projects []NavProject
+}
+
+type NavProject struct {
+	Name          string
+	QualifiedName string
+	HasAgent      bool
+	FileCount     int
+}
+
+// buildNav builds NavData from current config and cache state.
+func (s *Server) buildNav(activeQN string) NavData {
+	nav := NavData{ActiveQN: activeQN}
+
+	activeAgents := agents.FindActive()
+	projects := s.cache.ProjectsSortedByModTime()
+
+	// Build lookup maps
+	projectsByWS := make(map[string][]NavProject)
+	for _, p := range projects {
+		hasAgent := false
+		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
+			hasAgent = true
+		}
+		np := NavProject{
+			Name:          p.Name,
+			QualifiedName: p.QualifiedName(),
+			HasAgent:      hasAgent,
+			FileCount:     p.FileCount,
+		}
+		if p.Origin == "standalone" {
+			nav.Standalone = append(nav.Standalone, np)
+		} else {
+			projectsByWS[p.WorkspaceName] = append(projectsByWS[p.WorkspaceName], np)
+		}
+	}
+
+	for _, ws := range s.cfg.Workspaces {
+		name := ws.DisplayName()
+		nav.Workspaces = append(nav.Workspaces, NavWorkspace{
+			Name:     name,
+			Path:     ws.Path,
+			Projects: projectsByWS[name],
+		})
+	}
+
+	return nav
+}
+
+// PageData wraps nav data and page-specific data for the layout template.
+type PageData struct {
+	Nav  NavData
+	Page interface{}
+}
+
+// renderPage wraps page-specific data with NavData and executes the layout.
+func (s *Server) renderPage(w http.ResponseWriter, tmplName string, nav NavData, pageData interface{}) {
+	data := PageData{Nav: nav, Page: pageData}
+	if err := s.getTemplate().ExecuteTemplate(w, tmplName, data); err != nil {
+		log.Printf("Template error (%s): %v", tmplName, err)
+	}
+}
+
 type IndexFile struct {
 	Project  string
 	FilePath string

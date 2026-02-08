@@ -2,6 +2,8 @@
 
 {{define "head"}}
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({ startOnLoad: false, theme: 'default' });</script>
 {{end}}
 
 {{define "pagestyle"}}
@@ -162,6 +164,14 @@
     .content > p:first-of-type strong { color: #333; }
     .content > p:first-of-type strong ~ strong::before { content: '\A'; white-space: pre; }
     .content .chroma { background: #282a36; }
+    .content .mermaid-container {
+        background: #fff;
+        border: 1px solid #e8e8e8;
+        border-radius: 6px;
+        padding: 16px;
+        overflow-x: auto;
+        text-align: center;
+    }
 
     /* Comments panel */
     .comments-panel {
@@ -1336,6 +1346,7 @@
                 }
                 var newRaw = doc.getElementById('raw-markdown');
                 if (newRaw) rawMarkdown = newRaw.content.textContent;
+                renderMermaidBlocks();
                 refreshComments();
                 document.querySelector('.file-main-scroll').scrollTop = contentScroll;
             })
@@ -1386,7 +1397,35 @@
         }
     });
 
+    // --- Mermaid diagram rendering ---
+    function renderMermaidBlocks() {
+        var content = document.getElementById('content');
+        if (!content) return;
+        var codeBlocks = content.querySelectorAll('code.language-mermaid');
+        if (codeBlocks.length === 0) return;
+        var containers = [];
+        codeBlocks.forEach(function(code) {
+            var pre = code.parentElement;
+            if (!pre || pre.tagName !== 'PRE') return;
+            var text = code.textContent;
+            var div = document.createElement('div');
+            div.className = 'mermaid-container';
+            var sourceLine = pre.getAttribute('data-source-line');
+            if (sourceLine) div.setAttribute('data-source-line', sourceLine);
+            var mermaidDiv = document.createElement('div');
+            mermaidDiv.className = 'mermaid';
+            mermaidDiv.textContent = text;
+            div.appendChild(mermaidDiv);
+            pre.parentNode.replaceChild(div, pre);
+            containers.push(mermaidDiv);
+        });
+        if (containers.length > 0) {
+            mermaid.run({ nodes: containers });
+        }
+    }
+
     // Initial render
+    renderMermaidBlocks();
     renderThreads(threads || [], anchorLines || {});
     renderReviewBanner();
     refreshReview();

@@ -10,6 +10,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/loganj/birdseye/internal/cache"
+	"github.com/loganj/birdseye/internal/discovery"
 )
 
 // EventType represents the type of change
@@ -38,6 +39,10 @@ type Watcher struct {
 	// Debounce timers to coalesce rapid changes
 	debounce   map[string]*time.Timer
 	debounceMu sync.Mutex
+
+	// Multi-workspace support
+	workspacePaths []string
+	discoverFn     func() ([]discovery.Project, error) // called on workspace change
 }
 
 // New creates a new watcher
@@ -58,34 +63,42 @@ func New(c *cache.Cache) (*Watcher, error) {
 	return w, nil
 }
 
-// Start begins watching for changes
-func (w *Watcher) Start() error {
-	root := w.cache.Root()
+// Start begins watching for changes across all workspaces and project sources.
+func (w *Watcher) Start(workspacePaths []string, discoverFn func() ([]discovery.Project, error)) error {
+	w.workspacePaths = workspacePaths
+	w.discoverFn = discoverFn
 
-	// Watch the root directory for new projects
-	if err := w.watcher.Add(root); err != nil {
-		return err
+	// Watch all workspace directories for new/removed projects
+	for _, ws := range workspacePaths {
+		if err := w.watcher.Add(ws); err != nil {
+			log.Printf("Warning: could not watch workspace %s: %v", ws, err)
+		}
 	}
 
-	// Watch each project's thoughts directory and .birdseye/comments directory
+	// Watch each project's sources and .birdseye/comments directory
 	for _, p := range w.cache.Projects() {
-		tp := p.ThoughtsPath()
-		if tp == "" {
-			continue
-		}
-		if err := w.watchDir(tp); err != nil {
-			log.Printf("Warning: could not watch %s: %v", tp, err)
-		}
-		commentsDir := filepath.Join(p.Path, ".birdseye", "comments")
-		if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
-			if err := w.watchDir(commentsDir); err != nil {
-				log.Printf("Warning: could not watch %s: %v", commentsDir, err)
-			}
-		}
+		w.watchProject(p)
 	}
 
 	go w.loop()
 	return nil
+}
+
+// watchProject sets up file watches for all sources and comments of a project.
+func (w *Watcher) watchProject(p discovery.Project) {
+	for _, src := range p.Sources {
+		if src.RootPath != "" {
+			if err := w.watchDir(src.RootPath); err != nil {
+				log.Printf("Warning: could not watch %s: %v", src.RootPath, err)
+			}
+		}
+	}
+	commentsDir := filepath.Join(p.Path, ".birdseye", "comments")
+	if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
+		if err := w.watchDir(commentsDir); err != nil {
+			log.Printf("Warning: could not watch %s: %v", commentsDir, err)
+		}
+	}
 }
 
 // watchDir recursively watches a directory and its subdirectories
@@ -168,28 +181,26 @@ func (w *Watcher) loop() {
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := event.Name
-	root := w.cache.Root()
 
-	// Check if this is a change in the root directory (new/removed project)
-	if filepath.Dir(path) == root {
-		w.debounceRefresh("_root_", func() {
-			// Check if a thoughts/ dir exists in this potential project
-			thoughtsPath := filepath.Join(path, "thoughts")
-			if info, err := os.Stat(thoughtsPath); err == nil && info.IsDir() {
-				// New project or project with thoughts/ added
-				if err := w.cache.RescanProjects(); err == nil {
-					// Watch the new project's thoughts directory
-					w.watchDir(thoughtsPath)
-					w.Broadcast(Event{Type: EventProjectsChanged})
+	// Check if this is a change in a workspace directory (new/removed project)
+	parentDir := filepath.Dir(path)
+	for _, ws := range w.workspacePaths {
+		if parentDir == ws {
+			w.debounceRefresh("workspace:"+ws, func() {
+				if w.discoverFn != nil {
+					projects, err := w.discoverFn()
+					if err == nil {
+						w.cache.RescanWith(projects)
+						// Watch any new project sources
+						for _, p := range projects {
+							w.watchProject(p)
+						}
+						w.Broadcast(Event{Type: EventProjectsChanged})
+					}
 				}
-			} else if event.Op&fsnotify.Remove != 0 {
-				// Project removed
-				if err := w.cache.RescanProjects(); err == nil {
-					w.Broadcast(Event{Type: EventProjectsChanged})
-				}
-			}
-		})
-		return
+			})
+			return
+		}
 	}
 
 	// Find which project this path belongs to
@@ -225,12 +236,19 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	})
 }
 
-// findProjectForPath finds which project a path belongs to
+// findProjectForPath finds which project a path belongs to by checking
+// all source roots and .birdseye directories. Returns the qualified name.
 func (w *Watcher) findProjectForPath(path string) string {
 	for _, p := range w.cache.Projects() {
-		tp := p.ThoughtsPath()
-		if (tp != "" && strings.HasPrefix(path, tp+"/")) || strings.HasPrefix(path, p.Path+"/.birdseye/") {
-			return p.Name
+		// Check all source roots
+		for _, src := range p.Sources {
+			if src.RootPath != "" && strings.HasPrefix(path, src.RootPath+"/") {
+				return p.QualifiedName()
+			}
+		}
+		// Check .birdseye directory
+		if strings.HasPrefix(path, p.Path+"/.birdseye/") {
+			return p.QualifiedName()
 		}
 	}
 	return ""

@@ -18,6 +18,14 @@ type Workspace struct {
 	Name string `json:"name,omitempty"` // display name, defaults to basename
 }
 
+// DisplayName returns the workspace's display name, defaulting to the basename of its path.
+func (w Workspace) DisplayName() string {
+	if w.Name != "" {
+		return w.Name
+	}
+	return filepath.Base(w.Path)
+}
+
 // ProjectConfig is a standalone project opened explicitly.
 type ProjectConfig struct {
 	Path    string         `json:"path"`

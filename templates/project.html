@@ -291,11 +291,11 @@
     {{if .Files}}
     <ul class="files">
         {{range .Files}}
-        <li class="file" data-project="{{$.Project.Name}}" data-path="{{.Path}}">
+        <li class="file" data-project="{{$.Project.QualifiedName}}" data-project-path="{{$.Project.Path}}" data-path="{{.Path}}">
             <div class="file-left">
                 <input type="checkbox" class="file-checkbox" />
                 {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                <span class="file-name"><a href="/file/{{$.Project.Name}}/{{.Path}}">{{.Name}}</a></span>
+                <span class="file-name"><a href="/file/{{$.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
             </div>
             <div class="file-right">
                 <div class="copy-dropdown">
@@ -322,7 +322,8 @@
     </div>
 
     <script>
-        const projectName = '{{.Project.Name}}';
+        const qualifiedName = '{{.Project.QualifiedName}}';
+        const projectPath = '{{.Project.Path}}';
 
         // Dropdown
         function toggleDropdown(event) {
@@ -350,19 +351,20 @@
 
         function copyRelative(btn) {
             const d = getFileData(btn);
-            navigator.clipboard.writeText('@thoughts/' + d.path);
+            navigator.clipboard.writeText('@' + d.path);
             flashCopied(btn);
         }
 
         function copyAbsolute(btn) {
+            const row = btn.closest('[data-project-path]');
             const d = getFileData(btn);
-            navigator.clipboard.writeText('@' + d.project + '/thoughts/' + d.path);
+            navigator.clipboard.writeText(row.dataset.projectPath + '/' + d.path);
             flashCopied(btn);
         }
 
         function copyFileToClipboard(btn) {
             const d = getFileData(btn);
-            fetch(`/api/copy-file?project=${encodeURIComponent(d.project)}&path=${encodeURIComponent(d.path)}`)
+            fetch(`/api/copy-file?project=${encodeURIComponent(qualifiedName)}&path=${encodeURIComponent(d.path)}`)
                 .then(resp => { if (resp.ok) flashCopied(btn); });
         }
 
@@ -383,7 +385,7 @@
             const checkboxes = document.querySelectorAll('.file-checkbox:checked');
             const paths = Array.from(checkboxes).map(cb => {
                 const file = cb.closest('.file');
-                return '@' + file.dataset.project + '/thoughts/' + file.dataset.path;
+                return file.dataset.projectPath + '/' + file.dataset.path;
             });
             navigator.clipboard.writeText(paths.join('\n'));
             clearSelection();
@@ -425,9 +427,9 @@
         window.addEventListener('beforeunload', function() { events.close(); });
         events.addEventListener('change', function(e) {
             const data = JSON.parse(e.data);
-            if (data.type === 'files' && data.project === projectName) debouncedRefresh('files', refreshFiles);
+            if (data.type === 'files' && data.project === qualifiedName) debouncedRefresh('files', refreshFiles);
             if (data.type === 'projects') debouncedRefresh('projects', refreshProjectStatus);
-            if (data.type === 'comments' && data.project === projectName) debouncedRefresh('reviews', refreshReviewBadges);
+            if (data.type === 'comments' && data.project === qualifiedName) debouncedRefresh('reviews', refreshReviewBadges);
         });
 
         // Combined check: deletion detection + agent status in one fetch
@@ -435,7 +437,7 @@
             try {
                 const response = await fetch('/api/projects');
                 const projects = await response.json();
-                const project = projects.find(p => p.name === projectName);
+                const project = projects.find(p => p.qualifiedName === qualifiedName);
                 if (!project) {
                     showDeletingState();
                     return;
@@ -463,16 +465,16 @@
 
         async function refreshFiles() {
             try {
-                const response = await fetch(`/api/project/${projectName}`);
+                const response = await fetch(`/api/project/${qualifiedName}`);
                 const files = await response.json();
                 const container = document.querySelector('.files');
                 if (!container) { location.reload(); return; }
                 container.innerHTML = files.map(f => `
-                    <li class="file" data-project="${projectName}" data-path="${f.path}">
+                    <li class="file" data-project="${qualifiedName}" data-project-path="${projectPath}" data-path="${f.path}">
                         <div class="file-left">
                             <input type="checkbox" class="file-checkbox" />
                             ${f.fileType && f.fileType !== 'other' ? `<span class="file-type ${f.fileType}">${f.fileType}</span>` : ''}
-                            <span class="file-name"><a href="/file/${projectName}/${f.path}">${f.name}</a></span>
+                            <span class="file-name"><a href="/file/${qualifiedName}/${f.path}">${f.name}</a></span>
                         </div>
                         <div class="file-right">
                             <div class="copy-dropdown">
@@ -502,7 +504,7 @@
 
         async function refreshReviewBadges() {
             try {
-                const response = await fetch('/api/reviews?project=' + encodeURIComponent(projectName));
+                const response = await fetch('/api/reviews?project=' + encodeURIComponent(qualifiedName));
                 const reviews = await response.json();
                 reviewData = {};
                 reviews.forEach(r => {

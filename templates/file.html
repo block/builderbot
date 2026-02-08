@@ -545,7 +545,7 @@
         <div class="main">
             <div class="breadcrumb">
                 <a href="/">&#8592; All Projects</a>
-                / <a href="/project/{{.Project.Name}}">{{.Project.Name}}</a>
+                / <a href="/project/{{.Project.QualifiedName}}">{{.Project.Name}}</a>
                 / {{.FileName}}
             </div>
 
@@ -557,8 +557,8 @@
                     <div class="dropdown-menu">
                         <button onclick="copyText(this, rawMarkdown)">Markdown</button>
                         <button onclick="copyFileToClipboard(this)">File</button>
-                        <button onclick="copyText(this, '@thoughts/{{.FilePath}}')">Relative path</button>
-                        <button onclick="copyText(this, '@{{.Project.Name}}/thoughts/{{.FilePath}}')">Absolute path</button>
+                        <button onclick="copyText(this, '@{{.FilePath}}')">Relative path</button>
+                        <button onclick="copyText(this, '{{.Project.Path}}/{{.FilePath}}')">Absolute path</button>
                     </div>
                 </div>
             </div>
@@ -586,7 +586,7 @@
 
     <script>
         let rawMarkdown = document.getElementById('raw-markdown').content.textContent;
-        const projectName = '{{.Project.Name}}';
+        const qualifiedName = '{{.Project.QualifiedName}}';
         const filePath = '{{.FilePath}}';
 
         let threads = {{.ThreadsJSON}};
@@ -629,7 +629,7 @@
         }
 
         function copyFileToClipboard(btn) {
-            fetch(`/api/copy-file?project=${encodeURIComponent(projectName)}&path=${encodeURIComponent(filePath)}`)
+            fetch(`/api/copy-file?project=${encodeURIComponent(qualifiedName)}&path=${encodeURIComponent(filePath)}`)
                 .then(resp => { if (resp.ok) flashCopied(btn); });
         }
 
@@ -692,7 +692,7 @@
         }
 
         function refreshReview() {
-            fetch('/api/reviews?project=' + encodeURIComponent(projectName))
+            fetch('/api/reviews?project=' + encodeURIComponent(qualifiedName))
                 .then(r => r.json())
                 .then(reviews => {
                     const myReview = reviews.find(r => r.filePath === filePath);
@@ -893,7 +893,7 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    project: projectName,
+                    project: qualifiedName,
                     path: filePath,
                     author: author,
                     role: 'human',
@@ -922,7 +922,7 @@
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    project: projectName,
+                    project: qualifiedName,
                     path: filePath,
                     status: 'resolved',
                     resolvedBy: author
@@ -940,7 +940,7 @@
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    project: projectName,
+                    project: qualifiedName,
                     path: filePath,
                     status: 'open'
                 })
@@ -1199,7 +1199,7 @@
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    project: projectName,
+                    project: qualifiedName,
                     path: filePath,
                     anchor: pendingAnchor,
                     author: author,
@@ -1468,7 +1468,7 @@
 
         function refreshComments() {
             const formState = saveFormState();
-            fetch('/api/threads?project=' + encodeURIComponent(projectName) + '&path=' + encodeURIComponent(filePath))
+            fetch('/api/threads?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(filePath))
                 .then(r => r.json())
                 .then(data => {
                     threads = data;
@@ -1525,11 +1525,11 @@
         evtSource.addEventListener('change', function(e) {
             try {
                 const data = JSON.parse(e.data);
-                if (data.type === 'comments' && data.project === projectName) {
+                if (data.type === 'comments' && data.project === qualifiedName) {
                     debouncedRefresh('comments', refreshComments);
                     debouncedRefresh('review', refreshReview);
                 }
-                if (data.type === 'files' && data.project === projectName) {
+                if (data.type === 'files' && data.project === qualifiedName) {
                     debouncedRefresh('document', refreshDocument);
                 }
             } catch (err) {

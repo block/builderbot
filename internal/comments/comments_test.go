@@ -26,7 +26,7 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatalf("creating thoughts dir: %v", err)
 	}
 
-	c := cache.New(tmpDir)
+	c := cache.New()
 	c.SetProjects([]discovery.Project{
 		{
 			Name: testProject,

@@ -234,11 +234,11 @@
     <h2>Projects ({{len .Projects}})</h2>
     <div class="projects">
         {{range .Projects}}
-        <div class="project" data-path="{{.Name}}/thoughts">
+        <div class="project" data-name="{{.QualifiedName}}" data-workspace="{{.WorkspaceName}}" data-project-path="{{.Path}}">
             <div class="project-header">
-                <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a>{{if index $.Agents .Name}}<span class="agent-dot" title="{{index $.Agents .Name}}"></span>{{end}}</div>
+                <div class="project-name"><a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if index $.Agents .QualifiedName}}<span class="agent-dot" title="{{index $.Agents .QualifiedName}}"></span>{{end}}</div>
                 <div style="display:flex;gap:8px;align-items:center">
-                    {{if index $.Ages .Name}}<span class="project-age">{{index $.Ages .Name}}</span>{{end}}
+                    {{if index $.Ages .QualifiedName}}<span class="project-age">{{index $.Ages .QualifiedName}}</span>{{end}}
                     <div class="project-dropdown">
                         <button class="dropdown-dots" onclick="toggleProjectMenu(event)">&#8942;</button>
                         <div class="project-menu">
@@ -284,9 +284,8 @@
         function copyProjectPath(btn, event) {
             event.preventDefault();
             event.stopPropagation();
-            const el = btn.closest('[data-path]');
-            const path = '@' + el.dataset.path;
-            navigator.clipboard.writeText(path);
+            const el = btn.closest('[data-name]');
+            navigator.clipboard.writeText(el.dataset.projectPath);
 
             const dd = btn.closest('.project-dropdown');
             dd.classList.remove('open');
@@ -300,11 +299,13 @@
         let deleteTarget = '';
 
         function showDeleteDialog(btn) {
-            const el = btn.closest('[data-path]');
-            deleteTarget = el.dataset.path.replace('/thoughts', '');
+            const el = btn.closest('[data-name]');
+            deleteTarget = el.dataset.name; // qualified name
             btn.closest('.project-dropdown').classList.remove('open');
 
-            document.getElementById('deleteProjectName').textContent = deleteTarget;
+            // Show display name (last segment) in the dialog
+            const displayName = deleteTarget.includes('/') ? deleteTarget.split('/').pop() : deleteTarget;
+            document.getElementById('deleteProjectName').textContent = displayName;
             document.getElementById('deleteInfo').style.display = 'none';
             document.getElementById('deleteInfo').innerHTML = '';
             document.getElementById('confirmDeleteBtn').disabled = true;
@@ -420,9 +421,9 @@
                 const projects = await response.json();
                 const container = document.querySelector('.projects');
                 container.innerHTML = projects.map(p => `
-                    <div class="project" data-path="${p.name}/thoughts">
+                    <div class="project" data-name="${p.qualifiedName}" data-workspace="${p.workspace}" data-project-path="${p.projectPath}">
                         <div class="project-header">
-                            <div class="project-name"><a href="/project/${p.name}">${p.name}</a>${p.agentCount ? `<span class="agent-dot" title="${p.agentCount === 1 ? (p.agentPrompts[0] || 'Agent active').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;') : p.agentCount + ' agents active'}"></span>` : ''}${p.reviewCount ? `<span class="review-count">${p.reviewCount} in review</span>` : ''}</div>
+                            <div class="project-name"><a href="/project/${p.qualifiedName}">${p.name}</a>${p.agentCount ? `<span class="agent-dot" title="${p.agentCount === 1 ? (p.agentPrompts[0] || 'Agent active').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;') : p.agentCount + ' agents active'}"></span>` : ''}${p.reviewCount ? `<span class="review-count">${p.reviewCount} in review</span>` : ''}</div>
                             <div style="display:flex;gap:8px;align-items:center">
                                 ${p.age ? `<span class="project-age">${p.age}</span>` : ''}
                                 <div class="project-dropdown">

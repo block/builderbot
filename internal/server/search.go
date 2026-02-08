@@ -13,7 +13,7 @@ import (
 
 // MatchedFile represents a file that matched by name or content
 type MatchedFile struct {
-	Path      string // relative to thoughts dir
+	Path      string // relative to project root (e.g., "thoughts/plans/foo.md")
 	Name      string
 	NameMatch bool   // matched by filename
 	FileType  string // "research", "plan", or "other"
@@ -21,8 +21,11 @@ type MatchedFile struct {
 
 // ProjectResults groups matched files for a single project
 type ProjectResults struct {
-	Project string
-	Files   []MatchedFile
+	Project       string
+	QualifiedName string
+	Workspace     string
+	ProjectPath   string // absolute filesystem path
+	Files         []MatchedFile
 }
 
 // SearchData is passed to the search template
@@ -52,61 +55,63 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			matchingProjects = append(matchingProjects, project)
 		}
 
-		// Track which files matched, deduped by path
-		fileMatches := make(map[string]*MatchedFile) // relPath -> match
+		// Track which files matched, deduped by project-relative path
+		fileMatches := make(map[string]*MatchedFile)
 
-		// Search files in this project
-		thoughtsPath := project.ThoughtsPath()
-		if thoughtsPath == "" {
-			continue
-		}
-
-		filepath.Walk(thoughtsPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
-				return nil
+		// Search files across all sources in this project
+		for _, source := range project.Sources {
+			if source.RootPath == "" {
+				continue
 			}
 
-			relPath, _ := filepath.Rel(thoughtsPath, path)
-			fileName := filepath.Base(path)
-
-			fileType := classifyFile(relPath)
-
-			// Check if filename matches
-			if strings.Contains(strings.ToLower(fileName), query) {
-				fileMatches[relPath] = &MatchedFile{
-					Path:      relPath,
-					Name:      fileName,
-					NameMatch: true,
-					FileType:  fileType,
+			filepath.Walk(source.RootPath, func(path string, info os.FileInfo, err error) error {
+				if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+					return nil
 				}
-			}
 
-			// Search file content
-			file, err := os.Open(path)
-			if err != nil {
-				return nil
-			}
-			defer file.Close()
+				relToProject, _ := filepath.Rel(project.Path, path)
+				fileName := filepath.Base(path)
 
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				if strings.Contains(strings.ToLower(scanner.Text()), query) {
-					if _, ok := fileMatches[relPath]; !ok {
-						fileMatches[relPath] = &MatchedFile{
-							Path:     relPath,
-							Name:     fileName,
-							FileType: fileType,
-						}
+				fileType := classifyFile(relToProject)
+
+				// Check if filename matches
+				if strings.Contains(strings.ToLower(fileName), query) {
+					fileMatches[relToProject] = &MatchedFile{
+						Path:      relToProject,
+						Name:      fileName,
+						NameMatch: true,
+						FileType:  fileType,
 					}
-					break // only need to know it matched, not how many times
 				}
-			}
-			return nil
-		})
+
+				// Search file content
+				file, err := os.Open(path)
+				if err != nil {
+					return nil
+				}
+				defer file.Close()
+
+				scanner := bufio.NewScanner(file)
+				for scanner.Scan() {
+					if strings.Contains(strings.ToLower(scanner.Text()), query) {
+						if _, ok := fileMatches[relToProject]; !ok {
+							fileMatches[relToProject] = &MatchedFile{
+								Path:     relToProject,
+								Name:     fileName,
+								FileType: fileType,
+							}
+						}
+						break // only need to know it matched, not how many times
+					}
+				}
+				return nil
+			})
+		}
 
 		// Collect matches for this project
 		if len(fileMatches) > 0 {
-			pr := &ProjectResults{Project: project.Name}
+			qn := project.QualifiedName()
+			pr := &ProjectResults{Project: project.Name, Workspace: project.WorkspaceName, ProjectPath: project.Path, QualifiedName: qn}
 			for _, m := range fileMatches {
 				pr.Files = append(pr.Files, *m)
 				totalFiles++
@@ -118,7 +123,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				}
 				return pr.Files[i].Name < pr.Files[j].Name
 			})
-			projectResultsMap[project.Name] = pr
+			projectResultsMap[qn] = pr
 		}
 
 		if totalFiles >= maxFiles {

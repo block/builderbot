@@ -9,18 +9,6 @@ import (
 	"github.com/loganj/birdseye/internal/watcher"
 )
 
-// toCommentPath converts a thoughts-relative path (used by HTTP API) to a
-// project-relative path (used by the comment store).
-func toCommentPath(thoughtsRelPath string) string {
-	return "thoughts/" + thoughtsRelPath
-}
-
-// fromCommentPath converts a project-relative path (from comment store) back
-// to a thoughts-relative path (for HTTP API responses).
-func fromCommentPath(projectRelPath string) string {
-	return strings.TrimPrefix(projectRelPath, "thoughts/")
-}
-
 // handleAPIThreads dispatches GET (list threads) and POST (create thread).
 func (s *Server) handleAPIThreads(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -107,7 +95,7 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 	result := make([]APIFileInReview, len(files))
 	for i, f := range files {
 		result[i] = APIFileInReview{
-			FilePath:    fromCommentPath(f.FilePath),
+			FilePath:    f.FilePath,
 			OpenThreads: f.OpenThreads,
 			AgentActive: s.comments.IsAgentActive(projectName, f.FilePath),
 		}
@@ -118,6 +106,7 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListThreads handles GET /api/threads?project=X&path=Y[&status=open][&agent=true].
+// Paths are project-relative (e.g., "thoughts/plans/foo.md").
 func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 	projectName := r.URL.Query().Get("project")
 	if projectName == "" {
@@ -131,7 +120,7 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 
 	// Record heartbeat when an agent polls for threads
 	if isAgent && filePath != "" {
-		s.comments.RecordHeartbeat(projectName, toCommentPath(filePath))
+		s.comments.RecordHeartbeat(projectName, filePath)
 	}
 
 	// When path is omitted, return all open threads across the project
@@ -144,16 +133,12 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		if threads == nil {
 			threads = []comments.ThreadWithFile{}
 		}
-		// Convert project-relative paths back to thoughts-relative for HTTP API
-		for i := range threads {
-			threads[i].FilePath = fromCommentPath(threads[i].FilePath)
-		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(threads)
 		return
 	}
 
-	threads, err := s.comments.LoadThreads(projectName, toCommentPath(filePath))
+	threads, err := s.comments.LoadThreads(projectName, filePath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -204,7 +189,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		Body:   req.Body,
 	}
 
-	thread, err := s.comments.CreateThread(req.Project, toCommentPath(req.Path), req.Anchor, comment)
+	thread, err := s.comments.CreateThread(req.Project, req.Path, req.Anchor, comment)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -241,7 +226,7 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request, thread
 		Body:   req.Body,
 	}
 
-	thread, err := s.comments.AddComment(req.Project, toCommentPath(req.Path), threadID, comment)
+	thread, err := s.comments.AddComment(req.Project, req.Path, threadID, comment)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -278,9 +263,9 @@ func (s *Server) handleUpdateThread(w http.ResponseWriter, r *http.Request, thre
 	var err error
 	switch req.Status {
 	case "resolved":
-		err = s.comments.ResolveThread(req.Project, toCommentPath(req.Path), threadID, req.ResolvedBy)
+		err = s.comments.ResolveThread(req.Project, req.Path, threadID, req.ResolvedBy)
 	case "open":
-		err = s.comments.ReopenThread(req.Project, toCommentPath(req.Path), threadID)
+		err = s.comments.ReopenThread(req.Project, req.Path, threadID)
 	default:
 		http.Error(w, "invalid status: must be 'resolved' or 'open'", http.StatusBadRequest)
 		return

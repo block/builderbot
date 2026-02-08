@@ -42,24 +42,36 @@ var md = goldmark.New(
 )
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
-	// Parse /file/{project}/{path}
-	path := strings.TrimPrefix(r.URL.Path, "/file/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) < 2 {
+	// Parse /file/{qualifiedName}/{filePath}
+	// qualifiedName may be "workspace/project" (2 segments) or "project" (1 segment).
+	// Try 2-segment match first, then fall back to 1-segment.
+	rest := strings.TrimPrefix(r.URL.Path, "/file/")
+
+	var project *discovery.Project
+	var filePath string
+
+	// Try 2-segment qualified name: workspace/project/path
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) >= 3 {
+		qn := parts[0] + "/" + parts[1]
+		if p := s.cache.FindProject(qn); p != nil {
+			project = p
+			filePath = parts[2]
+		}
+	}
+	// Fall back to 1-segment qualified name: project/path
+	if project == nil && len(parts) >= 2 {
+		if p := s.cache.FindProject(parts[0]); p != nil {
+			project = p
+			filePath = strings.Join(parts[1:], "/")
+		}
+	}
+	if project == nil || filePath == "" {
 		http.NotFound(w, r)
 		return
 	}
-	projectName := parts[0]
-	filePath := parts[1]
 
-	// Find project
-	project := s.cache.FindProject(projectName)
-	if project == nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	fullPath := filepath.Join(project.ThoughtsPath(), filePath)
+	fullPath := filepath.Join(project.Path, filePath)
 	content, err := os.ReadFile(fullPath)
 	if err != nil {
 		http.NotFound(w, r)
@@ -84,8 +96,8 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		parentPath = ""
 	}
 
-	// Load comment threads for this file (comment store uses project-relative paths)
-	threads, _ := s.comments.LoadThreads(projectName, "thoughts/"+filePath)
+	// Load comment threads for this file (paths are project-relative)
+	threads, _ := s.comments.LoadThreads(project.QualifiedName(), filePath)
 	anchorLines := comments.ResolveAnchorsToLines(threads, string(content))
 
 	threadsJSON, _ := json.Marshal(threads)

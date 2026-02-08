@@ -53,14 +53,10 @@ func runServe(port int, dev bool, rootOverride string) {
 		log.Printf("Warning: could not save config: %v", err)
 	}
 
-	// Use the first workspace path as root for now.
-	// Phase 3 will generalize to multi-workspace discovery.
-	rootDir := cfg.Workspaces[0].Path
-
 	agents.StartPolling()
 	defer agents.StopPolling()
 
-	c := cache.New(rootDir)
+	c := cache.New()
 	cs := comments.NewStore(c)
 
 	w, err := watcher.New(c)
@@ -75,7 +71,7 @@ func runServe(port int, dev bool, rootOverride string) {
 	}
 
 	mcpHandler := mcpserver.NewHandler(cs, c)
-	srv := server.New(c, w, cs, mcpHandler, templateDir)
+	srv := server.New(c, w, cs, mcpHandler, templateDir, cfg)
 	addr := fmt.Sprintf(":%d", port)
 
 	// Write .mcp.json for MCP client discovery

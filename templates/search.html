@@ -319,9 +319,9 @@
             <h2>Projects</h2>
             <div class="projects">
                 {{range .MatchingProjects}}
-                <div class="project" data-path="{{.Name}}/thoughts">
+                <div class="project" data-path="{{.Path}}">
                     <div class="project-header">
-                        <div class="project-name"><a href="/project/{{.Name}}">{{.Name}}</a></div>
+                        <div class="project-name"><a href="/project/{{.QualifiedName}}">{{.Name}}</a></div>
                         <button class="copy-btn" onclick="copyItemPath(this, event)">Copy</button>
                     </div>
                     {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
@@ -334,19 +334,20 @@
             {{if .ProjectResults}}
             <h2>Thoughts</h2>
             {{range .ProjectResults}}
-            {{$proj := .Project}}
+            {{$qn := .QualifiedName}}
+            {{$projPath := .ProjectPath}}
             <div class="project-group">
-                <div class="project-group-header" data-path="{{$proj}}/thoughts">
-                    <a href="/project/{{$proj}}">{{$proj}}</a>
+                <div class="project-group-header" data-path="{{$projPath}}">
+                    <a href="/project/{{$qn}}">{{.Project}}</a>
                     <button class="copy-btn" onclick="copyItemPath(this, event)">Copy</button>
                 </div>
                 {{range .Files}}
-                <div class="file" data-project="{{$proj}}" data-path="{{.Path}}">
+                <div class="file" data-project="{{$qn}}" data-project-path="{{$projPath}}" data-path="{{.Path}}">
                     <div class="file-left">
                         <input type="checkbox" class="file-checkbox" />
                         {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
                         {{if .NameMatch}}<span class="match-type">name</span>{{end}}
-                        <span class="file-name"><a href="/file/{{$proj}}/{{.Path}}">{{.Name}}</a></span>
+                        <span class="file-name"><a href="/file/{{$qn}}/{{.Path}}">{{.Name}}</a></span>
                     </div>
                     <div class="file-right">
                         <div class="copy-dropdown">
@@ -379,8 +380,7 @@
             event.preventDefault();
             event.stopPropagation();
             const el = btn.closest('[data-path]');
-            const path = '@' + el.dataset.path;
-            navigator.clipboard.writeText(path);
+            navigator.clipboard.writeText(el.dataset.path);
 
             btn.textContent = 'Copied!';
             btn.classList.add('copied');
@@ -416,13 +416,14 @@
 
         function copyRelative(btn) {
             const d = getFileData(btn);
-            navigator.clipboard.writeText('@thoughts/' + d.path);
+            navigator.clipboard.writeText('@' + d.path);
             flashCopied(btn);
         }
 
         function copyAbsolute(btn) {
+            const row = btn.closest('[data-project-path]');
             const d = getFileData(btn);
-            navigator.clipboard.writeText('@' + d.project + '/thoughts/' + d.path);
+            navigator.clipboard.writeText(row.dataset.projectPath + '/' + d.path);
             flashCopied(btn);
         }
 
@@ -459,7 +460,7 @@
             const checkboxes = document.querySelectorAll('.file-checkbox:checked');
             const paths = Array.from(checkboxes).map(cb => {
                 const file = cb.closest('.file');
-                return '@' + file.dataset.path;
+                return file.dataset.projectPath + '/' + file.dataset.path;
             });
 
             navigator.clipboard.writeText(paths.join('\n'));

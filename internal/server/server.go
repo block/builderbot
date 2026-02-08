@@ -18,6 +18,7 @@ import (
 	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
+	"github.com/loganj/birdseye/internal/config"
 	"github.com/loganj/birdseye/internal/discovery"
 	"github.com/loganj/birdseye/internal/watcher"
 	"github.com/loganj/birdseye/templates"
@@ -32,9 +33,10 @@ type Server struct {
 	tmpl        *template.Template
 	loadOnce    sync.Once
 	templateDir string // if set, reload templates from disk on each request
+	cfg         *config.Config
 }
 
-func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, templateDir string) *Server {
+func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, templateDir string, cfg *config.Config) *Server {
 	s := &Server{
 		cache:       c,
 		watcher:     w,
@@ -42,6 +44,7 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 		mcpHandler:  mcpHandler,
 		mux:         http.NewServeMux(),
 		templateDir: templateDir,
+		cfg:         cfg,
 	}
 
 	// Parse templates from embedded filesystem
@@ -68,21 +71,50 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+// discoverAllProjects discovers projects from all configured workspaces and standalone projects.
+func (s *Server) discoverAllProjects() []discovery.Project {
+	var allProjects []discovery.Project
+	for _, ws := range s.cfg.Workspaces {
+		projects, err := discovery.DiscoverWorkspace(ws.Path, ws.DisplayName())
+		if err != nil {
+			log.Printf("Warning: could not discover workspace %s: %v", ws.Path, err)
+			continue
+		}
+		allProjects = append(allProjects, projects...)
+	}
+	for _, pc := range s.cfg.Projects {
+		p, err := discovery.LoadStandaloneProject(pc.Path, pc)
+		if err != nil {
+			log.Printf("Warning: could not load standalone project %s: %v", pc.Path, err)
+			continue
+		}
+		allProjects = append(allProjects, p)
+	}
+	return allProjects
+}
+
+// workspacePaths extracts workspace directory paths from the config.
+func (s *Server) workspacePaths() []string {
+	paths := make([]string, len(s.cfg.Workspaces))
+	for i, ws := range s.cfg.Workspaces {
+		paths[i] = ws.Path
+	}
+	return paths
+}
+
 // ensureLoaded does fast project discovery on first request, then populates in background.
 func (s *Server) ensureLoaded() {
 	s.loadOnce.Do(func() {
-		root := s.cache.Root()
-		projects, err := discovery.FindProjectsFast(root)
-		if err != nil {
-			log.Printf("Error discovering projects: %v", err)
-			return
-		}
-
-		log.Printf("Found %d projects with thoughts/ directories", len(projects))
+		projects := s.discoverAllProjects()
+		log.Printf("Found %d projects across %d workspace(s)", len(projects), len(s.cfg.Workspaces))
 
 		s.cache.SetProjects(projects)
 
-		if err := s.watcher.Start(); err != nil {
+		wsPaths := s.workspacePaths()
+		discoverFn := func() ([]discovery.Project, error) {
+			return s.discoverAllProjects(), nil
+		}
+		if err := s.watcher.Start(wsPaths, discoverFn); err != nil {
 			log.Printf("Warning: file watcher failed to start: %v", err)
 		}
 
@@ -111,6 +143,8 @@ func (s *Server) populateProjects() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			qn := p.QualifiedName()
+
 			var git *discovery.GitInfo
 			if p.Name != "(root)" {
 				git = discovery.GetGitInfo(p.Path)
@@ -121,7 +155,7 @@ func (s *Server) populateProjects() {
 				summary = "Cross-project notes and research"
 			} else {
 				// Use cached file list to avoid re-walking the directory
-				cachedFiles := s.cache.ProjectFiles(p.Name)
+				cachedFiles := s.cache.ProjectFiles(qn)
 				if len(cachedFiles) > 0 {
 					limit := 5
 					if len(cachedFiles) < limit {
@@ -129,13 +163,13 @@ func (s *Server) populateProjects() {
 					}
 					filePaths := make([]string, limit)
 					for i, f := range cachedFiles[:limit] {
-						filePaths[i] = filepath.Join(p.ThoughtsPath(), f.Path)
+						filePaths[i] = filepath.Join(p.Path, f.FullPath)
 					}
 					summary = discovery.GenerateSummaryFromFiles(filePaths)
 				}
 			}
 
-			s.cache.EnrichProject(p.Name, git, summary)
+			s.cache.EnrichProject(qn, git, summary)
 		}(p)
 	}
 
@@ -188,7 +222,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	for i, f := range allFiles {
 		files[i] = IndexFile{
 			Project:  f.Project,
-			FilePath: f.Path,
+			FilePath: f.FullPath,
 			FileName: f.Name,
 			ModTime:  f.ModTime,
 			Age:      formatAge(f.ModTime),
@@ -203,21 +237,22 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	agentMap := make(map[string]string)
 	for _, p := range sortedProjects {
 		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
+			qn := p.QualifiedName()
 			if len(agts) == 1 {
 				prompt := agts[0].Prompt
 				if prompt == "" {
 					prompt = "Agent active"
 				}
-				agentMap[p.Name] = prompt
+				agentMap[qn] = prompt
 			} else {
-				agentMap[p.Name] = fmt.Sprintf("%d agents active", len(agts))
+				agentMap[qn] = fmt.Sprintf("%d agents active", len(agts))
 			}
 		}
 	}
 
 	ages := make(map[string]string)
 	for _, p := range sortedProjects {
-		ages[p.Name] = computeProjectAge(p)
+		ages[p.QualifiedName()] = computeProjectAge(p)
 	}
 
 	data := struct {
@@ -309,24 +344,28 @@ type ProjectFile struct {
 }
 
 func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
-	// Parse /project/{name}
-	projectName := strings.TrimPrefix(r.URL.Path, "/project/")
-	projectName = strings.TrimSuffix(projectName, "/")
+	// Parse /project/{qualifiedName} where qualifiedName is "workspace/project" or "project"
+	qualifiedName := strings.TrimPrefix(r.URL.Path, "/project/")
+	qualifiedName = strings.TrimSuffix(qualifiedName, "/")
+	if qualifiedName == "" {
+		http.NotFound(w, r)
+		return
+	}
 
-	// Find project
-	project := s.cache.FindProject(projectName)
+	// Find project by qualified name
+	project := s.cache.FindProject(qualifiedName)
 	if project == nil {
 		http.NotFound(w, r)
 		return
 	}
 
 	// Get files from cache
-	cachedFiles := s.cache.ProjectFiles(projectName)
+	cachedFiles := s.cache.ProjectFiles(qualifiedName)
 	files := make([]ProjectFile, len(cachedFiles))
 	for i, f := range cachedFiles {
 		files[i] = ProjectFile{
 			Name:     f.Name,
-			Path:     f.Path,
+			Path:     f.FullPath,
 			ModTime:  f.ModTime,
 			Age:      formatAge(f.ModTime),
 			FileType: f.FileType,
@@ -396,16 +435,19 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // API handlers for dynamic updates
 
 type APIProject struct {
-	Name         string   `json:"name"`
-	Branch       string   `json:"branch,omitempty"`
-	Dirty        bool     `json:"dirty,omitempty"`
-	FileCount    int      `json:"fileCount"`
-	Summary      string   `json:"summary,omitempty"`
-	LastModified string   `json:"lastModified"`
-	AgentCount   int      `json:"agentCount,omitempty"`
-	AgentPrompts []string `json:"agentPrompts,omitempty"`
-	Age          string   `json:"age,omitempty"`
-	ReviewCount  int      `json:"reviewCount,omitempty"`
+	Name          string   `json:"name"`
+	QualifiedName string   `json:"qualifiedName"`
+	Workspace     string   `json:"workspace"`
+	ProjectPath   string   `json:"projectPath"`
+	Branch        string   `json:"branch,omitempty"`
+	Dirty         bool     `json:"dirty,omitempty"`
+	FileCount     int      `json:"fileCount"`
+	Summary       string   `json:"summary,omitempty"`
+	LastModified  string   `json:"lastModified"`
+	AgentCount    int      `json:"agentCount,omitempty"`
+	AgentPrompts  []string `json:"agentPrompts,omitempty"`
+	Age           string   `json:"age,omitempty"`
+	ReviewCount   int      `json:"reviewCount,omitempty"`
 }
 
 func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
@@ -416,12 +458,16 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 	projects := s.cache.ProjectsSortedByModTime()
 	result := make([]APIProject, len(projects))
 	for i, p := range projects {
+		qn := p.QualifiedName()
 		result[i] = APIProject{
-			Name:         p.Name,
-			FileCount:    p.FileCount,
-			Summary:      p.Summary,
-			LastModified: p.LastModified.Format(time.RFC3339),
-			Age:          computeProjectAge(p),
+			Name:          p.Name,
+			QualifiedName: qn,
+			Workspace:     p.WorkspaceName,
+			ProjectPath:   p.Path,
+			FileCount:     p.FileCount,
+			Summary:       p.Summary,
+			LastModified:  p.LastModified.Format(time.RFC3339),
+			Age:           computeProjectAge(p),
 		}
 		if p.Git != nil {
 			result[i].Branch = p.Git.Branch
@@ -436,7 +482,7 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 			result[i].AgentPrompts = prompts
 		}
 		// Count files in review for this project
-		if reviews, err := s.comments.ListFilesInReview(p.Name); err == nil {
+		if reviews, err := s.comments.ListFilesInReview(qn); err == nil {
 			result[i].ReviewCount = len(reviews)
 		}
 	}
@@ -444,27 +490,36 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 type APIFile struct {
-	Name     string `json:"name"`
-	Path     string `json:"path"`
-	Project  string `json:"project,omitempty"`
-	Age      string `json:"age"`
-	FileType string `json:"fileType,omitempty"`
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Project     string `json:"project,omitempty"`
+	Workspace   string `json:"workspace,omitempty"`
+	ProjectPath string `json:"projectPath,omitempty"`
+	Age         string `json:"age"`
+	FileType    string `json:"fileType,omitempty"`
 }
 
 func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	projectName := strings.TrimPrefix(r.URL.Path, "/api/project/")
-	projectName = strings.TrimSuffix(projectName, "/")
+	// Parse /api/project/{qualifiedName}
+	qualifiedName := strings.TrimPrefix(r.URL.Path, "/api/project/")
+	qualifiedName = strings.TrimSuffix(qualifiedName, "/")
+	if qualifiedName == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
 
-	files := s.cache.ProjectFiles(projectName)
+	files := s.cache.ProjectFiles(qualifiedName)
 	result := make([]APIFile, len(files))
 	for i, f := range files {
 		result[i] = APIFile{
-			Name:     f.Name,
-			Path:     f.Path,
-			Age:      formatAge(f.ModTime),
-			FileType: f.FileType,
+			Name:        f.Name,
+			Path:        f.FullPath,
+			Workspace:   f.Workspace,
+			ProjectPath: f.ProjectPath,
+			Age:         formatAge(f.ModTime),
+			FileType:    f.FileType,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -477,32 +532,33 @@ func (s *Server) handleAPIRecent(w http.ResponseWriter, r *http.Request) {
 	result := make([]APIFile, len(files))
 	for i, f := range files {
 		result[i] = APIFile{
-			Name:    f.Name,
-			Path:    f.Path,
-			Project: f.Project,
-			Age:     formatAge(f.ModTime),
+			Name:      f.Name,
+			Path:      f.FullPath,
+			Project:   f.Project,
+			Workspace: f.Workspace,
+			Age:       formatAge(f.ModTime),
 		}
 	}
 	json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
-	projectName := r.URL.Query().Get("project")
+	qualifiedName := r.URL.Query().Get("project")
 	filePath := r.URL.Query().Get("path")
-	if projectName == "" || filePath == "" {
+	if qualifiedName == "" || filePath == "" {
 		http.Error(w, "missing project or path", http.StatusBadRequest)
 		return
 	}
 
-	project := s.cache.FindProject(projectName)
+	project := s.cache.FindProject(qualifiedName)
 	if project == nil {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
 
-	fullPath := filepath.Join(project.ThoughtsPath(), filePath)
+	fullPath := filepath.Join(project.Path, filePath)
 
-	// Verify the file exists and is under the thoughts directory
+	// Verify the file exists and is under the project directory
 	if _, err := os.Stat(fullPath); err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
@@ -525,19 +581,19 @@ type ProjectInfo struct {
 }
 
 func (s *Server) handleProjectInfo(w http.ResponseWriter, r *http.Request) {
-	projectName := r.URL.Query().Get("name")
-	if projectName == "" {
+	qualifiedName := r.URL.Query().Get("name")
+	if qualifiedName == "" {
 		http.Error(w, "missing project name", http.StatusBadRequest)
 		return
 	}
-	project := s.cache.FindProject(projectName)
+	project := s.cache.FindProject(qualifiedName)
 	if project == nil {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
 
 	info := ProjectInfo{
-		FileCount: len(s.cache.ProjectFiles(projectName)),
+		FileCount: len(s.cache.ProjectFiles(qualifiedName)),
 	}
 
 	// Fresh git status
@@ -563,30 +619,30 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	projectName := r.URL.Query().Get("name")
-	if projectName == "" {
+	qualifiedName := r.URL.Query().Get("name")
+	if qualifiedName == "" {
 		http.Error(w, "missing project name", http.StatusBadRequest)
 		return
 	}
-	if projectName == "(root)" {
-		http.Error(w, "cannot delete root project", http.StatusForbidden)
-		return
-	}
 
-	project := s.cache.FindProject(projectName)
+	project := s.cache.FindProject(qualifiedName)
 	if project == nil {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
+	if project.Name == "(root)" {
+		http.Error(w, "cannot delete root project", http.StatusForbidden)
+		return
+	}
 
 	if err := os.RemoveAll(project.Path); err != nil {
-		log.Printf("Failed to delete project %s: %v", projectName, err)
+		log.Printf("Failed to delete project %s: %v", qualifiedName, err)
 		http.Error(w, fmt.Sprintf("failed to delete: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	log.Printf("Deleted project directory: %s", project.Path)
-	s.cache.RemoveProject(projectName)
+	s.cache.RemoveProject(qualifiedName)
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 	w.WriteHeader(http.StatusNoContent)
 }

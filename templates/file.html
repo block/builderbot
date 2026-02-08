@@ -253,7 +253,7 @@
         padding: 4px 12px;
         background: #fff5f5;
     }
-    .comment-highlight {
+    .comment-highlight, .pending-highlight {
         background: #fff3aa;
         border-bottom: 2px solid #f5c518;
         cursor: pointer;
@@ -882,7 +882,52 @@
 
     function captureSelectionAndShowForm(sel, selectedText) {
         pendingAnchor = computeAnchor(sel, selectedText);
+        applyPendingHighlight(sel);
         showNewThreadForm(selectedText);
+    }
+
+    function applyPendingHighlight(sel) {
+        removePendingHighlight();
+        if (!sel.rangeCount) return;
+        var range = sel.getRangeAt(0);
+        var contentEl = document.getElementById('content');
+        if (!contentEl.contains(range.commonAncestorContainer)) return;
+        // Collect text nodes that intersect the selection range
+        var treeWalker = document.createTreeWalker(contentEl, NodeFilter.SHOW_TEXT);
+        var textNodes = [];
+        while (treeWalker.nextNode()) {
+            if (range.intersectsNode(treeWalker.currentNode)) textNodes.push(treeWalker.currentNode);
+        }
+        // Wrap each overlapping text node (iterate backwards to preserve positions)
+        for (var i = textNodes.length - 1; i >= 0; i--) {
+            var node = textNodes[i];
+            var start = (node === range.startContainer) ? range.startOffset : 0;
+            var end = (node === range.endContainer) ? range.endOffset : node.nodeValue.length;
+            if (start >= end) continue;
+            if (start === 0 && end === node.nodeValue.length) {
+                var mark = document.createElement('mark');
+                mark.className = 'pending-highlight';
+                node.parentNode.insertBefore(mark, node);
+                mark.appendChild(node);
+            } else {
+                var subRange = document.createRange();
+                subRange.setStart(node, start);
+                subRange.setEnd(node, end);
+                var mark = document.createElement('mark');
+                mark.className = 'pending-highlight';
+                subRange.surroundContents(mark);
+            }
+        }
+        sel.removeAllRanges();
+    }
+
+    function removePendingHighlight() {
+        document.querySelectorAll('.pending-highlight').forEach(function(mark) {
+            var parent = mark.parentNode;
+            while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+            parent.removeChild(mark);
+            parent.normalize();
+        });
     }
 
     function computeAnchor(sel, selectedText) {
@@ -1009,6 +1054,7 @@
     function hideNewThreadForm() {
         document.getElementById('new-thread-form-container').innerHTML = '';
         pendingAnchor = null;
+        removePendingHighlight();
     }
     function handleNewThreadKeydown(event) {
         if (event.key === 'Escape') hideNewThreadForm();
@@ -1040,6 +1086,7 @@
     function addCommentHighlights(threadList, lines) {
         var content = document.getElementById('content');
         if (!content) return;
+        removePendingHighlight();
         content.querySelectorAll('.comment-highlight').forEach(function(mark) {
             var parent = mark.parentNode;
             while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);

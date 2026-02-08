@@ -101,7 +101,20 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	threads, _ := s.comments.LoadThreads(project.QualifiedName(), filePath)
 	anchorLines := comments.ResolveAnchorsToLines(threads, string(content))
 
-	threadsJSON, _ := json.Marshal(threads)
+	// Wrap threads with typing state for initial render
+	qualName := project.QualifiedName()
+	type threadWithTyping struct {
+		comments.Thread
+		AgentTyping bool `json:"agentTyping,omitempty"`
+	}
+	wrapped := make([]threadWithTyping, len(threads))
+	for i, t := range threads {
+		wrapped[i] = threadWithTyping{Thread: t}
+		if s.comments.IsTyping(qualName, filePath, t.ID) {
+			wrapped[i].AgentTyping = true
+		}
+	}
+	threadsJSON, _ := json.Marshal(wrapped)
 	anchorLinesJSON, _ := json.Marshal(anchorLines)
 
 	// Determine source type for this file (needed for menu options)
@@ -144,12 +157,11 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	s.renderPage(w, "file.html", nav, data)
 
 	// Auto-start agent if there are pending human comments and no agent running
-	qualifiedName := project.QualifiedName()
-	if s.agents != nil && s.agents.Status(qualifiedName) == nil {
-		if s.comments.HasPendingHumanComments(qualifiedName) {
+	if s.agents != nil && s.agents.Status(qualName) == nil {
+		if s.comments.HasPendingHumanComments(qualName) {
 			go func() {
-				if _, err := s.agents.Start(qualifiedName); err != nil {
-					log.Printf("Auto-start agent on view for %s: %v", qualifiedName, err)
+				if _, err := s.agents.Start(qualName); err != nil {
+					log.Printf("Auto-start agent on view for %s: %v", qualName, err)
 				}
 			}()
 		}

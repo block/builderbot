@@ -263,9 +263,6 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project is required")
 		}
 
-		// Clear typing state — agent is done processing and entering wait loop
-		store.ClearProjectTyping(input.Project)
-
 		// Record heartbeat at start of wait
 		store.RecordHeartbeat(input.Project, "")
 
@@ -337,6 +334,19 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			}
 			res, err := textResult(result)
 			return res, nil, err
+		}
+
+		// Refresh typing timestamps for threads still awaiting a response
+		// so they survive across 30s wait cycles.
+		for _, f := range files {
+			fc, loadErr := store.Load(input.Project, f.FilePath)
+			if loadErr == nil {
+				for _, t := range fc.Threads {
+					if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+						store.SetTyping(input.Project, f.FilePath, t.ID)
+					}
+				}
+			}
 		}
 
 		result := map[string]any{

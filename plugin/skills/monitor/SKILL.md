@@ -1,7 +1,6 @@
 ---
-name: monitor-reviews
-user_invocable: true
-description: "Review and discuss markdown documents in thoughts/ directories using birdseye. TRIGGER: always invoke this skill after creating or modifying files in thoughts/ (plans, research, guides). Also use when asked to monitor reviews, watch for feedback, respond to comments, or when user mentions \"birdseye\", \"review\", \"thoughts review\", or \"monitor reviews\"."
+name: monitor
+description: "Monitor and respond to birdseye document review comments on markdown files in thoughts/ directories."
 ---
 
 # Birdseye Document Review

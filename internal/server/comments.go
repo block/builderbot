@@ -105,6 +105,12 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+// threadResponse wraps a Thread with ephemeral UI state.
+type threadResponse struct {
+	comments.Thread
+	AgentTyping bool `json:"agentTyping,omitempty"`
+}
+
 // handleListThreads handles GET /api/threads?project=X&path=Y[&status=open][&agent=true].
 // Paths are project-relative (e.g., "thoughts/plans/foo.md").
 func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
@@ -155,12 +161,21 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		threads = filtered
 	}
 
-	if threads == nil {
-		threads = []comments.Thread{}
+	var result []threadResponse
+	for _, t := range threads {
+		tr := threadResponse{Thread: t}
+		if s.comments.IsTyping(projectName, filePath, t.ID) {
+			tr.AgentTyping = true
+		}
+		result = append(result, tr)
+	}
+
+	if result == nil {
+		result = []threadResponse{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(threads)
+	json.NewEncoder(w).Encode(result)
 }
 
 // handleCreateThread handles POST /api/threads.
@@ -196,6 +211,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventCommentsChanged, Project: req.Project})
+	s.maybeStartAgent(req.Project, req.Role)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(thread)
@@ -237,6 +253,7 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request, thread
 	}
 
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventCommentsChanged, Project: req.Project})
+	s.maybeStartAgent(req.Project, req.Role)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(thread)

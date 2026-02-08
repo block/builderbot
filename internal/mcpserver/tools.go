@@ -130,6 +130,10 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 		for _, t := range fc.Threads {
 			if t.ID == input.ThreadID {
+				// Set typing indicator if last comment is from a human
+				if len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+					store.SetTyping(input.Project, input.Path, input.ThreadID)
+				}
 				res, err := textResult(t)
 				return res, nil, err
 			}
@@ -145,6 +149,8 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		if input.Project == "" || input.Path == "" || input.ThreadID == "" || input.Body == "" {
 			return nil, nil, fmt.Errorf("project, path, threadId, and body are all required")
 		}
+
+		store.ClearTyping(input.Project, input.Path, input.ThreadID)
 
 		comment := comments.Comment{
 			Author: "claude",
@@ -250,6 +256,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		if input.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")
 		}
+
+		// Clear typing state — agent is done processing and entering wait loop
+		store.ClearProjectTyping(input.Project)
 
 		// Record heartbeat at start of wait
 		store.RecordHeartbeat(input.Project, "")

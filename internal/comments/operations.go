@@ -172,6 +172,21 @@ func (s *Store) ListOpenThreads(projectName string) ([]ThreadWithFile, error) {
 	return results, nil
 }
 
+// HasPendingHumanComments returns true if any open thread in the project
+// has a human as the last commenter (i.e., awaiting agent response).
+func (s *Store) HasPendingHumanComments(projectName string) bool {
+	threads, err := s.ListOpenThreads(projectName)
+	if err != nil || len(threads) == 0 {
+		return false
+	}
+	for _, t := range threads {
+		if len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+			return true
+		}
+	}
+	return false
+}
+
 // ListFilesInReview walks the .birdseye/comments/ directory for the given
 // project and returns all files that have at least one open comment thread.
 // Returned file paths are relative to the project root (e.g., "thoughts/shared/plans/foo.md").

@@ -736,7 +736,7 @@
 
         // --- Sidebar SSE refresh (agent dots) ---
         onSSE(function(data) {
-            if (data.type === 'projects') {
+            if (data.type === 'projects' || data.type === 'agents') {
                 debouncedRefresh('sidebar', refreshSidebar);
             }
         });

@@ -157,6 +157,42 @@
     .file-menu .menu-danger { color: #cf222e; }
     .file-menu .menu-danger:hover { background: #fff5f5; }
 
+    .agent-controls { margin-bottom: 0; }
+    .agent-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        font-size: 0.85em;
+        color: #2da44e;
+        background: #dafbe1;
+        border: 1px solid #aceebb;
+        border-radius: 6px;
+        margin-bottom: 16px;
+    }
+    .agent-status .agent-dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        background: #2da44e;
+        border-radius: 50%;
+        flex-shrink: 0;
+        animation: sidebar-pulse 2s infinite;
+    }
+    .agent-status .agent-stop-btn {
+        background: none;
+        border: 1px solid #aceebb;
+        border-radius: 4px;
+        padding: 2px 8px;
+        font-size: 0.85em;
+        cursor: pointer;
+        color: #656d76;
+        margin-left: 4px;
+    }
+    .agent-status .agent-stop-btn:hover {
+        background: #fff;
+        border-color: #656d76;
+    }
     .add-source-btn {
         display: inline-block;
         color: #aaa;
@@ -168,6 +204,7 @@
 {{end}}
 
 {{define "content"}}
+    <div class="agent-controls" id="agent-controls"></div>
     <div id="fileContainer">
     {{if .Page.Files}}
         {{if .Page.MultiSource}}
@@ -402,11 +439,40 @@
         });
     }
 
+    // --- Agent controls ---
+    function refreshAgentControls() {
+        fetch('/api/agents?project=' + encodeURIComponent(qualifiedName))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var el = document.getElementById('agent-controls');
+                if (!el) return;
+                if (data.running) {
+                    el.innerHTML = '<div class="agent-status">' +
+                        '<span class="agent-dot"></span>' +
+                        '<span>Agent active</span>' +
+                        '<button onclick="stopAgent()" class="agent-stop-btn">Stop</button>' +
+                        '</div>';
+                } else {
+                    el.innerHTML = '';
+                }
+            })
+            .catch(function() {});
+    }
+
+    function stopAgent() {
+        fetch('/api/agents/stop?project=' + encodeURIComponent(qualifiedName), {
+            method: 'POST'
+        }).then(refreshAgentControls);
+    }
+
+    refreshAgentControls();
+
     // SSE handlers
     onSSE(function(data) {
         if (data.type === 'files' && data.project === qualifiedName) debouncedRefresh('files', refreshFiles);
         if (data.type === 'projects') debouncedRefresh('projects', refreshProjectStatus);
         if (data.type === 'comments' && data.project === qualifiedName) debouncedRefresh('reviews', refreshReviewBadges);
+        if (data.type === 'agents') debouncedRefresh('agent-controls', refreshAgentControls);
     });
 
     // Trigger visibility-based refresh

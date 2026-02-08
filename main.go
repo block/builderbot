@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
 	"github.com/loganj/birdseye/internal/config"
@@ -69,8 +70,9 @@ func runServe(port int, dev bool, rootOverride string) {
 		templateDir = "templates"
 	}
 
+	am := agents.New(c, cs, port)
 	mcpHandler := mcpserver.NewHandler(cs, c)
-	srv := server.New(c, w, cs, mcpHandler, templateDir, cfg, cfgPath)
+	srv := server.New(c, w, cs, mcpHandler, am, templateDir, cfg, cfgPath)
 	addr := fmt.Sprintf(":%d", port)
 
 	// Write .mcp.json for MCP client discovery
@@ -108,6 +110,7 @@ func runServe(port int, dev bool, rootOverride string) {
 
 	<-done
 	fmt.Println("\nShutting down...")
+	am.StopAll()
 	config.RemovePortFile()
 	w.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

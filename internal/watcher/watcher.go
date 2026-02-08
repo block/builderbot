@@ -20,6 +20,7 @@ const (
 	EventProjectsChanged EventType = "projects"
 	EventFilesChanged    EventType = "files"
 	EventCommentsChanged EventType = "comments"
+	EventAgentsChanged   EventType = "agents"
 )
 
 // Event represents a change notification

@@ -19,6 +19,9 @@ type Store struct {
 	changed    chan struct{} // closed on every Save, then replaced
 	changedMu  sync.Mutex
 	changeSeq  uint64 // monotonic counter incremented on each change
+	typingMu   sync.RWMutex
+	typing     map[string]time.Time // key: "project:path:threadId" -> when typing started
+	onTyping   func(project string) // called when typing state changes
 }
 
 // FileComments holds all comment threads for a single file.
@@ -72,6 +75,7 @@ func NewStore(c *cache.Cache) *Store {
 		cache:      c,
 		heartbeats: make(map[string]time.Time),
 		changed:    make(chan struct{}),
+		typing:     make(map[string]time.Time),
 	}
 }
 
@@ -156,4 +160,56 @@ func (s *Store) IsProjectActive(projectName string) bool {
 		}
 	}
 	return false
+}
+
+// SetOnTyping sets a callback invoked when typing state changes.
+func (s *Store) SetOnTyping(fn func(project string)) {
+	s.typingMu.Lock()
+	defer s.typingMu.Unlock()
+	s.onTyping = fn
+}
+
+// SetTyping marks a thread as having an agent actively composing a reply.
+func (s *Store) SetTyping(project, path, threadID string) {
+	key := project + ":" + path + ":" + threadID
+	s.typingMu.Lock()
+	s.typing[key] = time.Now()
+	fn := s.onTyping
+	s.typingMu.Unlock()
+	if fn != nil {
+		fn(project)
+	}
+}
+
+// ClearTyping removes the typing indicator for a specific thread.
+func (s *Store) ClearTyping(project, path, threadID string) {
+	key := project + ":" + path + ":" + threadID
+	s.typingMu.Lock()
+	delete(s.typing, key)
+	s.typingMu.Unlock()
+}
+
+// ClearProjectTyping removes all typing indicators for a project.
+func (s *Store) ClearProjectTyping(project string) {
+	prefix := project + ":"
+	s.typingMu.Lock()
+	for key := range s.typing {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.typing, key)
+		}
+	}
+	s.typingMu.Unlock()
+}
+
+// IsTyping returns true if an agent is actively composing a reply to the given thread.
+// Typing state auto-expires after 60 seconds.
+func (s *Store) IsTyping(project, path, threadID string) bool {
+	key := project + ":" + path + ":" + threadID
+	s.typingMu.RLock()
+	defer s.typingMu.RUnlock()
+	t, ok := s.typing[key]
+	if !ok {
+		return false
+	}
+	return time.Since(t) < 60*time.Second
 }

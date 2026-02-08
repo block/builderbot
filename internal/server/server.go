@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
 	"github.com/loganj/birdseye/internal/config"
@@ -27,6 +28,7 @@ type Server struct {
 	cache       *cache.Cache
 	watcher     *watcher.Watcher
 	comments    *comments.Store
+	agents      *agents.Manager
 	mcpHandler  http.Handler
 	mux         *http.ServeMux
 	tmpl        *template.Template
@@ -38,11 +40,12 @@ type Server struct {
 	cfgMu       sync.Mutex // protects cfg mutations
 }
 
-func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, templateDir string, cfg *config.Config, cfgPath string) *Server {
+func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, am *agents.Manager, templateDir string, cfg *config.Config, cfgPath string) *Server {
 	s := &Server{
 		cache:       c,
 		watcher:     w,
 		comments:    cs,
+		agents:      am,
 		mcpHandler:  mcpHandler,
 		mux:         http.NewServeMux(),
 		templateDir: templateDir,
@@ -54,6 +57,16 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 	s.tmpl = template.Must(template.ParseFS(templates.FS, "*.html"))
 	// Parse layout template separately for clone-per-page rendering
 	s.layoutTmpl = template.Must(template.New("").ParseFS(templates.FS, "_layout.html"))
+
+	if am != nil {
+		am.SetOnChange(func() {
+			s.watcher.Broadcast(watcher.Event{Type: watcher.EventAgentsChanged})
+		})
+	}
+
+	cs.SetOnTyping(func(project string) {
+		w.Broadcast(watcher.Event{Type: watcher.EventCommentsChanged, Project: project})
+	})
 
 	s.routes()
 	return s
@@ -211,6 +224,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/threads", s.handleAPIThreads)
 	s.mux.HandleFunc("/api/threads/", s.handleAPIThreadAction)
 	s.mux.HandleFunc("/api/reviews", s.handleAPIListReviews)
+	// Agent management endpoints
+	s.mux.HandleFunc("/api/agents", s.handleAgentStatus)
+	s.mux.HandleFunc("/api/agents/start", s.handleAgentStart)
+	s.mux.HandleFunc("/api/agents/stop", s.handleAgentStop)
 	// MCP (Model Context Protocol) endpoint
 	if s.mcpHandler != nil {
 		s.mux.Handle("/mcp", s.mcpHandler)
@@ -642,6 +659,7 @@ type APIProject struct {
 	FileCount      int    `json:"fileCount"`
 	LastModified   string `json:"lastModified"`
 	AgentConnected bool   `json:"agentConnected,omitempty"`
+	AgentRunning   bool   `json:"agentRunning,omitempty"`
 	Age            string `json:"age,omitempty"`
 	ReviewCount    int    `json:"reviewCount,omitempty"`
 }
@@ -678,6 +696,7 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 			LastModified:   p.LastModified.Format(time.RFC3339),
 			Age:            computeProjectAge(p),
 			AgentConnected: s.comments.IsProjectActive(qn),
+			AgentRunning:   s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running,
 		}
 		if p.Git != nil {
 			result[i].Branch = p.Git.Branch

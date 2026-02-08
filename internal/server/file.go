@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"html/template"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -141,6 +142,18 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	nav := s.buildNav(project.QualifiedName())
 	nav.InProject = true
 	s.renderPage(w, "file.html", nav, data)
+
+	// Auto-start agent if there are pending human comments and no agent running
+	qualifiedName := project.QualifiedName()
+	if s.agents != nil && s.agents.Status(qualifiedName) == nil {
+		if s.comments.HasPendingHumanComments(qualifiedName) {
+			go func() {
+				if _, err := s.agents.Start(qualifiedName); err != nil {
+					log.Printf("Auto-start agent on view for %s: %v", qualifiedName, err)
+				}
+			}()
+		}
+	}
 }
 
 func stripFrontmatter(content []byte) []byte {

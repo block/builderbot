@@ -44,8 +44,8 @@ func EnsureGlobalGitignore() {
 
 // globalGitignorePath returns the path to the global gitignore file.
 func globalGitignorePath() string {
-	// Check git config for core.excludesFile
-	out, err := exec.Command("git", "config", "--global", "core.excludesFile").Output()
+	// Check the effective core.excludesFile (resolves includes from all config levels)
+	out, err := exec.Command("git", "config", "core.excludesFile").Output()
 	if err == nil {
 		p := strings.TrimSpace(string(out))
 		if p != "" {

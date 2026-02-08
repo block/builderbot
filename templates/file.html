@@ -1,1561 +1,1132 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.FileName}} - Birdseye</title>
+{{define "title"}}{{.Page.FileName}} - Birdseye{{end}}
+
+{{define "head"}}
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
-    <style>
-        * { box-sizing: border-box; }
-        html { scroll-behavior: smooth; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            margin: 0;
-            padding: 0;
-            background: #fafafa;
-            color: #333;
-        }
-        a { color: #0066cc; text-decoration: none; }
-        a:hover { text-decoration: underline; }
+{{end}}
 
-        .layout {
-            display: grid;
-            grid-template-columns: 220px 1fr 340px;
-            height: 100vh;
-        }
+{{define "pagestyle"}}
+    html { scroll-behavior: smooth; }
 
-        .sidebar {
-            position: sticky;
-            top: 0;
-            height: 100vh;
-            overflow-y: auto;
-            padding: 24px 16px;
-            border-right: 1px solid #e8e8e8;
-            background: #fff;
-        }
-        .sidebar-title {
-            font-size: 0.7em;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: #888;
-            margin-bottom: 12px;
-        }
-        .sidebar-nav {
-            list-style: none;
-            padding: 0;
-            margin: 0;
-        }
-        .sidebar-nav li {
-            margin-bottom: 4px;
-        }
-        .sidebar-nav a {
-            display: block;
-            padding: 4px 8px;
-            font-size: 0.85em;
-            color: #555;
-            border-radius: 4px;
-            text-decoration: none;
-            line-height: 1.4;
-        }
-        .sidebar-nav a:hover {
-            background: #f0f0f0;
-            text-decoration: none;
-        }
-        .sidebar-nav .level-2 { padding-left: 16px; }
-        .sidebar-nav .level-3 { padding-left: 28px; font-size: 0.8em; color: #777; }
+    /* File page overrides the main-content area to be a 2-column sub-grid */
+    .main-content { padding: 0 !important; display: grid; grid-template-columns: 1fr 340px; }
+    .file-main { padding: 24px 40px; max-width: 900px; overflow-y: auto; height: 100vh; }
 
-        .main {
-            padding: 24px 40px;
-            max-width: 900px;
-            height: 100vh;
-            overflow-y: auto;
-        }
+    /* TOC as a collapsible block at the top of file-main */
+    .toc { margin-bottom: 16px; }
+    .toc summary {
+        font-weight: 500;
+        font-size: 0.8em;
+        color: #888;
+        cursor: pointer;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        user-select: none;
+    }
+    .toc summary:hover { color: #555; }
+    .toc-nav { padding: 8px 0; }
+    .toc-nav a {
+        display: block;
+        padding: 3px 8px;
+        font-size: 0.85em;
+        color: #555;
+        border-radius: 4px;
+        text-decoration: none;
+        line-height: 1.4;
+    }
+    .toc-nav a:hover { background: #f0f0f0; text-decoration: none; }
+    .toc-nav .level-2 { padding-left: 16px; }
+    .toc-nav .level-3 { padding-left: 28px; font-size: 0.8em; color: #777; }
 
-        .breadcrumb { margin-bottom: 16px; color: #888; font-size: 0.9em; }
-        .breadcrumb a { color: #666; }
-        .breadcrumb a:hover { color: #0066cc; }
+    .file-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 20px;
+        padding: 10px 14px;
+        background: #fff;
+        border: 1px solid #e8e8e8;
+        border-radius: 8px;
+    }
+    .file-type {
+        font-size: 0.7em;
+        font-weight: 500;
+        text-transform: uppercase;
+        padding: 2px 6px;
+        border-radius: 3px;
+        flex-shrink: 0;
+    }
+    .file-type.research { background: #ddf4ff; color: #0969da; }
+    .file-type.plan { background: #dafbe1; color: #1a7f37; }
+    .toolbar-filename {
+        font-weight: 600;
+        font-size: 0.95em;
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
 
-        .file-toolbar {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 20px;
-            padding: 10px 14px;
-            background: #fff;
-            border: 1px solid #e8e8e8;
-            border-radius: 8px;
-        }
-        .file-type {
-            font-size: 0.7em;
-            font-weight: 500;
-            text-transform: uppercase;
-            padding: 2px 6px;
-            border-radius: 3px;
-            flex-shrink: 0;
-        }
-        .file-type.research {
-            background: #ddf4ff;
-            color: #0969da;
-        }
-        .file-type.plan {
-            background: #dafbe1;
-            color: #1a7f37;
-        }
-        .toolbar-filename {
-            font-weight: 600;
-            font-size: 0.95em;
-            flex: 1;
-            min-width: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
+    /* Copy dropdown */
+    .copy-dropdown { position: relative; flex-shrink: 0; }
+    .dropdown-toggle {
+        background: none;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 5px 10px;
+        font-size: 0.8em;
+        color: #666;
+        cursor: pointer;
+        transition: background-color 0.15s, border-color 0.15s;
+        white-space: nowrap;
+    }
+    .dropdown-toggle:hover {
+        background: #f5f5f5;
+        border-color: #ccc;
+        color: #333;
+    }
+    .dropdown-toggle.copied {
+        background: #dafbe1;
+        border-color: #1a7f37;
+        color: #1a7f37;
+    }
+    .dropdown-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        z-index: 100;
+        min-width: 160px;
+        padding: 4px 0;
+    }
+    .copy-dropdown.open .dropdown-menu { display: block; }
+    .dropdown-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 12px;
+        border: none;
+        background: none;
+        font-size: 0.85em;
+        color: #333;
+        cursor: pointer;
+    }
+    .dropdown-menu button:hover { background: #f5f5f5; }
 
-        /* Copy dropdown */
-        .copy-dropdown { position: relative; flex-shrink: 0; }
-        .dropdown-toggle {
-            background: none;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 5px 10px;
-            font-size: 0.8em;
-            color: #666;
-            cursor: pointer;
-            transition: background-color 0.15s, border-color 0.15s;
-            white-space: nowrap;
-        }
-        .dropdown-toggle:hover {
-            background: #f5f5f5;
-            border-color: #ccc;
-            color: #333;
-        }
-        .dropdown-toggle.copied {
-            background: #dafbe1;
-            border-color: #1a7f37;
-            color: #1a7f37;
-        }
-        .dropdown-menu {
-            display: none;
-            position: absolute;
-            right: 0;
-            top: calc(100% + 4px);
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            z-index: 100;
-            min-width: 160px;
-            padding: 4px 0;
-        }
-        .copy-dropdown.open .dropdown-menu { display: block; }
-        .dropdown-menu button {
-            display: block;
-            width: 100%;
-            text-align: left;
-            padding: 8px 12px;
-            border: none;
-            background: none;
-            font-size: 0.85em;
-            color: #333;
-            cursor: pointer;
-        }
-        .dropdown-menu button:hover { background: #f5f5f5; }
+    .content {
+        position: relative;
+        background: #fff;
+        padding: 32px 40px;
+        border-radius: 8px;
+        border: 1px solid #e8e8e8;
+        line-height: 1.7;
+    }
+    .content h1, .content h2, .content h3, .content h4 { color: #333; font-weight: 600; }
+    .content h1 { border-bottom: 1px solid #e8e8e8; padding-bottom: 8px; }
+    .content h2 { border-bottom: 1px solid #e8e8e8; padding-bottom: 6px; }
+    .content code {
+        background: #f5f5f5;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.85em;
+        color: #333;
+        word-break: break-word;
+    }
+    .content td code {
+        background: none;
+        padding: 0;
+        font-size: 0.8em;
+        color: #555;
+    }
+    .content pre {
+        background: #282a36;
+        padding: 16px;
+        border-radius: 6px;
+        overflow-x: auto;
+    }
+    .content pre code {
+        background: none;
+        padding: 0;
+        color: #f8f8f2;
+    }
+    .content ul, .content ol { padding-left: 24px; }
+    .content li { margin-bottom: 4px; }
+    .content blockquote {
+        border-left: 3px solid #0066cc;
+        margin-left: 0;
+        padding-left: 16px;
+        color: #666;
+    }
+    .content table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+    .content th, .content td { border: 1px solid #e8e8e8; padding: 8px 12px; text-align: left; }
+    .content th { background: #f5f5f5; }
+    .content hr { border: none; border-top: 1px solid #e8e8e8; margin: 24px 0; }
+    .content img { max-width: 100%; }
+    .content a { color: #0066cc; }
+    .content > p:first-of-type {
+        background: #f8f9fa;
+        padding: 12px 16px;
+        border-radius: 6px;
+        font-size: 0.85em;
+        color: #666;
+        line-height: 1.8;
+    }
+    .content > p:first-of-type strong { color: #333; }
+    .content > p:first-of-type strong ~ strong::before { content: '\A'; white-space: pre; }
+    .content .chroma { background: #282a36; }
 
-        .content {
-            position: relative;
-            background: #fff;
-            padding: 32px 40px;
-            border-radius: 8px;
-            border: 1px solid #e8e8e8;
-            line-height: 1.7;
-        }
-        .content h1, .content h2, .content h3, .content h4 { color: #333; font-weight: 600; }
-        .content h1 { border-bottom: 1px solid #e8e8e8; padding-bottom: 8px; }
-        .content h2 { border-bottom: 1px solid #e8e8e8; padding-bottom: 6px; }
-        .content code {
-            background: #f5f5f5;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 0.85em;
-            color: #333;
-            word-break: break-word;
-        }
-        .content td code {
-            background: none;
-            padding: 0;
-            font-size: 0.8em;
-            color: #555;
-        }
-        .content pre {
-            background: #282a36;
-            padding: 16px;
-            border-radius: 6px;
-            overflow-x: auto;
-        }
-        .content pre code {
-            background: none;
-            padding: 0;
-            color: #f8f8f2;
-        }
-        .content ul, .content ol { padding-left: 24px; }
-        .content li { margin-bottom: 4px; }
-        .content blockquote {
-            border-left: 3px solid #0066cc;
-            margin-left: 0;
-            padding-left: 16px;
-            color: #666;
-        }
-        .content table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 16px 0;
-        }
-        .content th, .content td {
-            border: 1px solid #e8e8e8;
-            padding: 8px 12px;
-            text-align: left;
-        }
-        .content th {
-            background: #f5f5f5;
-        }
-        .content hr {
-            border: none;
-            border-top: 1px solid #e8e8e8;
-            margin: 24px 0;
-        }
-        .content img {
-            max-width: 100%;
-        }
-        .content a {
-            color: #0066cc;
-        }
-        /* Style metadata paragraphs */
-        .content > p:first-of-type {
-            background: #f8f9fa;
-            padding: 12px 16px;
-            border-radius: 6px;
-            font-size: 0.85em;
-            color: #666;
-            line-height: 1.8;
-        }
-        .content > p:first-of-type strong {
-            color: #333;
-        }
-        .content > p:first-of-type strong ~ strong::before {
-            content: '\A';
-            white-space: pre;
-        }
-        .content .chroma { background: #282a36; }
+    /* Comments panel */
+    .comments-panel {
+        height: 100vh;
+        overflow-y: auto;
+        padding: 16px;
+        border-left: 1px solid #e8e8e8;
+        background: #fff;
+        font-size: 0.85em;
+    }
+    .comments-panel-header {
+        font-size: 0.7em;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #888;
+        margin-bottom: 12px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    .thread-card {
+        border: 1px solid #e8e8e8;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        overflow: hidden;
+        cursor: pointer;
+        transition: border-color 0.15s;
+    }
+    .thread-card:hover { border-color: #ccc; }
+    .thread-card.highlighted { border-color: #0066cc; box-shadow: 0 0 0 1px #0066cc; }
+    .thread-anchor {
+        padding: 8px 12px;
+        background: #f8f9fa;
+        border-bottom: 1px solid #e8e8e8;
+        font-size: 0.9em;
+        color: #666;
+        font-style: italic;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .thread-anchor::before { content: '\201C'; }
+    .thread-anchor::after { content: '\201D'; }
+    .thread-comment { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; }
+    .thread-comment:last-child { border-bottom: none; }
+    .comment-header { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+    .comment-author { font-weight: 600; font-size: 0.9em; }
+    .comment-role {
+        font-size: 0.7em;
+        padding: 1px 5px;
+        border-radius: 3px;
+        text-transform: uppercase;
+    }
+    .comment-role.human { background: #ddf4ff; color: #0969da; }
+    .comment-role.agent { background: #dafbe1; color: #1a7f37; }
+    .comment-time { font-size: 0.8em; color: #999; }
+    .comment-body { line-height: 1.5; }
+    .comment-body p { margin: 0.25em 0; }
+    .comment-body p:first-child { margin-top: 0; }
+    .comment-body p:last-child { margin-bottom: 0; }
+    .comment-body code { background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.9em; }
+    .comment-body pre { background: #f0f0f0; padding: 0.5em; border-radius: 4px; overflow-x: auto; margin: 0.4em 0; }
+    .comment-body pre code { background: none; padding: 0; }
+    .comment-body ul, .comment-body ol { margin: 0.3em 0; padding-left: 1.5em; }
+    .comment-body blockquote { margin: 0.3em 0; padding-left: 0.8em; border-left: 3px solid #ddd; color: #666; }
+    .thread-status {
+        display: inline-block;
+        font-size: 0.7em;
+        padding: 1px 5px;
+        border-radius: 3px;
+        text-transform: uppercase;
+        font-weight: 500;
+    }
+    .thread-status.open { background: #fff3cd; color: #856404; }
+    .thread-status.resolved { background: #d4edda; color: #155724; }
+    .thread-resolved { opacity: 0.6; }
+    #resolved-toggle label:hover { color: #555; }
+    .orphaned-warning {
+        font-size: 0.75em;
+        color: #dc3545;
+        padding: 4px 12px;
+        background: #fff5f5;
+    }
+    .comment-highlight {
+        background: #fff3aa;
+        border-bottom: 2px solid #f5c518;
+        cursor: pointer;
+        border-radius: 2px;
+        transition: background 0.2s;
+    }
+    .comment-highlight:hover { background: #ffe066; }
+    .comment-highlight.resolved {
+        background: transparent;
+        border-bottom-color: transparent;
+        cursor: default;
+    }
+    .comment-highlight.active {
+        background: #ffe066;
+        border-bottom-color: #f5c518;
+        box-shadow: 0 0 0 2px rgba(245, 197, 24, 0.4);
+        cursor: pointer;
+    }
+    .no-comments {
+        color: #999;
+        text-align: center;
+        padding: 40px 16px;
+    }
+    .review-banner {
+        background: #ddf4ff;
+        border: 1px solid #b6d4fe;
+        border-radius: 6px;
+        padding: 8px 12px;
+        margin-bottom: 12px;
+        font-size: 0.85em;
+    }
+    .review-banner strong { color: #0969da; }
+    .review-banner.agent-active { animation: review-pulse 2s infinite; }
+    @keyframes review-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.3); }
+        70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
+    }
 
-        /* Comments panel */
-        .comments-panel {
-            position: sticky;
-            top: 0;
-            height: 100vh;
-            overflow-y: auto;
-            padding: 16px;
-            border-left: 1px solid #e8e8e8;
-            background: #fff;
-            font-size: 0.85em;
-        }
-        .comments-panel-header {
-            font-size: 0.7em;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: #888;
-            margin-bottom: 12px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .thread-card {
-            border: 1px solid #e8e8e8;
-            border-radius: 6px;
-            margin-bottom: 12px;
-            overflow: hidden;
-            cursor: pointer;
-            transition: border-color 0.15s;
-        }
-        .thread-card:hover { border-color: #ccc; }
-        .thread-card.highlighted { border-color: #0066cc; box-shadow: 0 0 0 1px #0066cc; }
-        .thread-anchor {
-            padding: 8px 12px;
-            background: #f8f9fa;
-            border-bottom: 1px solid #e8e8e8;
-            font-size: 0.9em;
-            color: #666;
-            font-style: italic;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .thread-anchor::before { content: '\201C'; }
-        .thread-anchor::after { content: '\201D'; }
-        .thread-comment {
-            padding: 8px 12px;
-            border-bottom: 1px solid #f0f0f0;
-        }
-        .thread-comment:last-child { border-bottom: none; }
-        .comment-header {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            margin-bottom: 4px;
-        }
-        .comment-author {
-            font-weight: 600;
-            font-size: 0.9em;
-        }
-        .comment-role {
-            font-size: 0.7em;
-            padding: 1px 5px;
-            border-radius: 3px;
-            text-transform: uppercase;
-        }
-        .comment-role.human { background: #ddf4ff; color: #0969da; }
-        .comment-role.agent { background: #dafbe1; color: #1a7f37; }
-        .comment-time {
-            font-size: 0.8em;
-            color: #999;
-        }
-        .comment-body { line-height: 1.5; }
-        .comment-body p { margin: 0.25em 0; }
-        .comment-body p:first-child { margin-top: 0; }
-        .comment-body p:last-child { margin-bottom: 0; }
-        .comment-body code { background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.9em; }
-        .comment-body pre { background: #f0f0f0; padding: 0.5em; border-radius: 4px; overflow-x: auto; margin: 0.4em 0; }
-        .comment-body pre code { background: none; padding: 0; }
-        .comment-body ul, .comment-body ol { margin: 0.3em 0; padding-left: 1.5em; }
-        .comment-body blockquote { margin: 0.3em 0; padding-left: 0.8em; border-left: 3px solid #ddd; color: #666; }
-        .thread-status {
-            display: inline-block;
-            font-size: 0.7em;
-            padding: 1px 5px;
-            border-radius: 3px;
-            text-transform: uppercase;
-            font-weight: 500;
-        }
-        .thread-status.open { background: #fff3cd; color: #856404; }
-        .thread-status.resolved { background: #d4edda; color: #155724; }
-        .thread-resolved { opacity: 0.6; }
-        #resolved-toggle label:hover { color: #555; }
-        .orphaned-warning {
-            font-size: 0.75em;
-            color: #dc3545;
-            padding: 4px 12px;
-            background: #fff5f5;
-        }
-        /* Comment highlights */
-        .comment-highlight {
-            background: #fff3aa;
-            border-bottom: 2px solid #f5c518;
-            cursor: pointer;
-            border-radius: 2px;
-            transition: background 0.2s;
-        }
-        .comment-highlight:hover {
-            background: #ffe066;
-        }
-        .comment-highlight.resolved {
-            background: transparent;
-            border-bottom-color: transparent;
-            cursor: default;
-        }
-        .comment-highlight.active {
-            background: #ffe066;
-            border-bottom-color: #f5c518;
-            box-shadow: 0 0 0 2px rgba(245, 197, 24, 0.4);
-            cursor: pointer;
-        }
-        /* No comments state */
-        .no-comments {
-            color: #999;
-            text-align: center;
-            padding: 40px 16px;
-        }
-        /* Review banner */
-        .review-banner {
-            background: #ddf4ff;
-            border: 1px solid #b6d4fe;
-            border-radius: 6px;
-            padding: 8px 12px;
-            margin-bottom: 12px;
-            font-size: 0.85em;
-        }
-        .review-banner strong { color: #0969da; }
-        .review-banner.agent-active {
-            animation: review-pulse 2s infinite;
-        }
-        @keyframes review-pulse {
-            0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.3); }
-            70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
-        }
+    /* Floating comment button */
+    .comment-btn-float {
+        position: absolute;
+        background: #0066cc;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        padding: 4px 10px;
+        font-size: 0.8em;
+        cursor: pointer;
+        z-index: 50;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        white-space: nowrap;
+    }
+    .comment-btn-float:hover { background: #0052a3; }
 
-        /* Floating comment button */
-        .comment-btn-float {
-            position: absolute;
-            background: #0066cc;
-            color: #fff;
-            border: none;
-            border-radius: 4px;
-            padding: 4px 10px;
-            font-size: 0.8em;
-            cursor: pointer;
-            z-index: 50;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-            white-space: nowrap;
-        }
-        .comment-btn-float:hover { background: #0052a3; }
+    /* New thread form */
+    .new-thread-form {
+        border: 1px solid #0066cc;
+        border-radius: 6px;
+        padding: 12px;
+        margin-bottom: 12px;
+        background: #f8f9fa;
+    }
+    .new-thread-form .quoted-text {
+        font-style: italic;
+        color: #666;
+        font-size: 0.9em;
+        margin-bottom: 8px;
+        padding: 6px 10px;
+        border-left: 3px solid #0066cc;
+        background: #fff;
+        max-height: 80px;
+        overflow-y: auto;
+    }
+    .new-thread-form textarea,
+    .reply-form textarea {
+        width: 100%;
+        min-height: 60px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 8px;
+        font-family: inherit;
+        font-size: 0.9em;
+        resize: vertical;
+        margin-bottom: 8px;
+    }
+    .new-thread-form textarea:focus,
+    .reply-form textarea:focus {
+        outline: none;
+        border-color: #0066cc;
+    }
+    .new-thread-form .author-field,
+    .reply-form .author-field {
+        width: 100%;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 6px 8px;
+        font-family: inherit;
+        font-size: 0.85em;
+        margin-bottom: 8px;
+    }
+    .new-thread-form .author-field:focus,
+    .reply-form .author-field:focus {
+        outline: none;
+        border-color: #0066cc;
+    }
+    .form-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+    }
+    .form-actions button {
+        padding: 5px 12px;
+        border-radius: 4px;
+        font-size: 0.85em;
+        cursor: pointer;
+    }
+    .btn-submit {
+        background: #0066cc;
+        color: #fff;
+        border: 1px solid #0066cc;
+    }
+    .btn-submit:hover { background: #0052a3; }
+    .btn-submit:disabled { opacity: 0.5; cursor: default; }
+    .btn-cancel-form {
+        background: #f5f5f5;
+        color: #333;
+        border: 1px solid #ddd;
+    }
+    .btn-cancel-form:hover { background: #eee; }
 
-        /* New thread form */
-        .new-thread-form {
-            border: 1px solid #0066cc;
-            border-radius: 6px;
-            padding: 12px;
-            margin-bottom: 12px;
-            background: #f8f9fa;
-        }
-        .new-thread-form .quoted-text {
-            font-style: italic;
-            color: #666;
-            font-size: 0.9em;
-            margin-bottom: 8px;
-            padding: 6px 10px;
-            border-left: 3px solid #0066cc;
-            background: #fff;
-            max-height: 80px;
-            overflow-y: auto;
-        }
-        .new-thread-form textarea,
-        .reply-form textarea {
-            width: 100%;
-            min-height: 60px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 8px;
-            font-family: inherit;
-            font-size: 0.9em;
-            resize: vertical;
-            margin-bottom: 8px;
-        }
-        .new-thread-form textarea:focus,
-        .reply-form textarea:focus {
-            outline: none;
-            border-color: #0066cc;
-        }
-        .new-thread-form .author-field,
-        .reply-form .author-field {
-            width: 100%;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 6px 8px;
-            font-family: inherit;
-            font-size: 0.85em;
-            margin-bottom: 8px;
-        }
-        .new-thread-form .author-field:focus,
-        .reply-form .author-field:focus {
-            outline: none;
-            border-color: #0066cc;
-        }
-        .form-actions {
-            display: flex;
-            gap: 8px;
-            justify-content: flex-end;
-        }
-        .form-actions button {
-            padding: 5px 12px;
-            border-radius: 4px;
-            font-size: 0.85em;
-            cursor: pointer;
-        }
-        .btn-submit {
-            background: #0066cc;
-            color: #fff;
-            border: 1px solid #0066cc;
-        }
-        .btn-submit:hover { background: #0052a3; }
-        .btn-submit:disabled { opacity: 0.5; cursor: default; }
-        .btn-cancel-form {
-            background: #f5f5f5;
-            color: #333;
-            border: 1px solid #ddd;
-        }
-        .btn-cancel-form:hover { background: #eee; }
+    .reply-form { padding: 8px 12px; border-top: 1px solid #e8e8e8; }
 
-        /* Reply form */
-        .reply-form {
-            padding: 8px 12px;
-            border-top: 1px solid #e8e8e8;
-        }
+    .thread-actions {
+        display: flex;
+        gap: 6px;
+        padding: 6px 12px;
+        border-top: 1px solid #f0f0f0;
+    }
+    .thread-actions button {
+        font-size: 0.75em;
+        padding: 3px 8px;
+        border-radius: 3px;
+        cursor: pointer;
+        border: 1px solid #ddd;
+        background: #f8f9fa;
+        color: #555;
+    }
+    .thread-actions button:hover {
+        background: #eee;
+        border-color: #ccc;
+    }
 
-        /* Thread action buttons */
-        .thread-actions {
-            display: flex;
-            gap: 6px;
-            padding: 6px 12px;
-            border-top: 1px solid #f0f0f0;
-        }
-        .thread-actions button {
-            font-size: 0.75em;
-            padding: 3px 8px;
-            border-radius: 3px;
-            cursor: pointer;
-            border: 1px solid #ddd;
-            background: #f8f9fa;
-            color: #555;
-        }
-        .thread-actions button:hover {
-            background: #eee;
-            border-color: #ccc;
-        }
-        .resolve-btn { }
-        .reopen-btn { }
+    @media (max-width: 900px) {
+        .main-content { grid-template-columns: 1fr !important; }
+        .comments-panel { display: none; }
+        .file-main { padding: 24px; }
+    }
+{{end}}
 
-        @media (max-width: 800px) {
-            .layout {
-                grid-template-columns: 1fr;
-            }
-            .sidebar {
-                display: none;
-            }
-            .comments-panel {
-                display: none;
-            }
-            .main {
-                padding: 24px;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="layout">
-        <div class="sidebar">
-            <div class="sidebar-title">On this page</div>
-            <ul class="sidebar-nav">
-                {{range .Headings}}
-                <li><a href="#{{.ID}}" class="level-{{.Level}}">{{.Text}}</a></li>
-                {{end}}
-            </ul>
-        </div>
-
-        <div class="main">
-            <div class="breadcrumb">
-                <a href="/">&#8592; All Projects</a>
-                / <a href="/project/{{.Project.QualifiedName}}">{{.Project.Name}}</a>
-                / {{.FileName}}
-            </div>
-
-            <div class="file-toolbar">
-                {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                <span class="toolbar-filename">{{.FileName}}</span>
-                <div class="copy-dropdown">
-                    <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy &#9662;</button>
-                    <div class="dropdown-menu">
-                        <button onclick="copyText(this, rawMarkdown)">Markdown</button>
-                        <button onclick="copyFileToClipboard(this)">File</button>
-                        <button onclick="copyText(this, '@{{.FilePath}}')">Relative path</button>
-                        <button onclick="copyText(this, '{{.Project.Path}}/{{.FilePath}}')">Absolute path</button>
-                    </div>
+{{define "content"}}
+    <div class="file-main" id="file-main">
+        <div class="file-toolbar">
+            {{if ne .Page.FileType "other"}}<span class="file-type {{.Page.FileType}}">{{.Page.FileType}}</span>{{end}}
+            <span class="toolbar-filename">{{.Page.FileName}}</span>
+            <div class="copy-dropdown">
+                <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy &#9662;</button>
+                <div class="dropdown-menu">
+                    <button onclick="copyText(this, rawMarkdown)">Markdown</button>
+                    <button onclick="copyFileToClipboard(this)">File</button>
+                    <button onclick="copyText(this, '@{{.Page.FilePath}}')">Relative path</button>
+                    <button onclick="copyText(this, '{{.Page.Project.Path}}/{{.Page.FilePath}}')">Absolute path</button>
                 </div>
             </div>
-            <div class="content" id="content">
-                {{.Content}}
-            </div>
         </div>
 
-        <div class="comments-panel" id="comments-panel">
-            <div class="comments-panel-header">
-                <span>Comments <span id="comments-count"></span></span>
-                <span id="resolved-toggle" style="display:none;">
-                    <label style="cursor:pointer; font-weight:normal; text-transform:none; letter-spacing:normal;">
-                        <input type="checkbox" id="show-resolved-checkbox" onchange="toggleResolved()" style="margin-right:3px; vertical-align:middle;">
-                        <span id="resolved-count"></span>
-                    </label>
-                </span>
-            </div>
-            <div id="review-banner-container"></div>
-            <div id="new-thread-form-container"></div>
-            <div id="threads-container"></div>
+        {{if .Page.Headings}}
+        <details class="toc" open>
+            <summary>On this page</summary>
+            <nav class="toc-nav">
+                {{range .Page.Headings}}
+                <a href="#{{.ID}}" class="level-{{.Level}}">{{.Text}}</a>
+                {{end}}
+            </nav>
+        </details>
+        {{end}}
+
+        <div class="content" id="content">
+            {{.Page.Content}}
         </div>
     </div>
-    <template id="raw-markdown">{{.Raw}}</template>
 
-    <script>
-        let rawMarkdown = document.getElementById('raw-markdown').content.textContent;
-        const qualifiedName = '{{.Project.QualifiedName}}';
-        const filePath = '{{.FilePath}}';
+    <div class="comments-panel" id="comments-panel">
+        <div class="comments-panel-header">
+            <span>Comments <span id="comments-count"></span></span>
+            <span id="resolved-toggle" style="display:none;">
+                <label style="cursor:pointer; font-weight:normal; text-transform:none; letter-spacing:normal;">
+                    <input type="checkbox" id="show-resolved-checkbox" onchange="toggleResolved()" style="margin-right:3px; vertical-align:middle;">
+                    <span id="resolved-count"></span>
+                </label>
+            </span>
+        </div>
+        <div id="review-banner-container"></div>
+        <div id="new-thread-form-container"></div>
+        <div id="threads-container"></div>
+    </div>
+    <template id="raw-markdown">{{.Page.Raw}}</template>
+{{end}}
 
-        let threads = {{.ThreadsJSON}};
-        let anchorLines = {{.AnchorLines}};
-        let currentReviewAgentActive = false;
+{{define "pagescript"}}
+    var rawMarkdown = document.getElementById('raw-markdown').content.textContent;
+    var qualifiedName = '{{.Page.Project.QualifiedName}}';
+    var filePath = '{{.Page.FilePath}}';
 
-        // Author name from localStorage
-        function getSavedAuthor() {
-            return localStorage.getItem('birdseye-author') || '';
-        }
-        function saveAuthor(name) {
-            if (name) localStorage.setItem('birdseye-author', name);
-        }
+    var threads = {{.Page.ThreadsJSON}};
+    var anchorLines = {{.Page.AnchorLines}};
+    var currentReviewAgentActive = false;
 
-        function toggleDropdown(event) {
-            event.preventDefault();
-            event.stopPropagation();
-            const dd = event.target.closest('.copy-dropdown');
-            document.querySelectorAll('.copy-dropdown.open').forEach(d => { if (d !== dd) d.classList.remove('open'); });
-            dd.classList.toggle('open');
-        }
-        document.addEventListener('click', () => {
-            document.querySelectorAll('.copy-dropdown.open').forEach(d => d.classList.remove('open'));
-            // Remove floating comment button on click elsewhere
-            removeFloatingCommentBtn();
-        });
+    // Author name from localStorage
+    function getSavedAuthor() {
+        return localStorage.getItem('birdseye-author') || '';
+    }
+    function saveAuthor(name) {
+        if (name) localStorage.setItem('birdseye-author', name);
+    }
 
-        function flashCopied(btn) {
-            const dd = btn.closest('.copy-dropdown');
-            dd.classList.remove('open');
-            const toggle = dd.querySelector('.dropdown-toggle');
-            toggle.textContent = 'Copied!';
-            toggle.classList.add('copied');
-            setTimeout(() => { toggle.textContent = 'Copy \u25BE'; toggle.classList.remove('copied'); }, 1500);
-        }
+    // File-page copy dropdown: also remove floating comment btn on click
+    document.addEventListener('click', function() {
+        removeFloatingCommentBtn();
+    });
 
-        function copyText(btn, text) {
-            navigator.clipboard.writeText(text);
-            flashCopied(btn);
-        }
+    function copyText(btn, text) {
+        navigator.clipboard.writeText(text);
+        flashCopied(btn);
+    }
 
-        function copyFileToClipboard(btn) {
-            fetch(`/api/copy-file?project=${encodeURIComponent(qualifiedName)}&path=${encodeURIComponent(filePath)}`)
-                .then(resp => { if (resp.ok) flashCopied(btn); });
-        }
+    // Override copyFileToClipboard for file page (uses filePath instead of data-attr)
+    function copyFileToClipboard(btn) {
+        fetch('/api/copy-file?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(filePath))
+            .then(function(resp) { if (resp.ok) flashCopied(btn); });
+    }
 
-        // --- Comments panel logic ---
+    // --- Comments panel logic ---
 
-        function formatTime(isoStr) {
-            if (!isoStr) return '';
-            const d = new Date(isoStr);
-            const now = new Date();
-            const diffMs = now - d;
-            const diffMins = Math.floor(diffMs / 60000);
-            if (diffMins < 1) return 'just now';
-            if (diffMins < 60) return diffMins + 'm ago';
-            const diffHours = Math.floor(diffMins / 60);
-            if (diffHours < 24) return diffHours + 'h ago';
-            const diffDays = Math.floor(diffHours / 24);
-            if (diffDays < 7) return diffDays + 'd ago';
-            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-        }
+    function formatTime(isoStr) {
+        if (!isoStr) return '';
+        var d = new Date(isoStr);
+        var now = new Date();
+        var diffMs = now - d;
+        var diffMins = Math.floor(diffMs / 60000);
+        if (diffMins < 1) return 'just now';
+        if (diffMins < 60) return diffMins + 'm ago';
+        var diffHours = Math.floor(diffMins / 60);
+        if (diffHours < 24) return diffHours + 'h ago';
+        var diffDays = Math.floor(diffHours / 24);
+        if (diffDays < 7) return diffDays + 'd ago';
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    }
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        function renderCommentMarkdown(text) {
-            if (!text) return '';
-            const html = marked.parse(text, { breaks: true, gfm: true });
-            const tmp = document.createElement('div');
-            tmp.innerHTML = html;
-            tmp.querySelectorAll('script, style, iframe, form, object, embed').forEach(el => el.remove());
-            tmp.querySelectorAll('*').forEach(el => {
-                for (const attr of [...el.attributes]) {
-                    if (attr.name.startsWith('on') || (attr.name === 'href' && attr.value.trimStart().startsWith('javascript:'))) {
-                        el.removeAttribute(attr.name);
-                    }
+    function renderCommentMarkdown(text) {
+        if (!text) return '';
+        var html = marked.parse(text, { breaks: true, gfm: true });
+        var tmp = document.createElement('div');
+        tmp.innerHTML = html;
+        tmp.querySelectorAll('script, style, iframe, form, object, embed').forEach(function(el) { el.remove(); });
+        tmp.querySelectorAll('*').forEach(function(el) {
+            for (var attr of [...el.attributes]) {
+                if (attr.name.startsWith('on') || (attr.name === 'href' && attr.value.trimStart().startsWith('javascript:'))) {
+                    el.removeAttribute(attr.name);
                 }
-            });
-            return tmp.innerHTML;
-        }
-
-        function truncateText(text, maxLen) {
-            if (!text) return '';
-            return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
-        }
-
-        // --- Review banner (in comments panel) ---
-
-        function renderReviewBanner() {
-            const container = document.getElementById('review-banner-container');
-            const openCount = (threads || []).filter(t => t.status === 'open').length;
-            if (openCount === 0) {
-                container.innerHTML = '';
-                return;
-            }
-            const agentClass = currentReviewAgentActive ? ' agent-active' : '';
-            container.innerHTML = '<div class="review-banner' + agentClass + '"><strong>In review</strong> &mdash; ' +
-                openCount + ' open thread' + (openCount !== 1 ? 's' : '') + '</div>';
-        }
-
-        function refreshReview() {
-            fetch('/api/reviews?project=' + encodeURIComponent(qualifiedName))
-                .then(r => r.json())
-                .then(reviews => {
-                    const myReview = reviews.find(r => r.filePath === filePath);
-                    if (myReview) {
-                        currentReviewAgentActive = myReview.agentActive || false;
-                    } else {
-                        currentReviewAgentActive = false;
-                    }
-                    renderReviewBanner();
-                })
-                .catch(err => console.error('Failed to refresh review:', err));
-        }
-
-        // --- Thread rendering ---
-
-        function renderThreads(threadList, lines) {
-            const container = document.getElementById('threads-container');
-            const countEl = document.getElementById('comments-count');
-
-            // Remove old comment highlights
-            const contentEl = document.getElementById('content');
-            if (contentEl) {
-                contentEl.querySelectorAll('.comment-highlight').forEach(mark => {
-                    const parent = mark.parentNode;
-                    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-                    parent.removeChild(mark);
-                    parent.normalize();
-                });
-            }
-
-            if (!threadList || threadList.length === 0) {
-                container.innerHTML = '<div class="no-comments">No comments yet</div>';
-                countEl.textContent = '';
-                document.getElementById('resolved-toggle').style.display = 'none';
-                return;
-            }
-
-            // Split into open, resolved, and orphaned
-            const openThreads = [];
-            const resolvedThreads = [];
-            const orphanedThreads = [];
-
-            threadList.forEach(t => {
-                const line = lines[t.id];
-                if (t.status === 'resolved') {
-                    resolvedThreads.push(t);
-                } else if (line === -1 || line === undefined) {
-                    orphanedThreads.push(t);
-                } else {
-                    openThreads.push(t);
-                }
-            });
-
-            // Sort by anchor line (top to bottom)
-            const sortByLine = (a, b) => (lines[a.id] || 0) - (lines[b.id] || 0);
-            openThreads.sort(sortByLine);
-            resolvedThreads.sort(sortByLine);
-
-            const openCount = openThreads.length + orphanedThreads.length;
-            countEl.textContent = openCount > 0 ? openCount : '';
-
-            // Update resolved toggle in header
-            const resolvedToggle = document.getElementById('resolved-toggle');
-            const resolvedCountEl = document.getElementById('resolved-count');
-            const showResolvedCheckbox = document.getElementById('show-resolved-checkbox');
-            if (resolvedThreads.length > 0) {
-                resolvedToggle.style.display = '';
-                resolvedCountEl.textContent = resolvedThreads.length + ' resolved';
-            } else {
-                resolvedToggle.style.display = 'none';
-            }
-
-            const showResolved = showResolvedCheckbox && showResolvedCheckbox.checked;
-
-            let html = '';
-
-            // Open threads
-            openThreads.forEach(t => {
-                html += buildThreadCard(t, lines[t.id], false);
-            });
-
-            // Orphaned threads
-            orphanedThreads.forEach(t => {
-                html += buildThreadCard(t, -1, false);
-            });
-
-            // Resolved threads (shown only when checkbox is checked)
-            if (showResolved && resolvedThreads.length > 0) {
-                resolvedThreads.forEach(t => {
-                    html += buildThreadCard(t, lines[t.id], true);
-                });
-            }
-
-            container.innerHTML = html;
-
-            // Highlight commented text
-            addCommentHighlights(threadList, lines);
-        }
-
-        function buildThreadCard(thread, line, isResolved) {
-            const tid = escapeHtml(thread.id);
-            let html = '<div class="thread-card' + (isResolved ? ' thread-resolved' : '') +
-                '" data-thread-id="' + tid + '" data-line="' + (line || -1) +
-                '" onclick="focusThread(\'' + tid + '\')">';
-
-            // Anchor text
-            html += '<div class="thread-anchor">' +
-                '<span class="thread-status ' + thread.status + '">' + thread.status + '</span> ' +
-                escapeHtml(truncateText(thread.anchor.selectedText, 80)) +
-                '</div>';
-
-            // Orphaned warning
-            if (line === -1) {
-                html += '<div class="orphaned-warning">Anchor text not found in document</div>';
-            }
-
-            // Comments
-            thread.comments.forEach(c => {
-                html += '<div class="thread-comment">';
-                html += '<div class="comment-header">';
-                html += '<span class="comment-author">' + escapeHtml(c.author) + '</span>';
-                if (c.role) {
-                    html += '<span class="comment-role ' + c.role + '">' + c.role + '</span>';
-                }
-                html += '<span class="comment-time">' + formatTime(c.createdAt) + '</span>';
-                html += '</div>';
-                html += '<div class="comment-body">' + renderCommentMarkdown(c.body) + '</div>';
-                html += '</div>';
-            });
-
-            // Thread actions (resolve/reopen + reply)
-            html += '<div class="thread-actions">';
-            html += '<button onclick="event.stopPropagation(); toggleReplyForm(\'' + tid + '\')">Reply</button>';
-            if (thread.status === 'open') {
-                html += '<button class="resolve-btn" onclick="event.stopPropagation(); resolveThread(\'' + tid + '\')">Resolve</button>';
-            } else {
-                html += '<button class="reopen-btn" onclick="event.stopPropagation(); reopenThread(\'' + tid + '\')">Reopen</button>';
-            }
-            html += '</div>';
-
-            // Reply form (hidden by default)
-            html += '<div class="reply-form" id="reply-form-' + tid + '" style="display:none;">';
-            html += '<textarea placeholder="Write a reply..." onkeydown="handleReplyKeydown(event, \'' + tid + '\')"></textarea>';
-            html += '<input type="text" class="author-field" placeholder="Your name" value="' + escapeHtml(getSavedAuthor()) + '" />';
-            html += '<div class="form-actions">';
-            html += '<button class="btn-cancel-form" onclick="event.stopPropagation(); hideReplyForm(\'' + tid + '\')">Cancel</button>';
-            html += '<button class="btn-submit" onclick="event.stopPropagation(); submitReply(\'' + tid + '\')">Reply</button>';
-            html += '</div>';
-            html += '</div>';
-
-            html += '</div>';
-            return html;
-        }
-
-        // --- Reply form ---
-
-        function toggleReplyForm(threadId) {
-            const form = document.getElementById('reply-form-' + threadId);
-            if (!form) return;
-            const isVisible = form.style.display !== 'none';
-            // Hide all reply forms first
-            document.querySelectorAll('.reply-form').forEach(f => f.style.display = 'none');
-            if (!isVisible) {
-                form.style.display = '';
-                form.querySelector('textarea').focus();
-            }
-        }
-
-        function hideReplyForm(threadId) {
-            const form = document.getElementById('reply-form-' + threadId);
-            if (form) form.style.display = 'none';
-        }
-
-        function handleReplyKeydown(event, threadId) {
-            if (event.key === 'Escape') {
-                hideReplyForm(threadId);
-            }
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                submitReply(threadId);
-            }
-        }
-
-        function submitReply(threadId) {
-            const form = document.getElementById('reply-form-' + threadId);
-            if (!form) return;
-            const textarea = form.querySelector('textarea');
-            const authorInput = form.querySelector('.author-field');
-            const body = textarea.value.trim();
-            const author = authorInput.value.trim();
-
-            if (!body || !author) return;
-            saveAuthor(author);
-
-            const submitBtn = form.querySelector('.btn-submit');
-            submitBtn.disabled = true;
-
-            fetch('/api/threads/' + encodeURIComponent(threadId) + '/comments', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    project: qualifiedName,
-                    path: filePath,
-                    author: author,
-                    role: 'human',
-                    body: body
-                })
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Failed to add reply');
-                return r.json();
-            })
-            .then(() => {
-                hideReplyForm(threadId);
-                refreshComments();
-            })
-            .catch(err => {
-                console.error('Failed to reply:', err);
-                submitBtn.disabled = false;
-            });
-        }
-
-        // --- Resolve / Reopen ---
-
-        function resolveThread(threadId) {
-            const author = getSavedAuthor() || 'anonymous';
-            fetch('/api/threads/' + encodeURIComponent(threadId), {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    project: qualifiedName,
-                    path: filePath,
-                    status: 'resolved',
-                    resolvedBy: author
-                })
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Failed to resolve thread');
-                refreshComments();
-            })
-            .catch(err => console.error('Failed to resolve thread:', err));
-        }
-
-        function reopenThread(threadId) {
-            fetch('/api/threads/' + encodeURIComponent(threadId), {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    project: qualifiedName,
-                    path: filePath,
-                    status: 'open'
-                })
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Failed to reopen thread');
-                refreshComments();
-            })
-            .catch(err => console.error('Failed to reopen thread:', err));
-        }
-
-        function toggleResolved() {
-            renderThreads(threads || [], anchorLines || {});
-        }
-
-        // --- Text selection and comment creation ---
-
-        let pendingAnchor = null;
-
-        function removeFloatingCommentBtn() {
-            const existing = document.querySelector('.comment-btn-float');
-            if (existing) existing.remove();
-        }
-
-        document.getElementById('content').addEventListener('mouseup', function(e) {
-            // Small delay to let the selection finalize
-            setTimeout(() => {
-                const sel = window.getSelection();
-                if (!sel || sel.isCollapsed || !sel.toString().trim()) {
-                    removeFloatingCommentBtn();
-                    return;
-                }
-
-                // Only capture selection within .content
-                const contentEl = document.getElementById('content');
-                if (!contentEl.contains(sel.anchorNode) || !contentEl.contains(sel.focusNode)) {
-                    return;
-                }
-
-                const selectedText = sel.toString().trim();
-                if (!selectedText) return;
-
-                removeFloatingCommentBtn();
-
-                // Position the button near the end of selection
-                const range = sel.getRangeAt(0);
-                const rect = range.getBoundingClientRect();
-                const contentRect = contentEl.getBoundingClientRect();
-
-                const btn = document.createElement('button');
-                btn.className = 'comment-btn-float';
-                btn.textContent = 'Comment';
-                btn.style.top = (rect.bottom - contentRect.top + 4) + 'px';
-                btn.style.left = (rect.right - contentRect.left) + 'px';
-
-                btn.addEventListener('mousedown', function(ev) {
-                    ev.preventDefault();
-                    ev.stopPropagation();
-                });
-                btn.addEventListener('click', function(ev) {
-                    ev.stopPropagation();
-                    captureSelectionAndShowForm(sel, selectedText);
-                    removeFloatingCommentBtn();
-                });
-
-                contentEl.appendChild(btn);
-            }, 10);
-        });
-
-        function captureSelectionAndShowForm(sel, selectedText) {
-            // Compute anchor from selection
-            const anchor = computeAnchor(sel, selectedText);
-            pendingAnchor = anchor;
-            showNewThreadForm(selectedText);
-        }
-
-        function computeAnchor(sel, selectedText) {
-            const anchor = {
-                selectedText: selectedText,
-                before: '',
-                after: '',
-                headingPath: ''
-            };
-
-            // Find source line range from data-source-line attributes
-            const contentEl = document.getElementById('content');
-            let startNode = sel.anchorNode;
-            let endNode = sel.focusNode;
-
-            // Walk up to find elements with data-source-line
-            function findSourceLine(node) {
-                let el = node.nodeType === 3 ? node.parentElement : node;
-                while (el && el !== contentEl) {
-                    if (el.hasAttribute && el.hasAttribute('data-source-line')) {
-                        return parseInt(el.getAttribute('data-source-line'), 10);
-                    }
-                    el = el.parentElement;
-                }
-                return -1;
-            }
-
-            const startLine = findSourceLine(startNode);
-            const endLine = findSourceLine(endNode);
-
-            // Determine which occurrence of selectedText the user actually selected
-            // by counting how many times it appears before the selection in the
-            // rendered block element text.
-            let occurrenceIndex = 0;
-            let blockEl = startNode.nodeType === 3 ? startNode.parentElement : startNode;
-            while (blockEl && blockEl !== contentEl && !(blockEl.hasAttribute && blockEl.hasAttribute('data-source-line'))) {
-                blockEl = blockEl.parentElement;
-            }
-            if (blockEl && blockEl !== contentEl) {
-                try {
-                    const range = sel.getRangeAt(0);
-                    const preRange = document.createRange();
-                    preRange.setStart(blockEl, 0);
-                    preRange.setEnd(range.startContainer, range.startOffset);
-                    const textBefore = preRange.toString();
-                    let searchPos = 0;
-                    while (true) {
-                        const found = textBefore.indexOf(selectedText, searchPos);
-                        if (found === -1) break;
-                        occurrenceIndex++;
-                        searchPos = found + 1;
-                    }
-                } catch (e) {
-                    // Range manipulation can fail in edge cases; fall back to 0
-                }
-            }
-
-            function findNthOccurrence(haystack, needle, n) {
-                let pos = 0;
-                for (let i = 0; i <= n; i++) {
-                    const found = haystack.indexOf(needle, pos);
-                    if (found === -1) return -1;
-                    if (i === n) return found;
-                    pos = found + 1;
-                }
-                return -1;
-            }
-
-            function setBeforeAfter(globalOffset) {
-                const beforeStart = Math.max(0, globalOffset - 80);
-                anchor.before = rawMarkdown.substring(beforeStart, globalOffset);
-                const afterEnd = Math.min(rawMarkdown.length, globalOffset + selectedText.length + 80);
-                anchor.after = rawMarkdown.substring(globalOffset + selectedText.length, afterEnd);
-            }
-
-            // Search for selectedText in rawMarkdown within the source line range
-            if (startLine > 0) {
-                const lines = rawMarkdown.split('\n');
-                const searchStart = Math.max(0, startLine - 1);
-                const searchEnd = Math.min(lines.length, (endLine > 0 ? endLine : startLine) + 5);
-                const regionText = lines.slice(searchStart, searchEnd).join('\n');
-
-                const idx = findNthOccurrence(regionText, selectedText, occurrenceIndex);
-                if (idx !== -1) {
-                    const globalLines = lines.slice(0, searchStart).join('\n');
-                    const globalOffset = globalLines.length > 0 ? globalLines.length + 1 + idx : idx;
-                    setBeforeAfter(globalOffset);
-                } else {
-                    // Fallback: try first occurrence in region
-                    const firstIdx = regionText.indexOf(selectedText);
-                    if (firstIdx !== -1) {
-                        const globalLines = lines.slice(0, searchStart).join('\n');
-                        const globalOffset = globalLines.length > 0 ? globalLines.length + 1 + firstIdx : firstIdx;
-                        setBeforeAfter(globalOffset);
-                    } else {
-                        // Fallback: search entire rawMarkdown
-                        const globalIdx = rawMarkdown.indexOf(selectedText);
-                        if (globalIdx !== -1) setBeforeAfter(globalIdx);
-                    }
-                }
-            } else {
-                // Fallback: search entire rawMarkdown
-                const globalIdx = rawMarkdown.indexOf(selectedText);
-                if (globalIdx !== -1) setBeforeAfter(globalIdx);
-            }
-
-            // Compute headingPath by walking up the DOM
-            anchor.headingPath = computeHeadingPath(sel.anchorNode);
-
-            return anchor;
-        }
-
-        function computeHeadingPath(node) {
-            const contentEl = document.getElementById('content');
-            const headings = [];
-            let el = node.nodeType === 3 ? node.parentElement : node;
-
-            // Walk backwards through siblings and parents to find heading ancestors
-            while (el && el !== contentEl) {
-                // Check preceding siblings for headings
-                let sibling = el.previousElementSibling;
-                while (sibling) {
-                    const tag = sibling.tagName;
-                    if (tag && /^H[1-6]$/.test(tag)) {
-                        headings.unshift(sibling.textContent.trim());
-                        break;
-                    }
-                    sibling = sibling.previousElementSibling;
-                }
-                el = el.parentElement;
-            }
-
-            return headings.join(' > ');
-        }
-
-        // --- New thread form ---
-
-        function showNewThreadForm(selectedText) {
-            const container = document.getElementById('new-thread-form-container');
-            container.innerHTML =
-                '<div class="new-thread-form">' +
-                '<div class="quoted-text">' + escapeHtml(truncateText(selectedText, 200)) + '</div>' +
-                '<textarea id="new-thread-body" placeholder="Write a comment..." onkeydown="handleNewThreadKeydown(event)"></textarea>' +
-                '<input type="text" class="author-field" id="new-thread-author" placeholder="Your name" value="' + escapeHtml(getSavedAuthor()) + '" />' +
-                '<div class="form-actions">' +
-                '<button class="btn-cancel-form" onclick="hideNewThreadForm()">Cancel</button>' +
-                '<button class="btn-submit" id="new-thread-submit" onclick="submitNewThread()">Comment</button>' +
-                '</div>' +
-                '</div>';
-            document.getElementById('new-thread-body').focus();
-            // Scroll the comments panel to top
-            document.getElementById('comments-panel').scrollTop = 0;
-        }
-
-        function hideNewThreadForm() {
-            document.getElementById('new-thread-form-container').innerHTML = '';
-            pendingAnchor = null;
-        }
-
-        function handleNewThreadKeydown(event) {
-            if (event.key === 'Escape') {
-                hideNewThreadForm();
-            }
-            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                submitNewThread();
-            }
-        }
-
-        function submitNewThread() {
-            if (!pendingAnchor) return;
-
-            const body = document.getElementById('new-thread-body').value.trim();
-            const author = document.getElementById('new-thread-author').value.trim();
-
-            if (!body || !author) return;
-            saveAuthor(author);
-
-            const submitBtn = document.getElementById('new-thread-submit');
-            submitBtn.disabled = true;
-
-            fetch('/api/threads', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    project: qualifiedName,
-                    path: filePath,
-                    anchor: pendingAnchor,
-                    author: author,
-                    role: 'human',
-                    body: body
-                })
-            })
-            .then(r => {
-                if (!r.ok) throw new Error('Failed to create thread');
-                return r.json();
-            })
-            .then(() => {
-                hideNewThreadForm();
-                refreshComments();
-                refreshReview();
-            })
-            .catch(err => {
-                console.error('Failed to create thread:', err);
-                submitBtn.disabled = false;
-            });
-        }
-
-        // Escape key to dismiss new thread form
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') {
-                hideNewThreadForm();
-                removeFloatingCommentBtn();
             }
         });
+        return tmp.innerHTML;
+    }
 
-        // --- Comment text highlighting ---
+    function truncateText(text, maxLen) {
+        if (!text) return '';
+        return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
+    }
 
-        function addCommentHighlights(threadList, lines) {
-            const content = document.getElementById('content');
-            if (!content) return;
+    // --- Review banner ---
 
-            // Remove old highlights
-            content.querySelectorAll('.comment-highlight').forEach(mark => {
-                const parent = mark.parentNode;
+    function renderReviewBanner() {
+        var container = document.getElementById('review-banner-container');
+        var openCount = (threads || []).filter(function(t) { return t.status === 'open'; }).length;
+        if (openCount === 0) { container.innerHTML = ''; return; }
+        var agentClass = currentReviewAgentActive ? ' agent-active' : '';
+        container.innerHTML = '<div class="review-banner' + agentClass + '"><strong>In review</strong> &mdash; ' +
+            openCount + ' open thread' + (openCount !== 1 ? 's' : '') + '</div>';
+    }
+
+    function refreshReview() {
+        fetch('/api/reviews?project=' + encodeURIComponent(qualifiedName))
+            .then(function(r) { return r.json(); })
+            .then(function(reviews) {
+                var myReview = reviews.find(function(r) { return r.filePath === filePath; });
+                currentReviewAgentActive = myReview ? (myReview.agentActive || false) : false;
+                renderReviewBanner();
+            })
+            .catch(function(err) { console.error('Failed to refresh review:', err); });
+    }
+
+    // --- Thread rendering ---
+
+    function renderThreads(threadList, lines) {
+        var container = document.getElementById('threads-container');
+        var countEl = document.getElementById('comments-count');
+
+        var contentEl = document.getElementById('content');
+        if (contentEl) {
+            contentEl.querySelectorAll('.comment-highlight').forEach(function(mark) {
+                var parent = mark.parentNode;
                 while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
                 parent.removeChild(mark);
                 parent.normalize();
             });
-
-            // Process threads that have anchor text
-            threadList.forEach(t => {
-                const selectedText = t.anchor && t.anchor.selectedText;
-                if (!selectedText) return;
-
-                const line = lines[t.id];
-
-                // Find the block element to search within
-                let scopeEl = null;
-                if (line > 0) {
-                    const elements = content.querySelectorAll('[data-source-line]');
-                    // Try exact match first, then closest
-                    let bestEl = null;
-                    let bestDist = Infinity;
-                    elements.forEach(el => {
-                        const sl = parseInt(el.getAttribute('data-source-line'), 10);
-                        if (sl === line) { bestEl = el; bestDist = 0; }
-                        else if (Math.abs(sl - line) < bestDist) {
-                            bestDist = Math.abs(sl - line);
-                            bestEl = el;
-                        }
-                    });
-                    scopeEl = bestEl;
-                }
-                if (!scopeEl) scopeEl = content;
-
-                highlightTextInElement(scopeEl, selectedText, t.id, t.status);
-            });
         }
 
-        function highlightTextInElement(root, text, threadId, status) {
-            const treeWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-            const textNodes = [];
-            while (treeWalker.nextNode()) textNodes.push(treeWalker.currentNode);
-
-            // Build concatenated text with node mapping
-            let concat = '';
-            const nodeMap = []; // {node, startIdx, endIdx}
-            textNodes.forEach(node => {
-                const start = concat.length;
-                concat += node.nodeValue;
-                nodeMap.push({ node: node, start: start, end: concat.length });
-            });
-
-            const matchIdx = concat.indexOf(text);
-            if (matchIdx === -1) return;
-
-            const matchEnd = matchIdx + text.length;
-
-            // Find which text nodes are affected
-            for (let i = nodeMap.length - 1; i >= 0; i--) {
-                const entry = nodeMap[i];
-                if (entry.end <= matchIdx || entry.start >= matchEnd) continue;
-
-                const node = entry.node;
-                const nodeStart = Math.max(0, matchIdx - entry.start);
-                const nodeEnd = Math.min(node.nodeValue.length, matchEnd - entry.start);
-
-                // Split the text node and wrap the matched portion
-                const beforeText = node.nodeValue.substring(0, nodeStart);
-                const matchText = node.nodeValue.substring(nodeStart, nodeEnd);
-                const afterText = node.nodeValue.substring(nodeEnd);
-
-                const mark = document.createElement('mark');
-                mark.className = 'comment-highlight ' + status;
-                mark.setAttribute('data-thread-id', threadId);
-                mark.textContent = matchText;
-                mark.onclick = function(e) {
-                    e.stopPropagation();
-                    highlightThread(threadId);
-                };
-
-                const parent = node.parentNode;
-                if (afterText) parent.insertBefore(document.createTextNode(afterText), node.nextSibling);
-                parent.insertBefore(mark, node.nextSibling);
-                if (beforeText) {
-                    node.nodeValue = beforeText;
-                } else {
-                    parent.removeChild(node);
-                }
-            }
+        if (!threadList || threadList.length === 0) {
+            container.innerHTML = '<div class="no-comments">No comments yet</div>';
+            countEl.textContent = '';
+            document.getElementById('resolved-toggle').style.display = 'none';
+            return;
         }
 
-        // Called when clicking a highlight in the doc — scroll to the comment card
-        function highlightThread(threadId) {
-            activateThread(threadId, 'comment');
-        }
-
-        // Called when clicking a comment card — scroll to the highlight in the doc
-        function focusThread(threadId) {
-            activateThread(threadId, 'highlight');
-        }
-
-        function activateThread(threadId, scrollTo) {
-            // Clear previous focus
-            document.querySelectorAll('.thread-card.highlighted').forEach(c => c.classList.remove('highlighted'));
-            document.querySelectorAll('.comment-highlight.active').forEach(m => m.classList.remove('active'));
-
-            // Intensify the text highlight
-            const marks = document.querySelectorAll('.comment-highlight[data-thread-id="' + threadId + '"]');
-            marks.forEach(m => m.classList.add('active'));
-
-            // Highlight the comment card
-            const card = document.querySelector('.thread-card[data-thread-id="' + threadId + '"]');
-            if (card) card.classList.add('highlighted');
-
-            // Scroll to the requested target
-            if (scrollTo === 'comment' && card) {
-                card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            } else if (scrollTo === 'highlight' && marks.length > 0) {
-                marks[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }
-
-            // Clear after 3s
-            setTimeout(() => {
-                marks.forEach(m => m.classList.remove('active'));
-                if (card) card.classList.remove('highlighted');
-            }, 3000);
-        }
-
-        // --- Client-side anchor resolution ---
-
-        function resolveAnchor(markdown, anchor) {
-            if (!anchor || !anchor.selectedText) return -1;
-            const text = anchor.selectedText;
-
-            let idx = markdown.indexOf(text);
-            if (idx === -1) return -1;
-
-            // Only one occurrence — no ambiguity
-            if (markdown.indexOf(text, idx + 1) === -1) return idx;
-
-            // Multiple occurrences: disambiguate with before/after context
-            if (anchor.before || anchor.after) {
-                let offset = 0;
-                while (true) {
-                    const found = markdown.indexOf(text, offset);
-                    if (found === -1) break;
-
-                    let beforeOk = true;
-                    let afterOk = true;
-
-                    if (anchor.before) {
-                        if (found >= anchor.before.length) {
-                            beforeOk = markdown.substring(found - anchor.before.length, found) === anchor.before;
-                        } else {
-                            beforeOk = false;
-                        }
-                    }
-                    if (anchor.after) {
-                        const aStart = found + text.length;
-                        if (aStart + anchor.after.length <= markdown.length) {
-                            afterOk = markdown.substring(aStart, aStart + anchor.after.length) === anchor.after;
-                        } else {
-                            afterOk = false;
-                        }
-                    }
-
-                    if (beforeOk && afterOk) return found;
-                    offset = found + 1;
-                }
-            }
-            return idx; // fallback to first
-        }
-
-        function resolveAnchorsToLines(threadList, markdown) {
-            const result = {};
-            threadList.forEach(t => {
-                const offset = resolveAnchor(markdown, t.anchor);
-                if (offset < 0) {
-                    result[t.id] = -1;
-                } else {
-                    let line = 1;
-                    for (let i = 0; i < offset && i < markdown.length; i++) {
-                        if (markdown[i] === '\n') line++;
-                    }
-                    result[t.id] = line;
-                }
-            });
-            return result;
-        }
-
-        // --- Form state preservation ---
-
-        function saveFormState() {
-            const state = { scrollTop: document.getElementById('comments-panel').scrollTop };
-            // Check for an open reply form
-            document.querySelectorAll('.reply-form').forEach(form => {
-                if (form.style.display !== 'none') {
-                    const threadId = form.id.replace('reply-form-', '');
-                    const textarea = form.querySelector('textarea');
-                    const author = form.querySelector('.author-field');
-                    state.reply = {
-                        threadId: threadId,
-                        body: textarea ? textarea.value : '',
-                        author: author ? author.value : ''
-                    };
-                }
-            });
-            return state;
-        }
-
-        function restoreFormState(state) {
-            if (!state) return;
-            if (state.reply) {
-                const form = document.getElementById('reply-form-' + state.reply.threadId);
-                if (form) {
-                    form.style.display = '';
-                    const textarea = form.querySelector('textarea');
-                    if (textarea) {
-                        textarea.value = state.reply.body;
-                        textarea.focus();
-                    }
-                    const author = form.querySelector('.author-field');
-                    if (author) author.value = state.reply.author;
-                }
-            }
-            document.getElementById('comments-panel').scrollTop = state.scrollTop;
-        }
-
-        // --- SSE real-time updates ---
-
-        function refreshComments() {
-            const formState = saveFormState();
-            fetch('/api/threads?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(filePath))
-                .then(r => r.json())
-                .then(data => {
-                    threads = data;
-                    anchorLines = resolveAnchorsToLines(threads, rawMarkdown);
-                    renderThreads(threads, anchorLines);
-                    restoreFormState(formState);
-                    renderReviewBanner();
-                })
-                .catch(err => console.error('Failed to refresh comments:', err));
-        }
-
-        function refreshDocument() {
-            const contentScroll = window.scrollY;
-            fetch(window.location.href)
-                .then(r => r.text())
-                .then(pageHtml => {
-                    const doc = new DOMParser().parseFromString(pageHtml, 'text/html');
-
-                    const newContent = doc.getElementById('content');
-                    if (newContent) {
-                        document.getElementById('content').innerHTML = newContent.innerHTML;
-                    }
-
-                    const newRaw = doc.getElementById('raw-markdown');
-                    if (newRaw) {
-                        rawMarkdown = newRaw.content.textContent;
-                    }
-
-                    refreshComments();
-                    window.scrollTo(0, contentScroll);
-                })
-                .catch(err => {
-                    console.error('Failed to refresh document:', err);
-                    window.location.reload();
-                });
-        }
-
-        // Debounce + in-flight deduplication to prevent connection starvation
-        const _pending = {};
-        const _timers = {};
-        function debouncedRefresh(key, fn, delay) {
-            delay = delay || 200;
-            clearTimeout(_timers[key]);
-            _timers[key] = setTimeout(function() {
-                if (_pending[key]) return;
-                _pending[key] = true;
-                Promise.resolve(fn()).finally(function() { _pending[key] = false; });
-            }, delay);
-        }
-
-        // Set up SSE with visibility management to avoid connection starvation
-        let evtSource = null;
-        function connectSSE() {
-            if (evtSource) evtSource.close();
-            evtSource = new EventSource('/events');
-            evtSource.addEventListener('change', function(e) {
-                try {
-                    const data = JSON.parse(e.data);
-                    if (data.type === 'comments' && data.project === qualifiedName) {
-                        debouncedRefresh('comments', refreshComments);
-                        debouncedRefresh('review', refreshReview);
-                    }
-                    if (data.type === 'files' && data.project === qualifiedName) {
-                        debouncedRefresh('document', refreshDocument);
-                    }
-                } catch (err) {
-                    console.error('SSE parse error:', err);
-                }
-            });
-        }
-        connectSSE();
-        window.addEventListener('beforeunload', function() { if (evtSource) evtSource.close(); });
-        document.addEventListener('visibilitychange', function() {
-            if (document.hidden) {
-                if (evtSource) { evtSource.close(); evtSource = null; }
-            } else {
-                connectSSE();
-                debouncedRefresh('comments', refreshComments);
-                debouncedRefresh('document', refreshDocument);
-            }
+        var openThreads = [], resolvedThreads = [], orphanedThreads = [];
+        threadList.forEach(function(t) {
+            var line = lines[t.id];
+            if (t.status === 'resolved') resolvedThreads.push(t);
+            else if (line === -1 || line === undefined) orphanedThreads.push(t);
+            else openThreads.push(t);
         });
 
-        // Initial render
-        renderThreads(threads || [], anchorLines || {});
-        renderReviewBanner();
-        // Fetch fresh review state (for agentActive)
-        refreshReview();
-    </script>
-</body>
-</html>
+        var sortByLine = function(a, b) { return (lines[a.id] || 0) - (lines[b.id] || 0); };
+        openThreads.sort(sortByLine);
+        resolvedThreads.sort(sortByLine);
+
+        var openCount = openThreads.length + orphanedThreads.length;
+        countEl.textContent = openCount > 0 ? openCount : '';
+
+        var resolvedToggle = document.getElementById('resolved-toggle');
+        var resolvedCountEl = document.getElementById('resolved-count');
+        var showResolvedCheckbox = document.getElementById('show-resolved-checkbox');
+        if (resolvedThreads.length > 0) {
+            resolvedToggle.style.display = '';
+            resolvedCountEl.textContent = resolvedThreads.length + ' resolved';
+        } else {
+            resolvedToggle.style.display = 'none';
+        }
+
+        var showResolved = showResolvedCheckbox && showResolvedCheckbox.checked;
+        var html = '';
+
+        openThreads.forEach(function(t) { html += buildThreadCard(t, lines[t.id], false); });
+        orphanedThreads.forEach(function(t) { html += buildThreadCard(t, -1, false); });
+        if (showResolved && resolvedThreads.length > 0) {
+            resolvedThreads.forEach(function(t) { html += buildThreadCard(t, lines[t.id], true); });
+        }
+
+        container.innerHTML = html;
+        addCommentHighlights(threadList, lines);
+    }
+
+    function buildThreadCard(thread, line, isResolved) {
+        var tid = escapeHtml(thread.id);
+        var html = '<div class="thread-card' + (isResolved ? ' thread-resolved' : '') +
+            '" data-thread-id="' + tid + '" data-line="' + (line || -1) +
+            '" onclick="focusThread(\'' + tid + '\')">';
+
+        html += '<div class="thread-anchor">' +
+            '<span class="thread-status ' + thread.status + '">' + thread.status + '</span> ' +
+            escapeHtml(truncateText(thread.anchor.selectedText, 80)) + '</div>';
+
+        if (line === -1) html += '<div class="orphaned-warning">Anchor text not found in document</div>';
+
+        thread.comments.forEach(function(c) {
+            html += '<div class="thread-comment">';
+            html += '<div class="comment-header">';
+            html += '<span class="comment-author">' + escapeHtml(c.author) + '</span>';
+            if (c.role) html += '<span class="comment-role ' + c.role + '">' + c.role + '</span>';
+            html += '<span class="comment-time">' + formatTime(c.createdAt) + '</span>';
+            html += '</div>';
+            html += '<div class="comment-body">' + renderCommentMarkdown(c.body) + '</div>';
+            html += '</div>';
+        });
+
+        html += '<div class="thread-actions">';
+        html += '<button onclick="event.stopPropagation(); toggleReplyForm(\'' + tid + '\')">Reply</button>';
+        if (thread.status === 'open') {
+            html += '<button class="resolve-btn" onclick="event.stopPropagation(); resolveThread(\'' + tid + '\')">Resolve</button>';
+        } else {
+            html += '<button class="reopen-btn" onclick="event.stopPropagation(); reopenThread(\'' + tid + '\')">Reopen</button>';
+        }
+        html += '</div>';
+
+        html += '<div class="reply-form" id="reply-form-' + tid + '" style="display:none;">';
+        html += '<textarea placeholder="Write a reply..." onkeydown="handleReplyKeydown(event, \'' + tid + '\')"></textarea>';
+        html += '<input type="text" class="author-field" placeholder="Your name" value="' + escapeHtml(getSavedAuthor()) + '" />';
+        html += '<div class="form-actions">';
+        html += '<button class="btn-cancel-form" onclick="event.stopPropagation(); hideReplyForm(\'' + tid + '\')">Cancel</button>';
+        html += '<button class="btn-submit" onclick="event.stopPropagation(); submitReply(\'' + tid + '\')">Reply</button>';
+        html += '</div></div>';
+
+        html += '</div>';
+        return html;
+    }
+
+    // --- Reply form ---
+    function toggleReplyForm(threadId) {
+        var form = document.getElementById('reply-form-' + threadId);
+        if (!form) return;
+        var isVisible = form.style.display !== 'none';
+        document.querySelectorAll('.reply-form').forEach(function(f) { f.style.display = 'none'; });
+        if (!isVisible) { form.style.display = ''; form.querySelector('textarea').focus(); }
+    }
+    function hideReplyForm(threadId) {
+        var form = document.getElementById('reply-form-' + threadId);
+        if (form) form.style.display = 'none';
+    }
+    function handleReplyKeydown(event, threadId) {
+        if (event.key === 'Escape') hideReplyForm(threadId);
+        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submitReply(threadId);
+    }
+
+    function submitReply(threadId) {
+        var form = document.getElementById('reply-form-' + threadId);
+        if (!form) return;
+        var textarea = form.querySelector('textarea');
+        var authorInput = form.querySelector('.author-field');
+        var body = textarea.value.trim();
+        var author = authorInput.value.trim();
+        if (!body || !author) return;
+        saveAuthor(author);
+        var submitBtn = form.querySelector('.btn-submit');
+        submitBtn.disabled = true;
+        fetch('/api/threads/' + encodeURIComponent(threadId) + '/comments', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project: qualifiedName, path: filePath, author: author, role: 'human', body: body })
+        })
+        .then(function(r) { if (!r.ok) throw new Error('Failed'); return r.json(); })
+        .then(function() { hideReplyForm(threadId); refreshComments(); })
+        .catch(function(err) { console.error('Failed to reply:', err); submitBtn.disabled = false; });
+    }
+
+    // --- Resolve / Reopen ---
+    function resolveThread(threadId) {
+        var author = getSavedAuthor() || 'anonymous';
+        fetch('/api/threads/' + encodeURIComponent(threadId), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project: qualifiedName, path: filePath, status: 'resolved', resolvedBy: author })
+        }).then(function(r) { if (!r.ok) throw new Error('Failed'); refreshComments(); })
+        .catch(function(err) { console.error('Failed to resolve:', err); });
+    }
+    function reopenThread(threadId) {
+        fetch('/api/threads/' + encodeURIComponent(threadId), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project: qualifiedName, path: filePath, status: 'open' })
+        }).then(function(r) { if (!r.ok) throw new Error('Failed'); refreshComments(); })
+        .catch(function(err) { console.error('Failed to reopen:', err); });
+    }
+    function toggleResolved() { renderThreads(threads || [], anchorLines || {}); }
+
+    // --- Text selection and comment creation ---
+    var pendingAnchor = null;
+
+    function removeFloatingCommentBtn() {
+        var existing = document.querySelector('.comment-btn-float');
+        if (existing) existing.remove();
+    }
+
+    document.getElementById('content').addEventListener('mouseup', function(e) {
+        setTimeout(function() {
+            var sel = window.getSelection();
+            if (!sel || sel.isCollapsed || !sel.toString().trim()) { removeFloatingCommentBtn(); return; }
+            var contentEl = document.getElementById('content');
+            if (!contentEl.contains(sel.anchorNode) || !contentEl.contains(sel.focusNode)) return;
+            var selectedText = sel.toString().trim();
+            if (!selectedText) return;
+            removeFloatingCommentBtn();
+            var range = sel.getRangeAt(0);
+            var rect = range.getBoundingClientRect();
+            var contentRect = contentEl.getBoundingClientRect();
+            var btn = document.createElement('button');
+            btn.className = 'comment-btn-float';
+            btn.textContent = 'Comment';
+            btn.style.top = (rect.bottom - contentRect.top + 4) + 'px';
+            btn.style.left = (rect.right - contentRect.left) + 'px';
+            btn.addEventListener('mousedown', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
+            btn.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                captureSelectionAndShowForm(sel, selectedText);
+                removeFloatingCommentBtn();
+            });
+            contentEl.appendChild(btn);
+        }, 10);
+    });
+
+    function captureSelectionAndShowForm(sel, selectedText) {
+        pendingAnchor = computeAnchor(sel, selectedText);
+        showNewThreadForm(selectedText);
+    }
+
+    function computeAnchor(sel, selectedText) {
+        var anchor = { selectedText: selectedText, before: '', after: '', headingPath: '' };
+        var contentEl = document.getElementById('content');
+        var startNode = sel.anchorNode;
+        var endNode = sel.focusNode;
+
+        function findSourceLine(node) {
+            var el = node.nodeType === 3 ? node.parentElement : node;
+            while (el && el !== contentEl) {
+                if (el.hasAttribute && el.hasAttribute('data-source-line')) {
+                    return parseInt(el.getAttribute('data-source-line'), 10);
+                }
+                el = el.parentElement;
+            }
+            return -1;
+        }
+
+        var startLine = findSourceLine(startNode);
+        var endLine = findSourceLine(endNode);
+
+        var occurrenceIndex = 0;
+        var blockEl = startNode.nodeType === 3 ? startNode.parentElement : startNode;
+        while (blockEl && blockEl !== contentEl && !(blockEl.hasAttribute && blockEl.hasAttribute('data-source-line'))) {
+            blockEl = blockEl.parentElement;
+        }
+        if (blockEl && blockEl !== contentEl) {
+            try {
+                var range = sel.getRangeAt(0);
+                var preRange = document.createRange();
+                preRange.setStart(blockEl, 0);
+                preRange.setEnd(range.startContainer, range.startOffset);
+                var textBefore = preRange.toString();
+                var searchPos = 0;
+                while (true) {
+                    var found = textBefore.indexOf(selectedText, searchPos);
+                    if (found === -1) break;
+                    occurrenceIndex++;
+                    searchPos = found + 1;
+                }
+            } catch (e) {}
+        }
+
+        function findNthOccurrence(haystack, needle, n) {
+            var pos = 0;
+            for (var i = 0; i <= n; i++) {
+                var found = haystack.indexOf(needle, pos);
+                if (found === -1) return -1;
+                if (i === n) return found;
+                pos = found + 1;
+            }
+            return -1;
+        }
+
+        function setBeforeAfter(globalOffset) {
+            var beforeStart = Math.max(0, globalOffset - 80);
+            anchor.before = rawMarkdown.substring(beforeStart, globalOffset);
+            var afterEnd = Math.min(rawMarkdown.length, globalOffset + selectedText.length + 80);
+            anchor.after = rawMarkdown.substring(globalOffset + selectedText.length, afterEnd);
+        }
+
+        if (startLine > 0) {
+            var lines = rawMarkdown.split('\n');
+            var searchStart = Math.max(0, startLine - 1);
+            var searchEnd = Math.min(lines.length, (endLine > 0 ? endLine : startLine) + 5);
+            var regionText = lines.slice(searchStart, searchEnd).join('\n');
+            var idx = findNthOccurrence(regionText, selectedText, occurrenceIndex);
+            if (idx !== -1) {
+                var globalLines = lines.slice(0, searchStart).join('\n');
+                var globalOffset = globalLines.length > 0 ? globalLines.length + 1 + idx : idx;
+                setBeforeAfter(globalOffset);
+            } else {
+                var firstIdx = regionText.indexOf(selectedText);
+                if (firstIdx !== -1) {
+                    var globalLines2 = lines.slice(0, searchStart).join('\n');
+                    var globalOffset2 = globalLines2.length > 0 ? globalLines2.length + 1 + firstIdx : firstIdx;
+                    setBeforeAfter(globalOffset2);
+                } else {
+                    var globalIdx = rawMarkdown.indexOf(selectedText);
+                    if (globalIdx !== -1) setBeforeAfter(globalIdx);
+                }
+            }
+        } else {
+            var globalIdx2 = rawMarkdown.indexOf(selectedText);
+            if (globalIdx2 !== -1) setBeforeAfter(globalIdx2);
+        }
+
+        anchor.headingPath = computeHeadingPath(sel.anchorNode);
+        return anchor;
+    }
+
+    function computeHeadingPath(node) {
+        var contentEl = document.getElementById('content');
+        var headings = [];
+        var el = node.nodeType === 3 ? node.parentElement : node;
+        while (el && el !== contentEl) {
+            var sibling = el.previousElementSibling;
+            while (sibling) {
+                var tag = sibling.tagName;
+                if (tag && /^H[1-6]$/.test(tag)) { headings.unshift(sibling.textContent.trim()); break; }
+                sibling = sibling.previousElementSibling;
+            }
+            el = el.parentElement;
+        }
+        return headings.join(' > ');
+    }
+
+    // --- New thread form ---
+    function showNewThreadForm(selectedText) {
+        var container = document.getElementById('new-thread-form-container');
+        container.innerHTML =
+            '<div class="new-thread-form">' +
+            '<div class="quoted-text">' + escapeHtml(truncateText(selectedText, 200)) + '</div>' +
+            '<textarea id="new-thread-body" placeholder="Write a comment..." onkeydown="handleNewThreadKeydown(event)"></textarea>' +
+            '<input type="text" class="author-field" id="new-thread-author" placeholder="Your name" value="' + escapeHtml(getSavedAuthor()) + '" />' +
+            '<div class="form-actions">' +
+            '<button class="btn-cancel-form" onclick="hideNewThreadForm()">Cancel</button>' +
+            '<button class="btn-submit" id="new-thread-submit" onclick="submitNewThread()">Comment</button>' +
+            '</div></div>';
+        document.getElementById('new-thread-body').focus();
+        document.getElementById('comments-panel').scrollTop = 0;
+    }
+    function hideNewThreadForm() {
+        document.getElementById('new-thread-form-container').innerHTML = '';
+        pendingAnchor = null;
+    }
+    function handleNewThreadKeydown(event) {
+        if (event.key === 'Escape') hideNewThreadForm();
+        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submitNewThread();
+    }
+    function submitNewThread() {
+        if (!pendingAnchor) return;
+        var body = document.getElementById('new-thread-body').value.trim();
+        var author = document.getElementById('new-thread-author').value.trim();
+        if (!body || !author) return;
+        saveAuthor(author);
+        var submitBtn = document.getElementById('new-thread-submit');
+        submitBtn.disabled = true;
+        fetch('/api/threads', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project: qualifiedName, path: filePath, anchor: pendingAnchor, author: author, role: 'human', body: body })
+        })
+        .then(function(r) { if (!r.ok) throw new Error('Failed'); return r.json(); })
+        .then(function() { hideNewThreadForm(); refreshComments(); refreshReview(); })
+        .catch(function(err) { console.error('Failed to create thread:', err); submitBtn.disabled = false; });
+    }
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') { hideNewThreadForm(); removeFloatingCommentBtn(); }
+    });
+
+    // --- Comment text highlighting ---
+    function addCommentHighlights(threadList, lines) {
+        var content = document.getElementById('content');
+        if (!content) return;
+        content.querySelectorAll('.comment-highlight').forEach(function(mark) {
+            var parent = mark.parentNode;
+            while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+            parent.removeChild(mark);
+            parent.normalize();
+        });
+        threadList.forEach(function(t) {
+            var selectedText = t.anchor && t.anchor.selectedText;
+            if (!selectedText) return;
+            var line = lines[t.id];
+            var scopeEl = null;
+            if (line > 0) {
+                var elements = content.querySelectorAll('[data-source-line]');
+                var bestEl = null, bestDist = Infinity;
+                elements.forEach(function(el) {
+                    var sl = parseInt(el.getAttribute('data-source-line'), 10);
+                    if (sl === line) { bestEl = el; bestDist = 0; }
+                    else if (Math.abs(sl - line) < bestDist) { bestDist = Math.abs(sl - line); bestEl = el; }
+                });
+                scopeEl = bestEl;
+            }
+            if (!scopeEl) scopeEl = content;
+            highlightTextInElement(scopeEl, selectedText, t.id, t.status);
+        });
+    }
+
+    function highlightTextInElement(root, text, threadId, status) {
+        var treeWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        var textNodes = [];
+        while (treeWalker.nextNode()) textNodes.push(treeWalker.currentNode);
+        var concat = '';
+        var nodeMap = [];
+        textNodes.forEach(function(node) {
+            var start = concat.length;
+            concat += node.nodeValue;
+            nodeMap.push({ node: node, start: start, end: concat.length });
+        });
+        var matchIdx = concat.indexOf(text);
+        if (matchIdx === -1) return;
+        var matchEnd = matchIdx + text.length;
+        for (var i = nodeMap.length - 1; i >= 0; i--) {
+            var entry = nodeMap[i];
+            if (entry.end <= matchIdx || entry.start >= matchEnd) continue;
+            var node = entry.node;
+            var nodeStart = Math.max(0, matchIdx - entry.start);
+            var nodeEnd = Math.min(node.nodeValue.length, matchEnd - entry.start);
+            var beforeText = node.nodeValue.substring(0, nodeStart);
+            var matchText = node.nodeValue.substring(nodeStart, nodeEnd);
+            var afterText = node.nodeValue.substring(nodeEnd);
+            var mark = document.createElement('mark');
+            mark.className = 'comment-highlight ' + status;
+            mark.setAttribute('data-thread-id', threadId);
+            mark.textContent = matchText;
+            mark.onclick = function(e) { e.stopPropagation(); highlightThread(threadId); };
+            var parent = node.parentNode;
+            if (afterText) parent.insertBefore(document.createTextNode(afterText), node.nextSibling);
+            parent.insertBefore(mark, node.nextSibling);
+            if (beforeText) { node.nodeValue = beforeText; } else { parent.removeChild(node); }
+        }
+    }
+
+    function highlightThread(threadId) { activateThread(threadId, 'comment'); }
+    function focusThread(threadId) { activateThread(threadId, 'highlight'); }
+
+    function activateThread(threadId, scrollTo) {
+        document.querySelectorAll('.thread-card.highlighted').forEach(function(c) { c.classList.remove('highlighted'); });
+        document.querySelectorAll('.comment-highlight.active').forEach(function(m) { m.classList.remove('active'); });
+        var marks = document.querySelectorAll('.comment-highlight[data-thread-id="' + threadId + '"]');
+        marks.forEach(function(m) { m.classList.add('active'); });
+        var card = document.querySelector('.thread-card[data-thread-id="' + threadId + '"]');
+        if (card) card.classList.add('highlighted');
+        if (scrollTo === 'comment' && card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        else if (scrollTo === 'highlight' && marks.length > 0) marks[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setTimeout(function() {
+            marks.forEach(function(m) { m.classList.remove('active'); });
+            if (card) card.classList.remove('highlighted');
+        }, 3000);
+    }
+
+    // --- Client-side anchor resolution ---
+    function resolveAnchor(markdown, anchor) {
+        if (!anchor || !anchor.selectedText) return -1;
+        var text = anchor.selectedText;
+        var idx = markdown.indexOf(text);
+        if (idx === -1) return -1;
+        if (markdown.indexOf(text, idx + 1) === -1) return idx;
+        if (anchor.before || anchor.after) {
+            var offset = 0;
+            while (true) {
+                var found = markdown.indexOf(text, offset);
+                if (found === -1) break;
+                var beforeOk = true, afterOk = true;
+                if (anchor.before) {
+                    beforeOk = found >= anchor.before.length && markdown.substring(found - anchor.before.length, found) === anchor.before;
+                }
+                if (anchor.after) {
+                    var aStart = found + text.length;
+                    afterOk = aStart + anchor.after.length <= markdown.length && markdown.substring(aStart, aStart + anchor.after.length) === anchor.after;
+                }
+                if (beforeOk && afterOk) return found;
+                offset = found + 1;
+            }
+        }
+        return idx;
+    }
+
+    function resolveAnchorsToLines(threadList, markdown) {
+        var result = {};
+        threadList.forEach(function(t) {
+            var offset = resolveAnchor(markdown, t.anchor);
+            if (offset < 0) { result[t.id] = -1; return; }
+            var line = 1;
+            for (var i = 0; i < offset && i < markdown.length; i++) {
+                if (markdown[i] === '\n') line++;
+            }
+            result[t.id] = line;
+        });
+        return result;
+    }
+
+    // --- Form state preservation ---
+    function saveFormState() {
+        var state = { scrollTop: document.getElementById('comments-panel').scrollTop };
+        document.querySelectorAll('.reply-form').forEach(function(form) {
+            if (form.style.display !== 'none') {
+                var threadId = form.id.replace('reply-form-', '');
+                var textarea = form.querySelector('textarea');
+                var author = form.querySelector('.author-field');
+                state.reply = { threadId: threadId, body: textarea ? textarea.value : '', author: author ? author.value : '' };
+            }
+        });
+        return state;
+    }
+    function restoreFormState(state) {
+        if (!state) return;
+        if (state.reply) {
+            var form = document.getElementById('reply-form-' + state.reply.threadId);
+            if (form) {
+                form.style.display = '';
+                var textarea = form.querySelector('textarea');
+                if (textarea) { textarea.value = state.reply.body; textarea.focus(); }
+                var author = form.querySelector('.author-field');
+                if (author) author.value = state.reply.author;
+            }
+        }
+        document.getElementById('comments-panel').scrollTop = state.scrollTop;
+    }
+
+    // --- SSE real-time updates ---
+    function refreshComments() {
+        var formState = saveFormState();
+        fetch('/api/threads?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(filePath))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                threads = data;
+                anchorLines = resolveAnchorsToLines(threads, rawMarkdown);
+                renderThreads(threads, anchorLines);
+                restoreFormState(formState);
+                renderReviewBanner();
+            })
+            .catch(function(err) { console.error('Failed to refresh comments:', err); });
+    }
+
+    function refreshDocument() {
+        var contentScroll = document.getElementById('file-main').scrollTop;
+        fetch(window.location.href)
+            .then(function(r) { return r.text(); })
+            .then(function(pageHtml) {
+                var doc = new DOMParser().parseFromString(pageHtml, 'text/html');
+                var newContent = doc.getElementById('content');
+                if (newContent) document.getElementById('content').innerHTML = newContent.innerHTML;
+                var newRaw = doc.getElementById('raw-markdown');
+                if (newRaw) rawMarkdown = newRaw.content.textContent;
+                refreshComments();
+                document.getElementById('file-main').scrollTop = contentScroll;
+            })
+            .catch(function(err) {
+                console.error('Failed to refresh document:', err);
+                window.location.reload();
+            });
+    }
+
+    // SSE handlers
+    onSSE(function(data) {
+        if (data.type === 'comments' && data.project === qualifiedName) {
+            debouncedRefresh('comments', refreshComments);
+            debouncedRefresh('review', refreshReview);
+        }
+        if (data.type === 'files' && data.project === qualifiedName) {
+            debouncedRefresh('document', refreshDocument);
+        }
+    });
+
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) {
+            debouncedRefresh('comments', refreshComments);
+            debouncedRefresh('document', refreshDocument);
+        }
+    });
+
+    // Initial render
+    renderThreads(threads || [], anchorLines || {});
+    renderReviewBanner();
+    refreshReview();
+{{end}}
+
+{{template "layout" .}}

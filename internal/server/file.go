@@ -126,7 +126,8 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		ThreadsJSON: template.JS(threadsJSON),
 		AnchorLines: template.JS(anchorLinesJSON),
 	}
-	s.getTemplate().ExecuteTemplate(w, "file.html", data)
+	nav := s.buildNav(project.QualifiedName())
+	s.renderPage(w, "file.html", nav, data)
 }
 
 func stripFrontmatter(content []byte) []byte {

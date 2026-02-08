@@ -43,12 +43,6 @@ type createThreadInput struct {
 	HeadingPath  string `json:"headingPath,omitempty" jsonschema:"Heading path for context"`
 }
 
-type resolveInput struct {
-	Project  string `json:"project" jsonschema:"Project name"`
-	Path     string `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
-	ThreadID string `json:"threadId" jsonschema:"Thread ID to resolve"`
-}
-
 type filesInReviewInput struct {
 	Project string `json:"project" jsonschema:"Project name"`
 }
@@ -218,26 +212,6 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, err
 		}
 		res, err := textResult(thread)
-		return res, nil, err
-	})
-
-	// birdseye_resolve
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "birdseye_resolve",
-		Description: "Resolve a comment thread, marking it as addressed.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, input resolveInput) (*mcp.CallToolResult, any, error) {
-		if input.Project == "" || input.Path == "" || input.ThreadID == "" {
-			return nil, nil, fmt.Errorf("project, path, and threadId are all required")
-		}
-
-		err := store.ResolveThread(input.Project, input.Path, input.ThreadID, "claude")
-		if err != nil {
-			return nil, nil, err
-		}
-		res, err := textResult(map[string]string{
-			"status":   "resolved",
-			"threadId": input.ThreadID,
-		})
 		return res, nil, err
 	})
 

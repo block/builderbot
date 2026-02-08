@@ -52,6 +52,10 @@ type waitForChangesInput struct {
 	SinceSeq uint64 `json:"sinceSeq,omitempty" jsonschema:"Sequence number from previous wait call. Changes since this seq return immediately."`
 }
 
+type findProjectInput struct {
+	Directory string `json:"directory" jsonschema:"Absolute path to a directory inside the project (typically your working directory)"`
+}
+
 // textResult returns a CallToolResult containing a single JSON text block.
 func textResult(v any) (*mcp.CallToolResult, error) {
 	data, err := json.MarshalIndent(v, "", "  ")
@@ -272,6 +276,28 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			"changed": changed,
 			"seq":     seq,
 			"files":   files,
+		}
+		res, err := textResult(result)
+		return res, nil, err
+	})
+
+	// birdseye_find_project
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "birdseye_find_project",
+		Description: "Find the birdseye project for a given directory. Returns the project name to use with other birdseye tools. Call this first if you don't already know your project name.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, input findProjectInput) (*mcp.CallToolResult, any, error) {
+		if input.Directory == "" {
+			return nil, nil, fmt.Errorf("directory is required")
+		}
+
+		project := c.FindProjectByPath(input.Directory)
+		if project == nil {
+			return nil, nil, fmt.Errorf("no project found for directory: %s", input.Directory)
+		}
+
+		result := map[string]string{
+			"project": project.QualifiedName(),
+			"path":    project.Path,
 		}
 		res, err := textResult(result)
 		return res, nil, err

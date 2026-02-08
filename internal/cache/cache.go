@@ -81,6 +81,24 @@ func (c *Cache) FindProject(qualifiedName string) *discovery.Project {
 	return nil
 }
 
+// FindProjectByPath returns a project whose root is a prefix of the given
+// absolute path, or nil if no project matches.
+func (c *Cache) FindProjectByPath(absPath string) *discovery.Project {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var best *discovery.Project
+	bestLen := -1
+	for i := range c.projects {
+		projPath := c.projects[i].Path
+		if (strings.HasPrefix(absPath, projPath+"/") || absPath == projPath) && len(projPath) > bestLen {
+			p := c.projects[i]
+			best = &p
+			bestLen = len(projPath)
+		}
+	}
+	return best
+}
+
 // SetProjectFiles updates the file list for a project
 func (c *Cache) SetProjectFiles(projectName string, files []FileInfo) {
 	c.mu.Lock()

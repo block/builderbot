@@ -594,14 +594,12 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		SourceOrder []string
 		AutoSources map[string]bool
 		SourceTypes map[string]string
-		MultiSource bool // true if more than one source has files
 	}{
 		Project:     project,
 		Files:       files,
 		SourceOrder: sourceOrder,
 		AutoSources: autoSources,
 		SourceTypes: sourceTypes,
-		MultiSource: len(sourceOrder) > 1,
 	}
 	s.renderPage(w, "project.html", nav, pageData)
 }

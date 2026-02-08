@@ -201,78 +201,63 @@
         padding: 8px 0;
     }
     .add-source-btn:hover { color: #666; text-decoration: none; }
+    .main-content { scroll-behavior: smooth; }
+{{end}}
+
+{{define "sidebar_extra"}}
+    {{if .Page.SourceOrder}}
+    <div class="sidebar-card">
+        <div class="sidebar-card-title">Sources</div>
+        <nav class="sidebar-card-nav">
+            {{range .Page.SourceOrder}}
+            <a href="#source-{{.}}">{{.}}</a>
+            {{end}}
+        </nav>
+    </div>
+    {{end}}
 {{end}}
 
 {{define "content"}}
     <div class="agent-controls" id="agent-controls"></div>
     <div id="fileContainer">
     {{if .Page.Files}}
-        {{if .Page.MultiSource}}
-            {{range $source := .Page.SourceOrder}}
-            <div class="source-section" data-source="{{$source}}" data-source-type="{{index $.Page.SourceTypes $source}}">
-                <div class="source-header">
-                    <span class="source-header-label">{{$source}}</span>
-                    {{if index $.Page.AutoSources $source}}<span class="auto-badge">(auto)</span>
-                    {{else}}{{if ne (index $.Page.SourceTypes $source) "files"}}<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>
-                    <div class="source-header-menu">
-                        <button onclick="removeSource('{{$source}}')">Remove from Birdseye</button>
-                    </div>{{end}}{{end}}
-                </div>
-                <ul class="files">
-                    {{range $.Page.Files}}{{if eq .Source $source}}
-                    <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
-                        <div class="file-left">
-                            <input type="checkbox" class="file-checkbox" />
-                            {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                            <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
-                        </div>
-                        <div class="file-right">
-                            <span class="file-age">{{.Age}}</span>
-                            <div class="file-menu-wrap">
-                                <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
-                                <div class="file-menu">
-                                    <button onclick="copyFileToClipboard(this)">Copy file</button>
-                                    <button onclick="copyRelative(this)">Copy relative path</button>
-                                    <button onclick="copyAbsolute(this)">Copy absolute path</button>
-                                    {{if eq .SourceType "files"}}<div class="menu-divider"></div>
-                                    <button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>{{end}}
-                                    <div class="menu-divider"></div>
-                                    <button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>
-                                </div>
+        {{range $source := .Page.SourceOrder}}
+        <div class="source-section" id="source-{{$source}}" data-source="{{$source}}" data-source-type="{{index $.Page.SourceTypes $source}}">
+            <div class="source-header">
+                <span class="source-header-label">{{$source}}</span>
+                {{if index $.Page.AutoSources $source}}<span class="auto-badge">(auto)</span>
+                {{else}}{{if ne (index $.Page.SourceTypes $source) "files"}}<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>
+                <div class="source-header-menu">
+                    <button onclick="removeSource('{{$source}}')">Remove from Birdseye</button>
+                </div>{{end}}{{end}}
+            </div>
+            <ul class="files">
+                {{range $.Page.Files}}{{if eq .Source $source}}
+                <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
+                    <div class="file-left">
+                        <input type="checkbox" class="file-checkbox" />
+                        {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
+                        <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
+                    </div>
+                    <div class="file-right">
+                        <span class="file-age">{{.Age}}</span>
+                        <div class="file-menu-wrap">
+                            <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
+                            <div class="file-menu">
+                                <button onclick="copyFileToClipboard(this)">Copy file</button>
+                                <button onclick="copyRelative(this)">Copy relative path</button>
+                                <button onclick="copyAbsolute(this)">Copy absolute path</button>
+                                {{if eq .SourceType "files"}}<div class="menu-divider"></div>
+                                <button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>{{end}}
+                                <div class="menu-divider"></div>
+                                <button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>
                             </div>
                         </div>
-                    </li>
-                    {{end}}{{end}}
-                </ul>
-            </div>
-            {{end}}
-        {{else}}
-        <ul class="files">
-            {{range .Page.Files}}
-            <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
-                <div class="file-left">
-                    <input type="checkbox" class="file-checkbox" />
-                    {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                    <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
-                </div>
-                <div class="file-right">
-                    <span class="file-age">{{.Age}}</span>
-                    <div class="file-menu-wrap">
-                        <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
-                        <div class="file-menu">
-                            <button onclick="copyFileToClipboard(this)">Copy file</button>
-                            <button onclick="copyRelative(this)">Copy relative path</button>
-                            <button onclick="copyAbsolute(this)">Copy absolute path</button>
-                            {{if eq .SourceType "files"}}<div class="menu-divider"></div>
-                            <button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>{{end}}
-                            <div class="menu-divider"></div>
-                            <button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>
-                        </div>
                     </div>
-                </div>
-            </li>
-            {{end}}
-        </ul>
+                </li>
+                {{end}}{{end}}
+            </ul>
+        </div>
         {{end}}
     {{else}}
     <p class="empty">No files yet.</p>
@@ -562,10 +547,10 @@
             });
 
             var html = '';
-            if (sourceOrder.length > 1) {
+            if (sourceOrder.length > 0) {
                 sourceOrder.forEach(function(src) {
                     var sType = sourceTypes[src];
-                    html += '<div class="source-section" data-source="' + escapeHtml(src) + '" data-source-type="' + escapeHtml(sType) + '">';
+                    html += '<div class="source-section" id="source-' + escapeHtml(src) + '" data-source="' + escapeHtml(src) + '" data-source-type="' + escapeHtml(sType) + '">';
                     html += '<div class="source-header"><span class="source-header-label">' + escapeHtml(src) + '</span>';
                     if (autoSources[src]) {
                         html += '<span class="auto-badge">(auto)</span>';
@@ -578,10 +563,6 @@
                     sourceFiles[src].forEach(function(f) { html += renderFileRow(f); });
                     html += '</ul></div>';
                 });
-            } else if (files.length > 0) {
-                html = '<ul class="files">';
-                files.forEach(function(f) { html += renderFileRow(f); });
-                html += '</ul>';
             } else {
                 html = '<p class="empty">No files yet.</p>';
             }

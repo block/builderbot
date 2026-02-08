@@ -134,6 +134,21 @@
 
 {{end}}
 
+{{define "sidebar_extra"}}
+    {{range .Page.Workspaces}}
+    {{if .Projects}}
+    <div class="sidebar-card">
+        <div class="sidebar-card-title">Projects</div>
+        <nav class="sidebar-card-nav">
+            {{range .Projects}}
+            <a href="/project/{{.QualifiedName}}"{{if eq .FileCount 0}} class="deemphasized"{{end}}>{{.Name}}</a>
+            {{end}}
+        </nav>
+    </div>
+    {{end}}
+    {{end}}
+{{end}}
+
 {{define "content"}}
     {{range .Page.Workspaces}}
     <div class="projects">

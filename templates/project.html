@@ -1,305 +1,269 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Project.Name}} - Birdseye</title>
-    <style>
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 24px;
-            background: #fafafa;
-            color: #333;
-        }
-        a { color: #0066cc; text-decoration: none; }
-        a:hover { text-decoration: underline; }
-        .breadcrumb { margin-bottom: 20px; color: #888; font-size: 0.9em; }
-        .breadcrumb a { color: #666; }
-        .breadcrumb a:hover { color: #0066cc; }
-        h1 { color: #333; font-weight: 600; margin-bottom: 8px; }
-        .git-info { color: #666; font-size: 0.9em; margin-bottom: 24px; }
-        .branch { color: #2da44e; }
-        .dirty { color: #cf222e; }
-        .files { list-style: none; padding: 0; margin: 0; }
-        .file {
-            padding: 12px 16px;
-            background: #fff;
-            margin-bottom: 8px;
-            border-radius: 6px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border: 1px solid #e8e8e8;
-            transition: border-color 0.15s, background-color 0.15s;
-        }
-        .file:hover { border-color: #ccc; }
-        .file.selected {
-            background: #f0f7ff;
-            border-color: #0066cc;
-        }
-        .file-left {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            min-width: 0;
-            flex: 1;
-        }
-        .file-checkbox {
-            width: 16px;
-            height: 16px;
-            cursor: pointer;
-            flex-shrink: 0;
-        }
-        .file-name {
-            font-weight: 500;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .file-type {
-            font-size: 0.7em;
-            font-weight: 500;
-            text-transform: uppercase;
-            padding: 2px 6px;
-            border-radius: 3px;
-            flex-shrink: 0;
-        }
-        .file-type.research {
-            background: #ddf4ff;
-            color: #0969da;
-        }
-        .file-type.plan {
-            background: #dafbe1;
-            color: #1a7f37;
-        }
-        .file-right {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-shrink: 0;
-        }
-        .file-age {
-            color: #888;
-            font-size: 0.85em;
-            white-space: nowrap;
-        }
-        .empty { color: #888; font-style: italic; }
+{{define "title"}}{{.Page.Project.Name}} - Birdseye{{end}}
 
-        .review-badge {
-            font-size: 0.7em;
-            font-weight: 500;
-            text-transform: uppercase;
-            padding: 2px 6px;
-            border-radius: 3px;
-            background: #ddf4ff;
-            color: #0969da;
-            flex-shrink: 0;
-        }
-        .review-badge.agent-active {
-            animation: review-badge-pulse 2s infinite;
-        }
-        @keyframes review-badge-pulse {
-            0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.4); }
-            70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
-        }
+{{define "pagestyle"}}
+    h1 { color: #333; font-weight: 600; margin-bottom: 8px; }
+    .git-info { color: #666; font-size: 0.9em; margin-bottom: 24px; }
+    .branch { color: #2da44e; }
+    .dirty { color: #cf222e; }
+    .files { list-style: none; padding: 0; margin: 0; }
+    .file {
+        padding: 12px 16px;
+        background: #fff;
+        margin-bottom: 8px;
+        border-radius: 6px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border: 1px solid #e8e8e8;
+        transition: border-color 0.15s, background-color 0.15s;
+    }
+    .file:hover { border-color: #ccc; }
+    .file.selected {
+        background: #f0f7ff;
+        border-color: #0066cc;
+    }
+    .file-left {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+        flex: 1;
+    }
+    .file-checkbox {
+        width: 16px;
+        height: 16px;
+        cursor: pointer;
+        flex-shrink: 0;
+    }
+    .file-name {
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .file-type {
+        font-size: 0.7em;
+        font-weight: 500;
+        text-transform: uppercase;
+        padding: 2px 6px;
+        border-radius: 3px;
+        flex-shrink: 0;
+    }
+    .file-type.research { background: #ddf4ff; color: #0969da; }
+    .file-type.plan { background: #dafbe1; color: #1a7f37; }
+    .file-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+    }
+    .file-age {
+        color: #888;
+        font-size: 0.85em;
+        white-space: nowrap;
+    }
+    .empty { color: #888; font-style: italic; }
 
-        .agent-banner {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 16px;
-            background: #dafbe1;
-            border: 1px solid #aceebb;
-            border-radius: 6px;
-            margin-bottom: 24px;
-            font-size: 0.9em;
-            color: #1a7f37;
-        }
-        .agent-dot {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            background: #1a7f37;
-            border-radius: 50%;
-            flex-shrink: 0;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0.4); }
-            70% { box-shadow: 0 0 0 6px rgba(26, 127, 55, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0); }
-        }
-        .agent-prompt {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
+    .review-badge {
+        font-size: 0.7em;
+        font-weight: 500;
+        text-transform: uppercase;
+        padding: 2px 6px;
+        border-radius: 3px;
+        background: #ddf4ff;
+        color: #0969da;
+        flex-shrink: 0;
+    }
+    .review-badge.agent-active {
+        animation: review-badge-pulse 2s infinite;
+    }
+    @keyframes review-badge-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.4); }
+        70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
+    }
 
-        /* Copy dropdown */
-        .copy-dropdown { position: relative; }
-        .dropdown-toggle {
-            background: none;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 4px 8px;
-            font-size: 0.75em;
-            color: #666;
-            cursor: pointer;
-            opacity: 0;
-            transition: opacity 0.15s, background-color 0.15s, border-color 0.15s;
-        }
-        .file:hover .dropdown-toggle,
-        .copy-dropdown.open .dropdown-toggle {
-            opacity: 1;
-        }
-        .dropdown-toggle:hover {
-            background: #f5f5f5;
-            border-color: #ccc;
-            color: #333;
-        }
-        .dropdown-toggle.copied {
-            opacity: 1;
-            background: #dafbe1;
-            border-color: #1a7f37;
-            color: #1a7f37;
-        }
-        .dropdown-menu {
-            display: none;
-            position: absolute;
-            right: 0;
-            top: calc(100% + 4px);
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            z-index: 100;
-            min-width: 160px;
-            padding: 4px 0;
-        }
-        .copy-dropdown.open .dropdown-menu { display: block; }
-        .dropdown-menu button {
-            display: block;
-            width: 100%;
-            text-align: left;
-            padding: 8px 12px;
-            border: none;
-            background: none;
-            font-size: 0.85em;
-            color: #333;
-            cursor: pointer;
-        }
-        .dropdown-menu button:hover { background: #f5f5f5; }
+    .agent-banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 16px;
+        background: #dafbe1;
+        border: 1px solid #aceebb;
+        border-radius: 6px;
+        margin-bottom: 24px;
+        font-size: 0.9em;
+        color: #1a7f37;
+    }
+    .agent-dot-banner {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        background: #1a7f37;
+        border-radius: 50%;
+        flex-shrink: 0;
+        animation: agent-pulse 2s infinite;
+    }
+    @keyframes agent-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0.4); }
+        70% { box-shadow: 0 0 0 6px rgba(26, 127, 55, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0); }
+    }
+    .agent-prompt {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
 
-        /* Selection bar */
-        .selection-bar {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            background: #333;
-            color: #fff;
-            padding: 12px 24px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 16px;
-            transform: translateY(-100%);
-            transition: transform 0.2s ease-out;
-            z-index: 1000;
-        }
-        .selection-bar.visible {
-            transform: translateY(0);
-        }
-        .selection-bar .count {
-            font-size: 0.9em;
-        }
-        .selection-bar button {
-            background: #0066cc;
-            color: #fff;
-            border: none;
-            border-radius: 4px;
-            padding: 8px 16px;
-            font-size: 0.9em;
-            cursor: pointer;
-            transition: background-color 0.15s;
-        }
-        .selection-bar button:hover {
-            background: #0052a3;
-        }
-        .selection-bar button.copied {
-            background: #1a7f37;
-        }
-        .selection-bar .clear-btn {
-            background: transparent;
-            border: 1px solid #666;
-            color: #ccc;
-        }
-        .selection-bar .clear-btn:hover {
-            background: #444;
-            border-color: #888;
-        }
+    /* Copy dropdown */
+    .copy-dropdown { position: relative; }
+    .dropdown-toggle {
+        background: none;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 0.75em;
+        color: #666;
+        cursor: pointer;
+        opacity: 0;
+        transition: opacity 0.15s, background-color 0.15s, border-color 0.15s;
+    }
+    .file:hover .dropdown-toggle,
+    .copy-dropdown.open .dropdown-toggle {
+        opacity: 1;
+    }
+    .dropdown-toggle:hover {
+        background: #f5f5f5;
+        border-color: #ccc;
+        color: #333;
+    }
+    .dropdown-toggle.copied {
+        opacity: 1;
+        background: #dafbe1;
+        border-color: #1a7f37;
+        color: #1a7f37;
+    }
+    .dropdown-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        z-index: 100;
+        min-width: 160px;
+        padding: 4px 0;
+    }
+    .copy-dropdown.open .dropdown-menu { display: block; }
+    .dropdown-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 12px;
+        border: none;
+        background: none;
+        font-size: 0.85em;
+        color: #333;
+        cursor: pointer;
+    }
+    .dropdown-menu button:hover { background: #f5f5f5; }
 
-        .deleting-banner {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 16px;
-            background: #fff5f5;
-            border: 1px solid #f0c0c0;
-            border-radius: 6px;
-            margin-bottom: 24px;
-            font-size: 0.9em;
-            color: #cf222e;
-            font-weight: 500;
-        }
-        body.project-deleting .files,
-        body.project-deleting .git-info,
-        body.project-deleting .agent-banner,
-        body.project-deleting .selection-bar,
-        body.project-deleting h1,
-        body.project-deleting .empty {
-            opacity: 0.3;
-            pointer-events: none;
-        }
-    </style>
-</head>
-<body>
-    <div class="breadcrumb">
-        <a href="/">← All Projects</a> / {{.Project.Name}}
-    </div>
+    /* Selection bar */
+    .selection-bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        background: #333;
+        color: #fff;
+        padding: 12px 24px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 16px;
+        transform: translateY(-100%);
+        transition: transform 0.2s ease-out;
+        z-index: 1000;
+    }
+    .selection-bar.visible { transform: translateY(0); }
+    .selection-bar .count { font-size: 0.9em; }
+    .selection-bar button {
+        background: #0066cc;
+        color: #fff;
+        border: none;
+        border-radius: 4px;
+        padding: 8px 16px;
+        font-size: 0.9em;
+        cursor: pointer;
+        transition: background-color 0.15s;
+    }
+    .selection-bar button:hover { background: #0052a3; }
+    .selection-bar button.copied { background: #1a7f37; }
+    .selection-bar .clear-btn {
+        background: transparent;
+        border: 1px solid #666;
+        color: #ccc;
+    }
+    .selection-bar .clear-btn:hover {
+        background: #444;
+        border-color: #888;
+    }
 
-    <h1>{{.Project.Name}}</h1>
-    {{if .Project.Git}}
+    .deleting-banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 16px;
+        background: #fff5f5;
+        border: 1px solid #f0c0c0;
+        border-radius: 6px;
+        margin-bottom: 24px;
+        font-size: 0.9em;
+        color: #cf222e;
+        font-weight: 500;
+    }
+    body.project-deleting .files,
+    body.project-deleting .git-info,
+    body.project-deleting .agent-banner,
+    body.project-deleting .selection-bar,
+    body.project-deleting h1,
+    body.project-deleting .empty {
+        opacity: 0.3;
+        pointer-events: none;
+    }
+{{end}}
+
+{{define "content"}}
+    <h1>{{.Page.Project.Name}}</h1>
+    {{if .Page.Project.Git}}
     <div class="git-info">
-        <span class="branch">{{.Project.Git.Branch}}</span>{{if .Project.Git.Dirty}}<span class="dirty"> (uncommitted changes)</span>{{end}}
+        <span class="branch">{{.Page.Project.Git.Branch}}</span>{{if .Page.Project.Git.Dirty}}<span class="dirty"> (uncommitted changes)</span>{{end}}
     </div>
     {{end}}
 
     <div id="agentBanners">
-    {{range .AgentPrompts}}
+    {{range .Page.AgentPrompts}}
     <div class="agent-banner">
-        <span class="agent-dot"></span>
+        <span class="agent-dot-banner"></span>
         <span class="agent-prompt">Agent active{{if .}}: {{.}}{{end}}</span>
     </div>
     {{end}}
     </div>
 
-    {{if .Files}}
+    {{if .Page.Files}}
     <ul class="files">
-        {{range .Files}}
-        <li class="file" data-project="{{$.Project.QualifiedName}}" data-project-path="{{$.Project.Path}}" data-path="{{.Path}}">
+        {{range .Page.Files}}
+        <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}">
             <div class="file-left">
                 <input type="checkbox" class="file-checkbox" />
                 {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                <span class="file-name"><a href="/file/{{$.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
+                <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
             </div>
             <div class="file-right">
                 <div class="copy-dropdown">
-                    <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy ▾</button>
+                    <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy &#9662;</button>
                     <div class="dropdown-menu">
                         <button onclick="copyFileToClipboard(this)">File</button>
                         <button onclick="copyRelative(this)">Relative path</button>
@@ -320,243 +284,146 @@
         <button onclick="copySelected()">Copy paths</button>
         <button class="clear-btn" onclick="clearSelection()">Clear</button>
     </div>
+{{end}}
 
-    <script>
-        const qualifiedName = '{{.Project.QualifiedName}}';
-        const projectPath = '{{.Project.Path}}';
+{{define "pagescript"}}
+    var qualifiedName = '{{.Page.Project.QualifiedName}}';
+    var projectPath = '{{.Page.Project.Path}}';
 
-        // Dropdown
-        function toggleDropdown(event) {
-            event.preventDefault();
-            event.stopPropagation();
-            const dd = event.target.closest('.copy-dropdown');
-            document.querySelectorAll('.copy-dropdown.open').forEach(d => { if (d !== dd) d.classList.remove('open'); });
-            dd.classList.toggle('open');
-        }
-        document.addEventListener('click', () => document.querySelectorAll('.copy-dropdown.open').forEach(d => d.classList.remove('open')));
-
-        function flashCopied(btn) {
-            const dd = btn.closest('.copy-dropdown');
-            dd.classList.remove('open');
-            const toggle = dd.querySelector('.dropdown-toggle');
-            toggle.textContent = 'Copied!';
-            toggle.classList.add('copied');
-            setTimeout(() => { toggle.textContent = 'Copy ▾'; toggle.classList.remove('copied'); }, 1500);
-        }
-
-        function getFileData(btn) {
-            const row = btn.closest('[data-project]');
-            return { project: row.dataset.project, path: row.dataset.path };
-        }
-
-        function copyRelative(btn) {
-            const d = getFileData(btn);
-            navigator.clipboard.writeText('@' + d.path);
-            flashCopied(btn);
-        }
-
-        function copyAbsolute(btn) {
-            const row = btn.closest('[data-project-path]');
-            const d = getFileData(btn);
-            navigator.clipboard.writeText(row.dataset.projectPath + '/' + d.path);
-            flashCopied(btn);
-        }
-
-        function copyFileToClipboard(btn) {
-            const d = getFileData(btn);
-            fetch(`/api/copy-file?project=${encodeURIComponent(qualifiedName)}&path=${encodeURIComponent(d.path)}`)
-                .then(resp => { if (resp.ok) flashCopied(btn); });
-        }
-
-        // Selection
-        function updateSelectionBar() {
-            const checkboxes = document.querySelectorAll('.file-checkbox:checked');
-            const bar = document.getElementById('selectionBar');
-            const count = document.getElementById('selectedCount');
-            count.textContent = checkboxes.length;
-            bar.classList.toggle('visible', checkboxes.length > 0);
-            document.querySelectorAll('.file').forEach(file => {
-                const cb = file.querySelector('.file-checkbox');
-                file.classList.toggle('selected', cb && cb.checked);
+    // Selection
+    function attachFileListeners() {
+        document.querySelectorAll('.file-checkbox').forEach(function(cb) { cb.addEventListener('change', updateSelectionBar); });
+        document.querySelectorAll('.file').forEach(function(file) {
+            file.addEventListener('click', function(e) {
+                if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON' || e.target.type === 'checkbox') return;
+                var cb = file.querySelector('.file-checkbox');
+                cb.checked = !cb.checked;
+                updateSelectionBar();
             });
-        }
+        });
+    }
+    attachFileListeners();
 
-        function copySelected() {
-            const checkboxes = document.querySelectorAll('.file-checkbox:checked');
-            const paths = Array.from(checkboxes).map(cb => {
-                const file = cb.closest('.file');
-                return file.dataset.projectPath + '/' + file.dataset.path;
-            });
-            navigator.clipboard.writeText(paths.join('\n'));
-            clearSelection();
-        }
+    // SSE handlers
+    onSSE(function(data) {
+        if (data.type === 'files' && data.project === qualifiedName) debouncedRefresh('files', refreshFiles);
+        if (data.type === 'projects') debouncedRefresh('projects', refreshProjectStatus);
+        if (data.type === 'comments' && data.project === qualifiedName) debouncedRefresh('reviews', refreshReviewBadges);
+    });
 
-        function clearSelection() {
-            document.querySelectorAll('.file-checkbox:checked').forEach(cb => cb.checked = false);
-            updateSelectionBar();
+    // Trigger visibility-based refresh
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) {
+            debouncedRefresh('files', refreshFiles);
+            debouncedRefresh('projects', refreshProjectStatus);
         }
+    });
 
-        function attachFileListeners() {
-            document.querySelectorAll('.file-checkbox').forEach(cb => cb.addEventListener('change', updateSelectionBar));
-            document.querySelectorAll('.file').forEach(file => {
-                file.addEventListener('click', (e) => {
-                    if (e.target.tagName === 'A' || e.target.tagName === 'BUTTON' || e.target.type === 'checkbox') return;
-                    const cb = file.querySelector('.file-checkbox');
-                    cb.checked = !cb.checked;
-                    updateSelectionBar();
-                });
-            });
-        }
-        attachFileListeners();
-
-        // Debounce + in-flight deduplication to prevent connection starvation
-        const _pending = {};
-        const _timers = {};
-        function debouncedRefresh(key, fn, delay) {
-            delay = delay || 200;
-            clearTimeout(_timers[key]);
-            _timers[key] = setTimeout(function() {
-                if (_pending[key]) return;
-                _pending[key] = true;
-                Promise.resolve(fn()).finally(function() { _pending[key] = false; });
-            }, delay);
-        }
-
-        // SSE with visibility management to avoid connection starvation
-        let events = null;
-        function connectSSE() {
-            if (events) events.close();
-            events = new EventSource('/events');
-            events.addEventListener('change', function(e) {
-                const data = JSON.parse(e.data);
-                if (data.type === 'files' && data.project === qualifiedName) debouncedRefresh('files', refreshFiles);
-                if (data.type === 'projects') debouncedRefresh('projects', refreshProjectStatus);
-                if (data.type === 'comments' && data.project === qualifiedName) debouncedRefresh('reviews', refreshReviewBadges);
-            });
-        }
-        connectSSE();
-        window.addEventListener('beforeunload', function() { if (events) events.close(); });
-        document.addEventListener('visibilitychange', function() {
-            if (document.hidden) {
-                if (events) { events.close(); events = null; }
+    // Combined check: deletion detection + agent status
+    async function refreshProjectStatus() {
+        try {
+            var response = await fetch('/api/projects');
+            var projects = await response.json();
+            var project = projects.find(function(p) { return p.qualifiedName === qualifiedName; });
+            if (!project) {
+                showDeletingState();
+                return;
+            }
+            var container = document.getElementById('agentBanners');
+            if (project.agentCount > 0) {
+                container.innerHTML = project.agentPrompts.map(function(prompt) {
+                    return '<div class="agent-banner"><span class="agent-dot-banner"></span><span class="agent-prompt">Agent active' + (prompt ? ': ' + escapeHtml(prompt) : '') + '</span></div>';
+                }).join('');
             } else {
-                connectSSE();
-                debouncedRefresh('files', refreshFiles);
-                debouncedRefresh('projects', refreshProjectStatus);
+                container.innerHTML = '';
+            }
+        } catch (err) {}
+    }
+
+    function showDeletingState() {
+        if (document.body.classList.contains('project-deleting')) return;
+        document.body.classList.add('project-deleting');
+        var banner = document.createElement('div');
+        banner.className = 'deleting-banner';
+        banner.textContent = 'This project is being deleted\u2026';
+        var h1 = document.querySelector('h1');
+        if (h1) h1.after(banner);
+    }
+
+    async function refreshFiles() {
+        try {
+            var response = await fetch('/api/project/' + qualifiedName);
+            var files = await response.json();
+            var container = document.querySelector('.files');
+            if (!container) { location.reload(); return; }
+            container.innerHTML = files.map(function(f) {
+                return '<li class="file" data-project="' + qualifiedName + '" data-project-path="' + projectPath + '" data-path="' + f.path + '">' +
+                    '<div class="file-left">' +
+                        '<input type="checkbox" class="file-checkbox" />' +
+                        (f.fileType && f.fileType !== 'other' ? '<span class="file-type ' + f.fileType + '">' + f.fileType + '</span>' : '') +
+                        '<span class="file-name"><a href="/file/' + qualifiedName + '/' + f.path + '">' + f.name + '</a></span>' +
+                    '</div>' +
+                    '<div class="file-right">' +
+                        '<div class="copy-dropdown">' +
+                            '<button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy \u25BE</button>' +
+                            '<div class="dropdown-menu">' +
+                                '<button onclick="copyFileToClipboard(this)">File</button>' +
+                                '<button onclick="copyRelative(this)">Relative path</button>' +
+                                '<button onclick="copyAbsolute(this)">Absolute path</button>' +
+                            '</div>' +
+                        '</div>' +
+                        '<span class="file-age">' + f.age + '</span>' +
+                    '</div>' +
+                '</li>';
+            }).join('');
+            attachFileListeners();
+            clearSelection();
+            applyReviewBadges();
+        } catch (err) {
+            console.error('Failed to refresh files:', err);
+        }
+    }
+    refreshProjectStatus();
+    setInterval(function() { debouncedRefresh('projects', refreshProjectStatus); }, 30000);
+
+    // Review badges
+    var reviewData = {};
+
+    async function refreshReviewBadges() {
+        try {
+            var response = await fetch('/api/reviews?project=' + encodeURIComponent(qualifiedName));
+            var reviews = await response.json();
+            reviewData = {};
+            reviews.forEach(function(r) { reviewData[r.filePath] = r; });
+            applyReviewBadges();
+        } catch (err) {
+            console.error('Failed to refresh review badges:', err);
+        }
+    }
+
+    function applyReviewBadges() {
+        document.querySelectorAll('.file[data-path]').forEach(function(file) {
+            var path = file.dataset.path;
+            var existing = file.querySelector('.review-badge');
+            if (existing) existing.remove();
+
+            if (reviewData[path]) {
+                var badge = document.createElement('span');
+                badge.className = 'review-badge';
+                if (reviewData[path].agentActive) badge.classList.add('agent-active');
+                badge.textContent = 'in review';
+                var fileLeft = file.querySelector('.file-left');
+                var fileName = file.querySelector('.file-name');
+                if (fileName) {
+                    fileLeft.insertBefore(badge, fileName);
+                } else {
+                    fileLeft.appendChild(badge);
+                }
             }
         });
+    }
 
-        // Combined check: deletion detection + agent status in one fetch
-        async function refreshProjectStatus() {
-            try {
-                const response = await fetch('/api/projects');
-                const projects = await response.json();
-                const project = projects.find(p => p.qualifiedName === qualifiedName);
-                if (!project) {
-                    showDeletingState();
-                    return;
-                }
-                const container = document.getElementById('agentBanners');
-                if (project.agentCount > 0) {
-                    container.innerHTML = project.agentPrompts.map(prompt =>
-                        `<div class="agent-banner"><span class="agent-dot"></span><span class="agent-prompt">Agent active${prompt ? ': ' + prompt.replace(/&/g,'&amp;').replace(/</g,'&lt;') : ''}</span></div>`
-                    ).join('');
-                } else {
-                    container.innerHTML = '';
-                }
-            } catch (err) {}
-        }
+    refreshReviewBadges();
+{{end}}
 
-        function showDeletingState() {
-            if (document.body.classList.contains('project-deleting')) return;
-            document.body.classList.add('project-deleting');
-            const banner = document.createElement('div');
-            banner.className = 'deleting-banner';
-            banner.textContent = 'This project is being deleted\u2026';
-            const breadcrumb = document.querySelector('.breadcrumb');
-            breadcrumb.after(banner);
-        }
-
-        async function refreshFiles() {
-            try {
-                const response = await fetch(`/api/project/${qualifiedName}`);
-                const files = await response.json();
-                const container = document.querySelector('.files');
-                if (!container) { location.reload(); return; }
-                container.innerHTML = files.map(f => `
-                    <li class="file" data-project="${qualifiedName}" data-project-path="${projectPath}" data-path="${f.path}">
-                        <div class="file-left">
-                            <input type="checkbox" class="file-checkbox" />
-                            ${f.fileType && f.fileType !== 'other' ? `<span class="file-type ${f.fileType}">${f.fileType}</span>` : ''}
-                            <span class="file-name"><a href="/file/${qualifiedName}/${f.path}">${f.name}</a></span>
-                        </div>
-                        <div class="file-right">
-                            <div class="copy-dropdown">
-                                <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy ▾</button>
-                                <div class="dropdown-menu">
-                                    <button onclick="copyFileToClipboard(this)">File</button>
-                                    <button onclick="copyRelative(this)">Relative path</button>
-                                    <button onclick="copyAbsolute(this)">Absolute path</button>
-                                </div>
-                            </div>
-                            <span class="file-age">${f.age}</span>
-                        </div>
-                    </li>
-                `).join('');
-                attachFileListeners();
-                clearSelection();
-                applyReviewBadges();
-            } catch (err) {
-                console.error('Failed to refresh files:', err);
-            }
-        }
-        refreshProjectStatus();
-        setInterval(function() { debouncedRefresh('projects', refreshProjectStatus); }, 30000);
-
-        // Review badges
-        let reviewData = {};
-
-        async function refreshReviewBadges() {
-            try {
-                const response = await fetch('/api/reviews?project=' + encodeURIComponent(qualifiedName));
-                const reviews = await response.json();
-                reviewData = {};
-                reviews.forEach(r => {
-                    reviewData[r.filePath] = r;
-                });
-                applyReviewBadges();
-            } catch (err) {
-                console.error('Failed to refresh review badges:', err);
-            }
-        }
-
-        function applyReviewBadges() {
-            document.querySelectorAll('.file[data-path]').forEach(file => {
-                const path = file.dataset.path;
-                // Remove existing review badge
-                const existing = file.querySelector('.review-badge');
-                if (existing) existing.remove();
-
-                if (reviewData[path]) {
-                    const badge = document.createElement('span');
-                    badge.className = 'review-badge';
-                    if (reviewData[path].agentActive) {
-                        badge.classList.add('agent-active');
-                    }
-                    badge.textContent = 'in review';
-                    // Insert badge in file-left, after the file-type if present
-                    const fileLeft = file.querySelector('.file-left');
-                    const fileName = file.querySelector('.file-name');
-                    if (fileName) {
-                        fileLeft.insertBefore(badge, fileName);
-                    } else {
-                        fileLeft.appendChild(badge);
-                    }
-                }
-            });
-        }
-
-        refreshReviewBadges();
-    </script>
-</body>
-</html>
+{{template "layout" .}}

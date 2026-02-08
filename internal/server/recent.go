@@ -29,10 +29,11 @@ func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	data := struct {
+	nav := s.buildNav("")
+	pageData := struct {
 		Files []RecentFile
 	}{
 		Files: files,
 	}
-	s.getTemplate().ExecuteTemplate(w, "recent.html", data)
+	s.renderPage(w, "recent.html", nav, pageData)
 }

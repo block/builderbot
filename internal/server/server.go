@@ -521,7 +521,8 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	data := struct {
+	nav := s.buildNav(project.QualifiedName())
+	pageData := struct {
 		Project      *discovery.Project
 		Files        []ProjectFile
 		AgentPrompts []string
@@ -530,7 +531,7 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		Files:        files,
 		AgentPrompts: agentPrompts,
 	}
-	s.getTemplate().ExecuteTemplate(w, "project.html", data)
+	s.renderPage(w, "project.html", nav, pageData)
 }
 
 // handleEvents is the SSE endpoint for live updates

@@ -40,7 +40,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
 	if query == "" {
-		s.getTemplate().ExecuteTemplate(w, "search.html", SearchData{})
+		nav := s.buildNav("")
+		s.renderPage(w, "search.html", nav, SearchData{})
 		return
 	}
 
@@ -140,13 +141,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return projectResults[i].Project < projectResults[j].Project
 	})
 
-	data := SearchData{
+	nav := s.buildNav("")
+	nav.SearchQuery = query
+	pageData := SearchData{
 		Query:            query,
 		MatchingProjects: matchingProjects,
 		ProjectResults:   projectResults,
 		TotalFiles:       totalFiles,
 	}
-	s.getTemplate().ExecuteTemplate(w, "search.html", data)
+	s.renderPage(w, "search.html", nav, pageData)
 }
 
 func classifyFile(relPath string) string {

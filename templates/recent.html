@@ -1,64 +1,42 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Recent Files - Birdseye</title>
-    <style>
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 24px;
-            background: #fafafa;
-            color: #333;
-        }
-        a { color: #0066cc; text-decoration: none; }
-        a:hover { text-decoration: underline; }
-        .breadcrumb { margin-bottom: 20px; color: #888; font-size: 0.9em; }
-        .breadcrumb a { color: #666; }
-        .breadcrumb a:hover { color: #0066cc; }
-        h1 { color: #333; font-weight: 600; }
-        .subtitle { color: #888; margin-bottom: 20px; }
-        .file {
-            padding: 12px 16px;
-            background: #fff;
-            margin-bottom: 8px;
-            border-radius: 6px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border: 1px solid #e8e8e8;
-            transition: border-color 0.15s;
-        }
-        .file:hover { border-color: #ccc; }
-        .file-info { min-width: 0; }
-        .file-name {
-            font-weight: 500;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .file-project { color: #888; font-size: 0.85em; }
-        .file-time {
-            color: #888;
-            font-size: 0.85em;
-            white-space: nowrap;
-            margin-left: 16px;
-        }
-    </style>
-</head>
-<body>
-    <div class="breadcrumb">
-        <a href="/">← All Projects</a> / Recent Files
-    </div>
+{{define "title"}}Recent Files - Birdseye{{end}}
 
+{{define "pagestyle"}}
+    h1 { color: #333; font-weight: 600; }
+    .subtitle { color: #888; margin-bottom: 20px; }
+    .file {
+        padding: 12px 16px;
+        background: #fff;
+        margin-bottom: 8px;
+        border-radius: 6px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border: 1px solid #e8e8e8;
+        transition: border-color 0.15s;
+    }
+    .file:hover { border-color: #ccc; }
+    .file-info { min-width: 0; }
+    .file-name {
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .file-project { color: #888; font-size: 0.85em; }
+    .file-time {
+        color: #888;
+        font-size: 0.85em;
+        white-space: nowrap;
+        margin-left: 16px;
+    }
+{{end}}
+
+{{define "content"}}
     <h1>Recent Files</h1>
     <p class="subtitle">50 most recently modified files</p>
 
     <div id="files-container">
-    {{range .Files}}
+    {{range .Page.Files}}
     <div class="file">
         <div class="file-info">
             <div class="file-name"><a href="/file/{{.Project}}/{{.FilePath}}">{{.FileName}}</a></div>
@@ -68,50 +46,36 @@
     </div>
     {{end}}
     </div>
+{{end}}
 
-    <script>
-        // Live updates via SSE with visibility management
-        let events = null;
-        function connectSSE() {
-            if (events) events.close();
-            events = new EventSource('/events');
-            events.addEventListener('change', function(e) {
-                const data = JSON.parse(e.data);
-                if (data.type === 'files') refreshRecent();
-            });
-            events.addEventListener('error', function() {
-                console.log('SSE connection lost, will reconnect...');
-            });
-        }
-        connectSSE();
-        window.addEventListener('beforeunload', function() { if (events) events.close(); });
-        document.addEventListener('visibilitychange', function() {
-            if (document.hidden) {
-                if (events) { events.close(); events = null; }
-            } else {
-                connectSSE();
-                refreshRecent();
-            }
-        });
+{{define "pagescript"}}
+    // SSE for live updates
+    onSSE(function(data) {
+        if (data.type === 'files') debouncedRefresh('recent', refreshRecent);
+    });
 
-        async function refreshRecent() {
-            try {
-                const response = await fetch('/api/recent');
-                const files = await response.json();
-                const container = document.getElementById('files-container');
-                container.innerHTML = files.map(f => `
-                    <div class="file">
-                        <div class="file-info">
-                            <div class="file-name"><a href="/file/${f.project}/${f.path}">${f.name}</a></div>
-                            <div class="file-project">${f.project}/${f.path}</div>
-                        </div>
-                        <span class="file-time">${f.age}</span>
-                    </div>
-                `).join('');
-            } catch (err) {
-                console.error('Failed to refresh recent:', err);
-            }
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) debouncedRefresh('recent', refreshRecent);
+    });
+
+    async function refreshRecent() {
+        try {
+            var response = await fetch('/api/recent');
+            var files = await response.json();
+            var container = document.getElementById('files-container');
+            container.innerHTML = files.map(function(f) {
+                return '<div class="file">' +
+                    '<div class="file-info">' +
+                        '<div class="file-name"><a href="/file/' + f.project + '/' + f.path + '">' + f.name + '</a></div>' +
+                        '<div class="file-project">' + f.project + '/' + f.path + '</div>' +
+                    '</div>' +
+                    '<span class="file-time">' + f.age + '</span>' +
+                '</div>';
+            }).join('');
+        } catch (err) {
+            console.error('Failed to refresh recent:', err);
         }
-    </script>
-</body>
-</html>
+    }
+{{end}}
+
+{{template "layout" .}}

@@ -281,8 +281,44 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			store.RecordHeartbeat(input.Project, f.FilePath)
 		}
 
+		// When changed, enrich response with threads needing agent response
+		if changed {
+			type fileWithThreads struct {
+				FilePath    string            `json:"filePath"`
+				OpenThreads int               `json:"openThreads"`
+				Threads     []comments.Thread `json:"threads,omitempty"`
+			}
+
+			var enrichedFiles []fileWithThreads
+			for _, f := range files {
+				ef := fileWithThreads{
+					FilePath:    f.FilePath,
+					OpenThreads: f.OpenThreads,
+				}
+
+				fc, loadErr := store.Load(input.Project, f.FilePath)
+				if loadErr == nil {
+					for _, t := range fc.Threads {
+						if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+							ef.Threads = append(ef.Threads, t)
+							store.SetTyping(input.Project, f.FilePath, t.ID)
+						}
+					}
+				}
+				enrichedFiles = append(enrichedFiles, ef)
+			}
+
+			result := map[string]any{
+				"changed": true,
+				"seq":     seq,
+				"files":   enrichedFiles,
+			}
+			res, err := textResult(result)
+			return res, nil, err
+		}
+
 		result := map[string]any{
-			"changed": changed,
+			"changed": false,
 			"seq":     seq,
 			"files":   files,
 		}

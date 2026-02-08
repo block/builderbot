@@ -15,7 +15,9 @@ func buildPrompt(projectName string) string {
    d. Reply thoughtfully to comments where the last comment is from a human.
    e. If a comment asks you to change the file, make the change and reply confirming what you changed.
 3. After processing all current threads, call birdseye_wait_for_changes for project %q to wait for new activity.
-4. When the tool returns with "changed": true, go back to step 1 to check for new or updated threads.
+4. When the tool returns with "changed": true:
+   - If the response includes threads (in the files array), these are threads with pending human comments. Read the file content for context, then reply directly — no need to call files_in_review, list_threads, or read_thread.
+   - If no threads are included, go back to step 1.
 5. When the tool returns with "changed": false (timeout) and no files are in review, keep waiting — the human may come back. Continue calling birdseye_wait_for_changes.
 6. Exit only after 10 consecutive timeouts with no files in review. This gives the human about 5 minutes to add new comments before you shut down.
 

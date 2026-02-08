@@ -98,6 +98,23 @@
         }
         .sidebar-add:hover { color: #666; text-decoration: none; background: #f0f0f0; }
 
+        /* Sidebar floating card (for page-specific content like TOC) */
+        .sidebar-card {
+            margin: 12px 12px 0 12px;
+            padding: 10px 12px;
+            background: #f8f9fa;
+            border: 1px solid #e8e8e8;
+            border-radius: 6px;
+        }
+        .sidebar-card-title {
+            font-size: 0.7em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #888;
+            margin-bottom: 6px;
+        }
+
         /* Modals */
         .modal-overlay {
             display: none;
@@ -316,19 +333,18 @@
             </a>
             {{end}}
 
-            {{if .Nav.Standalone}}
-            <div class="sidebar-section-label">Standalone</div>
             {{range .Nav.Standalone}}
             <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}" href="/project/{{.QualifiedName}}">
                 {{.Name}}
                 {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
             </a>
             {{end}}
-            {{end}}
 
             <div class="sidebar-divider"></div>
             <a class="sidebar-link" href="/recent">Recent</a>
             <div class="sidebar-add" onclick="showAddDialog(event)">+ Add workspace or project</div>
+
+            {{block "sidebar_extra" .}}{{end}}
         </nav>
 
         <div class="main-content">

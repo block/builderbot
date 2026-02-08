@@ -11,31 +11,19 @@
     .main-content { padding: 0 !important; display: grid; grid-template-columns: 1fr 340px; }
     .file-main { padding: 24px 40px; max-width: 900px; overflow-y: auto; height: 100vh; }
 
-    /* TOC as a collapsible block at the top of file-main */
-    .toc { margin-bottom: 16px; }
-    .toc summary {
-        font-weight: 500;
-        font-size: 0.8em;
-        color: #888;
-        cursor: pointer;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        user-select: none;
-    }
-    .toc summary:hover { color: #555; }
-    .toc-nav { padding: 8px 0; }
+    /* TOC in sidebar card */
     .toc-nav a {
         display: block;
-        padding: 3px 8px;
-        font-size: 0.85em;
+        padding: 2px 4px;
+        font-size: 0.8em;
         color: #555;
-        border-radius: 4px;
+        border-radius: 3px;
         text-decoration: none;
         line-height: 1.4;
     }
-    .toc-nav a:hover { background: #f0f0f0; text-decoration: none; }
-    .toc-nav .level-2 { padding-left: 16px; }
-    .toc-nav .level-3 { padding-left: 28px; font-size: 0.8em; color: #777; }
+    .toc-nav a:hover { background: #e8e8e8; text-decoration: none; }
+    .toc-nav .level-2 { padding-left: 12px; }
+    .toc-nav .level-3 { padding-left: 22px; font-size: 0.75em; color: #777; }
 
     .file-toolbar {
         display: flex;
@@ -377,6 +365,19 @@
     }
 {{end}}
 
+{{define "sidebar_extra"}}
+    {{if .Page.Headings}}
+    <div class="sidebar-card">
+        <div class="sidebar-card-title">On this page</div>
+        <nav class="toc-nav">
+            {{range .Page.Headings}}
+            <a href="#{{.ID}}" class="level-{{.Level}}">{{.Text}}</a>
+            {{end}}
+        </nav>
+    </div>
+    {{end}}
+{{end}}
+
 {{define "content"}}
     <div class="file-main" id="file-main">
         <div class="file-toolbar">
@@ -392,17 +393,6 @@
                 </div>
             </div>
         </div>
-
-        {{if .Page.Headings}}
-        <details class="toc" open>
-            <summary>On this page</summary>
-            <nav class="toc-nav">
-                {{range .Page.Headings}}
-                <a href="#{{.ID}}" class="level-{{.Level}}">{{.Text}}</a>
-                {{end}}
-            </nav>
-        </details>
-        {{end}}
 
         <div class="content" id="content">
             {{.Page.Content}}

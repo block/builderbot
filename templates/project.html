@@ -422,14 +422,28 @@
             }, delay);
         }
 
-        // SSE
-        const events = new EventSource('/events');
-        window.addEventListener('beforeunload', function() { events.close(); });
-        events.addEventListener('change', function(e) {
-            const data = JSON.parse(e.data);
-            if (data.type === 'files' && data.project === qualifiedName) debouncedRefresh('files', refreshFiles);
-            if (data.type === 'projects') debouncedRefresh('projects', refreshProjectStatus);
-            if (data.type === 'comments' && data.project === qualifiedName) debouncedRefresh('reviews', refreshReviewBadges);
+        // SSE with visibility management to avoid connection starvation
+        let events = null;
+        function connectSSE() {
+            if (events) events.close();
+            events = new EventSource('/events');
+            events.addEventListener('change', function(e) {
+                const data = JSON.parse(e.data);
+                if (data.type === 'files' && data.project === qualifiedName) debouncedRefresh('files', refreshFiles);
+                if (data.type === 'projects') debouncedRefresh('projects', refreshProjectStatus);
+                if (data.type === 'comments' && data.project === qualifiedName) debouncedRefresh('reviews', refreshReviewBadges);
+            });
+        }
+        connectSSE();
+        window.addEventListener('beforeunload', function() { if (events) events.close(); });
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                if (events) { events.close(); events = null; }
+            } else {
+                connectSSE();
+                debouncedRefresh('files', refreshFiles);
+                debouncedRefresh('projects', refreshProjectStatus);
+            }
         });
 
         // Combined check: deletion detection + agent status in one fetch

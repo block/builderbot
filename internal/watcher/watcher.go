@@ -84,6 +84,20 @@ func (w *Watcher) Start(workspacePaths []string, discoverFn func() ([]discovery.
 	return nil
 }
 
+// Refresh updates workspace paths and watches any new projects.
+// Called after config changes (add/remove workspace or project).
+func (w *Watcher) Refresh(workspacePaths []string, projects []discovery.Project) {
+	w.workspacePaths = workspacePaths
+	for _, ws := range workspacePaths {
+		if err := w.watcher.Add(ws); err != nil {
+			log.Printf("Warning: could not watch workspace %s: %v", ws, err)
+		}
+	}
+	for _, p := range projects {
+		w.watchProject(p)
+	}
+}
+
 // watchProject sets up file watches for all sources and comments of a project.
 func (w *Watcher) watchProject(p discovery.Project) {
 	for _, src := range p.Sources {

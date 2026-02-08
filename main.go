@@ -71,7 +71,7 @@ func runServe(port int, dev bool, rootOverride string) {
 	}
 
 	mcpHandler := mcpserver.NewHandler(cs, c)
-	srv := server.New(c, w, cs, mcpHandler, templateDir, cfg)
+	srv := server.New(c, w, cs, mcpHandler, templateDir, cfg, cfgPath)
 	addr := fmt.Sprintf(":%d", port)
 
 	// Write .mcp.json for MCP client discovery

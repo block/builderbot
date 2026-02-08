@@ -1519,21 +1519,35 @@
             }, delay);
         }
 
-        // Set up SSE
-        const evtSource = new EventSource('/events');
-        window.addEventListener('beforeunload', function() { evtSource.close(); });
-        evtSource.addEventListener('change', function(e) {
-            try {
-                const data = JSON.parse(e.data);
-                if (data.type === 'comments' && data.project === qualifiedName) {
-                    debouncedRefresh('comments', refreshComments);
-                    debouncedRefresh('review', refreshReview);
+        // Set up SSE with visibility management to avoid connection starvation
+        let evtSource = null;
+        function connectSSE() {
+            if (evtSource) evtSource.close();
+            evtSource = new EventSource('/events');
+            evtSource.addEventListener('change', function(e) {
+                try {
+                    const data = JSON.parse(e.data);
+                    if (data.type === 'comments' && data.project === qualifiedName) {
+                        debouncedRefresh('comments', refreshComments);
+                        debouncedRefresh('review', refreshReview);
+                    }
+                    if (data.type === 'files' && data.project === qualifiedName) {
+                        debouncedRefresh('document', refreshDocument);
+                    }
+                } catch (err) {
+                    console.error('SSE parse error:', err);
                 }
-                if (data.type === 'files' && data.project === qualifiedName) {
-                    debouncedRefresh('document', refreshDocument);
-                }
-            } catch (err) {
-                console.error('SSE parse error:', err);
+            });
+        }
+        connectSSE();
+        window.addEventListener('beforeunload', function() { if (evtSource) evtSource.close(); });
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                if (evtSource) { evtSource.close(); evtSource = null; }
+            } else {
+                connectSSE();
+                debouncedRefresh('comments', refreshComments);
+                debouncedRefresh('document', refreshDocument);
             }
         });
 

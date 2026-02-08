@@ -34,9 +34,11 @@ type Server struct {
 	loadOnce    sync.Once
 	templateDir string // if set, reload templates from disk on each request
 	cfg         *config.Config
+	cfgPath     string
+	cfgMu       sync.Mutex // protects cfg mutations
 }
 
-func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, templateDir string, cfg *config.Config) *Server {
+func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, templateDir string, cfg *config.Config, cfgPath string) *Server {
 	s := &Server{
 		cache:       c,
 		watcher:     w,
@@ -45,6 +47,7 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 		mux:         http.NewServeMux(),
 		templateDir: templateDir,
 		cfg:         cfg,
+		cfgPath:     cfgPath,
 	}
 
 	// Parse templates from embedded filesystem
@@ -192,6 +195,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/copy-file", s.handleCopyFile)
 	s.mux.HandleFunc("/api/project-info", s.handleProjectInfo)
 	s.mux.HandleFunc("/api/delete-project", s.handleDeleteProject)
+	// Workspace and project management
+	s.mux.HandleFunc("/api/workspaces", s.handleAPIWorkspaces)
 	// Comment and review API endpoints
 	s.mux.HandleFunc("/api/threads", s.handleAPIThreads)
 	s.mux.HandleFunc("/api/threads/", s.handleAPIThreadAction)
@@ -211,22 +216,17 @@ type IndexFile struct {
 	Age      string
 }
 
+// WorkspaceGroup groups projects discovered from a single workspace directory.
+type WorkspaceGroup struct {
+	Name     string
+	Path     string
+	Projects []discovery.Project
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
-	}
-	// Get files from cache
-	allFiles := s.cache.AllFiles(100)
-	files := make([]IndexFile, len(allFiles))
-	for i, f := range allFiles {
-		files[i] = IndexFile{
-			Project:  f.Project,
-			FilePath: f.FullPath,
-			FileName: f.Name,
-			ModTime:  f.ModTime,
-			Age:      formatAge(f.ModTime),
-		}
 	}
 
 	// Get projects sorted by last modified
@@ -255,16 +255,53 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		ages[p.QualifiedName()] = computeProjectAge(p)
 	}
 
+	// Group projects by workspace, maintaining config order
+	wsMap := make(map[string]*WorkspaceGroup)
+	var wsOrder []string
+	for _, ws := range s.cfg.Workspaces {
+		name := ws.DisplayName()
+		wsMap[name] = &WorkspaceGroup{Name: name, Path: ws.Path}
+		wsOrder = append(wsOrder, name)
+	}
+	var standalone []discovery.Project
+	for _, p := range sortedProjects {
+		if p.Origin == "standalone" {
+			standalone = append(standalone, p)
+			continue
+		}
+		if wg, ok := wsMap[p.WorkspaceName]; ok {
+			wg.Projects = append(wg.Projects, p)
+		}
+	}
+	// Within each workspace: active projects first (by mod time), then empty (by name)
+	for _, wg := range wsMap {
+		sort.SliceStable(wg.Projects, func(i, j int) bool {
+			iActive := wg.Projects[i].FileCount > 0
+			jActive := wg.Projects[j].FileCount > 0
+			if iActive != jActive {
+				return iActive
+			}
+			if !iActive {
+				return wg.Projects[i].Name < wg.Projects[j].Name
+			}
+			return false // preserve mod time order from sortedProjects
+		})
+	}
+	var workspaces []WorkspaceGroup
+	for _, name := range wsOrder {
+		workspaces = append(workspaces, *wsMap[name])
+	}
+
 	data := struct {
-		Projects []discovery.Project
-		Files    []IndexFile
-		Agents   map[string]string
-		Ages     map[string]string
+		Workspaces []WorkspaceGroup
+		Standalone []discovery.Project
+		Agents     map[string]string
+		Ages       map[string]string
 	}{
-		Projects: sortedProjects,
-		Files:    files,
-		Agents:   agentMap,
-		Ages:     ages,
+		Workspaces: workspaces,
+		Standalone: standalone,
+		Agents:     agentMap,
+		Ages:       ages,
 	}
 	s.getTemplate().ExecuteTemplate(w, "index.html", data)
 }
@@ -438,7 +475,10 @@ type APIProject struct {
 	Name          string   `json:"name"`
 	QualifiedName string   `json:"qualifiedName"`
 	Workspace     string   `json:"workspace"`
+	WorkspacePath string   `json:"workspacePath,omitempty"`
 	ProjectPath   string   `json:"projectPath"`
+	Origin        string   `json:"origin"`
+	HasRPI        bool     `json:"hasRPI"`
 	Branch        string   `json:"branch,omitempty"`
 	Dirty         bool     `json:"dirty,omitempty"`
 	FileCount     int      `json:"fileCount"`
@@ -451,6 +491,19 @@ type APIProject struct {
 }
 
 func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleListAPIProjects(w, r)
+	case http.MethodPost:
+		s.handleAddStandaloneProject(w, r)
+	case http.MethodDelete:
+		s.handleCloseStandaloneProject(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	activeAgents := agents.FindActive()
@@ -463,7 +516,10 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 			Name:          p.Name,
 			QualifiedName: qn,
 			Workspace:     p.WorkspaceName,
+			WorkspacePath: p.WorkspacePath,
 			ProjectPath:   p.Path,
+			Origin:        p.Origin,
+			HasRPI:        p.HasThoughts(),
 			FileCount:     p.FileCount,
 			Summary:       p.Summary,
 			LastModified:  p.LastModified.Format(time.RFC3339),
@@ -642,6 +698,23 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Deleted project directory: %s", project.Path)
+
+	// If this was a standalone project, also remove from config
+	if project.Origin == "standalone" {
+		s.cfgMu.Lock()
+		var filtered []config.ProjectConfig
+		for _, pc := range s.cfg.Projects {
+			if filepath.Clean(pc.Path) != filepath.Clean(project.Path) {
+				filtered = append(filtered, pc)
+			}
+		}
+		s.cfg.Projects = filtered
+		if err := config.Save(s.cfgPath, s.cfg); err != nil {
+			log.Printf("Warning: could not save config after project delete: %v", err)
+		}
+		s.cfgMu.Unlock()
+	}
+
 	s.cache.RemoveProject(qualifiedName)
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 	w.WriteHeader(http.StatusNoContent)

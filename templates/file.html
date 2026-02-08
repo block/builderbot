@@ -842,7 +842,14 @@
     function ensureAgent() {
         fetch('/api/agents/start?project=' + encodeURIComponent(qualifiedName), {
             method: 'POST'
-        }).catch(function() {}); // fire-and-forget
+        }).then(function(r) {
+            return r.json();
+        }).then(function(data) {
+            if (data.running) {
+                var indicator = document.getElementById('agent-indicator');
+                if (indicator) indicator.style.display = 'inline-flex';
+            }
+        }).catch(function() {});
     }
 
     // --- Reply form ---

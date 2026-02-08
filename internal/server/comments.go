@@ -59,9 +59,10 @@ func (s *Server) handleAPIThreadAction(w http.ResponseWriter, r *http.Request) {
 
 // APIFileInReview extends FileInReview with agent activity status.
 type APIFileInReview struct {
-	FilePath    string `json:"filePath"`
-	OpenThreads int    `json:"openThreads"`
-	AgentActive bool   `json:"agentActive"`
+	FilePath      string `json:"filePath"`
+	OpenThreads   int    `json:"openThreads"`
+	AgentActive   bool   `json:"agentActive"`
+	TypingThreads int    `json:"typingThreads,omitempty"`
 }
 
 // handleAPIListReviews handles GET /api/reviews?project=X[&agent=true].
@@ -92,12 +93,14 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	agentActive := s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running
 	result := make([]APIFileInReview, len(files))
 	for i, f := range files {
 		result[i] = APIFileInReview{
-			FilePath:    f.FilePath,
-			OpenThreads: f.OpenThreads,
-			AgentActive: s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running,
+			FilePath:      f.FilePath,
+			OpenThreads:   f.OpenThreads,
+			AgentActive:   agentActive,
+			TypingThreads: s.comments.TypingCount(projectName, f.FilePath),
 		}
 	}
 

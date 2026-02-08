@@ -226,6 +226,22 @@ func (s *Store) ClearProjectTyping(project string) {
 	}
 }
 
+// TypingCount returns the number of threads with active typing indicators
+// for the given project and file path. Like IsTyping, indicators auto-expire
+// after 60 seconds.
+func (s *Store) TypingCount(project, path string) int {
+	prefix := project + ":" + path + ":"
+	s.typingMu.RLock()
+	defer s.typingMu.RUnlock()
+	count := 0
+	for key, t := range s.typing {
+		if strings.HasPrefix(key, prefix) && time.Since(t) < 60*time.Second {
+			count++
+		}
+	}
+	return count
+}
+
 // IsTyping returns true if an agent is actively composing a reply to the given thread.
 // Typing state auto-expires after 60 seconds.
 func (s *Store) IsTyping(project, path, threadID string) bool {

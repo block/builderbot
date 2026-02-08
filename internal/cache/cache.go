@@ -157,15 +157,14 @@ func (c *Cache) RefreshAllProjects() {
 	wg.Wait()
 }
 
-// EnrichProject updates a project's git info and summary without rescanning files.
+// EnrichProject updates a project's git info without rescanning files.
 // name should be the qualified name (e.g., "Development/birdseye").
-func (c *Cache) EnrichProject(name string, git *discovery.GitInfo, summary string) {
+func (c *Cache) EnrichProject(name string, git *discovery.GitInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i := range c.projects {
 		if c.projects[i].QualifiedName() == name {
 			c.projects[i].Git = git
-			c.projects[i].Summary = summary
 			break
 		}
 	}
@@ -205,9 +204,9 @@ func (c *Cache) RefreshProjectGitInfo(name string) {
 }
 
 // RescanWith replaces the project list with the given projects,
-// preserving existing git info and summaries for known projects.
+// preserving existing git info for known projects.
 func (c *Cache) RescanWith(projects []discovery.Project) {
-	// Preserve enrichment data (git info, summary) for projects we already know about
+	// Preserve enrichment data (git info) for projects we already know about
 	c.mu.RLock()
 	existing := make(map[string]discovery.Project)
 	for _, p := range c.projects {
@@ -218,7 +217,6 @@ func (c *Cache) RescanWith(projects []discovery.Project) {
 	for i := range projects {
 		if prev, ok := existing[projects[i].QualifiedName()]; ok {
 			projects[i].Git = prev.Git
-			projects[i].Summary = prev.Summary
 		}
 	}
 

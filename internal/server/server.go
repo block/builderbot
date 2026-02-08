@@ -152,13 +152,13 @@ func (s *Server) ensureLoaded() {
 	})
 }
 
-// populateProjects scans file lists and fills in git info + summaries in the background.
+// populateProjects scans file lists and fills in git info in the background.
 func (s *Server) populateProjects() {
 	s.cache.RefreshAllProjects()
 	log.Printf("Background file scan complete")
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 
-	// Now enrich with git info and summaries
+	// Now enrich with git info
 	projects := s.cache.Projects()
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8) // bound concurrency to avoid fork-bombing
@@ -170,38 +170,15 @@ func (s *Server) populateProjects() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			qn := p.QualifiedName()
-
-			var git *discovery.GitInfo
 			if p.Name != "(root)" {
-				git = discovery.GetGitInfo(p.Path)
+				git := discovery.GetGitInfo(p.Path)
+				s.cache.EnrichProject(p.QualifiedName(), git)
 			}
-
-			var summary string
-			if p.Name == "(root)" {
-				summary = "Cross-project notes and research"
-			} else {
-				// Use cached file list to avoid re-walking the directory
-				cachedFiles := s.cache.ProjectFiles(qn)
-				if len(cachedFiles) > 0 {
-					limit := 5
-					if len(cachedFiles) < limit {
-						limit = len(cachedFiles)
-					}
-					filePaths := make([]string, limit)
-					for i, f := range cachedFiles[:limit] {
-						filePaths[i] = filepath.Join(p.Path, f.FullPath)
-					}
-					summary = discovery.GenerateSummaryFromFiles(filePaths)
-				}
-			}
-
-			s.cache.EnrichProject(qn, git, summary)
 		}(p)
 	}
 
 	wg.Wait()
-	log.Printf("Background enrichment complete (git info + summaries)")
+	log.Printf("Background enrichment complete (git info)")
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 }
 
@@ -232,25 +209,25 @@ func (s *Server) routes() {
 	}
 }
 
-// NavData provides the sidebar with project tree data on every page.
+// NavData provides the sidebar with workspace/project links on every page.
 type NavData struct {
 	Workspaces  []NavWorkspace
 	Standalone  []NavProject
-	ActiveQN    string // qualified name of the active project, if any
+	ActiveQN    string // qualified name of the active project (for standalone highlighting)
+	ActiveWS    string // workspace path of the active project (for workspace highlighting)
 	SearchQuery string // pre-fill search box if on search page
 }
 
 type NavWorkspace struct {
 	Name     string
 	Path     string
-	Projects []NavProject
+	HasAgent bool // true if any project in this workspace has an active agent
 }
 
 type NavProject struct {
 	Name          string
 	QualifiedName string
 	HasAgent      bool
-	FileCount     int
 }
 
 // buildNav builds NavData from current config and cache state.
@@ -260,32 +237,46 @@ func (s *Server) buildNav(activeQN string) NavData {
 	activeAgents := agents.FindActive()
 	projects := s.cache.ProjectsSortedByModTime()
 
-	// Build lookup maps
-	projectsByWS := make(map[string][]NavProject)
+	// Figure out which workspace the active project belongs to
 	for _, p := range projects {
-		hasAgent := false
-		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
-			hasAgent = true
+		if p.QualifiedName() == activeQN && p.Origin != "standalone" {
+			nav.ActiveWS = p.WorkspacePath
+			break
 		}
-		np := NavProject{
-			Name:          p.Name,
-			QualifiedName: p.QualifiedName(),
-			HasAgent:      hasAgent,
-			FileCount:     p.FileCount,
-		}
+	}
+
+	// Check which workspaces have active agents
+	wsHasAgent := make(map[string]bool)
+	for _, p := range projects {
 		if p.Origin == "standalone" {
-			nav.Standalone = append(nav.Standalone, np)
-		} else {
-			projectsByWS[p.WorkspaceName] = append(projectsByWS[p.WorkspaceName], np)
+			continue
+		}
+		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
+			wsHasAgent[p.WorkspacePath] = true
 		}
 	}
 
 	for _, ws := range s.cfg.Workspaces {
-		name := ws.DisplayName()
 		nav.Workspaces = append(nav.Workspaces, NavWorkspace{
-			Name:     name,
+			Name:     ws.DisplayName(),
 			Path:     ws.Path,
-			Projects: projectsByWS[name],
+			HasAgent: wsHasAgent[ws.Path],
+		})
+	}
+
+	// Standalone projects
+	for _, p := range projects {
+		if p.Origin != "standalone" {
+			continue
+		}
+		hasAgent := false
+		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
+			hasAgent = true
+		}
+		nav.Standalone = append(nav.Standalone, NavProject{
+			Name:          p.Name,
+			QualifiedName: p.QualifiedName(),
+			HasAgent:      hasAgent,
 		})
 	}
 
@@ -585,7 +576,6 @@ type APIProject struct {
 	Branch        string   `json:"branch,omitempty"`
 	Dirty         bool     `json:"dirty,omitempty"`
 	FileCount     int      `json:"fileCount"`
-	Summary       string   `json:"summary,omitempty"`
 	LastModified  string   `json:"lastModified"`
 	AgentCount    int      `json:"agentCount,omitempty"`
 	AgentPrompts  []string `json:"agentPrompts,omitempty"`
@@ -624,7 +614,6 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 			Origin:        p.Origin,
 			HasRPI:        p.HasThoughts(),
 			FileCount:     p.FileCount,
-			Summary:       p.Summary,
 			LastModified:  p.LastModified.Format(time.RFC3339),
 			Age:           computeProjectAge(p),
 		}

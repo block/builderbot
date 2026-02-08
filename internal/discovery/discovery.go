@@ -1,10 +1,8 @@
 package discovery
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -30,7 +28,6 @@ type Project struct {
 	WorkspaceName string // display name of the workspace (empty for standalone)
 	Git           *GitInfo
 	FileCount     int
-	Summary       string
 	LastModified  time.Time
 }
 
@@ -198,165 +195,4 @@ func getLastModified(thoughtsPath string) time.Time {
 		return nil
 	})
 	return latest
-}
-
-// GenerateSummary generates a summary from recent thoughts files.
-func GenerateSummary(projectPath, thoughtsPath string) string {
-	// Generate summary from thoughts files
-	files := getRecentThoughtsFiles(thoughtsPath, 5)
-	if len(files) == 0 {
-		return ""
-	}
-
-	filePaths := make([]string, len(files))
-	for i, f := range files {
-		filePaths[i] = f.path
-	}
-	return GenerateSummaryFromFiles(filePaths)
-}
-
-// GenerateSummaryFromFiles generates a summary from pre-sorted file paths.
-// Use this when you already have the recent files list (e.g. from cache)
-// to avoid re-walking the directory.
-func GenerateSummaryFromFiles(filePaths []string) string {
-	if len(filePaths) == 0 {
-		return ""
-	}
-
-	// Try to extract meaningful content from recent files
-	var topics []string
-	datePrefix := regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-?`)
-
-	for _, path := range filePaths {
-		// Try to get the h1 title from the file
-		if title := extractFileTitle(path); title != "" {
-			topics = append(topics, title)
-			continue
-		}
-
-		// Fall back to humanized filename
-		name := strings.TrimSuffix(filepath.Base(path), ".md")
-		name = datePrefix.ReplaceAllString(name, "")
-		name = strings.ReplaceAll(name, "-", " ")
-		name = strings.TrimSpace(name)
-		if name != "" && len(name) > 3 {
-			topics = append(topics, name)
-		}
-	}
-
-	if len(topics) == 0 {
-		return ""
-	}
-
-	// Deduplicate and limit
-	seen := make(map[string]bool)
-	var unique []string
-	for _, t := range topics {
-		lower := strings.ToLower(t)
-		if !seen[lower] && len(t) > 3 {
-			seen[lower] = true
-			unique = append(unique, t)
-			if len(unique) >= 3 {
-				break
-			}
-		}
-	}
-
-	return truncateSummary(strings.Join(unique, "; "), 140)
-}
-
-func getRecentThoughtsFiles(thoughtsPath string, limit int) []struct {
-	path    string
-	modTime time.Time
-} {
-	var files []struct {
-		path    string
-		modTime time.Time
-	}
-
-	filepath.Walk(thoughtsPath, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(path, ".md") {
-			files = append(files, struct {
-				path    string
-				modTime time.Time
-			}{path, info.ModTime()})
-		}
-		return nil
-	})
-
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.After(files[j].modTime)
-	})
-
-	if len(files) > limit {
-		files = files[:limit]
-	}
-	return files
-}
-
-func extractFileTitle(path string) string {
-	file, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		// Skip YAML frontmatter
-		if line == "---" {
-			inFrontmatter := true
-			for scanner.Scan() {
-				if strings.TrimSpace(scanner.Text()) == "---" {
-					inFrontmatter = false
-					break
-				}
-			}
-			if inFrontmatter {
-				return ""
-			}
-			continue
-		}
-		// Look for h1
-		if strings.HasPrefix(line, "# ") {
-			title := strings.TrimPrefix(line, "# ")
-			// Clean up common suffixes
-			title = strings.TrimSuffix(title, " Implementation Plan")
-			title = strings.TrimSuffix(title, " Plan")
-			title = strings.TrimSuffix(title, " Research")
-			return title
-		}
-		// If first non-empty line isn't a header, give up
-		return ""
-	}
-	return ""
-}
-
-func humanizeName(name string) string {
-	// Convert kebab-case or snake_case to Title Case
-	name = strings.ReplaceAll(name, "-", " ")
-	name = strings.ReplaceAll(name, "_", " ")
-	words := strings.Fields(name)
-	for i, word := range words {
-		if len(word) > 0 {
-			words[i] = strings.ToUpper(word[:1]) + word[1:]
-		}
-	}
-	return strings.Join(words, " ")
-}
-
-func truncateSummary(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	// Try to cut at word boundary
-	truncated := s[:max]
-	if lastSpace := strings.LastIndex(truncated, " "); lastSpace > max-30 {
-		truncated = truncated[:lastSpace]
-	}
-	return truncated + "..."
 }

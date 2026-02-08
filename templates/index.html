@@ -71,7 +71,6 @@
     .project-menu button.muted { color: #888; }
 
     .project-meta { font-size: 0.8em; color: #888; margin-bottom: 8px; }
-    .project-summary { font-size: 0.9em; color: #666; line-height: 1.5; }
     .branch { color: #2da44e; }
     .dirty { color: #cf222e; }
     .project-age { font-size: 0.8em; color: #999; }
@@ -167,7 +166,6 @@
                 </div>
             </div>
             {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
-            {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
         </div>
         {{end}}
     </div>
@@ -194,7 +192,6 @@
                 </div>
             </div>
             {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
-            {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
         </div>
         {{end}}
     </div>
@@ -364,8 +361,6 @@
         var rpiBadge = p.hasRPI ? '<span class="rpi-badge">RPI</span>' : '';
         var age = p.age ? '<span class="project-age">' + p.age + '</span>' : '';
         var branch = p.branch ? '<div class="project-meta"><span class="branch">' + escapeHtml(p.branch) + (p.dirty ? '<span class="dirty">*</span>' : '') + '</span></div>' : '';
-        var summary = p.summary ? '<div class="project-summary">' + escapeHtml(p.summary) + '</div>' : '';
-
         var menuItems = '<button onclick="copyProjectPath(this, event)">Copy path</button>';
         if (isStandalone) {
             menuItems += '<button class="muted" onclick="closeProject(this)">Close</button>';
@@ -385,7 +380,6 @@
                 '</div>' +
             '</div>' +
             branch +
-            summary +
         '</div>';
     }
 

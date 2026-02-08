@@ -45,30 +45,11 @@
         }
 
         /* Sidebar */
-        .sidebar-section { margin-bottom: 4px; }
-        .sidebar-section-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 6px 16px;
-            font-size: 0.75em;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: #888;
-            cursor: pointer;
-            user-select: none;
-        }
-        .sidebar-section-header:hover { color: #555; }
-        .sidebar-chevron { font-size: 1.1em; transition: transform 0.15s; }
-        .sidebar-section.collapsed .sidebar-chevron { transform: rotate(0deg); }
-        .sidebar-section:not(.collapsed) .sidebar-chevron { transform: rotate(90deg); }
-        .sidebar-section.collapsed .sidebar-items { display: none; }
         .sidebar-item {
             display: flex;
             align-items: center;
             gap: 8px;
-            padding: 5px 16px 5px 28px;
+            padding: 7px 16px;
             font-size: 0.85em;
             color: #555;
             text-decoration: none;
@@ -76,7 +57,6 @@
         }
         .sidebar-item:hover { background: #f0f0f0; text-decoration: none; color: #333; }
         .sidebar-item.active { background: #e8f0fe; color: #0066cc; font-weight: 500; }
-        .sidebar-item.deemphasized { opacity: 0.5; }
         .sidebar-item .agent-dot {
             display: inline-block;
             width: 7px;
@@ -91,10 +71,18 @@
             70% { box-shadow: 0 0 0 4px rgba(45, 164, 78, 0); }
             100% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0); }
         }
+        .sidebar-section-label {
+            padding: 10px 16px 4px 16px;
+            font-size: 0.7em;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #aaa;
+        }
         .sidebar-divider { border-top: 1px solid #e8e8e8; margin: 8px 16px; }
         .sidebar-link {
             display: block;
-            padding: 6px 16px;
+            padding: 7px 16px;
             font-size: 0.85em;
             color: #666;
             text-decoration: none;
@@ -103,7 +91,7 @@
         .sidebar-add {
             color: #aaa;
             font-size: 0.85em;
-            padding: 6px 16px;
+            padding: 7px 16px;
             cursor: pointer;
             text-decoration: none;
             display: block;
@@ -322,39 +310,20 @@
 
         <nav class="sidebar">
             {{range .Nav.Workspaces}}
-            <div class="sidebar-section" data-section="ws:{{.Path}}">
-                <div class="sidebar-section-header" onclick="toggleSection(this)">
-                    <span>{{.Name}}</span>
-                    <span class="sidebar-chevron">&#9656;</span>
-                </div>
-                <div class="sidebar-items">
-                    {{range .Projects}}
-                    <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}{{if eq .FileCount 0}} deemphasized{{end}}"
-                       href="/project/{{.QualifiedName}}">
-                        {{.Name}}
-                        {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
-                    </a>
-                    {{end}}
-                </div>
-            </div>
+            <a class="sidebar-item{{if eq .Path $.Nav.ActiveWS}} active{{end}}" href="/">
+                {{.Name}}
+                {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
+            </a>
             {{end}}
 
             {{if .Nav.Standalone}}
-            <div class="sidebar-section">
-                <div class="sidebar-section-header" onclick="toggleSection(this)">
-                    <span>Standalone</span>
-                    <span class="sidebar-chevron">&#9656;</span>
-                </div>
-                <div class="sidebar-items">
-                    {{range .Nav.Standalone}}
-                    <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}{{if eq .FileCount 0}} deemphasized{{end}}"
-                       href="/project/{{.QualifiedName}}">
-                        {{.Name}}
-                        {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
-                    </a>
-                    {{end}}
-                </div>
-            </div>
+            <div class="sidebar-section-label">Standalone</div>
+            {{range .Nav.Standalone}}
+            <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}" href="/project/{{.QualifiedName}}">
+                {{.Name}}
+                {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
+            </a>
+            {{end}}
             {{end}}
 
             <div class="sidebar-divider"></div>
@@ -382,32 +351,6 @@
     </div>
 
     <script>
-        // --- Sidebar section toggle with localStorage persistence ---
-        function toggleSection(header) {
-            var section = header.closest('.sidebar-section');
-            section.classList.toggle('collapsed');
-            saveSidebarState();
-        }
-
-        function saveSidebarState() {
-            var collapsed = [];
-            document.querySelectorAll('.sidebar-section.collapsed').forEach(function(s) {
-                if (s.dataset.section) collapsed.push(s.dataset.section);
-            });
-            localStorage.setItem('birdseye-sidebar-collapsed', JSON.stringify(collapsed));
-        }
-
-        function restoreSidebarState() {
-            try {
-                var collapsed = JSON.parse(localStorage.getItem('birdseye-sidebar-collapsed') || '[]');
-                collapsed.forEach(function(id) {
-                    var section = document.querySelector('.sidebar-section[data-section="' + CSS.escape(id) + '"]');
-                    if (section) section.classList.add('collapsed');
-                });
-            } catch(e) {}
-        }
-        restoreSidebarState();
-
         // --- Add workspace/project modal ---
         var addMode = '';
 
@@ -604,9 +547,9 @@
             updateSelectionBar();
         }
 
-        // --- Sidebar SSE refresh ---
+        // --- Sidebar SSE refresh (agent dots) ---
         onSSE(function(data) {
-            if (data.type === 'projects' || data.type === 'files') {
+            if (data.type === 'projects') {
                 debouncedRefresh('sidebar', refreshSidebar);
             }
         });
@@ -615,22 +558,28 @@
             fetch('/api/projects')
                 .then(function(r) { return r.json(); })
                 .then(function(projects) {
-                    // Update agent dots and file counts
-                    document.querySelectorAll('.sidebar-item').forEach(function(item) {
-                        var href = item.getAttribute('href');
-                        if (!href) return;
-                        var qn = href.replace('/project/', '');
+                    // Build set of workspace paths that have active agents
+                    var wsAgents = {};
+                    projects.forEach(function(p) {
+                        if (p.origin !== 'standalone' && p.agentCount > 0) {
+                            wsAgents[p.workspacePath] = true;
+                        }
+                    });
+                    // Update workspace sidebar items
+                    document.querySelectorAll('.sidebar-item[href="/"]').forEach(function(item) {
+                        // We can't easily match workspace path from the DOM, so just reload on change
+                    });
+                    // Update standalone sidebar items
+                    document.querySelectorAll('.sidebar-item[href^="/project/"]').forEach(function(item) {
+                        var qn = item.getAttribute('href').replace('/project/', '');
                         var proj = projects.find(function(p) { return p.qualifiedName === qn; });
                         if (!proj) return;
-                        // Update agent dot
                         var dot = item.querySelector('.agent-dot');
                         if (proj.agentCount > 0 && !dot) {
                             item.insertAdjacentHTML('beforeend', ' <span class="agent-dot"></span>');
                         } else if (proj.agentCount === 0 && dot) {
                             dot.remove();
                         }
-                        // Update deemphasized state
-                        item.classList.toggle('deemphasized', proj.fileCount === 0);
                     });
                 })
                 .catch(function() {});

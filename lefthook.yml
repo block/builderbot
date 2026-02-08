@@ -3,12 +3,16 @@ output:
   - success
   - failure
 
-pre-push:
-  parallel: true
+pre-commit:
   commands:
     staged-fmt:
       root: "staged/"
       run: just fmt
+      stage_fixed: true
+
+pre-push:
+  parallel: true
+  commands:
     staged-lint:
       root: "staged/"
       run: just lint

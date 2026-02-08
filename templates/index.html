@@ -1,4 +1,4 @@
-{{define "title"}}Birdseye{{end}}
+{{define "title"}}{{with (index .Page.Workspaces 0)}}{{.Name}} - {{end}}Birdseye{{end}}
 
 {{define "pagestyle"}}
     .projects {
@@ -132,27 +132,16 @@
     .btn-delete:hover { background: #a40e26; }
     .btn-delete:disabled { opacity: 0.6; cursor: default; }
 
-    .ws-heading {
-        font-size: 1em;
-        font-weight: 600;
-        color: #555;
-        margin: 24px 0 12px 0;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        font-size: 0.8em;
-    }
-    .ws-heading:first-child { margin-top: 0; }
 {{end}}
 
 {{define "content"}}
     {{range .Page.Workspaces}}
-    <div class="ws-heading">{{.Name}}</div>
     <div class="projects">
         {{range .Projects}}
         <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-workspace="{{.WorkspaceName}}" data-project-path="{{.Path}}" data-origin="workspace">
             <div class="project-header">
                 <div class="project-name">
-                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Page.Agents .QualifiedName}}<span class="agent-dot" title="{{index $.Page.Agents .QualifiedName}}"></span>{{end}}
+                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                     {{if index $.Page.Ages .QualifiedName}}<span class="project-age">{{index $.Page.Ages .QualifiedName}}</span>{{end}}
@@ -172,13 +161,12 @@
     {{end}}
 
     {{if .Page.Standalone}}
-    <div class="ws-heading">Standalone</div>
     <div class="projects">
         {{range .Page.Standalone}}
         <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-project-path="{{.Path}}" data-origin="standalone">
             <div class="project-header">
                 <div class="project-name">
-                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Page.Agents .QualifiedName}}<span class="agent-dot" title="{{index $.Page.Agents .QualifiedName}}"></span>{{end}}
+                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                     {{if index $.Page.Ages .QualifiedName}}<span class="project-age">{{index $.Page.Ages .QualifiedName}}</span>{{end}}
@@ -212,6 +200,8 @@
 {{end}}
 
 {{define "pagescript"}}
+    var workspacePath = '{{.Page.WorkspacePath}}';
+
     // --- Project dropdown menu ---
     function toggleProjectMenu(event) {
         event.preventDefault();
@@ -356,7 +346,7 @@
 
     function renderProjectTile(p, isStandalone) {
         var deemph = p.fileCount === 0 ? ' deemphasized' : '';
-        var agentDot = p.agentCount ? '<span class="agent-dot" title="' + (p.agentCount === 1 ? escapeHtml(p.agentPrompts[0] || 'Agent active') : p.agentCount + ' agents active') + '"></span>' : '';
+        var agentDot = p.agentConnected ? '<span class="agent-dot" title="MCP connected"></span>' : '';
         var reviewBadge = p.reviewCount ? '<span class="review-count">' + p.reviewCount + ' in review</span>' : '';
         var rpiBadge = p.hasRPI ? '<span class="rpi-badge">RPI</span>' : '';
         var age = p.age ? '<span class="project-age">' + p.age + '</span>' : '';
@@ -388,42 +378,20 @@
             var response = await fetch('/api/projects');
             var projects = await response.json();
 
-            var workspaces = {};
-            var wsOrder = [];
-            var standalone = [];
-
+            var filtered = [];
             for (var p of projects) {
-                if (p.origin === 'standalone') {
-                    standalone.push(p);
-                    continue;
+                if (workspacePath && p.workspacePath === workspacePath && p.origin !== 'standalone') {
+                    filtered.push(p);
                 }
-                var wsKey = p.workspacePath || '';
-                if (!workspaces[wsKey]) {
-                    workspaces[wsKey] = { name: p.workspace, path: p.workspacePath, projects: [] };
-                    wsOrder.push(wsKey);
-                }
-                workspaces[wsKey].projects.push(p);
             }
 
-            for (var key of wsOrder) {
-                workspaces[key].projects.sort(function(a, b) {
-                    if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
-                    if (a.fileCount === 0 && b.fileCount === 0) return a.name.localeCompare(b.name);
-                    return 0;
-                });
-            }
+            filtered.sort(function(a, b) {
+                if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
+                if (a.fileCount === 0 && b.fileCount === 0) return a.name.localeCompare(b.name);
+                return 0;
+            });
 
-            var html = '';
-            for (var key of wsOrder) {
-                var ws = workspaces[key];
-                html += '<div class="ws-heading">' + escapeHtml(ws.name) + '</div>';
-                html += '<div class="projects">' + ws.projects.map(function(p) { return renderProjectTile(p, false); }).join('') + '</div>';
-            }
-
-            if (standalone.length > 0) {
-                html += '<div class="ws-heading">Standalone</div>';
-                html += '<div class="projects">' + standalone.map(function(p) { return renderProjectTile(p, true); }).join('') + '</div>';
-            }
+            var html = '<div class="projects">' + filtered.map(function(p) { return renderProjectTile(p, false); }).join('') + '</div>';
 
             var mainContent = document.querySelector('.main-content');
             // Preserve the delete modal

@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
 	"github.com/loganj/birdseye/internal/config"
@@ -184,6 +183,7 @@ func (s *Server) populateProjects() {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/", s.handleIndex)
+	s.mux.HandleFunc("/workspace/", s.handleWorkspace)
 	s.mux.HandleFunc("/project/", s.handleProject)
 	s.mux.HandleFunc("/file/", s.handleFile)
 	s.mux.HandleFunc("/search", s.handleSearch)
@@ -216,6 +216,7 @@ type NavData struct {
 	ActiveProject *NavProject // active workspace project (shown indented under workspace)
 	ActiveQN      string      // qualified name of the active project (for standalone highlighting)
 	ActiveWS      string      // workspace path of the active project (for workspace highlighting)
+	ActiveWSName  string      // display name of the active workspace (for URL construction)
 	InProject     bool        // true when viewing a project or file page (triggers focused sidebar)
 	SearchQuery   string      // pre-fill search box if on search page
 }
@@ -223,12 +224,13 @@ type NavData struct {
 type NavWorkspace struct {
 	Name     string
 	Path     string
-	HasAgent bool // true if any project in this workspace has an active agent
+	HasAgent bool // true if any project in this workspace has an MCP connection
 }
 
 type NavProject struct {
 	Name          string
 	QualifiedName string
+	Path          string // filesystem path (for removal API)
 	HasAgent      bool
 	HasRPI        bool
 	Branch        string
@@ -239,22 +241,19 @@ type NavProject struct {
 func (s *Server) buildNav(activeQN string) NavData {
 	nav := NavData{ActiveQN: activeQN}
 
-	activeAgents := agents.FindActive()
 	projects := s.cache.ProjectsSortedByModTime()
 
-	// Check which workspaces have active agents, and build active project info
+	// Check which workspaces have active MCP connections
 	wsHasAgent := make(map[string]bool)
 	for _, p := range projects {
 		qn := p.QualifiedName()
-		hasAgent := false
-		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
-			hasAgent = true
-		}
+		hasAgent := s.comments.IsProjectActive(qn)
 
 		if p.Origin == "standalone" {
 			np := NavProject{
 				Name:          p.Name,
 				QualifiedName: qn,
+				Path:          p.Path,
 				HasAgent:      hasAgent,
 				HasRPI:        p.HasThoughts(),
 			}
@@ -273,6 +272,7 @@ func (s *Server) buildNav(activeQN string) NavData {
 		// Build active project details for workspace projects
 		if qn == activeQN {
 			nav.ActiveWS = p.WorkspacePath
+			nav.ActiveWSName = p.WorkspaceName
 			np := NavProject{
 				Name:          p.Name,
 				QualifiedName: qn,
@@ -336,86 +336,92 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get projects sorted by last modified
+	// Redirect to first workspace or standalone project
+	if len(s.cfg.Workspaces) > 0 {
+		http.Redirect(w, r, "/workspace/"+s.cfg.Workspaces[0].DisplayName(), http.StatusFound)
+		return
+	}
+
+	projects := s.cache.ProjectsSortedByModTime()
+	for _, p := range projects {
+		if p.Origin == "standalone" {
+			http.Redirect(w, r, "/project/"+p.QualifiedName(), http.StatusFound)
+			return
+		}
+	}
+
+	// Nothing configured
+	http.Redirect(w, r, "/recent", http.StatusFound)
+}
+
+func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
+	wsName := strings.TrimPrefix(r.URL.Path, "/workspace/")
+	if wsName == "" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	// Find workspace config by display name
+	var wsConfig *config.Workspace
+	for i := range s.cfg.Workspaces {
+		if s.cfg.Workspaces[i].DisplayName() == wsName {
+			wsConfig = &s.cfg.Workspaces[i]
+			break
+		}
+	}
+	if wsConfig == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Get projects for this workspace only
 	sortedProjects := s.cache.ProjectsSortedByModTime()
 
-	// Check for active agents
-	activeAgents := agents.FindActive()
-	agentMap := make(map[string]string)
-	for _, p := range sortedProjects {
-		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
-			qn := p.QualifiedName()
-			if len(agts) == 1 {
-				prompt := agts[0].Prompt
-				if prompt == "" {
-					prompt = "Agent active"
-				}
-				agentMap[qn] = prompt
-			} else {
-				agentMap[qn] = fmt.Sprintf("%d agents active", len(agts))
-			}
-		}
-	}
-
+	agentConnected := make(map[string]bool)
 	ages := make(map[string]string)
-	for _, p := range sortedProjects {
-		ages[p.QualifiedName()] = computeProjectAge(p)
-	}
+	var wsProjects []discovery.Project
 
-	// Group projects by workspace, maintaining config order
-	wsMap := make(map[string]*WorkspaceGroup)
-	var wsOrder []string
-	for _, ws := range s.cfg.Workspaces {
-		name := ws.DisplayName()
-		wsMap[name] = &WorkspaceGroup{Name: name, Path: ws.Path}
-		wsOrder = append(wsOrder, name)
-	}
-	var standalone []discovery.Project
 	for _, p := range sortedProjects {
-		if p.Origin == "standalone" {
-			standalone = append(standalone, p)
+		if p.Origin == "standalone" || p.WorkspaceName != wsConfig.DisplayName() {
 			continue
 		}
-		if wg, ok := wsMap[p.WorkspaceName]; ok {
-			wg.Projects = append(wg.Projects, p)
+		qn := p.QualifiedName()
+		if s.comments.IsProjectActive(qn) {
+			agentConnected[qn] = true
 		}
-	}
-	// Within each workspace: active projects first (by mod time), then empty (by name)
-	for _, wg := range wsMap {
-		sort.SliceStable(wg.Projects, func(i, j int) bool {
-			iActive := wg.Projects[i].FileCount > 0
-			jActive := wg.Projects[j].FileCount > 0
-			if iActive != jActive {
-				return iActive
-			}
-			if !iActive {
-				return wg.Projects[i].Name < wg.Projects[j].Name
-			}
-			return false // preserve mod time order from sortedProjects
-		})
-	}
-	var workspaces []WorkspaceGroup
-	for _, name := range wsOrder {
-		workspaces = append(workspaces, *wsMap[name])
+		ages[qn] = computeProjectAge(p)
+		wsProjects = append(wsProjects, p)
 	}
 
+	// Active projects first (by mod time), then empty (by name)
+	sort.SliceStable(wsProjects, func(i, j int) bool {
+		iActive := wsProjects[i].FileCount > 0
+		jActive := wsProjects[j].FileCount > 0
+		if iActive != jActive {
+			return iActive
+		}
+		if !iActive {
+			return wsProjects[i].Name < wsProjects[j].Name
+		}
+		return false
+	})
+
+	wg := WorkspaceGroup{Name: wsConfig.DisplayName(), Path: wsConfig.Path, Projects: wsProjects}
+
 	nav := s.buildNav("")
-	// Support highlight params from "← Home" link
-	if ws := r.URL.Query().Get("ws"); ws != "" {
-		nav.ActiveWS = ws
-	} else if pq := r.URL.Query().Get("project"); pq != "" {
-		nav.ActiveQN = pq
-	}
+	nav.ActiveWS = wsConfig.Path
+	nav.ActiveWSName = wsConfig.DisplayName()
 	pageData := struct {
-		Workspaces []WorkspaceGroup
-		Standalone []discovery.Project
-		Agents     map[string]string
-		Ages       map[string]string
+		Workspaces     []WorkspaceGroup
+		Standalone     []discovery.Project
+		AgentConnected map[string]bool
+		Ages           map[string]string
+		WorkspacePath  string
 	}{
-		Workspaces: workspaces,
-		Standalone: standalone,
-		Agents:     agentMap,
-		Ages:       ages,
+		Workspaces:     []WorkspaceGroup{wg},
+		AgentConnected: agentConnected,
+		Ages:           ages,
+		WorkspacePath:  wsConfig.Path,
 	}
 	s.renderPage(w, "index.html", nav, pageData)
 }
@@ -523,26 +529,14 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check for active agents
-	var agentPrompts []string
-	activeAgents := agents.FindActive()
-	if agts, ok := activeAgents[project.Path]; ok && len(agts) > 0 {
-		agentPrompts = make([]string, len(agts))
-		for i, a := range agts {
-			agentPrompts[i] = a.Prompt
-		}
-	}
-
 	nav := s.buildNav(project.QualifiedName())
 	nav.InProject = true
 	pageData := struct {
-		Project      *discovery.Project
-		Files        []ProjectFile
-		AgentPrompts []string
+		Project *discovery.Project
+		Files   []ProjectFile
 	}{
-		Project:      project,
-		Files:        files,
-		AgentPrompts: agentPrompts,
+		Project: project,
+		Files:   files,
 	}
 	s.renderPage(w, "project.html", nav, pageData)
 }
@@ -588,21 +582,20 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // API handlers for dynamic updates
 
 type APIProject struct {
-	Name          string   `json:"name"`
-	QualifiedName string   `json:"qualifiedName"`
-	Workspace     string   `json:"workspace"`
-	WorkspacePath string   `json:"workspacePath,omitempty"`
-	ProjectPath   string   `json:"projectPath"`
-	Origin        string   `json:"origin"`
-	HasRPI        bool     `json:"hasRPI"`
-	Branch        string   `json:"branch,omitempty"`
-	Dirty         bool     `json:"dirty,omitempty"`
-	FileCount     int      `json:"fileCount"`
-	LastModified  string   `json:"lastModified"`
-	AgentCount    int      `json:"agentCount,omitempty"`
-	AgentPrompts  []string `json:"agentPrompts,omitempty"`
-	Age           string   `json:"age,omitempty"`
-	ReviewCount   int      `json:"reviewCount,omitempty"`
+	Name           string `json:"name"`
+	QualifiedName  string `json:"qualifiedName"`
+	Workspace      string `json:"workspace"`
+	WorkspacePath  string `json:"workspacePath,omitempty"`
+	ProjectPath    string `json:"projectPath"`
+	Origin         string `json:"origin"`
+	HasRPI         bool   `json:"hasRPI"`
+	Branch         string `json:"branch,omitempty"`
+	Dirty          bool   `json:"dirty,omitempty"`
+	FileCount      int    `json:"fileCount"`
+	LastModified   string `json:"lastModified"`
+	AgentConnected bool   `json:"agentConnected,omitempty"`
+	Age            string `json:"age,omitempty"`
+	ReviewCount    int    `json:"reviewCount,omitempty"`
 }
 
 func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
@@ -621,35 +614,26 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	activeAgents := agents.FindActive()
-
 	projects := s.cache.ProjectsSortedByModTime()
 	result := make([]APIProject, len(projects))
 	for i, p := range projects {
 		qn := p.QualifiedName()
 		result[i] = APIProject{
-			Name:          p.Name,
-			QualifiedName: qn,
-			Workspace:     p.WorkspaceName,
-			WorkspacePath: p.WorkspacePath,
-			ProjectPath:   p.Path,
-			Origin:        p.Origin,
-			HasRPI:        p.HasThoughts(),
-			FileCount:     p.FileCount,
-			LastModified:  p.LastModified.Format(time.RFC3339),
-			Age:           computeProjectAge(p),
+			Name:           p.Name,
+			QualifiedName:  qn,
+			Workspace:      p.WorkspaceName,
+			WorkspacePath:  p.WorkspacePath,
+			ProjectPath:    p.Path,
+			Origin:         p.Origin,
+			HasRPI:         p.HasThoughts(),
+			FileCount:      p.FileCount,
+			LastModified:   p.LastModified.Format(time.RFC3339),
+			Age:            computeProjectAge(p),
+			AgentConnected: s.comments.IsProjectActive(qn),
 		}
 		if p.Git != nil {
 			result[i].Branch = p.Git.Branch
 			result[i].Dirty = p.Git.Dirty
-		}
-		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
-			result[i].AgentCount = len(agts)
-			prompts := make([]string, len(agts))
-			for j, a := range agts {
-				prompts[j] = a.Prompt
-			}
-			result[i].AgentPrompts = prompts
 		}
 		// Count files in review for this project
 		if reviews, err := s.comments.ListFilesInReview(qn); err == nil {

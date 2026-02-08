@@ -117,6 +117,53 @@
         .sidebar-add:hover { color: #666; text-decoration: none; background: #f0f0f0; }
         .sidebar-back { color: #0066cc; font-size: 0.8em; }
 
+        /* Sidebar item three-dot menu */
+        .sidebar-item-wrap { position: relative; }
+        .sidebar-dots {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            opacity: 0;
+            background: #fff;
+            border: none;
+            padding: 2px 4px;
+            font-size: 1em;
+            color: #999;
+            cursor: pointer;
+            line-height: 1;
+            z-index: 1;
+        }
+        .sidebar-item-wrap:hover .sidebar-dots,
+        .sidebar-item-wrap.menu-open .sidebar-dots { opacity: 1; }
+        .sidebar-dots:hover { color: #333; }
+        .sidebar-item-menu {
+            display: none;
+            position: absolute;
+            left: 16px;
+            top: 100%;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            z-index: 100;
+            min-width: 180px;
+            padding: 4px 0;
+        }
+        .sidebar-item-wrap.menu-open .sidebar-item-menu { display: block; }
+        .sidebar-item-menu button {
+            display: block;
+            width: 100%;
+            text-align: left;
+            padding: 8px 12px;
+            border: none;
+            background: none;
+            font-size: 0.8em;
+            color: #333;
+            cursor: pointer;
+        }
+        .sidebar-item-menu button:hover { background: #f5f5f5; }
+
         /* Sidebar floating card (for page-specific content like TOC) */
         .sidebar-card {
             margin: 12px 12px 0 12px;
@@ -347,11 +394,11 @@
         <nav class="sidebar">
             {{if .Nav.InProject}}
             <!-- Focused mode: only show parent context + active project -->
-            <a class="sidebar-item sidebar-back" href="/?{{if .Nav.ActiveWS}}ws={{.Nav.ActiveWS}}{{else}}project={{.Nav.ActiveQN}}{{end}}">&#8592; Home</a>
+            <a class="sidebar-item sidebar-back" href="{{if .Nav.ActiveWSName}}/workspace/{{.Nav.ActiveWSName}}{{else}}/{{end}}">&#8592; Home</a>
             <div class="sidebar-divider"></div>
             {{if .Nav.ActiveWS}}
             {{range .Nav.Workspaces}}{{if eq .Path $.Nav.ActiveWS}}
-            <a class="sidebar-item" href="/?ws={{.Path}}">
+            <a class="sidebar-item" href="/workspace/{{.Name}}">
                 {{.Name}}
                 {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
             </a>
@@ -377,19 +424,31 @@
             {{else}}
             <!-- Home mode: show all workspaces and standalone projects -->
             {{range .Nav.Workspaces}}
-            <a class="sidebar-item{{if eq .Path $.Nav.ActiveWS}} active{{end}}" href="/">
-                {{.Name}}
-                {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
-            </a>
+            <div class="sidebar-item-wrap" data-remove-type="workspace" data-remove-path="{{.Path}}" data-remove-name="{{.Name}}">
+                <a class="sidebar-item{{if eq .Path $.Nav.ActiveWS}} active{{end}}" href="/workspace/{{.Name}}">
+                    {{.Name}}
+                    {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
+                </a>
+                <button class="sidebar-dots" onclick="toggleSidebarMenu(event)">&#8942;</button>
+                <div class="sidebar-item-menu">
+                    <button onclick="showRemoveDialog(this)">Remove from Birdseye</button>
+                </div>
+            </div>
             {{end}}
 
             {{range .Nav.Standalone}}
-            <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}" href="/project/{{.QualifiedName}}">
-                {{.Name}}
-                {{if .HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
-                {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
-                {{if .Branch}}<span class="branch-info">{{.Branch}}{{if .Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
-            </a>
+            <div class="sidebar-item-wrap" data-remove-type="project" data-remove-path="{{.Path}}" data-remove-name="{{.Name}}">
+                <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}" href="/project/{{.QualifiedName}}">
+                    {{.Name}}
+                    {{if .HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
+                    {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
+                    {{if .Branch}}<span class="branch-info">{{.Branch}}{{if .Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
+                </a>
+                <button class="sidebar-dots" onclick="toggleSidebarMenu(event)">&#8942;</button>
+                <div class="sidebar-item-menu">
+                    <button onclick="showRemoveDialog(this)">Remove from Birdseye</button>
+                </div>
+            </div>
             {{end}}
 
             <div class="sidebar-divider"></div>
@@ -402,6 +461,18 @@
 
         <div class="main-content">
             {{block "content" .}}{{end}}
+        </div>
+    </div>
+
+    <!-- Remove from Birdseye confirmation modal -->
+    <div class="modal-overlay" id="removeModal">
+        <div class="modal">
+            <h3>Remove <span id="removeItemName"></span>?</h3>
+            <p style="color:#666;font-size:0.9em;margin:0">This will remove it from Birdseye. No data will be deleted.</p>
+            <div class="modal-actions">
+                <button class="btn-cancel" onclick="closeRemoveDialog()">Cancel</button>
+                <button class="btn-primary" id="confirmRemoveBtn" onclick="confirmRemove()">Remove</button>
+            </div>
         </div>
     </div>
 
@@ -485,8 +556,64 @@
         }
 
         document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') closeAddDialog();
+            if (e.key === 'Escape') { closeAddDialog(); closeRemoveDialog(); }
         });
+
+        // --- Sidebar item three-dot menu ---
+        function toggleSidebarMenu(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            var wrap = event.target.closest('.sidebar-item-wrap');
+            document.querySelectorAll('.sidebar-item-wrap.menu-open').forEach(function(w) {
+                if (w !== wrap) w.classList.remove('menu-open');
+            });
+            wrap.classList.toggle('menu-open');
+        }
+
+        document.addEventListener('click', function() {
+            document.querySelectorAll('.sidebar-item-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
+        });
+
+        // --- Remove from Birdseye ---
+        var removeTarget = { type: '', path: '', name: '' };
+
+        function showRemoveDialog(btn) {
+            var wrap = btn.closest('.sidebar-item-wrap');
+            wrap.classList.remove('menu-open');
+            removeTarget.type = wrap.dataset.removeType;
+            removeTarget.path = wrap.dataset.removePath;
+            removeTarget.name = wrap.dataset.removeName;
+            document.getElementById('removeItemName').textContent = removeTarget.name;
+            document.getElementById('confirmRemoveBtn').disabled = false;
+            document.getElementById('confirmRemoveBtn').textContent = 'Remove';
+            document.getElementById('removeModal').classList.add('open');
+        }
+
+        function closeRemoveDialog() {
+            document.getElementById('removeModal').classList.remove('open');
+        }
+
+        function confirmRemove() {
+            var btn = document.getElementById('confirmRemoveBtn');
+            btn.disabled = true;
+            btn.textContent = 'Removing...';
+            var url = removeTarget.type === 'workspace' ? '/api/workspaces' : '/api/projects';
+            fetch(url, {
+                method: 'DELETE',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path: removeTarget.path})
+            })
+            .then(function(r) {
+                if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+                closeRemoveDialog();
+                window.location.href = '/';
+            })
+            .catch(function(err) {
+                alert('Failed to remove: ' + err.message);
+                btn.disabled = false;
+                btn.textContent = 'Remove';
+            });
+        }
 
         // --- Shared utilities ---
         function escapeHtml(s) {
@@ -618,26 +745,15 @@
             fetch('/api/projects')
                 .then(function(r) { return r.json(); })
                 .then(function(projects) {
-                    // Build set of workspace paths that have active agents
-                    var wsAgents = {};
-                    projects.forEach(function(p) {
-                        if (p.origin !== 'standalone' && p.agentCount > 0) {
-                            wsAgents[p.workspacePath] = true;
-                        }
-                    });
-                    // Update workspace sidebar items
-                    document.querySelectorAll('.sidebar-item[href="/"]').forEach(function(item) {
-                        // We can't easily match workspace path from the DOM, so just reload on change
-                    });
-                    // Update standalone sidebar items
+                    // Update project sidebar items with MCP connection dots
                     document.querySelectorAll('.sidebar-item[href^="/project/"]').forEach(function(item) {
                         var qn = item.getAttribute('href').replace('/project/', '');
                         var proj = projects.find(function(p) { return p.qualifiedName === qn; });
                         if (!proj) return;
                         var dot = item.querySelector('.agent-dot');
-                        if (proj.agentCount > 0 && !dot) {
+                        if (proj.agentConnected && !dot) {
                             item.insertAdjacentHTML('beforeend', ' <span class="agent-dot"></span>');
-                        } else if (proj.agentCount === 0 && dot) {
+                        } else if (!proj.agentConnected && dot) {
                             dot.remove();
                         }
                     });

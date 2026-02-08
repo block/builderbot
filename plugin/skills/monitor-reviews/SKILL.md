@@ -31,7 +31,6 @@ in review. Resolving all threads on a file removes it from review.
       threads.
    c. Read each thread with `birdseye_read_thread`.
    d. Reply thoughtfully to comments you haven't yet responded to.
-   e. Resolve threads where you've fully addressed the feedback.
 3. Call `birdseye_wait_for_changes` in a loop to wait for new activity. This
    tool blocks for up to 30 seconds and returns immediately when a comment is
    created, replied to, resolved, or reopened. It also maintains your agent
@@ -50,6 +49,8 @@ in review. Resolving all threads on a file removes it from review.
   what you changed
 - If you disagree with feedback, explain your reasoning rather than silently
   ignoring it
+- Do NOT resolve threads -- only humans resolve threads. Your job is to reply
+  and make changes, not to decide when a conversation is done
 - Keep calling `birdseye_wait_for_changes` even when idle -- this maintains the
   "agent active" heartbeat indicator in the birdseye UI
 - Do NOT stop monitoring just because there are no open threads; the human may
@@ -65,4 +66,3 @@ in review. Resolving all threads on a file removes it from review.
 | `birdseye_read_thread` | Read a full comment thread with all replies |
 | `birdseye_create_thread` | Create a new comment thread anchored to text |
 | `birdseye_reply` | Reply to an existing thread |
-| `birdseye_resolve` | Mark a thread as resolved |

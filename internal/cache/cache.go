@@ -17,6 +17,8 @@ type FileInfo struct {
 	Workspace   string // workspace display name (empty for standalone)
 	ProjectPath string // absolute filesystem path to project root
 	Source      string // source name (e.g., "thoughts", "docs")
+	SourceType  string // source type: "thoughts", "tree", or "files"
+	SourceAuto  bool   // true if source was auto-detected
 	Path        string // relative to source root
 	FullPath    string // relative to project root (e.g., "thoughts/plans/foo.md")
 	Name        string
@@ -253,6 +255,8 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					Workspace:   project.WorkspaceName,
 					ProjectPath: project.Path,
 					Source:      source.Name,
+					SourceType:  source.Type,
+					SourceAuto:  source.Auto,
 					Path:        relToSource,
 					FullPath:    relToProject,
 					Name:        filepath.Base(path),
@@ -282,6 +286,8 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					Workspace:   project.WorkspaceName,
 					ProjectPath: project.Path,
 					Source:      source.Name,
+					SourceType:  source.Type,
+					SourceAuto:  source.Auto,
 					Path:        filepath.Base(filePath),
 					FullPath:    relToProject,
 					Name:        filepath.Base(filePath),

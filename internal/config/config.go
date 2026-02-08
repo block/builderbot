@@ -8,8 +8,9 @@ import (
 
 // Config is the persistent birdseye configuration.
 type Config struct {
-	Workspaces []Workspace     `json:"workspaces"`
-	Projects   []ProjectConfig `json:"projects,omitempty"`
+	Workspaces     []Workspace               `json:"workspaces"`
+	Projects       []ProjectConfig           `json:"projects,omitempty"`
+	ProjectSources map[string][]SourceConfig `json:"projectSources,omitempty"` // key: absolute project path, for workspace projects
 }
 
 // Workspace is a directory that is scanned for projects.

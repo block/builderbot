@@ -28,12 +28,6 @@
         100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
     }
 
-    /* Show/hide dropdown on hover in file rows */
-    .dropdown-toggle { opacity: 0; }
-    .file:hover .dropdown-toggle,
-    .copy-dropdown.open .dropdown-toggle { opacity: 1; }
-    .dropdown-toggle.copied { opacity: 1; }
-
     .deleting-banner {
         display: flex;
         align-items: center;
@@ -53,35 +47,228 @@
         opacity: 0.3;
         pointer-events: none;
     }
+
+    /* Source section headers */
+    .source-section { margin-bottom: 24px; }
+    .source-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 0 8px 0;
+        position: relative;
+    }
+    .source-header-label {
+        font-size: 0.8em;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #888;
+    }
+    .source-header .auto-badge {
+        font-size: 0.7em;
+        font-weight: 400;
+        text-transform: none;
+        letter-spacing: 0;
+        color: #aaa;
+    }
+
+    /* Source three-dot menu */
+    .source-dots {
+        margin-left: auto;
+        background: none;
+        border: none;
+        font-size: 1.1em;
+        color: #999;
+        cursor: pointer;
+        padding: 2px 4px;
+        line-height: 1;
+    }
+    .source-dots:hover { color: #333; }
+    .source-header-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: 100%;
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        z-index: 100;
+        min-width: 200px;
+        padding: 4px 0;
+    }
+    .source-header.menu-open .source-header-menu { display: block; }
+    .source-header-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 12px;
+        border: none;
+        background: none;
+        font-size: 0.8em;
+        color: #333;
+        cursor: pointer;
+    }
+    .source-header-menu button:hover { background: #f5f5f5; }
+
+    /* File three-dot menu */
+    .file-dots {
+        background: none;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-size: 0.85em;
+        color: #999;
+        cursor: pointer;
+        line-height: 1;
+    }
+    .file-dots:hover { color: #333; border-color: #ccc; }
+    .file-menu-wrap { position: relative; }
+    .file-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        z-index: 100;
+        min-width: 200px;
+        padding: 4px 0;
+    }
+    .file-menu-wrap.menu-open .file-menu { display: block; }
+    .file-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 12px;
+        border: none;
+        background: none;
+        font-size: 0.85em;
+        color: #333;
+        cursor: pointer;
+    }
+    .file-menu button:hover { background: #f5f5f5; }
+    .file-menu .menu-divider {
+        border-top: 1px solid #eee;
+        margin: 4px 0;
+    }
+    .file-menu .menu-danger { color: #cf222e; }
+    .file-menu .menu-danger:hover { background: #fff5f5; }
+
+    .add-source-btn {
+        display: inline-block;
+        color: #aaa;
+        font-size: 0.85em;
+        cursor: pointer;
+        padding: 8px 0;
+    }
+    .add-source-btn:hover { color: #666; text-decoration: none; }
 {{end}}
 
 {{define "content"}}
+    <div id="fileContainer">
     {{if .Page.Files}}
-    <ul class="files">
-        {{range .Page.Files}}
-        <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}">
-            <div class="file-left">
-                <input type="checkbox" class="file-checkbox" />
-                {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
-            </div>
-            <div class="file-right">
-                <div class="copy-dropdown">
-                    <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy &#9662;</button>
-                    <div class="dropdown-menu">
-                        <button onclick="copyFileToClipboard(this)">File</button>
-                        <button onclick="copyRelative(this)">Relative path</button>
-                        <button onclick="copyAbsolute(this)">Absolute path</button>
-                    </div>
+        {{if .Page.MultiSource}}
+            {{range $source := .Page.SourceOrder}}
+            <div class="source-section" data-source="{{$source}}" data-source-type="{{index $.Page.SourceTypes $source}}">
+                <div class="source-header">
+                    <span class="source-header-label">{{$source}}</span>
+                    {{if index $.Page.AutoSources $source}}<span class="auto-badge">(auto)</span>
+                    {{else}}{{if ne (index $.Page.SourceTypes $source) "files"}}<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>
+                    <div class="source-header-menu">
+                        <button onclick="removeSource('{{$source}}')">Remove from Birdseye</button>
+                    </div>{{end}}{{end}}
                 </div>
-                <span class="file-age">{{.Age}}</span>
+                <ul class="files">
+                    {{range $.Page.Files}}{{if eq .Source $source}}
+                    <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
+                        <div class="file-left">
+                            <input type="checkbox" class="file-checkbox" />
+                            {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
+                            <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
+                        </div>
+                        <div class="file-right">
+                            <div class="file-menu-wrap">
+                                <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
+                                <div class="file-menu">
+                                    <button onclick="copyFileToClipboard(this)">Copy file</button>
+                                    <button onclick="copyRelative(this)">Copy relative path</button>
+                                    <button onclick="copyAbsolute(this)">Copy absolute path</button>
+                                    {{if eq .SourceType "files"}}<div class="menu-divider"></div>
+                                    <button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>{{end}}
+                                    <div class="menu-divider"></div>
+                                    <button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>
+                                </div>
+                            </div>
+                            <span class="file-age">{{.Age}}</span>
+                        </div>
+                    </li>
+                    {{end}}{{end}}
+                </ul>
             </div>
-        </li>
+            {{end}}
+        {{else}}
+        <ul class="files">
+            {{range .Page.Files}}
+            <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
+                <div class="file-left">
+                    <input type="checkbox" class="file-checkbox" />
+                    {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
+                    <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
+                </div>
+                <div class="file-right">
+                    <div class="file-menu-wrap">
+                        <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
+                        <div class="file-menu">
+                            <button onclick="copyFileToClipboard(this)">Copy file</button>
+                            <button onclick="copyRelative(this)">Copy relative path</button>
+                            <button onclick="copyAbsolute(this)">Copy absolute path</button>
+                            {{if eq .SourceType "files"}}<div class="menu-divider"></div>
+                            <button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>{{end}}
+                            <div class="menu-divider"></div>
+                            <button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>
+                        </div>
+                    </div>
+                    <span class="file-age">{{.Age}}</span>
+                </div>
+            </li>
+            {{end}}
+        </ul>
         {{end}}
-    </ul>
     {{else}}
     <p class="empty">No files yet.</p>
     {{end}}
+    </div>
+
+    <a class="add-source-btn" onclick="showAddSourceDialog()">+ Add to project</a>
+
+    <!-- Add source modal -->
+    <div class="modal-overlay" id="addSourceModal">
+        <div class="modal">
+            <h3>Add to project</h3>
+            <p style="color:#666;font-size:0.9em;margin:0 0 12px 0">Path relative to project root &mdash; a directory (e.g., <code>docs</code>) or a markdown file (e.g., <code>README.md</code>)</p>
+            <input type="text" class="modal-input" id="sourcePathInput" placeholder="docs or path/to/file.md">
+            <div class="modal-error" id="sourceModalError"></div>
+            <div class="modal-actions">
+                <button class="btn-cancel" onclick="closeAddSourceDialog()">Cancel</button>
+                <button class="btn-primary" id="addSourceBtn" onclick="confirmAddSource()">Add</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Delete file confirmation modal -->
+    <div class="modal-overlay" id="deleteFileModal">
+        <div class="modal">
+            <h3>Delete file?</h3>
+            <p style="color:#666;font-size:0.9em;margin:0">This will permanently delete <strong id="deleteFileName"></strong> from the filesystem. This cannot be undone.</p>
+            <div class="modal-actions">
+                <button class="btn-cancel" onclick="closeDeleteFileDialog()">Cancel</button>
+                <button class="btn-primary" id="confirmDeleteBtn" style="background:#cf222e;border-color:#cf222e;" onclick="executeDeleteFile()">Delete from disk</button>
+            </div>
+        </div>
+    </div>
 
     <div class="selection-bar" id="selectionBar">
         <span class="count"><span id="selectedCount">0</span> selected</span>
@@ -107,6 +294,113 @@
         });
     }
     attachFileListeners();
+
+    // --- Menus ---
+    function toggleSourceMenu(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var header = event.target.closest('.source-header');
+        closeAllMenus();
+        header.classList.toggle('menu-open');
+    }
+
+    function toggleFileMenu(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var wrap = event.target.closest('.file-menu-wrap');
+        closeAllMenus();
+        wrap.classList.toggle('menu-open');
+    }
+
+    function closeAllMenus() {
+        document.querySelectorAll('.source-header.menu-open').forEach(function(h) { h.classList.remove('menu-open'); });
+        document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
+    }
+
+    document.addEventListener('click', closeAllMenus);
+
+    // --- Copy actions (from file menu) ---
+    function getFileData(btn) {
+        var row = btn.closest('[data-project]');
+        return { project: row.dataset.project, path: row.dataset.path };
+    }
+
+    function copyRelative(btn) {
+        var d = getFileData(btn);
+        navigator.clipboard.writeText('@' + d.path);
+        closeAllMenus();
+    }
+
+    function copyAbsolute(btn) {
+        var row = btn.closest('[data-project-path]');
+        var d = getFileData(btn);
+        navigator.clipboard.writeText(row.dataset.projectPath + '/' + d.path);
+        closeAllMenus();
+    }
+
+    function copyFileToClipboard(btn) {
+        var d = getFileData(btn);
+        fetch('/api/copy-file?project=' + encodeURIComponent(d.project) + '&path=' + encodeURIComponent(d.path));
+        closeAllMenus();
+    }
+
+    // --- Remove file from Birdseye (individual files only) ---
+    function removeFileFromBirdseye(btn) {
+        var d = getFileData(btn);
+        closeAllMenus();
+        fetch('/api/sources', {
+            method: 'DELETE',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project: d.project, file: d.path})
+        })
+        .then(function(r) {
+            if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+            debouncedRefresh('files', refreshFiles);
+        })
+        .catch(function(err) {
+            alert('Failed to remove: ' + err.message);
+        });
+    }
+
+    // --- Delete file from disk ---
+    var pendingDelete = { project: '', path: '', name: '' };
+
+    function confirmDeleteFile(btn) {
+        var d = getFileData(btn);
+        var row = btn.closest('.file');
+        pendingDelete.project = d.project;
+        pendingDelete.path = d.path;
+        pendingDelete.name = row.querySelector('.file-name a').textContent;
+        closeAllMenus();
+        document.getElementById('deleteFileName').textContent = pendingDelete.name;
+        document.getElementById('confirmDeleteBtn').disabled = false;
+        document.getElementById('confirmDeleteBtn').textContent = 'Delete from disk';
+        document.getElementById('deleteFileModal').classList.add('open');
+    }
+
+    function closeDeleteFileDialog() {
+        document.getElementById('deleteFileModal').classList.remove('open');
+    }
+
+    function executeDeleteFile() {
+        var btn = document.getElementById('confirmDeleteBtn');
+        btn.disabled = true;
+        btn.textContent = 'Deleting...';
+
+        fetch('/api/delete-file?project=' + encodeURIComponent(pendingDelete.project) + '&path=' + encodeURIComponent(pendingDelete.path), {
+            method: 'POST'
+        })
+        .then(function(r) {
+            if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+            closeDeleteFileDialog();
+            debouncedRefresh('files', refreshFiles);
+        })
+        .catch(function(err) {
+            alert('Failed to delete: ' + err.message);
+            btn.disabled = false;
+            btn.textContent = 'Delete from disk';
+        });
+    }
 
     // SSE handlers
     onSSE(function(data) {
@@ -146,32 +440,84 @@
         if (content) content.prepend(banner);
     }
 
+    function renderFileRow(f) {
+        var isIndividual = (f.sourceType === 'files');
+        return '<li class="file" data-project="' + escapeHtml(qualifiedName) + '" data-project-path="' + escapeHtml(projectPath) + '" data-path="' + escapeHtml(f.path) + '" data-source="' + escapeHtml(f.source || '') + '" data-source-type="' + escapeHtml(f.sourceType || '') + '">' +
+            '<div class="file-left">' +
+                '<input type="checkbox" class="file-checkbox" />' +
+                (f.fileType && f.fileType !== 'other' ? '<span class="file-type ' + escapeHtml(f.fileType) + '">' + escapeHtml(f.fileType) + '</span>' : '') +
+                '<span class="file-name"><a href="/file/' + encodeURI(qualifiedName) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>' +
+            '</div>' +
+            '<div class="file-right">' +
+                '<div class="file-menu-wrap">' +
+                    '<button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>' +
+                    '<div class="file-menu">' +
+                        '<button onclick="copyFileToClipboard(this)">Copy file</button>' +
+                        '<button onclick="copyRelative(this)">Copy relative path</button>' +
+                        '<button onclick="copyAbsolute(this)">Copy absolute path</button>' +
+                        (isIndividual ? '<div class="menu-divider"></div><button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>' : '') +
+                        '<div class="menu-divider"></div>' +
+                        '<button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>' +
+                    '</div>' +
+                '</div>' +
+                '<span class="file-age">' + escapeHtml(f.age) + '</span>' +
+            '</div>' +
+        '</li>';
+    }
+
     async function refreshFiles() {
         try {
             var response = await fetch('/api/project/' + qualifiedName);
             var files = await response.json();
-            var container = document.querySelector('.files');
+            var container = document.getElementById('fileContainer');
             if (!container) { location.reload(); return; }
-            container.innerHTML = files.map(function(f) {
-                return '<li class="file" data-project="' + qualifiedName + '" data-project-path="' + projectPath + '" data-path="' + f.path + '">' +
-                    '<div class="file-left">' +
-                        '<input type="checkbox" class="file-checkbox" />' +
-                        (f.fileType && f.fileType !== 'other' ? '<span class="file-type ' + f.fileType + '">' + f.fileType + '</span>' : '') +
-                        '<span class="file-name"><a href="/file/' + qualifiedName + '/' + f.path + '">' + f.name + '</a></span>' +
-                    '</div>' +
-                    '<div class="file-right">' +
-                        '<div class="copy-dropdown">' +
-                            '<button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy \u25BE</button>' +
-                            '<div class="dropdown-menu">' +
-                                '<button onclick="copyFileToClipboard(this)">File</button>' +
-                                '<button onclick="copyRelative(this)">Relative path</button>' +
-                                '<button onclick="copyAbsolute(this)">Absolute path</button>' +
-                            '</div>' +
-                        '</div>' +
-                        '<span class="file-age">' + f.age + '</span>' +
-                    '</div>' +
-                '</li>';
-            }).join('');
+
+            // Group files by source
+            var sourceOrder = [];
+            var sourceFiles = {};
+            var sourceTypes = {};
+            files.forEach(function(f) {
+                var src = f.source || '';
+                if (!sourceFiles[src]) {
+                    sourceFiles[src] = [];
+                    sourceOrder.push(src);
+                    sourceTypes[src] = f.sourceType || '';
+                }
+                sourceFiles[src].push(f);
+            });
+
+            // Track which sources are auto-detected
+            var autoSources = {};
+            files.forEach(function(f) {
+                if (f.sourceAuto) autoSources[f.source || ''] = true;
+            });
+
+            var html = '';
+            if (sourceOrder.length > 1) {
+                sourceOrder.forEach(function(src) {
+                    var sType = sourceTypes[src];
+                    html += '<div class="source-section" data-source="' + escapeHtml(src) + '" data-source-type="' + escapeHtml(sType) + '">';
+                    html += '<div class="source-header"><span class="source-header-label">' + escapeHtml(src) + '</span>';
+                    if (autoSources[src]) {
+                        html += '<span class="auto-badge">(auto)</span>';
+                    } else if (sType !== 'files') {
+                        html += '<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>';
+                        html += '<div class="source-header-menu"><button onclick="removeSource(\'' + escapeHtml(src) + '\')">Remove from Birdseye</button></div>';
+                    }
+                    html += '</div>';
+                    html += '<ul class="files">';
+                    sourceFiles[src].forEach(function(f) { html += renderFileRow(f); });
+                    html += '</ul></div>';
+                });
+            } else if (files.length > 0) {
+                html = '<ul class="files">';
+                files.forEach(function(f) { html += renderFileRow(f); });
+                html += '</ul>';
+            } else {
+                html = '<p class="empty">No files yet.</p>';
+            }
+
+            container.innerHTML = html;
             attachFileListeners();
             clearSelection();
             applyReviewBadges();
@@ -220,6 +566,72 @@
     }
 
     refreshReviewBadges();
+
+    // Add source dialog
+    function showAddSourceDialog() {
+        document.getElementById('sourcePathInput').value = '';
+        document.getElementById('sourceModalError').style.display = 'none';
+        document.getElementById('addSourceBtn').disabled = false;
+        document.getElementById('addSourceBtn').textContent = 'Add';
+        document.getElementById('addSourceModal').classList.add('open');
+        setTimeout(function() { document.getElementById('sourcePathInput').focus(); }, 50);
+    }
+
+    function closeAddSourceDialog() {
+        document.getElementById('addSourceModal').classList.remove('open');
+    }
+
+    function confirmAddSource() {
+        var path = document.getElementById('sourcePathInput').value.trim();
+        if (!path) { showSourceError('Please enter a path.'); return; }
+
+        var btn = document.getElementById('addSourceBtn');
+        btn.disabled = true;
+        btn.textContent = 'Adding...';
+
+        fetch('/api/sources', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project: qualifiedName, path: path})
+        })
+        .then(function(r) {
+            if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+            closeAddSourceDialog();
+            debouncedRefresh('files', refreshFiles);
+        })
+        .catch(function(err) {
+            showSourceError(err.message);
+            btn.disabled = false;
+            btn.textContent = 'Add';
+        });
+    }
+
+    function showSourceError(msg) {
+        var el = document.getElementById('sourceModalError');
+        el.textContent = msg;
+        el.style.display = 'block';
+    }
+
+    function removeSource(name) {
+        closeAllMenus();
+        if (!confirm('Remove source "' + name + '" from this project?\nNo files will be deleted.')) return;
+        fetch('/api/sources', {
+            method: 'DELETE',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project: qualifiedName, name: name})
+        })
+        .then(function(r) {
+            if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+            debouncedRefresh('files', refreshFiles);
+        })
+        .catch(function(err) {
+            alert('Failed to remove source: ' + err.message);
+        });
+    }
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') { closeAddSourceDialog(); closeDeleteFileDialog(); }
+    });
 {{end}}
 
 {{template "layout" .}}

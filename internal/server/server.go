@@ -106,6 +106,12 @@ func (s *Server) discoverAllProjects() []discovery.Project {
 			log.Printf("Warning: could not discover workspace %s: %v", ws.Path, err)
 			continue
 		}
+		// Merge any configured sources for workspace projects
+		for i := range projects {
+			if extras, ok := s.cfg.ProjectSources[projects[i].Path]; ok {
+				projects[i].Sources = append(projects[i].Sources, discovery.SourceConfigsToFileSources(projects[i].Path, extras)...)
+			}
+		}
 		allProjects = append(allProjects, projects...)
 	}
 	for _, pc := range s.cfg.Projects {
@@ -196,8 +202,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/copy-file", s.handleCopyFile)
 	s.mux.HandleFunc("/api/project-info", s.handleProjectInfo)
 	s.mux.HandleFunc("/api/delete-project", s.handleDeleteProject)
+	s.mux.HandleFunc("/api/delete-file", s.handleDeleteFile)
 	// Workspace and project management
 	s.mux.HandleFunc("/api/workspaces", s.handleAPIWorkspaces)
+	s.mux.HandleFunc("/api/sources", s.handleAPISources)
 	// Comment and review API endpoints
 	s.mux.HandleFunc("/api/threads", s.handleAPIThreads)
 	s.mux.HandleFunc("/api/threads/", s.handleAPIThreadAction)
@@ -493,11 +501,13 @@ func computeProjectAge(p discovery.Project) string {
 }
 
 type ProjectFile struct {
-	Name     string
-	Path     string
-	ModTime  time.Time
-	Age      string
-	FileType string // "research", "plan", or "other"
+	Name       string
+	Path       string
+	Source     string // source name (e.g., "thoughts", "docs")
+	SourceType string // "thoughts", "tree", or "files"
+	ModTime    time.Time
+	Age        string
+	FileType   string // "research", "plan", or "other"
 }
 
 func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
@@ -521,22 +531,59 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	files := make([]ProjectFile, len(cachedFiles))
 	for i, f := range cachedFiles {
 		files[i] = ProjectFile{
-			Name:     f.Name,
-			Path:     f.FullPath,
-			ModTime:  f.ModTime,
-			Age:      formatAge(f.ModTime),
-			FileType: f.FileType,
+			Name:       f.Name,
+			Path:       f.FullPath,
+			Source:     f.Source,
+			SourceType: f.SourceType,
+			ModTime:    f.ModTime,
+			Age:        formatAge(f.ModTime),
+			FileType:   f.FileType,
 		}
+	}
+
+	// Build ordered source list and group files by source
+	sourceOrder := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, src := range project.Sources {
+		if !seen[src.Name] {
+			seen[src.Name] = true
+			sourceOrder = append(sourceOrder, src.Name)
+		}
+	}
+	// Also include any sources that appear in files but not in project.Sources
+	for _, f := range files {
+		if !seen[f.Source] {
+			seen[f.Source] = true
+			sourceOrder = append(sourceOrder, f.Source)
+		}
+	}
+
+	// Determine which sources are auto-detected and their types
+	autoSources := make(map[string]bool)
+	sourceTypes := make(map[string]string) // source name → type
+	for _, src := range project.Sources {
+		if src.Auto {
+			autoSources[src.Name] = true
+		}
+		sourceTypes[src.Name] = src.Type
 	}
 
 	nav := s.buildNav(project.QualifiedName())
 	nav.InProject = true
 	pageData := struct {
-		Project *discovery.Project
-		Files   []ProjectFile
+		Project     *discovery.Project
+		Files       []ProjectFile
+		SourceOrder []string
+		AutoSources map[string]bool
+		SourceTypes map[string]string
+		MultiSource bool // true if more than one source has files
 	}{
-		Project: project,
-		Files:   files,
+		Project:     project,
+		Files:       files,
+		SourceOrder: sourceOrder,
+		AutoSources: autoSources,
+		SourceTypes: sourceTypes,
+		MultiSource: len(sourceOrder) > 1,
 	}
 	s.renderPage(w, "project.html", nav, pageData)
 }
@@ -646,6 +693,9 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 type APIFile struct {
 	Name        string `json:"name"`
 	Path        string `json:"path"`
+	Source      string `json:"source,omitempty"`
+	SourceType  string `json:"sourceType,omitempty"`
+	SourceAuto  bool   `json:"sourceAuto,omitempty"`
 	Project     string `json:"project,omitempty"`
 	Workspace   string `json:"workspace,omitempty"`
 	ProjectPath string `json:"projectPath,omitempty"`
@@ -670,6 +720,9 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 		result[i] = APIFile{
 			Name:        f.Name,
 			Path:        f.FullPath,
+			Source:      f.Source,
+			SourceType:  f.SourceType,
+			SourceAuto:  f.SourceAuto,
 			Workspace:   f.Workspace,
 			ProjectPath: f.ProjectPath,
 			Age:         formatAge(f.ModTime),
@@ -797,9 +850,9 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Deleted project directory: %s", project.Path)
 
-	// If this was a standalone project, also remove from config
+	// Remove project from config
+	s.cfgMu.Lock()
 	if project.Origin == "standalone" {
-		s.cfgMu.Lock()
 		var filtered []config.ProjectConfig
 		for _, pc := range s.cfg.Projects {
 			if filepath.Clean(pc.Path) != filepath.Clean(project.Path) {
@@ -807,14 +860,68 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.cfg.Projects = filtered
-		if err := config.Save(s.cfgPath, s.cfg); err != nil {
-			log.Printf("Warning: could not save config after project delete: %v", err)
-		}
-		s.cfgMu.Unlock()
 	}
+	// Also clean up any source overrides for this project
+	delete(s.cfg.ProjectSources, project.Path)
+	if err := config.Save(s.cfgPath, s.cfg); err != nil {
+		log.Printf("Warning: could not save config after project delete: %v", err)
+	}
+	s.cfgMu.Unlock()
 
 	s.cache.RemoveProject(qualifiedName)
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	qualifiedName := r.URL.Query().Get("project")
+	filePath := r.URL.Query().Get("path")
+	if qualifiedName == "" || filePath == "" {
+		http.Error(w, "missing project or path", http.StatusBadRequest)
+		return
+	}
+
+	project := s.cache.FindProject(qualifiedName)
+	if project == nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+
+	fullPath := filepath.Join(project.Path, filePath)
+
+	// Verify the file exists and is under the project directory
+	if !strings.HasPrefix(fullPath, project.Path+"/") {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	if _, err := os.Stat(fullPath); err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+
+	if err := os.Remove(fullPath); err != nil {
+		log.Printf("Failed to delete file %s: %v", fullPath, err)
+		http.Error(w, fmt.Sprintf("failed to delete: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Deleted file: %s", fullPath)
+
+	// If this was an individually-added file, also remove from config
+	s.cfgMu.Lock()
+	s.removeFileFromConfig(project, filePath)
+	if err := config.Save(s.cfgPath, s.cfg); err != nil {
+		log.Printf("Warning: could not save config after file delete: %v", err)
+	}
+	s.cfgMu.Unlock()
+
+	// Refresh cache so the file disappears from listings
+	s.cache.RefreshProject(qualifiedName)
+	s.watcher.Broadcast(watcher.Event{Type: watcher.EventFilesChanged, Project: qualifiedName})
 	w.WriteHeader(http.StatusNoContent)
 }
 

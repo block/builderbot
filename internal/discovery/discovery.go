@@ -147,30 +147,37 @@ func LoadStandaloneProject(projectPath string, cfg config.ProjectConfig) (Projec
 	project.Sources = DetectSources(absPath)
 
 	// Add user-configured sources
-	for _, src := range cfg.Sources {
+	project.Sources = append(project.Sources, SourceConfigsToFileSources(absPath, cfg.Sources)...)
+
+	return project, nil
+}
+
+// SourceConfigsToFileSources converts config source entries to runtime FileSources.
+func SourceConfigsToFileSources(projectPath string, configs []config.SourceConfig) []FileSource {
+	var sources []FileSource
+	for _, src := range configs {
 		fs := FileSource{
 			Name: src.Name,
 			Type: src.Type,
 			Auto: false,
 		}
 		if src.Type == "tree" {
-			fs.RootPath = filepath.Join(absPath, src.Path)
+			fs.RootPath = filepath.Join(projectPath, src.Path)
 			if fs.Name == "" {
 				fs.Name = src.Path
 			}
 		} else if src.Type == "files" {
 			fs.Files = make([]string, len(src.Files))
 			for i, f := range src.Files {
-				fs.Files[i] = filepath.Join(absPath, f)
+				fs.Files[i] = filepath.Join(projectPath, f)
 			}
 			if fs.Name == "" {
 				fs.Name = "files"
 			}
 		}
-		project.Sources = append(project.Sources, fs)
+		sources = append(sources, fs)
 	}
-
-	return project, nil
+	return sources
 }
 
 func countMdFiles(dir string) int {

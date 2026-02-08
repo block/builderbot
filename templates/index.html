@@ -65,7 +65,7 @@
             display: flex;
             align-items: center;
             gap: 6px;
-            padding: 10px 16px;
+            padding: 10px 10px;
             font-size: 0.9em;
             color: #888;
             cursor: pointer;
@@ -92,19 +92,19 @@
             color: #0066cc;
         }
         .tab-close {
-            display: none;
+            display: inline-flex;
             align-items: center;
             justify-content: center;
             background: none;
             border: none;
             font-size: 1.1em;
-            color: #aaa;
+            color: transparent;
             cursor: pointer;
             padding: 0 2px;
             line-height: 1;
             border-radius: 3px;
         }
-        .tab:hover .tab-close { display: inline-flex; }
+        .tab:hover .tab-close { color: #aaa; }
         .tab-close:hover {
             color: #cf222e;
             background: rgba(207, 34, 46, 0.1);
@@ -274,8 +274,8 @@
             font-weight: 500;
             padding: 1px 5px;
             border-radius: 3px;
-            background: #e8f5e9;
-            color: #2e7d32;
+            background: #f0f0f0;
+            color: #888;
             margin-left: 6px;
             vertical-align: middle;
         }
@@ -354,8 +354,7 @@
     <div class="header">
         <h1>Birdseye</h1>
         <div class="nav">
-            <a href="/recent">Recent</a>
-            <a href="/search">Search</a>
+            <a href="/recent">Recent Files</a>
         </div>
     </div>
 
@@ -375,15 +374,15 @@
                     <button class="tab-close" onclick="removeWorkspace(event, this)" title="Remove workspace">&times;</button>
                 </div>
                 {{end}}
-                {{if .Standalone}}
-                <div class="tab" data-tab="standalone" onclick="selectTab(this)">
-                    <span class="tab-label">Projects</span>
-                    <span class="tab-count">{{len .Standalone}}</span>
+                {{range .Standalone}}
+                <div class="tab" data-tab="sa:{{.Path}}" onclick="selectTab(this)">
+                    <span class="tab-label">{{.Name}}</span>
+                    <button class="tab-close" onclick="closeStandaloneTab(event, this)" title="Close project">&times;</button>
                 </div>
                 {{end}}
             </div>
             <div class="tab tab-add" id="addTab" onclick="toggleAddMenu(event)">
-                +
+                + Add
                 <div class="add-menu" id="addMenu">
                     <button onclick="showAddDialog('workspace')">Workspace</button>
                     <button onclick="showAddDialog('project')">Project</button>
@@ -420,10 +419,9 @@
             </div>
             {{end}}
 
-            {{if .Standalone}}
-            <div class="tab-panel" data-panel="standalone">
+            {{range .Standalone}}
+            <div class="tab-panel" data-panel="sa:{{.Path}}">
                 <div class="projects">
-                    {{range .Standalone}}
                     <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-project-path="{{.Path}}" data-origin="standalone">
                         <div class="project-header">
                             <div class="project-name">
@@ -436,7 +434,6 @@
                                     <div class="project-menu">
                                         <button onclick="copyProjectPath(this, event)">Copy path</button>
                                         <button class="muted" onclick="closeProject(this)">Close</button>
-                                        <button class="danger" onclick="showDeleteDialog(this)">Delete</button>
                                     </div>
                                 </div>
                             </div>
@@ -444,7 +441,6 @@
                         {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
                         {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
                     </div>
-                    {{end}}
                 </div>
             </div>
             {{end}}
@@ -538,6 +534,24 @@
                 body: JSON.stringify({path: path})
             })
             .then(r => { if (!r.ok) throw new Error('Failed to remove workspace'); return refreshProjects(); })
+            .catch(err => alert(err.message));
+        }
+
+        // --- Close standalone project (tab close button) ---
+        function closeStandaloneTab(event, btn) {
+            event.stopPropagation();
+            const tab = btn.closest('.tab');
+            const tabId = tab.dataset.tab;
+            const path = tabId.replace(/^sa:/, '');
+
+            if (!confirm('Close this project? It will be removed from Birdseye but no files will be deleted.')) return;
+
+            fetch('/api/projects', {
+                method: 'DELETE',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path: path})
+            })
+            .then(r => { if (!r.ok) throw new Error('Failed to close project'); return refreshProjects(); })
             .catch(err => alert(err.message));
         }
 
@@ -717,7 +731,7 @@
                 if (addMode === 'workspace') {
                     setActiveTabId('ws:' + path);
                 } else {
-                    setActiveTabId('standalone');
+                    setActiveTabId('sa:' + path);
                 }
                 refreshProjects();
             })
@@ -801,8 +815,7 @@
             let menuItems = `<button onclick="copyProjectPath(this, event)">Copy path</button>`;
             if (isStandalone) {
                 menuItems += `<button class="muted" onclick="closeProject(this)">Close</button>`;
-            }
-            if (p.name !== '(root)') {
+            } else if (p.name !== '(root)') {
                 menuItems += `<button class="danger" onclick="showDeleteDialog(this)">Delete</button>`;
             }
 
@@ -867,11 +880,12 @@
                     </div>`;
                 }
 
-                if (standalone.length) {
-                    const isActive = 'standalone' === activeTabId ? ' active' : '';
-                    tabHtml += `<div class="tab${isActive}" data-tab="standalone" onclick="selectTab(this)">
-                        <span class="tab-label">Projects</span>
-                        <span class="tab-count">${standalone.length}</span>
+                for (const p of standalone) {
+                    const tabId = 'sa:' + p.projectPath;
+                    const isActive = tabId === activeTabId ? ' active' : '';
+                    tabHtml += `<div class="tab${isActive}" data-tab="${escapeHtml(tabId)}" onclick="selectTab(this)">
+                        <span class="tab-label">${escapeHtml(p.name)}</span>
+                        <button class="tab-close" onclick="closeStandaloneTab(event, this)" title="Close project">&times;</button>
                     </div>`;
                 }
 
@@ -888,10 +902,11 @@
                     </div>`;
                 }
 
-                if (standalone.length) {
-                    const isActive = 'standalone' === activeTabId ? ' active' : '';
-                    panelHtml += `<div class="tab-panel${isActive}" data-panel="standalone">
-                        <div class="projects">${standalone.map(p => renderProjectTile(p, true)).join('')}</div>
+                for (const p of standalone) {
+                    const tabId = 'sa:' + p.projectPath;
+                    const isActive = tabId === activeTabId ? ' active' : '';
+                    panelHtml += `<div class="tab-panel${isActive}" data-panel="${escapeHtml(tabId)}">
+                        <div class="projects">${renderProjectTile(p, true)}</div>
                     </div>`;
                 }
 

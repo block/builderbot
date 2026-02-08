@@ -1,451 +1,204 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Birdseye</title>
-    <style>
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            max-width: 1000px;
-            margin: 0 auto;
-            padding: 24px;
-            background: #fafafa;
-            color: #333;
-        }
-        h1 { color: #333; margin: 0 0 8px 0; font-size: 1.5em; font-weight: 600; }
-        a { color: #0066cc; text-decoration: none; }
-        a:hover { text-decoration: underline; }
+{{define "title"}}Birdseye{{end}}
 
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 24px;
-            padding-bottom: 16px;
-            border-bottom: 1px solid #e0e0e0;
-        }
-        .nav a { margin-left: 20px; color: #666; }
-        .nav a:hover { color: #0066cc; }
+{{define "pagestyle"}}
+    .projects {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 16px;
+    }
+    .project {
+        background: #fff;
+        border-radius: 8px;
+        padding: 16px 20px;
+        border: 1px solid #e8e8e8;
+        transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .project:hover {
+        border-color: #ccc;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+    .project.deemphasized { opacity: 0.5; }
+    .project.deemphasized:hover { opacity: 0.75; }
+    .project-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+    }
+    .project-name {
+        font-weight: 600;
+        font-size: 1.05em;
+        margin-bottom: 4px;
+    }
+    .project-dropdown { position: relative; }
+    .dropdown-dots {
+        background: none;
+        border: none;
+        padding: 2px 6px;
+        font-size: 1.2em;
+        color: #999;
+        cursor: pointer;
+        line-height: 1;
+    }
+    .dropdown-dots:hover { color: #333; }
+    .project-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        z-index: 100;
+        min-width: 140px;
+        padding: 4px 0;
+    }
+    .project-dropdown.open .project-menu { display: block; }
+    .project-menu button {
+        display: block;
+        width: 100%;
+        padding: 8px 12px;
+        border: none;
+        background: none;
+        cursor: pointer;
+        font-size: 0.85em;
+        color: #333;
+        text-align: left;
+    }
+    .project-menu button:hover { background: #f5f5f5; }
+    .project-menu button.danger { color: #cf222e; }
+    .project-menu button.danger:hover { background: #fff5f5; }
+    .project-menu button.muted { color: #888; }
 
-        .search-box { margin-bottom: 24px; }
-        .search-box input {
-            width: 100%;
-            padding: 12px 16px;
-            font-size: 1em;
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            color: #333;
-        }
-        .search-box input:focus {
-            outline: none;
-            border-color: #0066cc;
-            box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
-        }
-        .search-box input::placeholder { color: #999; }
+    .project-meta { font-size: 0.8em; color: #888; margin-bottom: 8px; }
+    .project-summary { font-size: 0.9em; color: #666; line-height: 1.5; }
+    .branch { color: #2da44e; }
+    .dirty { color: #cf222e; }
+    .project-age { font-size: 0.8em; color: #999; }
+    .project.deleting { opacity: 0.5; pointer-events: none; }
+    .deleting-badge {
+        font-size: 0.75em;
+        color: #cf222e;
+        font-weight: 500;
+        margin-left: 8px;
+    }
+    .agent-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        background: #2da44e;
+        border-radius: 50%;
+        margin-left: 8px;
+        vertical-align: middle;
+        cursor: default;
+        animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0.4); }
+        70% { box-shadow: 0 0 0 6px rgba(45, 164, 78, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0); }
+    }
+    .review-count {
+        font-size: 0.75em;
+        font-weight: 500;
+        padding: 2px 6px;
+        border-radius: 3px;
+        background: #ddf4ff;
+        color: #0969da;
+        margin-left: 8px;
+        vertical-align: middle;
+    }
+    .rpi-badge {
+        font-size: 0.7em;
+        font-weight: 500;
+        padding: 1px 5px;
+        border-radius: 3px;
+        background: #f0f0f0;
+        color: #888;
+        margin-left: 6px;
+        vertical-align: middle;
+    }
 
-        /* Tab bar */
-        .tab-bar-wrapper {
-            display: flex;
-            align-items: stretch;
-            border-bottom: 1px solid #ddd;
-        }
-        .tab-bar {
-            display: flex;
-            overflow-x: auto;
-            scrollbar-width: none;
-            flex: 1;
-            min-width: 0;
-        }
-        .tab-bar::-webkit-scrollbar { display: none; }
-        .tab {
-            position: relative;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 10px 10px;
-            font-size: 0.9em;
-            color: #888;
-            cursor: pointer;
-            border-bottom: 2px solid transparent;
-            margin-bottom: -1px;
-            white-space: nowrap;
-            user-select: none;
-            transition: color 0.15s;
-        }
-        .tab:hover { color: #555; }
-        .tab.active {
-            color: #333;
-            border-bottom-color: #0066cc;
-        }
-        .tab-count {
-            font-size: 0.8em;
-            color: #aaa;
-            background: #f0f0f0;
-            padding: 1px 6px;
-            border-radius: 10px;
-        }
-        .tab.active .tab-count {
-            background: #e8f0fe;
-            color: #0066cc;
-        }
-        .tab-close {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: none;
-            border: none;
-            font-size: 1.1em;
-            color: transparent;
-            cursor: pointer;
-            padding: 0 2px;
-            line-height: 1;
-            border-radius: 3px;
-        }
-        .tab:hover .tab-close { color: #aaa; }
-        .tab-close:hover {
-            color: #cf222e;
-            background: rgba(207, 34, 46, 0.1);
-        }
+    /* Delete modal */
+    .modal-info {
+        margin: 12px 0;
+        padding: 12px;
+        background: #f6f8fa;
+        border-radius: 6px;
+        font-size: 0.9em;
+        line-height: 1.8;
+    }
+    .modal-info .warning { color: #b45309; }
+    .btn-delete { background: #cf222e; border: 1px solid #cf222e; color: #fff; }
+    .btn-delete:hover { background: #a40e26; }
+    .btn-delete:disabled { opacity: 0.6; cursor: default; }
 
-        /* Ghost add tab */
-        .tab-add {
-            color: #ccc;
-            border-bottom-color: transparent !important;
-            font-size: 1.1em;
-            padding: 10px 14px;
-        }
-        .tab-add:hover { color: #999; }
-        .add-menu {
-            display: none;
-            position: absolute;
-            top: 100%;
-            left: 0;
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            z-index: 100;
-            min-width: 150px;
-            padding: 4px 0;
-        }
-        .tab-add.open .add-menu { display: block; }
-        .add-menu button {
-            display: block;
-            width: 100%;
-            padding: 8px 14px;
-            border: none;
-            background: none;
-            cursor: pointer;
-            font-size: 0.85em;
-            color: #333;
-            text-align: left;
-        }
-        .add-menu button:hover { background: #f5f5f5; }
+    .ws-heading {
+        font-size: 1em;
+        font-weight: 600;
+        color: #555;
+        margin: 24px 0 12px 0;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-size: 0.8em;
+    }
+    .ws-heading:first-child { margin-top: 0; }
+{{end}}
 
-        /* Tab content */
-        .tab-content {
-            padding-top: 20px;
-            min-height: 200px;
-        }
-        .tab-panel { display: none; }
-        .tab-panel.active { display: block; }
-
-        .empty-state {
-            text-align: center;
-            padding: 48px 24px;
-            color: #999;
-        }
-        .empty-state p { margin: 8px 0; font-size: 0.95em; }
-
-        /* Project grid */
-        .projects {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-            gap: 16px;
-        }
-        .project {
-            background: #fff;
-            border-radius: 8px;
-            padding: 16px 20px;
-            border: 1px solid #e8e8e8;
-            transition: border-color 0.15s, box-shadow 0.15s;
-        }
-        .project:hover {
-            border-color: #ccc;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-        }
-        .project.deemphasized { opacity: 0.5; }
-        .project.deemphasized:hover { opacity: 0.75; }
-        .project-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-        }
-        .project-name {
-            font-weight: 600;
-            font-size: 1.05em;
-            margin-bottom: 4px;
-        }
-        .project-dropdown { position: relative; }
-        .dropdown-dots {
-            background: none;
-            border: none;
-            padding: 2px 6px;
-            font-size: 1.2em;
-            color: #999;
-            cursor: pointer;
-            line-height: 1;
-        }
-        .dropdown-dots:hover { color: #333; }
-        .project-menu {
-            display: none;
-            position: absolute;
-            right: 0;
-            top: calc(100% + 4px);
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            z-index: 100;
-            min-width: 140px;
-            padding: 4px 0;
-        }
-        .project-dropdown.open .project-menu { display: block; }
-        .project-menu button {
-            display: block;
-            width: 100%;
-            padding: 8px 12px;
-            border: none;
-            background: none;
-            cursor: pointer;
-            font-size: 0.85em;
-            color: #333;
-            text-align: left;
-        }
-        .project-menu button:hover { background: #f5f5f5; }
-        .project-menu button.danger { color: #cf222e; }
-        .project-menu button.danger:hover { background: #fff5f5; }
-        .project-menu button.muted { color: #888; }
-
-        .project-meta { font-size: 0.8em; color: #888; margin-bottom: 8px; }
-        .project-summary { font-size: 0.9em; color: #666; line-height: 1.5; }
-        .branch { color: #2da44e; }
-        .dirty { color: #cf222e; }
-        .project-age { font-size: 0.8em; color: #999; }
-        .project.deleting { opacity: 0.5; pointer-events: none; }
-        .deleting-badge {
-            font-size: 0.75em;
-            color: #cf222e;
-            font-weight: 500;
-            margin-left: 8px;
-        }
-
-        .agent-dot {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            background: #2da44e;
-            border-radius: 50%;
-            margin-left: 8px;
-            vertical-align: middle;
-            cursor: default;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0.4); }
-            70% { box-shadow: 0 0 0 6px rgba(45, 164, 78, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0); }
-        }
-        .review-count {
-            font-size: 0.75em;
-            font-weight: 500;
-            padding: 2px 6px;
-            border-radius: 3px;
-            background: #ddf4ff;
-            color: #0969da;
-            margin-left: 8px;
-            vertical-align: middle;
-        }
-        .rpi-badge {
-            font-size: 0.7em;
-            font-weight: 500;
-            padding: 1px 5px;
-            border-radius: 3px;
-            background: #f0f0f0;
-            color: #888;
-            margin-left: 6px;
-            vertical-align: middle;
-        }
-
-        /* Modals */
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.5);
-            z-index: 200;
-            justify-content: center;
-            align-items: center;
-        }
-        .modal-overlay.open { display: flex; }
-        .modal {
-            background: #fff;
-            border-radius: 12px;
-            padding: 24px;
-            max-width: 480px;
-            width: 100%;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.2);
-        }
-        .modal h3 { margin: 0 0 12px 0; font-size: 1.1em; }
-        .modal-info {
-            margin: 12px 0;
-            padding: 12px;
-            background: #f6f8fa;
-            border-radius: 6px;
-            font-size: 0.9em;
-            line-height: 1.8;
-        }
-        .modal-info .warning { color: #b45309; }
-        .modal-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 8px;
-            margin-top: 20px;
-        }
-        .modal-actions button {
-            padding: 8px 16px;
-            border-radius: 6px;
-            font-size: 0.9em;
-            cursor: pointer;
-        }
-        .btn-cancel { background: #f5f5f5; border: 1px solid #ddd; color: #333; }
-        .btn-cancel:hover { background: #eee; }
-        .btn-primary { background: #0066cc; border: 1px solid #0066cc; color: #fff; }
-        .btn-primary:hover { background: #0055aa; }
-        .btn-delete { background: #cf222e; border: 1px solid #cf222e; color: #fff; }
-        .btn-delete:hover { background: #a40e26; }
-        .btn-delete:disabled { opacity: 0.6; cursor: default; }
-
-        .modal-input {
-            width: 100%;
-            padding: 10px 12px;
-            font-size: 0.95em;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            margin-top: 4px;
-        }
-        .modal-input:focus {
-            outline: none;
-            border-color: #0066cc;
-            box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
-        }
-        .modal-error {
-            color: #cf222e;
-            font-size: 0.85em;
-            margin-top: 8px;
-            display: none;
-        }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>Birdseye</h1>
-        <div class="nav">
-            <a href="/recent">Recent Files</a>
-        </div>
-    </div>
-
-    <div class="search-box">
-        <form action="/search" method="GET">
-            <input type="search" name="q" placeholder="Search all thoughts...">
-        </form>
-    </div>
-
-    <div id="tab-container">
-        <div class="tab-bar-wrapper">
-            <div class="tab-bar" id="tabBar">
-                {{range .Workspaces}}
-                <div class="tab" data-tab="ws:{{.Path}}" onclick="selectTab(this)">
-                    <span class="tab-label">{{.Name}}</span>
-                    <span class="tab-count">{{len .Projects}}</span>
-                    <button class="tab-close" onclick="removeWorkspace(event, this)" title="Remove workspace">&times;</button>
+{{define "content"}}
+    {{range .Page.Workspaces}}
+    <div class="ws-heading">{{.Name}}</div>
+    <div class="projects">
+        {{range .Projects}}
+        <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-workspace="{{.WorkspaceName}}" data-project-path="{{.Path}}" data-origin="workspace">
+            <div class="project-header">
+                <div class="project-name">
+                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Page.Agents .QualifiedName}}<span class="agent-dot" title="{{index $.Page.Agents .QualifiedName}}"></span>{{end}}
                 </div>
-                {{end}}
-                {{range .Standalone}}
-                <div class="tab" data-tab="sa:{{.Path}}" onclick="selectTab(this)">
-                    <span class="tab-label">{{.Name}}</span>
-                    <button class="tab-close" onclick="closeStandaloneTab(event, this)" title="Close project">&times;</button>
-                </div>
-                {{end}}
-            </div>
-            <div class="tab tab-add" id="addTab" onclick="toggleAddMenu(event)">
-                + Add
-                <div class="add-menu" id="addMenu">
-                    <button onclick="showAddDialog('workspace')">Workspace</button>
-                    <button onclick="showAddDialog('project')">Project</button>
-                </div>
-            </div>
-        </div>
-
-        <div class="tab-content" id="tabContent">
-            {{range .Workspaces}}
-            <div class="tab-panel" data-panel="ws:{{.Path}}">
-                <div class="projects">
-                    {{range .Projects}}
-                    <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-workspace="{{.WorkspaceName}}" data-project-path="{{.Path}}" data-origin="workspace">
-                        <div class="project-header">
-                            <div class="project-name">
-                                <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Agents .QualifiedName}}<span class="agent-dot" title="{{index $.Agents .QualifiedName}}"></span>{{end}}
-                            </div>
-                            <div style="display:flex;gap:8px;align-items:center">
-                                {{if index $.Ages .QualifiedName}}<span class="project-age">{{index $.Ages .QualifiedName}}</span>{{end}}
-                                <div class="project-dropdown">
-                                    <button class="dropdown-dots" onclick="toggleProjectMenu(event)">&#8942;</button>
-                                    <div class="project-menu">
-                                        <button onclick="copyProjectPath(this, event)">Copy path</button>
-                                        {{if ne .Name "(root)"}}<button class="danger" onclick="showDeleteDialog(this)">Delete</button>{{end}}
-                                    </div>
-                                </div>
-                            </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                    {{if index $.Page.Ages .QualifiedName}}<span class="project-age">{{index $.Page.Ages .QualifiedName}}</span>{{end}}
+                    <div class="project-dropdown">
+                        <button class="dropdown-dots" onclick="toggleProjectMenu(event)">&#8942;</button>
+                        <div class="project-menu">
+                            <button onclick="copyProjectPath(this, event)">Copy path</button>
+                            {{if ne .Name "(root)"}}<button class="danger" onclick="showDeleteDialog(this)">Delete</button>{{end}}
                         </div>
-                        {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
-                        {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
-                    </div>
-                    {{end}}
-                </div>
-            </div>
-            {{end}}
-
-            {{range .Standalone}}
-            <div class="tab-panel" data-panel="sa:{{.Path}}">
-                <div class="projects">
-                    <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-project-path="{{.Path}}" data-origin="standalone">
-                        <div class="project-header">
-                            <div class="project-name">
-                                <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Agents .QualifiedName}}<span class="agent-dot" title="{{index $.Agents .QualifiedName}}"></span>{{end}}
-                            </div>
-                            <div style="display:flex;gap:8px;align-items:center">
-                                {{if index $.Ages .QualifiedName}}<span class="project-age">{{index $.Ages .QualifiedName}}</span>{{end}}
-                                <div class="project-dropdown">
-                                    <button class="dropdown-dots" onclick="toggleProjectMenu(event)">&#8942;</button>
-                                    <div class="project-menu">
-                                        <button onclick="copyProjectPath(this, event)">Copy path</button>
-                                        <button class="muted" onclick="closeProject(this)">Close</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
-                        {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
                     </div>
                 </div>
             </div>
-            {{end}}
+            {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
+            {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
         </div>
+        {{end}}
     </div>
+    {{end}}
+
+    {{if .Page.Standalone}}
+    <div class="ws-heading">Standalone</div>
+    <div class="projects">
+        {{range .Page.Standalone}}
+        <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-project-path="{{.Path}}" data-origin="standalone">
+            <div class="project-header">
+                <div class="project-name">
+                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Page.Agents .QualifiedName}}<span class="agent-dot" title="{{index $.Page.Agents .QualifiedName}}"></span>{{end}}
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                    {{if index $.Page.Ages .QualifiedName}}<span class="project-age">{{index $.Page.Ages .QualifiedName}}</span>{{end}}
+                    <div class="project-dropdown">
+                        <button class="dropdown-dots" onclick="toggleProjectMenu(event)">&#8942;</button>
+                        <div class="project-menu">
+                            <button onclick="copyProjectPath(this, event)">Copy path</button>
+                            <button class="muted" onclick="closeProject(this)">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
+            {{if .Summary}}<div class="project-summary">{{.Summary}}</div>{{end}}
+        </div>
+        {{end}}
+    </div>
+    {{end}}
 
     <!-- Delete project modal -->
     <div class="modal-overlay" id="deleteModal">
@@ -459,480 +212,245 @@
             </div>
         </div>
     </div>
+{{end}}
 
-    <!-- Add workspace/project modal -->
-    <div class="modal-overlay" id="addModal">
-        <div class="modal">
-            <h3 id="addModalTitle"></h3>
-            <p style="color:#666;font-size:0.9em;margin:0 0 12px 0" id="addModalDesc"></p>
-            <input type="text" class="modal-input" id="addPathInput" placeholder="/path/to/directory">
-            <div class="modal-error" id="addModalError"></div>
-            <div class="modal-actions">
-                <button class="btn-cancel" onclick="closeAddDialog()">Cancel</button>
-                <button class="btn-primary" id="addConfirmBtn" onclick="confirmAdd()">Add</button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        // --- Tab management ---
-        function getActiveTabId() {
-            return localStorage.getItem('birdseye-active-tab') || '';
-        }
-
-        function setActiveTabId(id) {
-            localStorage.setItem('birdseye-active-tab', id);
-        }
-
-        function selectTab(tabEl) {
-            if (event && event.target.closest('.tab-close')) return;
-
-            document.querySelectorAll('.tab-bar .tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-
-            tabEl.classList.add('active');
-            const tabId = tabEl.dataset.tab;
-            setActiveTabId(tabId);
-
-            const panel = document.querySelector(`.tab-panel[data-panel="${CSS.escape(tabId)}"]`);
-            if (panel) panel.classList.add('active');
-        }
-
-        function activateDefaultTab() {
-            const savedId = getActiveTabId();
-            const tabs = document.querySelectorAll('.tab-bar .tab:not(.tab-add)');
-
-            if (savedId) {
-                const saved = document.querySelector(`.tab-bar .tab[data-tab="${CSS.escape(savedId)}"]`);
-                if (saved) { selectTab(saved); return; }
-            }
-
-            if (tabs.length > 0) selectTab(tabs[0]);
-        }
-
-        activateDefaultTab();
-
-        // --- Add menu ---
-        function toggleAddMenu(event) {
-            event.stopPropagation();
-            if (event.target.closest('.add-menu')) return;
-            document.getElementById('addTab').classList.toggle('open');
-        }
-
-        // --- Remove workspace (tab close button) ---
-        function removeWorkspace(event, btn) {
-            event.stopPropagation();
-            const tab = btn.closest('.tab');
-            const tabId = tab.dataset.tab;
-            const path = tabId.replace(/^ws:/, '');
-
-            if (!confirm('Remove this workspace from Birdseye? No files will be deleted.')) return;
-
-            fetch('/api/workspaces', {
-                method: 'DELETE',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({path: path})
-            })
-            .then(r => { if (!r.ok) throw new Error('Failed to remove workspace'); return refreshProjects(); })
-            .catch(err => alert(err.message));
-        }
-
-        // --- Close standalone project (tab close button) ---
-        function closeStandaloneTab(event, btn) {
-            event.stopPropagation();
-            const tab = btn.closest('.tab');
-            const tabId = tab.dataset.tab;
-            const path = tabId.replace(/^sa:/, '');
-
-            if (!confirm('Close this project? It will be removed from Birdseye but no files will be deleted.')) return;
-
-            fetch('/api/projects', {
-                method: 'DELETE',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({path: path})
-            })
-            .then(r => { if (!r.ok) throw new Error('Failed to close project'); return refreshProjects(); })
-            .catch(err => alert(err.message));
-        }
-
-        // --- Close outside menus ---
-        document.addEventListener('click', () => {
-            document.querySelectorAll('.project-dropdown.open').forEach(d => d.classList.remove('open'));
-            document.getElementById('addTab').classList.remove('open');
+{{define "pagescript"}}
+    // --- Project dropdown menu ---
+    function toggleProjectMenu(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var dd = event.target.closest('.project-dropdown');
+        document.querySelectorAll('.project-dropdown.open').forEach(function(d) {
+            if (d !== dd) d.classList.remove('open');
         });
+        dd.classList.toggle('open');
+    }
 
-        // --- Project dropdown menu ---
-        function toggleProjectMenu(event) {
-            event.preventDefault();
-            event.stopPropagation();
-            const dd = event.target.closest('.project-dropdown');
-            document.querySelectorAll('.project-dropdown.open').forEach(d => {
-                if (d !== dd) d.classList.remove('open');
-            });
-            dd.classList.toggle('open');
-        }
+    document.addEventListener('click', function() {
+        document.querySelectorAll('.project-dropdown.open').forEach(function(d) { d.classList.remove('open'); });
+    });
 
-        function copyProjectPath(btn, event) {
-            event.preventDefault();
-            event.stopPropagation();
-            const el = btn.closest('[data-name]');
-            navigator.clipboard.writeText(el.dataset.projectPath);
-            const dd = btn.closest('.project-dropdown');
-            dd.classList.remove('open');
-            const toggle = dd.querySelector('.dropdown-dots');
-            toggle.style.color = '#1a7f37';
-            setTimeout(() => { toggle.style.color = ''; }, 1500);
-        }
+    function copyProjectPath(btn, event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var el = btn.closest('[data-name]');
+        navigator.clipboard.writeText(el.dataset.projectPath);
+        var dd = btn.closest('.project-dropdown');
+        dd.classList.remove('open');
+        var toggle = dd.querySelector('.dropdown-dots');
+        toggle.style.color = '#1a7f37';
+        setTimeout(function() { toggle.style.color = ''; }, 1500);
+    }
 
-        // --- Delete project flow ---
-        let deleteTarget = '';
+    // --- Delete project flow ---
+    var deleteTarget = '';
 
-        function showDeleteDialog(btn) {
-            const el = btn.closest('[data-name]');
-            deleteTarget = el.dataset.name;
-            btn.closest('.project-dropdown').classList.remove('open');
+    function showDeleteDialog(btn) {
+        var el = btn.closest('[data-name]');
+        deleteTarget = el.dataset.name;
+        btn.closest('.project-dropdown').classList.remove('open');
 
-            const displayName = deleteTarget.includes('/') ? deleteTarget.split('/').pop() : deleteTarget;
-            document.getElementById('deleteProjectName').textContent = displayName;
-            document.getElementById('deleteInfo').style.display = 'none';
-            document.getElementById('deleteInfo').innerHTML = '';
-            document.getElementById('confirmDeleteBtn').disabled = true;
-            document.getElementById('confirmDeleteBtn').textContent = 'Delete';
-            document.getElementById('deleteModal').classList.add('open');
+        var displayName = deleteTarget.includes('/') ? deleteTarget.split('/').pop() : deleteTarget;
+        document.getElementById('deleteProjectName').textContent = displayName;
+        document.getElementById('deleteInfo').style.display = 'none';
+        document.getElementById('deleteInfo').innerHTML = '';
+        document.getElementById('confirmDeleteBtn').disabled = true;
+        document.getElementById('confirmDeleteBtn').textContent = 'Delete';
+        document.getElementById('deleteModal').classList.add('open');
 
-            fetch(`/api/project-info?name=${encodeURIComponent(deleteTarget)}`)
-                .then(r => {
-                    if (!r.ok) throw new Error('Failed to load project info');
-                    return r.json();
-                })
-                .then(info => {
-                    const lines = [];
-                    lines.push(`${info.fileCount} thoughts file${info.fileCount !== 1 ? 's' : ''}`);
-                    if (info.dirty) {
-                        lines.push('<span class="warning">\u26A0 Has unstaged changes</span>');
-                    }
-                    if (info.unpushedCommits > 0) {
-                        lines.push(`<span class="warning">\u26A0 ${info.unpushedCommits} unpushed commit${info.unpushedCommits !== 1 ? 's' : ''}</span>`);
-                    }
-                    const infoEl = document.getElementById('deleteInfo');
-                    infoEl.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
-                    infoEl.style.display = 'block';
-                    document.getElementById('confirmDeleteBtn').disabled = false;
-                })
-                .catch(() => {
-                    document.getElementById('confirmDeleteBtn').disabled = false;
-                });
-        }
-
-        const deletingProjects = new Set();
-
-        function confirmDelete() {
-            const name = deleteTarget;
-            closeDeleteDialog();
-            markProjectDeleting(name);
-
-            fetch(`/api/delete-project?name=${encodeURIComponent(name)}`, { method: 'POST' })
-                .then(async r => {
-                    if (!r.ok) throw new Error(await r.text());
-                    refreshProjects();
-                })
-                .catch(err => {
-                    deletingProjects.delete(name);
-                    unmarkProjectDeleting(name);
-                    alert('Failed to delete project: ' + err.message);
-                });
-        }
-
-        function markProjectDeleting(name) {
-            deletingProjects.add(name);
-            const tile = findProjectTile(name);
-            if (!tile) return;
-            tile.classList.add('deleting');
-            const nameEl = tile.querySelector('.project-name');
-            if (nameEl && !nameEl.querySelector('.deleting-badge')) {
-                nameEl.insertAdjacentHTML('beforeend', '<span class="deleting-badge">Deleting\u2026</span>');
-            }
-        }
-
-        function unmarkProjectDeleting(name) {
-            const tile = findProjectTile(name);
-            if (!tile) return;
-            tile.classList.remove('deleting');
-            const badge = tile.querySelector('.deleting-badge');
-            if (badge) badge.remove();
-        }
-
-        function findProjectTile(name) {
-            return document.querySelector(`.project[data-name="${CSS.escape(name)}"]`);
-        }
-
-        function closeDeleteDialog() {
-            document.getElementById('deleteModal').classList.remove('open');
-            deleteTarget = '';
-        }
-
-        // --- Close standalone project ---
-        function closeProject(btn) {
-            const el = btn.closest('[data-name]');
-            const path = el.dataset.projectPath;
-            btn.closest('.project-dropdown').classList.remove('open');
-
-            if (!confirm('Close this project? It will be removed from Birdseye but no files will be deleted.')) return;
-
-            fetch('/api/projects', {
-                method: 'DELETE',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({path: path})
+        fetch('/api/project-info?name=' + encodeURIComponent(deleteTarget))
+            .then(function(r) {
+                if (!r.ok) throw new Error('Failed to load project info');
+                return r.json();
             })
-            .then(r => { if (!r.ok) throw new Error('Failed to close project'); return refreshProjects(); })
-            .catch(err => alert(err.message));
-        }
-
-        // --- Add workspace/project dialog ---
-        let addMode = '';
-
-        function showAddDialog(mode) {
-            addMode = mode;
-            document.getElementById('addTab').classList.remove('open');
-            document.getElementById('addModalTitle').textContent = mode === 'workspace' ? 'Add Workspace' : 'Add Project';
-            document.getElementById('addModalDesc').textContent = mode === 'workspace'
-                ? 'Enter a directory path. All subdirectories will appear as projects.'
-                : 'Enter a project directory path.';
-            document.getElementById('addPathInput').value = '';
-            document.getElementById('addModalError').style.display = 'none';
-            document.getElementById('addConfirmBtn').disabled = false;
-            document.getElementById('addConfirmBtn').textContent = 'Add';
-            document.getElementById('addModal').classList.add('open');
-            setTimeout(() => document.getElementById('addPathInput').focus(), 100);
-        }
-
-        function closeAddDialog() {
-            document.getElementById('addModal').classList.remove('open');
-            addMode = '';
-        }
-
-        function confirmAdd() {
-            const path = document.getElementById('addPathInput').value.trim();
-            if (!path) { showAddError('Please enter a path.'); return; }
-
-            const btn = document.getElementById('addConfirmBtn');
-            btn.disabled = true;
-            btn.textContent = 'Adding...';
-
-            const url = addMode === 'workspace' ? '/api/workspaces' : '/api/projects';
-            fetch(url, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({path: path})
-            })
-            .then(async r => {
-                if (!r.ok) throw new Error(await r.text());
-                closeAddDialog();
-                if (addMode === 'workspace') {
-                    setActiveTabId('ws:' + path);
-                } else {
-                    setActiveTabId('sa:' + path);
+            .then(function(info) {
+                var lines = [];
+                lines.push(info.fileCount + ' thoughts file' + (info.fileCount !== 1 ? 's' : ''));
+                if (info.dirty) {
+                    lines.push('<span class="warning">\u26A0 Has unstaged changes</span>');
                 }
+                if (info.unpushedCommits > 0) {
+                    lines.push('<span class="warning">\u26A0 ' + info.unpushedCommits + ' unpushed commit' + (info.unpushedCommits !== 1 ? 's' : '') + '</span>');
+                }
+                var infoEl = document.getElementById('deleteInfo');
+                infoEl.innerHTML = lines.map(function(l) { return '<div>' + l + '</div>'; }).join('');
+                infoEl.style.display = 'block';
+                document.getElementById('confirmDeleteBtn').disabled = false;
+            })
+            .catch(function() {
+                document.getElementById('confirmDeleteBtn').disabled = false;
+            });
+    }
+
+    var deletingProjects = new Set();
+
+    function confirmDelete() {
+        var name = deleteTarget;
+        closeDeleteDialog();
+        markProjectDeleting(name);
+
+        fetch('/api/delete-project?name=' + encodeURIComponent(name), { method: 'POST' })
+            .then(function(r) {
+                if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
                 refreshProjects();
             })
-            .catch(err => {
-                showAddError(err.message);
-                btn.disabled = false;
-                btn.textContent = 'Add';
+            .catch(function(err) {
+                deletingProjects.delete(name);
+                unmarkProjectDeleting(name);
+                alert('Failed to delete project: ' + err.message);
             });
+    }
+
+    function markProjectDeleting(name) {
+        deletingProjects.add(name);
+        var tile = findProjectTile(name);
+        if (!tile) return;
+        tile.classList.add('deleting');
+        var nameEl = tile.querySelector('.project-name');
+        if (nameEl && !nameEl.querySelector('.deleting-badge')) {
+            nameEl.insertAdjacentHTML('beforeend', '<span class="deleting-badge">Deleting\u2026</span>');
+        }
+    }
+
+    function unmarkProjectDeleting(name) {
+        var tile = findProjectTile(name);
+        if (!tile) return;
+        tile.classList.remove('deleting');
+        var badge = tile.querySelector('.deleting-badge');
+        if (badge) badge.remove();
+    }
+
+    function findProjectTile(name) {
+        return document.querySelector('.project[data-name="' + CSS.escape(name) + '"]');
+    }
+
+    function closeDeleteDialog() {
+        document.getElementById('deleteModal').classList.remove('open');
+        deleteTarget = '';
+    }
+
+    // --- Close standalone project ---
+    function closeProject(btn) {
+        var el = btn.closest('[data-name]');
+        var path = el.dataset.projectPath;
+        btn.closest('.project-dropdown').classList.remove('open');
+
+        if (!confirm('Close this project? It will be removed from Birdseye but no files will be deleted.')) return;
+
+        fetch('/api/projects', {
+            method: 'DELETE',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({path: path})
+        })
+        .then(function(r) { if (!r.ok) throw new Error('Failed to close project'); return refreshProjects(); })
+        .catch(function(err) { alert(err.message); });
+    }
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closeDeleteDialog();
+    });
+
+    // --- SSE + refresh ---
+    onSSE(function(data) {
+        if (data.type === 'projects' || data.type === 'files' || data.type === 'comments') {
+            debouncedRefresh('projects', refreshProjects);
+        }
+    });
+
+    function renderProjectTile(p, isStandalone) {
+        var deemph = p.fileCount === 0 ? ' deemphasized' : '';
+        var agentDot = p.agentCount ? '<span class="agent-dot" title="' + (p.agentCount === 1 ? escapeHtml(p.agentPrompts[0] || 'Agent active') : p.agentCount + ' agents active') + '"></span>' : '';
+        var reviewBadge = p.reviewCount ? '<span class="review-count">' + p.reviewCount + ' in review</span>' : '';
+        var rpiBadge = p.hasRPI ? '<span class="rpi-badge">RPI</span>' : '';
+        var age = p.age ? '<span class="project-age">' + p.age + '</span>' : '';
+        var branch = p.branch ? '<div class="project-meta"><span class="branch">' + escapeHtml(p.branch) + (p.dirty ? '<span class="dirty">*</span>' : '') + '</span></div>' : '';
+        var summary = p.summary ? '<div class="project-summary">' + escapeHtml(p.summary) + '</div>' : '';
+
+        var menuItems = '<button onclick="copyProjectPath(this, event)">Copy path</button>';
+        if (isStandalone) {
+            menuItems += '<button class="muted" onclick="closeProject(this)">Close</button>';
+        } else if (p.name !== '(root)') {
+            menuItems += '<button class="danger" onclick="showDeleteDialog(this)">Delete</button>';
         }
 
-        function showAddError(msg) {
-            const el = document.getElementById('addModalError');
-            el.textContent = msg;
-            el.style.display = 'block';
-        }
+        return '<div class="project' + deemph + '" data-name="' + escapeHtml(p.qualifiedName) + '" data-workspace="' + escapeHtml(p.workspace || '') + '" data-project-path="' + escapeHtml(p.projectPath) + '" data-origin="' + p.origin + '">' +
+            '<div class="project-header">' +
+                '<div class="project-name"><a href="/project/' + encodeURI(p.qualifiedName) + '">' + escapeHtml(p.name) + '</a>' + rpiBadge + agentDot + reviewBadge + '</div>' +
+                '<div style="display:flex;gap:8px;align-items:center">' +
+                    age +
+                    '<div class="project-dropdown">' +
+                        '<button class="dropdown-dots" onclick="toggleProjectMenu(event)">&#8942;</button>' +
+                        '<div class="project-menu">' + menuItems + '</div>' +
+                    '</div>' +
+                '</div>' +
+            '</div>' +
+            branch +
+            summary +
+        '</div>';
+    }
 
-        document.getElementById('addPathInput').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') { e.preventDefault(); confirmAdd(); }
-        });
+    async function refreshProjects() {
+        try {
+            var response = await fetch('/api/projects');
+            var projects = await response.json();
 
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') {
-                closeDeleteDialog();
-                closeAddDialog();
+            var workspaces = {};
+            var wsOrder = [];
+            var standalone = [];
+
+            for (var p of projects) {
+                if (p.origin === 'standalone') {
+                    standalone.push(p);
+                    continue;
+                }
+                var wsKey = p.workspacePath || '';
+                if (!workspaces[wsKey]) {
+                    workspaces[wsKey] = { name: p.workspace, path: p.workspacePath, projects: [] };
+                    wsOrder.push(wsKey);
+                }
+                workspaces[wsKey].projects.push(p);
             }
-        });
 
-        // --- SSE + refresh ---
-        const _pending = {};
-        const _timers = {};
-        function debouncedRefresh(key, fn, delay) {
-            delay = delay || 200;
-            clearTimeout(_timers[key]);
-            _timers[key] = setTimeout(function() {
-                if (_pending[key]) return;
-                _pending[key] = true;
-                Promise.resolve(fn()).finally(function() { _pending[key] = false; });
-            }, delay);
-        }
-
-        let events = null;
-        function connectSSE() {
-            if (events) events.close();
-            events = new EventSource('/events');
-            events.addEventListener('change', function(e) {
-                const data = JSON.parse(e.data);
-                if (data.type === 'projects' || data.type === 'files' || data.type === 'comments') {
-                    debouncedRefresh('projects', refreshProjects);
-                }
-            });
-            events.addEventListener('error', function() {
-                console.log('SSE connection lost, will reconnect...');
-            });
-        }
-        connectSSE();
-        window.addEventListener('beforeunload', function() { if (events) events.close(); });
-        // Free SSE connection when tab is hidden to avoid exhausting
-        // the browser's 6-connection-per-origin HTTP/1.1 limit.
-        document.addEventListener('visibilitychange', function() {
-            if (document.hidden) {
-                if (events) { events.close(); events = null; }
-            } else {
-                connectSSE();
-                debouncedRefresh('projects', refreshProjects);
-            }
-        });
-
-        function escapeHtml(s) {
-            return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        }
-
-        function renderProjectTile(p, isStandalone) {
-            const deemph = p.fileCount === 0 ? ' deemphasized' : '';
-            const agentDot = p.agentCount ? `<span class="agent-dot" title="${p.agentCount === 1 ? escapeHtml(p.agentPrompts[0] || 'Agent active') : p.agentCount + ' agents active'}"></span>` : '';
-            const reviewBadge = p.reviewCount ? `<span class="review-count">${p.reviewCount} in review</span>` : '';
-            const rpiBadge = p.hasRPI ? '<span class="rpi-badge">RPI</span>' : '';
-            const age = p.age ? `<span class="project-age">${p.age}</span>` : '';
-            const branch = p.branch ? `<div class="project-meta"><span class="branch">${escapeHtml(p.branch)}${p.dirty ? '<span class="dirty">*</span>' : ''}</span></div>` : '';
-            const summary = p.summary ? `<div class="project-summary">${escapeHtml(p.summary)}</div>` : '';
-
-            let menuItems = `<button onclick="copyProjectPath(this, event)">Copy path</button>`;
-            if (isStandalone) {
-                menuItems += `<button class="muted" onclick="closeProject(this)">Close</button>`;
-            } else if (p.name !== '(root)') {
-                menuItems += `<button class="danger" onclick="showDeleteDialog(this)">Delete</button>`;
-            }
-
-            return `<div class="project${deemph}" data-name="${escapeHtml(p.qualifiedName)}" data-workspace="${escapeHtml(p.workspace || '')}" data-project-path="${escapeHtml(p.projectPath)}" data-origin="${p.origin}">
-                <div class="project-header">
-                    <div class="project-name"><a href="/project/${encodeURI(p.qualifiedName)}">${escapeHtml(p.name)}</a>${rpiBadge}${agentDot}${reviewBadge}</div>
-                    <div style="display:flex;gap:8px;align-items:center">
-                        ${age}
-                        <div class="project-dropdown">
-                            <button class="dropdown-dots" onclick="toggleProjectMenu(event)">&#8942;</button>
-                            <div class="project-menu">${menuItems}</div>
-                        </div>
-                    </div>
-                </div>
-                ${branch}
-                ${summary}
-            </div>`;
-        }
-
-        async function refreshProjects() {
-            try {
-                const response = await fetch('/api/projects');
-                const projects = await response.json();
-
-                const workspaces = {};
-                const wsOrder = [];
-                const standalone = [];
-
-                for (const p of projects) {
-                    if (p.origin === 'standalone') {
-                        standalone.push(p);
-                        continue;
-                    }
-                    const wsKey = p.workspacePath || '';
-                    if (!workspaces[wsKey]) {
-                        workspaces[wsKey] = { name: p.workspace, path: p.workspacePath, projects: [] };
-                        wsOrder.push(wsKey);
-                    }
-                    workspaces[wsKey].projects.push(p);
-                }
-
-                for (const key of wsOrder) {
-                    workspaces[key].projects.sort((a, b) => {
-                        if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
-                        if (a.fileCount === 0 && b.fileCount === 0) return a.name.localeCompare(b.name);
-                        return 0;
-                    });
-                }
-
-                const activeTabId = getActiveTabId();
-
-                // Build tab bar
-                let tabHtml = '';
-                for (const key of wsOrder) {
-                    const ws = workspaces[key];
-                    const tabId = 'ws:' + ws.path;
-                    const isActive = tabId === activeTabId ? ' active' : '';
-                    tabHtml += `<div class="tab${isActive}" data-tab="${escapeHtml(tabId)}" onclick="selectTab(this)">
-                        <span class="tab-label">${escapeHtml(ws.name)}</span>
-                        <span class="tab-count">${ws.projects.length}</span>
-                        <button class="tab-close" onclick="removeWorkspace(event, this)" title="Remove workspace">&times;</button>
-                    </div>`;
-                }
-
-                for (const p of standalone) {
-                    const tabId = 'sa:' + p.projectPath;
-                    const isActive = tabId === activeTabId ? ' active' : '';
-                    tabHtml += `<div class="tab${isActive}" data-tab="${escapeHtml(tabId)}" onclick="selectTab(this)">
-                        <span class="tab-label">${escapeHtml(p.name)}</span>
-                        <button class="tab-close" onclick="closeStandaloneTab(event, this)" title="Close project">&times;</button>
-                    </div>`;
-                }
-
-                // "+" tab is static outside #tabBar, no need to regenerate
-
-                // Build tab panels
-                let panelHtml = '';
-                for (const key of wsOrder) {
-                    const ws = workspaces[key];
-                    const tabId = 'ws:' + ws.path;
-                    const isActive = tabId === activeTabId ? ' active' : '';
-                    panelHtml += `<div class="tab-panel${isActive}" data-panel="${escapeHtml(tabId)}">
-                        <div class="projects">${ws.projects.map(p => renderProjectTile(p, false)).join('')}</div>
-                    </div>`;
-                }
-
-                for (const p of standalone) {
-                    const tabId = 'sa:' + p.projectPath;
-                    const isActive = tabId === activeTabId ? ' active' : '';
-                    panelHtml += `<div class="tab-panel${isActive}" data-panel="${escapeHtml(tabId)}">
-                        <div class="projects">${renderProjectTile(p, true)}</div>
-                    </div>`;
-                }
-
-                document.getElementById('tabBar').innerHTML = tabHtml;
-                document.getElementById('tabContent').innerHTML = panelHtml;
-
-                // If no tab is active, activate first
-                if (!document.querySelector('.tab.active:not(.tab-add)')) {
-                    const first = document.querySelector('.tab:not(.tab-add)');
-                    if (first) selectTab(first);
-                }
-
-                // Re-apply deleting state
-                deletingProjects.forEach(name => {
-                    if (!findProjectTile(name)) {
-                        deletingProjects.delete(name);
-                    } else {
-                        markProjectDeleting(name);
-                    }
+            for (var key of wsOrder) {
+                workspaces[key].projects.sort(function(a, b) {
+                    if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
+                    if (a.fileCount === 0 && b.fileCount === 0) return a.name.localeCompare(b.name);
+                    return 0;
                 });
-            } catch (err) {
-                console.error('Failed to refresh projects:', err);
             }
-        }
 
-        setInterval(function() { debouncedRefresh('projects', refreshProjects); }, 30000);
-    </script>
-</body>
-</html>
+            var html = '';
+            for (var key of wsOrder) {
+                var ws = workspaces[key];
+                html += '<div class="ws-heading">' + escapeHtml(ws.name) + '</div>';
+                html += '<div class="projects">' + ws.projects.map(function(p) { return renderProjectTile(p, false); }).join('') + '</div>';
+            }
+
+            if (standalone.length > 0) {
+                html += '<div class="ws-heading">Standalone</div>';
+                html += '<div class="projects">' + standalone.map(function(p) { return renderProjectTile(p, true); }).join('') + '</div>';
+            }
+
+            var mainContent = document.querySelector('.main-content');
+            // Preserve the delete modal
+            var deleteModal = document.getElementById('deleteModal');
+            mainContent.innerHTML = html;
+            if (deleteModal) mainContent.appendChild(deleteModal);
+
+            // Re-apply deleting state
+            deletingProjects.forEach(function(name) {
+                if (!findProjectTile(name)) {
+                    deletingProjects.delete(name);
+                } else {
+                    markProjectDeleting(name);
+                }
+            });
+        } catch (err) {
+            console.error('Failed to refresh projects:', err);
+        }
+    }
+
+    setInterval(function() { debouncedRefresh('projects', refreshProjects); }, 30000);
+{{end}}
+
+{{template "layout" .}}

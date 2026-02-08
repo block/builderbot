@@ -31,6 +31,7 @@ type Server struct {
 	mcpHandler  http.Handler
 	mux         *http.ServeMux
 	tmpl        *template.Template
+	layoutTmpl  *template.Template // base layout for sidebar pages
 	loadOnce    sync.Once
 	templateDir string // if set, reload templates from disk on each request
 	cfg         *config.Config
@@ -52,6 +53,8 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 
 	// Parse templates from embedded filesystem
 	s.tmpl = template.Must(template.ParseFS(templates.FS, "*.html"))
+	// Parse layout template separately for clone-per-page rendering
+	s.layoutTmpl = template.Must(template.New("").ParseFS(templates.FS, "_layout.html"))
 
 	s.routes()
 	return s
@@ -67,6 +70,27 @@ func (s *Server) getTemplate() *template.Template {
 		return t
 	}
 	return s.tmpl
+}
+
+// getPageTemplate returns a template set with the layout + a specific page template.
+// Each page gets its own clone so block definitions (title, content, etc.) don't conflict.
+func (s *Server) getPageTemplate(pageName string) *template.Template {
+	if s.templateDir != "" {
+		layoutPath := filepath.Join(s.templateDir, "_layout.html")
+		pagePath := filepath.Join(s.templateDir, pageName)
+		t, err := template.ParseFiles(layoutPath, pagePath)
+		if err != nil {
+			log.Printf("Error loading page template %s: %v", pageName, err)
+			return s.tmpl
+		}
+		return t
+	}
+	t, err := template.Must(s.layoutTmpl.Clone()).ParseFS(templates.FS, pageName)
+	if err != nil {
+		log.Printf("Error cloning page template %s: %v", pageName, err)
+		return s.tmpl
+	}
+	return t
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -275,9 +299,12 @@ type PageData struct {
 }
 
 // renderPage wraps page-specific data with NavData and executes the layout.
+// It clones the layout template and parses the page template into the clone,
+// so each page's block definitions (title, content, etc.) don't conflict.
 func (s *Server) renderPage(w http.ResponseWriter, tmplName string, nav NavData, pageData interface{}) {
 	data := PageData{Nav: nav, Page: pageData}
-	if err := s.getTemplate().ExecuteTemplate(w, tmplName, data); err != nil {
+	t := s.getPageTemplate(tmplName)
+	if err := t.ExecuteTemplate(w, tmplName, data); err != nil {
 		log.Printf("Template error (%s): %v", tmplName, err)
 	}
 }
@@ -366,7 +393,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		workspaces = append(workspaces, *wsMap[name])
 	}
 
-	data := struct {
+	nav := s.buildNav("")
+	pageData := struct {
 		Workspaces []WorkspaceGroup
 		Standalone []discovery.Project
 		Agents     map[string]string
@@ -377,7 +405,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Agents:     agentMap,
 		Ages:       ages,
 	}
-	s.getTemplate().ExecuteTemplate(w, "index.html", data)
+	s.renderPage(w, "index.html", nav, pageData)
 }
 
 func formatAge(t time.Time) string {

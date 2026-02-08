@@ -103,12 +103,23 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	threadsJSON, _ := json.Marshal(threads)
 	anchorLinesJSON, _ := json.Marshal(anchorLines)
 
+	// Determine source type for this file (needed for menu options)
+	sourceType := ""
+	cachedFiles := s.cache.ProjectFiles(project.QualifiedName())
+	for _, cf := range cachedFiles {
+		if cf.FullPath == filePath {
+			sourceType = cf.SourceType
+			break
+		}
+	}
+
 	data := struct {
 		Project     *discovery.Project
 		FilePath    string
 		FileName    string
 		ParentPath  string
 		FileType    string
+		SourceType  string
 		Content     template.HTML
 		Headings    []Heading
 		Raw         string
@@ -120,6 +131,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		FileName:    filepath.Base(filePath),
 		ParentPath:  parentPath,
 		FileType:    classifyFile(filePath),
+		SourceType:  sourceType,
 		Content:     template.HTML(htmlContent),
 		Headings:    headings,
 		Raw:         string(content),

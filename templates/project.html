@@ -190,6 +190,7 @@
                             <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
                         </div>
                         <div class="file-right">
+                            <span class="file-age">{{.Age}}</span>
                             <div class="file-menu-wrap">
                                 <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
                                 <div class="file-menu">
@@ -202,7 +203,6 @@
                                     <button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>
                                 </div>
                             </div>
-                            <span class="file-age">{{.Age}}</span>
                         </div>
                     </li>
                     {{end}}{{end}}
@@ -219,6 +219,7 @@
                     <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
                 </div>
                 <div class="file-right">
+                    <span class="file-age">{{.Age}}</span>
                     <div class="file-menu-wrap">
                         <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
                         <div class="file-menu">
@@ -231,7 +232,6 @@
                             <button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>
                         </div>
                     </div>
-                    <span class="file-age">{{.Age}}</span>
                 </div>
             </li>
             {{end}}
@@ -449,6 +449,7 @@
                 '<span class="file-name"><a href="/file/' + encodeURI(qualifiedName) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>' +
             '</div>' +
             '<div class="file-right">' +
+                '<span class="file-age">' + escapeHtml(f.age) + '</span>' +
                 '<div class="file-menu-wrap">' +
                     '<button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>' +
                     '<div class="file-menu">' +
@@ -460,7 +461,6 @@
                         '<button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>' +
                     '</div>' +
                 '</div>' +
-                '<span class="file-age">' + escapeHtml(f.age) + '</span>' +
             '</div>' +
         '</li>';
     }

@@ -55,9 +55,51 @@
         white-space: nowrap;
     }
 
-    /* File page copy dropdown overrides */
-    .copy-dropdown { flex-shrink: 0; }
-    .file-toolbar .dropdown-toggle { padding: 5px 10px; font-size: 0.8em; white-space: nowrap; }
+    /* File page three-dot menu */
+    .file-menu-wrap { position: relative; flex-shrink: 0; }
+    .file-dots {
+        background: none;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-size: 0.85em;
+        color: #999;
+        cursor: pointer;
+        line-height: 1;
+    }
+    .file-dots:hover { color: #333; border-color: #ccc; }
+    .file-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        z-index: 100;
+        min-width: 200px;
+        padding: 4px 0;
+    }
+    .file-menu-wrap.menu-open .file-menu { display: block; }
+    .file-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 12px;
+        border: none;
+        background: none;
+        font-size: 0.85em;
+        color: #333;
+        cursor: pointer;
+    }
+    .file-menu button:hover { background: #f5f5f5; }
+    .file-menu .menu-divider {
+        border-top: 1px solid #eee;
+        margin: 4px 0;
+    }
+    .file-menu .menu-danger { color: #cf222e; }
+    .file-menu .menu-danger:hover { background: #fff5f5; }
 
     .content {
         position: relative;
@@ -391,13 +433,17 @@
         <div class="file-toolbar">
             {{if ne .Page.FileType "other"}}<span class="file-type {{.Page.FileType}}">{{.Page.FileType}}</span>{{end}}
             <span class="toolbar-filename">{{.Page.FileName}}</span>
-            <div class="copy-dropdown">
-                <button class="dropdown-toggle" onclick="toggleDropdown(event)">Copy &#9662;</button>
-                <div class="dropdown-menu">
-                    <button onclick="copyText(this, rawMarkdown)">Markdown</button>
-                    <button onclick="copyFileToClipboard(this)">File</button>
-                    <button onclick="copyText(this, '@{{.Page.FilePath}}')">Relative path</button>
-                    <button onclick="copyText(this, '{{.Page.Project.Path}}/{{.Page.FilePath}}')">Absolute path</button>
+            <div class="file-menu-wrap">
+                <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
+                <div class="file-menu">
+                    <button onclick="copyMarkdown(this)">Copy markdown</button>
+                    <button onclick="copyFileToClipboard(this)">Copy file</button>
+                    <button onclick="copyText(this, '@{{.Page.FilePath}}')">Copy relative path</button>
+                    <button onclick="copyText(this, '{{.Page.Project.Path}}/{{.Page.FilePath}}')">Copy absolute path</button>
+                    {{if eq .Page.SourceType "files"}}<div class="menu-divider"></div>
+                    <button onclick="removeFileFromBirdseye()">Remove from Birdseye</button>{{end}}
+                    <div class="menu-divider"></div>
+                    <button class="menu-danger" onclick="confirmDeleteFile()">Delete from disk</button>
                 </div>
             </div>
         </div>
@@ -426,6 +472,18 @@
         </div>
     </div>
     <template id="raw-markdown">{{.Page.Raw}}</template>
+
+    <!-- Delete file confirmation modal -->
+    <div class="modal-overlay" id="deleteFileModal">
+        <div class="modal">
+            <h3>Delete file?</h3>
+            <p style="color:#666;font-size:0.9em;margin:0">This will permanently delete <strong>{{.Page.FileName}}</strong> from the filesystem. This cannot be undone.</p>
+            <div class="modal-actions">
+                <button class="btn-cancel" onclick="closeDeleteFileDialog()">Cancel</button>
+                <button class="btn-primary" id="confirmDeleteBtn" style="background:#cf222e;border-color:#cf222e;" onclick="executeDeleteFile()">Delete from disk</button>
+            </div>
+        </div>
+    </div>
 {{end}}
 
 {{define "pagescript"}}
@@ -445,20 +503,91 @@
         if (name) localStorage.setItem('birdseye-author', name);
     }
 
-    // File-page copy dropdown: also remove floating comment btn on click
+    // Close menus and floating comment btn on click
     document.addEventListener('click', function() {
         removeFloatingCommentBtn();
+        closeAllMenus();
     });
+
+    // --- Three-dot menu ---
+    function toggleFileMenu(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var wrap = event.target.closest('.file-menu-wrap');
+        var wasOpen = wrap.classList.contains('menu-open');
+        closeAllMenus();
+        if (!wasOpen) wrap.classList.add('menu-open');
+    }
+
+    function closeAllMenus() {
+        document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
+    }
 
     function copyText(btn, text) {
         navigator.clipboard.writeText(text);
+        closeAllMenus();
         flashCopied(btn);
     }
 
-    // Override copyFileToClipboard for file page (uses filePath instead of data-attr)
+    function copyMarkdown(btn) {
+        navigator.clipboard.writeText(rawMarkdown);
+        closeAllMenus();
+        flashCopied(btn);
+    }
+
+    // Copy file to clipboard (macOS)
     function copyFileToClipboard(btn) {
         fetch('/api/copy-file?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(filePath))
             .then(function(resp) { if (resp.ok) flashCopied(btn); });
+        closeAllMenus();
+    }
+
+    // --- Remove from Birdseye (individually-added files only) ---
+    function removeFileFromBirdseye() {
+        closeAllMenus();
+        fetch('/api/sources', {
+            method: 'DELETE',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project: qualifiedName, file: filePath})
+        })
+        .then(function(r) {
+            if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+            window.location.href = '/project/' + encodeURI(qualifiedName);
+        })
+        .catch(function(err) {
+            alert('Failed to remove: ' + err.message);
+        });
+    }
+
+    // --- Delete file from disk ---
+    function confirmDeleteFile() {
+        closeAllMenus();
+        document.getElementById('confirmDeleteBtn').disabled = false;
+        document.getElementById('confirmDeleteBtn').textContent = 'Delete from disk';
+        document.getElementById('deleteFileModal').classList.add('open');
+    }
+
+    function closeDeleteFileDialog() {
+        document.getElementById('deleteFileModal').classList.remove('open');
+    }
+
+    function executeDeleteFile() {
+        var btn = document.getElementById('confirmDeleteBtn');
+        btn.disabled = true;
+        btn.textContent = 'Deleting...';
+
+        fetch('/api/delete-file?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(filePath), {
+            method: 'POST'
+        })
+        .then(function(r) {
+            if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+            window.location.href = '/project/' + encodeURI(qualifiedName);
+        })
+        .catch(function(err) {
+            alert('Failed to delete: ' + err.message);
+            btn.disabled = false;
+            btn.textContent = 'Delete from disk';
+        });
     }
 
     // --- Comments panel logic ---
@@ -872,7 +1001,7 @@
     }
 
     document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') { hideNewThreadForm(); removeFloatingCommentBtn(); }
+        if (e.key === 'Escape') { hideNewThreadForm(); removeFloatingCommentBtn(); closeDeleteFileDialog(); }
     });
 
     // --- Comment text highlighting ---

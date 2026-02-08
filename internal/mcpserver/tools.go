@@ -85,12 +85,15 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			if err != nil {
 				return nil, nil, err
 			}
-			// Record heartbeat for each file
+			// Record heartbeat and set typing for each thread awaiting response
 			seen := make(map[string]bool)
 			for _, t := range threads {
 				if !seen[t.FilePath] {
 					store.RecordHeartbeat(input.Project, t.FilePath)
 					seen[t.FilePath] = true
+				}
+				if len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+					store.SetTyping(input.Project, t.FilePath, t.ID)
 				}
 			}
 			res, err := textResult(threads)
@@ -108,6 +111,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		for _, t := range fc.Threads {
 			if input.Status == "" || t.Status == input.Status {
 				filtered = append(filtered, t)
+			}
+			if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+				store.SetTyping(input.Project, input.Path, t.ID)
 			}
 		}
 		res, err := textResult(filtered)
@@ -281,7 +287,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			store.RecordHeartbeat(input.Project, f.FilePath)
 		}
 
-		// When changed, enrich response with threads needing agent response
+		// When changed, enrich response with threads needing agent response.
+		// Set typing indicators first so the UI shows dots before the agent
+		// receives the response and potentially replies quickly.
 		if changed {
 			type fileWithThreads struct {
 				FilePath    string            `json:"filePath"`
@@ -289,21 +297,35 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				Threads     []comments.Thread `json:"threads,omitempty"`
 			}
 
+			// First pass: set typing indicators for all threads awaiting a response
+			type pendingThread struct {
+				filePath string
+				thread   comments.Thread
+			}
+			var pending []pendingThread
+			for _, f := range files {
+				fc, loadErr := store.Load(input.Project, f.FilePath)
+				if loadErr == nil {
+					for _, t := range fc.Threads {
+						if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+							store.SetTyping(input.Project, f.FilePath, t.ID)
+							pending = append(pending, pendingThread{filePath: f.FilePath, thread: t})
+						}
+					}
+				}
+			}
+
+			// Second pass: build enriched response
+			pendingByFile := make(map[string][]comments.Thread)
+			for _, p := range pending {
+				pendingByFile[p.filePath] = append(pendingByFile[p.filePath], p.thread)
+			}
 			var enrichedFiles []fileWithThreads
 			for _, f := range files {
 				ef := fileWithThreads{
 					FilePath:    f.FilePath,
 					OpenThreads: f.OpenThreads,
-				}
-
-				fc, loadErr := store.Load(input.Project, f.FilePath)
-				if loadErr == nil {
-					for _, t := range fc.Threads {
-						if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-							ef.Threads = append(ef.Threads, t)
-							store.SetTyping(input.Project, f.FilePath, t.ID)
-						}
-					}
+					Threads:     pendingByFile[f.FilePath],
 				}
 				enrichedFiles = append(enrichedFiles, ef)
 			}

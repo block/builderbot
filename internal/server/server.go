@@ -211,11 +211,12 @@ func (s *Server) routes() {
 
 // NavData provides the sidebar with workspace/project links on every page.
 type NavData struct {
-	Workspaces  []NavWorkspace
-	Standalone  []NavProject
-	ActiveQN    string // qualified name of the active project (for standalone highlighting)
-	ActiveWS    string // workspace path of the active project (for workspace highlighting)
-	SearchQuery string // pre-fill search box if on search page
+	Workspaces    []NavWorkspace
+	Standalone    []NavProject
+	ActiveProject *NavProject // active workspace project (shown indented under workspace)
+	ActiveQN      string      // qualified name of the active project (for standalone highlighting)
+	ActiveWS      string      // workspace path of the active project (for workspace highlighting)
+	SearchQuery   string      // pre-fill search box if on search page
 }
 
 type NavWorkspace struct {
@@ -228,6 +229,9 @@ type NavProject struct {
 	Name          string
 	QualifiedName string
 	HasAgent      bool
+	HasRPI        bool
+	Branch        string
+	Dirty         bool
 }
 
 // buildNav builds NavData from current config and cache state.
@@ -237,22 +241,48 @@ func (s *Server) buildNav(activeQN string) NavData {
 	activeAgents := agents.FindActive()
 	projects := s.cache.ProjectsSortedByModTime()
 
-	// Figure out which workspace the active project belongs to
-	for _, p := range projects {
-		if p.QualifiedName() == activeQN && p.Origin != "standalone" {
-			nav.ActiveWS = p.WorkspacePath
-			break
-		}
-	}
-
-	// Check which workspaces have active agents
+	// Check which workspaces have active agents, and build active project info
 	wsHasAgent := make(map[string]bool)
 	for _, p := range projects {
+		qn := p.QualifiedName()
+		hasAgent := false
+		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
+			hasAgent = true
+		}
+
 		if p.Origin == "standalone" {
+			np := NavProject{
+				Name:          p.Name,
+				QualifiedName: qn,
+				HasAgent:      hasAgent,
+				HasRPI:        p.HasThoughts(),
+			}
+			if p.Git != nil {
+				np.Branch = p.Git.Branch
+				np.Dirty = p.Git.Dirty
+			}
+			nav.Standalone = append(nav.Standalone, np)
 			continue
 		}
-		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
+
+		if hasAgent {
 			wsHasAgent[p.WorkspacePath] = true
+		}
+
+		// Build active project details for workspace projects
+		if qn == activeQN {
+			nav.ActiveWS = p.WorkspacePath
+			np := NavProject{
+				Name:          p.Name,
+				QualifiedName: qn,
+				HasAgent:      hasAgent,
+				HasRPI:        p.HasThoughts(),
+			}
+			if p.Git != nil {
+				np.Branch = p.Git.Branch
+				np.Dirty = p.Git.Dirty
+			}
+			nav.ActiveProject = &np
 		}
 	}
 
@@ -261,22 +291,6 @@ func (s *Server) buildNav(activeQN string) NavData {
 			Name:     ws.DisplayName(),
 			Path:     ws.Path,
 			HasAgent: wsHasAgent[ws.Path],
-		})
-	}
-
-	// Standalone projects
-	for _, p := range projects {
-		if p.Origin != "standalone" {
-			continue
-		}
-		hasAgent := false
-		if agts, ok := activeAgents[p.Path]; ok && len(agts) > 0 {
-			hasAgent = true
-		}
-		nav.Standalone = append(nav.Standalone, NavProject{
-			Name:          p.Name,
-			QualifiedName: p.QualifiedName(),
-			HasAgent:      hasAgent,
 		})
 	}
 

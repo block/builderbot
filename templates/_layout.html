@@ -57,6 +57,24 @@
         }
         .sidebar-item:hover { background: #f0f0f0; text-decoration: none; color: #333; }
         .sidebar-item.active { background: #e8f0fe; color: #0066cc; font-weight: 500; }
+        .sidebar-item.subitem { padding-left: 28px; font-size: 0.8em; }
+        .sidebar-item .rpi-badge {
+            font-size: 0.7em;
+            font-weight: 500;
+            padding: 0px 4px;
+            border-radius: 3px;
+            background: #f0f0f0;
+            color: #888;
+            flex-shrink: 0;
+        }
+        .sidebar-item.active .rpi-badge { background: #d4e4fc; color: #5a8fd8; }
+        .sidebar-item .branch-info {
+            font-size: 0.8em;
+            color: #2da44e;
+            flex-shrink: 0;
+            margin-left: auto;
+        }
+        .sidebar-item .branch-dirty { color: #cf222e; }
         .sidebar-item .agent-dot {
             display: inline-block;
             width: 7px;
@@ -327,16 +345,26 @@
 
         <nav class="sidebar">
             {{range .Nav.Workspaces}}
-            <a class="sidebar-item{{if eq .Path $.Nav.ActiveWS}} active{{end}}" href="/">
+            <a class="sidebar-item" href="/">
                 {{.Name}}
                 {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
             </a>
+            {{if and $.Nav.ActiveProject (eq .Path $.Nav.ActiveWS)}}
+            <a class="sidebar-item subitem active" href="/project/{{$.Nav.ActiveProject.QualifiedName}}">
+                {{$.Nav.ActiveProject.Name}}
+                {{if $.Nav.ActiveProject.HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
+                {{if $.Nav.ActiveProject.HasAgent}}<span class="agent-dot"></span>{{end}}
+                {{if $.Nav.ActiveProject.Branch}}<span class="branch-info">{{$.Nav.ActiveProject.Branch}}{{if $.Nav.ActiveProject.Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
+            </a>
+            {{end}}
             {{end}}
 
             {{range .Nav.Standalone}}
             <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}" href="/project/{{.QualifiedName}}">
                 {{.Name}}
+                {{if .HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
                 {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
+                {{if .Branch}}<span class="branch-info">{{.Branch}}{{if .Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
             </a>
             {{end}}
 

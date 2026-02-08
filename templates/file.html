@@ -14,19 +14,9 @@
     .file-main { display: flex; flex-direction: column; overflow: hidden; }
     .file-main-scroll { padding: 0 40px 24px 40px; max-width: 900px; overflow-y: auto; flex: 1; }
 
-    /* TOC in sidebar card */
-    .toc-nav a {
-        display: block;
-        padding: 2px 4px;
-        font-size: 0.8em;
-        color: #555;
-        border-radius: 3px;
-        text-decoration: none;
-        line-height: 1.4;
-    }
-    .toc-nav a:hover { background: #e8e8e8; text-decoration: none; }
-    .toc-nav .level-2 { padding-left: 12px; }
-    .toc-nav .level-3 { padding-left: 22px; font-size: 0.75em; color: #777; }
+    /* TOC heading indentation */
+    .sidebar-card-nav .level-2 { padding-left: 12px; }
+    .sidebar-card-nav .level-3 { padding-left: 22px; font-size: 0.75em; color: #777; }
 
     .file-toolbar {
         display: flex;
@@ -488,7 +478,7 @@
     {{if .Page.Headings}}
     <div class="sidebar-card">
         <div class="sidebar-card-title">On this page</div>
-        <nav class="toc-nav">
+        <nav class="sidebar-card-nav">
             {{range .Page.Headings}}
             <a href="#{{.ID}}" class="level-{{.Level}}">{{.Text}}</a>
             {{end}}
@@ -1334,12 +1324,12 @@
                 var doc = new DOMParser().parseFromString(pageHtml, 'text/html');
                 var newContent = doc.getElementById('content');
                 if (newContent) document.getElementById('content').innerHTML = newContent.innerHTML;
-                var newToc = doc.querySelector('.toc-nav');
-                var oldToc = document.querySelector('.toc-nav');
+                var newToc = doc.querySelector('.sidebar-card-nav');
+                var oldToc = document.querySelector('.sidebar-card-nav');
                 if (newToc && oldToc) {
                     oldToc.innerHTML = newToc.innerHTML;
                 } else if (newToc && !oldToc) {
-                    var card = doc.querySelector('.toc-nav').closest('.sidebar-card');
+                    var card = doc.querySelector('.sidebar-card-nav').closest('.sidebar-card');
                     if (card) document.querySelector('nav.sidebar').appendChild(card);
                 } else if (!newToc && oldToc) {
                     oldToc.closest('.sidebar-card').remove();

@@ -6,10 +6,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/loganj/birdseye/internal/config"
 	"github.com/loganj/birdseye/internal/watcher"
 )
+
+// expandTilde expands a leading ~ to the user's home directory.
+func expandTilde(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[1:])
+		}
+	}
+	return path
+}
 
 // refreshAfterConfigChange saves the config and re-discovers all projects.
 func (s *Server) refreshAfterConfigChange() {
@@ -49,7 +60,7 @@ func (s *Server) handleAddWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	absPath, err := filepath.Abs(req.Path)
+	absPath, err := filepath.Abs(expandTilde(req.Path))
 	if err != nil {
 		http.Error(w, "invalid path: "+err.Error(), http.StatusBadRequest)
 		return
@@ -129,7 +140,7 @@ func (s *Server) handleAddStandaloneProject(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	absPath, err := filepath.Abs(req.Path)
+	absPath, err := filepath.Abs(expandTilde(req.Path))
 	if err != nil {
 		http.Error(w, "invalid path: "+err.Error(), http.StatusBadRequest)
 		return

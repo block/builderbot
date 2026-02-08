@@ -156,10 +156,10 @@
         .modal h3 { margin: 0 0 12px 0; font-size: 1.1em; }
         .modal-actions {
             display: flex;
-            justify-content: flex-end;
             gap: 8px;
             margin-top: 20px;
         }
+        .modal-actions .btn-cancel { margin-right: auto; }
         .modal-actions button {
             padding: 8px 16px;
             border-radius: 6px;
@@ -408,64 +408,57 @@
     <!-- Add workspace/project modal -->
     <div class="modal-overlay" id="addModal">
         <div class="modal">
-            <h3 id="addModalTitle"></h3>
-            <p style="color:#666;font-size:0.9em;margin:0 0 12px 0" id="addModalDesc"></p>
+            <h3>Add to Birdseye</h3>
             <input type="text" class="modal-input" id="addPathInput" placeholder="/path/to/directory">
             <div class="modal-error" id="addModalError"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" onclick="closeAddDialog()">Cancel</button>
-                <button class="btn-primary" id="addConfirmBtn" onclick="confirmAdd()">Add</button>
+                <button class="btn-primary" id="addWorkspaceBtn" onclick="confirmAdd('workspace')">Add Workspace</button>
+                <button class="btn-primary" id="addProjectBtn" onclick="confirmAdd('project')">Add Project</button>
             </div>
         </div>
     </div>
 
     <script>
-        // --- Add workspace/project modal ---
-        var addMode = '';
+        // --- Sidebar: prevent click on active item from losing selection ---
+        document.addEventListener('click', function(e) {
+            var item = e.target.closest('.sidebar-item.active');
+            if (!item || !item.href) return;
+            var link = new URL(item.href, window.location.origin);
+            if (link.pathname === window.location.pathname) {
+                e.preventDefault();
+            }
+        });
 
+        // --- Add workspace/project modal ---
         function showAddDialog(event) {
             if (event) event.stopPropagation();
-            // Show a choice: workspace or project
-            addMode = '';
-            document.getElementById('addModalTitle').textContent = 'Add to Birdseye';
-            document.getElementById('addModalDesc').innerHTML =
-                '<button class="btn-primary" style="margin-right:8px" onclick="setAddMode(\'workspace\')">Workspace</button>' +
-                '<button class="btn-cancel" onclick="setAddMode(\'project\')">Project</button>';
-            document.getElementById('addPathInput').style.display = 'none';
-            document.getElementById('addModalError').style.display = 'none';
-            document.getElementById('addConfirmBtn').style.display = 'none';
-            document.getElementById('addModal').classList.add('open');
-        }
-
-        function setAddMode(mode) {
-            addMode = mode;
-            document.getElementById('addModalTitle').textContent = mode === 'workspace' ? 'Add Workspace' : 'Add Project';
-            document.getElementById('addModalDesc').textContent = mode === 'workspace'
-                ? 'Enter a directory path. All subdirectories will appear as projects.'
-                : 'Enter a project directory path.';
             document.getElementById('addPathInput').value = '';
-            document.getElementById('addPathInput').style.display = '';
-            document.getElementById('addConfirmBtn').style.display = '';
-            document.getElementById('addConfirmBtn').disabled = false;
-            document.getElementById('addConfirmBtn').textContent = 'Add';
             document.getElementById('addModalError').style.display = 'none';
+            document.getElementById('addWorkspaceBtn').disabled = false;
+            document.getElementById('addProjectBtn').disabled = false;
+            document.getElementById('addWorkspaceBtn').textContent = 'Add Workspace';
+            document.getElementById('addProjectBtn').textContent = 'Add Project';
+            document.getElementById('addModal').classList.add('open');
             setTimeout(function() { document.getElementById('addPathInput').focus(); }, 50);
         }
 
         function closeAddDialog() {
             document.getElementById('addModal').classList.remove('open');
-            addMode = '';
         }
 
-        function confirmAdd() {
+        function confirmAdd(mode) {
             var path = document.getElementById('addPathInput').value.trim();
             if (!path) { showAddError('Please enter a path.'); return; }
 
-            var btn = document.getElementById('addConfirmBtn');
-            btn.disabled = true;
-            btn.textContent = 'Adding...';
+            var wsBtn = document.getElementById('addWorkspaceBtn');
+            var projBtn = document.getElementById('addProjectBtn');
+            wsBtn.disabled = true;
+            projBtn.disabled = true;
+            if (mode === 'workspace') wsBtn.textContent = 'Adding...';
+            else projBtn.textContent = 'Adding...';
 
-            var url = addMode === 'workspace' ? '/api/workspaces' : '/api/projects';
+            var url = mode === 'workspace' ? '/api/workspaces' : '/api/projects';
             fetch(url, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -478,8 +471,10 @@
             })
             .catch(function(err) {
                 showAddError(err.message);
-                btn.disabled = false;
-                btn.textContent = 'Add';
+                wsBtn.disabled = false;
+                projBtn.disabled = false;
+                wsBtn.textContent = 'Add Workspace';
+                projBtn.textContent = 'Add Project';
             });
         }
 
@@ -488,10 +483,6 @@
             el.textContent = msg;
             el.style.display = 'block';
         }
-
-        document.getElementById('addPathInput').addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') { e.preventDefault(); confirmAdd(); }
-        });
 
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') closeAddDialog();

@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
 	"github.com/loganj/birdseye/internal/config"
@@ -52,9 +51,6 @@ func runServe(port int, dev bool, rootOverride string) {
 	if err := config.Save(cfgPath, cfg); err != nil {
 		log.Printf("Warning: could not save config: %v", err)
 	}
-
-	agents.StartPolling()
-	defer agents.StopPolling()
 
 	c := cache.New()
 	cs := comments.NewStore(c)

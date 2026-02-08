@@ -2,6 +2,7 @@ package comments
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -141,4 +142,18 @@ func (s *Store) IsAgentActive(projectName, filePath string) bool {
 		return false
 	}
 	return time.Since(t) < 60*time.Second
+}
+
+// IsProjectActive returns true if any agent has polled for any file (or the
+// project itself) within the last 60 seconds.
+func (s *Store) IsProjectActive(projectName string) bool {
+	s.heartMu.RLock()
+	defer s.heartMu.RUnlock()
+	prefix := projectName + ":"
+	for key, t := range s.heartbeats {
+		if strings.HasPrefix(key, prefix) && time.Since(t) < 60*time.Second {
+			return true
+		}
+	}
+	return false
 }

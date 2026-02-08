@@ -1375,6 +1375,7 @@
         }
         if (data.type === 'agents') {
             debouncedRefresh('agents', refreshAgentStatus);
+            debouncedRefresh('review', refreshReview);
         }
     });
 

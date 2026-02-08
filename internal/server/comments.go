@@ -97,7 +97,7 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 		result[i] = APIFileInReview{
 			FilePath:    f.FilePath,
 			OpenThreads: f.OpenThreads,
-			AgentActive: s.comments.IsAgentActive(projectName, f.FilePath),
+			AgentActive: s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running,
 		}
 	}
 

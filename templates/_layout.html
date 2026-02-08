@@ -745,15 +745,29 @@
             fetch('/api/projects')
                 .then(function(r) { return r.json(); })
                 .then(function(projects) {
-                    // Update project sidebar items with MCP connection dots
+                    // Update project sidebar items with agent dots
                     document.querySelectorAll('.sidebar-item[href^="/project/"]').forEach(function(item) {
                         var qn = item.getAttribute('href').replace('/project/', '');
                         var proj = projects.find(function(p) { return p.qualifiedName === qn; });
                         if (!proj) return;
                         var dot = item.querySelector('.agent-dot');
-                        if (proj.agentConnected && !dot) {
+                        if (proj.agentRunning && !dot) {
                             item.insertAdjacentHTML('beforeend', ' <span class="agent-dot"></span>');
-                        } else if (!proj.agentConnected && dot) {
+                        } else if (!proj.agentRunning && dot) {
+                            dot.remove();
+                        }
+                    });
+                    // Update workspace sidebar items with agent dots
+                    var wsHasAgent = {};
+                    projects.forEach(function(p) {
+                        if (p.agentRunning && p.workspace) wsHasAgent[p.workspace] = true;
+                    });
+                    document.querySelectorAll('.sidebar-item[href^="/workspace/"]').forEach(function(item) {
+                        var name = item.getAttribute('href').replace('/workspace/', '');
+                        var dot = item.querySelector('.agent-dot');
+                        if (wsHasAgent[name] && !dot) {
+                            item.insertAdjacentHTML('beforeend', ' <span class="agent-dot"></span>');
+                        } else if (!wsHasAgent[name] && dot) {
                             dot.remove();
                         }
                     });

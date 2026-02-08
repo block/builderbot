@@ -339,14 +339,14 @@
 
     // --- SSE + refresh ---
     onSSE(function(data) {
-        if (data.type === 'projects' || data.type === 'files' || data.type === 'comments') {
+        if (data.type === 'projects' || data.type === 'files' || data.type === 'comments' || data.type === 'agents') {
             debouncedRefresh('projects', refreshProjects);
         }
     });
 
     function renderProjectTile(p, isStandalone) {
         var deemph = p.fileCount === 0 ? ' deemphasized' : '';
-        var agentDot = p.agentConnected ? '<span class="agent-dot" title="MCP connected"></span>' : '';
+        var agentDot = p.agentRunning ? '<span class="agent-dot" title="Agent running"></span>' : '';
         var reviewBadge = p.reviewCount ? '<span class="review-count">' + p.reviewCount + ' in review</span>' : '';
         var rpiBadge = p.hasRPI ? '<span class="rpi-badge">RPI</span>' : '';
         var age = p.age ? '<span class="project-age">' + p.age + '</span>' : '';

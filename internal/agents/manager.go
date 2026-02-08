@@ -31,7 +31,7 @@ type Manager struct {
 	cache    *cache.Cache
 	comments *comments.Store
 	port     int
-	onChange func() // called when agent starts or stops
+	onChange func(projectName string) // called when agent starts or stops
 }
 
 func New(c *cache.Cache, cs *comments.Store, port int) *Manager {
@@ -44,7 +44,7 @@ func New(c *cache.Cache, cs *comments.Store, port int) *Manager {
 }
 
 // SetOnChange sets a callback invoked when an agent starts or stops.
-func (m *Manager) SetOnChange(fn func()) {
+func (m *Manager) SetOnChange(fn func(projectName string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onChange = fn
@@ -127,6 +127,9 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 		close(agent.done)
 		log.Printf("Agent exited for %s (PID %d): %v", projectName, agent.PID, agent.exitErr)
 
+		m.comments.ClearProjectHeartbeats(projectName)
+		m.comments.ClearProjectTyping(projectName)
+
 		m.mu.Lock()
 		// Only delete if it's still the same agent (not replaced)
 		if current, ok := m.agents[projectName]; ok && current == agent {
@@ -136,12 +139,12 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 		m.mu.Unlock()
 
 		if fn != nil {
-			fn()
+			fn(projectName)
 		}
 	}()
 
 	if m.onChange != nil {
-		go m.onChange()
+		go m.onChange(projectName)
 	}
 
 	return agent, nil

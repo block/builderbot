@@ -59,8 +59,8 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 	s.layoutTmpl = template.Must(template.New("").ParseFS(templates.FS, "_layout.html"))
 
 	if am != nil {
-		am.SetOnChange(func() {
-			s.watcher.Broadcast(watcher.Event{Type: watcher.EventAgentsChanged})
+		am.SetOnChange(func(projectName string) {
+			s.watcher.Broadcast(watcher.Event{Type: watcher.EventAgentsChanged, Project: projectName})
 		})
 	}
 
@@ -273,7 +273,7 @@ func (s *Server) buildNav(activeQN string) NavData {
 	wsHasAgent := make(map[string]bool)
 	for _, p := range projects {
 		qn := p.QualifiedName()
-		hasAgent := s.comments.IsProjectActive(qn)
+		hasAgent := s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running
 
 		if p.Origin == "standalone" {
 			np := NavProject{
@@ -412,7 +412,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		qn := p.QualifiedName()
-		if s.comments.IsProjectActive(qn) {
+		if s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running {
 			agentConnected[qn] = true
 		}
 		ages[qn] = computeProjectAge(p)
@@ -695,7 +695,7 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 			FileCount:      p.FileCount,
 			LastModified:   p.LastModified.Format(time.RFC3339),
 			Age:            computeProjectAge(p),
-			AgentConnected: s.comments.IsProjectActive(qn),
+			AgentConnected: s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running,
 			AgentRunning:   s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running,
 		}
 		if p.Git != nil {

@@ -148,6 +148,18 @@ func (s *Store) IsAgentActive(projectName, filePath string) bool {
 	return time.Since(t) < 60*time.Second
 }
 
+// ClearProjectHeartbeats removes all heartbeat entries for a project.
+func (s *Store) ClearProjectHeartbeats(projectName string) {
+	prefix := projectName + ":"
+	s.heartMu.Lock()
+	defer s.heartMu.Unlock()
+	for key := range s.heartbeats {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.heartbeats, key)
+		}
+	}
+}
+
 // IsProjectActive returns true if any agent has polled for any file (or the
 // project itself) within the last 60 seconds.
 func (s *Store) IsProjectActive(projectName string) bool {
@@ -182,23 +194,36 @@ func (s *Store) SetTyping(project, path, threadID string) {
 }
 
 // ClearTyping removes the typing indicator for a specific thread.
+// Broadcasts a change event if the indicator was actually cleared.
 func (s *Store) ClearTyping(project, path, threadID string) {
 	key := project + ":" + path + ":" + threadID
 	s.typingMu.Lock()
+	_, cleared := s.typing[key]
 	delete(s.typing, key)
+	fn := s.onTyping
 	s.typingMu.Unlock()
+	if cleared && fn != nil {
+		fn(project)
+	}
 }
 
 // ClearProjectTyping removes all typing indicators for a project.
+// Broadcasts a change event if any indicators were actually cleared.
 func (s *Store) ClearProjectTyping(project string) {
 	prefix := project + ":"
 	s.typingMu.Lock()
+	cleared := false
 	for key := range s.typing {
 		if strings.HasPrefix(key, prefix) {
 			delete(s.typing, key)
+			cleared = true
 		}
 	}
+	fn := s.onTyping
 	s.typingMu.Unlock()
+	if cleared && fn != nil {
+		fn(project)
+	}
 }
 
 // IsTyping returns true if an agent is actively composing a reply to the given thread.

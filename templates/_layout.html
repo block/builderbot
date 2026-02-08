@@ -115,6 +115,7 @@
             display: block;
         }
         .sidebar-add:hover { color: #666; text-decoration: none; background: #f0f0f0; }
+        .sidebar-back { color: #0066cc; font-size: 0.8em; }
 
         /* Sidebar floating card (for page-specific content like TOC) */
         .sidebar-card {
@@ -344,19 +345,42 @@
         </div>
 
         <nav class="sidebar">
-            {{range .Nav.Workspaces}}
-            <a class="sidebar-item" href="/">
+            {{if .Nav.InProject}}
+            <!-- Focused mode: only show parent context + active project -->
+            <a class="sidebar-item sidebar-back" href="/?{{if .Nav.ActiveWS}}ws={{.Nav.ActiveWS}}{{else}}project={{.Nav.ActiveQN}}{{end}}">&#8592; Home</a>
+            <div class="sidebar-divider"></div>
+            {{if .Nav.ActiveWS}}
+            {{range .Nav.Workspaces}}{{if eq .Path $.Nav.ActiveWS}}
+            <a class="sidebar-item" href="/?ws={{.Path}}">
                 {{.Name}}
                 {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
             </a>
-            {{if and $.Nav.ActiveProject (eq .Path $.Nav.ActiveWS)}}
-            <a class="sidebar-item subitem active" href="/project/{{$.Nav.ActiveProject.QualifiedName}}">
-                {{$.Nav.ActiveProject.Name}}
-                {{if $.Nav.ActiveProject.HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
-                {{if $.Nav.ActiveProject.HasAgent}}<span class="agent-dot"></span>{{end}}
-                {{if $.Nav.ActiveProject.Branch}}<span class="branch-info">{{$.Nav.ActiveProject.Branch}}{{if $.Nav.ActiveProject.Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
+            {{end}}{{end}}
+            {{if .Nav.ActiveProject}}
+            <a class="sidebar-item subitem active" href="/project/{{.Nav.ActiveProject.QualifiedName}}">
+                {{.Nav.ActiveProject.Name}}
+                {{if .Nav.ActiveProject.HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
+                {{if .Nav.ActiveProject.HasAgent}}<span class="agent-dot"></span>{{end}}
+                {{if .Nav.ActiveProject.Branch}}<span class="branch-info">{{.Nav.ActiveProject.Branch}}{{if .Nav.ActiveProject.Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
             </a>
             {{end}}
+            {{else}}
+            {{range .Nav.Standalone}}{{if eq .QualifiedName $.Nav.ActiveQN}}
+            <a class="sidebar-item active" href="/project/{{.QualifiedName}}">
+                {{.Name}}
+                {{if .HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
+                {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
+                {{if .Branch}}<span class="branch-info">{{.Branch}}{{if .Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
+            </a>
+            {{end}}{{end}}
+            {{end}}
+            {{else}}
+            <!-- Home mode: show all workspaces and standalone projects -->
+            {{range .Nav.Workspaces}}
+            <a class="sidebar-item{{if eq .Path $.Nav.ActiveWS}} active{{end}}" href="/">
+                {{.Name}}
+                {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
+            </a>
             {{end}}
 
             {{range .Nav.Standalone}}
@@ -371,6 +395,7 @@
             <div class="sidebar-divider"></div>
             <a class="sidebar-link" href="/recent">Recent</a>
             <div class="sidebar-add" onclick="showAddDialog(event)">+ Add workspace or project</div>
+            {{end}}
 
             {{block "sidebar_extra" .}}{{end}}
         </nav>

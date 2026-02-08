@@ -216,6 +216,7 @@ type NavData struct {
 	ActiveProject *NavProject // active workspace project (shown indented under workspace)
 	ActiveQN      string      // qualified name of the active project (for standalone highlighting)
 	ActiveWS      string      // workspace path of the active project (for workspace highlighting)
+	InProject     bool        // true when viewing a project or file page (triggers focused sidebar)
 	SearchQuery   string      // pre-fill search box if on search page
 }
 
@@ -399,6 +400,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nav := s.buildNav("")
+	// Support highlight params from "← Home" link
+	if ws := r.URL.Query().Get("ws"); ws != "" {
+		nav.ActiveWS = ws
+	} else if pq := r.URL.Query().Get("project"); pq != "" {
+		nav.ActiveQN = pq
+	}
 	pageData := struct {
 		Workspaces []WorkspaceGroup
 		Standalone []discovery.Project
@@ -527,6 +534,7 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nav := s.buildNav(project.QualifiedName())
+	nav.InProject = true
 	pageData := struct {
 		Project      *discovery.Project
 		Files        []ProjectFile

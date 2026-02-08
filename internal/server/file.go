@@ -127,6 +127,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		AnchorLines: template.JS(anchorLinesJSON),
 	}
 	nav := s.buildNav(project.QualifiedName())
+	nav.InProject = true
 	s.renderPage(w, "file.html", nav, data)
 }
 

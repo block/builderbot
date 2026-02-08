@@ -386,16 +386,27 @@
             deleteTarget = '';
         }
 
+        // Debounce + in-flight deduplication to prevent connection starvation
+        const _pending = {};
+        const _timers = {};
+        function debouncedRefresh(key, fn, delay) {
+            delay = delay || 200;
+            clearTimeout(_timers[key]);
+            _timers[key] = setTimeout(function() {
+                if (_pending[key]) return;
+                _pending[key] = true;
+                Promise.resolve(fn()).finally(function() { _pending[key] = false; });
+            }, delay);
+        }
+
         // Live updates via SSE
         const events = new EventSource('/events');
+        window.addEventListener('beforeunload', function() { events.close(); });
 
         events.addEventListener('change', function(e) {
             const data = JSON.parse(e.data);
-            if (data.type === 'projects' || data.type === 'files') {
-                refreshProjects();
-            }
-            if (data.type === 'comments') {
-                refreshAgentStatus();
+            if (data.type === 'projects' || data.type === 'files' || data.type === 'comments') {
+                debouncedRefresh('projects', refreshProjects);
             }
         });
 
@@ -441,67 +452,7 @@
                 console.error('Failed to refresh projects:', err);
             }
         }
-        // Poll agent status every 5 seconds (lightweight update, no DOM rebuild)
-        async function refreshAgentStatus() {
-            try {
-                const response = await fetch('/api/projects');
-                const projects = await response.json();
-                const agentMap = {};
-                projects.forEach(p => {
-                    if (p.agentCount) {
-                        agentMap[p.name] = p.agentCount === 1
-                            ? (p.agentPrompts[0] || 'Agent active')
-                            : p.agentCount + ' agents active';
-                    }
-                });
-
-                document.querySelectorAll('.project').forEach(el => {
-                    const link = el.querySelector('.project-name a');
-                    if (!link) return;
-                    const name = link.textContent;
-                    const existingDot = el.querySelector('.agent-dot');
-                    if (agentMap[name]) {
-                        if (!existingDot) {
-                            const dot = document.createElement('span');
-                            dot.className = 'agent-dot';
-                            dot.title = agentMap[name];
-                            el.querySelector('.project-name').appendChild(dot);
-                        } else {
-                            existingDot.title = agentMap[name];
-                        }
-                    } else if (existingDot) {
-                        existingDot.remove();
-                    }
-                    // Update age marker
-                    const proj = projects.find(p => p.name === name);
-                    const ageEl = el.querySelector('.project-age');
-                    if (proj && proj.age) {
-                        if (ageEl) {
-                            ageEl.textContent = proj.age;
-                        }
-                    } else if (ageEl) {
-                        ageEl.textContent = '';
-                    }
-
-                    // Update review count badge
-                    const existingReview = el.querySelector('.review-count');
-                    if (proj && proj.reviewCount) {
-                        if (existingReview) {
-                            existingReview.textContent = proj.reviewCount + ' in review';
-                        } else {
-                            const badge = document.createElement('span');
-                            badge.className = 'review-count';
-                            badge.textContent = proj.reviewCount + ' in review';
-                            el.querySelector('.project-name').appendChild(badge);
-                        }
-                    } else if (existingReview) {
-                        existingReview.remove();
-                    }
-                });
-            } catch (err) {}
-        }
-        refreshAgentStatus();
-        setInterval(refreshAgentStatus, 30000);
+        setInterval(function() { debouncedRefresh('projects', refreshProjects); }, 30000);
     </script>
 </body>
 </html>

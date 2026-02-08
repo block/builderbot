@@ -407,21 +407,46 @@
         }
         attachFileListeners();
 
+        // Debounce + in-flight deduplication to prevent connection starvation
+        const _pending = {};
+        const _timers = {};
+        function debouncedRefresh(key, fn, delay) {
+            delay = delay || 200;
+            clearTimeout(_timers[key]);
+            _timers[key] = setTimeout(function() {
+                if (_pending[key]) return;
+                _pending[key] = true;
+                Promise.resolve(fn()).finally(function() { _pending[key] = false; });
+            }, delay);
+        }
+
         // SSE
         const events = new EventSource('/events');
+        window.addEventListener('beforeunload', function() { events.close(); });
         events.addEventListener('change', function(e) {
             const data = JSON.parse(e.data);
-            if (data.type === 'files' && data.project === projectName) refreshFiles();
-            if (data.type === 'projects') checkIfDeleted();
-            if (data.type === 'comments' && data.project === projectName) refreshReviewBadges();
+            if (data.type === 'files' && data.project === projectName) debouncedRefresh('files', refreshFiles);
+            if (data.type === 'projects') debouncedRefresh('projects', refreshProjectStatus);
+            if (data.type === 'comments' && data.project === projectName) debouncedRefresh('reviews', refreshReviewBadges);
         });
 
-        async function checkIfDeleted() {
+        // Combined check: deletion detection + agent status in one fetch
+        async function refreshProjectStatus() {
             try {
                 const response = await fetch('/api/projects');
                 const projects = await response.json();
-                if (!projects.find(p => p.name === projectName)) {
+                const project = projects.find(p => p.name === projectName);
+                if (!project) {
                     showDeletingState();
+                    return;
+                }
+                const container = document.getElementById('agentBanners');
+                if (project.agentCount > 0) {
+                    container.innerHTML = project.agentPrompts.map(prompt =>
+                        `<div class="agent-banner"><span class="agent-dot"></span><span class="agent-prompt">Agent active${prompt ? ': ' + prompt.replace(/&/g,'&amp;').replace(/</g,'&lt;') : ''}</span></div>`
+                    ).join('');
+                } else {
+                    container.innerHTML = '';
                 }
             } catch (err) {}
         }
@@ -469,23 +494,8 @@
                 console.error('Failed to refresh files:', err);
             }
         }
-        async function refreshAgentStatus() {
-            try {
-                const response = await fetch('/api/projects');
-                const projects = await response.json();
-                const project = projects.find(p => p.name === projectName);
-                const container = document.getElementById('agentBanners');
-                if (project && project.agentCount > 0) {
-                    container.innerHTML = project.agentPrompts.map(prompt =>
-                        `<div class="agent-banner"><span class="agent-dot"></span><span class="agent-prompt">Agent active${prompt ? ': ' + prompt.replace(/&/g,'&amp;').replace(/</g,'&lt;') : ''}</span></div>`
-                    ).join('');
-                } else {
-                    container.innerHTML = '';
-                }
-            } catch (err) {}
-        }
-        refreshAgentStatus();
-        setInterval(refreshAgentStatus, 30000);
+        refreshProjectStatus();
+        setInterval(function() { debouncedRefresh('projects', refreshProjectStatus); }, 30000);
 
         // Review badges
         let reviewData = {};

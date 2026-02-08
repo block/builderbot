@@ -1506,17 +1506,31 @@
                 });
         }
 
+        // Debounce + in-flight deduplication to prevent connection starvation
+        const _pending = {};
+        const _timers = {};
+        function debouncedRefresh(key, fn, delay) {
+            delay = delay || 200;
+            clearTimeout(_timers[key]);
+            _timers[key] = setTimeout(function() {
+                if (_pending[key]) return;
+                _pending[key] = true;
+                Promise.resolve(fn()).finally(function() { _pending[key] = false; });
+            }, delay);
+        }
+
         // Set up SSE
         const evtSource = new EventSource('/events');
+        window.addEventListener('beforeunload', function() { evtSource.close(); });
         evtSource.addEventListener('change', function(e) {
             try {
                 const data = JSON.parse(e.data);
                 if (data.type === 'comments' && data.project === projectName) {
-                    refreshComments();
-                    refreshReview();
+                    debouncedRefresh('comments', refreshComments);
+                    debouncedRefresh('review', refreshReview);
                 }
                 if (data.type === 'files' && data.project === projectName) {
-                    refreshDocument();
+                    debouncedRefresh('document', refreshDocument);
                 }
             } catch (err) {
                 console.error('SSE parse error:', err);

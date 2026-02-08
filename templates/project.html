@@ -1,10 +1,6 @@
 {{define "title"}}{{.Page.Project.Name}} - Birdseye{{end}}
 
 {{define "pagestyle"}}
-    h1 { color: #333; font-weight: 600; margin-bottom: 8px; }
-    .git-info { color: #666; font-size: 0.9em; margin-bottom: 24px; }
-    .branch { color: #2da44e; }
-    .dirty { color: #cf222e; }
     .files { list-style: none; padding: 0; margin: 0; }
     .file-age {
         color: #888;
@@ -32,38 +28,6 @@
         100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
     }
 
-    .agent-banner {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 10px 16px;
-        background: #dafbe1;
-        border: 1px solid #aceebb;
-        border-radius: 6px;
-        margin-bottom: 24px;
-        font-size: 0.9em;
-        color: #1a7f37;
-    }
-    .agent-dot-banner {
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        background: #1a7f37;
-        border-radius: 50%;
-        flex-shrink: 0;
-        animation: agent-pulse 2s infinite;
-    }
-    @keyframes agent-pulse {
-        0% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0.4); }
-        70% { box-shadow: 0 0 0 6px rgba(26, 127, 55, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(26, 127, 55, 0); }
-    }
-    .agent-prompt {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-    }
-
     /* Show/hide dropdown on hover in file rows */
     .dropdown-toggle { opacity: 0; }
     .file:hover .dropdown-toggle,
@@ -84,10 +48,7 @@
         font-weight: 500;
     }
     body.project-deleting .files,
-    body.project-deleting .git-info,
-    body.project-deleting .agent-banner,
     body.project-deleting .selection-bar,
-    body.project-deleting h1,
     body.project-deleting .empty {
         opacity: 0.3;
         pointer-events: none;
@@ -95,22 +56,6 @@
 {{end}}
 
 {{define "content"}}
-    <h1>{{.Page.Project.Name}}</h1>
-    {{if .Page.Project.Git}}
-    <div class="git-info">
-        <span class="branch">{{.Page.Project.Git.Branch}}</span>{{if .Page.Project.Git.Dirty}}<span class="dirty"> (uncommitted changes)</span>{{end}}
-    </div>
-    {{end}}
-
-    <div id="agentBanners">
-    {{range .Page.AgentPrompts}}
-    <div class="agent-banner">
-        <span class="agent-dot-banner"></span>
-        <span class="agent-prompt">Agent active{{if .}}: {{.}}{{end}}</span>
-    </div>
-    {{end}}
-    </div>
-
     {{if .Page.Files}}
     <ul class="files">
         {{range .Page.Files}}
@@ -178,7 +123,7 @@
         }
     });
 
-    // Combined check: deletion detection + agent status
+    // Check for project deletion
     async function refreshProjectStatus() {
         try {
             var response = await fetch('/api/projects');
@@ -187,14 +132,6 @@
             if (!project) {
                 showDeletingState();
                 return;
-            }
-            var container = document.getElementById('agentBanners');
-            if (project.agentCount > 0) {
-                container.innerHTML = project.agentPrompts.map(function(prompt) {
-                    return '<div class="agent-banner"><span class="agent-dot-banner"></span><span class="agent-prompt">Agent active' + (prompt ? ': ' + escapeHtml(prompt) : '') + '</span></div>';
-                }).join('');
-            } else {
-                container.innerHTML = '';
             }
         } catch (err) {}
     }
@@ -205,8 +142,8 @@
         var banner = document.createElement('div');
         banner.className = 'deleting-banner';
         banner.textContent = 'This project is being deleted\u2026';
-        var h1 = document.querySelector('h1');
-        if (h1) h1.after(banner);
+        var content = document.querySelector('.main-content');
+        if (content) content.prepend(banner);
     }
 
     async function refreshFiles() {

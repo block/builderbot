@@ -305,6 +305,19 @@
         flex-shrink: 0;
         animation: sidebar-pulse 2s infinite;
     }
+    .agent-stop-btn {
+        background: none;
+        border: 1px solid #d0d7de;
+        border-radius: 4px;
+        padding: 1px 6px;
+        font-size: 10px;
+        cursor: pointer;
+        color: #656d76;
+    }
+    .agent-stop-btn:hover {
+        background: #f6f8fa;
+        border-color: #656d76;
+    }
     @keyframes review-pulse {
         0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.3); }
         70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
@@ -479,6 +492,7 @@
             <span class="agent-indicator" id="agent-indicator" style="display:none">
                 <span class="agent-dot"></span>
                 <span>Agent</span>
+                <button onclick="stopAgent()" class="agent-stop-btn" id="agent-stop-btn" style="display:none">Stop</button>
             </span>
             <span id="resolved-toggle" style="display:none;">
                 <label style="cursor:pointer; font-weight:normal; text-transform:none; letter-spacing:normal;">
@@ -661,13 +675,15 @@
             openCount + ' open thread' + (openCount !== 1 ? 's' : '') + '</div>';
     }
 
-    function updateAgentIndicator(reviews) {
+    function updateAgentIndicator() {
         var indicator = document.getElementById('agent-indicator');
         if (!indicator) return;
-        var active = reviews.some(function(r) {
-            return r.filePath === filePath && r.agentActive;
-        });
-        indicator.style.display = active ? 'inline-flex' : 'none';
+        fetch('/api/agents?project=' + encodeURIComponent(qualifiedName))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                indicator.style.display = data.running ? 'inline-flex' : 'none';
+            })
+            .catch(function() {});
     }
 
     function refreshReview() {
@@ -677,7 +693,7 @@
                 var myReview = reviews.find(function(r) { return r.filePath === filePath; });
                 currentReviewAgentActive = myReview ? (myReview.agentActive || false) : false;
                 renderReviewBanner();
-                updateAgentIndicator(reviews);
+                updateAgentIndicator();
             })
             .catch(function(err) { console.error('Failed to refresh review:', err); });
     }
@@ -787,13 +803,20 @@
         return html;
     }
 
+    // Pre-launch agent so it's ready when the comment is submitted
+    function ensureAgent() {
+        fetch('/api/agents/start?project=' + encodeURIComponent(qualifiedName), {
+            method: 'POST'
+        }).catch(function() {}); // fire-and-forget
+    }
+
     // --- Reply form ---
     function toggleReplyForm(threadId) {
         var form = document.getElementById('reply-form-' + threadId);
         if (!form) return;
         var isVisible = form.style.display !== 'none';
         document.querySelectorAll('.reply-form').forEach(function(f) { f.style.display = 'none'; });
-        if (!isVisible) { form.style.display = ''; form.querySelector('textarea').focus(); }
+        if (!isVisible) { ensureAgent(); form.style.display = ''; form.querySelector('textarea').focus(); }
     }
     function hideReplyForm(threadId) {
         var form = document.getElementById('reply-form-' + threadId);
@@ -1038,6 +1061,7 @@
 
     // --- New thread form ---
     function showNewThreadForm(selectedText) {
+        ensureAgent();
         var container = document.getElementById('new-thread-form-container');
         container.innerHTML =
             '<div class="new-thread-form">' +
@@ -1279,6 +1303,25 @@
             });
     }
 
+    // --- Agent process status (for stop button) ---
+    function stopAgent() {
+        fetch('/api/agents/stop?project=' + encodeURIComponent(qualifiedName), {
+            method: 'POST'
+        }).then(function() {
+            refreshAgentStatus();
+        });
+    }
+
+    function refreshAgentStatus() {
+        fetch('/api/agents?project=' + encodeURIComponent(qualifiedName))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                var btn = document.getElementById('agent-stop-btn');
+                if (btn) btn.style.display = data.running ? 'inline' : 'none';
+            })
+            .catch(function() {});
+    }
+
     // SSE handlers
     onSSE(function(data) {
         if (data.type === 'comments' && data.project === qualifiedName) {
@@ -1287,6 +1330,9 @@
         }
         if (data.type === 'files' && data.project === qualifiedName) {
             debouncedRefresh('document', refreshDocument);
+        }
+        if (data.type === 'agents') {
+            debouncedRefresh('agents', refreshAgentStatus);
         }
     });
 
@@ -1301,6 +1347,7 @@
     renderThreads(threads || [], anchorLines || {});
     renderReviewBanner();
     refreshReview();
+    refreshAgentStatus();
 {{end}}
 
 {{template "layout" .}}

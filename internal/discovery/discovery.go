@@ -10,14 +10,40 @@ import (
 	"time"
 )
 
+// FileSource represents a set of files to display for a project.
+type FileSource struct {
+	Name     string   // display name (e.g., "thoughts", "docs")
+	Type     string   // "thoughts", "tree", "files"
+	RootPath string   // absolute path to tree root (for thoughts/tree types)
+	Files    []string // absolute paths (for "files" type)
+	Auto     bool     // true if auto-detected (thoughts/), false if user-added
+}
+
 type Project struct {
-	Name         string
-	Path         string
-	ThoughtsPath string
-	Git          *GitInfo
-	FileCount    int
-	Summary      string
-	LastModified time.Time
+	Name          string
+	Path          string // project root directory
+	Sources       []FileSource
+	Origin        string // "workspace" or "standalone"
+	WorkspacePath string // which workspace discovered this (empty for standalone)
+	Git           *GitInfo
+	FileCount     int
+	Summary       string
+	LastModified  time.Time
+}
+
+// ThoughtsPath returns the thoughts source root if present, empty string otherwise.
+func (p *Project) ThoughtsPath() string {
+	for _, s := range p.Sources {
+		if s.Type == "thoughts" {
+			return s.RootPath
+		}
+	}
+	return ""
+}
+
+// HasThoughts returns true if the project has a thoughts/ directory.
+func (p *Project) HasThoughts() bool {
+	return p.ThoughtsPath() != ""
 }
 
 func FindProjects(root string) ([]Project, error) {
@@ -45,9 +71,14 @@ func FindProjects(root string) ([]Project, error) {
 		}
 
 		project := Project{
-			Name:         entry.Name(),
-			Path:         projectPath,
-			ThoughtsPath: thoughtsPath,
+			Name: entry.Name(),
+			Path: projectPath,
+			Sources: []FileSource{{
+				Name:     "thoughts",
+				Type:     "thoughts",
+				RootPath: thoughtsPath,
+				Auto:     true,
+			}},
 		}
 		project.Git = GetGitInfo(projectPath)
 		project.FileCount = countMdFiles(thoughtsPath)
@@ -61,9 +92,14 @@ func FindProjects(root string) ([]Project, error) {
 	rootThoughts := filepath.Join(root, "thoughts")
 	if info, err := os.Stat(rootThoughts); err == nil && info.IsDir() {
 		project := Project{
-			Name:         "(root)",
-			Path:         root,
-			ThoughtsPath: rootThoughts,
+			Name: "(root)",
+			Path: root,
+			Sources: []FileSource{{
+				Name:     "thoughts",
+				Type:     "thoughts",
+				RootPath: rootThoughts,
+				Auto:     true,
+			}},
 		}
 		project.Git = nil // root isn't a git repo
 		project.FileCount = countMdFiles(rootThoughts)
@@ -112,9 +148,14 @@ func FindProjectsFast(root string) ([]Project, error) {
 		}
 
 		projects = append(projects, Project{
-			Name:         entry.Name(),
-			Path:         projectPath,
-			ThoughtsPath: thoughtsPath,
+			Name: entry.Name(),
+			Path: projectPath,
+			Sources: []FileSource{{
+				Name:     "thoughts",
+				Type:     "thoughts",
+				RootPath: thoughtsPath,
+				Auto:     true,
+			}},
 		})
 	}
 
@@ -122,9 +163,14 @@ func FindProjectsFast(root string) ([]Project, error) {
 	rootThoughts := filepath.Join(root, "thoughts")
 	if info, err := os.Stat(rootThoughts); err == nil && info.IsDir() {
 		projects = append(projects, Project{
-			Name:         "(root)",
-			Path:         root,
-			ThoughtsPath: rootThoughts,
+			Name: "(root)",
+			Path: root,
+			Sources: []FileSource{{
+				Name:     "thoughts",
+				Type:     "thoughts",
+				RootPath: rootThoughts,
+				Auto:     true,
+			}},
 		})
 	}
 

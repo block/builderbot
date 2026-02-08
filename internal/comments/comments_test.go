@@ -29,9 +29,14 @@ func newTestStore(t *testing.T) *Store {
 	c := cache.New(tmpDir)
 	c.SetProjects([]discovery.Project{
 		{
-			Name:         testProject,
-			Path:         projectDir,
-			ThoughtsPath: thoughtsDir,
+			Name: testProject,
+			Path: projectDir,
+			Sources: []discovery.FileSource{{
+				Name:     "thoughts",
+				Type:     "thoughts",
+				RootPath: thoughtsDir,
+				Auto:     true,
+			}},
 		},
 	})
 

@@ -127,7 +127,7 @@ func (c *Cache) RefreshProject(projectName string) {
 		return
 	}
 
-	files := scanProjectFiles(project.ThoughtsPath, projectName)
+	files := scanProjectFiles(project.ThoughtsPath(), projectName)
 	c.SetProjectFiles(projectName, files)
 
 	// Update project metadata

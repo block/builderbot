@@ -59,7 +59,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath := filepath.Join(project.ThoughtsPath, filePath)
+	fullPath := filepath.Join(project.ThoughtsPath(), filePath)
 	content, err := os.ReadFile(fullPath)
 	if err != nil {
 		http.NotFound(w, r)

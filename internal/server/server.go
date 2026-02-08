@@ -129,7 +129,7 @@ func (s *Server) populateProjects() {
 					}
 					filePaths := make([]string, limit)
 					for i, f := range cachedFiles[:limit] {
-						filePaths[i] = filepath.Join(p.ThoughtsPath, f.Path)
+						filePaths[i] = filepath.Join(p.ThoughtsPath(), f.Path)
 					}
 					summary = discovery.GenerateSummaryFromFiles(filePaths)
 				}
@@ -182,7 +182,6 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-
 	// Get files from cache
 	allFiles := s.cache.AllFiles(100)
 	files := make([]IndexFile, len(allFiles))
@@ -501,7 +500,7 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath := filepath.Join(project.ThoughtsPath, filePath)
+	fullPath := filepath.Join(project.ThoughtsPath(), filePath)
 
 	// Verify the file exists and is under the thoughts directory
 	if _, err := os.Stat(fullPath); err != nil {

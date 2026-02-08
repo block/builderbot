@@ -56,12 +56,17 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		fileMatches := make(map[string]*MatchedFile) // relPath -> match
 
 		// Search files in this project
-		filepath.Walk(project.ThoughtsPath, func(path string, info os.FileInfo, err error) error {
+		thoughtsPath := project.ThoughtsPath()
+		if thoughtsPath == "" {
+			continue
+		}
+
+		filepath.Walk(thoughtsPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
 				return nil
 			}
 
-			relPath, _ := filepath.Rel(project.ThoughtsPath, path)
+			relPath, _ := filepath.Rel(thoughtsPath, path)
 			fileName := filepath.Base(path)
 
 			fileType := classifyFile(relPath)

@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Info represents a running Claude agent.
@@ -13,8 +14,54 @@ type Info struct {
 	Prompt string
 }
 
-// FindActive returns a map from working directory path to active Claude agents.
+var (
+	mu     sync.RWMutex
+	cached map[string][]Info
+	stopCh chan struct{}
+)
+
+// StartPolling begins background polling for active agents every 5 seconds.
+func StartPolling() {
+	stopCh = make(chan struct{})
+	// Do an initial poll synchronously so the first read has data.
+	result := poll()
+	mu.Lock()
+	cached = result
+	mu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				result := poll()
+				mu.Lock()
+				cached = result
+				mu.Unlock()
+			}
+		}
+	}()
+}
+
+// StopPolling stops the background polling goroutine.
+func StopPolling() {
+	if stopCh != nil {
+		close(stopCh)
+	}
+}
+
+// FindActive returns the latest snapshot of active Claude agents.
+// Never blocks on process inspection; returns cached data from background poll.
 func FindActive() map[string][]Info {
+	mu.RLock()
+	defer mu.RUnlock()
+	return cached
+}
+
+func poll() map[string][]Info {
 	out, err := exec.Command("ps", "-eo", "pid,args").Output()
 	if err != nil {
 		return nil
@@ -52,7 +99,7 @@ func FindActive() map[string][]Info {
 		procs = append(procs, proc{pid: pid, prompt: prompt})
 	}
 
-	var mu sync.Mutex
+	var lmu sync.Mutex
 	var wg sync.WaitGroup
 	result := make(map[string][]Info)
 
@@ -67,9 +114,9 @@ func FindActive() map[string][]Info {
 			for _, line := range strings.Split(string(out), "\n") {
 				if strings.HasPrefix(line, "n/") {
 					dir := line[1:]
-					mu.Lock()
+					lmu.Lock()
 					result[dir] = append(result[dir], Info{PID: p.pid, Prompt: p.prompt})
-					mu.Unlock()
+					lmu.Unlock()
 					break
 				}
 			}

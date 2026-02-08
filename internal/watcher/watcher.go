@@ -69,8 +69,12 @@ func (w *Watcher) Start() error {
 
 	// Watch each project's thoughts directory and .birdseye/comments directory
 	for _, p := range w.cache.Projects() {
-		if err := w.watchDir(p.ThoughtsPath); err != nil {
-			log.Printf("Warning: could not watch %s: %v", p.ThoughtsPath, err)
+		tp := p.ThoughtsPath()
+		if tp == "" {
+			continue
+		}
+		if err := w.watchDir(tp); err != nil {
+			log.Printf("Warning: could not watch %s: %v", tp, err)
 		}
 		commentsDir := filepath.Join(p.Path, ".birdseye", "comments")
 		if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
@@ -224,7 +228,8 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 // findProjectForPath finds which project a path belongs to
 func (w *Watcher) findProjectForPath(path string) string {
 	for _, p := range w.cache.Projects() {
-		if strings.HasPrefix(path, p.ThoughtsPath+"/") || strings.HasPrefix(path, p.Path+"/.birdseye/") {
+		tp := p.ThoughtsPath()
+		if (tp != "" && strings.HasPrefix(path, tp+"/")) || strings.HasPrefix(path, p.Path+"/.birdseye/") {
 			return p.Name
 		}
 	}

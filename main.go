@@ -9,10 +9,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
 	"github.com/loganj/birdseye/internal/config"
@@ -23,20 +23,42 @@ import (
 
 func main() {
 	port := flag.Int("port", 8080, "port to listen on")
-	root := flag.String("root", "", "root directory to scan (default: ~/Development)")
+	root := flag.String("root", "", "root directory (deprecated, use config file)")
 	dev := flag.Bool("dev", false, "development mode: reload templates from disk on each request")
 	flag.Parse()
 
-	rootDir := *root
-	if rootDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Fatal(err)
-		}
-		rootDir = filepath.Join(home, "Development")
+	if flag.NArg() > 0 {
+		// Paths provided: open them in a running instance (Phase 6)
+		fmt.Fprintf(os.Stderr, "CLI open mode not yet implemented\n")
+		os.Exit(1)
 	}
 
+	runServe(*port, *dev, *root)
+}
+
+func runServe(port int, dev bool, rootOverride string) {
 	config.EnsureGlobalGitignore()
+
+	// Load or create config
+	cfgPath := config.DefaultConfigPath()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		log.Printf("Warning: could not load config: %v", err)
+		cfg = &config.Config{}
+	}
+
+	config.EnsureDefaults(cfg, rootOverride)
+
+	if err := config.Save(cfgPath, cfg); err != nil {
+		log.Printf("Warning: could not save config: %v", err)
+	}
+
+	// Use the first workspace path as root for now.
+	// Phase 3 will generalize to multi-workspace discovery.
+	rootDir := cfg.Workspaces[0].Path
+
+	agents.StartPolling()
+	defer agents.StopPolling()
 
 	c := cache.New(rootDir)
 	cs := comments.NewStore(c)
@@ -48,19 +70,19 @@ func main() {
 	defer w.Stop()
 
 	var templateDir string
-	if *dev {
+	if dev {
 		templateDir = "templates"
 	}
 
 	mcpHandler := mcpserver.NewHandler(cs, c)
 	srv := server.New(c, w, cs, mcpHandler, templateDir)
-	addr := fmt.Sprintf(":%d", *port)
+	addr := fmt.Sprintf(":%d", port)
 
 	// Write .mcp.json for MCP client discovery
 	mcpConfig := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"birdseye": map[string]interface{}{
-				"url": fmt.Sprintf("http://localhost:%d/mcp", *port),
+				"url": fmt.Sprintf("http://localhost:%d/mcp", port),
 			},
 		},
 	}

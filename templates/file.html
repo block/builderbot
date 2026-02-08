@@ -67,55 +67,9 @@
         white-space: nowrap;
     }
 
-    /* Copy dropdown */
-    .copy-dropdown { position: relative; flex-shrink: 0; }
-    .dropdown-toggle {
-        background: none;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-        padding: 5px 10px;
-        font-size: 0.8em;
-        color: #666;
-        cursor: pointer;
-        transition: background-color 0.15s, border-color 0.15s;
-        white-space: nowrap;
-    }
-    .dropdown-toggle:hover {
-        background: #f5f5f5;
-        border-color: #ccc;
-        color: #333;
-    }
-    .dropdown-toggle.copied {
-        background: #dafbe1;
-        border-color: #1a7f37;
-        color: #1a7f37;
-    }
-    .dropdown-menu {
-        display: none;
-        position: absolute;
-        right: 0;
-        top: calc(100% + 4px);
-        background: #fff;
-        border: 1px solid #ddd;
-        border-radius: 6px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        z-index: 100;
-        min-width: 160px;
-        padding: 4px 0;
-    }
-    .copy-dropdown.open .dropdown-menu { display: block; }
-    .dropdown-menu button {
-        display: block;
-        width: 100%;
-        text-align: left;
-        padding: 8px 12px;
-        border: none;
-        background: none;
-        font-size: 0.85em;
-        color: #333;
-        cursor: pointer;
-    }
-    .dropdown-menu button:hover { background: #f5f5f5; }
+    /* File page copy dropdown overrides */
+    .copy-dropdown { flex-shrink: 0; }
+    .file-toolbar .dropdown-toggle { padding: 5px 10px; font-size: 0.8em; white-space: nowrap; }
 
     .content {
         position: relative;

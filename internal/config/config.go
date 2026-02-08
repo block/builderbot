@@ -2,8 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // Config is the persistent birdseye configuration.
@@ -87,6 +90,53 @@ func Save(path string, cfg *Config) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// PortFilePath returns the path to the server port file.
+func PortFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "birdseye", "server.port")
+}
+
+// WritePortFile writes the server port to the port file.
+func WritePortFile(port int) error {
+	path := PortFilePath()
+	if path == "" {
+		return fmt.Errorf("cannot determine port file path")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(strconv.Itoa(port)), 0644)
+}
+
+// ReadPortFile reads the server port from the port file.
+// Returns 0 if the file does not exist or cannot be read.
+func ReadPortFile() int {
+	path := PortFilePath()
+	if path == "" {
+		return 0
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return port
+}
+
+// RemovePortFile removes the server port file.
+func RemovePortFile() {
+	path := PortFilePath()
+	if path != "" {
+		os.Remove(path)
+	}
 }
 
 // EnsureDefaults fills in default workspace if none are configured.

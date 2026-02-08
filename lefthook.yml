@@ -6,9 +6,9 @@ output:
 pre-push:
   parallel: true
   commands:
-    staged-fmt-check:
+    staged-fmt:
       root: "staged/"
-      run: just fmt-check
+      run: just fmt
     staged-lint:
       root: "staged/"
       run: just lint

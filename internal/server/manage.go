@@ -505,6 +505,199 @@ func (s *Server) handleRemoveSource(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleAPIOpen handles POST /api/open.
+// Given a filesystem path, it resolves it to an existing project/file or adds
+// it as a new standalone project/file source. Returns a JSON response with the
+// URL to navigate to.
+func (s *Server) handleAPIOpen(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if req.Path == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "path is required"})
+		return
+	}
+
+	absPath, err := filepath.Abs(expandTilde(req.Path))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid path: " + err.Error()})
+		return
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "path not found: " + absPath})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if info.IsDir() {
+		s.handleOpenDirectory(w, absPath)
+	} else {
+		s.handleOpenFile(w, absPath)
+	}
+}
+
+// handleOpenDirectory handles /api/open for a directory path.
+// Checks if it matches an existing project, otherwise adds as standalone.
+func (s *Server) handleOpenDirectory(w http.ResponseWriter, absPath string) {
+	// Check if this path is an existing project
+	for _, p := range s.cache.Projects() {
+		if filepath.Clean(p.Path) == filepath.Clean(absPath) {
+			json.NewEncoder(w).Encode(map[string]string{
+				"url": "/project/" + p.QualifiedName(),
+			})
+			return
+		}
+	}
+
+	// Check if already a standalone project in config
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	for _, pc := range s.cfg.Projects {
+		if filepath.Clean(pc.Path) == filepath.Clean(absPath) {
+			// Already in config but maybe not discovered yet; refresh and return
+			s.refreshAfterConfigChange()
+			for _, p := range s.cache.Projects() {
+				if filepath.Clean(p.Path) == filepath.Clean(absPath) {
+					json.NewEncoder(w).Encode(map[string]string{
+						"url": "/project/" + p.QualifiedName(),
+					})
+					return
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]string{
+				"url": "/",
+			})
+			return
+		}
+	}
+
+	// Not found - add as a new standalone project
+	s.cfg.Projects = append(s.cfg.Projects, config.ProjectConfig{Path: absPath})
+	s.refreshAfterConfigChange()
+
+	// Find the newly added project
+	for _, p := range s.cache.Projects() {
+		if filepath.Clean(p.Path) == filepath.Clean(absPath) {
+			log.Printf("Opened new standalone project: %s", absPath)
+			json.NewEncoder(w).Encode(map[string]string{
+				"url": "/project/" + p.QualifiedName(),
+			})
+			return
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"url": "/",
+	})
+}
+
+// handleOpenFile handles /api/open for a file path.
+// Checks if the file is in an existing project, otherwise adds it as a file
+// source to the appropriate project or creates a new standalone project.
+func (s *Server) handleOpenFile(w http.ResponseWriter, absPath string) {
+	// Check if this file is already in an existing project
+	for _, p := range s.cache.Projects() {
+		cleanProjectPath := filepath.Clean(p.Path)
+		if strings.HasPrefix(absPath, cleanProjectPath+"/") {
+			relPath, _ := filepath.Rel(cleanProjectPath, absPath)
+			// Check if the file is in the cache (already being tracked)
+			for _, f := range s.cache.ProjectFiles(p.QualifiedName()) {
+				if f.FullPath == relPath {
+					json.NewEncoder(w).Encode(map[string]string{
+						"url": "/file/" + p.QualifiedName() + "/" + relPath,
+					})
+					return
+				}
+			}
+			// File is under a known project but not tracked.
+			// If it's a .md file, add it as a file source.
+			if strings.HasSuffix(absPath, ".md") {
+				s.cfgMu.Lock()
+				added := s.addFileToConfig(&p, relPath)
+				if !added {
+					s.addSourceToConfig(&p, config.SourceConfig{
+						Type:  "files",
+						Files: []string{relPath},
+					})
+				}
+				s.refreshAfterConfigChange()
+				s.cfgMu.Unlock()
+
+				log.Printf("Added file %s to project %s", relPath, p.QualifiedName())
+				json.NewEncoder(w).Encode(map[string]string{
+					"url": "/file/" + p.QualifiedName() + "/" + relPath,
+				})
+				return
+			}
+			// Non-markdown file in known project - just navigate to project
+			json.NewEncoder(w).Encode(map[string]string{
+				"url": "/project/" + p.QualifiedName(),
+			})
+			return
+		}
+	}
+
+	// File is not under any known project. Create a standalone project from its
+	// parent directory and add the file.
+	if !strings.HasSuffix(absPath, ".md") {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "only .md files can be opened directly"})
+		return
+	}
+
+	projectDir := filepath.Dir(absPath)
+	fileName := filepath.Base(absPath)
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	// Add as standalone project with this file as a source
+	s.cfg.Projects = append(s.cfg.Projects, config.ProjectConfig{
+		Path: projectDir,
+		Sources: []config.SourceConfig{{
+			Type:  "files",
+			Files: []string{fileName},
+		}},
+	})
+	s.refreshAfterConfigChange()
+
+	// Find the new project and return its file URL
+	for _, p := range s.cache.Projects() {
+		if filepath.Clean(p.Path) == filepath.Clean(projectDir) {
+			log.Printf("Opened file %s in new project %s", fileName, p.QualifiedName())
+			json.NewEncoder(w).Encode(map[string]string{
+				"url": "/file/" + p.QualifiedName() + "/" + fileName,
+			})
+			return
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{
+		"url": "/",
+	})
+}
+
 // removeFileFromConfig removes a single file from a "files" source in config.
 // If the files source becomes empty, it is removed entirely.
 // Must be called with cfgMu held.

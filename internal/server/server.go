@@ -206,6 +206,7 @@ func (s *Server) routes() {
 	// Workspace and project management
 	s.mux.HandleFunc("/api/workspaces", s.handleAPIWorkspaces)
 	s.mux.HandleFunc("/api/sources", s.handleAPISources)
+	s.mux.HandleFunc("/api/open", s.handleAPIOpen)
 	// Comment and review API endpoints
 	s.mux.HandleFunc("/api/threads", s.handleAPIThreads)
 	s.mux.HandleFunc("/api/threads/", s.handleAPIThreadAction)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -8,7 +9,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -27,9 +31,8 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() > 0 {
-		// Paths provided: open them in a running instance (Phase 6)
-		fmt.Fprintf(os.Stderr, "CLI open mode not yet implemented\n")
-		os.Exit(1)
+		runOpen(flag.Args(), *port)
+		return
 	}
 
 	runServe(*port, *dev, *root)
@@ -81,6 +84,11 @@ func runServe(port int, dev bool, rootOverride string) {
 	mcpJSON, _ := json.MarshalIndent(mcpConfig, "", "  ")
 	os.WriteFile(".mcp.json", mcpJSON, 0644)
 
+	// Write port file for CLI discovery
+	if err := config.WritePortFile(port); err != nil {
+		log.Printf("Warning: could not write port file: %v", err)
+	}
+
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: srv,
@@ -100,8 +108,134 @@ func runServe(port int, dev bool, rootOverride string) {
 
 	<-done
 	fmt.Println("\nShutting down...")
+	config.RemovePortFile()
 	w.Stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	httpServer.Shutdown(ctx)
+}
+
+// runOpen opens paths in a running birdseye instance, starting the server if needed.
+func runOpen(paths []string, portFlag int) {
+	port := config.ReadPortFile()
+
+	// Check if server is already running at that port
+	if port > 0 && isServerRunning(port) {
+		openPaths(port, paths)
+		return
+	}
+
+	// No running server - start one on the fixed port
+	port = portFlag
+
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not determine executable path: %v\n", err)
+		os.Exit(1)
+	}
+
+	cmd := exec.Command(exe, fmt.Sprintf("-port=%d", port))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// Detach the child process so it survives parent exit
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not start server: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Release the child so it's not reaped when we exit
+	cmd.Process.Release()
+
+	fmt.Printf("Started birdseye server on port %d (pid %d)\n", port, cmd.Process.Pid)
+
+	// Wait for server to become ready
+	if !waitForServer(port, 10*time.Second) {
+		fmt.Fprintf(os.Stderr, "Error: server did not start within timeout\n")
+		os.Exit(1)
+	}
+
+	openPaths(port, paths)
+}
+
+// openPaths sends each path to the /api/open endpoint and opens the returned URL in a browser.
+func openPaths(port int, paths []string) {
+	for _, arg := range paths {
+		absPath, err := filepath.Abs(arg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not resolve path %q: %v\n", arg, err)
+			continue
+		}
+
+		body, _ := json.Marshal(map[string]string{"path": absPath})
+		resp, err := http.Post(
+			fmt.Sprintf("http://localhost:%d/api/open", port),
+			"application/json",
+			bytes.NewReader(body),
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not contact server for %q: %v\n", arg, err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			var errResp struct {
+				Error string `json:"error"`
+			}
+			json.NewDecoder(resp.Body).Decode(&errResp)
+			resp.Body.Close()
+			fmt.Fprintf(os.Stderr, "Warning: server error for %q: %s\n", arg, errResp.Error)
+			continue
+		}
+
+		var result struct {
+			URL string `json:"url"`
+		}
+		json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+
+		if result.URL != "" {
+			fullURL := fmt.Sprintf("http://localhost:%d%s", port, result.URL)
+			fmt.Printf("Opening %s\n", fullURL)
+			openBrowser(fullURL)
+		}
+	}
+}
+
+// isServerRunning checks if a birdseye server is responding at the given port.
+func isServerRunning(port int) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/api/projects", port))
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// waitForServer polls the server until it responds or the timeout expires.
+func waitForServer(port int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if isServerRunning(port) {
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return false
+}
+
+// openBrowser opens the given URL in the default browser.
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	default:
+		fmt.Printf("Open in browser: %s\n", url)
+		return
+	}
+	cmd.Start()
 }

@@ -74,11 +74,10 @@ ci: fmt-check lint typecheck
 # Setup & Maintenance
 # ============================================================================
 
-# First-time setup: install all dependencies and git hooks
+# First-time setup: install all dependencies
 install:
     npm install
     cd src-tauri && cargo fetch
-    lefthook install
 
 # Delete all build artifacts and dependencies
 clean:

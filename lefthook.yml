@@ -1,0 +1,17 @@
+skip_lfs: true
+output:
+  - success
+  - failure
+
+pre-push:
+  parallel: true
+  commands:
+    staged-fmt:
+      root: "staged/"
+      run: just fmt
+    staged-lint:
+      root: "staged/"
+      run: just lint
+    staged-typecheck:
+      root: "staged/"
+      run: just typecheck

@@ -220,6 +220,29 @@
         background: #fff;
         border-color: #656d76;
     }
+    .agent-status .context-bar {
+        width: 60px;
+        height: 6px;
+        background: #c8e6c9;
+        border-radius: 3px;
+        overflow: hidden;
+    }
+    .agent-status .context-bar-fill {
+        height: 100%;
+        background: #2da44e;
+        border-radius: 3px;
+        transition: width 0.3s ease;
+    }
+    .agent-status .context-bar-fill.warning { background: #d29922; }
+    .agent-status .context-bar-fill.critical { background: #cf222e; }
+    .agent-status .context-label {
+        font-size: 0.85em;
+        color: #656d76;
+        cursor: default;
+    }
+    .agent-status .context-bar {
+        cursor: default;
+    }
     .add-source-btn {
         display: inline-block;
         color: #aaa;
@@ -452,6 +475,18 @@
     }
 
     // --- Agent controls ---
+    var agentPollTimer = null;
+
+    function contextBarColorClass(pct) {
+        if (pct >= 85) return 'critical';
+        if (pct >= 60) return 'warning';
+        return '';
+    }
+
+    function formatTokenCount(n) {
+        return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
     function refreshAgentControls() {
         fetch('/api/agents?project=' + encodeURIComponent(qualifiedName))
             .then(function(r) { return r.json(); })
@@ -459,16 +494,33 @@
                 var el = document.getElementById('agent-controls');
                 if (!el) return;
                 if (data.running) {
+                    var pct = Math.round(data.contextPercent || 0);
+                    var colorClass = contextBarColorClass(pct);
+                    var costStr = data.totalCostUSD > 0 ? ' · $' + data.totalCostUSD.toFixed(2) : '';
+                    var tooltip = formatTokenCount(data.contextUsed || 0) + ' / ' + formatTokenCount(data.contextWindow || 0) + ' tokens';
                     el.innerHTML = '<div class="agent-status">' +
                         '<span class="agent-dot"></span>' +
                         '<span>Agent active</span>' +
+                        '<div class="context-bar" title="' + tooltip + '"><div class="context-bar-fill' + (colorClass ? ' ' + colorClass : '') + '" style="width:' + pct + '%"></div></div>' +
+                        '<span class="context-label" title="' + tooltip + '">' + pct + '% context' + costStr + '</span>' +
                         '<button onclick="stopAgent()" class="agent-stop-btn">Stop</button>' +
                         '</div>';
+                    startAgentPolling();
                 } else {
                     el.innerHTML = '';
+                    stopAgentPolling();
                 }
             })
             .catch(function() {});
+    }
+
+    function startAgentPolling() {
+        if (agentPollTimer) return;
+        agentPollTimer = setInterval(refreshAgentControls, 5000);
+    }
+
+    function stopAgentPolling() {
+        if (agentPollTimer) { clearInterval(agentPollTimer); agentPollTimer = null; }
     }
 
     function stopAgent() {

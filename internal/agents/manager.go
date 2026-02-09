@@ -22,6 +22,12 @@ type Agent struct {
 	cmd         *exec.Cmd
 	done        chan struct{} // closed when process exits
 	exitErr     error         // set after process exits
+
+	mu            sync.Mutex
+	contextWindow int     // from result message or default 200000
+	contextUsed   int     // latest effective input tokens
+	totalCostUSD  float64 // running cost
+	numTurns      int     // number of assistant turns
 }
 
 // Manager manages Claude Code agent processes, one per project.
@@ -99,7 +105,11 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create log file: %w", err)
 	}
-	cmd.Stdout = logFile
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		logFile.Close()
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
 	cmd.Stderr = logFile
 
 	if err := cmd.Start(); err != nil {
@@ -108,13 +118,17 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 	}
 
 	agent := &Agent{
-		Project:     projectName,
-		ProjectPath: proj.Path,
-		PID:         cmd.Process.Pid,
-		StartedAt:   time.Now(),
-		cmd:         cmd,
-		done:        make(chan struct{}),
+		Project:       projectName,
+		ProjectPath:   proj.Path,
+		PID:           cmd.Process.Pid,
+		StartedAt:     time.Now(),
+		cmd:           cmd,
+		done:          make(chan struct{}),
+		contextWindow: 200000, // default for opus, refined when result arrives
 	}
+
+	// Parse NDJSON stream in background, writing through to log file
+	go agent.parseStream(stdout, logFile)
 	m.agents[projectName] = agent
 
 	log.Printf("Agent started for %s (PID %d)", projectName, agent.PID)
@@ -179,10 +193,15 @@ func (m *Manager) Stop(projectName string) error {
 
 // AgentStatus contains the status of an agent for a project.
 type AgentStatus struct {
-	Project   string    `json:"project"`
-	PID       int       `json:"pid"`
-	StartedAt time.Time `json:"startedAt"`
-	Running   bool      `json:"running"`
+	Project        string    `json:"project"`
+	PID            int       `json:"pid"`
+	StartedAt      time.Time `json:"startedAt"`
+	Running        bool      `json:"running"`
+	ContextWindow  int       `json:"contextWindow"`
+	ContextUsed    int       `json:"contextUsed"`
+	ContextPercent float64   `json:"contextPercent"`
+	TotalCostUSD   float64   `json:"totalCostUSD"`
+	NumTurns       int       `json:"numTurns"`
 }
 
 // Status returns the agent status for a project, or nil if no agent.
@@ -202,11 +221,28 @@ func (m *Manager) Status(projectName string) *AgentStatus {
 	default:
 	}
 
+	agent.mu.Lock()
+	contextWindow := agent.contextWindow
+	contextUsed := agent.contextUsed
+	totalCostUSD := agent.totalCostUSD
+	numTurns := agent.numTurns
+	agent.mu.Unlock()
+
+	var contextPercent float64
+	if contextWindow > 0 {
+		contextPercent = float64(contextUsed) / float64(contextWindow) * 100
+	}
+
 	return &AgentStatus{
-		Project:   agent.Project,
-		PID:       agent.PID,
-		StartedAt: agent.StartedAt,
-		Running:   running,
+		Project:        agent.Project,
+		PID:            agent.PID,
+		StartedAt:      agent.StartedAt,
+		Running:        running,
+		ContextWindow:  contextWindow,
+		ContextUsed:    contextUsed,
+		ContextPercent: contextPercent,
+		TotalCostUSD:   totalCostUSD,
+		NumTurns:       numTurns,
 	}
 }
 

@@ -13,9 +13,6 @@ import { load, type Store } from '@tauri-apps/plugin-store';
 // Singleton store instance
 let store: Store | null = null;
 
-// Track active key change listeners for cleanup
-const keyChangeUnlisteners: Map<string, () => void> = new Map();
-
 /**
  * Initialize the persistent store.
  * Must be called once at app startup before using get/set.
@@ -23,9 +20,6 @@ const keyChangeUnlisteners: Map<string, () => void> = new Map();
 export async function initPersistentStore(): Promise<void> {
   if (store) return;
 
-  // Load or create the store file in the app data directory
-  // The file is automatically saved when values change
-  // We use overrideDefaults to load existing values from disk
   store = await load('preferences.json', {
     defaults: {},
     autoSave: true,
@@ -69,44 +63,4 @@ export async function deleteStoreValue(key: string): Promise<void> {
   }
 
   await store.delete(key);
-}
-
-/**
- * Check if the store has been initialized.
- */
-export function isStoreInitialized(): boolean {
-  return store !== null;
-}
-
-/**
- * Subscribe to changes for a specific key.
- * The callback is called whenever the key's value changes.
- * Returns an unsubscribe function.
- */
-export async function onKeyChange<T>(
-  key: string,
-  callback: (value: T | undefined) => void
-): Promise<() => void> {
-  if (!store) {
-    console.warn('[PersistentStore] Store not initialized, call initPersistentStore() first');
-    return () => {};
-  }
-
-  // Remove existing listener for this key if any
-  const existingUnlisten = keyChangeUnlisteners.get(key);
-  if (existingUnlisten) {
-    existingUnlisten();
-    keyChangeUnlisteners.delete(key);
-  }
-
-  // Subscribe to changes
-  const unlisten = await store.onKeyChange<T>(key, callback);
-
-  // Track for cleanup
-  keyChangeUnlisteners.set(key, unlisten);
-
-  return () => {
-    unlisten();
-    keyChangeUnlisteners.delete(key);
-  };
 }

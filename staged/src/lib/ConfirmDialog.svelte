@@ -2,12 +2,11 @@
   ConfirmDialog.svelte - Themed confirmation dialog
 
   A modal dialog for confirming destructive actions, styled to match the app theme.
-  Replaces the native system dialog for a consistent look.
 
   Usage:
     <ConfirmDialog
       title="Delete Branch"
-      message="Are you sure you want to delete this branch?"
+      message="Are you sure?"
       confirmLabel="Delete"
       danger={true}
       onConfirm={() => doDelete()}

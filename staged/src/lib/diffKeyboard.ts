@@ -6,10 +6,12 @@
  * - K/Up: Jump to previous diff hunk
  * - Ctrl+N: Scroll down
  * - Ctrl+P: Scroll up
+ * - I: Add comment on current hunk
+ *
+ * Uses plain DOM event listeners (no external keyboard service dependency).
  */
 
 import type { Alignment } from './types';
-import { registerShortcuts, type Shortcut } from './services/keyboard';
 
 export interface DiffNavConfig {
   scrollAmount: number; // pixels per keypress for smooth scroll
@@ -145,50 +147,58 @@ function goToPreviousHunk(config: DiffNavConfig): boolean {
 
 /**
  * Set up diff navigation keyboard shortcuts.
- * Returns a cleanup function.
+ * Attaches a keydown listener to `window` and returns a cleanup function.
  */
 export function setupDiffKeyboardNav(config: Partial<DiffNavConfig> = {}): () => void {
   const cfg = { ...DEFAULT_CONFIG, ...config };
 
-  const shortcuts: Shortcut[] = [
-    {
-      id: 'diff-next-hunk',
-      keys: ['j', 'ArrowDown'],
-      description: 'Next diff hunk',
-      category: 'navigation',
-      handler: () => goToNextHunk(cfg),
-    },
-    {
-      id: 'diff-prev-hunk',
-      keys: ['k', 'ArrowUp'],
-      description: 'Previous diff hunk',
-      category: 'navigation',
-      handler: () => goToPreviousHunk(cfg),
-    },
-    {
-      id: 'diff-scroll-down',
-      keys: ['n'],
-      modifiers: { ctrl: true },
-      description: 'Scroll down',
-      category: 'navigation',
-      handler: () => cfg.scrollBy(cfg.scrollAmount),
-    },
-    {
-      id: 'diff-scroll-up',
-      keys: ['p'],
-      modifiers: { ctrl: true },
-      description: 'Scroll up',
-      category: 'navigation',
-      handler: () => cfg.scrollBy(-cfg.scrollAmount),
-    },
-    {
-      id: 'diff-add-comment',
-      keys: ['i'],
-      description: 'Add comment on hunk',
-      category: 'comments',
-      handler: () => commentOnCurrentHunk(cfg),
-    },
-  ];
+  function handleKeydown(event: KeyboardEvent): void {
+    // Skip when focus is in an input or textarea
+    const target = event.target as HTMLElement;
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
 
-  return registerShortcuts(shortcuts);
+    const key = event.key.toLowerCase();
+    const ctrl = event.ctrlKey;
+    const meta = event.metaKey;
+    const shift = event.shiftKey;
+    const alt = event.altKey;
+
+    // J or ArrowDown — next hunk (no modifiers)
+    if ((key === 'j' || key === 'arrowdown') && !ctrl && !meta && !shift && !alt) {
+      if (goToNextHunk(cfg)) event.preventDefault();
+      return;
+    }
+
+    // K or ArrowUp — previous hunk (no modifiers)
+    if ((key === 'k' || key === 'arrowup') && !ctrl && !meta && !shift && !alt) {
+      if (goToPreviousHunk(cfg)) event.preventDefault();
+      return;
+    }
+
+    // Ctrl+N — scroll down
+    if (key === 'n' && ctrl && !meta && !shift && !alt) {
+      event.preventDefault();
+      cfg.scrollBy(cfg.scrollAmount);
+      return;
+    }
+
+    // Ctrl+P — scroll up
+    if (key === 'p' && ctrl && !meta && !shift && !alt) {
+      event.preventDefault();
+      cfg.scrollBy(-cfg.scrollAmount);
+      return;
+    }
+
+    // I — add comment on current hunk (no modifiers)
+    if (key === 'i' && !ctrl && !meta && !shift && !alt) {
+      if (commentOnCurrentHunk(cfg)) event.preventDefault();
+      return;
+    }
+  }
+
+  window.addEventListener('keydown', handleKeydown);
+
+  return () => {
+    window.removeEventListener('keydown', handleKeydown);
+  };
 }

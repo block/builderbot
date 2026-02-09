@@ -1,13 +1,9 @@
 /**
  * Global styles for Staged
  *
- * Uses CSS custom properties defined by the theme system.
- * See src/lib/theme.ts for the theme definition.
- *
- * Design philosophy:
- * - The code IS the interface - minimize chrome
- * - Boundaries through subtle contrast, not heavy borders
- * - Horizontal space is precious - every pixel counts
+ * Uses CSS custom properties for theming. The values below are the
+ * laserwave dark defaults. On startup, createAdaptiveTheme() overwrites
+ * them with colors derived from the user's selected syntax theme.
  */
 
 * {
@@ -15,16 +11,7 @@
 }
 
 :root {
-  /*
-   * Theme colors - Default: laserwave
-   * 
-   * These are pre-computed from createAdaptiveTheme() for the default syntax theme.
-   * They're immediately overwritten by the adaptive theme system on mount, but
-   * having them here prevents any flash of unstyled content.
-   * 
-   * To regenerate: run the theme through createAdaptiveTheme(bg, fg, comment)
-   * Laserwave: bg=#27212e, fg=#ffffff, comment=#91889b
-   */
+  /* ── Static defaults (overwritten by adaptive theme on init) ── */
   --theme-is-dark: 1;
 
   --bg-primary: #27212e;
@@ -52,6 +39,13 @@
   --diff-removed-bg: rgba(248, 81, 73, 0.08);
   --diff-changed-bg: rgba(255, 255, 255, 0.04);
   --diff-range-border: #524d58;
+  --diff-comment-highlight: rgba(88, 166, 255, 0.5);
+
+  --search-match-bg: rgba(250, 200, 50, 0.35);
+  --search-current-match-bg: rgba(255, 150, 50, 0.5);
+
+  --annotation-overlay-bg: rgba(0, 0, 0, 0.5);
+  --annotation-border: rgba(255, 255, 255, 0.1);
 
   --ui-accent: #3fb950;
   --ui-accent-hover: #2ea043;
@@ -61,23 +55,21 @@
 
   --scrollbar-thumb: #47424d;
   --scrollbar-thumb-hover: #5d5962;
+  --scrollbar-thumb-transparent: rgba(255, 255, 255, 0.15);
+  --scrollbar-thumb-hover-transparent: rgba(255, 255, 255, 0.25);
 
   --shadow-overlay: rgba(0, 0, 0, 0.6);
   --shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.4);
   --shadow-glow: 0 0 0 1px rgba(255, 255, 255, 0.1);
 
-  /* 
-   * Size scale - all sizes derive from --size-base
-   * Adjust --size-base to scale the entire UI
-   */
+  /* ── Sizing (not theme-dependent) ── */
   --size-base: 13px;
-  --size-xs: calc(var(--size-base) * 0.846); /* ~11px */
-  --size-sm: calc(var(--size-base) * 0.923); /* ~12px */
-  --size-md: var(--size-base); /* 13px */
-  --size-lg: calc(var(--size-base) * 1.077); /* ~14px */
-  --size-xl: calc(var(--size-base) * 1.231); /* ~16px */
+  --size-xs: calc(var(--size-base) * 0.846);
+  --size-sm: calc(var(--size-base) * 0.923);
+  --size-md: var(--size-base);
+  --size-lg: calc(var(--size-base) * 1.077);
+  --size-xl: calc(var(--size-base) * 1.231);
 
-  /* Typography */
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
   font-size: var(--size-md);
   line-height: 1.5;
@@ -98,7 +90,6 @@ body {
   min-height: 100vh;
 }
 
-/* Minimal scrollbar - track is invisible, just show thumb */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -115,4 +106,22 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
+}
+
+/* ── Shared animations ── */
+
+.spinner,
+.spinning {
+  animation: spin 1s linear infinite;
+  transform-origin: center;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }

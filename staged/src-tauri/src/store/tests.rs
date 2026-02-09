@@ -1,0 +1,866 @@
+//! Tests for the store module.
+
+use super::models::*;
+use super::Store;
+
+#[test]
+fn test_create_and_get_project() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let fetched = store.get_project(&project.id).unwrap().unwrap();
+    assert_eq!(fetched.repo_path, "/tmp/test-repo");
+    assert!(fetched.subpath.is_none());
+}
+
+#[test]
+fn test_project_with_subpath() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/monorepo").with_subpath("packages/app".to_string());
+    store.create_project(&project).unwrap();
+
+    let fetched = store.get_project(&project.id).unwrap().unwrap();
+    assert_eq!(fetched.subpath.as_deref(), Some("packages/app"));
+}
+
+#[test]
+fn test_project_unique_repo_path() {
+    let store = Store::in_memory().unwrap();
+    let p1 = Project::new("/tmp/test-repo");
+    let p2 = Project::new("/tmp/test-repo");
+    store.create_project(&p1).unwrap();
+    assert!(store.create_project(&p2).is_err());
+}
+
+#[test]
+fn test_list_projects() {
+    let store = Store::in_memory().unwrap();
+    store.create_project(&Project::new("/tmp/a")).unwrap();
+    store.create_project(&Project::new("/tmp/b")).unwrap();
+    let projects = store.list_projects().unwrap();
+    assert_eq!(projects.len(), 2);
+}
+
+#[test]
+fn test_delete_project_cascades() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // Create a workdir assigned to this branch
+    let workdir = Workdir::new(&project.id, "/tmp/wt").with_branch(&branch.id);
+    store.create_workdir(&workdir).unwrap();
+
+    let session = Session::new_running("do something");
+    store.create_session(&session).unwrap();
+
+    // Link the session to a commit on this branch
+    let commit = Commit::new_with_sha(&branch.id, "abc123").with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+
+    store.delete_project(&project.id).unwrap();
+
+    // Branch cascades from project, commits cascade from branch
+    assert!(store.get_branch(&branch.id).unwrap().is_none());
+    assert!(store.get_commit(&commit.id).unwrap().is_none());
+    // Workdir cascades from project
+    assert!(store.get_workdir(&workdir.id).unwrap().is_none());
+    // Session is still running, so the cleanup trigger leaves it alone
+    assert!(store.get_session(&session.id).unwrap().is_some());
+}
+
+#[test]
+fn test_branch_crud() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let branch = Branch::new(&project.id, "feature", "main").with_pr(42);
+    store.create_branch(&branch).unwrap();
+
+    let fetched = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(fetched.branch_name, "feature");
+    assert_eq!(fetched.pr_number, Some(42));
+
+    store.update_branch_base(&branch.id, "develop").unwrap();
+    let updated = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(updated.base_branch, "develop");
+}
+
+#[test]
+fn test_session_lifecycle() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("fix the bug");
+    store.create_session(&session).unwrap();
+
+    // Running
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.status, SessionStatus::Running);
+
+    // Complete
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .unwrap();
+    let completed = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(completed.status, SessionStatus::Completed);
+    assert!(completed.error_message.is_none());
+}
+
+#[test]
+fn test_session_error() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("do stuff");
+    store.create_session(&session).unwrap();
+
+    store
+        .update_session_status(&session.id, SessionStatus::Error, Some("boom"))
+        .unwrap();
+    let failed = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(failed.status, SessionStatus::Error);
+    assert_eq!(failed.error_message.as_deref(), Some("boom"));
+}
+
+#[test]
+fn test_session_error_message_ignored_for_non_error() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("do stuff");
+    store.create_session(&session).unwrap();
+
+    // Even if error_message is passed, it's ignored for non-Error status
+    store
+        .update_session_status(
+            &session.id,
+            SessionStatus::Completed,
+            Some("should be ignored"),
+        )
+        .unwrap();
+    let completed = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(completed.status, SessionStatus::Completed);
+    assert!(completed.error_message.is_none());
+}
+
+#[test]
+fn test_transition_from_running() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("race me");
+    store.create_session(&session).unwrap();
+
+    // Simulate: cancel_session sets status to cancelled via direct update
+    store
+        .update_session_status(&session.id, SessionStatus::Cancelled, None)
+        .unwrap();
+    let after_cancel = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(after_cancel.status, SessionStatus::Cancelled);
+
+    // Simulate: background thread tries to set completed — should be a no-op
+    let transitioned = store
+        .transition_from_running(&session.id, SessionStatus::Completed, None)
+        .unwrap();
+    assert!(!transitioned);
+
+    // Status is still cancelled, not overwritten
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Cancelled);
+}
+
+#[test]
+fn test_transition_from_running_succeeds_when_running() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("happy path");
+    store.create_session(&session).unwrap();
+
+    // No concurrent cancel — transition should succeed
+    let transitioned = store
+        .transition_from_running(&session.id, SessionStatus::Completed, None)
+        .unwrap();
+    assert!(transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Completed);
+}
+
+#[test]
+fn test_session_messages() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test");
+    store.create_session(&session).unwrap();
+
+    let id1 = store
+        .add_session_message(&session.id, MessageRole::User, "hello")
+        .unwrap();
+    let id2 = store
+        .add_session_message(&session.id, MessageRole::Assistant, "hi there")
+        .unwrap();
+
+    let all = store.get_session_messages(&session.id).unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].role, MessageRole::User);
+    assert_eq!(all[1].role, MessageRole::Assistant);
+
+    // Test since (inclusive — re-fetches id1 plus anything after it)
+    let since = store.get_session_messages_since(&session.id, id1).unwrap();
+    assert_eq!(since.len(), 2);
+    assert_eq!(since[0].id, id1);
+    assert_eq!(since[1].id, id2);
+}
+
+// =============================================================================
+// Workdirs
+// =============================================================================
+
+#[test]
+fn test_workdir_crud() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let workdir = Workdir::new(&project.id, "/tmp/wt/feature");
+    store.create_workdir(&workdir).unwrap();
+
+    let fetched = store.get_workdir(&workdir.id).unwrap().unwrap();
+    assert_eq!(fetched.path, "/tmp/wt/feature");
+    assert!(fetched.branch_id.is_none());
+}
+
+#[test]
+fn test_workdir_assign_and_release() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let workdir = Workdir::new(&project.id, "/tmp/wt/feature");
+    store.create_workdir(&workdir).unwrap();
+
+    // Assign
+    store.assign_workdir(&workdir.id, &branch.id).unwrap();
+    let assigned = store.get_workdir(&workdir.id).unwrap().unwrap();
+    assert_eq!(assigned.branch_id.as_deref(), Some(branch.id.as_str()));
+
+    // Look up by branch
+    let by_branch = store.get_workdir_for_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(by_branch.id, workdir.id);
+
+    // Release
+    store.release_workdir(&workdir.id).unwrap();
+    let released = store.get_workdir(&workdir.id).unwrap().unwrap();
+    assert!(released.branch_id.is_none());
+
+    // No longer found by branch
+    assert!(store.get_workdir_for_branch(&branch.id).unwrap().is_none());
+}
+
+#[test]
+fn test_workdir_find_available() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let w1 = Workdir::new(&project.id, "/tmp/wt/1").with_branch(&branch.id);
+    let w2 = Workdir::new(&project.id, "/tmp/wt/2");
+    store.create_workdir(&w1).unwrap();
+    store.create_workdir(&w2).unwrap();
+
+    // w1 is occupied, w2 is available
+    let available = store.find_available_workdir(&project.id).unwrap().unwrap();
+    assert_eq!(available.id, w2.id);
+}
+
+#[test]
+fn test_workdir_find_available_none() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let w1 = Workdir::new(&project.id, "/tmp/wt/1").with_branch(&branch.id);
+    store.create_workdir(&w1).unwrap();
+
+    // All occupied
+    assert!(store.find_available_workdir(&project.id).unwrap().is_none());
+}
+
+#[test]
+fn test_workdir_unique_path_per_project() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let w1 = Workdir::new(&project.id, "/tmp/wt/1");
+    let w2 = Workdir::new(&project.id, "/tmp/wt/1");
+    store.create_workdir(&w1).unwrap();
+    assert!(store.create_workdir(&w2).is_err());
+}
+
+#[test]
+fn test_workdir_branch_id_nulled_on_branch_delete() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let workdir = Workdir::new(&project.id, "/tmp/wt").with_branch(&branch.id);
+    store.create_workdir(&workdir).unwrap();
+
+    // Delete branch — workdir should remain but with branch_id = NULL
+    store.delete_branch(&branch.id).unwrap();
+    let after = store.get_workdir(&workdir.id).unwrap().unwrap();
+    assert!(after.branch_id.is_none());
+}
+
+#[test]
+fn test_list_workdirs_for_project() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let w1 = Workdir::new(&project.id, "/tmp/wt/1");
+    let w2 = Workdir::new(&project.id, "/tmp/wt/2");
+    store.create_workdir(&w1).unwrap();
+    store.create_workdir(&w2).unwrap();
+
+    let workdirs = store.list_workdirs_for_project(&project.id).unwrap();
+    assert_eq!(workdirs.len(), 2);
+}
+
+// =============================================================================
+// Commits
+// =============================================================================
+
+#[test]
+fn test_commit_with_sha() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let session = Session::new_running("first commit");
+    store.create_session(&session).unwrap();
+
+    let commit = Commit::new_with_sha(&branch.id, "aaa111").with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+
+    // Look up by id
+    let fetched = store.get_commit(&commit.id).unwrap().unwrap();
+    assert_eq!(fetched.sha.as_deref(), Some("aaa111"));
+    assert_eq!(fetched.session_id.as_deref(), Some(session.id.as_str()));
+
+    // Look up by sha
+    let by_sha = store
+        .get_commit_by_sha(&branch.id, "aaa111")
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_sha.id, commit.id);
+
+    // Unknown sha returns None
+    let missing = store.get_commit_by_sha(&branch.id, "zzz999").unwrap();
+    assert!(missing.is_none());
+}
+
+#[test]
+fn test_commit_pending_then_landed() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let session = Session::new_running("working on it");
+    store.create_session(&session).unwrap();
+
+    // Create pending commit (no SHA yet)
+    let commit = Commit::new_pending(&branch.id).with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+
+    let pending = store.get_commit(&commit.id).unwrap().unwrap();
+    assert!(pending.sha.is_none());
+    assert_eq!(pending.session_id.as_deref(), Some(session.id.as_str()));
+
+    // Listed in branch commits
+    let commits = store.list_commits_for_branch(&branch.id).unwrap();
+    assert_eq!(commits.len(), 1);
+    assert!(commits[0].sha.is_none());
+
+    // Commit lands in git — update SHA
+    store.update_commit_sha(&commit.id, "bbb222").unwrap();
+
+    let landed = store.get_commit(&commit.id).unwrap().unwrap();
+    assert_eq!(landed.sha.as_deref(), Some("bbb222"));
+
+    // Can now look up by sha
+    let by_sha = store
+        .get_commit_by_sha(&branch.id, "bbb222")
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_sha.id, commit.id);
+}
+
+#[test]
+fn test_commit_unique_sha_per_branch() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let c1 = Commit::new_with_sha(&branch.id, "aaa111");
+    let c2 = Commit::new_with_sha(&branch.id, "aaa111");
+    store.create_commit(&c1).unwrap();
+    assert!(store.create_commit(&c2).is_err());
+
+    // Multiple pending commits (sha = NULL) are allowed
+    let p1 = Commit::new_pending(&branch.id);
+    let p2 = Commit::new_pending(&branch.id);
+    store.create_commit(&p1).unwrap();
+    store.create_commit(&p2).unwrap();
+}
+
+#[test]
+fn test_delete_branch_cascades_commits() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let session = Session::new_running("test");
+    store.create_session(&session).unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::User, "hi")
+        .unwrap();
+
+    let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+
+    let note = Note::new(&branch.id, "Note", "some content");
+    store.create_note(&note).unwrap();
+
+    store.delete_branch(&branch.id).unwrap();
+
+    // Session is still running, so the cleanup trigger leaves it alone
+    assert!(store.get_session(&session.id).unwrap().is_some());
+    assert!(!store.get_session_messages(&session.id).unwrap().is_empty());
+    // Commits and notes cascade from branch
+    assert!(store.get_commit(&commit.id).unwrap().is_none());
+    assert!(store.get_note(&note.id).unwrap().is_none());
+}
+
+// =============================================================================
+// Session cleanup triggers
+// =============================================================================
+
+#[test]
+fn test_completed_session_cleaned_up_on_branch_delete() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // Completed session linked to a commit
+    let session = Session::new_running("make changes");
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .unwrap();
+
+    let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+
+    store.delete_branch(&branch.id).unwrap();
+
+    // Commit cascaded, trigger cleaned up the session + its messages
+    assert!(store.get_commit(&commit.id).unwrap().is_none());
+    assert!(store.get_session(&session.id).unwrap().is_none());
+}
+
+#[test]
+fn test_session_not_cleaned_up_if_still_referenced() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch_a = Branch::new(&project.id, "feature-a", "main");
+    let branch_b = Branch::new(&project.id, "feature-b", "main");
+    store.create_branch(&branch_a).unwrap();
+    store.create_branch(&branch_b).unwrap();
+
+    // Same session referenced by commits on two branches
+    let session = Session::new_running("shared work");
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .unwrap();
+
+    let commit_a = Commit::new_with_sha(&branch_a.id, "aaa").with_session(&session.id);
+    let commit_b = Commit::new_with_sha(&branch_b.id, "bbb").with_session(&session.id);
+    store.create_commit(&commit_a).unwrap();
+    store.create_commit(&commit_b).unwrap();
+
+    // Delete branch_a — session still referenced by branch_b's commit
+    store.delete_branch(&branch_a.id).unwrap();
+    assert!(store.get_session(&session.id).unwrap().is_some());
+
+    // Delete branch_b — now the session is unreferenced and gets cleaned up
+    store.delete_branch(&branch_b.id).unwrap();
+    assert!(store.get_session(&session.id).unwrap().is_none());
+}
+
+#[test]
+fn test_running_session_not_cleaned_up() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // Running session linked to a commit
+    let session = Session::new_running("still working");
+    store.create_session(&session).unwrap();
+
+    let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+
+    store.delete_branch(&branch.id).unwrap();
+
+    // Session is still running — trigger leaves it alone
+    assert!(store.get_session(&session.id).unwrap().is_some());
+}
+
+#[test]
+fn test_session_cleaned_up_via_note_delete() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let session = Session::new_running("write notes");
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .unwrap();
+
+    let note = Note::new(&branch.id, "Design", "content").with_session(&session.id);
+    store.create_note(&note).unwrap();
+
+    store.delete_branch(&branch.id).unwrap();
+
+    // Note cascaded, trigger cleaned up the session
+    assert!(store.get_session(&session.id).unwrap().is_none());
+}
+
+#[test]
+fn test_session_cleaned_up_via_review_delete() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let session = Session::new_running("review code");
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Commit).with_session(&session.id);
+    store.create_review(&review).unwrap();
+
+    store.delete_branch(&branch.id).unwrap();
+
+    // Review cascaded, trigger cleaned up the session
+    assert!(store.get_session(&session.id).unwrap().is_none());
+}
+
+#[test]
+fn test_session_messages_cascade_from_session_cleanup() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let session = Session::new_running("chat");
+    store.create_session(&session).unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::User, "hello")
+        .unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "hi")
+        .unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .unwrap();
+
+    let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+
+    store.delete_branch(&branch.id).unwrap();
+
+    // Session and its messages are both gone
+    assert!(store.get_session(&session.id).unwrap().is_none());
+    assert!(store.get_session_messages(&session.id).unwrap().is_empty());
+}
+
+// =============================================================================
+// Notes
+// =============================================================================
+
+#[test]
+fn test_notes() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let note = Note::new(&branch.id, "Design Doc", "# Design\n\nHere is the design.");
+    store.create_note(&note).unwrap();
+
+    // Listed in branch notes
+    let notes = store.list_notes_for_branch(&branch.id).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].content.contains("Design"));
+}
+
+// =============================================================================
+// Project Actions
+// =============================================================================
+
+#[test]
+fn test_project_actions() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let action = ProjectAction::new(
+        project.id.clone(),
+        "Build".to_string(),
+        "cargo build".to_string(),
+        ActionType::Build,
+        0,
+    );
+    store.create_project_action(&action).unwrap();
+
+    let actions = store.list_project_actions(&project.id).unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].name, "Build");
+
+    store.delete_project_action(&action.id).unwrap();
+    assert!(store.list_project_actions(&project.id).unwrap().is_empty());
+}
+
+#[test]
+fn test_reorder_actions() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let a1 = ProjectAction::new(
+        project.id.clone(),
+        "A".to_string(),
+        "a".to_string(),
+        ActionType::Build,
+        0,
+    );
+    let a2 = ProjectAction::new(
+        project.id.clone(),
+        "B".to_string(),
+        "b".to_string(),
+        ActionType::Test,
+        1,
+    );
+    store.create_project_action(&a1).unwrap();
+    store.create_project_action(&a2).unwrap();
+
+    // Reverse order
+    store
+        .reorder_project_actions(&[a2.id.clone(), a1.id.clone()])
+        .unwrap();
+
+    let actions = store.list_project_actions(&project.id).unwrap();
+    assert_eq!(actions[0].name, "B");
+    assert_eq!(actions[1].name, "A");
+}
+
+// =============================================================================
+// Reviews
+// =============================================================================
+
+#[test]
+fn test_review_crud() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Commit);
+    store.create_review(&review).unwrap();
+
+    let fetched = store.get_review(&review.id).unwrap().unwrap();
+    assert_eq!(fetched.branch_id, branch.id);
+    assert_eq!(fetched.commit_sha, "abc123");
+    assert_eq!(fetched.scope, ReviewScope::Commit);
+    assert!(fetched.reviewed.is_empty());
+    assert!(fetched.comments.is_empty());
+    assert!(fetched.reference_files.is_empty());
+}
+
+#[test]
+fn test_review_unique_constraint() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let r1 = Review::new(&branch.id, "abc123", ReviewScope::Commit);
+    let r2 = Review::new(&branch.id, "abc123", ReviewScope::Commit);
+    store.create_review(&r1).unwrap();
+    assert!(store.create_review(&r2).is_err());
+
+    // Different scope on same commit is fine
+    let r3 = Review::new(&branch.id, "abc123", ReviewScope::Branch);
+    store.create_review(&r3).unwrap();
+}
+
+#[test]
+fn test_review_with_comments_and_files() {
+    use crate::git::Span;
+
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Branch);
+    store.create_review(&review).unwrap();
+
+    // Mark files reviewed
+    store.mark_reviewed(&review.id, "src/main.rs").unwrap();
+    store.mark_reviewed(&review.id, "src/lib.rs").unwrap();
+
+    // Add comments
+    let c1 = Comment::new(
+        "src/main.rs",
+        Span::new(10, 15),
+        "Consider error handling here",
+    );
+    let c2 = Comment::new("src/lib.rs", Span::new(5, 6), "Typo in doc comment");
+    store.add_comment(&review.id, &c1).unwrap();
+    store.add_comment(&review.id, &c2).unwrap();
+
+    // Add reference files
+    store.add_reference_file(&review.id, "README.md").unwrap();
+
+    // Fetch and verify everything loaded
+    let fetched = store.get_review(&review.id).unwrap().unwrap();
+    assert_eq!(fetched.reviewed.len(), 2);
+    assert_eq!(fetched.comments.len(), 2);
+    assert_eq!(fetched.reference_files.len(), 1);
+    assert_eq!(fetched.reference_files[0], "README.md");
+
+    // Update a comment
+    store.update_comment(&c1.id, "Updated comment").unwrap();
+    let updated = store.get_review(&review.id).unwrap().unwrap();
+    let updated_comment = updated.comments.iter().find(|c| c.id == c1.id).unwrap();
+    assert_eq!(updated_comment.content, "Updated comment");
+
+    // Unmark a file
+    store.unmark_reviewed(&review.id, "src/lib.rs").unwrap();
+    let after_unmark = store.get_review(&review.id).unwrap().unwrap();
+    assert_eq!(after_unmark.reviewed.len(), 1);
+
+    // Delete a comment
+    store.delete_comment(&c2.id).unwrap();
+    let after_delete = store.get_review(&review.id).unwrap().unwrap();
+    assert_eq!(after_delete.comments.len(), 1);
+
+    // Remove reference file
+    store
+        .remove_reference_file(&review.id, "README.md")
+        .unwrap();
+    let after_remove = store.get_review(&review.id).unwrap().unwrap();
+    assert!(after_remove.reference_files.is_empty());
+}
+
+#[test]
+fn test_list_reviews_for_branch() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let r1 = Review::new(&branch.id, "aaa", ReviewScope::Commit);
+    let r2 = Review::new(&branch.id, "bbb", ReviewScope::Commit);
+    let r3 = Review::new(&branch.id, "bbb", ReviewScope::Branch);
+    store.create_review(&r1).unwrap();
+    store.create_review(&r2).unwrap();
+    store.create_review(&r3).unwrap();
+
+    let reviews = store.list_reviews_for_branch(&branch.id).unwrap();
+    assert_eq!(reviews.len(), 3);
+}
+
+#[test]
+fn test_delete_review_cascades() {
+    use crate::git::Span;
+
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Commit);
+    store.create_review(&review).unwrap();
+    store.mark_reviewed(&review.id, "file.rs").unwrap();
+    store
+        .add_comment(
+            &review.id,
+            &Comment::new("file.rs", Span::new(1, 2), "note"),
+        )
+        .unwrap();
+    store.add_reference_file(&review.id, "other.rs").unwrap();
+
+    store.delete_review(&review.id).unwrap();
+    assert!(store.get_review(&review.id).unwrap().is_none());
+}
+
+#[test]
+fn test_delete_branch_cascades_reviews() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Commit);
+    store.create_review(&review).unwrap();
+
+    store.delete_branch(&branch.id).unwrap();
+    assert!(store.get_review(&review.id).unwrap().is_none());
+}

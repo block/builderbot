@@ -10,32 +10,16 @@
   and comment highlights for all modes.
   
   Uses custom scroll implementation for frame-perfect sync between panes.
+  
+  This component is props-driven — it receives diff data, comments, and callbacks
+  rather than pulling from global stores.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import {
-    X,
-    GitBranch,
-    MessageSquarePlus,
-    MessageSquare,
-    Trash2,
-    Wand2,
-    Loader2,
-    Eye,
-    Code,
-  } from 'lucide-svelte';
+  import { MessageSquarePlus, MessageSquare, X } from 'lucide-svelte';
   import { marked } from 'marked';
   import DOMPurify from 'dompurify';
-  import type { FileDiff, Alignment, Comment, Span } from './types';
-  import {
-    commentsState,
-    getCommentsForRange,
-    getCommentsForCurrentFile,
-    findCommentById,
-    addComment,
-    updateComment,
-    deleteComment,
-  } from './stores/comments.svelte';
+  import type { FileDiff, Alignment, Comment, Span, SmartDiffAnnotation } from './types';
   import {
     initHighlighter,
     highlightLines,
@@ -56,71 +40,56 @@
     getTextLines,
   } from './diffUtils';
   import { setupDiffKeyboardNav } from './diffKeyboard';
-  import { registerShortcut } from './services/keyboard';
-  import { diffSelection } from './stores/diffSelection.svelte';
-  import {
-    diffState,
-    clearScrollTarget,
-    clearScrollTargetCommentId,
-  } from './stores/diffState.svelte';
-  import { DiffSpec, gitRefDisplay } from './types';
   import CommentEditor from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
-  import { smartDiffState, setAnnotationsRevealed } from './stores/smartDiff.svelte';
-  import type { AgentState } from './stores/agent.svelte';
-  import { sendAgentPrompt } from './services/ai';
-  import { repoState } from './stores/repoState.svelte';
-  import { preferences } from './stores/preferences.svelte';
   import Scrollbar from './Scrollbar.svelte';
   import HorizontalScrollbar from './HorizontalScrollbar.svelte';
-  import { globalSearchState, getFlattenedResults } from './stores/globalSearch.svelte';
-  import type { SearchMatch } from './services/diffSearch';
-  import type { MatchLocation } from './services/diffSearch';
-
-  // ==========================================================================
-  // Constants
-  // ==========================================================================
-
-  /** Duration (ms) for panel flex transitions - used to schedule connector redraws */
-  const PANEL_TRANSITION_MS = 250;
 
   // ==========================================================================
   // Props
   // ==========================================================================
 
   interface Props {
+    /** The file diff to render (null = no file selected). */
     diff: FileDiff | null;
-    sizeBase?: number;
-    /** Bumped when syntax theme changes to trigger re-highlight */
+    /** Comments on this file. */
+    comments?: Comment[];
+    /** Bumped when syntax theme changes to trigger re-highlight. */
     syntaxThemeVersion?: number;
-    /** Whether a new file is loading (show subtle indicator, keep old content) */
+    /** Whether a new file is loading (show subtle indicator, keep old content). */
     loading?: boolean;
-    /** Whether this is a reference file (not part of the diff) */
+    /** Whether this is a reference file (not part of the diff). */
     isReferenceFile?: boolean;
-    /** Agent state for this tab's chat session (optional, for agent prompt feature) */
-    agentState?: AgentState | null;
-    onRangeDiscard?: () => void;
+    /** Label for the before pane header (e.g. base branch name). */
+    beforeLabel?: string;
+    /** Label for the after pane header (e.g. head branch name). */
+    afterLabel?: string;
+    /** AI annotations for the after pane (render-only, not wired to backend). */
+    annotations?: SmartDiffAnnotation[];
+    /** Whether AI annotation overlays are currently revealed. */
+    annotationsRevealed?: boolean;
+
+    // -- Comment callbacks (all optional; without them commenting is disabled) --
+    onAddComment?: (path: string, span: Span, content: string) => Promise<void>;
+    onUpdateComment?: (commentId: string, content: string) => Promise<void>;
+    onDeleteComment?: (commentId: string) => Promise<void>;
   }
 
   let {
     diff,
-    sizeBase,
+    comments = [],
     syntaxThemeVersion = 0,
     loading = false,
     isReferenceFile = false,
-    agentState = null,
-    onRangeDiscard,
+    beforeLabel = 'before',
+    afterLabel = 'after',
+    annotations = [],
+    annotationsRevealed = false,
+    onAddComment,
+    onUpdateComment,
+    onDeleteComment,
   }: Props = $props();
-
-  // Get diff spec from store for display and logic
-  let isWorkingTree = $derived(diffSelection.spec.head.type === 'WorkingTree');
-  let diffBaseDisplay = $derived(gitRefDisplay(diffSelection.spec.base));
-  let diffHeadDisplay = $derived(
-    diffSelection.spec.head.type === 'WorkingTree'
-      ? 'Working Tree'
-      : gitRefDisplay(diffSelection.spec.head)
-  );
 
   // ==========================================================================
   // Element refs
@@ -131,10 +100,10 @@
   let connectorCanvas: HTMLCanvasElement | null = $state(null);
   let diffViewerEl: HTMLDivElement | null = $state(null);
 
-  /** Tracked width of afterPane for annotation overlays (updated via ResizeObserver) */
+  /** Tracked width of afterPane for annotation overlays. */
   let afterPaneWidth = $state(0);
 
-  /** Tracked width of beforePane for annotation overlays (updated via ResizeObserver) */
+  /** Tracked width of beforePane for annotation overlays. */
   let beforePaneWidth = $state(0);
 
   // ==========================================================================
@@ -150,10 +119,10 @@
   // Panel state (two-pane mode only)
   // ==========================================================================
 
-  /** Ratio of before pane width (0-1). 0.4 = 40% before, 60% after */
+  /** Ratio of before pane width (0-1). 0.4 = 40% before, 60% after. */
   let paneRatio = $state(0.4);
 
-  /** Whether user is currently dragging the divider */
+  /** Whether user is currently dragging the divider. */
   let isDraggingDivider = $state(false);
 
   // ==========================================================================
@@ -169,6 +138,9 @@
   // ==========================================================================
   // Comment state
   // ==========================================================================
+
+  // Whether commenting is enabled (all three callbacks must be provided)
+  let commentingEnabled = $derived(!!onAddComment && !!onUpdateComment && !!onDeleteComment);
 
   // Range-based commenting (from alignment hover)
   let commentingOnRange: number | null = $state(null);
@@ -202,16 +174,6 @@
   let editingCommentId: string | null = $state(null);
   let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
 
-  // Agent prompt on lines (similar to commenting)
-  let agentPromptOnLines: { pane: 'before' | 'after'; start: number; end: number } | null =
-    $state(null);
-  let agentPromptEditorStyle: {
-    top: number;
-    left: number;
-    width: number;
-    visible: boolean;
-  } | null = $state(null);
-
   // Markdown preview mode
   let markdownPreview = $state(false);
 
@@ -235,14 +197,6 @@
   let isDeletedFile = $derived(diff !== null && diff.after === null);
   let isTwoPaneMode = $derived(!isNewFile && !isDeletedFile);
   let isBinary = $derived(diff !== null && isBinaryDiff(diff));
-
-  // Check if alignment loading is complete
-  let alignmentsFullyLoaded = $derived(
-    diff !== null && activeAlignments.length >= diff.alignments.length
-  );
-
-  // Discard is only available when viewing the working tree
-  let canDiscard = $derived(isWorkingTree);
 
   // Extract lines from the diff
   let beforeLines = $derived(diff ? getTextLines(diff, 'before') : []);
@@ -275,52 +229,22 @@
     return DOMPurify.sanitize(html);
   });
 
-  // AI annotations for current file
-  // Only show informational annotations (explanations/context) as blur overlays
-  // Warnings and suggestions are shown as persistent comments instead
-  let currentFileAnnotations = $derived.by(() => {
-    if (!currentFilePath) return [];
-    const result = smartDiffState.results.get(currentFilePath);
-    if (!result) return [];
-    // Filter to only informational annotations with after_span
-    const annotations = result.annotations.filter(
+  // AI annotations for after pane (only informational ones with after_span)
+  let currentFileAnnotations = $derived(
+    annotations.filter(
       (a) => a.after_span && (a.category === 'explanation' || a.category === 'context')
-    );
-    if (annotations.length > 0) {
-      console.log(
-        '[DEBUG] Found',
-        annotations.length,
-        'informational annotations for',
-        currentFilePath,
-        annotations
-      );
-    }
-    return annotations;
-  });
+    )
+  );
 
   // AI annotations with before_span for the left pane
-  // Only show informational annotations (explanations/context) as blur overlays
-  let beforeFileAnnotations = $derived.by(() => {
-    if (!currentFilePath) return [];
-    const result = smartDiffState.results.get(currentFilePath);
-    if (!result) return [];
-    // Filter to only informational annotations with before_span
-    return result.annotations.filter(
+  let beforeFileAnnotations = $derived(
+    annotations.filter(
       (a) => a.before_span && (a.category === 'explanation' || a.category === 'context')
-    );
-  });
-
-  let showBeforeAnnotations = $derived(
-    beforeFileAnnotations.length > 0 && smartDiffState.showAnnotations
+    )
   );
 
-  // Whether annotations should be shown (have results and not globally hidden)
-  let showAiAnnotations = $derived(
-    currentFileAnnotations.length > 0 && smartDiffState.showAnnotations
-  );
-
-  // Whether annotations are currently revealed (hold A key)
-  let annotationsRevealed = $derived(smartDiffState.annotationsRevealed);
+  let showBeforeAnnotations = $derived(beforeFileAnnotations.length > 0);
+  let showAiAnnotations = $derived(currentFileAnnotations.length > 0);
 
   // Language detection
   let language = $derived(diff ? getLanguageFromDiff(diff, detectLanguage) : null);
@@ -356,11 +280,8 @@
     return map;
   });
 
-  // Comments for current file
-  let currentFileComments = $derived.by(() => {
-    if (!commentsState.currentPath) return [];
-    return commentsState.comments.filter((c) => c.path === commentsState.currentPath);
-  });
+  // Comments for the current file
+  let currentFileComments = $derived(comments.filter((c) => c.path === currentFilePath));
 
   // ==========================================================================
   // Custom scroll controller (frame-perfect sync)
@@ -369,7 +290,6 @@
   const scrollController = createScrollController();
 
   // Update scroll controller with active alignments
-  // Pass file path so scroll only resets on file change, not content refresh
   $effect(() => {
     const filePath = diff ? getFilePath(diff) : null;
     scrollController.setAlignments(activeAlignments, filePath);
@@ -429,7 +349,6 @@
       return { top: startPercent, height: heightPercent, type: 'change' as const };
     });
 
-    // AI annotation markers for before pane
     const annotationMarkers = beforeFileAnnotations
       .filter((a) => a.before_span)
       .map((annotation) => {
@@ -462,7 +381,6 @@
         return { top: startPercent, height: heightPercent, type: 'comment' as const };
       });
 
-    // AI annotation markers
     const annotationMarkers = currentFileAnnotations
       .filter((a) => a.after_span)
       .map((annotation) => {
@@ -484,7 +402,6 @@
   let beforeContentWidth = $state(0);
   let afterContentWidth = $state(0);
 
-  // Function to measure and update content widths
   function updateContentWidths() {
     requestAnimationFrame(() => {
       if (beforePane) {
@@ -512,17 +429,13 @@
 
   // Re-measure content width when lines change
   $effect(() => {
-    const _ = beforeLines.length; // reactive dependency
-    if (beforePane) {
-      updateContentWidths();
-    }
+    const _ = beforeLines.length;
+    if (beforePane) updateContentWidths();
   });
 
   $effect(() => {
-    const _ = afterLines.length; // reactive dependency
-    if (afterPane) {
-      updateContentWidths();
-    }
+    const _ = afterLines.length;
+    if (afterPane) updateContentWidths();
   });
 
   // Re-measure on pane resize (e.g., divider drag)
@@ -549,7 +462,6 @@
       hoveredRangeIndex = null;
       rangeToolbarStyle = null;
       focusedHunkIndex = null;
-      // Clear any line selection state from previous file
       lineSelection = null;
       commentingOnLines = null;
       lineCommentEditorStyle = null;
@@ -599,11 +511,9 @@
 
   let connectorRenderer: ConnectorRendererCanvas | null = $state(null);
 
-  // Initialize renderer when Canvas is available (recreate if canvas element changes)
   let previousCanvas: HTMLCanvasElement | null = null;
   $effect(() => {
     if (connectorCanvas && connectorCanvas !== previousCanvas) {
-      // Canvas element changed - destroy old renderer and create new one
       if (connectorRenderer) {
         connectorRenderer.destroy();
       }
@@ -624,7 +534,6 @@
       return;
     }
 
-    // In single-pane mode, pass empty alignments (no curves) but still draw comments
     const alignmentsForRenderer = isTwoPaneMode ? activeAlignments : [];
     connectorRenderer.setAlignments(alignmentsForRenderer);
     scheduleConnectorRedraw();
@@ -679,7 +588,6 @@
       return;
     }
 
-    // For single-pane modes, we still draw comment highlights
     const sourcePane = beforePane ?? afterPane;
     const firstLine = sourcePane.querySelector('.line') as HTMLElement | null;
     const lineHeight = firstLine ? firstLine.getBoundingClientRect().height : 20;
@@ -688,7 +596,6 @@
     const containerRect = afterPane.getBoundingClientRect();
     const verticalOffset = canvasRect ? containerRect.top - canvasRect.top : 0;
 
-    // Use scroll controller positions (not native scrollTop since we use transform)
     connectorRenderer.render(
       scrollController.beforeScrollY,
       scrollController.afterScrollY,
@@ -697,19 +604,7 @@
     );
   }
 
-  function redrawConnectors() {
-    redrawConnectorsImpl();
-  }
-
-  // Redraw when font size changes (sizeBase affects line height)
-  $effect(() => {
-    const _ = sizeBase;
-    if (diff && connectorCanvas && afterPane) {
-      scheduleConnectorRedraw();
-    }
-  });
-
-  // Redraw (or clear) connectors when markdown preview mode changes
+  // Redraw connectors when markdown preview mode changes
   $effect(() => {
     const _ = markdownPreview;
     if (diff && connectorCanvas) {
@@ -727,168 +622,6 @@
 
   function getAfterTokens(index: number): Token[] {
     return afterTokens[index] || [{ content: '', color: 'inherit' }];
-  }
-
-  // ==========================================================================
-  // Search highlight helpers
-  // ==========================================================================
-
-  /** A token segment that may be highlighted as a search match */
-  interface HighlightedSegment {
-    content: string;
-    color: string;
-    isMatch: boolean;
-    isCurrent: boolean;
-  }
-
-  /**
-   * Get all match locations for a specific line and side.
-   * Returns array of { location, isCurrent } for each match on this line/side.
-   *
-   * Uses windowed highlighting: only highlights 30 matches before + 30 after current match
-   * for performance optimization with large result sets.
-   *
-   * Note: Search only looks at right/after side, so left side will never have matches.
-   */
-  function getSearchMatchesForLine(
-    lineIndex: number,
-    side: 'left' | 'right'
-  ): Array<{ location: MatchLocation; isCurrent: boolean }> {
-    // Search only looks at right side
-    if (side === 'left') return [];
-
-    if (!globalSearchState.isOpen || globalSearchState.totalMatches === 0) {
-      return [];
-    }
-
-    // Get current file's results
-    const currentPath = afterPath ?? beforePath ?? '';
-    const fileResult = globalSearchState.fileResults.get(currentPath);
-    if (!fileResult) return [];
-
-    // Find the current match's local index within this file
-    const flattened = getFlattenedResults(diffState.files);
-    const currentGlobal = flattened[globalSearchState.currentResultIndex];
-    if (!currentGlobal || currentGlobal.filePath !== currentPath) {
-      // Current match is not in this file, don't highlight anything
-      return [];
-    }
-
-    const currentLocalIndex = currentGlobal.localIndex;
-
-    // Calculate window: 30 before and 30 after current match
-    const windowStart = Math.max(0, currentLocalIndex - 30);
-    const windowEnd = Math.min(fileResult.matches.length, currentLocalIndex + 31);
-
-    // Get matches in window that are on this line
-    const results: Array<{ location: MatchLocation; isCurrent: boolean }> = [];
-
-    for (let i = windowStart; i < windowEnd; i++) {
-      const match = fileResult.matches[i];
-      if (match.lineIndex !== lineIndex) continue;
-
-      const location = match.right;
-      if (location) {
-        results.push({
-          location,
-          isCurrent: i === currentLocalIndex,
-        });
-      }
-    }
-
-    return results;
-  }
-
-  /**
-   * Split tokens at search match boundaries to enable inline highlighting.
-   * Returns segments with isMatch/isCurrent flags for styling.
-   */
-  function applySearchHighlights(
-    tokens: Token[],
-    matches: Array<{ location: MatchLocation; isCurrent: boolean }>
-  ): HighlightedSegment[] {
-    if (matches.length === 0) {
-      // No matches - return tokens as-is
-      return tokens.map((t) => ({
-        content: t.content,
-        color: t.color,
-        isMatch: false,
-        isCurrent: false,
-      }));
-    }
-
-    const segments: HighlightedSegment[] = [];
-    let charIndex = 0;
-
-    for (const token of tokens) {
-      const tokenStart = charIndex;
-      const tokenEnd = charIndex + token.content.length;
-      let pos = 0;
-
-      while (pos < token.content.length) {
-        const absPos = tokenStart + pos;
-
-        // Find if we're inside any match
-        let inMatch: { location: MatchLocation; isCurrent: boolean } | null = null;
-        for (const m of matches) {
-          if (absPos >= m.location.startCol && absPos < m.location.endCol) {
-            inMatch = m;
-            break;
-          }
-        }
-
-        if (inMatch) {
-          // We're inside a match - find how much of this token is in the match
-          const matchEndInToken = Math.min(
-            token.content.length,
-            inMatch.location.endCol - tokenStart
-          );
-          const matchContent = token.content.slice(pos, matchEndInToken);
-
-          if (matchContent) {
-            segments.push({
-              content: matchContent,
-              color: token.color,
-              isMatch: true,
-              isCurrent: inMatch.isCurrent,
-            });
-          }
-          pos = matchEndInToken;
-        } else {
-          // Not in a match - find next match start or end of token
-          let nextBoundary = token.content.length;
-          for (const m of matches) {
-            if (m.location.startCol > absPos && m.location.startCol < tokenStart + nextBoundary) {
-              nextBoundary = m.location.startCol - tokenStart;
-            }
-          }
-
-          const normalContent = token.content.slice(pos, nextBoundary);
-          if (normalContent) {
-            segments.push({
-              content: normalContent,
-              color: token.color,
-              isMatch: false,
-              isCurrent: false,
-            });
-          }
-          pos = nextBoundary;
-        }
-      }
-
-      charIndex = tokenEnd;
-    }
-
-    return segments;
-  }
-
-  /**
-   * Get tokens for a line with search highlighting applied.
-   */
-  function getHighlightedTokens(lineIndex: number, side: 'left' | 'right'): HighlightedSegment[] {
-    const tokens = side === 'left' ? getBeforeTokens(lineIndex) : getAfterTokens(lineIndex);
-    const matches = getSearchMatchesForLine(lineIndex, side);
-    return applySearchHighlights(tokens, matches);
   }
 
   // ==========================================================================
@@ -921,11 +654,17 @@
   // Comment helpers
   // ==========================================================================
 
+  function findCommentById(id: string): Comment | null {
+    return comments.find((c) => c.id === id) ?? null;
+  }
+
   function getCommentsForAlignment(alignmentIndex: number): Comment[] {
     const alignmentData = changedAlignments[alignmentIndex];
     if (!alignmentData) return [];
     const { alignment } = alignmentData;
-    return getCommentsForRange(alignment.after.start, alignment.after.end);
+    return currentFileComments.filter(
+      (c) => c.span.start < alignment.after.end && c.span.end > alignment.after.start
+    );
   }
 
   function alignmentHasComments(alignmentIndex: number): boolean {
@@ -939,21 +678,17 @@
   function handleWheel(side: 'before' | 'after', e: WheelEvent) {
     e.preventDefault();
 
-    // Handle vertical scroll
     if (e.deltaY !== 0) {
       scrollController.scrollBy(side, e.deltaY);
     }
 
-    // Handle horizontal scroll (shift+wheel or trackpad horizontal gesture)
     const deltaX = e.shiftKey ? e.deltaY : e.deltaX;
     if (deltaX !== 0) {
-      // Sync horizontal scroll for both panes
       scrollController.scrollByXBoth(deltaX);
     }
 
-    // Trigger UI updates (defer to allow DOM transform to apply)
     requestAnimationFrame(() => {
-      redrawConnectors();
+      redrawConnectorsImpl();
       updateToolbarPosition();
       updateCommentEditorPosition();
       updateLineSelectionToolbar();
@@ -963,7 +698,6 @@
 
   function handleBeforeWheel(e: WheelEvent) {
     if (!diff) return;
-    // Allow scrolling in two-pane mode and deleted file mode
     if (!isTwoPaneMode && !isDeletedFile) return;
     handleWheel('before', e);
   }
@@ -973,10 +707,9 @@
     handleWheel('after', e);
   }
 
-  // Handle scrollbar callbacks
   function handleBeforeScrollbarScroll(deltaY: number) {
     scrollController.scrollBy('before', deltaY);
-    redrawConnectors();
+    redrawConnectorsImpl();
     updateToolbarPosition();
     updateCommentEditorPosition();
     updateLineSelectionToolbar();
@@ -985,17 +718,15 @@
 
   function handleAfterScrollbarScroll(deltaY: number) {
     scrollController.scrollBy('after', deltaY);
-    redrawConnectors();
+    redrawConnectorsImpl();
     updateToolbarPosition();
     updateCommentEditorPosition();
     updateLineSelectionToolbar();
     updateLineCommentEditorPosition();
   }
 
-  // Handle horizontal scrollbar (syncs both panes)
   function handleHorizontalScrollbarScroll(deltaX: number) {
     scrollController.scrollByXBoth(deltaX);
-    // Trigger UI updates (defer to allow DOM transform to apply)
     requestAnimationFrame(() => {
       updateToolbarPosition();
       updateCommentEditorPosition();
@@ -1029,18 +760,14 @@
     if (!isDraggingDivider || !diffViewerEl) return;
 
     const rect = diffViewerEl.getBoundingClientRect();
-    // Account for left padding (8px) and spine width (24px)
     const availableWidth = rect.width - 8 - 24;
     const mouseX = e.clientX - rect.left - 8;
 
-    // Calculate ratio, clamping to reasonable bounds (15% - 85%)
     let ratio = mouseX / availableWidth;
     ratio = Math.max(0.15, Math.min(0.85, ratio));
-
     paneRatio = ratio;
 
-    // Update connectors during drag
-    redrawConnectors();
+    redrawConnectorsImpl();
   }
 
   function handleDividerMouseUp() {
@@ -1050,18 +777,15 @@
   }
 
   function handleDividerDoubleClick() {
-    // Reset to default 40/60 split
     paneRatio = 0.4;
-    redrawConnectors();
+    redrawConnectorsImpl();
   }
 
   // Redraw connectors when pane ratio changes
   $effect(() => {
     const _ = paneRatio;
     if (diff && connectorCanvas && afterPane) {
-      requestAnimationFrame(() => {
-        scheduleConnectorRedraw();
-      });
+      requestAnimationFrame(() => scheduleConnectorRedraw());
     }
   });
 
@@ -1128,29 +852,14 @@
   }
 
   // ==========================================================================
-  // Range actions
-  // ==========================================================================
-
-  async function handleDiscardRange() {
-    if (hoveredRangeIndex === null || !canDiscard || !diff) return;
-
-    const alignmentData = changedAlignments[hoveredRangeIndex];
-    if (!alignmentData) return;
-
-    hoveredRangeIndex = null;
-    rangeToolbarStyle = null;
-    onRangeDiscard?.();
-  }
-
-  // ==========================================================================
   // Comment highlight click (from spine)
   // ==========================================================================
 
   function handleCommentHighlightClick(info: CommentHighlightInfo) {
-    if (!afterPane) return;
+    if (!afterPane || !commentingEnabled) return;
 
     const { span, commentId } = info;
-    scrollToLine(span.start);
+    scrollController.scrollToRow(span.start, 'after');
 
     const start = span.start;
     const end = Math.max(span.start, span.end - 1);
@@ -1161,17 +870,12 @@
     updateLineCommentEditorPosition();
   }
 
-  function scrollToLine(lineIndex: number) {
-    // Use the scroll controller which manages scrolling via CSS transforms
-    scrollController.scrollToRow(lineIndex, 'after');
-  }
-
   // ==========================================================================
   // Range comment handling
   // ==========================================================================
 
   function handleStartComment() {
-    if (hoveredRangeIndex === null) return;
+    if (hoveredRangeIndex === null || !commentingEnabled) return;
     commentingOnRange = hoveredRangeIndex;
     commentPositionPreference = decideCommentPosition();
     updateCommentEditorPosition();
@@ -1251,9 +955,8 @@
 
     const paneContentTop = paneRect.top - viewerRect.top;
     const paneContentBottom = paneRect.bottom - viewerRect.top;
-    const editorTop = top;
     const editorBottom = top + editorHeight;
-    const visible = editorBottom > paneContentTop && editorTop < paneContentBottom;
+    const visible = editorBottom > paneContentTop && top < paneContentBottom;
 
     commentEditorStyle = {
       top,
@@ -1265,7 +968,7 @@
   }
 
   async function handleCommentSubmit(content: string) {
-    if (commentingOnRange === null || !currentFilePath) return;
+    if (commentingOnRange === null || !currentFilePath || !onAddComment) return;
 
     const alignmentData = changedAlignments[commentingOnRange];
     if (!alignmentData) return;
@@ -1273,7 +976,7 @@
     const { alignment } = alignmentData;
     const span: Span = { start: alignment.after.start, end: alignment.after.end };
 
-    await addComment(currentFilePath, span, content);
+    await onAddComment(currentFilePath, span, content);
     commentingOnRange = null;
     commentEditorStyle = null;
   }
@@ -1284,11 +987,11 @@
   }
 
   async function handleCommentEdit(id: string, content: string) {
-    await updateComment(id, content);
+    await onUpdateComment?.(id, content);
   }
 
   async function handleCommentDelete(id: string) {
-    await deleteComment(id);
+    await onDeleteComment?.(id);
   }
 
   // ==========================================================================
@@ -1299,6 +1002,7 @@
     // Only allow selection on after pane (commentable)
     if (pane === 'before') return;
     if (event.button !== 0) return;
+    if (!commentingEnabled) return;
 
     event.preventDefault();
     window.getSelection()?.removeAllRanges();
@@ -1309,10 +1013,10 @@
     commentingOnLines = null;
     lineCommentEditorStyle = null;
 
-    document.addEventListener('mousemove', handleDragMove);
+    document.addEventListener('mousemove', handleSelectionDragMove);
   }
 
-  function handleDragMove(event: MouseEvent) {
+  function handleSelectionDragMove(event: MouseEvent) {
     if (!isSelecting || !lineSelection) return;
 
     const pane = lineSelection.pane === 'before' ? beforePane : afterPane;
@@ -1335,11 +1039,11 @@
     isSelecting = false;
     justFinishedSelecting = true;
 
-    document.removeEventListener('mousemove', handleDragMove);
+    document.removeEventListener('mousemove', handleSelectionDragMove);
 
     if (lineSelection) {
       requestAnimationFrame(() => {
-        updateLineSelectionToolbar(true); // Recalculate left position on new selection
+        updateLineSelectionToolbar(true);
       });
     }
   }
@@ -1352,7 +1056,7 @@
     editingCommentId = null;
   }
 
-  // Store the initial left position for line selection toolbar (doesn't change with horizontal scroll)
+  // Store the initial left position for line selection toolbar
   let lineSelectionToolbarLeft: number | null = $state(null);
 
   function updateLineSelectionToolbar(recalculateLeft = false) {
@@ -1369,7 +1073,6 @@
       return;
     }
 
-    // Get the actual selected line element
     const lines = pane.querySelectorAll('.line');
     const lineEl = lines[selectedLineRange.start] as HTMLElement | null;
     if (!lineEl) {
@@ -1381,7 +1084,6 @@
     const viewerRect = diffViewerEl.getBoundingClientRect();
     const lineRect = lineEl.getBoundingClientRect();
 
-    // Calculate left position only on initial selection or when explicitly requested
     if (recalculateLeft || lineSelectionToolbarLeft === null) {
       const lineContent = lineEl.querySelector('.line-content') as HTMLElement | null;
       if (lineContent) {
@@ -1399,94 +1101,10 @@
   }
 
   function handleStartLineComment() {
-    if (!selectedLineRange) return;
+    if (!selectedLineRange || !commentingEnabled) return;
     commentingOnLines = { ...selectedLineRange };
-    // Clear any previously-viewed comment so the editor starts empty
     editingCommentId = null;
     updateLineCommentEditorPosition();
-  }
-
-  function handleAskAgent() {
-    if (!selectedLineRange) return;
-    agentPromptOnLines = { ...selectedLineRange };
-    updateAgentPromptEditorPosition();
-  }
-
-  function updateAgentPromptEditorPosition() {
-    if (!agentPromptOnLines || !diffViewerEl) {
-      agentPromptEditorStyle = null;
-      return;
-    }
-
-    const pane = agentPromptOnLines.pane === 'before' ? beforePane : afterPane;
-    if (!pane) {
-      agentPromptEditorStyle = null;
-      return;
-    }
-
-    const viewerRect = diffViewerEl.getBoundingClientRect();
-    const paneRect = pane.getBoundingClientRect();
-
-    const lastLineEl = pane.querySelectorAll('.line')[agentPromptOnLines.end] as HTMLElement | null;
-    if (!lastLineEl) {
-      agentPromptEditorStyle = null;
-      return;
-    }
-
-    const lineRect = lastLineEl.getBoundingClientRect();
-    const top = lineRect.bottom - viewerRect.top;
-
-    const editorHeight = 120;
-    const paneContentTop = paneRect.top - viewerRect.top;
-    const paneContentBottom = paneRect.bottom - viewerRect.top;
-    const visible = top + editorHeight > paneContentTop && top < paneContentBottom;
-
-    agentPromptEditorStyle = {
-      top,
-      left: paneRect.left - viewerRect.left + 12,
-      width: paneRect.width - 24,
-      visible,
-    };
-  }
-
-  function handleAgentPromptCancel() {
-    agentPromptOnLines = null;
-    agentPromptEditorStyle = null;
-    clearLineSelection();
-  }
-
-  async function handleAgentPromptSubmit(instruction: string) {
-    if (!agentPromptOnLines || !diff || !agentState) return;
-
-    const filePath = getFilePath(diff);
-    if (!filePath) return;
-
-    const lineRange =
-      agentPromptOnLines.start === agentPromptOnLines.end
-        ? `line ${agentPromptOnLines.start + 1}`
-        : `lines ${agentPromptOnLines.start + 1}-${agentPromptOnLines.end + 1}`;
-
-    const prompt = `[${filePath}:${lineRange}] ${instruction}`;
-
-    // Close the editor
-    agentPromptOnLines = null;
-    agentPromptEditorStyle = null;
-    clearLineSelection();
-
-    // Send to agent
-    agentState.loading = true;
-    agentState.error = '';
-    agentState.response = '';
-
-    try {
-      const result = await sendAgentPrompt(repoState.currentPath, prompt, agentState.sessionId);
-      agentState.response = result.response;
-      agentState.sessionId = result.sessionId;
-    } catch (e) {
-      agentState.error = e instanceof Error ? e.message : String(e);
-    } finally {
-      agentState.loading = false;
-    }
   }
 
   function updateLineCommentEditorPosition() {
@@ -1527,14 +1145,14 @@
   }
 
   async function handleLineCommentSubmit(content: string) {
-    if (!commentingOnLines || !currentFilePath) return;
+    if (!commentingOnLines || !currentFilePath || !onAddComment) return;
 
     const span: Span = {
       start: commentingOnLines.start,
       end: commentingOnLines.end + 1,
     };
 
-    await addComment(currentFilePath, span, content);
+    await onAddComment(currentFilePath, span, content);
     clearLineSelection();
   }
 
@@ -1556,17 +1174,6 @@
     }
   });
 
-  $effect(() => {
-    if (agentPromptOnLines) {
-      updateAgentPromptEditorPosition();
-    }
-  });
-
-  // Svelte action to auto-focus input
-  function autoFocusInput(node: HTMLInputElement) {
-    node.focus();
-  }
-
   // ==========================================================================
   // Global event handlers
   // ==========================================================================
@@ -1583,7 +1190,6 @@
       return;
     }
 
-    // Clear keyboard-focused hunk when user clicks
     focusedHunkIndex = null;
 
     const target = event.target as HTMLElement;
@@ -1601,20 +1207,15 @@
   }
 
   function handleLineSelectionKeydown(event: KeyboardEvent) {
-    // Skip if focus is in an input or textarea
     const target = event.target as HTMLElement;
-    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
-      return;
-    }
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
 
-    // Enter: Open comment dialog when lines are selected but dialog not open
     if (event.key === 'Enter' && selectedLineRange && !commentingOnLines) {
       event.preventDefault();
       handleStartLineComment();
       return;
     }
 
-    // Escape: Clear line selection when lines are selected but dialog not open
     if (event.key === 'Escape' && selectedLineRange && !commentingOnLines) {
       event.preventDefault();
       clearLineSelection();
@@ -1623,34 +1224,8 @@
   }
 
   // ==========================================================================
-  // AI Annotation Reveal (hold A key)
+  // Copy handling
   // ==========================================================================
-
-  function handleAnnotationRevealKeydown(event: KeyboardEvent) {
-    // Skip if focus is in an input or textarea
-    const target = event.target as HTMLElement;
-    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
-      return;
-    }
-
-    // A key: reveal annotations (show code through blur)
-    if (event.key === 'a' || event.key === 'A') {
-      // Don't trigger if modifier keys are held (allow Cmd+A for select all, etc.)
-      if (event.metaKey || event.ctrlKey || event.altKey) {
-        return;
-      }
-      console.log('[DEBUG] A key pressed, revealing annotations');
-      setAnnotationsRevealed(true);
-    }
-  }
-
-  function handleAnnotationRevealKeyup(event: KeyboardEvent) {
-    // A key released: hide annotations again
-    if (event.key === 'a' || event.key === 'A') {
-      console.log('[DEBUG] A key released, hiding annotations');
-      setAnnotationsRevealed(false);
-    }
-  }
 
   function handleCopy(event: ClipboardEvent) {
     if (selectedLineRange) {
@@ -1672,8 +1247,7 @@
       }
 
       if (lines.length > 0) {
-        const text = lines.join('\n');
-        event.clipboardData?.setData('text/plain', text);
+        event.clipboardData?.setData('text/plain', lines.join('\n'));
       }
       return;
     }
@@ -1703,8 +1277,7 @@
 
     if (lines.length > 0) {
       event.preventDefault();
-      const text = lines.join('\n');
-      event.clipboardData?.setData('text/plain', text);
+      event.clipboardData?.setData('text/plain', lines.join('\n'));
     }
   }
 
@@ -1725,6 +1298,7 @@
       getLineHeight: () => scrollController.getDimensions('after').lineHeight,
       getViewportHeight: () => scrollController.getDimensions('after').viewportHeight,
       startCommentOnHunk: (hunkIndex) => {
+        if (!commentingEnabled) return;
         commentingOnRange = hunkIndex;
         commentPositionPreference = decideCommentPosition();
         updateCommentEditorPosition();
@@ -1738,20 +1312,16 @@
     document.addEventListener('mouseup', handleGlobalMouseUp);
     document.addEventListener('click', handleGlobalClick);
     document.addEventListener('keydown', handleLineSelectionKeydown);
-    document.addEventListener('keydown', handleAnnotationRevealKeydown);
-    document.addEventListener('keyup', handleAnnotationRevealKeyup);
+
     return () => {
       cleanupKeyboardNav?.();
       document.removeEventListener('copy', handleCopy);
       document.removeEventListener('mouseup', handleGlobalMouseUp);
       document.removeEventListener('click', handleGlobalClick);
       document.removeEventListener('keydown', handleLineSelectionKeydown);
-      document.removeEventListener('keydown', handleAnnotationRevealKeydown);
-      document.removeEventListener('keyup', handleAnnotationRevealKeyup);
-      document.removeEventListener('mousemove', handleDragMove);
+      document.removeEventListener('mousemove', handleSelectionDragMove);
       document.removeEventListener('mousemove', handleDividerMouseMove);
       document.removeEventListener('mouseup', handleDividerMouseUp);
-      // Clean up connector renderer
       if (connectorRenderer) {
         connectorRenderer.destroy();
         connectorRenderer = null;
@@ -1759,79 +1329,29 @@
     };
   });
 
-  // Track afterPane width for annotation overlays
+  // Track pane widths for annotation overlays
   $effect(() => {
     if (!afterPane) return;
-
-    // Set initial width
     afterPaneWidth = afterPane.clientWidth;
-
-    // Update on resize
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         afterPaneWidth = entry.contentRect.width;
       }
     });
     resizeObserver.observe(afterPane);
-
     return () => resizeObserver.disconnect();
   });
 
-  // Track beforePane width for annotation overlays
   $effect(() => {
     if (!beforePane) return;
-
-    // Set initial width
     beforePaneWidth = beforePane.clientWidth;
-
-    // Update on resize
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         beforePaneWidth = entry.contentRect.width;
       }
     });
     resizeObserver.observe(beforePane);
-
     return () => resizeObserver.disconnect();
-  });
-
-  // Handle external scroll target requests (e.g., from sidebar comment clicks)
-  $effect(() => {
-    const targetLine = diffState.scrollTargetLine;
-    // Wait until alignments are fully loaded before scrolling
-    if (targetLine !== null && afterPane && diff && alignmentsFullyLoaded) {
-      // Use requestAnimationFrame to ensure DOM is painted after alignment load
-      requestAnimationFrame(() => {
-        scrollToLine(targetLine);
-        clearScrollTarget();
-      });
-    }
-  });
-
-  // Handle auto-expanding comments when selected from sidebar
-  $effect(() => {
-    const targetCommentId = diffState.scrollTargetCommentId;
-    if (targetCommentId !== null && afterPane && diff && alignmentsFullyLoaded) {
-      // Find the comment
-      const comment = findCommentById(targetCommentId);
-      if (comment) {
-        // Use requestAnimationFrame to ensure DOM is ready
-        requestAnimationFrame(() => {
-          // Replicate the logic from handleCommentHighlightClick
-          scrollToLine(comment.span.start);
-
-          const start = comment.span.start;
-          const end = Math.max(comment.span.start, comment.span.end - 1);
-
-          lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
-          commentingOnLines = { pane: 'after', start, end };
-          editingCommentId = comment.id;
-          updateLineCommentEditorPosition();
-
-          clearScrollTargetCommentId();
-        });
-      }
-    }
   });
 </script>
 
@@ -1868,10 +1388,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="diff-pane before-pane" style="flex: {paneRatio}">
           <div class="pane-header">
-            <span class="pane-ref">
-              <GitBranch size={12} />
-              {diffBaseDisplay}
-            </span>
+            <span class="pane-label">{beforeLabel}</span>
             <span class="pane-path" title={beforePath}>{beforePath ?? 'No file'}</span>
             {#if isMarkdownFile}
               <button
@@ -1879,11 +1396,7 @@
                 onclick={() => (markdownPreview = !markdownPreview)}
                 title={markdownPreview ? 'Show code' : 'Preview markdown'}
               >
-                {#if markdownPreview}
-                  <Code size={14} />
-                {:else}
-                  <Eye size={14} />
-                {/if}
+                {markdownPreview ? '{ }' : '📄'}
               </button>
             {/if}
           </div>
@@ -1931,12 +1444,8 @@
                       onmouseleave={handleLineMouseLeave}
                     >
                       <span class="line-content">
-                        {#each getHighlightedTokens(i, 'left') as segment}
-                          <span
-                            style="color: {segment.color}"
-                            class:search-match={segment.isMatch}
-                            class:search-current={segment.isCurrent}>{segment.content}</span
-                          >
+                        {#each getBeforeTokens(i) as token}
+                          <span style="color: {token.color}">{token.content}</span>
                         {/each}
                       </span>
                     </div>
@@ -1947,7 +1456,7 @@
                     </div>
                   {/if}
                 </div>
-                <!-- Full-pane AI blur overlay with before_description text -->
+                <!-- AI blur overlay for before pane -->
                 {#if showBeforeAnnotations && annotationsRevealed}
                   {@const lineHeight = scrollController.getDimensions('before').lineHeight || 20}
                   <div class="ai-blur-overlay">
@@ -1982,10 +1491,7 @@
       {#if isDeletedFile}
         <div class="diff-pane single-pane-content">
           <div class="pane-header">
-            <span class="pane-ref">
-              <GitBranch size={12} />
-              {diffBaseDisplay}
-            </span>
+            <span class="pane-label">{beforeLabel}</span>
             <span class="pane-path" title={beforePath}>{beforePath ?? 'No file'}</span>
           </div>
           <div class="code-area" onwheel={handleBeforeWheel}>
@@ -2005,12 +1511,8 @@
                 {#each beforeLines as line, i}
                   <div class="line">
                     <span class="line-content">
-                      {#each getHighlightedTokens(i, 'left') as segment}
-                        <span
-                          style="color: {segment.color}"
-                          class:search-match={segment.isMatch}
-                          class:search-current={segment.isCurrent}>{segment.content}</span
-                        >
+                      {#each getBeforeTokens(i) as token}
+                        <span style="color: {token.color}">{token.content}</span>
                       {/each}
                     </span>
                   </div>
@@ -2048,10 +1550,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="diff-pane after-pane" style="flex: {1 - paneRatio}">
           <div class="pane-header">
-            <span class="pane-ref">
-              <GitBranch size={12} />
-              {diffHeadDisplay}
-            </span>
+            <span class="pane-label">{afterLabel}</span>
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
             {#if isMarkdownFile}
               <button
@@ -2059,11 +1558,7 @@
                 onclick={() => (markdownPreview = !markdownPreview)}
                 title={markdownPreview ? 'Show code' : 'Preview markdown'}
               >
-                {#if markdownPreview}
-                  <Code size={14} />
-                {:else}
-                  <Eye size={14} />
-                {/if}
+                {markdownPreview ? '{ }' : '📄'}
               </button>
             {/if}
           </div>
@@ -2106,12 +1601,8 @@
                       onmousedown={(e) => handleLineMouseDown('after', i, e)}
                     >
                       <span class="line-content">
-                        {#each getHighlightedTokens(i, 'right') as segment}
-                          <span
-                            style="color: {segment.color}"
-                            class:search-match={segment.isMatch}
-                            class:search-current={segment.isCurrent}>{segment.content}</span
-                          >
+                        {#each getAfterTokens(i) as token}
+                          <span style="color: {token.color}">{token.content}</span>
                         {/each}
                       </span>
                     </div>
@@ -2122,7 +1613,7 @@
                     </div>
                   {/if}
                 </div>
-                <!-- Full-pane AI blur overlay with annotation text -->
+                <!-- AI blur overlay for after pane -->
                 {#if showAiAnnotations && annotationsRevealed}
                   {@const lineHeight = scrollController.getDimensions('after').lineHeight || 20}
                   <div class="ai-blur-overlay">
@@ -2164,10 +1655,7 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="diff-pane single-pane-content">
           <div class="pane-header">
-            <span class="pane-ref">
-              <GitBranch size={12} />
-              {diffHeadDisplay}
-            </span>
+            <span class="pane-label">{afterLabel}</span>
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
           </div>
           <div class="code-area" onwheel={handleAfterWheel}>
@@ -2185,12 +1673,8 @@
                     onmousedown={(e) => handleLineMouseDown('after', i, e)}
                   >
                     <span class="line-content">
-                      {#each getHighlightedTokens(i, 'right') as segment}
-                        <span
-                          style="color: {segment.color}"
-                          class:search-match={segment.isMatch}
-                          class:search-current={segment.isCurrent}>{segment.content}</span
-                        >
+                      {#each getAfterTokens(i) as token}
+                        <span style="color: {token.color}">{token.content}</span>
                       {/each}
                     </span>
                   </div>
@@ -2201,7 +1685,7 @@
                   </div>
                 {/if}
               </div>
-              <!-- Full-pane AI blur overlay with annotation text (new file mode) -->
+              <!-- AI blur overlay for after pane (new file mode) -->
               {#if showAiAnnotations && annotationsRevealed}
                 {@const lineHeight = scrollController.getDimensions('after').lineHeight || 20}
                 <div class="ai-blur-overlay">
@@ -2247,8 +1731,8 @@
       {/if}
     </div>
 
-    <!-- Range action toolbar (two-pane mode only) -->
-    {#if isTwoPaneMode && hoveredRangeIndex !== null && rangeToolbarStyle && commentingOnRange === null}
+    <!-- Range action toolbar (two-pane mode only, when commenting is enabled) -->
+    {#if isTwoPaneMode && commentingEnabled && hoveredRangeIndex !== null && rangeToolbarStyle && commentingOnRange === null}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="range-toolbar"
@@ -2262,15 +1746,6 @@
             <MessageSquarePlus size={12} />
           {/if}
         </button>
-        {#if canDiscard}
-          <button
-            class="range-btn discard-btn"
-            onclick={handleDiscardRange}
-            title="Discard changes"
-          >
-            <X size={12} />
-          </button>
-        {/if}
       </div>
     {/if}
 
@@ -2304,7 +1779,7 @@
     {/if}
 
     <!-- Line selection toolbar -->
-    {#if selectedLineRange && lineSelectionToolbarStyle && !commentingOnLines}
+    {#if commentingEnabled && selectedLineRange && lineSelectionToolbarStyle && !commentingOnLines}
       <div
         class="line-selection-toolbar"
         style="top: {lineSelectionToolbarStyle.top}px; left: {lineSelectionToolbarStyle.left}px;"
@@ -2321,9 +1796,6 @@
           title="Add comment (Enter)"
         >
           <MessageSquarePlus size={12} />
-        </button>
-        <button class="range-btn agent-btn" onclick={handleAskAgent} title="Ask agent about this">
-          <Wand2 size={12} />
         </button>
         <button class="range-btn" onclick={clearLineSelection} title="Clear selection (Esc)">
           <X size={12} />
@@ -2359,40 +1831,6 @@
             }
           : undefined}
       />
-    {/if}
-
-    <!-- Agent prompt editor -->
-    {#if agentPromptOnLines && agentPromptEditorStyle}
-      {@const lineCount = agentPromptOnLines.end - agentPromptOnLines.start + 1}
-      <div
-        class="agent-prompt-editor"
-        class:agent-prompt-editor-hidden={!agentPromptEditorStyle.visible}
-        style="top: {agentPromptEditorStyle.top}px; left: {agentPromptEditorStyle.left}px; width: {agentPromptEditorStyle.width}px;"
-      >
-        <input
-          type="text"
-          class="agent-prompt-input"
-          placeholder="Ask agent about {lineCount} line{lineCount !== 1 ? 's' : ''}..."
-          onkeydown={(e) => {
-            if (e.key === 'Escape') {
-              e.preventDefault();
-              handleAgentPromptCancel();
-            } else if (e.key === 'Enter') {
-              e.preventDefault();
-              const input = e.target as HTMLInputElement;
-              const value = input.value.trim();
-              if (value) {
-                handleAgentPromptSubmit(value);
-              }
-            }
-          }}
-          use:autoFocusInput
-        />
-        <div class="agent-prompt-hint">
-          <Wand2 size={10} />
-          <span>Enter to send · Esc to cancel</span>
-        </div>
-      </div>
     {/if}
   {/if}
 </div>
@@ -2502,10 +1940,7 @@
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .pane-ref {
-    display: flex;
-    align-items: center;
-    gap: 4px;
+  .pane-label {
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
     font-size: var(--size-xs);
     color: var(--text-faint);
@@ -2694,7 +2129,7 @@
   }
 
   .spine.dragging .divider-handle {
-    background-color: var(--accent-primary);
+    background-color: var(--ui-accent);
   }
 
   /* Prevent text selection during drag */
@@ -2712,7 +2147,7 @@
     visibility: hidden;
   }
 
-  /* Code area wrapper - contains code-container and scrollbar markers */
+  /* Code area wrapper */
   .code-area {
     flex: 1;
     position: relative;
@@ -2736,7 +2171,7 @@
   .lines-wrapper {
     display: block;
     will-change: transform;
-    position: relative; /* For AI annotation overlays */
+    position: relative;
     width: max-content;
     min-width: 100%;
   }
@@ -2783,24 +2218,24 @@
     background-color: rgba(128, 128, 128, 0.15);
   }
 
-  /* Keyboard-navigated focused hunk - more prominent highlight */
+  /* Keyboard-navigated focused hunk */
   .line.range-focused {
-    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.12));
-    box-shadow: inset 3px 0 0 var(--accent-primary);
+    background-color: color-mix(in srgb, var(--ui-accent) 12%, transparent);
+    box-shadow: inset 3px 0 0 var(--ui-accent);
   }
 
   .line.range-focused.content-changed {
-    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.18));
+    background-color: color-mix(in srgb, var(--ui-accent) 18%, transparent);
   }
 
   /* Line selection highlight */
   .line.line-selected {
-    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.15));
+    background-color: color-mix(in srgb, var(--ui-accent) 15%, transparent);
   }
 
   .line.line-selected.content-changed,
   .line.line-selected.range-hovered {
-    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.15));
+    background-color: color-mix(in srgb, var(--ui-accent) 15%, transparent);
   }
 
   .empty-state,
@@ -2859,12 +2294,8 @@
     background-color: var(--bg-hover);
   }
 
-  .range-btn.discard-btn:hover {
-    color: var(--status-deleted);
-  }
-
   .range-btn.comment-btn:hover {
-    color: var(--accent-primary);
+    color: var(--ui-accent);
   }
 
   /* Line selection toolbar */
@@ -2898,61 +2329,5 @@
     -webkit-backdrop-filter: blur(6px);
     background: rgba(var(--ui-accent-rgb, 59, 130, 246), 0.08);
     pointer-events: none;
-  }
-
-  /* Agent prompt editor */
-  .agent-prompt-editor {
-    position: absolute;
-    z-index: 100;
-    display: flex;
-    flex-direction: column;
-    background-color: var(--bg-chrome);
-    border-radius: 8px;
-    overflow: hidden;
-    transition: opacity 0.15s ease;
-  }
-
-  .agent-prompt-editor-hidden {
-    opacity: 0.3;
-    pointer-events: none;
-  }
-
-  .agent-prompt-input {
-    width: 100%;
-    padding: 10px 12px;
-    background: transparent;
-    border: none;
-    color: var(--text-primary);
-    font-family: inherit;
-    font-size: var(--size-sm);
-    line-height: 1.5;
-  }
-
-  .agent-prompt-input:focus {
-    outline: none;
-  }
-
-  .agent-prompt-input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .agent-prompt-hint {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 12px 8px;
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-  }
-
-  /* Search match highlighting */
-  .search-match {
-    background-color: var(--search-match-bg);
-    border-radius: 2px;
-  }
-
-  .search-current {
-    background-color: var(--search-current-match-bg);
-    border-radius: 2px;
   }
 </style>

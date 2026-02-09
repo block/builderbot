@@ -144,9 +144,6 @@
     const clickY = e.clientY - trackRect.top;
     const trackHeight = trackRect.height;
 
-    // Calculate where the click is as a percentage
-    const clickPercent = clickY / trackHeight;
-
     // Jump so the thumb center is at the click position
     const thumbHeightPx = (thumbHeightPercent / 100) * trackHeight;
     const targetThumbTop = clickY - thumbHeightPx / 2;

@@ -8,6 +8,8 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-show",
+    "core:window:allow-close",
     "dialog:default",
     "clipboard-manager:allow-write-text",
     "window-state:default",

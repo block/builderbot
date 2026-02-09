@@ -12,6 +12,7 @@
  */
 
 import { createHighlighter, type Highlighter, type ThemedToken, type BundledLanguage } from 'shiki';
+import { luminance } from '../theme';
 
 // Simple token type that doesn't leak Shiki internals
 export interface Token {
@@ -22,6 +23,7 @@ export interface Token {
 // Theme info exposed to the app
 export interface HighlighterTheme {
   name: string;
+  isDark: boolean; // Derived from bg luminance — authoritative for the active theme
   bg: string;
   fg: string;
   comment: string; // Color used for comments - useful for muted UI text
@@ -103,7 +105,9 @@ export const SYNTAX_THEMES = [
 
 export type SyntaxThemeName = (typeof SYNTAX_THEMES)[number];
 
-// Light themes (all others are dark)
+// Known light themes — used by the theme picker to show sun/moon icons for
+// themes that haven't been loaded yet. For the *active* theme, use
+// getTheme().isDark instead (derived from actual bg luminance).
 const LIGHT_THEMES: Set<SyntaxThemeName> = new Set([
   'catppuccin-latte',
   'everforest-light',
@@ -125,52 +129,12 @@ const LIGHT_THEMES: Set<SyntaxThemeName> = new Set([
   'vitesse-light',
 ]);
 
-// Custom themes loaded from ~/.config/staged/themes/
-// Maps theme name -> { isLight, path }
-const customThemes = new Map<string, { isLight: boolean; path: string }>();
-
 /**
- * Check if a theme is a light theme.
- * Works for both bundled and custom themes.
+ * Check if a theme name is a light theme (heuristic for unloaded themes).
+ * For the active/loaded theme, prefer getTheme().isDark which uses luminance.
  */
 export function isLightTheme(themeName: string): boolean {
-  // Check custom themes first
-  const custom = customThemes.get(themeName);
-  if (custom) {
-    return custom.isLight;
-  }
-  // Fall back to bundled themes
   return LIGHT_THEMES.has(themeName as SyntaxThemeName);
-}
-
-/**
- * Check if a theme name is a custom theme.
- */
-export function isCustomTheme(themeName: string): boolean {
-  return customThemes.has(themeName);
-}
-
-/**
- * Register a custom theme (called after discovering themes from backend).
- */
-export function registerCustomTheme(name: string, isLight: boolean, path: string): void {
-  customThemes.set(name, { isLight, path });
-}
-
-/**
- * Clear all registered custom themes.
- */
-export function clearCustomThemes(): void {
-  customThemes.clear();
-}
-
-/**
- * Get all registered custom theme names.
- */
-export function getCustomThemeNames(): string[] {
-  return Array.from(customThemes.keys()).sort((a, b) =>
-    a.toLowerCase().localeCompare(b.toLowerCase())
-  );
 }
 
 // Static theme imports (Vite can't handle dynamic imports for these)
@@ -237,15 +201,6 @@ const themeImports: Record<SyntaxThemeName, () => Promise<any>> = {
   'vitesse-dark': () => import('shiki/themes/vitesse-dark.mjs'),
   'vitesse-light': () => import('shiki/themes/vitesse-light.mjs'),
 };
-
-// Theme change listeners
-type ThemeChangeListener = (theme: HighlighterTheme) => void;
-const themeChangeListeners: Set<ThemeChangeListener> = new Set();
-
-export function onThemeChange(listener: ThemeChangeListener): () => void {
-  themeChangeListeners.add(listener);
-  return () => themeChangeListeners.delete(listener);
-}
 
 // Track which languages we've attempted to load (to avoid repeated failures)
 const loadedLanguages = new Set<string>();
@@ -515,147 +470,6 @@ const EXTENSION_MAP: Record<string, BundledLanguage> = {
   ltx: 'latex',
 };
 
-// Theme settings type from Shiki (not exported, so we define it here)
-interface ThemeSetting {
-  scope?: string | string[];
-  settings?: { foreground?: string };
-}
-
-/**
- * Extract the comment color from a theme's token settings.
- * Falls back to the provided fallback color if not found.
- */
-function extractCommentColor(settings: ThemeSetting[] | undefined, fallback: string): string {
-  if (!settings) return fallback;
-
-  for (const setting of settings) {
-    if (!setting.scope || !setting.settings?.foreground) continue;
-
-    const scopes = Array.isArray(setting.scope) ? setting.scope : [setting.scope];
-    if (scopes.includes('comment')) {
-      return setting.settings.foreground;
-    }
-  }
-
-  return fallback;
-}
-
-/**
- * Strip alpha channel from hex color if present (e.g., #50FA7B80 -> #50FA7B)
- */
-function stripAlpha(color: string): string {
-  // Handle 8-digit hex (#RRGGBBAA)
-  if (color.length === 9 && color.startsWith('#')) {
-    return color.slice(0, 7);
-  }
-  return color;
-}
-
-/**
- * Extract git-related colors from theme's colors object.
- * Tries multiple keys in order of preference.
- */
-function extractGitColors(colors: Record<string, string> | undefined): {
-  added: string | null;
-  deleted: string | null;
-  modified: string | null;
-} {
-  if (!colors) {
-    return { added: null, deleted: null, modified: null };
-  }
-
-  // Try keys in order of preference (foreground colors first, then gutter/diff)
-  const addedKeys = [
-    'gitDecoration.addedResourceForeground',
-    'editorGutter.addedBackground',
-    'diffEditor.insertedTextBackground',
-  ];
-  const deletedKeys = [
-    'gitDecoration.deletedResourceForeground',
-    'editorGutter.deletedBackground',
-    'diffEditor.removedTextBackground',
-  ];
-  const modifiedKeys = [
-    'gitDecoration.modifiedResourceForeground',
-    'editorGutter.modifiedBackground',
-  ];
-
-  const findColor = (keys: string[]): string | null => {
-    for (const key of keys) {
-      const value = colors[key];
-      if (value) {
-        return stripAlpha(value);
-      }
-    }
-    return null;
-  };
-
-  return {
-    added: findColor(addedKeys),
-    deleted: findColor(deletedKeys),
-    modified: findColor(modifiedKeys),
-  };
-}
-
-/**
- * Initialize the highlighter with a theme.
- * Only loads core languages at startup for fast init.
- * Other languages are lazy-loaded on demand.
- *
- * This is idempotent - multiple calls return the same instance.
- */
-export async function initHighlighter(themeName: string = 'github-dark'): Promise<void> {
-  // Return existing instance if already initialized
-  if (highlighter) {
-    return;
-  }
-
-  // If initialization is in progress, wait for it
-  if (initPromise) {
-    return initPromise;
-  }
-
-  // Start initialization
-  initPromise = (async () => {
-    highlighter = await createHighlighter({
-      themes: [themeName],
-      langs: CORE_LANGUAGES,
-    });
-
-    // Mark core languages as loaded
-    CORE_LANGUAGES.forEach((lang) => loadedLanguages.add(lang));
-
-    // Set current theme name (used by highlightLines)
-    currentThemeName = themeName;
-
-    // Extract theme colors
-    const theme = highlighter.getTheme(themeName);
-    const fg = theme.fg || '#d4d4d4';
-    const gitColors = extractGitColors(theme.colors as Record<string, string> | undefined);
-    currentTheme = {
-      name: themeName,
-      bg: theme.bg || '#1e1e1e',
-      fg,
-      comment: extractCommentColor(theme.settings as ThemeSetting[], fg),
-      ...gitColors,
-    };
-  })();
-
-  return initPromise;
-}
-
-/**
- * Get the current theme info (background, foreground colors).
- * Returns null if highlighter not initialized.
- */
-export function getTheme(): HighlighterTheme | null {
-  return currentTheme;
-}
-
-/**
- * Detect language from file path/extension.
- * Returns null for unknown extensions.
- */
 // Map special filenames (case-insensitive) to languages
 const FILENAME_MAP: Record<string, BundledLanguage> = {
   // Docker
@@ -723,8 +537,145 @@ const FILENAME_MAP: Record<string, BundledLanguage> = {
   'go.sum': 'go',
 };
 
+// Theme settings type from Shiki (not exported, so we define it here)
+interface ThemeSetting {
+  scope?: string | string[];
+  settings?: { foreground?: string };
+}
+
+/**
+ * Extract the comment color from a theme's token settings.
+ * Falls back to the provided fallback color if not found.
+ */
+function extractCommentColor(settings: ThemeSetting[] | undefined, fallback: string): string {
+  if (!settings) return fallback;
+
+  for (const setting of settings) {
+    if (!setting.scope || !setting.settings?.foreground) continue;
+
+    const scopes = Array.isArray(setting.scope) ? setting.scope : [setting.scope];
+    if (scopes.includes('comment')) {
+      return setting.settings.foreground;
+    }
+  }
+
+  return fallback;
+}
+
+/**
+ * Strip alpha channel from hex color if present (e.g., #50FA7B80 -> #50FA7B)
+ */
+function stripAlpha(color: string): string {
+  if (color.length === 9 && color.startsWith('#')) {
+    return color.slice(0, 7);
+  }
+  return color;
+}
+
+/**
+ * Extract git-related colors from theme's colors object.
+ * Tries multiple keys in order of preference.
+ */
+function extractGitColors(colors: Record<string, string> | undefined): {
+  added: string | null;
+  deleted: string | null;
+  modified: string | null;
+} {
+  if (!colors) {
+    return { added: null, deleted: null, modified: null };
+  }
+
+  const addedKeys = [
+    'gitDecoration.addedResourceForeground',
+    'editorGutter.addedBackground',
+    'diffEditor.insertedTextBackground',
+  ];
+  const deletedKeys = [
+    'gitDecoration.deletedResourceForeground',
+    'editorGutter.deletedBackground',
+    'diffEditor.removedTextBackground',
+  ];
+  const modifiedKeys = [
+    'gitDecoration.modifiedResourceForeground',
+    'editorGutter.modifiedBackground',
+  ];
+
+  const findColor = (keys: string[]): string | null => {
+    for (const key of keys) {
+      const value = colors[key];
+      if (value) {
+        return stripAlpha(value);
+      }
+    }
+    return null;
+  };
+
+  return {
+    added: findColor(addedKeys),
+    deleted: findColor(deletedKeys),
+    modified: findColor(modifiedKeys),
+  };
+}
+
+/**
+ * Extract theme info from a loaded Shiki theme.
+ */
+function extractThemeInfo(
+  themeName: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  theme: any
+): HighlighterTheme {
+  const bg = theme.bg || '#1e1e1e';
+  const fg = theme.fg || '#d4d4d4';
+  const gitColors = extractGitColors(theme.colors as Record<string, string> | undefined);
+  return {
+    name: themeName,
+    isDark: luminance(bg) < 0.5,
+    bg,
+    fg,
+    comment: extractCommentColor(theme.settings as ThemeSetting[], fg),
+    ...gitColors,
+  };
+}
+
+/**
+ * Initialize the highlighter with a theme.
+ * Only loads core languages at startup for fast init.
+ * Other languages are lazy-loaded on demand.
+ *
+ * This is idempotent - multiple calls return the same instance.
+ */
+export async function initHighlighter(themeName: string = 'laserwave'): Promise<void> {
+  if (highlighter) return;
+  if (initPromise) return initPromise;
+
+  initPromise = (async () => {
+    highlighter = await createHighlighter({
+      themes: [themeName],
+      langs: CORE_LANGUAGES,
+    });
+
+    CORE_LANGUAGES.forEach((lang) => loadedLanguages.add(lang));
+    currentThemeName = themeName;
+    currentTheme = extractThemeInfo(themeName, highlighter.getTheme(themeName));
+  })();
+
+  return initPromise;
+}
+
+/**
+ * Get the current theme info (background, foreground colors).
+ * Returns null if highlighter not initialized.
+ */
+export function getTheme(): HighlighterTheme | null {
+  return currentTheme;
+}
+
+/**
+ * Detect language from file path/extension.
+ * Returns null for unknown extensions.
+ */
 export function detectLanguage(filePath: string): BundledLanguage | null {
-  // Get the filename (last path component)
   const filename = filePath.split('/').pop() || '';
   const filenameLower = filename.toLowerCase();
 
@@ -733,7 +684,7 @@ export function detectLanguage(filePath: string): BundledLanguage | null {
     return FILENAME_MAP[filenameLower];
   }
 
-  // Check if filename starts with a dot (dotfile) - try the lowercase version
+  // Check dotfile mapping
   if (filename.startsWith('.') && FILENAME_MAP[filename.toLowerCase()]) {
     return FILENAME_MAP[filename.toLowerCase()];
   }
@@ -756,20 +707,14 @@ function isSupportedLanguage(lang: string): lang is BundledLanguage {
  */
 async function ensureLanguageLoaded(lang: BundledLanguage): Promise<boolean> {
   if (!highlighter) return false;
-
-  // Already loaded
   if (loadedLanguages.has(lang)) return true;
-
-  // Already failed to load
   if (failedLanguages.has(lang)) return false;
 
-  // Not in our supported set
   if (!isSupportedLanguage(lang)) {
     failedLanguages.add(lang);
     return false;
   }
 
-  // Try to load it
   try {
     await highlighter.loadLanguage(lang);
     loadedLanguages.add(lang);
@@ -790,14 +735,8 @@ async function ensureLanguageLoaded(lang: BundledLanguage): Promise<boolean> {
 export function highlightLine(code: string, lang: BundledLanguage | null): Token[] {
   const fallback = [{ content: code, color: currentTheme?.fg || '#d4d4d4' }];
 
-  if (!highlighter || !currentTheme || !lang) {
-    return fallback;
-  }
-
-  // If language isn't loaded yet, return fallback (will be loaded async)
-  if (!loadedLanguages.has(lang)) {
-    return fallback;
-  }
+  if (!highlighter || !currentTheme || !lang) return fallback;
+  if (!loadedLanguages.has(lang)) return fallback;
 
   try {
     const result = highlighter.codeToTokens(code, {
@@ -880,66 +819,6 @@ export async function setSyntaxTheme(themeName: SyntaxThemeName): Promise<void> 
     }
   }
 
-  // Update current theme
   currentThemeName = themeName;
-  const theme = highlighter.getTheme(themeName);
-  const fg = theme.fg || '#d4d4d4';
-  const gitColors = extractGitColors(theme.colors as Record<string, string> | undefined);
-  currentTheme = {
-    name: themeName,
-    bg: theme.bg || '#1e1e1e',
-    fg,
-    comment: extractCommentColor(theme.settings as ThemeSetting[], fg),
-    ...gitColors,
-  };
-
-  // Notify listeners
-  themeChangeListeners.forEach((listener) => listener(currentTheme!));
-}
-
-/**
- * Load and switch to a custom theme from JSON content.
- * The theme JSON should be in VS Code theme format.
- */
-export async function setCustomSyntaxTheme(themeName: string, themeJson: string): Promise<void> {
-  if (!highlighter) {
-    // Initialize with a default theme first, then load custom
-    await initHighlighter('github-dark');
-  }
-
-  // Parse the theme JSON
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let themeData: any;
-  try {
-    themeData = JSON.parse(themeJson);
-  } catch {
-    throw new Error(`Invalid theme JSON for "${themeName}"`);
-  }
-
-  // Ensure the theme has a name (use provided name if not in JSON)
-  if (!themeData.name) {
-    themeData.name = themeName;
-  }
-
-  // Load the theme into Shiki
-  const loadedThemes = highlighter!.getLoadedThemes();
-  if (!loadedThemes.includes(themeData.name)) {
-    await highlighter!.loadTheme(themeData);
-  }
-
-  // Update current theme
-  currentThemeName = themeData.name;
-  const theme = highlighter!.getTheme(themeData.name);
-  const fg = theme.fg || '#d4d4d4';
-  const gitColors = extractGitColors(theme.colors as Record<string, string> | undefined);
-  currentTheme = {
-    name: themeData.name,
-    bg: theme.bg || '#1e1e1e',
-    fg,
-    comment: extractCommentColor(theme.settings as ThemeSetting[], fg),
-    ...gitColors,
-  };
-
-  // Notify listeners
-  themeChangeListeners.forEach((listener) => listener(currentTheme!));
+  currentTheme = extractThemeInfo(themeName, highlighter.getTheme(themeName));
 }

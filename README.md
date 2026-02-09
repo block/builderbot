@@ -16,14 +16,34 @@ A local web app that **only** operates on markdown files inside `thoughts/` dire
 - **MCP server** at `/mcp` for AI agents to participate in document review programmatically
 - **Agent presence** -- shows when an agent is actively monitoring a file
 
+## Installation
+
+### Prerequisites
+
+1. **Go 1.21+** - Required to build and run the server
+   ```bash
+   # On macOS with Homebrew
+   brew install go
+
+   # Or download from https://go.dev/dl/
+   ```
+
+2. **just** - Command runner for development tasks
+   ```bash
+   # On macOS with Homebrew
+   brew install just
+
+   # Or see https://github.com/casey/just for other platforms
+   ```
+
+3. **fswatch** (optional) - For hot reload in dev mode (auto-installed via brew on macOS)
+
 ## Usage
 
 ```bash
 just run    # Build, start server, open browser
 just dev    # Same, but with hot reload on file changes
 ```
-
-Requires Go 1.21+ and [just](https://github.com/casey/just). Hot reload requires fswatch (auto-installed via brew).
 
 ## Options
 

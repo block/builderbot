@@ -186,7 +186,8 @@ func stripFrontmatter(content []byte) []byte {
 	return []byte(strings.TrimLeft(afterFrontmatter, "\n"))
 }
 
-var headingRegex = regexp.MustCompile(`<h([1-3]) id="([^"]+)"[^>]*>([^<]+)</h[1-3]>`)
+var headingRegex = regexp.MustCompile(`<h([1-3]) id="([^"]+)"[^>]*>(.*?)</h[1-3]>`)
+var htmlTagRegex = regexp.MustCompile(`<[^>]+>`)
 
 func extractHeadings(html string) []Heading {
 	matches := headingRegex.FindAllStringSubmatch(html, -1)
@@ -198,10 +199,11 @@ func extractHeadings(html string) []Heading {
 		} else if m[1] == "3" {
 			level = 3
 		}
+		text := htmlTagRegex.ReplaceAllString(m[3], "")
 		headings = append(headings, Heading{
 			Level: level,
 			ID:    m[2],
-			Text:  strings.TrimSpace(m[3]),
+			Text:  strings.TrimSpace(text),
 		})
 	}
 	return headings

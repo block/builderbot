@@ -318,6 +318,13 @@
         background: #f6f8fa;
         border-color: #656d76;
     }
+    .agent-context-label {
+        font-size: 10px;
+        color: #656d76;
+        cursor: default;
+    }
+    .agent-context-label.warning { color: #d29922; }
+    .agent-context-label.critical { color: #cf222e; }
     @keyframes review-pulse {
         0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.3); }
         70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
@@ -703,15 +710,54 @@
             openCount + ' open thread' + (openCount !== 1 ? 's' : '') + '</div>';
     }
 
+    var agentPollTimer = null;
+
+    function agentContextColorClass(pct) {
+        if (pct >= 85) return 'critical';
+        if (pct >= 60) return 'warning';
+        return '';
+    }
+
+    function formatTokenCount(n) {
+        return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
     function updateAgentIndicator() {
         var indicator = document.getElementById('agent-indicator');
         if (!indicator) return;
         fetch('/api/agents?project=' + encodeURIComponent(qualifiedName))
             .then(function(r) { return r.json(); })
             .then(function(data) {
-                indicator.style.display = data.running ? 'inline-flex' : 'none';
+                if (data.running) {
+                    indicator.style.display = 'inline-flex';
+                    var pct = Math.round(data.contextPercent || 0);
+                    var colorClass = agentContextColorClass(pct);
+                    var contextLabel = indicator.querySelector('.agent-context-label');
+                    if (!contextLabel) {
+                        contextLabel = document.createElement('span');
+                        contextLabel.className = 'agent-context-label';
+                        var agentText = indicator.querySelector('span:not(.agent-dot):not(.agent-context-label)');
+                        if (agentText) agentText.after(contextLabel);
+                    }
+                    contextLabel.textContent = pct + '%';
+                    contextLabel.title = formatTokenCount(data.contextUsed || 0) + ' / ' + formatTokenCount(data.contextWindow || 0) + ' tokens';
+                    contextLabel.className = 'agent-context-label' + (colorClass ? ' ' + colorClass : '');
+                    startAgentPolling();
+                } else {
+                    indicator.style.display = 'none';
+                    stopAgentPolling();
+                }
             })
             .catch(function() {});
+    }
+
+    function startAgentPolling() {
+        if (agentPollTimer) return;
+        agentPollTimer = setInterval(updateAgentIndicator, 5000);
+    }
+
+    function stopAgentPolling() {
+        if (agentPollTimer) { clearInterval(agentPollTimer); agentPollTimer = null; }
     }
 
     function refreshReview() {

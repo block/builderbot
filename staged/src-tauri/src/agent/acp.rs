@@ -1,12 +1,22 @@
-//! ACP (Agent Client Protocol) driver — spawns goose and speaks ACP.
+//! ACP (Agent Client Protocol) driver — spawns an ACP-compatible agent
+//! and communicates via the ACP JSON-RPC protocol over stdio.
 //!
 //! This is the **only** file that imports `agent_client_protocol`. To
 //! switch to a different agent backend, create a new module implementing
 //! [`AgentDriver`] and leave this file untouched (or remove it).
 //!
+//! ## Supported agents
+//!
+//! | ID        | Command           | Notes                                      |
+//! |-----------|-------------------|--------------------------------------------|
+//! | `goose`   | `goose`           | Needs `acp --with-builtin developer,...`   |
+//! | `claude`  | `claude-code-acp` | Runs in ACP mode by default                |
+//! | `codex`   | `codex-acp`       | Runs in ACP mode by default                |
+//! | `pi`      | `pi-acp`          | Runs in ACP mode by default                |
+//!
 //! ## Process lifecycle
 //!
-//! The goose subprocess is spawned with `kill_on_drop(true)`. When the
+//! The agent subprocess is spawned with `kill_on_drop(true)`. When the
 //! future returned by [`AcpDriver::run`] completes — for any reason —
 //! the child is dropped and the OS process is killed. This is the
 //! primary guarantee that cancellation doesn't leave orphan processes.
@@ -23,6 +33,7 @@ use agent_client_protocol::{
     SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent,
 };
 use async_trait::async_trait;
+use serde::Serialize;
 use tokio::process::Command;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
@@ -32,23 +43,129 @@ use super::AgentDriver;
 use crate::store::Store;
 
 // =============================================================================
+// Known agents — the registry of ACP-compatible providers
+// =============================================================================
+
+/// Static metadata for each known ACP agent.
+struct KnownAgent {
+    /// Unique identifier used in preferences and IPC.
+    id: &'static str,
+    /// Human-readable label for the UI.
+    label: &'static str,
+    /// CLI command name to search for.
+    command: &'static str,
+    /// Arguments to pass when spawning in ACP mode.
+    acp_args: &'static [&'static str],
+}
+
+/// All agents we know how to talk to, in display order.
+const KNOWN_AGENTS: &[KnownAgent] = &[
+    KnownAgent {
+        id: "goose",
+        label: "Goose",
+        command: "goose",
+        acp_args: &["acp", "--with-builtin", "developer,extensionmanager"],
+    },
+    KnownAgent {
+        id: "claude",
+        label: "Claude Code",
+        command: "claude-code-acp",
+        acp_args: &[],
+    },
+    KnownAgent {
+        id: "codex",
+        label: "Codex",
+        command: "codex-acp",
+        acp_args: &[],
+    },
+    KnownAgent {
+        id: "pi",
+        label: "Pi",
+        command: "pi-acp",
+        acp_args: &[],
+    },
+];
+
+// =============================================================================
+// Provider discovery — exposed to the frontend
+// =============================================================================
+
+/// Information about a discovered ACP provider, serialized to the frontend.
+#[derive(Debug, Clone, Serialize)]
+pub struct AcpProviderInfo {
+    pub id: String,
+    pub label: String,
+}
+
+/// Scan the system for all known ACP agents that are installed.
+///
+/// Returns only agents whose CLI binary can be found. The order matches
+/// `KNOWN_AGENTS` (display order).
+pub fn discover_providers() -> Vec<AcpProviderInfo> {
+    KNOWN_AGENTS
+        .iter()
+        .filter(|agent| find_command(agent.command).is_some())
+        .map(|agent| AcpProviderInfo {
+            id: agent.id.to_string(),
+            label: agent.label.to_string(),
+        })
+        .collect()
+}
+
+// =============================================================================
 // AcpDriver — the public driver
 // =============================================================================
 
 pub struct AcpDriver {
-    goose_path: PathBuf,
+    binary_path: PathBuf,
+    acp_args: Vec<String>,
+    agent_label: String,
 }
 
 impl AcpDriver {
-    /// Locate the `goose` binary and return a ready-to-use driver.
+    /// Create a driver for the given provider ID (e.g. "goose", "claude").
     ///
-    /// Fails immediately if goose can't be found — the caller gets a clear
-    /// error before any background work starts.
-    pub fn new() -> Result<Self, String> {
-        let goose_path = find_goose().ok_or_else(|| {
-            "Could not find `goose` binary. Install it and ensure it's on your PATH.".to_string()
+    /// Looks up the agent in `KNOWN_AGENTS`, locates the binary on disk,
+    /// and returns a ready-to-use driver. Fails immediately if the agent
+    /// is unknown or its binary can't be found.
+    pub fn new(provider_id: &str) -> Result<Self, String> {
+        let agent = KNOWN_AGENTS
+            .iter()
+            .find(|a| a.id == provider_id)
+            .ok_or_else(|| format!("Unknown agent provider: {provider_id}"))?;
+
+        let binary_path = find_command(agent.command).ok_or_else(|| {
+            format!(
+                "Could not find `{}` binary. Install it and ensure it's on your PATH.",
+                agent.command
+            )
         })?;
-        Ok(Self { goose_path })
+
+        Ok(Self {
+            binary_path,
+            acp_args: agent.acp_args.iter().map(|s| s.to_string()).collect(),
+            agent_label: agent.label.to_string(),
+        })
+    }
+
+    /// Create a driver for the first available provider.
+    ///
+    /// Tries each known agent in order and returns the first one found.
+    /// This is the fallback when no provider preference is set.
+    pub fn first_available() -> Result<Self, String> {
+        for agent in KNOWN_AGENTS {
+            if let Some(path) = find_command(agent.command) {
+                return Ok(Self {
+                    binary_path: path,
+                    acp_args: agent.acp_args.iter().map(|s| s.to_string()).collect(),
+                    agent_label: agent.label.to_string(),
+                });
+            }
+        }
+        Err(
+            "No ACP agent found. Install Goose, Claude Code, Codex, or Pi and ensure it's on your PATH."
+                .to_string(),
+        )
     }
 }
 
@@ -63,19 +180,18 @@ impl AgentDriver for AcpDriver {
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
     ) -> Result<(), String> {
-        // Spawn goose in ACP mode
-        let mut child = Command::new(&self.goose_path)
-            .args(["acp", "--with-builtin", "developer,extensionmanager"])
+        let mut child = Command::new(&self.binary_path)
+            .args(&self.acp_args)
             .current_dir(working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // stderr is intentionally discarded — we don't currently need
             // anything from it, and piping without draining would block
-            // goose if the OS pipe buffer fills up.
+            // the agent if the OS pipe buffer fills up.
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| format!("Failed to spawn goose: {e}"))?;
+            .map_err(|e| format!("Failed to spawn {}: {e}", self.agent_label))?;
 
         let stdin = child
             .stdin
@@ -350,7 +466,7 @@ fn extract_content_preview(content: &[agent_client_protocol::ToolCallContent]) -
 }
 
 // =============================================================================
-// Find goose binary
+// Binary discovery
 // =============================================================================
 
 /// Common paths where CLIs might be installed (GUI apps don't inherit shell PATH).
@@ -361,9 +477,14 @@ const COMMON_PATHS: &[&str] = &[
     "/home/linuxbrew/.linuxbrew/bin",
 ];
 
-fn find_goose() -> Option<PathBuf> {
+/// Find a CLI binary by command name.
+///
+/// Searches in order:
+/// 1. Login shell `which` (picks up user's PATH from `.zshrc` / `.bashrc`)
+/// 2. Common install locations
+fn find_command(cmd: &str) -> Option<PathBuf> {
     // Strategy 1: Login shell `which`
-    if let Some(path) = find_via_login_shell("goose") {
+    if let Some(path) = find_via_login_shell(cmd) {
         if path.exists() {
             return Some(path);
         }
@@ -371,7 +492,7 @@ fn find_goose() -> Option<PathBuf> {
 
     // Strategy 2: Common paths
     for dir in COMMON_PATHS {
-        let path = PathBuf::from(dir).join("goose");
+        let path = PathBuf::from(dir).join(cmd);
         if path.exists() {
             return Some(path);
         }

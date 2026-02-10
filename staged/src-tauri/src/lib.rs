@@ -1093,6 +1093,16 @@ fn detect_default_branch_cmd(repo_path: String) -> Result<String, String> {
 }
 
 // =============================================================================
+// Utilities
+// =============================================================================
+
+/// Open a URL in the user's default browser.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    open::that(&url).map_err(|e| format!("Failed to open URL: {e}"))
+}
+
+// =============================================================================
 // Tauri App Setup
 // =============================================================================
 
@@ -1199,6 +1209,8 @@ pub fn run() {
             delete_pending_commit,
             list_git_branches,
             detect_default_branch_cmd,
+            open_url,
+            session_commands::discover_acp_providers,
             session_commands::get_session,
             session_commands::get_session_messages,
             session_commands::get_session_messages_since,

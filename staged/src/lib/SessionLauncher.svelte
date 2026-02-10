@@ -15,6 +15,7 @@
   import type { Session, SessionStatus } from './types';
   import { startSession, deleteSession } from './commands';
   import SessionModal from './SessionModal.svelte';
+  import { preferences } from './stores/preferences.svelte';
 
   interface Props {
     onClose: () => void;
@@ -81,7 +82,7 @@
       // We need a working directory — use the user's home dir as a default
       // for these standalone debug sessions.
       const workingDir = '/tmp';
-      const s = await startSession(text, workingDir);
+      const s = await startSession(text, workingDir, preferences.aiAgent ?? undefined);
       sessions = [...sessions, s];
       prompt = '';
     } catch (e) {

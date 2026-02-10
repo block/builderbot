@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
+use crate::agent::{self, AcpProviderInfo};
 use crate::git;
 use crate::session_runner::{self, SessionConfig};
 use crate::store::{self, Store};
@@ -37,6 +38,25 @@ fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<
         .unwrap()
         .clone()
         .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
+}
+
+// =============================================================================
+// Provider discovery
+// =============================================================================
+
+/// Scan the system for installed ACP-compatible agents.
+///
+/// Returns a list of available providers with their IDs and labels.
+/// The frontend uses this for the agent setup modal and selector.
+///
+/// Marked `async` so Tauri runs it on the async runtime instead of the
+/// main thread — `find_command` spawns login shells which can take tens
+/// of milliseconds per agent.
+#[tauri::command]
+pub async fn discover_acp_providers() -> Vec<AcpProviderInfo> {
+    tokio::task::spawn_blocking(agent::discover_providers)
+        .await
+        .unwrap_or_default()
 }
 
 // =============================================================================
@@ -90,10 +110,14 @@ pub fn start_session(
     app_handle: tauri::AppHandle,
     prompt: String,
     working_dir: String,
+    provider: Option<String>,
 ) -> Result<store::Session, String> {
     let store = get_store(&store)?;
     let working_dir = PathBuf::from(working_dir);
-    let session = store::Session::new_running(&prompt, &working_dir);
+    let mut session = store::Session::new_running(&prompt, &working_dir);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
+    }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     session_runner::start_session(
@@ -103,6 +127,7 @@ pub fn start_session(
             working_dir,
             agent_session_id: None,
             pre_head_sha: None,
+            provider,
         },
         store,
         app_handle,
@@ -136,6 +161,9 @@ pub fn resume_session(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
+    // Use the provider that originally created this session so the
+    // agent's conversation history can be restored correctly.
+    let provider = session.provider.clone();
     let agent_session_id = session.agent_id.clone();
     let working_dir = PathBuf::from(&session.working_dir);
 
@@ -162,6 +190,7 @@ pub fn resume_session(
             working_dir,
             agent_session_id,
             pre_head_sha: None,
+            provider,
         },
         store,
         app_handle,
@@ -245,6 +274,7 @@ pub fn start_branch_session(
     branch_id: String,
     prompt: String,
     session_type: BranchSessionType,
+    provider: Option<String>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
 
@@ -277,7 +307,10 @@ pub fn start_branch_session(
     let full_prompt = build_full_prompt(&prompt, &branch_context, &session_type);
 
     // Create the session
-    let session = store::Session::new_running(&full_prompt, &worktree_path);
+    let mut session = store::Session::new_running(&full_prompt, &worktree_path);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
+    }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     // Create artifact stub and compute pre-head SHA
@@ -303,6 +336,7 @@ pub fn start_branch_session(
             working_dir: worktree_path.clone(),
             agent_session_id: None,
             pre_head_sha,
+            provider,
         },
         store,
         app_handle,

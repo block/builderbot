@@ -81,6 +81,29 @@ export function getBranchTimeline(branchId: string): Promise<BranchTimeline> {
 }
 
 // =============================================================================
+// Utilities
+// =============================================================================
+
+/** Open a URL in the user's default browser. */
+export function openUrl(url: string): Promise<void> {
+  return invoke('open_url', { url });
+}
+
+// =============================================================================
+// Agent discovery
+// =============================================================================
+
+export interface AcpProviderInfo {
+  id: string;
+  label: string;
+}
+
+/** Scan the system for installed ACP-compatible agents. */
+export function discoverAcpProviders(): Promise<AcpProviderInfo[]> {
+  return invoke('discover_acp_providers');
+}
+
+// =============================================================================
 // Sessions
 // =============================================================================
 
@@ -99,12 +122,17 @@ export function getSessionMessagesSince(
   return invoke('get_session_messages_since', { sessionId, sinceId });
 }
 
-/** Create a session and immediately start the agent (goose). */
-export function startSession(prompt: string, workingDir: string): Promise<Session> {
-  return invoke('start_session', { prompt, workingDir });
+/** Create a session and immediately start the agent. */
+export function startSession(
+  prompt: string,
+  workingDir: string,
+  provider?: string
+): Promise<Session> {
+  return invoke('start_session', { prompt, workingDir, provider: provider ?? null });
 }
 
-/** Send a follow-up message to an existing (completed/cancelled/error) session. */
+/** Send a follow-up message to an existing session.
+ *  The backend uses the provider that originally created the session. */
 export function resumeSession(sessionId: string, prompt: string): Promise<void> {
   return invoke('resume_session', { sessionId, prompt });
 }
@@ -121,9 +149,15 @@ export function deleteSession(sessionId: string): Promise<void> {
 export function startBranchSession(
   branchId: string,
   prompt: string,
-  sessionType: BranchSessionType
+  sessionType: BranchSessionType,
+  provider?: string
 ): Promise<BranchSessionResponse> {
-  return invoke('start_branch_session', { branchId, prompt, sessionType });
+  return invoke('start_branch_session', {
+    branchId,
+    prompt,
+    sessionType,
+    provider: provider ?? null,
+  });
 }
 
 // =============================================================================

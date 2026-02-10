@@ -10,9 +10,12 @@
   import TopBar from './lib/TopBar.svelte';
   import ProjectHome from './lib/ProjectHome.svelte';
   import SessionLauncher from './lib/SessionLauncher.svelte';
+  import AgentSetupModal from './lib/AgentSetupModal.svelte';
   import { preferences, initPreferences } from './lib/stores/preferences.svelte';
+  import { agentState, refreshProviders } from './lib/stores/agent.svelte';
 
   let showSessionLab = $state(false);
+  let showAgentSetup = $state(false);
 
   // Konami code: ↑↑↓↓←→←→BA
   const konamiSequence = [
@@ -52,6 +55,15 @@
     }
     console.debug(`[Staged] preferences ready in ${Math.round(performance.now() - t0)}ms`);
 
+    // Discover available agents. We await so we know whether to show
+    // the setup modal before revealing the window.
+    await refreshProviders();
+
+    // Show the setup modal only when no agents are installed at all.
+    if (agentState.providers.length === 0) {
+      showAgentSetup = true;
+    }
+
     // Window was created hidden — show it now that the theme is applied
     await getCurrentWindow().show();
   });
@@ -68,6 +80,10 @@
       <ProjectHome />
     </div>
   </main>
+
+  {#if showAgentSetup}
+    <AgentSetupModal onClose={() => (showAgentSetup = false)} />
+  {/if}
 
   {#if showSessionLab}
     <SessionLauncher onClose={() => (showSessionLab = false)} />

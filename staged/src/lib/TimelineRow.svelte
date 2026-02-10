@@ -13,7 +13,7 @@
     Loader2,
     MessageSquare,
     Trash2,
-    AlertCircle,
+    AlertTriangle,
   } from 'lucide-svelte';
 
   export type TimelineItemType =
@@ -98,7 +98,7 @@
       {:else if type === 'generating-note'}
         <Loader2 size={12} class="spinner" />
       {:else if type === 'failed-commit' || type === 'failed-note'}
-        <AlertCircle size={12} />
+        <AlertTriangle size={12} />
       {:else if type === 'commit'}
         <GitCommit size={12} />
       {:else if type === 'note'}
@@ -233,8 +233,8 @@
   }
 
   .timeline-icon.failed-icon {
-    color: var(--ui-danger);
-    border-color: var(--ui-danger);
+    color: var(--text-muted);
+    border-color: var(--border-muted);
   }
 
   .timeline-info {
@@ -266,7 +266,7 @@
   }
 
   .failed-meta {
-    color: var(--ui-danger);
+    color: var(--text-muted);
   }
 
   .timeline-meta {

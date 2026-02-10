@@ -533,91 +533,145 @@ type ProjectFile struct {
 	FileType   string // "research", "plan", or "other"
 }
 
-// GroupedFiles represents files organized by category/feature for template rendering
-type GroupedFiles struct {
-	Groups []FileGroup
+// FileGroupView is the top-level display unit in the project file list.
+// Each group is rendered as its own section with a header and file list.
+type FileGroupView struct {
+	Name       string // display name ("thoughts", "Context", "auth-feature", etc.)
+	Source     string // source name for management operations (e.g., "rp1")
+	SourceType string // "tree" or "files"
+	Auto       bool
+	BadgeText  string // source type badge text (e.g., "RPI", "RP1")
+	BadgeColor string // CSS color for badge text
+	BadgeBg    string // CSS background for badge
+	Files      []ProjectFile
 }
 
-// FileGroup represents a category or feature group
-type FileGroup struct {
-	Type  string // "category" or "feature"
-	Name  string // category name or feature ID
-	Files []FileData
-}
+// buildFileGroups produces a flat list of display groups for a project.
+// Sources with GroupFiles produce one group per group; sources without
+// produce a single group named after the source.
+func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) []FileGroupView {
+	// Index files by source
+	filesBySource := make(map[string][]cache.FileInfo)
+	for _, f := range cachedFiles {
+		filesBySource[f.Source] = append(filesBySource[f.Source], f)
+	}
 
-// FileData represents file information for template rendering
-type FileData struct {
-	Name        string
-	DisplayName string // qualified display name from FileInfo.DisplayName()
-	Path        string // FullPath for links
-	Source      string
-	SourceType  string
-	ModTime     time.Time
-	Age         string
-	FileType    string
-}
+	var groups []FileGroupView
+	seen := make(map[string]bool)
 
-// groupRP1Files groups RP1 files by category and feature for template rendering
-func groupRP1Files(files []cache.FileInfo) GroupedFiles {
-	categoryGroups := make(map[string][]cache.FileInfo)
-	featureGroups := make(map[string][]cache.FileInfo)
+	for _, src := range project.Sources {
+		if seen[src.Name] {
+			continue
+		}
+		seen[src.Name] = true
 
-	for _, f := range files {
-		if f.FeatureID != "" {
-			featureGroups[f.FeatureID] = append(featureGroups[f.FeatureID], f)
-		} else if f.Category != "" {
-			categoryGroups[f.Category] = append(categoryGroups[f.Category], f)
+		srcFiles := filesBySource[src.Name]
+		if len(srcFiles) == 0 {
+			continue
+		}
+
+		st := discovery.GetSourceType(src.Name)
+
+		// Badge info from registered source type
+		var badgeText, badgeColor, badgeBg string
+		if st != nil {
+			badgeText = st.DisplayName
+			badgeColor = st.BadgeColor
+			badgeBg = st.BadgeBg
+		}
+
+		if st != nil && st.GroupFiles != nil {
+			// Build path lookup and get source-relative paths
+			paths := make([]string, len(srcFiles))
+			fileByPath := make(map[string]cache.FileInfo)
+			for i, f := range srcFiles {
+				paths[i] = f.Path
+				fileByPath[f.Path] = f
+			}
+
+			for _, g := range st.GroupFiles(paths) {
+				gv := FileGroupView{
+					Name:       g.Name,
+					Source:     src.Name,
+					SourceType: src.Type,
+					Auto:       src.Auto,
+					BadgeText:  badgeText,
+					BadgeColor: badgeColor,
+					BadgeBg:    badgeBg,
+				}
+				for _, p := range g.Paths {
+					if f, ok := fileByPath[p]; ok {
+						gv.Files = append(gv.Files, ProjectFile{
+							Name:       f.Name,
+							Path:       f.FullPath,
+							Source:     f.Source,
+							SourceType: f.SourceType,
+							ModTime:    f.ModTime,
+							Age:        formatAge(f.ModTime),
+							FileType:   f.FileType,
+						})
+					}
+				}
+				groups = append(groups, gv)
+			}
+		} else {
+			// No grouping — single group named after the source
+			gv := FileGroupView{
+				Name:       src.Name,
+				Source:     src.Name,
+				SourceType: src.Type,
+				Auto:       src.Auto,
+				BadgeText:  badgeText,
+				BadgeColor: badgeColor,
+				BadgeBg:    badgeBg,
+			}
+			for _, f := range srcFiles {
+				gv.Files = append(gv.Files, ProjectFile{
+					Name:       f.Name,
+					Path:       f.FullPath,
+					Source:     f.Source,
+					SourceType: f.SourceType,
+					ModTime:    f.ModTime,
+					Age:        formatAge(f.ModTime),
+					FileType:   f.FileType,
+				})
+			}
+			groups = append(groups, gv)
 		}
 	}
 
-	var result GroupedFiles
-
-	// Add category groups in fixed order: Context, PRDs, Quick Builds, Other
-	catOrder := []string{"Context", "PRDs", "Quick Builds", "Other"}
-	for _, cat := range catOrder {
-		if files, ok := categoryGroups[cat]; ok && len(files) > 0 {
-			result.Groups = append(result.Groups, FileGroup{
-				Type:  "category",
-				Name:  cat,
-				Files: convertToFileData(files),
+	// Also include any sources that appear in files but not in project.Sources
+	for _, f := range cachedFiles {
+		if seen[f.Source] {
+			continue
+		}
+		seen[f.Source] = true
+		srcFiles := filesBySource[f.Source]
+		gv := FileGroupView{
+			Name:       f.Source,
+			Source:     f.Source,
+			SourceType: f.SourceType,
+		}
+		if st := discovery.GetSourceType(f.Source); st != nil {
+			gv.BadgeText = st.DisplayName
+			gv.BadgeColor = st.BadgeColor
+			gv.BadgeBg = st.BadgeBg
+		}
+		for _, sf := range srcFiles {
+			gv.Files = append(gv.Files, ProjectFile{
+				Name:       sf.Name,
+				Path:       sf.FullPath,
+				Source:     sf.Source,
+				SourceType: sf.SourceType,
+				ModTime:    sf.ModTime,
+				Age:        formatAge(sf.ModTime),
+				FileType:   sf.FileType,
 			})
 		}
+		groups = append(groups, gv)
 	}
 
-	// Add feature groups in alphabetical order by feature ID
-	featureIDs := make([]string, 0, len(featureGroups))
-	for id := range featureGroups {
-		featureIDs = append(featureIDs, id)
-	}
-	sort.Strings(featureIDs)
-
-	for _, id := range featureIDs {
-		result.Groups = append(result.Groups, FileGroup{
-			Type:  "feature",
-			Name:  id,
-			Files: convertToFileData(featureGroups[id]),
-		})
-	}
-
-	return result
-}
-
-// convertToFileData converts FileInfo to FileData for template rendering
-func convertToFileData(files []cache.FileInfo) []FileData {
-	result := make([]FileData, len(files))
-	for i, f := range files {
-		result[i] = FileData{
-			Name:        f.Name,
-			DisplayName: f.DisplayName(),
-			Path:        f.FullPath,
-			Source:      f.Source,
-			SourceType:  f.SourceType,
-			ModTime:     f.ModTime,
-			Age:         formatAge(f.ModTime),
-			FileType:    f.FileType,
-		}
-	}
-	return result
+	return groups
 }
 
 func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
@@ -636,77 +690,17 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get files from cache
 	cachedFiles := s.cache.ProjectFiles(qualifiedName)
-	files := make([]ProjectFile, len(cachedFiles))
-	for i, f := range cachedFiles {
-		files[i] = ProjectFile{
-			Name:       f.Name,
-			Path:       f.FullPath,
-			Source:     f.Source,
-			SourceType: f.SourceType,
-			ModTime:    f.ModTime,
-			Age:        formatAge(f.ModTime),
-			FileType:   f.FileType,
-		}
-	}
-
-	// Build ordered source list and group files by source
-	sourceOrder := make([]string, 0)
-	seen := make(map[string]bool)
-	for _, src := range project.Sources {
-		if !seen[src.Name] {
-			seen[src.Name] = true
-			sourceOrder = append(sourceOrder, src.Name)
-		}
-	}
-	// Also include any sources that appear in files but not in project.Sources
-	for _, f := range files {
-		if !seen[f.Source] {
-			seen[f.Source] = true
-			sourceOrder = append(sourceOrder, f.Source)
-		}
-	}
-
-	// Determine which sources are auto-detected and their types
-	autoSources := make(map[string]bool)
-	sourceTypes := make(map[string]string) // source name → type
-	for _, src := range project.Sources {
-		if src.Auto {
-			autoSources[src.Name] = true
-		}
-		sourceTypes[src.Name] = src.Type
-	}
-
-	// Prepare grouped data for RP1 files
-	var rp1Groups *GroupedFiles
-	rp1Files := make([]cache.FileInfo, 0)
-	for _, f := range cachedFiles {
-		if f.Source == "rp1" {
-			rp1Files = append(rp1Files, f)
-		}
-	}
-	if len(rp1Files) > 0 {
-		grouped := groupRP1Files(rp1Files)
-		rp1Groups = &grouped
-	}
+	groups := buildFileGroups(project, cachedFiles)
 
 	nav := s.buildNav(project.QualifiedName())
 	nav.InProject = true
 	pageData := struct {
-		Project     *discovery.Project
-		Files       []ProjectFile
-		SourceOrder []string
-		AutoSources map[string]bool
-		SourceTypes map[string]string
-		RP1Groups   *GroupedFiles
+		Project *discovery.Project
+		Groups  []FileGroupView
 	}{
-		Project:     project,
-		Files:       files,
-		SourceOrder: sourceOrder,
-		AutoSources: autoSources,
-		SourceTypes: sourceTypes,
-		RP1Groups:   rp1Groups,
+		Project: project,
+		Groups:  groups,
 	}
 	s.renderPage(w, "project.html", nav, pageData)
 }
@@ -826,17 +820,27 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 type APIFile struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName,omitempty"`
-	Path        string `json:"path"`
-	Source      string `json:"source,omitempty"`
-	SourceType  string `json:"sourceType,omitempty"`
-	SourceAuto  bool   `json:"sourceAuto,omitempty"`
-	Project     string `json:"project,omitempty"`
-	Workspace   string `json:"workspace,omitempty"`
-	ProjectPath string `json:"projectPath,omitempty"`
-	Age         string `json:"age"`
-	FileType    string `json:"fileType,omitempty"`
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Source     string `json:"source,omitempty"`
+	SourceType string `json:"sourceType,omitempty"`
+	SourceAuto bool   `json:"sourceAuto,omitempty"`
+	Project    string `json:"project,omitempty"`
+	Workspace  string `json:"workspace,omitempty"`
+	Age        string `json:"age"`
+	FileType   string `json:"fileType,omitempty"`
+}
+
+// APIFileGroupView is the top-level display unit returned by the project files API.
+type APIFileGroupView struct {
+	Name       string    `json:"name"`
+	Source     string    `json:"source"`
+	SourceType string    `json:"sourceType"`
+	Auto       bool      `json:"auto"`
+	BadgeText  string    `json:"badgeText,omitempty"`
+	BadgeColor string    `json:"badgeColor,omitempty"`
+	BadgeBg    string    `json:"badgeBg,omitempty"`
+	Files      []APIFile `json:"files"`
 }
 
 func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
@@ -850,21 +854,38 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	files := s.cache.ProjectFiles(qualifiedName)
-	result := make([]APIFile, len(files))
-	for i, f := range files {
-		result[i] = APIFile{
-			Name:        f.Name,
-			DisplayName: f.DisplayName(),
-			Path:        f.FullPath,
-			Source:      f.Source,
-			SourceType:  f.SourceType,
-			SourceAuto:  f.SourceAuto,
-			Workspace:   f.Workspace,
-			ProjectPath: f.ProjectPath,
-			Age:         formatAge(f.ModTime),
-			FileType:    f.FileType,
+	project := s.cache.FindProject(qualifiedName)
+	if project == nil {
+		json.NewEncoder(w).Encode([]APIFileGroupView{})
+		return
+	}
+
+	cachedFiles := s.cache.ProjectFiles(qualifiedName)
+	fileGroups := buildFileGroups(project, cachedFiles)
+
+	var result []APIFileGroupView
+	for _, g := range fileGroups {
+		apiGroup := APIFileGroupView{
+			Name:       g.Name,
+			Source:     g.Source,
+			SourceType: g.SourceType,
+			Auto:       g.Auto,
+			BadgeText:  g.BadgeText,
+			BadgeColor: g.BadgeColor,
+			BadgeBg:    g.BadgeBg,
 		}
+		for _, f := range g.Files {
+			apiGroup.Files = append(apiGroup.Files, APIFile{
+				Name:       f.Name,
+				Path:       f.Path,
+				Source:     f.Source,
+				SourceType: f.SourceType,
+				SourceAuto: g.Auto,
+				Age:        f.Age,
+				FileType:   f.FileType,
+			})
+		}
+		result = append(result, apiGroup)
 	}
 	json.NewEncoder(w).Encode(result)
 }
@@ -876,12 +897,11 @@ func (s *Server) handleAPIRecent(w http.ResponseWriter, r *http.Request) {
 	result := make([]APIFile, len(files))
 	for i, f := range files {
 		result[i] = APIFile{
-			Name:        f.Name,
-			DisplayName: f.DisplayName(),
-			Path:        f.FullPath,
-			Project:     f.Project,
-			Age:         formatAge(f.ModTime),
-			FileType:    f.FileType,
+			Name:     f.Name,
+			Path:     f.FullPath,
+			Project:  f.Project,
+			Age:      formatAge(f.ModTime),
+			FileType: f.FileType,
 		}
 	}
 	json.NewEncoder(w).Encode(result)

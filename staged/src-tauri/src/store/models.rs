@@ -176,6 +176,11 @@ pub struct Session {
     pub prompt: String,
     pub status: SessionStatus,
     pub working_dir: String,
+    /// Which agent provider ran this session (e.g. "goose", "claude").
+    /// Protocol-agnostic — survives a switch from ACP to another protocol.
+    pub provider: Option<String>,
+    /// Protocol-level session ID used by the agent for conversation
+    /// resumption (e.g. the ACP session ID returned by `new_session`).
     pub agent_id: Option<String>,
     pub error_message: Option<String>,
     pub created_at: i64,
@@ -190,11 +195,17 @@ impl Session {
             prompt: prompt.to_string(),
             status: SessionStatus::Running,
             working_dir: working_dir.to_string_lossy().to_string(),
+            provider: None,
             agent_id: None,
             error_message: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    pub fn with_provider(mut self, provider: &str) -> Self {
+        self.provider = Some(provider.to_string());
+        self
     }
 
     pub fn with_agent(mut self, agent_id: &str) -> Self {

@@ -33,6 +33,7 @@ const SIZE_DEFAULT = 13;
 
 const SIZE_STORE_KEY = 'size-base';
 const SYNTAX_THEME_STORE_KEY = 'syntax-theme';
+const AI_AGENT_STORE_KEY = 'ai-agent';
 
 const DEFAULT_SYNTAX_THEME: SyntaxThemeName = 'laserwave';
 
@@ -57,6 +58,8 @@ export const preferences = $state({
   sizeBase: SIZE_DEFAULT,
   /** Current syntax theme name */
   syntaxTheme: DEFAULT_SYNTAX_THEME as string,
+  /** Selected AI agent provider ID (e.g. "goose", "claude"). Null = not yet chosen. */
+  aiAgent: null as string | null,
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -110,6 +113,12 @@ export async function initPreferences(): Promise<void> {
   }
   await setSyntaxTheme(preferences.syntaxTheme as SyntaxThemeName);
   applyAdaptiveTheme();
+
+  // Load AI agent preference
+  const savedAgent = await getStoreValue<string>(AI_AGENT_STORE_KEY);
+  if (savedAgent) {
+    preferences.aiAgent = savedAgent;
+  }
 
   preferences.loaded = true;
 }
@@ -168,4 +177,16 @@ export function resetSize(): void {
   preferences.sizeBase = SIZE_DEFAULT;
   applySize();
   setStoreValue(SIZE_STORE_KEY, preferences.sizeBase);
+}
+
+// =============================================================================
+// AI Agent Actions
+// =============================================================================
+
+/**
+ * Set the preferred AI agent provider.
+ */
+export function setAiAgent(agentId: string): void {
+  preferences.aiAgent = agentId;
+  setStoreValue(AI_AGENT_STORE_KEY, agentId);
 }

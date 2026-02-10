@@ -131,6 +131,9 @@ pub struct SessionConfig {
     /// will check if a new commit was created and update the linked commit
     /// record in the DB.
     pub pre_head_sha: Option<String>,
+    /// ACP provider ID (e.g. "goose", "claude"). When `None`, the first
+    /// available provider is used.
+    pub provider: Option<String>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -147,8 +150,11 @@ pub fn start_session(
     app_handle: AppHandle,
     registry: Arc<SessionRegistry>,
 ) -> Result<(), String> {
-    // Create the driver eagerly so we fail fast if goose isn't found.
-    let driver = AcpDriver::new()?;
+    // Create the driver eagerly so we fail fast if the agent isn't found.
+    let driver = match &config.provider {
+        Some(id) => AcpDriver::new(id)?,
+        None => AcpDriver::first_available()?,
+    };
 
     // Persist the user message right away so it's visible immediately.
     store

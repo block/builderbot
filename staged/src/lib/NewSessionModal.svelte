@@ -16,6 +16,8 @@
   import { X, GitCommitHorizontal, StickyNote, GitBranch, Loader2, Send } from 'lucide-svelte';
   import type { Branch, BranchSessionType } from './types';
   import * as commands from './commands';
+  import AgentSelector from './AgentSelector.svelte';
+  import { preferences } from './stores/preferences.svelte';
 
   interface Props {
     branch: Branch;
@@ -69,7 +71,12 @@
     error = null;
 
     try {
-      const result = await commands.startBranchSession(branch.id, prompt.trim(), currentMode);
+      const result = await commands.startBranchSession(
+        branch.id,
+        prompt.trim(),
+        currentMode,
+        preferences.aiAgent ?? undefined
+      );
       onStarted({ sessionId: result.sessionId, artifactId: result.artifactId });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -169,18 +176,21 @@
       {/if}
 
       <div class="form-actions">
-        <button type="button" class="cancel-btn" onclick={handleClose} disabled={starting}>
-          Cancel
-        </button>
-        <button type="submit" class="submit-btn" disabled={starting || !prompt.trim()}>
-          {#if starting}
-            <Loader2 size={14} class="spinning" />
-            Starting…
-          {:else}
-            <Send size={14} />
-            Start
-          {/if}
-        </button>
+        <AgentSelector disabled={starting} />
+        <div class="form-actions-right">
+          <button type="button" class="cancel-btn" onclick={handleClose} disabled={starting}>
+            Cancel
+          </button>
+          <button type="submit" class="submit-btn" disabled={starting || !prompt.trim()}>
+            {#if starting}
+              <Loader2 size={14} class="spinning" />
+              Starting…
+            {:else}
+              <Send size={14} />
+              Start
+            {/if}
+          </button>
+        </div>
       </div>
     </form>
   </div>
@@ -375,9 +385,15 @@
   /* Actions */
   .form-actions {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    justify-content: space-between;
     gap: 8px;
     margin-top: 4px;
+  }
+
+  .form-actions-right {
+    display: flex;
+    gap: 8px;
   }
 
   .cancel-btn,

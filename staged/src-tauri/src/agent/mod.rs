@@ -21,6 +21,9 @@ use tokio_util::sync::CancellationToken;
 use crate::store::Store;
 use writer::MessageWriter;
 
+// Re-export provider discovery for use by Tauri commands.
+pub use acp::{discover_providers, AcpProviderInfo};
+
 /// Everything the session orchestrator needs to run one turn of an agent.
 ///
 /// Implementors own the protocol details (spawning a process, connecting,

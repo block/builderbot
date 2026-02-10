@@ -16,6 +16,7 @@
     onCommitClick?: (sha: string) => void;
     onNoteClick?: (noteId: string, title: string, content: string) => void;
     onDeleteCommit?: (sha: string, sessionId?: string) => void;
+    onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
     onDeleteNote?: (noteId: string, sessionId?: string) => void;
   }
 
@@ -25,6 +26,7 @@
     onCommitClick,
     onNoteClick,
     onDeleteCommit,
+    onDeletePendingCommit,
     onDeleteNote,
   }: Props = $props();
 
@@ -39,6 +41,7 @@
     sessionId?: string;
     // Extra data for click handlers
     commitSha?: string;
+    commitId?: string;
     noteId?: string;
     noteTitle?: string;
     noteContent?: string;
@@ -58,27 +61,60 @@
     for (const commit of timeline.commits) {
       const isPending = !commit.sha;
       const isRunning = commit.sessionStatus === 'running';
+      // Session finished but never produced a commit
+      const isFailed = isPending && !isRunning && !!commit.sessionId;
+
+      let type: TimelineItemType;
+      let secondaryMeta: string | undefined;
+
+      if (isFailed) {
+        type = 'failed-commit';
+        secondaryMeta = 'Session finished — no commit created';
+      } else if (isPending || isRunning) {
+        type = 'pending-commit';
+        secondaryMeta = 'generating...';
+      } else {
+        type = 'commit';
+        secondaryMeta = formatRelativeTime(commit.timestamp);
+      }
 
       all.push({
         key: commit.sha || `pending-${commit.sessionId || commit.timestamp}`,
-        type: isPending || isRunning ? 'pending-commit' : 'commit',
+        type,
         title: stripXmlTags(commit.subject),
         meta: commit.shortSha || undefined,
-        secondaryMeta: isPending ? 'generating...' : formatRelativeTime(commit.timestamp),
+        secondaryMeta,
         timestamp: commit.timestamp,
         sessionId: commit.sessionId ?? undefined,
         commitSha: commit.sha || undefined,
+        commitId: commit.id ?? undefined,
       });
     }
 
     for (const note of timeline.notes) {
-      const isGenerating = note.sessionStatus === 'running';
+      const isRunning = note.sessionStatus === 'running';
+      // Session finished but note has no real content
+      const isFailed = !isRunning && !!note.sessionId && !note.content?.trim();
+
+      let type: TimelineItemType;
+      let secondaryMeta: string | undefined;
+
+      if (isFailed) {
+        type = 'failed-note';
+        secondaryMeta = 'Session finished — no note created';
+      } else if (isRunning) {
+        type = 'generating-note';
+        secondaryMeta = 'generating...';
+      } else {
+        type = 'note';
+        secondaryMeta = formatRelativeTimeMs(note.createdAt);
+      }
 
       all.push({
         key: `note-${note.id}`,
-        type: isGenerating ? 'generating-note' : 'note',
+        type,
         title: stripXmlTags(note.title),
-        secondaryMeta: isGenerating ? 'generating...' : formatRelativeTimeMs(note.createdAt),
+        secondaryMeta,
         // Note timestamps are in milliseconds, convert to seconds for sorting
         timestamp: Math.floor(note.createdAt / 1000),
         sessionId: note.sessionId ?? undefined,
@@ -100,11 +136,19 @@
       });
     }
 
-    // Sort by timestamp ascending (oldest first), pending items at bottom
+    // Sort by timestamp ascending (oldest first), pending/failed items at bottom
     all.sort((a, b) => {
-      const aIsPending = a.type === 'pending-commit' || a.type === 'generating-note';
-      const bIsPending = b.type === 'pending-commit' || b.type === 'generating-note';
-      if (aIsPending !== bIsPending) return aIsPending ? 1 : -1;
+      const aIsTransient =
+        a.type === 'pending-commit' ||
+        a.type === 'generating-note' ||
+        a.type === 'failed-commit' ||
+        a.type === 'failed-note';
+      const bIsTransient =
+        b.type === 'pending-commit' ||
+        b.type === 'generating-note' ||
+        b.type === 'failed-commit' ||
+        b.type === 'failed-note';
+      if (aIsTransient !== bIsTransient) return aIsTransient ? 1 : -1;
       return a.timestamp - b.timestamp;
     });
 
@@ -135,7 +179,17 @@
   function handleDeleteClick(item: DisplayItem) {
     if (item.type === 'commit' && item.commitSha && onDeleteCommit) {
       onDeleteCommit(item.commitSha, item.sessionId);
-    } else if (item.type === 'note' && item.noteId && onDeleteNote) {
+    } else if (
+      (item.type === 'failed-commit' || item.type === 'pending-commit') &&
+      item.commitId &&
+      onDeletePendingCommit
+    ) {
+      onDeletePendingCommit(item.commitId, item.sessionId);
+    } else if (
+      (item.type === 'note' || item.type === 'failed-note' || item.type === 'generating-note') &&
+      item.noteId &&
+      onDeleteNote
+    ) {
       onDeleteNote(item.noteId, item.sessionId);
     }
   }

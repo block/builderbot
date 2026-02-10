@@ -24,6 +24,8 @@ export interface Branch {
 }
 
 export interface CommitTimelineItem {
+  /** DB id — present for pending/failed commits so they can be deleted by id. */
+  id: string | null;
   sha: string;
   shortSha: string;
   subject: string;

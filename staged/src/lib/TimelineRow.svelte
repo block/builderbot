@@ -6,13 +6,23 @@
   Hover reveals session and delete actions on the right.
 -->
 <script lang="ts">
-  import { GitCommit, FileText, FileSearch, Loader2, MessageSquare, Trash2 } from 'lucide-svelte';
+  import {
+    GitCommit,
+    FileText,
+    FileSearch,
+    Loader2,
+    MessageSquare,
+    Trash2,
+    AlertCircle,
+  } from 'lucide-svelte';
 
   export type TimelineItemType =
     | 'commit'
     | 'pending-commit'
+    | 'failed-commit'
     | 'note'
     | 'generating-note'
+    | 'failed-note'
     | 'review';
 
   interface Props {
@@ -43,7 +53,8 @@
   }: Props = $props();
 
   let isPending = $derived(type === 'pending-commit' || type === 'generating-note');
-  let isClickable = $derived(!!onItemClick && !isPending);
+  let isFailed = $derived(type === 'failed-commit' || type === 'failed-note');
+  let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
   let hasSession = $derived(!!sessionId);
 
   function handleRowClick() {
@@ -70,6 +81,7 @@
 <div
   class="timeline-row"
   class:pending={isPending}
+  class:failed={isFailed}
   class:clickable={isClickable}
   onclick={handleRowClick}
 >
@@ -79,11 +91,14 @@
       class:commit-icon={type === 'commit' || type === 'pending-commit'}
       class:note-icon={type === 'note' || type === 'generating-note'}
       class:review-icon={type === 'review'}
+      class:failed-icon={isFailed}
     >
       {#if type === 'pending-commit'}
         <Loader2 size={12} class="spinner" />
       {:else if type === 'generating-note'}
         <Loader2 size={12} class="spinner" />
+      {:else if type === 'failed-commit' || type === 'failed-note'}
+        <AlertCircle size={12} />
       {:else if type === 'commit'}
         <GitCommit size={12} />
       {:else if type === 'note'}
@@ -98,14 +113,16 @@
   </div>
   <div class="timeline-content">
     <div class="timeline-info">
-      <span class="timeline-title" class:skeleton-title={isPending}>{title}</span>
+      <span class="timeline-title" class:skeleton-title={isPending} class:failed-title={isFailed}
+        >{title}</span
+      >
       {#if meta || secondaryMeta}
         <div class="timeline-meta">
           {#if meta}
             <span class="meta-item">{meta}</span>
           {/if}
           {#if secondaryMeta}
-            <span class="meta-item">{secondaryMeta}</span>
+            <span class="meta-item" class:failed-meta={isFailed}>{secondaryMeta}</span>
           {/if}
         </div>
       {/if}
@@ -116,7 +133,7 @@
           <MessageSquare size={12} />
         </button>
       {/if}
-      {#if (onDeleteClick || deleteDisabledReason) && !isPending}
+      {#if onDeleteClick || deleteDisabledReason}
         <button
           class="action-btn delete-btn"
           onclick={handleDeleteClick}
@@ -152,6 +169,10 @@
   }
 
   .timeline-row.pending {
+    cursor: default;
+  }
+
+  .timeline-row.failed {
     cursor: default;
   }
 
@@ -211,6 +232,11 @@
     color: var(--text-muted);
   }
 
+  .timeline-icon.failed-icon {
+    color: var(--ui-danger);
+    border-color: var(--ui-danger);
+  }
+
   .timeline-info {
     flex: 1;
     min-width: 0;
@@ -231,6 +257,16 @@
     color: var(--text-muted);
     font-style: italic;
     font-weight: normal;
+  }
+
+  .failed-title {
+    color: var(--text-muted);
+    font-style: italic;
+    font-weight: normal;
+  }
+
+  .failed-meta {
+    color: var(--ui-danger);
   }
 
   .timeline-meta {

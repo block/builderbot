@@ -149,6 +149,11 @@ export function deleteCommit(
   return invoke('delete_commit', { branchId, commitSha, deleteSession });
 }
 
+/** Delete a pending commit (no SHA) by its DB id, optionally its session. */
+export function deletePendingCommit(commitId: string, deleteSession = true): Promise<void> {
+  return invoke('delete_pending_commit', { commitId, deleteSession });
+}
+
 // =============================================================================
 // Diff
 // =============================================================================

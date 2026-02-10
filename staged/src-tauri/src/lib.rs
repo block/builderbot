@@ -64,6 +64,8 @@ pub struct BranchWithWorkdir {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitTimelineItem {
+    /// DB id – present for pending commits so they can be deleted by id.
+    pub id: Option<String>,
     pub sha: String,
     pub short_sha: String,
     pub subject: String,
@@ -590,6 +592,40 @@ fn delete_note(
     Ok(())
 }
 
+/// Delete a pending commit (one with no SHA) by its DB id.
+/// This does NOT touch git — it only removes the DB record and optionally its session.
+#[tauri::command(rename_all = "camelCase")]
+fn delete_pending_commit(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    commit_id: String,
+    delete_session: Option<bool>,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+
+    let commit = store
+        .get_commit(&commit_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Commit not found: {}", commit_id))?;
+
+    // Safety check: only allow deleting commits that have no SHA (pending/failed)
+    if commit.sha.is_some() {
+        return Err(
+            "Cannot use delete_pending_commit for commits with a SHA. Use delete_commit instead."
+                .to_string(),
+        );
+    }
+
+    store.delete_commit(&commit_id).map_err(|e| e.to_string())?;
+
+    if delete_session.unwrap_or(false) {
+        if let Some(sid) = commit.session_id {
+            let _ = store.delete_session(&sid);
+        }
+    }
+
+    Ok(())
+}
+
 /// Delete a commit: resets the branch HEAD to the parent commit,
 /// removing the git commit, then cleans up the DB record and session.
 ///
@@ -680,6 +716,7 @@ fn get_branch_timeline(
                 );
 
                 commits.push(CommitTimelineItem {
+                    id: our_commit.as_ref().map(|c| c.id.clone()),
                     sha: gc.sha,
                     short_sha: gc.short_sha,
                     subject: gc.subject,
@@ -702,6 +739,7 @@ fn get_branch_timeline(
                 store.resolve_session_status(dc.session_id.as_deref());
 
             commits.push(CommitTimelineItem {
+                id: Some(dc.id.clone()),
                 sha: String::new(),
                 short_sha: String::new(),
                 subject: session_id
@@ -1158,6 +1196,7 @@ pub fn run() {
             get_branch_timeline,
             delete_note,
             delete_commit,
+            delete_pending_commit,
             list_git_branches,
             detect_default_branch_cmd,
             session_commands::get_session,

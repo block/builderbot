@@ -20,15 +20,7 @@ A local web app that **only** operates on markdown files inside `thoughts/` dire
 
 ### Prerequisites
 
-1. **Go 1.21+** - Required to build and run the server
-   ```bash
-   # On macOS with Homebrew
-   brew install go
-
-   # Or download from https://go.dev/dl/
-   ```
-
-2. **just** - Command runner for development tasks
+1. **just** - Command runner for development tasks (the only manual install)
    ```bash
    # On macOS with Homebrew
    brew install just
@@ -36,7 +28,11 @@ A local web app that **only** operates on markdown files inside `thoughts/` dire
    # Or see https://github.com/casey/just for other platforms
    ```
 
-3. **fswatch** (optional) - For hot reload in dev mode (auto-installed via brew on macOS)
+The remaining dependencies are auto-installed when you run `just run` or `just dev`:
+
+2. **Claude Code** - Birdseye is designed to work with Claude Code agents for collaborative document review (see [go/claude-code](https://go/claude-code) for setup details)
+3. **Go 1.21+** - Required to build and run the server
+4. **fswatch** (optional) - For hot reload in dev mode, installed automatically by `just dev`
 
 ## Usage
 

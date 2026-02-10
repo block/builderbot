@@ -2,8 +2,20 @@
 default: run
 
 # Build the binary
-build:
+build: ensure-deps
     go build -o birdseye .
+
+# Ensure required tools are installed
+ensure-deps:
+    #!/usr/bin/env bash
+    if ! command -v go &> /dev/null; then
+        echo "Installing Go..."
+        brew install go
+    fi
+    if ! command -v claude &> /dev/null; then
+        echo "Installing Claude Code..."
+        brew install claude-code
+    fi
 
 # Run the server and open browser
 run: build

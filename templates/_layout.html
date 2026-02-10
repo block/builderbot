@@ -695,20 +695,27 @@
         function copyRelative(btn) {
             var d = getFileData(btn);
             navigator.clipboard.writeText('@' + d.path);
-            flashCopied(btn);
+            closeFileMenuOrDropdown(btn);
         }
 
         function copyAbsolute(btn) {
             var row = btn.closest('[data-project-path]');
             var d = getFileData(btn);
             navigator.clipboard.writeText(row.dataset.projectPath + '/' + d.path);
-            flashCopied(btn);
+            closeFileMenuOrDropdown(btn);
         }
 
         function copyFileToClipboard(btn) {
             var d = getFileData(btn);
-            fetch('/api/copy-file?project=' + encodeURIComponent(d.project) + '&path=' + encodeURIComponent(d.path))
-                .then(function(resp) { if (resp.ok) flashCopied(btn); });
+            fetch('/api/copy-file?project=' + encodeURIComponent(d.project) + '&path=' + encodeURIComponent(d.path));
+            closeFileMenuOrDropdown(btn);
+        }
+
+        // Close whichever menu pattern the button is inside
+        function closeFileMenuOrDropdown(btn) {
+            var dd = btn.closest('.copy-dropdown');
+            if (dd) { flashCopied(btn); return; }
+            document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
         }
 
         // Close dropdowns on outside click
@@ -784,6 +791,126 @@
                     });
                 })
                 .catch(function() {});
+        }
+
+        // --- File three-dot menu (shared between file page and project page) ---
+        //
+        // Both pages put data-project, data-project-path, data-path, and
+        // data-source-type on the element that wraps the .file-menu-wrap.
+        // The optional data-has-raw-markdown flag adds "Copy markdown".
+        //
+        var publishURLs = {};
+
+        function buildFileMenuHTML(el) {
+            var showCopyMarkdown = el.hasAttribute('data-has-raw-markdown');
+            var isIndividual = el.dataset.sourceType === 'files';
+            var key = (el.dataset.project || '') + '\0' + (el.dataset.path || '');
+            var html = '';
+            if (showCopyMarkdown) {
+                html += '<button onclick="copyMarkdownSource(this)">Copy markdown</button>';
+            }
+            html += '<button onclick="copyFileToClipboard(this)">Copy file</button>';
+            html += '<button onclick="copyRelative(this)">Copy relative path</button>';
+            html += '<button onclick="copyAbsolute(this)">Copy absolute path</button>';
+            html += '<div class="menu-divider"></div>';
+            html += '<button onclick="publishFile(this)">Publish to Blockcell</button>';
+            html += '<button onclick="copyBlockcellLink(this)" class="blockcell-link-btn"' +
+                    (publishURLs[key] ? '' : ' style="display:none"') + '>Copy Blockcell link</button>';
+            if (isIndividual) {
+                html += '<div class="menu-divider"></div>';
+                html += '<button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>';
+            }
+            html += '<div class="menu-divider"></div>';
+            html += '<button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>';
+            return html;
+        }
+
+        function initFileMenus() {
+            document.querySelectorAll('.file-menu').forEach(function(menu) {
+                var el = menu.closest('[data-project]');
+                if (el) menu.innerHTML = buildFileMenuHTML(el);
+            });
+        }
+
+        function publishFile(btn) {
+            var el = btn.closest('[data-project]');
+            var project = el.dataset.project;
+            var path = el.dataset.path;
+            document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
+            var origText = btn.textContent;
+            btn.textContent = 'Publishing...';
+            btn.disabled = true;
+            fetch('/api/publish', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({project: project, path: path})
+            })
+            .then(function(r) {
+                if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+                return r.json();
+            })
+            .then(function(data) {
+                publishURLs[project + '\0' + path] = data.url;
+                var linkBtn = el.querySelector('.blockcell-link-btn');
+                if (linkBtn) linkBtn.style.display = '';
+                btn.textContent = origText;
+                btn.disabled = false;
+                showPublishToast(data.url);
+            })
+            .catch(function(err) {
+                btn.textContent = origText;
+                btn.disabled = false;
+                alert('Publish failed: ' + err.message);
+            });
+        }
+
+        function copyBlockcellLink(btn) {
+            var el = btn.closest('[data-project]');
+            var key = el.dataset.project + '\0' + el.dataset.path;
+            document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
+            if (publishURLs[key]) {
+                navigator.clipboard.writeText(publishURLs[key]);
+            }
+        }
+
+        function loadPublishStates() {
+            document.querySelectorAll('[data-project][data-path]').forEach(function(el) {
+                var project = el.dataset.project;
+                var path = el.dataset.path;
+                var key = project + '\0' + path;
+                if (publishURLs[key]) {
+                    var btn = el.querySelector('.blockcell-link-btn');
+                    if (btn) btn.style.display = '';
+                    return;
+                }
+                fetch('/api/publish-state?project=' + encodeURIComponent(project) + '&path=' + encodeURIComponent(path))
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (data.url) {
+                            publishURLs[key] = data.url;
+                            var btn = el.querySelector('.blockcell-link-btn');
+                            if (btn) btn.style.display = '';
+                        }
+                    })
+                    .catch(function() {});
+            });
+        }
+
+        function showPublishToast(url) {
+            var banner = document.createElement('div');
+            banner.style.cssText = 'position:fixed;top:16px;right:16px;background:#dafbe1;border:1px solid #a3d9a5;border-radius:8px;padding:12px 16px;font-size:0.85em;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.1);max-width:400px;';
+            banner.innerHTML = '<strong>Published!</strong> <a href="' + escapeHtml(url) + '" target="_blank" style="color:#0066cc;word-break:break-all;">' + escapeHtml(url) + '</a>';
+            document.body.appendChild(banner);
+            setTimeout(function() { banner.remove(); }, 8000);
+        }
+
+        // Copy raw markdown from the hidden <template> element (file page only).
+        // Pages that set data-has-raw-markdown must include <template id="raw-markdown">.
+        function copyMarkdownSource(btn) {
+            var tmpl = document.getElementById('raw-markdown');
+            if (!tmpl) return;
+            navigator.clipboard.writeText(tmpl.content.textContent);
+            document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
         }
 
         {{block "pagescript" .}}{{end}}

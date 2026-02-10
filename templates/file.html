@@ -496,24 +496,12 @@
 
 {{define "content"}}
     <div class="file-main" id="file-main">
-        <div class="file-toolbar">
+        <div class="file-toolbar" data-project="{{.Page.Project.QualifiedName}}" data-project-path="{{.Page.Project.Path}}" data-path="{{.Page.FilePath}}" data-source-type="{{.Page.SourceType}}" data-has-raw-markdown>
             {{if ne .Page.FileType "other"}}<span class="file-type {{.Page.FileType}}">{{.Page.FileType}}</span>{{end}}
             <span class="toolbar-filename">{{.Page.FileName}}</span>
             <div class="file-menu-wrap">
                 <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
-                <div class="file-menu">
-                    <button onclick="copyMarkdown(this)">Copy markdown</button>
-                    <button onclick="copyFileToClipboard(this)">Copy file</button>
-                    <button onclick="copyText(this, '@{{.Page.FilePath}}')">Copy relative path</button>
-                    <button onclick="copyText(this, '{{.Page.Project.Path}}/{{.Page.FilePath}}')">Copy absolute path</button>
-                    <div class="menu-divider"></div>
-                    <button onclick="publishToBlockcell()">Publish to Blockcell</button>
-                    <button onclick="copyBlockcellLink()" id="copy-blockcell-btn" style="display:none">Copy Blockcell link</button>
-                    {{if eq .Page.SourceType "files"}}<div class="menu-divider"></div>
-                    <button onclick="removeFileFromBirdseye()">Remove from Birdseye</button>{{end}}
-                    <div class="menu-divider"></div>
-                    <button class="menu-danger" onclick="confirmDeleteFile()">Delete from disk</button>
-                </div>
+                <div class="file-menu"></div>
             </div>
         </div>
 
@@ -595,25 +583,6 @@
 
     function closeAllMenus() {
         document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
-    }
-
-    function copyText(btn, text) {
-        navigator.clipboard.writeText(text);
-        closeAllMenus();
-        flashCopied(btn);
-    }
-
-    function copyMarkdown(btn) {
-        navigator.clipboard.writeText(rawMarkdown);
-        closeAllMenus();
-        flashCopied(btn);
-    }
-
-    // Copy file to clipboard (macOS)
-    function copyFileToClipboard(btn) {
-        fetch('/api/copy-file?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(filePath))
-            .then(function(resp) { if (resp.ok) flashCopied(btn); });
-        closeAllMenus();
     }
 
     // --- Remove from Birdseye (individually-added files only) ---
@@ -1463,74 +1432,14 @@
         }
     }
 
-    // --- Blockcell publish ---
-    var blockcellURL = null;
-
-    function loadPublishState() {
-        fetch('/api/publish-state?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(filePath))
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (data.url) {
-                    blockcellURL = data.url;
-                    document.getElementById('copy-blockcell-btn').style.display = '';
-                }
-            })
-            .catch(function() {});
-    }
-
-    function publishToBlockcell() {
-        closeAllMenus();
-        var btn = event.target;
-        var origText = btn.textContent;
-        btn.textContent = 'Publishing...';
-        btn.disabled = true;
-        fetch('/api/publish', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({project: qualifiedName, path: filePath})
-        })
-        .then(function(r) {
-            if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
-            return r.json();
-        })
-        .then(function(data) {
-            blockcellURL = data.url;
-            document.getElementById('copy-blockcell-btn').style.display = '';
-            btn.textContent = origText;
-            btn.disabled = false;
-            showPublishSuccess(data.url);
-        })
-        .catch(function(err) {
-            btn.textContent = origText;
-            btn.disabled = false;
-            alert('Publish failed: ' + err.message);
-        });
-    }
-
-    function copyBlockcellLink() {
-        closeAllMenus();
-        if (blockcellURL) {
-            navigator.clipboard.writeText(blockcellURL);
-            var btn = document.getElementById('copy-blockcell-btn');
-            flashCopied(btn);
-        }
-    }
-
-    function showPublishSuccess(url) {
-        var banner = document.createElement('div');
-        banner.style.cssText = 'position:fixed;top:16px;right:16px;background:#dafbe1;border:1px solid #a3d9a5;border-radius:8px;padding:12px 16px;font-size:0.85em;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.1);max-width:400px;';
-        banner.innerHTML = '<strong>Published!</strong> <a href="' + escapeHtml(url) + '" target="_blank" style="color:#0066cc;word-break:break-all;">' + escapeHtml(url) + '</a>';
-        document.body.appendChild(banner);
-        setTimeout(function() { banner.remove(); }, 8000);
-    }
-
     // Initial render
+    initFileMenus();
     renderMermaidBlocks();
     renderThreads(threads || [], anchorLines || {});
     renderReviewBanner();
     refreshReview();
     refreshAgentStatus();
-    loadPublishState();
+    loadPublishStates();
 {{end}}
 
 {{template "layout" .}}

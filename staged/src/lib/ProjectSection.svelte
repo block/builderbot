@@ -38,7 +38,11 @@
   </div>
   <div class="branches-list">
     {#each branches as branch (branch.id)}
-      <BranchCard {branch} onDelete={() => onDeleteBranch?.(branch.id)} />
+      <BranchCard
+        {branch}
+        projectSubpath={project.subpath}
+        onDelete={() => onDeleteBranch?.(branch.id)}
+      />
     {/each}
     <!-- New branch button -->
     <button class="new-branch-button" onclick={() => onNewBranch?.()}>

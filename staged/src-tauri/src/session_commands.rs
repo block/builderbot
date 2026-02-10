@@ -250,16 +250,24 @@ pub fn start_branch_session(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
 
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
     let workdir = store
         .get_workdir_for_branch(&branch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("No worktree for branch: {}", branch_id))?;
 
-    let worktree_path = Path::new(&workdir.path);
+    let mut worktree_path = PathBuf::from(&workdir.path);
+    if let Some(ref subpath) = project.subpath {
+        worktree_path = worktree_path.join(subpath);
+    }
 
     // Build branch history context
     let branch_context =
-        build_branch_context(worktree_path, &branch.base_branch, &store, &branch_id);
+        build_branch_context(&worktree_path, &branch.base_branch, &store, &branch_id);
 
     // Build the full prompt with action tag + context
     let full_prompt = build_full_prompt(&prompt, &branch_context, &session_type);
@@ -278,7 +286,7 @@ pub fn start_branch_session(
         BranchSessionType::Commit => {
             let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
             store.create_commit(&commit).map_err(|e| e.to_string())?;
-            let head_sha = git::get_head_sha(worktree_path)
+            let head_sha = git::get_head_sha(&worktree_path)
                 .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?;
             (commit.id, Some(head_sha))
         }
@@ -288,7 +296,7 @@ pub fn start_branch_session(
         SessionConfig {
             session_id: session.id.clone(),
             prompt: full_prompt,
-            working_dir: worktree_path.to_path_buf(),
+            working_dir: worktree_path.clone(),
             agent_session_id: None,
             pre_head_sha,
         },

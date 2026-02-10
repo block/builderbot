@@ -62,6 +62,7 @@ pub struct BranchWithWorkdir {
     pub workspace_status: Option<store::WorkspaceStatus>,
     pub agent: Option<String>,
     pub worktree_path: Option<String>,
+    pub is_main_worktree: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -409,6 +410,76 @@ fn list_projects(
         .map_err(|e| e.to_string())
 }
 
+/// Import existing worktrees for a project.
+///
+/// Scans the repository for existing worktrees and creates Branch + Workdir
+/// records for each one. Skips the main worktree (the repo itself).
+///
+/// Returns the number of worktrees imported.
+fn import_existing_worktrees(
+    store: &Arc<Store>,
+    project: &store::Project,
+) -> Result<usize, String> {
+    let repo_path = Path::new(&project.repo_path);
+
+    let default_branch = git::detect_default_branch(repo_path)
+        .map_err(|e| format!("Failed to detect default branch: {e}"))?;
+
+    let worktrees =
+        git::list_worktrees(repo_path).map_err(|e| format!("Failed to list worktrees: {e}"))?;
+
+    let mut imported_count = 0;
+
+    for (worktree_path, branch_name) in worktrees {
+        let branch_name = match branch_name {
+            Some(name) => name,
+            None => {
+                log::debug!(
+                    "Skipping worktree at {} (detached HEAD)",
+                    worktree_path.display()
+                );
+                continue;
+            }
+        };
+
+        let existing_branches = store
+            .list_branches_for_project(&project.id)
+            .map_err(|e| e.to_string())?;
+
+        if existing_branches
+            .iter()
+            .any(|b| b.branch_name == branch_name)
+        {
+            log::debug!("Branch '{branch_name}' already exists, skipping import");
+            continue;
+        }
+
+        let branch = store::Branch::new(&project.id, &branch_name, &default_branch);
+        store
+            .create_branch(&branch)
+            .map_err(|e| format!("Failed to create branch '{branch_name}': {e}"))?;
+
+        let worktree_str = worktree_path
+            .to_str()
+            .ok_or_else(|| format!("Invalid worktree path: {}", worktree_path.display()))?;
+
+        let workdir = store::Workdir::new(&project.id, worktree_str).with_branch(&branch.id);
+
+        store
+            .create_workdir(&workdir)
+            .map_err(|e| format!("Failed to create workdir for '{branch_name}': {e}"))?;
+
+        log::info!(
+            "Imported worktree: {} -> {}",
+            branch_name,
+            worktree_path.display()
+        );
+        imported_count += 1;
+    }
+
+    Ok(imported_count)
+}
+
 #[tauri::command]
 fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -420,14 +491,27 @@ fn create_project(
     // Validate that the path is a git repo
     let path = Path::new(&repo_path);
     if !path.join(".git").exists() && !path.is_dir() {
-        return Err(format!("Not a git repository: {}", repo_path));
+        return Err(format!("Not a git repository: {repo_path}"));
     }
 
-    // Check for duplicate
+    // Check for duplicate — still import worktrees even for existing projects,
+    // since they may have been added before this feature existed.
     if let Some(existing) = store
         .get_project_by_repo(&repo_path)
         .map_err(|e| e.to_string())?
     {
+        match import_existing_worktrees(&store, &existing) {
+            Ok(count) if count > 0 => {
+                log::info!(
+                    "Imported {count} worktree(s) for existing project '{}'",
+                    existing.repo_path
+                );
+            }
+            Err(e) => {
+                log::warn!("Failed to import worktrees for existing project: {e}");
+            }
+            _ => {}
+        }
         return Ok(existing);
     }
 
@@ -436,6 +520,23 @@ fn create_project(
         project = project.with_subpath(sub);
     }
     store.create_project(&project).map_err(|e| e.to_string())?;
+
+    // Import any existing worktrees for this project
+    match import_existing_worktrees(&store, &project) {
+        Ok(count) => {
+            if count > 0 {
+                log::info!(
+                    "Imported {count} existing worktree(s) for project '{}'",
+                    project.repo_path
+                );
+            }
+        }
+        Err(e) => {
+            // Log the error but don't fail project creation
+            log::warn!("Failed to import existing worktrees: {e}");
+        }
+    }
+
     Ok(project)
 }
 
@@ -469,6 +570,7 @@ fn to_branch_with_workdir(
         workspace_status: branch.workspace_status,
         agent: branch.agent,
         worktree_path: workdir_path,
+        is_main_worktree: false,
         created_at: branch.created_at,
         updated_at: branch.updated_at,
     }
@@ -480,6 +582,15 @@ fn list_branches_for_project(
     project_id: String,
 ) -> Result<Vec<BranchWithWorkdir>, String> {
     let store = get_store(&store)?;
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+
+    let canonical_repo = Path::new(&project.repo_path)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(&project.repo_path));
+
     let branches = store
         .list_branches_for_project(&project_id)
         .map_err(|e| e.to_string())?;
@@ -490,7 +601,16 @@ fn list_branches_for_project(
             .get_workdir_for_branch(&branch.id)
             .map_err(|e| e.to_string())?;
 
-        result.push(to_branch_with_workdir(branch, workdir.map(|w| w.path)));
+        let is_main = workdir.as_ref().is_some_and(|w| {
+            Path::new(&w.path)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&w.path))
+                == canonical_repo
+        });
+
+        let mut bw = to_branch_with_workdir(branch, workdir.map(|w| w.path));
+        bw.is_main_worktree = is_main;
+        result.push(bw);
     }
     Ok(result)
 }
@@ -508,7 +628,7 @@ fn create_branch(
     let project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", project_id))?;
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
     let repo_path = Path::new(&project.repo_path);
 
@@ -559,7 +679,7 @@ async fn create_remote_branch(
     let project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", project_id))?;
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
     let repo_path = Path::new(&project.repo_path);
 
@@ -618,7 +738,7 @@ async fn get_workspace_info(
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
     let ws_name = branch
         .workspace_name
@@ -643,7 +763,7 @@ async fn poll_workspace_status(
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
     let ws_name = branch
         .workspace_name
@@ -685,7 +805,7 @@ async fn delete_branch(
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
     match branch.branch_type {
         store::BranchType::Local => {
@@ -695,10 +815,22 @@ async fn delete_branch(
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
-            // Get the workdir (if any) so we can remove the worktree
             let workdir = store
                 .get_workdir_for_branch(&branch_id)
                 .map_err(|e| e.to_string())?;
+
+            // Prevent deletion of the main worktree (the repo checkout itself)
+            if let Some(ref wd) = workdir {
+                let canonical_repo = Path::new(&project.repo_path)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(&project.repo_path));
+                let canonical_wd = Path::new(&wd.path)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(&wd.path));
+                if canonical_wd == canonical_repo {
+                    return Err("Cannot delete the main worktree".to_string());
+                }
+            }
 
             if let Some(ref wd) = workdir {
                 let repo_path = Path::new(&project.repo_path);
@@ -708,11 +840,9 @@ async fn delete_branch(
             }
         }
         store::BranchType::Remote => {
-            // Delete the Blox workspace
             if let Some(ref ws_name) = branch.workspace_name {
-                // Best-effort: log but don't fail if workspace is already gone
                 if let Err(e) = blox::ws_delete(ws_name) {
-                    log::warn!("Failed to delete workspace {}: {}", ws_name, e);
+                    log::warn!("Failed to delete workspace {ws_name}: {e}");
                 }
             }
         }
@@ -749,7 +879,7 @@ fn create_project_action(
 ) -> Result<store::models::ProjectAction, String> {
     let store = get_store(&store)?;
     let parsed_type = builderbot_actions::ActionType::parse(&action_type)
-        .ok_or_else(|| format!("Invalid action type: {}", action_type))?;
+        .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
     let action =
         store::models::ProjectAction::new(project_id, name, command, parsed_type, sort_order)
             .with_auto_commit(auto_commit);
@@ -773,7 +903,7 @@ fn update_project_action(
     let action = store
         .get_project_action(&action_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Action not found: {}", action_id))?;
+        .ok_or_else(|| format!("Action not found: {action_id}"))?;
 
     let updated = store::models::ProjectAction {
         id: action.id,
@@ -781,7 +911,7 @@ fn update_project_action(
         name,
         command,
         action_type: builderbot_actions::ActionType::parse(&action_type)
-            .ok_or_else(|| format!("Invalid action type: {}", action_type))?,
+            .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
         sort_order,
         auto_commit,
         created_at: action.created_at,
@@ -820,7 +950,7 @@ fn delete_note(
     let note = store
         .get_note(&note_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Note not found: {}", note_id))?;
+        .ok_or_else(|| format!("Note not found: {note_id}"))?;
 
     store.delete_note(&note_id).map_err(|e| e.to_string())?;
 
@@ -845,7 +975,7 @@ fn delete_pending_commit(
     let commit = store
         .get_commit(&commit_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Commit not found: {}", commit_id))?;
+        .ok_or_else(|| format!("Commit not found: {commit_id}"))?;
 
     // Safety check: only allow deleting commits that have no SHA (pending/failed)
     if commit.sha.is_some() {
@@ -884,7 +1014,7 @@ fn delete_commit(
     let workdir = store
         .get_workdir_for_branch(&branch_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("No worktree for branch: {}", branch_id))?;
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
     let worktree = Path::new(&workdir.path);
 
@@ -934,7 +1064,7 @@ fn get_branch_timeline(
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
     let workdir = store
         .get_workdir_for_branch(&branch_id)
@@ -1089,12 +1219,12 @@ fn resolve_branch_context(
     let branch = store
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
     let workdir = store
         .get_workdir_for_branch(branch_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("No worktree for branch: {}", branch_id))?;
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
     Ok(BranchDiffContext {
         worktree_path: workdir.path,
@@ -1229,7 +1359,7 @@ async fn ensure_review(
 ) -> Result<store::Review, String> {
     let store = get_store(&store)?;
     let review_scope =
-        store::ReviewScope::parse(&scope).ok_or_else(|| format!("Invalid scope: {}", scope))?;
+        store::ReviewScope::parse(&scope).ok_or_else(|| format!("Invalid scope: {scope}"))?;
 
     store
         .ensure_review(&branch_id, &commit_sha, review_scope)
@@ -1418,7 +1548,7 @@ async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
 
         for (id, bundle_id) in KNOWN_OPENERS {
             let output = Command::new("mdfind")
-                .arg(format!("kMDItemCFBundleIdentifier == '{}'", bundle_id))
+                .arg(format!("kMDItemCFBundleIdentifier == '{bundle_id}'"))
                 .output()
                 .map_err(|e| format!("Failed to run mdfind: {e}"))?;
 
@@ -1490,7 +1620,7 @@ async fn open_in_app(path: String, app_id: String) -> Result<(), String> {
             .iter()
             .find(|(id, _)| *id == app_id)
             .map(|(_, bundle)| *bundle)
-            .ok_or_else(|| format!("Unknown app ID: {}", app_id))?;
+            .ok_or_else(|| format!("Unknown app ID: {app_id}"))?;
 
         let status = Command::new("open")
             .arg("-b")
@@ -1502,7 +1632,7 @@ async fn open_in_app(path: String, app_id: String) -> Result<(), String> {
         if status.success() {
             Ok(())
         } else {
-            Err(format!("Failed to open {} in {}", path, app_id))
+            Err(format!("Failed to open {path} in {app_id}"))
         }
     }
 

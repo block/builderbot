@@ -160,7 +160,7 @@ pub fn resume_session(
     let session = store
         .get_session(&session_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+        .ok_or_else(|| format!("Session not found: {session_id}"))?;
 
     // Use the provider that originally created this session so the
     // agent's conversation history can be restored correctly.
@@ -288,7 +288,7 @@ pub fn start_branch_session(
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
     let project = store
         .get_project(&branch.project_id)
@@ -307,7 +307,7 @@ pub fn start_branch_session(
         let workdir = store
             .get_workdir_for_branch(&branch_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("No worktree for branch: {}", branch_id))?;
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
         let mut worktree_path = PathBuf::from(&workdir.path);
         if let Some(ref subpath) = project.subpath {

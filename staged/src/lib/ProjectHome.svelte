@@ -112,9 +112,12 @@
     showNewProjectModal = true;
   }
 
-  function handleProjectCreated(project: Project) {
-    projects = [...projects, project];
-    branchesByProject = new Map(branchesByProject).set(project.id, []);
+  async function handleProjectCreated(project: Project) {
+    if (!projects.some((p) => p.id === project.id)) {
+      projects = [...projects, project];
+    }
+    const branches = await commands.listBranchesForProject(project.id);
+    branchesByProject = new Map(branchesByProject).set(project.id, branches);
     showNewProjectModal = false;
   }
 

@@ -26,6 +26,7 @@ export interface Branch {
   workspaceStatus: WorkspaceStatus | null;
   agent: string | null;
   worktreePath: string | null;
+  isMainWorktree: boolean;
   createdAt: number;
   updatedAt: number;
 }

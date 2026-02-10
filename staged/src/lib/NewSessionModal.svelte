@@ -45,13 +45,15 @@
     }
   });
 
-  // Focus textarea on mount
+  // Focus textarea on mount (one-time)
   $effect(() => {
     if (textareaEl) {
-      textareaEl.focus();
-      if (prompt) {
-        textareaEl.selectionStart = textareaEl.selectionEnd = prompt.length;
-      }
+      const el = textareaEl;
+      // Read length from the DOM element to avoid tracking `prompt` reactively,
+      // which would re-run this effect on every keystroke and force the cursor
+      // to the end of the buffer.
+      el.focus();
+      el.selectionStart = el.selectionEnd = el.value.length;
     }
   });
 

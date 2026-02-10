@@ -65,7 +65,19 @@ function copyMarkdown(btn) {
         var orig = btn.textContent;
         btn.textContent = 'Copied!';
         setTimeout(function() { btn.textContent = orig; }, 1500);
+        showToast('Markdown copied to clipboard');
     });
+}
+function showToast(msg) {
+    var t = document.createElement('div');
+    t.className = 'toast';
+    t.textContent = msg;
+    document.body.appendChild(t);
+    requestAnimationFrame(function() { t.classList.add('show'); });
+    setTimeout(function() {
+        t.classList.remove('show');
+        setTimeout(function() { t.remove(); }, 300);
+    }, 2000);
 }
 mermaid.initialize({ startOnLoad: false, theme: 'default' });
 document.addEventListener('DOMContentLoaded', function() {
@@ -142,6 +154,10 @@ main { padding: 32px 48px; max-width: 900px; }
 .content a { color: #0066cc; }
 .content .chroma { background: #282a36; }
 .content .mermaid-container { background: #fff; border: 1px solid #e8e8e8; border-radius: 6px; padding: 16px; overflow-x: auto; text-align: center; }
+
+/* Toast */
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px); background: #333; color: #fff; padding: 10px 20px; border-radius: 6px; font-size: 0.85em; opacity: 0; transition: opacity 0.3s, transform 0.3s; z-index: 1000; pointer-events: none; }
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
 /* Responsive */
 @media (max-width: 768px) {

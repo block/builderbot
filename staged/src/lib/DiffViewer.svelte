@@ -18,7 +18,7 @@
   import { onMount } from 'svelte';
   import { MessageSquarePlus, MessageSquare, X } from 'lucide-svelte';
   import { marked } from 'marked';
-  import DOMPurify from 'dompurify';
+  import { sanitize } from './sanitize';
   import type { FileDiff, Alignment, Comment, Span, SmartDiffAnnotation } from './types';
   import {
     initHighlighter,
@@ -218,7 +218,7 @@
     const content = beforeLines.join('\n');
     if (!content.trim()) return '';
     const html = marked.parse(content, { async: false }) as string;
-    return DOMPurify.sanitize(html);
+    return sanitize(html);
   });
 
   let afterMarkdownHtml = $derived.by(() => {
@@ -226,7 +226,7 @@
     const content = afterLines.join('\n');
     if (!content.trim()) return '';
     const html = marked.parse(content, { async: false }) as string;
-    return DOMPurify.sanitize(html);
+    return sanitize(html);
   });
 
   // AI annotations for after pane (only informational ones with after_span)

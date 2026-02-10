@@ -73,7 +73,6 @@ just dev       # Run in development mode (hot-reload)
 ```bash
 just dev        # Run app in dev mode with hot-reload
 just build      # Build for production
-just frontend   # Run just the frontend (quick UI iteration)
 
 # Code quality
 just fmt        # Format all code (Rust + TypeScript/Svelte)

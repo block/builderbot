@@ -312,7 +312,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				}
 			}
 
-			// Second pass: build enriched response
+			// Second pass: build response with pending threads
 			pendingByFile := make(map[string][]comments.Thread)
 			for _, p := range pending {
 				pendingByFile[p.filePath] = append(pendingByFile[p.filePath], p.thread)

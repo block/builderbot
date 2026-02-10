@@ -58,16 +58,19 @@
         .sidebar-item:hover { background: #f0f0f0; text-decoration: none; color: #333; }
         .sidebar-item.active { background: #e8f0fe; color: #0066cc; font-weight: 500; }
         .sidebar-item.subitem { padding-left: 28px; font-size: 0.8em; }
-        .sidebar-item .rpi-badge {
+        .sidebar-item .source-badge {
             font-size: 0.7em;
             font-weight: 500;
             padding: 0px 4px;
             border-radius: 3px;
-            background: #f0f0f0;
-            color: #888;
+            background: var(--badge-bg);
+            color: var(--badge-color);
             flex-shrink: 0;
         }
-        .sidebar-item.active .rpi-badge { background: #d4e4fc; color: #5a8fd8; }
+        .sidebar-item.active .source-badge {
+            background: var(--badge-active-bg);
+            color: var(--badge-active-color);
+        }
         .sidebar-item .branch-info {
             font-size: 0.8em;
             color: #2da44e;
@@ -297,6 +300,14 @@
         }
         .file-type.research { background: #ddf4ff; color: #0969da; }
         .file-type.plan { background: #dafbe1; color: #1a7f37; }
+        .file-type.knowledge { background: #f5f0ff; color: #8b5cf6; }
+        .file-type.requirement { background: #fff8e1; color: #b45309; }
+        .file-type.design { background: #e0f2f1; color: #00796b; }
+        .file-type.task { background: #e8eaf6; color: #3949ab; }
+        .file-type.field-notes { background: #f5f5f5; color: #666; }
+        .file-type.prd { background: #fff3cd; color: #856404; }
+        .file-type.charter { background: #ede7f6; color: #6a1b9a; }
+        .file-type.quick { background: #e3f2fd; color: #1565c0; }
 
         /* Shared copy dropdown */
         .copy-dropdown { position: relative; }
@@ -417,7 +428,7 @@
             {{if .Nav.ActiveProject}}
             <a class="sidebar-item subitem active" href="/project/{{.Nav.ActiveProject.QualifiedName}}">
                 {{.Nav.ActiveProject.Name}}
-                {{if .Nav.ActiveProject.HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
+                {{range .Nav.ActiveProject.Badges}}<span class="source-badge" style="--badge-bg:{{.Bg}};--badge-color:{{.Color}};--badge-active-bg:{{.ActiveBg}};--badge-active-color:{{.ActiveColor}}">{{.Text}}</span>{{end}}
                 {{if .Nav.ActiveProject.HasAgent}}<span class="agent-dot"></span>{{end}}
                 {{if .Nav.ActiveProject.Branch}}<span class="branch-info">{{.Nav.ActiveProject.Branch}}{{if .Nav.ActiveProject.Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
             </a>
@@ -426,7 +437,7 @@
             {{range .Nav.Standalone}}{{if eq .QualifiedName $.Nav.ActiveQN}}
             <a class="sidebar-item active" href="/project/{{.QualifiedName}}">
                 {{.Name}}
-                {{if .HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
+                {{range .Badges}}<span class="source-badge" style="--badge-bg:{{.Bg}};--badge-color:{{.Color}};--badge-active-bg:{{.ActiveBg}};--badge-active-color:{{.ActiveColor}}">{{.Text}}</span>{{end}}
                 {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
                 {{if .Branch}}<span class="branch-info">{{.Branch}}{{if .Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
             </a>
@@ -451,7 +462,7 @@
             <div class="sidebar-item-wrap" data-remove-type="project" data-remove-path="{{.Path}}" data-remove-name="{{.Name}}">
                 <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}" href="/project/{{.QualifiedName}}">
                     {{.Name}}
-                    {{if .HasRPI}}<span class="rpi-badge">RPI</span>{{end}}
+                    {{range .Badges}}<span class="source-badge" style="--badge-bg:{{.Bg}};--badge-color:{{.Color}};--badge-active-bg:{{.ActiveBg}};--badge-active-color:{{.ActiveColor}}">{{.Text}}</span>{{end}}
                     {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
                     {{if .Branch}}<span class="branch-info">{{.Branch}}{{if .Dirty}}<span class="branch-dirty">*</span>{{end}}</span>{{end}}
                 </a>

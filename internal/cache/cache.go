@@ -138,6 +138,25 @@ func (c *Cache) AllFiles(limit int) []FileInfo {
 	return all
 }
 
+// FindFile returns a specific file from the cache by project and file path.
+// Returns nil if the file is not found.
+func (c *Cache) FindFile(projectName, filePath string) *FileInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	files, ok := c.projectFiles[projectName]
+	if !ok {
+		return nil
+	}
+
+	for i := range files {
+		if files[i].FullPath == filePath {
+			return &files[i]
+		}
+	}
+	return nil
+}
+
 // RefreshProject rescans a single project's files across all its sources.
 // projectName should be the qualified name (e.g., "Development/birdseye").
 func (c *Cache) RefreshProject(projectName string) {
@@ -262,10 +281,18 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				relToProject, _ := filepath.Rel(project.Path, path)
 
 				fileType := "other"
-				if strings.Contains(relToSource, "research") {
-					fileType = "research"
-				} else if strings.Contains(relToSource, "plan") {
-					fileType = "plan"
+				st := discovery.GetSourceType(source.Name)
+				if st != nil && st.ClassifyFile != nil {
+					fileType = st.ClassifyFile(relToSource)
+					if fileType == "" {
+						return nil // skip this file
+					}
+				} else {
+					if strings.Contains(relToSource, "research") {
+						fileType = "research"
+					} else if strings.Contains(relToSource, "plan") {
+						fileType = "plan"
+					}
 				}
 
 				files = append(files, FileInfo{

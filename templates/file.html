@@ -498,7 +498,7 @@
     <div class="file-main" id="file-main">
         <div class="file-toolbar" data-project="{{.Page.Project.QualifiedName}}" data-project-path="{{.Page.Project.Path}}" data-path="{{.Page.FilePath}}" data-source-type="{{.Page.SourceType}}">
             {{if ne .Page.FileType "other"}}<span class="file-type {{.Page.FileType}}">{{.Page.FileType}}</span>{{end}}
-            <span class="toolbar-filename">{{.Page.FileName}}</span>
+            <span class="toolbar-filename">{{.Page.DisplayName}}</span>
             <div class="file-menu-wrap">
                 <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
                 <div class="file-menu"></div>

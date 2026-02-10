@@ -91,6 +91,13 @@
         letter-spacing: 0.5px;
         color: #888;
     }
+    .source-header .source-badge {
+        font-size: 0.65em;
+        font-weight: 600;
+        padding: 1px 5px;
+        border-radius: 3px;
+        letter-spacing: 0.3px;
+    }
     .source-header .auto-badge {
         font-size: 0.7em;
         font-weight: 400;
@@ -252,15 +259,16 @@
     }
     .add-source-btn:hover { color: #666; text-decoration: none; }
     .main-content { scroll-behavior: smooth; }
+
 {{end}}
 
 {{define "sidebar_extra"}}
-    {{if .Page.SourceOrder}}
+    {{if .Page.Groups}}
     <div class="sidebar-card">
         <div class="sidebar-card-title">Sources</div>
         <nav class="sidebar-card-nav">
-            {{range .Page.SourceOrder}}
-            <a href="#source-{{.}}">{{.}}</a>
+            {{range .Page.Groups}}
+            <a href="#source-{{.Name}}">{{.Name}}</a>
             {{end}}
         </nav>
     </div>
@@ -270,19 +278,20 @@
 {{define "content"}}
     <div class="agent-controls" id="agent-controls"></div>
     <div id="fileContainer">
-    {{if .Page.Files}}
-        {{range $source := .Page.SourceOrder}}
-        <div class="source-section" id="source-{{$source}}" data-source="{{$source}}" data-source-type="{{index $.Page.SourceTypes $source}}">
+    {{if .Page.Groups}}
+        {{range $group := .Page.Groups}}
+        <div class="source-section" id="source-{{$group.Name}}" data-source="{{$group.Source}}" data-source-type="{{$group.SourceType}}">
             <div class="source-header">
-                <span class="source-header-label">{{$source}}</span>
-                {{if index $.Page.AutoSources $source}}<span class="auto-badge">(auto)</span>
-                {{else}}{{if ne (index $.Page.SourceTypes $source) "files"}}<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>
+                {{if $group.BadgeText}}<span class="source-badge" style="color:{{$group.BadgeColor}};background:{{$group.BadgeBg}}">{{$group.BadgeText}}</span>{{end}}
+                <span class="source-header-label">{{$group.Name}}</span>
+                {{if $group.Auto}}<span class="auto-badge">(auto)</span>
+                {{else}}{{if ne $group.SourceType "files"}}<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>
                 <div class="source-header-menu">
-                    <button onclick="removeSource('{{$source}}')">Remove from Birdseye</button>
+                    <button onclick="removeSource('{{$group.Source}}')">Remove from Birdseye</button>
                 </div>{{end}}{{end}}
             </div>
             <ul class="files">
-                {{range $.Page.Files}}{{if eq .Source $source}}
+                {{range $group.Files}}
                 <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
                     <div class="file-left">
                         <input type="checkbox" class="file-checkbox" />
@@ -297,7 +306,7 @@
                         </div>
                     </div>
                 </li>
-                {{end}}{{end}}
+                {{end}}
             </ul>
         </div>
         {{end}}
@@ -563,46 +572,30 @@
     async function refreshFiles() {
         try {
             var response = await fetch('/api/project/' + qualifiedName);
-            var files = await response.json();
+            var groups = await response.json();
             var container = document.getElementById('fileContainer');
             if (!container) { location.reload(); return; }
 
-            // Group files by source
-            var sourceOrder = [];
-            var sourceFiles = {};
-            var sourceTypes = {};
-            files.forEach(function(f) {
-                var src = f.source || '';
-                if (!sourceFiles[src]) {
-                    sourceFiles[src] = [];
-                    sourceOrder.push(src);
-                    sourceTypes[src] = f.sourceType || '';
-                }
-                sourceFiles[src].push(f);
-            });
-
-            // Track which sources are auto-detected
-            var autoSources = {};
-            files.forEach(function(f) {
-                if (f.sourceAuto) autoSources[f.source || ''] = true;
-            });
-
             var html = '';
-            if (sourceOrder.length > 0) {
-                sourceOrder.forEach(function(src) {
-                    var sType = sourceTypes[src];
-                    html += '<div class="source-section" id="source-' + escapeHtml(src) + '" data-source="' + escapeHtml(src) + '" data-source-type="' + escapeHtml(sType) + '">';
-                    html += '<div class="source-header"><span class="source-header-label">' + escapeHtml(src) + '</span>';
-                    if (autoSources[src]) {
+            if (groups && groups.length > 0) {
+                groups.forEach(function(group) {
+                    html += '<div class="source-section" id="source-' + escapeHtml(group.name) + '" data-source="' + escapeHtml(group.source) + '" data-source-type="' + escapeHtml(group.sourceType) + '">';
+                    html += '<div class="source-header">';
+                    if (group.badgeText) {
+                        html += '<span class="source-badge" style="color:' + escapeHtml(group.badgeColor) + ';background:' + escapeHtml(group.badgeBg) + '">' + escapeHtml(group.badgeText) + '</span>';
+                    }
+                    html += '<span class="source-header-label">' + escapeHtml(group.name) + '</span>';
+                    if (group.auto) {
                         html += '<span class="auto-badge">(auto)</span>';
-                    } else if (sType !== 'files') {
+                    } else if (group.sourceType !== 'files') {
                         html += '<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>';
-                        html += '<div class="source-header-menu"><button onclick="removeSource(\'' + escapeHtml(src) + '\')">Remove from Birdseye</button></div>';
+                        html += '<div class="source-header-menu"><button onclick="removeSource(\'' + escapeHtml(group.source) + '\')">Remove from Birdseye</button></div>';
                     }
                     html += '</div>';
                     html += '<ul class="files">';
-                    sourceFiles[src].forEach(function(f) { html += renderFileRow(f); });
-                    html += '</ul></div>';
+                    (group.files || []).forEach(function(f) { html += renderFileRow(f); });
+                    html += '</ul>';
+                    html += '</div>';
                 });
             } else {
                 html = '<p class="empty">No files yet.</p>';

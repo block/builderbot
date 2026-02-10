@@ -9,12 +9,13 @@ impl Store {
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, agent_id, error_message, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, agent_id, error_message, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 session.id,
                 session.prompt,
                 session.status.as_str(),
+                session.working_dir,
                 session.agent_id,
                 session.error_message,
                 session.created_at,
@@ -27,7 +28,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, prompt, status, agent_id, error_message, created_at, updated_at
+            "SELECT id, prompt, status, working_dir, agent_id, error_message, created_at, updated_at
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -134,10 +135,11 @@ impl Store {
             id: row.get(0)?,
             prompt: row.get(1)?,
             status: SessionStatus::parse(&status_str).unwrap_or(SessionStatus::Error),
-            agent_id: row.get(3)?,
-            error_message: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            working_dir: row.get(3)?,
+            agent_id: row.get(4)?,
+            error_message: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     }
 }

@@ -55,11 +55,10 @@
 
   interface Props {
     sessionId: string;
-    workingDir: string;
     onClose: () => void;
   }
 
-  let { sessionId, workingDir, onClose }: Props = $props();
+  let { sessionId, onClose }: Props = $props();
 
   // =========================================================================
   // State
@@ -201,7 +200,7 @@
     sending = true;
     error = null;
     try {
-      await resumeSession(session.id, text, workingDir);
+      await resumeSession(session.id, text);
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = { ...session, status: 'running' };

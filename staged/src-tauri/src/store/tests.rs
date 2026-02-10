@@ -1,5 +1,7 @@
 //! Tests for the store module.
 
+use std::path::Path;
+
 use super::models::*;
 use super::Store;
 
@@ -55,7 +57,7 @@ fn test_delete_project_cascades() {
     let workdir = Workdir::new(&project.id, "/tmp/wt").with_branch(&branch.id);
     store.create_workdir(&workdir).unwrap();
 
-    let session = Session::new_running("do something");
+    let session = Session::new_running("do something", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     // Link the session to a commit on this branch
@@ -95,7 +97,7 @@ fn test_branch_crud() {
 fn test_session_lifecycle() {
     let store = Store::in_memory().unwrap();
 
-    let session = Session::new_running("fix the bug");
+    let session = Session::new_running("fix the bug", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     // Running
@@ -115,7 +117,7 @@ fn test_session_lifecycle() {
 fn test_session_error() {
     let store = Store::in_memory().unwrap();
 
-    let session = Session::new_running("do stuff");
+    let session = Session::new_running("do stuff", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     store
@@ -130,7 +132,7 @@ fn test_session_error() {
 fn test_session_error_message_ignored_for_non_error() {
     let store = Store::in_memory().unwrap();
 
-    let session = Session::new_running("do stuff");
+    let session = Session::new_running("do stuff", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     // Even if error_message is passed, it's ignored for non-Error status
@@ -150,7 +152,7 @@ fn test_session_error_message_ignored_for_non_error() {
 fn test_transition_from_running() {
     let store = Store::in_memory().unwrap();
 
-    let session = Session::new_running("race me");
+    let session = Session::new_running("race me", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     // Simulate: cancel_session sets status to cancelled via direct update
@@ -175,7 +177,7 @@ fn test_transition_from_running() {
 fn test_transition_from_running_succeeds_when_running() {
     let store = Store::in_memory().unwrap();
 
-    let session = Session::new_running("happy path");
+    let session = Session::new_running("happy path", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     // No concurrent cancel — transition should succeed
@@ -192,7 +194,7 @@ fn test_transition_from_running_succeeds_when_running() {
 fn test_session_messages() {
     let store = Store::in_memory().unwrap();
 
-    let session = Session::new_running("test");
+    let session = Session::new_running("test", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     let id1 = store
@@ -354,7 +356,7 @@ fn test_commit_with_sha() {
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
 
-    let session = Session::new_running("first commit");
+    let session = Session::new_running("first commit", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     let commit = Commit::new_with_sha(&branch.id, "aaa111").with_session(&session.id);
@@ -385,7 +387,7 @@ fn test_commit_pending_then_landed() {
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
 
-    let session = Session::new_running("working on it");
+    let session = Session::new_running("working on it", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     // Create pending commit (no SHA yet)
@@ -443,7 +445,7 @@ fn test_delete_branch_cascades_commits() {
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
 
-    let session = Session::new_running("test");
+    let session = Session::new_running("test", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
         .add_session_message(&session.id, MessageRole::User, "hi")
@@ -478,7 +480,7 @@ fn test_completed_session_cleaned_up_on_branch_delete() {
     store.create_branch(&branch).unwrap();
 
     // Completed session linked to a commit
-    let session = Session::new_running("make changes");
+    let session = Session::new_running("make changes", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
         .update_session_status(&session.id, SessionStatus::Completed, None)
@@ -505,7 +507,7 @@ fn test_session_not_cleaned_up_if_still_referenced() {
     store.create_branch(&branch_b).unwrap();
 
     // Same session referenced by commits on two branches
-    let session = Session::new_running("shared work");
+    let session = Session::new_running("shared work", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
         .update_session_status(&session.id, SessionStatus::Completed, None)
@@ -534,7 +536,7 @@ fn test_running_session_not_cleaned_up() {
     store.create_branch(&branch).unwrap();
 
     // Running session linked to a commit
-    let session = Session::new_running("still working");
+    let session = Session::new_running("still working", Path::new("/tmp"));
     store.create_session(&session).unwrap();
 
     let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);
@@ -554,7 +556,7 @@ fn test_session_cleaned_up_via_note_delete() {
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
 
-    let session = Session::new_running("write notes");
+    let session = Session::new_running("write notes", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
         .update_session_status(&session.id, SessionStatus::Completed, None)
@@ -577,7 +579,7 @@ fn test_session_cleaned_up_via_review_delete() {
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
 
-    let session = Session::new_running("review code");
+    let session = Session::new_running("review code", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
         .update_session_status(&session.id, SessionStatus::Completed, None)
@@ -600,7 +602,7 @@ fn test_session_messages_cascade_from_session_cleanup() {
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
 
-    let session = Session::new_running("chat");
+    let session = Session::new_running("chat", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
         .add_session_message(&session.id, MessageRole::User, "hello")

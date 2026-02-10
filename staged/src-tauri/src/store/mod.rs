@@ -59,7 +59,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -71,7 +71,7 @@ pub enum DbCompatibility {
     Ok,
     /// Database exists with an older schema — offer to reset.
     NeedsReset {
-        /// The app version that last opened this database (e.g. "0.2.0"),
+        /// The app version that last opened this database (e.g. "0.3.0"),
         /// or "0.1.0" for pre-versioning databases.
         db_app_version: String,
     },
@@ -261,6 +261,7 @@ impl Store {
                 id              TEXT PRIMARY KEY,
                 prompt          TEXT NOT NULL,
                 status          TEXT NOT NULL,
+                working_dir     TEXT NOT NULL,
                 agent_id        TEXT,
                 error_message   TEXT,
                 created_at      INTEGER NOT NULL,

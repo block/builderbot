@@ -366,7 +366,6 @@
 {#if openSessionId}
   <SessionModal
     sessionId={openSessionId}
-    workingDir={branch.worktreePath ?? '/tmp'}
     onClose={() => {
       openSessionId = null;
       loadTimeline();

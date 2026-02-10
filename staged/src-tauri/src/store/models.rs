@@ -1,5 +1,7 @@
 //! Domain types for Staged persistence.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -173,6 +175,7 @@ pub struct Session {
     pub id: String,
     pub prompt: String,
     pub status: SessionStatus,
+    pub working_dir: String,
     pub agent_id: Option<String>,
     pub error_message: Option<String>,
     pub created_at: i64,
@@ -180,12 +183,13 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new_running(prompt: &str) -> Self {
+    pub fn new_running(prompt: &str, working_dir: &Path) -> Self {
         let now = now_timestamp();
         Self {
             id: Uuid::new_v4().to_string(),
             prompt: prompt.to_string(),
             status: SessionStatus::Running,
+            working_dir: working_dir.to_string_lossy().to_string(),
             agent_id: None,
             error_message: None,
             created_at: now,

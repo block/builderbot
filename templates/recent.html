@@ -44,7 +44,7 @@
         <div class="file-info">
             <div class="file-name">
                 {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                <a href="/file/{{.Project}}/{{.FilePath}}">{{.FileName}}</a>
+                <a href="/file/{{.Project}}/{{.FilePath}}">{{.DisplayName}}</a>
             </div>
             <div class="file-project">{{.Project}}/{{.FilePath}}</div>
         </div>
@@ -70,11 +70,12 @@
             var files = await response.json();
             var container = document.getElementById('files-container');
             container.innerHTML = files.map(function(f) {
+                var displayName = f.displayName || f.name;
                 return '<div class="file">' +
                     '<div class="file-info">' +
                         '<div class="file-name">' +
                             (f.fileType && f.fileType !== 'other' ? '<span class="file-type ' + escapeHtml(f.fileType) + '">' + escapeHtml(f.fileType) + '</span>' : '') +
-                            '<a href="/file/' + escapeHtml(f.project) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a>' +
+                            '<a href="/file/' + escapeHtml(f.project) + '/' + encodeURI(f.path) + '">' + escapeHtml(displayName) + '</a>' +
                         '</div>' +
                         '<div class="file-project">' + escapeHtml(f.project) + '/' + escapeHtml(f.path) + '</div>' +
                     '</div>' +

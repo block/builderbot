@@ -252,6 +252,21 @@
     }
     .add-source-btn:hover { color: #666; text-decoration: none; }
     .main-content { scroll-behavior: smooth; }
+
+    /* Feature and category group headers */
+    .file-group {
+        margin-bottom: 16px;
+    }
+    .group-header {
+        font-size: 0.75em;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #666;
+        padding: 8px 0 8px 0;
+        border-bottom: 1px solid #e8e8e8;
+        margin-bottom: 8px;
+    }
 {{end}}
 
 {{define "sidebar_extra"}}
@@ -272,6 +287,43 @@
     <div id="fileContainer">
     {{if .Page.Files}}
         {{range $source := .Page.SourceOrder}}
+        {{if and (eq $source "rp1") $.Page.RP1Groups}}
+        {{/* RP1 source with feature groups */}}
+        <div class="source-section" id="source-{{$source}}" data-source="{{$source}}" data-source-type="{{index $.Page.SourceTypes $source}}">
+            <div class="source-header">
+                <span class="source-header-label">{{$source}}</span>
+                {{if index $.Page.AutoSources $source}}<span class="auto-badge">(auto)</span>
+                {{else}}{{if ne (index $.Page.SourceTypes $source) "files"}}<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>
+                <div class="source-header-menu">
+                    <button onclick="removeSource('{{$source}}')">Remove from Birdseye</button>
+                </div>{{end}}{{end}}
+            </div>
+            {{range $.Page.RP1Groups.Groups}}
+            <div class="file-group" data-group-type="{{.Type}}" data-group-name="{{.Name}}">
+                <div class="group-header">{{.Name}}</div>
+                <ul class="files">
+                    {{range .Files}}
+                    <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
+                        <div class="file-left">
+                            <input type="checkbox" class="file-checkbox" />
+                            {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
+                            <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.DisplayName}}</a></span>
+                        </div>
+                        <div class="file-right">
+                            <span class="file-age">{{.Age}}</span>
+                            <div class="file-menu-wrap">
+                                <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
+                                <div class="file-menu"></div>
+                            </div>
+                        </div>
+                    </li>
+                    {{end}}
+                </ul>
+            </div>
+            {{end}}
+        </div>
+        {{else}}
+        {{/* Regular source without grouping */}}
         <div class="source-section" id="source-{{$source}}" data-source="{{$source}}" data-source-type="{{index $.Page.SourceTypes $source}}">
             <div class="source-header">
                 <span class="source-header-label">{{$source}}</span>
@@ -300,6 +352,7 @@
                 {{end}}{{end}}
             </ul>
         </div>
+        {{end}}
         {{end}}
     {{else}}
     <p class="empty">No files yet.</p>

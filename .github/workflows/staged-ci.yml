@@ -49,14 +49,16 @@ jobs:
       # - name: Install dependencies
       #   run: just install
       - name: Install dependencies (Rust only)
-        run: cd src-tauri && cargo fetch
+        working-directory: staged/src-tauri
+        run: cargo fetch
 
       # Run all checks
       # TODO: Re-enable full check-all once npm lockfile is compatible with CI
       # - name: Check all (fmt, lint, typecheck)
       #   run: just check-all
       - name: Check (Rust only — fmt, lint, typecheck)
+        working-directory: staged/src-tauri
         run: |
-          cd src-tauri && cargo fmt --check
-          cd src-tauri && cargo clippy -- -D warnings
-          cd src-tauri && cargo check
+          cargo fmt --check
+          cargo clippy -- -D warnings
+          cargo check

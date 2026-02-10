@@ -43,7 +43,9 @@ dev:
 
     PIDFILE=".birdseye.pid"
 
-    # Kill previous birdseye dev server if running
+    PORT=8080
+
+    # Kill previous birdseye dev server if running (via PID file or port probe)
     if [ -f "$PIDFILE" ]; then
         OLD_PID=$(cat "$PIDFILE")
         if kill -0 "$OLD_PID" 2>/dev/null; then
@@ -54,12 +56,19 @@ dev:
         rm -f "$PIDFILE"
     fi
 
-    # Find an available port starting from 8080
-    PORT=8080
-    while lsof -ti:$PORT >/dev/null 2>&1; do
-        echo "Port $PORT is in use by another process, trying next..."
-        PORT=$((PORT + 1))
-    done
+    # If port is still in use, check if it's a birdseye instance we can take over
+    if lsof -ti:$PORT >/dev/null 2>&1; then
+        if curl -s "http://localhost:$PORT/api/projects" >/dev/null 2>&1; then
+            echo "Port $PORT held by another birdseye instance, stopping it..."
+            BLOCKING_PID=$(lsof -ti:$PORT)
+            kill $BLOCKING_PID 2>/dev/null
+            sleep 0.5
+        else
+            echo "Error: port $PORT is in use by a non-birdseye process." >&2
+            echo "Stop that process or use: ./birdseye -dev -port <other-port>" >&2
+            exit 1
+        fi
+    fi
 
     start_server() {
         go build -o birdseye . && ./birdseye -dev -port $PORT &

@@ -297,6 +297,9 @@
                                 <button onclick="copyFileToClipboard(this)">Copy file</button>
                                 <button onclick="copyRelative(this)">Copy relative path</button>
                                 <button onclick="copyAbsolute(this)">Copy absolute path</button>
+                                <div class="menu-divider"></div>
+                                <button onclick="publishFile(this)">Publish to Blockcell</button>
+                                <button onclick="copyBlockcellLink(this)" class="blockcell-link-btn" style="display:none">Copy Blockcell link</button>
                                 {{if eq .SourceType "files"}}<div class="menu-divider"></div>
                                 <button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>{{end}}
                                 <div class="menu-divider"></div>
@@ -531,6 +534,84 @@
 
     refreshAgentControls();
 
+    // --- Blockcell publish ---
+    // Cache of publish URLs keyed by file path
+    var publishURLs = {};
+
+    function loadAllPublishStates() {
+        document.querySelectorAll('.file[data-path]').forEach(function(row) {
+            var path = row.dataset.path;
+            if (publishURLs[path]) {
+                showBlockcellLinkBtn(row);
+                return;
+            }
+            fetch('/api/publish-state?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(path))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.url) {
+                        publishURLs[path] = data.url;
+                        showBlockcellLinkBtn(row);
+                    }
+                })
+                .catch(function() {});
+        });
+    }
+
+    function showBlockcellLinkBtn(row) {
+        var btn = row.querySelector('.blockcell-link-btn');
+        if (btn) btn.style.display = '';
+    }
+
+    function publishFile(btn) {
+        var d = getFileData(btn);
+        closeAllMenus();
+        var origText = btn.textContent;
+        btn.textContent = 'Publishing...';
+        btn.disabled = true;
+        fetch('/api/publish', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({project: d.project, path: d.path})
+        })
+        .then(function(r) {
+            if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+            return r.json();
+        })
+        .then(function(data) {
+            publishURLs[d.path] = data.url;
+            var row = btn.closest('.file');
+            if (row) showBlockcellLinkBtn(row);
+            btn.textContent = origText;
+            btn.disabled = false;
+            showPublishToast(data.url);
+        })
+        .catch(function(err) {
+            btn.textContent = origText;
+            btn.disabled = false;
+            alert('Publish failed: ' + err.message);
+        });
+    }
+
+    function copyBlockcellLink(btn) {
+        var d = getFileData(btn);
+        closeAllMenus();
+        var url = publishURLs[d.path];
+        if (url) {
+            navigator.clipboard.writeText(url);
+            flashCopied(btn);
+        }
+    }
+
+    function showPublishToast(url) {
+        var banner = document.createElement('div');
+        banner.style.cssText = 'position:fixed;top:16px;right:16px;background:#dafbe1;border:1px solid #a3d9a5;border-radius:8px;padding:12px 16px;font-size:0.85em;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.1);max-width:400px;';
+        banner.innerHTML = '<strong>Published!</strong> <a href="' + escapeHtml(url) + '" target="_blank" style="color:#0066cc;word-break:break-all;">' + escapeHtml(url) + '</a>';
+        document.body.appendChild(banner);
+        setTimeout(function() { banner.remove(); }, 8000);
+    }
+
+    loadAllPublishStates();
+
     // SSE handlers
     onSSE(function(data) {
         if (data.type === 'files' && data.project === qualifiedName) debouncedRefresh('files', refreshFiles);
@@ -589,6 +670,9 @@
                         '<button onclick="copyFileToClipboard(this)">Copy file</button>' +
                         '<button onclick="copyRelative(this)">Copy relative path</button>' +
                         '<button onclick="copyAbsolute(this)">Copy absolute path</button>' +
+                        '<div class="menu-divider"></div>' +
+                        '<button onclick="publishFile(this)">Publish to Blockcell</button>' +
+                        '<button onclick="copyBlockcellLink(this)" class="blockcell-link-btn" style="display:none">Copy Blockcell link</button>' +
                         (isIndividual ? '<div class="menu-divider"></div><button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>' : '') +
                         '<div class="menu-divider"></div>' +
                         '<button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>' +
@@ -650,6 +734,7 @@
             attachFileListeners();
             clearSelection();
             applyReviewBadges();
+            loadAllPublishStates();
         } catch (err) {
             console.error('Failed to refresh files:', err);
         }

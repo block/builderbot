@@ -1,0 +1,26 @@
+[package]
+name = "summarize"
+version = "0.1.0"
+edition = "2021"
+description = "Portable CLI tool to summarize files using an LLM"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+sha2 = "0.10"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+url = "2"
+nanoid = "0.4"
+axum = "0.8"
+opener = "0.7"
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"

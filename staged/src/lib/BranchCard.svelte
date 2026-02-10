@@ -222,6 +222,13 @@
       onConfirm: async () => {
         confirmDelete = null;
         try {
+          if (sessionId) {
+            try {
+              await commands.cancelSession(sessionId);
+            } catch {
+              // Session may already be finished
+            }
+          }
           await commands.deleteNote(noteId, !!sessionId);
           loadTimeline();
         } catch (e) {
@@ -229,6 +236,24 @@
         }
       },
     };
+  }
+
+  async function handleDeletePendingCommit(commitId: string, sessionId?: string) {
+    // For pending/failed commits, cancel the session if running, then delete the DB record.
+    // No confirmation needed — these artifacts were never finalized.
+    try {
+      if (sessionId) {
+        try {
+          await commands.cancelSession(sessionId);
+        } catch {
+          // Session may already be finished, that's fine
+        }
+      }
+      await commands.deletePendingCommit(commitId, !!sessionId);
+      loadTimeline();
+    } catch (e) {
+      console.error('Failed to delete pending commit:', e);
+    }
   }
 </script>
 
@@ -267,6 +292,7 @@
         onCommitClick={handleCommitClick}
         onNoteClick={handleNoteClick}
         onDeleteCommit={handleDeleteCommit}
+        onDeletePendingCommit={handleDeletePendingCommit}
         onDeleteNote={handleDeleteNote}
       />
     {/if}

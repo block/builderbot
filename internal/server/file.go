@@ -88,12 +88,14 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	threadsJSON, _ := json.Marshal(wrapped)
 	anchorLinesJSON, _ := json.Marshal(anchorLines)
 
-	// Determine source type for this file (needed for menu options)
+	// Determine source info for this file from cache
 	sourceType := ""
+	fileType := classifyFile(filePath)
 	cachedFiles := s.cache.ProjectFiles(project.QualifiedName())
 	for _, cf := range cachedFiles {
 		if cf.FullPath == filePath {
 			sourceType = cf.SourceType
+			fileType = cf.FileType
 			break
 		}
 	}
@@ -115,7 +117,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		FilePath:    filePath,
 		FileName:    filepath.Base(filePath),
 		ParentPath:  parentPath,
-		FileType:    classifyFile(filePath),
+		FileType:    fileType,
 		SourceType:  sourceType,
 		Content:     template.HTML(htmlContent),
 		Headings:    headings,

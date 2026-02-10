@@ -262,10 +262,15 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				relToProject, _ := filepath.Rel(project.Path, path)
 
 				fileType := "other"
-				if strings.Contains(relToSource, "research") {
-					fileType = "research"
-				} else if strings.Contains(relToSource, "plan") {
-					fileType = "plan"
+				st := discovery.GetSourceType(source.Name)
+				if st != nil && st.ClassifyFile != nil {
+					fileType = st.ClassifyFile(relToSource)
+				} else {
+					if strings.Contains(relToSource, "research") {
+						fileType = "research"
+					} else if strings.Contains(relToSource, "plan") {
+						fileType = "plan"
+					}
 				}
 
 				files = append(files, FileInfo{

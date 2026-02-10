@@ -263,7 +263,7 @@ type NavProject struct {
 	QualifiedName string
 	Path          string // filesystem path (for removal API)
 	HasAgent      bool
-	HasRPI        bool
+	Badges        []discovery.Badge
 	Branch        string
 	Dirty         bool
 }
@@ -286,7 +286,7 @@ func (s *Server) buildNav(activeQN string) NavData {
 				QualifiedName: qn,
 				Path:          p.Path,
 				HasAgent:      hasAgent,
-				HasRPI:        p.HasThoughts(),
+				Badges:        p.Badges(),
 			}
 			if p.Git != nil {
 				np.Branch = p.Git.Branch
@@ -308,7 +308,7 @@ func (s *Server) buildNav(activeQN string) NavData {
 				Name:          p.Name,
 				QualifiedName: qn,
 				HasAgent:      hasAgent,
-				HasRPI:        p.HasThoughts(),
+				Badges:        p.Badges(),
 			}
 			if p.Git != nil {
 				np.Branch = p.Git.Branch
@@ -649,22 +649,28 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 // API handlers for dynamic updates
 
+type APIBadge struct {
+	Text  string `json:"text"`
+	Color string `json:"color"`
+	Bg    string `json:"bg"`
+}
+
 type APIProject struct {
-	Name           string `json:"name"`
-	QualifiedName  string `json:"qualifiedName"`
-	Workspace      string `json:"workspace"`
-	WorkspacePath  string `json:"workspacePath,omitempty"`
-	ProjectPath    string `json:"projectPath"`
-	Origin         string `json:"origin"`
-	HasRPI         bool   `json:"hasRPI"`
-	Branch         string `json:"branch,omitempty"`
-	Dirty          bool   `json:"dirty,omitempty"`
-	FileCount      int    `json:"fileCount"`
-	LastModified   string `json:"lastModified"`
-	AgentConnected bool   `json:"agentConnected,omitempty"`
-	AgentRunning   bool   `json:"agentRunning,omitempty"`
-	Age            string `json:"age,omitempty"`
-	ReviewCount    int    `json:"reviewCount,omitempty"`
+	Name           string     `json:"name"`
+	QualifiedName  string     `json:"qualifiedName"`
+	Workspace      string     `json:"workspace"`
+	WorkspacePath  string     `json:"workspacePath,omitempty"`
+	ProjectPath    string     `json:"projectPath"`
+	Origin         string     `json:"origin"`
+	Badges         []APIBadge `json:"badges"`
+	Branch         string     `json:"branch,omitempty"`
+	Dirty          bool       `json:"dirty,omitempty"`
+	FileCount      int        `json:"fileCount"`
+	LastModified   string     `json:"lastModified"`
+	AgentConnected bool       `json:"agentConnected,omitempty"`
+	AgentRunning   bool       `json:"agentRunning,omitempty"`
+	Age            string     `json:"age,omitempty"`
+	ReviewCount    int        `json:"reviewCount,omitempty"`
 }
 
 func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
@@ -687,6 +693,10 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 	result := make([]APIProject, len(projects))
 	for i, p := range projects {
 		qn := p.QualifiedName()
+		apiBadges := make([]APIBadge, 0)
+		for _, b := range p.Badges() {
+			apiBadges = append(apiBadges, APIBadge{Text: b.Text, Color: b.Color, Bg: b.Bg})
+		}
 		result[i] = APIProject{
 			Name:           p.Name,
 			QualifiedName:  qn,
@@ -694,7 +704,7 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 			WorkspacePath:  p.WorkspacePath,
 			ProjectPath:    p.Path,
 			Origin:         p.Origin,
-			HasRPI:         p.HasThoughts(),
+			Badges:         apiBadges,
 			FileCount:      p.FileCount,
 			LastModified:   p.LastModified.Format(time.RFC3339),
 			Age:            computeProjectAge(p),
@@ -762,11 +772,11 @@ func (s *Server) handleAPIRecent(w http.ResponseWriter, r *http.Request) {
 	result := make([]APIFile, len(files))
 	for i, f := range files {
 		result[i] = APIFile{
-			Name:      f.Name,
-			Path:      f.FullPath,
-			Project:   f.Project,
-			Workspace: f.Workspace,
-			Age:       formatAge(f.ModTime),
+			Name:     f.Name,
+			Path:     f.FullPath,
+			Project:  f.Project,
+			Age:      formatAge(f.ModTime),
+			FileType: f.FileType,
 		}
 	}
 	json.NewEncoder(w).Encode(result)

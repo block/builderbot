@@ -107,13 +107,11 @@
         margin-left: 8px;
         vertical-align: middle;
     }
-    .rpi-badge {
+    .source-badge {
         font-size: 0.7em;
         font-weight: 500;
         padding: 1px 5px;
         border-radius: 3px;
-        background: #f0f0f0;
-        color: #888;
         margin-left: 6px;
         vertical-align: middle;
     }
@@ -156,7 +154,7 @@
         <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-workspace="{{.WorkspaceName}}" data-project-path="{{.Path}}" data-origin="workspace">
             <div class="project-header">
                 <div class="project-name">
-                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
+                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{range .Badges}}<span class="source-badge" style="background:{{.Bg}};color:{{.Color}}">{{.Text}}</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                     {{if index $.Page.Ages .QualifiedName}}<span class="project-age">{{index $.Page.Ages .QualifiedName}}</span>{{end}}
@@ -181,7 +179,7 @@
         <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-project-path="{{.Path}}" data-origin="standalone">
             <div class="project-header">
                 <div class="project-name">
-                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{if .HasThoughts}}<span class="rpi-badge">RPI</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
+                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{range .Badges}}<span class="source-badge" style="background:{{.Bg}};color:{{.Color}}">{{.Text}}</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                     {{if index $.Page.Ages .QualifiedName}}<span class="project-age">{{index $.Page.Ages .QualifiedName}}</span>{{end}}
@@ -363,7 +361,9 @@
         var deemph = p.fileCount === 0 ? ' deemphasized' : '';
         var agentDot = p.agentRunning ? '<span class="agent-dot" title="Agent running"></span>' : '';
         var reviewBadge = p.reviewCount ? '<span class="review-count">' + p.reviewCount + ' in review</span>' : '';
-        var rpiBadge = p.hasRPI ? '<span class="rpi-badge">RPI</span>' : '';
+        var badgesHtml = (p.badges || []).map(function(b) {
+            return '<span class="source-badge" style="background:' + escapeHtml(b.bg) + ';color:' + escapeHtml(b.color) + '">' + escapeHtml(b.text) + '</span>';
+        }).join('');
         var age = p.age ? '<span class="project-age">' + p.age + '</span>' : '';
         var branch = p.branch ? '<div class="project-meta"><span class="branch">' + escapeHtml(p.branch) + (p.dirty ? '<span class="dirty">*</span>' : '') + '</span></div>' : '';
         var menuItems = '<button onclick="copyProjectPath(this, event)">Copy path</button>';
@@ -375,7 +375,7 @@
 
         return '<div class="project' + deemph + '" data-name="' + escapeHtml(p.qualifiedName) + '" data-workspace="' + escapeHtml(p.workspace || '') + '" data-project-path="' + escapeHtml(p.projectPath) + '" data-origin="' + p.origin + '">' +
             '<div class="project-header">' +
-                '<div class="project-name"><a href="/project/' + encodeURI(p.qualifiedName) + '">' + escapeHtml(p.name) + '</a>' + rpiBadge + agentDot + reviewBadge + '</div>' +
+                '<div class="project-name"><a href="/project/' + encodeURI(p.qualifiedName) + '">' + escapeHtml(p.name) + '</a>' + badgesHtml + agentDot + reviewBadge + '</div>' +
                 '<div style="display:flex;gap:8px;align-items:center">' +
                     age +
                     '<div class="project-dropdown">' +

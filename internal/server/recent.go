@@ -6,12 +6,12 @@ import (
 )
 
 type RecentFile struct {
-	Project   string
-	Workspace string
-	FilePath  string
-	FileName  string
-	ModTime   time.Time
-	Age       string
+	Project  string
+	FilePath string
+	FileName string
+	ModTime  time.Time
+	Age      string
+	FileType string
 }
 
 func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
@@ -20,12 +20,12 @@ func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 	files := make([]RecentFile, len(cachedFiles))
 	for i, f := range cachedFiles {
 		files[i] = RecentFile{
-			Project:   f.Project,
-			Workspace: f.Workspace,
-			FilePath:  f.FullPath,
-			FileName:  f.Name,
-			ModTime:   f.ModTime,
-			Age:       formatAge(f.ModTime),
+			Project:  f.Project,
+			FilePath: f.FullPath,
+			FileName: f.Name,
+			ModTime:  f.ModTime,
+			Age:      formatAge(f.ModTime),
+			FileType: f.FileType,
 		}
 	}
 

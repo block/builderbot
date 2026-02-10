@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/loganj/birdseye/internal/activity"
 	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
@@ -17,16 +18,17 @@ import (
 
 func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 	c := cache.New()
-	w, err := watcher.New(c)
+	act := activity.New()
+	w, err := watcher.New(c, act)
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
 
-	cs := comments.NewStore(c)
+	cs := comments.NewStore(c, act)
 	am := agents.New(c, cs, 8080)
 	cfg := &config.Config{}
 
-	s := New(c, w, cs, nil, am, "", cfg, "")
+	s := New(c, w, cs, nil, am, act, "", cfg, "")
 
 	// Trigger ensureLoaded so it doesn't reset our test data
 	s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
@@ -85,16 +87,17 @@ func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 
 func TestAPIRecent_ReturnsFiles(t *testing.T) {
 	c := cache.New()
-	w, err := watcher.New(c)
+	act := activity.New()
+	w, err := watcher.New(c, act)
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
 
-	cs := comments.NewStore(c)
+	cs := comments.NewStore(c, act)
 	am := agents.New(c, cs, 8080)
 	cfg := &config.Config{}
 
-	s := New(c, w, cs, nil, am, "", cfg, "")
+	s := New(c, w, cs, nil, am, act, "", cfg, "")
 
 	projectName := "test/project"
 	now := time.Now()

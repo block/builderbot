@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/loganj/birdseye/internal/activity"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/discovery"
 )
@@ -32,6 +33,7 @@ type Event struct {
 // Watcher watches for filesystem changes and updates the cache
 type Watcher struct {
 	cache    *cache.Cache
+	activity *activity.Tracker
 	watcher  *fsnotify.Watcher
 	done     chan struct{}
 	eventsMu sync.RWMutex
@@ -47,7 +49,7 @@ type Watcher struct {
 }
 
 // New creates a new watcher
-func New(c *cache.Cache) (*Watcher, error) {
+func New(c *cache.Cache, act *activity.Tracker) (*Watcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -55,6 +57,7 @@ func New(c *cache.Cache) (*Watcher, error) {
 
 	w := &Watcher{
 		cache:    c,
+		activity: act,
 		watcher:  fw,
 		done:     make(chan struct{}),
 		subs:     make(map[chan Event]struct{}),
@@ -242,6 +245,19 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Only care about .md files for file list updates
 	if !strings.HasSuffix(path, ".md") && event.Op&fsnotify.Create == 0 {
 		return
+	}
+
+	// Record activity for .md file changes before debouncing
+	if strings.HasSuffix(path, ".md") && w.activity != nil {
+		if project := w.cache.FindProject(projectName); project != nil {
+			if relPath, err := filepath.Rel(project.Path, path); err == nil {
+				evtType := activity.FileModified
+				if event.Op&fsnotify.Create != 0 {
+					evtType = activity.FileCreated
+				}
+				w.activity.Record(evtType, projectName, relPath)
+			}
+		}
 	}
 
 	w.debounceRefresh(projectName, func() {

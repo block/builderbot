@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/loganj/birdseye/internal/activity"
 	"github.com/loganj/birdseye/internal/comments"
 	"github.com/loganj/birdseye/internal/discovery"
 	"github.com/loganj/birdseye/internal/markdown"
@@ -43,6 +44,8 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+
+	s.activity.Record(activity.FileViewed, project.QualifiedName(), filePath)
 
 	fullPath := filepath.Join(project.Path, filePath)
 	content, err := os.ReadFile(fullPath)

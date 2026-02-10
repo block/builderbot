@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/loganj/birdseye/internal/activity"
 	"github.com/loganj/birdseye/internal/publish"
 )
 
@@ -52,6 +53,8 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "publish failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	s.activity.Record(activity.FilePublished, input.Project, input.Path)
 
 	// Save publish state
 	if err := publish.SaveState(project.Path, input.Path, &publish.PublishState{

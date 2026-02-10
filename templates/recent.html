@@ -26,17 +26,33 @@
         text-overflow: ellipsis;
     }
     .file-project { color: #888; font-size: 0.85em; }
-    .file-time {
-        color: #888;
-        font-size: 0.85em;
+    .file-meta {
+        display: flex;
+        align-items: center;
+        gap: 12px;
         white-space: nowrap;
         margin-left: 16px;
     }
+    .file-time {
+        color: #888;
+        font-size: 0.85em;
+    }
+    .activity-label {
+        font-size: 0.75em;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-weight: 500;
+    }
+    .activity-viewed { background: #f0f0f0; color: #666; }
+    .activity-modified { background: #e8f0fe; color: #1a73e8; }
+    .activity-created { background: #e6f4ea; color: #137333; }
+    .activity-comment { background: #f3e8fd; color: #7b1fa2; }
+    .activity-published { background: #fef3e0; color: #e65100; }
 {{end}}
 
 {{define "content"}}
     <h1>Recent Files</h1>
-    <p class="subtitle">50 most recently modified files</p>
+    <p class="subtitle">Recently active files across all projects</p>
 
     <div id="files-container">
     {{range .Page.Files}}
@@ -48,7 +64,10 @@
             </div>
             <div class="file-project">{{.Project}}/{{.FilePath}}</div>
         </div>
-        <span class="file-time">{{.ModTime.Format "Jan 2, 2006 3:04 PM"}}</span>
+        <div class="file-meta">
+            {{if .ActivityType}}<span class="activity-label activity-{{.ActivityType}}">{{.ActivityType}} {{.ActivityAge}}</span>{{end}}
+            <span class="file-time">{{.Age}}</span>
+        </div>
     </div>
     {{end}}
     </div>
@@ -57,12 +76,17 @@
 {{define "pagescript"}}
     // SSE for live updates
     onSSE(function(data) {
-        if (data.type === 'files') debouncedRefresh('recent', refreshRecent);
+        if (data.type === 'files' || data.type === 'comments') debouncedRefresh('recent', refreshRecent);
     });
 
     document.addEventListener('visibilitychange', function() {
         if (!document.hidden) debouncedRefresh('recent', refreshRecent);
     });
+
+    function activityLabelHTML(actType, age) {
+        if (!actType) return '';
+        return '<span class="activity-label activity-' + escapeHtml(actType) + '">' + escapeHtml(actType) + ' ' + escapeHtml(age) + '</span>';
+    }
 
     async function refreshRecent() {
         try {
@@ -79,7 +103,10 @@
                         '</div>' +
                         '<div class="file-project">' + escapeHtml(f.project) + '/' + escapeHtml(f.path) + '</div>' +
                     '</div>' +
-                    '<span class="file-time">' + escapeHtml(f.age) + '</span>' +
+                    '<div class="file-meta">' +
+                        activityLabelHTML(f.activityType, f.activityAge) +
+                        '<span class="file-time">' + escapeHtml(f.age) + '</span>' +
+                    '</div>' +
                 '</div>';
             }).join('');
         } catch (err) {

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/loganj/birdseye/internal/activity"
 	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
@@ -57,9 +58,10 @@ func runServe(port int, dev bool, rootOverride string) {
 	}
 
 	c := cache.New()
-	cs := comments.NewStore(c)
+	act := activity.New()
+	cs := comments.NewStore(c, act)
 
-	w, err := watcher.New(c)
+	w, err := watcher.New(c, act)
 	if err != nil {
 		log.Fatalf("Failed to create watcher: %v", err)
 	}
@@ -72,7 +74,7 @@ func runServe(port int, dev bool, rootOverride string) {
 
 	am := agents.New(c, cs, port)
 	mcpHandler := mcpserver.NewHandler(cs, c)
-	srv := server.New(c, w, cs, mcpHandler, am, templateDir, cfg, cfgPath)
+	srv := server.New(c, w, cs, mcpHandler, am, act, templateDir, cfg, cfgPath)
 	addr := fmt.Sprintf(":%d", port)
 
 	// Write .mcp.json for MCP client discovery

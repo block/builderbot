@@ -2,30 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Sentinel value representing the working tree (uncommitted changes).
-/// Used for DiffId storage keys.
 pub const WORKDIR: &str = "WORKDIR";
-
-/// Identifies a diff between two repository states for storage (reviews).
-/// Uses resolved SHAs or WORKDIR sentinel, not symbolic refs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DiffId {
-    pub before: String,
-    pub after: String,
-}
-
-impl DiffId {
-    pub fn new(before: impl Into<String>, after: impl Into<String>) -> Self {
-        Self {
-            before: before.into(),
-            after: after.into(),
-        }
-    }
-
-    /// Returns true if this diff includes the working tree.
-    pub fn is_working_tree(&self) -> bool {
-        self.after == WORKDIR
-    }
-}
 
 /// A reference to a point in git history (or working tree)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

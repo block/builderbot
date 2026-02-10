@@ -1,0 +1,405 @@
+//! Tauri commands for session management.
+//!
+//! Separated from `lib.rs` to keep session concerns isolated. These are
+//! the commands exposed to the frontend via IPC.
+//!
+//! ## Design note: minimal surface area
+//!
+//! Only commands the frontend legitimately needs are exposed here:
+//! - `start_session` / `resume_session` — kick off agent work
+//! - `start_branch_session` — kick off branch-scoped agent work (note/commit)
+//! - `cancel_session` / `delete_session` — lifecycle control
+//! - `get_session` / `get_session_messages` / `get_session_messages_since` — reads for polling
+//!
+//! Internal-only operations (creating bare sessions, inserting messages,
+//! updating status) are **not** exposed as Tauri commands. They're used
+//! only by the backend (`session_runner` / `agent` modules) via the
+//! `Store` directly.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Serialize};
+use tauri::Emitter;
+
+use crate::git;
+use crate::session_runner::{self, SessionConfig};
+use crate::store::{self, Store};
+
+// =============================================================================
+// Helper — duplicated from lib.rs to avoid circular deps. If this grows,
+// consider extracting a shared `state.rs`.
+// =============================================================================
+
+fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
+    store
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
+}
+
+// =============================================================================
+// Read-only queries (used by frontend polling)
+// =============================================================================
+
+#[tauri::command]
+pub fn get_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<Option<store::Session>, String> {
+    get_store(&store)?
+        .get_session(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_session_messages(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<Vec<store::SessionMessage>, String> {
+    get_store(&store)?
+        .get_session_messages(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_session_messages_since(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+    since_id: i64,
+) -> Result<Vec<store::SessionMessage>, String> {
+    get_store(&store)?
+        .get_session_messages_since(&session_id, since_id)
+        .map_err(|e| e.to_string())
+}
+
+// =============================================================================
+// Lifecycle commands
+// =============================================================================
+
+/// Create a session and immediately start the agent.
+///
+/// The prompt is persisted as the first user message, goose is spawned
+/// in the background, and messages stream into the DB in real-time.
+/// Returns the Session record (status will be "running").
+#[tauri::command]
+pub fn start_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    prompt: String,
+    working_dir: String,
+) -> Result<store::Session, String> {
+    let store = get_store(&store)?;
+    let session = store::Session::new_running(&prompt);
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    session_runner::start_session(
+        SessionConfig {
+            session_id: session.id.clone(),
+            prompt,
+            working_dir: PathBuf::from(working_dir),
+            agent_session_id: None,
+            pre_head_sha: None,
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(session)
+}
+
+/// Send a follow-up message to an existing session.
+///
+/// Sets the session status back to "running", persists the user message,
+/// and spawns a new goose subprocess. Uses ACP `load_session` to restore
+/// the agent's conversation history from the previous turn(s), so the
+/// agent has full context when processing the follow-up.
+#[tauri::command]
+pub fn resume_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    prompt: String,
+    working_dir: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+
+    let session = store
+        .get_session(&session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Session not found: {}", session_id))?;
+
+    let agent_session_id = session.agent_id.clone();
+
+    let transitioned = store
+        .transition_to_running(&session_id)
+        .map_err(|e| e.to_string())?;
+    if !transitioned {
+        return Err("Session is already running".to_string());
+    }
+
+    let _ = app_handle.emit(
+        "session-status-changed",
+        session_runner::SessionStatusEvent {
+            session_id: session_id.clone(),
+            status: "running".to_string(),
+            error_message: None,
+        },
+    );
+
+    session_runner::start_session(
+        SessionConfig {
+            session_id,
+            prompt,
+            working_dir: PathBuf::from(working_dir),
+            agent_session_id,
+            pre_head_sha: None,
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cancel_session(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+) -> Result<(), String> {
+    let was_running = registry.cancel(&session_id);
+    if !was_running {
+        let store = get_store(&store)?;
+        if let Ok(Some(session)) = store.get_session(&session_id) {
+            if session.status == store::SessionStatus::Running {
+                let _ =
+                    store.update_session_status(&session_id, store::SessionStatus::Cancelled, None);
+                let _ = app_handle.emit(
+                    "session-status-changed",
+                    session_runner::SessionStatusEvent {
+                        session_id: session_id.clone(),
+                        status: "cancelled".to_string(),
+                        error_message: None,
+                    },
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_session(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<(), String> {
+    registry.cancel(&session_id);
+
+    get_store(&store)?
+        .delete_session(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+// =============================================================================
+// Branch-scoped sessions (note / commit)
+// =============================================================================
+
+/// The type of branch session to start.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BranchSessionType {
+    Note,
+    Commit,
+}
+
+/// Response from starting a branch session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSessionResponse {
+    pub session_id: String,
+    /// The ID of the artifact created (commit or note).
+    pub artifact_id: String,
+}
+
+/// Start a branch-scoped session (note or commit).
+///
+/// This builds the full prompt (action tag + branch history + user prompt),
+/// creates the artifact stub, and kicks off the agent in the branch's workdir.
+#[tauri::command(rename_all = "camelCase")]
+pub fn start_branch_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    prompt: String,
+    session_type: BranchSessionType,
+) -> Result<BranchSessionResponse, String> {
+    let store = get_store(&store)?;
+
+    // Resolve branch → project → workdir
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+
+    let workdir = store
+        .get_workdir_for_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {}", branch_id))?;
+
+    let worktree_path = Path::new(&workdir.path);
+
+    // Build branch history context
+    let branch_context =
+        build_branch_context(worktree_path, &branch.base_branch, &store, &branch_id);
+
+    // Build the full prompt with action tag + context
+    let full_prompt = build_full_prompt(&prompt, &branch_context, &session_type);
+
+    // Create the session
+    let session = store::Session::new_running(&full_prompt);
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    // Create artifact stub and compute pre-head SHA
+    let (artifact_id, pre_head_sha) = match session_type {
+        BranchSessionType::Note => {
+            let note = store::Note::new(&branch_id, "Generating…", "").with_session(&session.id);
+            store.create_note(&note).map_err(|e| e.to_string())?;
+            (note.id, None)
+        }
+        BranchSessionType::Commit => {
+            let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
+            store.create_commit(&commit).map_err(|e| e.to_string())?;
+            let head_sha = git::get_head_sha(worktree_path)
+                .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?;
+            (commit.id, Some(head_sha))
+        }
+    };
+
+    session_runner::start_session(
+        SessionConfig {
+            session_id: session.id.clone(),
+            prompt: full_prompt,
+            working_dir: worktree_path.to_path_buf(),
+            agent_session_id: None,
+            pre_head_sha,
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(BranchSessionResponse {
+        session_id: session.id,
+        artifact_id,
+    })
+}
+
+// =============================================================================
+// Prompt construction helpers
+// =============================================================================
+
+/// Build the branch history context block.
+fn build_branch_context(
+    worktree: &Path,
+    base_branch: &str,
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> String {
+    let mut parts = Vec::new();
+
+    parts.push(
+        "This branch represents an ongoing conversation across multiple sessions. \
+         Be judicious with your context window, but you are responsible for understanding \
+         previous changes or note content from the branch history when they relate to the \
+         next step."
+            .to_string(),
+    );
+
+    // Full commit log
+    match git::get_full_commit_log(worktree, base_branch) {
+        Ok(log) if !log.trim().is_empty() => {
+            parts.push(format!("## Commit History (oldest first)\n\n{log}"));
+        }
+        Ok(_) => {
+            parts.push("## Commit History\n\nNo commits on this branch yet.".to_string());
+        }
+        Err(e) => {
+            log::warn!("Failed to get commit log for branch context: {e}");
+            parts.push(format!("## Commit History\n\n(Error retrieving: {e})"));
+        }
+    }
+
+    // Notes — title + path only (content can be read from file if needed)
+    match store.list_notes_for_branch(branch_id) {
+        Ok(notes) if !notes.is_empty() => {
+            let mut note_section = String::from("## Notes\n");
+            for note in &notes {
+                if note.content.is_empty() {
+                    continue; // skip notes still generating
+                }
+                // Write note to a temp file so the agent can read it if needed
+                let note_path = std::env::temp_dir().join(format!("staged-note-{}.md", note.id));
+                if let Err(e) = std::fs::write(&note_path, &note.content) {
+                    log::warn!("Failed to write note to temp file: {e}");
+                    continue;
+                }
+                note_section.push_str(&format!(
+                    "\n- **{}** — `{}`",
+                    note.title,
+                    note_path.display()
+                ));
+            }
+            parts.push(note_section);
+        }
+        Ok(_) => {} // no notes, skip section
+        Err(e) => {
+            log::warn!("Failed to list notes for branch context: {e}");
+        }
+    }
+
+    parts.join("\n\n")
+}
+
+/// Assemble the full prompt from action tag + branch context + user prompt.
+fn build_full_prompt(
+    user_prompt: &str,
+    branch_context: &str,
+    session_type: &BranchSessionType,
+) -> String {
+    let action_tag = match session_type {
+        BranchSessionType::Note => {
+            "\
+<action>
+The user is requesting to make a note out of the prompt below. To return a note, \
+include a horizontal rule (---). The content after the rule will be interpreted as \
+the note. Begin the note with a markdown H1 heading as the title.
+</action>"
+        }
+        BranchSessionType::Commit => {
+            "\
+<action>
+The user is requesting you make a commit based on the prompt below. Make the necessary \
+code changes, following any verification or formatting steps as instructed, and then \
+create a commit with a conventional commit message. This commit should describe what \
+was requested and how it was fulfilled.
+</action>"
+        }
+    };
+
+    format!(
+        "{action_tag}\n\n\
+         <branch-history>\n\
+         {branch_context}\n\
+         </branch-history>\n\n\
+         {user_prompt}"
+    )
+}

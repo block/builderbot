@@ -405,7 +405,7 @@ pub fn fetch_pr(repo: &Path, base_ref: &str, pr_number: u64) -> Result<DiffSpec,
 // Review Sync
 // =============================================================================
 
-use crate::review::Comment;
+use crate::store::Comment;
 
 /// Result of syncing a review to GitHub.
 #[derive(Debug, Clone, Serialize, Deserialize)]

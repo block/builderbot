@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "staged",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.staged.app",
   "build": {
     "frontendDist": "../dist",
@@ -18,9 +18,9 @@
         "height": 1200,
         "resizable": true,
         "fullscreen": false,
+        "visible": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "transparent": true,
         "trafficLightPosition": { "x": 12, "y": 22 }
       }
     ],

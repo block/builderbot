@@ -1,6 +1,6 @@
 [package]
 name = "staged"
-version = "0.1.0"
+version = "0.2.0"
 description = "A standalone git diff viewer with staging integration"
 authors = ["baxen"]
 license = "MIT"
@@ -59,9 +59,10 @@ tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
 tauri-plugin-store = "2.4.2"
 
-[[bin]]
-name = "debug_diff"
-path = "src/bin/debug_diff.rs"
+# Debug binaries archived — uncomment when needed
+# [[bin]]
+# name = "debug_diff"
+# path = "src/bin/debug_diff.rs"
 
 [dev-dependencies]
 tempfile = "3.0"

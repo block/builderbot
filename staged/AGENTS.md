@@ -1,91 +1,20 @@
 # AGENTS.md
 
-## Overview
+## Commands
 
-**Staged** is a desktop git diff viewer. Tauri app with Rust backend (libgit2) and Svelte/TypeScript frontend.
+use `just check-all` before you finalize any commit. 
+generally don't run the dev server unless asked, usually it is run from a UI integration.
 
-## Architecture
+## Backend
 
-Frontend calls Rust via Tauri's `invoke()`. All git operations happen in Rust using libgit2.
+We are intentionally conservative with our data models. **Before adding fields or new types to
+the backend, get human review.**
 
-### Core Concepts
+Generally we want to avoid reconciliation of state, so git is authoritative for anything it tracks.
 
-- **DiffId**: A diff is identified by `base..head` refs (e.g., `main..HEAD`, `HEAD..@`)
-- **`@` = working tree**: Special ref representing uncommitted changes on disk
-- **Review sessions**: Stored per DiffId, contain comments, edits, and reviewed file markers
-
-### Backend Structure
-
-```
-src-tauri/src/
-├── diff/           # Core module
-│   ├── git.rs      # Git operations: compute_diff, get_refs, resolve_ref
-│   ├── types.rs    # FileDiff, LinePair, Alignment, GitRef, etc.
-│   ├── actions.rs  # stage_file, unstage_file, discard_file, etc.
-│   ├── review.rs   # ReviewStore, Review, Comment, Edit persistence
-│   └── watcher.rs  # File system watcher for auto-refresh
-├── lib.rs          # Tauri command handlers (thin layer over diff module)
-└── refresh.rs      # Debounced refresh controller
-```
-
-### Frontend Structure
-
-```
-src/
-├── App.svelte                  # Main shell, state management
-└── lib/
-    ├── Sidebar.svelte          # File list with review status
-    ├── DiffViewer.svelte       # Side-by-side diff with syntax highlighting
-    ├── DiffSelectorModal.svelte # Ref autocomplete picker
-    ├── types.ts                # TypeScript types mirroring Rust
-    ├── theme.ts                # Color definitions
-    └── services/
-        ├── git.ts              # Tauri invoke wrappers
-        ├── review.ts           # Review session API
-        ├── highlighter.ts      # Syntax highlighting (Shiki)
-        ├── scrollSync.ts       # Synchronized scroll for diff panels
-        └── statusEvents.ts     # File watcher event handling
-```
-
-### Design Principles
-
-- **Stateless backend**: Git is the source of truth. Rust functions discover repo state fresh each call—no cached state that can drift.
-- **Rebuildable features**: Self-contained modules with clear boundaries. Features can be deleted and rebuilt without surgery across the codebase.
-- **Horizontal space is precious**: Side-by-side diffs need width. Minimize chrome, prefer overlays, hide UI when possible.
+## Frontend
 
 ### Theming
 
 Colors defined in `src/lib/theme.ts`, applied via CSS custom properties in `app.css`.
 All components use `var(--*)` for colors—no hardcoded values.
-
-## Commands
-
-```bash
-just install    # First-time setup (deps + git hooks)
-just dev        # Run with hot-reload (human runs this)
-just build      # Production build
-just fmt        # Auto-format all code
-just lint       # Clippy for Rust
-just typecheck  # Type-check frontend + backend
-just check-all  # Format + lint + typecheck (run before pushing)
-just ci         # Same checks without modifying files (for CI)
-just clean      # Nuke all build artifacts and dependencies
-```
-
-**Note:** The human runs the dev server. Don't start it yourself.
-
-## Code Quality
-
-Before finishing work:
-```bash
-just check-all  # Auto-formats, then verifies lint + types pass
-```
-
-## Git Workflow
-
-**Do not** create branches, commit, or push unless explicitly asked.
-
-**Before pushing PRs**, always run:
-```bash
-just check-all  # Format, lint, and typecheck
-```

@@ -1,0 +1,158 @@
+//! Protocol-agnostic message writer — streams agent output into the DB.
+//!
+//! [`MessageWriter`] accumulates streaming text in memory and flushes to
+//! the DB at a throttled interval ([`FLUSH_INTERVAL`]). Tool calls and
+//! results are written immediately.
+//!
+//! This module has **no** protocol-specific types. Any agent driver
+//! (ACP, custom HTTP, mock, etc.) calls the same methods with plain
+//! `&str` arguments.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio::sync::Mutex;
+
+use crate::store::{MessageRole, Store};
+
+/// Minimum interval between DB flushes for streaming text. Chunks accumulate
+/// in memory and are written at most this often, reducing mutex contention
+/// when many sessions stream concurrently. [`MessageWriter::finalize`]
+/// always forces an immediate flush regardless of this interval.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
+
+/// Streams agent output into the DB, one session at a time.
+///
+/// All methods are `&self` + async — the struct uses interior mutability
+/// via `tokio::sync::Mutex` so it can be shared behind an `Arc`.
+pub struct MessageWriter {
+    session_id: String,
+    store: Arc<Store>,
+    /// DB row id of the current assistant message being streamed into.
+    current_assistant_msg_id: Mutex<Option<i64>>,
+    /// Accumulated text for the current assistant message (complete, not
+    /// a delta). Flushed wholesale on each DB write.
+    current_text: Mutex<String>,
+    /// When we last wrote to the DB — used to throttle flush frequency.
+    last_flush_at: Mutex<Instant>,
+    /// Maps external tool-call IDs → DB row IDs.
+    tool_call_rows: Mutex<HashMap<String, i64>>,
+}
+
+impl MessageWriter {
+    pub fn new(session_id: String, store: Arc<Store>) -> Self {
+        Self {
+            session_id,
+            store,
+            current_assistant_msg_id: Mutex::new(None),
+            current_text: Mutex::new(String::new()),
+            last_flush_at: Mutex::new(Instant::now()),
+            tool_call_rows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    // =====================================================================
+    // Text streaming
+    // =====================================================================
+
+    /// Append a text chunk to the current assistant message.
+    ///
+    /// Flushes to the DB at most every [`FLUSH_INTERVAL`]; intermediate
+    /// chunks accumulate in memory.
+    pub async fn append_text(&self, text: &str) {
+        {
+            let mut current = self.current_text.lock().await;
+            current.push_str(text);
+        }
+        self.maybe_flush_text().await;
+    }
+
+    /// Flush all buffered text and close the current message block.
+    ///
+    /// **Must** be called before the session ends (on success, error, and
+    /// cancellation) to ensure no text is lost.
+    pub async fn finalize(&self) {
+        self.flush_text().await;
+        *self.current_assistant_msg_id.lock().await = None;
+        *self.current_text.lock().await = String::new();
+    }
+
+    // =====================================================================
+    // Tool calls
+    // =====================================================================
+
+    /// Record a tool call. Finalizes any in-progress assistant text first
+    /// to maintain correct message ordering.
+    pub async fn record_tool_call(&self, tool_call_id: &str, title: &str) {
+        self.finalize().await;
+
+        match self
+            .store
+            .add_session_message(&self.session_id, MessageRole::ToolCall, title)
+        {
+            Ok(id) => {
+                self.tool_call_rows
+                    .lock()
+                    .await
+                    .insert(tool_call_id.to_string(), id);
+            }
+            Err(e) => log::error!("Failed to insert tool_call message: {e}"),
+        }
+    }
+
+    /// Update a previously recorded tool call's title.
+    pub async fn update_tool_call_title(&self, tool_call_id: &str, title: &str) {
+        let rows = self.tool_call_rows.lock().await;
+        if let Some(&row_id) = rows.get(tool_call_id) {
+            let _ = self.store.update_message_content(row_id, title);
+        }
+    }
+
+    /// Record the result/output of a tool call.
+    pub async fn record_tool_result(&self, content: &str) {
+        let _ = self
+            .store
+            .add_session_message(&self.session_id, MessageRole::ToolResult, content);
+    }
+
+    // =====================================================================
+    // Internal
+    // =====================================================================
+
+    /// Flush accumulated text to the DB unconditionally (insert or update).
+    ///
+    /// Idempotent — calling it twice without new chunks re-writes the same
+    /// content. The buffer is never cleared here; only [`finalize`] resets it.
+    async fn flush_text(&self) {
+        let text = self.current_text.lock().await;
+        if text.is_empty() {
+            return;
+        }
+        let mut msg_id = self.current_assistant_msg_id.lock().await;
+        match *msg_id {
+            Some(id) => {
+                let _ = self.store.update_message_content(id, &text);
+            }
+            None => {
+                match self.store.add_session_message(
+                    &self.session_id,
+                    MessageRole::Assistant,
+                    &text,
+                ) {
+                    Ok(id) => *msg_id = Some(id),
+                    Err(e) => log::error!("Failed to insert assistant message: {e}"),
+                }
+            }
+        }
+        *self.last_flush_at.lock().await = Instant::now();
+    }
+
+    /// Flush only if enough time has passed since the last flush.
+    async fn maybe_flush_text(&self) {
+        let elapsed = self.last_flush_at.lock().await.elapsed();
+        if elapsed >= FLUSH_INTERVAL {
+            self.flush_text().await;
+        }
+    }
+}

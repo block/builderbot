@@ -270,6 +270,29 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
     Ok(commits)
 }
 
+/// Get the full commit log (with bodies) between base and HEAD.
+///
+/// Returns a formatted string suitable for inclusion in a prompt, with
+/// commits listed oldest-first. Each entry includes SHA, author, date,
+/// and the full commit message (subject + body).
+pub fn get_full_commit_log(worktree: &Path, base: &str) -> Result<String, GitError> {
+    let range = format!("{base}..HEAD");
+
+    // --reverse gives oldest-first ordering
+    // %B is the full commit message (subject + body)
+    let output = cli::run(
+        worktree,
+        &[
+            "log",
+            "--reverse",
+            "--format=commit %H%nAuthor: %an%nDate: %ci%n%n%B",
+            &range,
+        ],
+    )?;
+
+    Ok(output)
+}
+
 /// Check if a branch exists in the repository.
 pub fn branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
     let result = cli::run(

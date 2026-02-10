@@ -1,0 +1,1444 @@
+<!--
+  SessionModal.svelte — View an AI session (live or historical)
+
+  The single session viewer used everywhere in the app. Shows the message
+  transcript with user messages as right-aligned chat bubbles, assistant
+  messages as plain markdown, and tool calls as collapsible cards with
+  argument previews.
+
+  Features:
+  - Text input always available at the bottom
+  - Send button when idle, Stop button when running
+  - Message queue: hitting Enter while running enqueues for after completion
+  - Copy button on every message
+  - Tool calls show name + args preview; expand to see output
+  - Fixed-size modal with proper scrolling
+
+  For running sessions, polls the DB incrementally:
+  - Re-fetches the last known message (it may have grown from streaming)
+  - Fetches any new messages after it
+  - Stops polling when status leaves "running"
+
+  Props:
+    sessionId — the session to display
+    onClose   — callback to close this modal
+-->
+<script lang="ts">
+  import { onMount, onDestroy, tick } from 'svelte';
+  import {
+    X,
+    Loader2,
+    AlertCircle,
+    CircleStop,
+    Send,
+    Copy,
+    Check,
+    ChevronRight,
+    ChevronDown,
+    Wrench,
+    Zap,
+    GitBranch,
+  } from 'lucide-svelte';
+  import { marked } from 'marked';
+  import DOMPurify from 'dompurify';
+  import type { Session, SessionMessage } from './types';
+  import {
+    cancelSession,
+    getSession,
+    getSessionMessages,
+    getSessionMessagesSince,
+    resumeSession,
+  } from './commands';
+
+  // Configure marked
+  marked.setOptions({ breaks: true, gfm: true });
+
+  interface Props {
+    sessionId: string;
+    workingDir: string;
+    onClose: () => void;
+  }
+
+  let { sessionId, workingDir, onClose }: Props = $props();
+
+  // =========================================================================
+  // State
+  // =========================================================================
+
+  let session = $state<Session | null>(null);
+  let messages = $state<SessionMessage[]>([]);
+  let loading = $state(true);
+  let error = $state<string | null>(null);
+  let cancelling = $state(false);
+  let messagesEl: HTMLDivElement;
+  let inputEl: HTMLTextAreaElement;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  let inputText = $state('');
+  let messageQueue = $state<string[]>([]);
+  let copiedId = $state<number | string | null>(null);
+  let expandedTools = $state<Set<number>>(new Set());
+
+  let isLive = $derived(session?.status === 'running');
+  let hasQueuedMessages = $derived(messageQueue.length > 0);
+
+  // =========================================================================
+  // Lifecycle
+  // =========================================================================
+
+  onMount(async () => {
+    await loadSession();
+    if (session?.status === 'running') {
+      startPolling();
+    }
+    // Focus input on open
+    tick().then(() => inputEl?.focus());
+  });
+
+  onDestroy(() => {
+    stopPolling();
+  });
+
+  // =========================================================================
+  // Data loading
+  // =========================================================================
+
+  /** Initial full load. */
+  async function loadSession() {
+    loading = true;
+    error = null;
+    try {
+      const [s, msgs] = await Promise.all([getSession(sessionId), getSessionMessages(sessionId)]);
+      if (!s) {
+        error = 'Session not found';
+        return;
+      }
+      session = s;
+      messages = msgs;
+      scrollToBottom();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = false;
+    }
+  }
+
+  /** Incremental poll — re-fetch last message (may have grown) + any new ones. */
+  async function poll() {
+    if (!session) return;
+    try {
+      // Fetch session status
+      const s = await getSession(sessionId);
+      if (s) session = s;
+
+      // Incremental message fetch
+      if (messages.length === 0) {
+        const msgs = await getSessionMessages(sessionId);
+        if (msgs.length > 0) {
+          messages = msgs;
+          scrollToBottom();
+        }
+      } else {
+        const lastId = messages[messages.length - 1].id;
+        const updated = await getSessionMessagesSince(sessionId, lastId);
+        if (updated.length > 0) {
+          const prev = messages.slice(0, -1);
+          messages = [...prev, ...updated];
+          if (updated.length > 1 || updated[0].id !== lastId) {
+            scrollToBottom();
+          }
+        }
+      }
+
+      // Stop polling when session is done; process queued messages
+      if (s && s.status !== 'running') {
+        stopPolling();
+        processQueue();
+      }
+    } catch {
+      // Silently ignore poll errors
+    }
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(poll, 500);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  // =========================================================================
+  // Message sending & queue
+  // =========================================================================
+
+  let sending = $state(false);
+
+  async function handleSend() {
+    const text = inputText.trim();
+    if (!text) return;
+    inputText = '';
+    // Reset textarea height after clearing (oninput won't fire for programmatic changes)
+    tick().then(() => autoResize());
+
+    if (isLive) {
+      // Session is running — queue the message for after it finishes
+      messageQueue = [...messageQueue, text];
+      return;
+    }
+
+    // Session is idle — send immediately
+    await sendMessage(text);
+  }
+
+  /** Actually send a message to the backend and start the agent. */
+  async function sendMessage(text: string) {
+    if (!session || sending) return;
+    sending = true;
+    error = null;
+    try {
+      await resumeSession(session.id, text, workingDir);
+      // Backend sets status to running and emits an event.
+      // Force an immediate poll to pick up the new user message + status.
+      session = { ...session, status: 'running' };
+      startPolling();
+      scrollToBottom();
+    } catch (e) {
+      error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      // Clear the queue — don't keep trying to send if the session is broken
+      messageQueue = [];
+    } finally {
+      sending = false;
+    }
+  }
+
+  /** Process the next queued message when the session becomes idle. */
+  async function processQueue() {
+    if (messageQueue.length === 0 || isLive || error) return;
+    const [next, ...rest] = messageQueue;
+    messageQueue = rest;
+    await sendMessage(next);
+  }
+
+  async function handleCancel() {
+    if (!session || cancelling) return;
+    cancelling = true;
+    try {
+      await cancelSession(session.id);
+    } catch (e) {
+      error = `Failed to cancel: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      cancelling = false;
+    }
+  }
+
+  // =========================================================================
+  // Input handling
+  // =========================================================================
+
+  function handleInputKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  }
+
+  function autoResize() {
+    if (!inputEl) return;
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  }
+
+  // =========================================================================
+  // Copy
+  // =========================================================================
+
+  async function copyContent(content: string, id: number | string) {
+    try {
+      await navigator.clipboard.writeText(content);
+      copiedId = id;
+      setTimeout(() => {
+        if (copiedId === id) copiedId = null;
+      }, 1500);
+    } catch {
+      // clipboard API may fail in some contexts
+    }
+  }
+
+  // =========================================================================
+  // Tool call expand/collapse
+  // =========================================================================
+
+  function toggleTool(msgId: number) {
+    const next = new Set(expandedTools);
+    if (next.has(msgId)) {
+      next.delete(msgId);
+    } else {
+      next.add(msgId);
+    }
+    expandedTools = next;
+  }
+
+  // =========================================================================
+  // Helpers
+  // =========================================================================
+
+  function scrollToBottom() {
+    tick().then(() => {
+      if (messagesEl) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    });
+  }
+
+  function renderMarkdown(content: string): string {
+    return DOMPurify.sanitize(marked.parse(content) as string);
+  }
+
+  // =========================================================================
+  // XML tag parsing (action / branch-history blocks)
+  // =========================================================================
+
+  type ContentSegment =
+    | { type: 'text'; text: string }
+    | { type: 'xml-block'; tag: string; label: string; content: string; icon: typeof Zap };
+
+  /** Parse content into segments, extracting XML-style tagged blocks. */
+  function parseContentSegments(content: string): ContentSegment[] {
+    const segments: ContentSegment[] = [];
+    let remaining = content;
+
+    const tagPattern = /<(action|branch-history)>([\s\S]*?)<\/\1>/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = tagPattern.exec(remaining)) !== null) {
+      // Text before this tag
+      if (match.index > lastIndex) {
+        const text = remaining.slice(lastIndex, match.index).trim();
+        if (text) segments.push({ type: 'text', text });
+      }
+
+      const tag = match[1];
+      const label = tag === 'action' ? 'Action instructions' : 'Branch history';
+      const icon = tag === 'action' ? Zap : GitBranch;
+      segments.push({ type: 'xml-block', tag, label, content: match[2].trim(), icon });
+
+      lastIndex = match.index + match[0].length;
+    }
+
+    // Remaining text after last tag
+    if (lastIndex < remaining.length) {
+      const text = remaining.slice(lastIndex).trim();
+      if (text) segments.push({ type: 'text', text });
+    }
+
+    // If no tags found, return single text segment
+    if (segments.length === 0 && content.trim()) {
+      segments.push({ type: 'text', text: content });
+    }
+
+    return segments;
+  }
+
+  /** Check if content has XML-tagged blocks. */
+  function hasXmlBlocks(content: string): boolean {
+    return /<(action|branch-history)>/.test(content);
+  }
+
+  /** Track which XML blocks are expanded */
+  let expandedXmlBlocks = $state<Set<string>>(new Set());
+
+  function toggleXmlBlock(key: string) {
+    const next = new Set(expandedXmlBlocks);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    expandedXmlBlocks = next;
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      onClose();
+      e.preventDefault();
+    }
+  }
+
+  function handleBackdropClick(e: MouseEvent) {
+    if (e.target === e.currentTarget) {
+      onClose();
+    }
+  }
+
+  /** Parse tool call content — returns { name, args } or null */
+  function parseToolCall(content: string): { name: string; args: Record<string, unknown> } | null {
+    try {
+      const parsed = JSON.parse(content);
+      if (parsed.name) {
+        return {
+          name: parsed.name,
+          args: parsed.arguments || parsed.args || parsed.input || {},
+        };
+      }
+    } catch {
+      // not JSON
+    }
+    return null;
+  }
+
+  /** Format tool call name for display */
+  function formatToolName(content: string): string {
+    const parsed = parseToolCall(content);
+    if (parsed) return parsed.name;
+    // Fallback: use content as title
+    if (content.length > 60) return content.slice(0, 60) + '…';
+    return content;
+  }
+
+  /** Format tool call args as a compact preview */
+  function formatToolArgs(content: string): string {
+    const parsed = parseToolCall(content);
+    if (!parsed || !parsed.args) return '';
+    const entries = Object.entries(parsed.args);
+    if (entries.length === 0) return '';
+    return entries
+      .map(([key, value]) => {
+        let v = typeof value === 'string' ? value : JSON.stringify(value);
+        if (v.length > 80) v = v.slice(0, 77) + '…';
+        return `${key}: ${v}`;
+      })
+      .join(', ');
+  }
+
+  /** Group consecutive tool_call / tool_result messages into pairs */
+  type ToolPair = {
+    call: SessionMessage;
+    result: SessionMessage | null;
+  };
+
+  type MessageGroup =
+    | { type: 'user'; message: SessionMessage }
+    | { type: 'assistant'; message: SessionMessage }
+    | { type: 'tools'; pairs: ToolPair[] };
+
+  let grouped = $derived.by(() => {
+    const groups: MessageGroup[] = [];
+    let i = 0;
+    while (i < messages.length) {
+      const msg = messages[i];
+      if (msg.role === 'user') {
+        groups.push({ type: 'user', message: msg });
+        i++;
+      } else if (msg.role === 'assistant') {
+        groups.push({ type: 'assistant', message: msg });
+        i++;
+      } else {
+        // tool_call / tool_result: collect into pairs
+        const pairs: ToolPair[] = [];
+        while (
+          i < messages.length &&
+          (messages[i].role === 'tool_call' || messages[i].role === 'tool_result')
+        ) {
+          if (messages[i].role === 'tool_call') {
+            const call = messages[i];
+            i++;
+            // Check if next message is the matching result
+            let result: SessionMessage | null = null;
+            if (i < messages.length && messages[i].role === 'tool_result') {
+              result = messages[i];
+              i++;
+            }
+            pairs.push({ call, result });
+          } else {
+            // Orphan tool_result (shouldn't happen, but handle gracefully)
+            pairs.push({
+              call: messages[i],
+              result: null,
+            });
+            i++;
+          }
+        }
+        groups.push({ type: 'tools', pairs });
+      }
+    }
+    return groups;
+  });
+</script>
+
+<svelte:window onkeydown={handleKeydown} />
+
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div
+  class="modal-backdrop"
+  role="dialog"
+  aria-modal="true"
+  tabindex="-1"
+  onclick={handleBackdropClick}
+  onkeydown={(e) => e.key === 'Escape' && onClose()}
+>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
+    <!-- Header -->
+    <header class="modal-header">
+      <div class="header-content">
+        <span class="header-title">
+          {session?.prompt
+            ? session.prompt.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim() ||
+              'Session'
+            : 'Session'}
+        </span>
+      </div>
+      <div class="header-actions">
+        <button class="close-btn" onclick={onClose} title="Close (Esc)">
+          <X size={16} />
+        </button>
+      </div>
+    </header>
+
+    <!-- Messages area -->
+    <div class="modal-content" bind:this={messagesEl}>
+      {#if loading}
+        <div class="center-state">
+          <Loader2 size={24} class="spinning" />
+          <span>Loading session…</span>
+        </div>
+      {:else if error}
+        <div class="center-state error">
+          <AlertCircle size={24} />
+          <span>{error}</span>
+        </div>
+      {:else if grouped.length === 0 && isLive}
+        <div class="center-state">
+          <Loader2 size={20} class="spinning" />
+          <span>Waiting for response…</span>
+        </div>
+      {:else if grouped.length === 0}
+        <div class="center-state">
+          <span>No messages</span>
+        </div>
+      {:else}
+        <div class="messages">
+          {#each grouped as group}
+            {#if group.type === 'user'}
+              {@const hasBlocks = hasXmlBlocks(group.message.content)}
+              {@const segments = hasBlocks ? parseContentSegments(group.message.content) : []}
+              {@const userText = hasBlocks
+                ? segments
+                    .filter((s) => s.type === 'text')
+                    .map((s) => s.text)
+                    .join('\n')
+                : group.message.content}
+              {@const xmlBlocks = segments.filter((s) => s.type === 'xml-block')}
+              <!-- Context cards (above the bubble, left-aligned like tool calls) -->
+              {#if xmlBlocks.length > 0}
+                <div class="message-row context-block-group">
+                  {#each xmlBlocks as seg, segIdx}
+                    {#if seg.type === 'xml-block'}
+                      {@const blockKey = `${group.message.id}-${segIdx}`}
+                      {@const isOpen = expandedXmlBlocks.has(blockKey)}
+                      <div class="context-card">
+                        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                        <div class="context-card-header" onclick={() => toggleXmlBlock(blockKey)}>
+                          <span class="context-chevron">
+                            {#if isOpen}
+                              <ChevronDown size={12} />
+                            {:else}
+                              <ChevronRight size={12} />
+                            {/if}
+                          </span>
+                          <seg.icon size={12} class="context-icon" />
+                          <span class="context-label">{seg.label}</span>
+                        </div>
+                        {#if isOpen}
+                          <div class="context-card-content">
+                            <pre>{seg.content}</pre>
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
+                  {/each}
+                </div>
+              {/if}
+              <!-- User prompt bubble -->
+              {#if userText.trim()}
+                <div class="message-row human-message">
+                  <div class="human-bubble">
+                    {userText}
+                    <button
+                      class="copy-btn inline-copy"
+                      onclick={() => copyContent(group.message.content, group.message.id)}
+                      title="Copy message"
+                    >
+                      {#if copiedId === group.message.id}
+                        <Check size={12} />
+                      {:else}
+                        <Copy size={12} />
+                      {/if}
+                    </button>
+                  </div>
+                </div>
+              {/if}
+            {:else if group.type === 'assistant'}
+              <div class="message-row assistant-message">
+                <div class="assistant-content">
+                  <div class="markdown-content">
+                    {@html renderMarkdown(group.message.content)}
+                  </div>
+                  <button
+                    class="copy-btn"
+                    onclick={() => copyContent(group.message.content, group.message.id)}
+                    title="Copy message"
+                  >
+                    {#if copiedId === group.message.id}
+                      <Check size={12} />
+                    {:else}
+                      <Copy size={12} />
+                    {/if}
+                  </button>
+                </div>
+              </div>
+            {:else}
+              <div class="message-row tool-group">
+                {#each group.pairs as pair}
+                  {@const toolName = formatToolName(pair.call.content)}
+                  {@const toolArgs = formatToolArgs(pair.call.content)}
+                  {@const isExpanded = expandedTools.has(pair.call.id)}
+                  <div class="tool-card">
+                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                    <div
+                      class="tool-header"
+                      class:tool-header-expandable={!!pair.result}
+                      onclick={() => pair.result && toggleTool(pair.call.id)}
+                    >
+                      <span class="tool-chevron">
+                        {#if pair.result}
+                          {#if isExpanded}
+                            <ChevronDown size={12} />
+                          {:else}
+                            <ChevronRight size={12} />
+                          {/if}
+                        {/if}
+                      </span>
+                      <Wrench size={12} class="tool-icon" />
+                      <span class="tool-name">{toolName}</span>
+                      {#if toolArgs}
+                        <span class="tool-args-preview">{toolArgs}</span>
+                      {/if}
+                      <button
+                        class="copy-btn tool-copy"
+                        onclick={(e) => {
+                          e.stopPropagation();
+                          copyContent(pair.call.content, `tc-${pair.call.id}`);
+                        }}
+                        title="Copy tool call"
+                      >
+                        {#if copiedId === `tc-${pair.call.id}`}
+                          <Check size={10} />
+                        {:else}
+                          <Copy size={10} />
+                        {/if}
+                      </button>
+                    </div>
+                    {#if isExpanded && pair.result}
+                      <div class="tool-output">
+                        <pre>{pair.result.content}</pre>
+                        <button
+                          class="copy-btn tool-output-copy"
+                          onclick={() => copyContent(pair.result!.content, `tr-${pair.result!.id}`)}
+                          title="Copy output"
+                        >
+                          {#if copiedId === `tr-${pair.result.id}`}
+                            <Check size={10} />
+                          {:else}
+                            <Copy size={10} />
+                          {/if}
+                        </button>
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          {/each}
+
+          {#if isLive}
+            <div class="thinking">
+              <Loader2 size={14} class="spinning" />
+              <span>Thinking…</span>
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if session?.status === 'error' && session.errorMessage}
+        <div class="error-banner">
+          <AlertCircle size={14} />
+          <span>{session.errorMessage}</span>
+        </div>
+      {/if}
+    </div>
+
+    <!-- Input area with queued messages -->
+    <div class="input-wrapper">
+      {#if hasQueuedMessages}
+        <div class="queue-popover">
+          {#each messageQueue as msg, i}
+            <div class="queue-item">
+              <span class="queue-item-label">Queued</span>
+              <span class="queue-item-text">{msg}</span>
+              <button
+                class="queue-item-remove"
+                onclick={() => {
+                  messageQueue = messageQueue.filter((_, idx) => idx !== i);
+                }}
+                title="Remove from queue"
+              >
+                <X size={10} />
+              </button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+      <div class="input-area">
+        <textarea
+          bind:this={inputEl}
+          bind:value={inputText}
+          class="message-input"
+          placeholder={isLive ? 'Type to queue a follow-up…' : 'Send a message…'}
+          rows={1}
+          onkeydown={handleInputKeydown}
+          oninput={autoResize}
+        ></textarea>
+        {#if isLive}
+          <button
+            class="action-btn stop-btn"
+            onclick={handleCancel}
+            disabled={cancelling}
+            title="Stop session"
+          >
+            {#if cancelling}
+              <Loader2 size={16} class="spinning" />
+            {:else}
+              <CircleStop size={16} />
+            {/if}
+          </button>
+        {:else}
+          <button
+            class="action-btn send-btn"
+            onclick={handleSend}
+            disabled={!inputText.trim()}
+            title="Send message"
+          >
+            <Send size={16} />
+          </button>
+        {/if}
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  /* ======================================================================= */
+  /* Modal shell                                                             */
+  /* ======================================================================= */
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--shadow-overlay);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal {
+    display: flex;
+    flex-direction: column;
+    width: 700px;
+    height: 600px;
+    background: var(--bg-chrome);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: var(--shadow-elevated);
+  }
+
+  /* ----- Header ---------------------------------------------------------- */
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+  }
+
+  .header-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .header-title {
+    font-size: var(--size-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .close-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
+  }
+
+  .close-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+
+  /* ----- Content area (scrollable) --------------------------------------- */
+
+  .modal-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    min-height: 0;
+  }
+
+  /* Custom scrollbar */
+  .modal-content::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .modal-content::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .modal-content::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb-transparent);
+    border-radius: 3px;
+  }
+
+  .modal-content::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover-transparent);
+  }
+
+  /* ----- Center states --------------------------------------------------- */
+
+  .center-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 40px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+    height: 100%;
+  }
+
+  .center-state.error {
+    color: var(--ui-danger);
+  }
+
+  /* ----- Messages -------------------------------------------------------- */
+
+  .messages {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .message-row {
+    position: relative;
+  }
+
+  /* Human messages — bubble, right-aligned */
+  .human-message {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .human-bubble {
+    position: relative;
+    max-width: 80%;
+    padding: 8px 12px;
+    padding-right: 30px;
+    background: var(--bg-elevated, var(--bg-hover));
+    border-radius: 14px 14px 4px 14px;
+    font-size: var(--size-sm);
+    color: var(--text-primary);
+    line-height: 1.5;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+
+  .human-bubble .inline-copy {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .human-bubble:hover .inline-copy {
+    opacity: 1;
+  }
+
+  /* Context blocks (action/branch-history tags rendered as tool-call-style cards) */
+  .context-block-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-left: 2px;
+  }
+
+  .context-card {
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-primary);
+  }
+
+  .context-card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 6px 8px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    cursor: pointer;
+    transition: background-color 0.1s;
+  }
+
+  .context-card-header:hover {
+    background: var(--bg-hover);
+  }
+
+  .context-chevron {
+    display: flex;
+    align-items: center;
+    width: 12px;
+    flex-shrink: 0;
+    color: var(--text-faint);
+  }
+
+  .context-card-header :global(.context-icon) {
+    flex-shrink: 0;
+    color: var(--text-faint);
+  }
+
+  .context-label {
+    font-weight: 500;
+    color: var(--text-muted);
+    font-size: calc(var(--size-xs) * 0.95);
+  }
+
+  .context-card-content {
+    border-top: 1px solid var(--border-subtle);
+    padding: 8px 10px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .context-card-content pre {
+    margin: 0;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: calc(var(--size-xs) * 0.9);
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+  }
+
+  .context-card-content::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .context-card-content::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .context-card-content::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb-transparent);
+    border-radius: 2px;
+  }
+
+  /* Assistant messages */
+  .assistant-message {
+    display: flex;
+  }
+
+  .assistant-content {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    padding-right: 28px;
+  }
+
+  .assistant-content > .copy-btn {
+    position: absolute;
+    top: 0;
+    right: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .assistant-content:hover > .copy-btn {
+    opacity: 1;
+  }
+
+  /* Copy button base */
+  .copy-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3px;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
+  }
+
+  .copy-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+
+  /* ----- Tool calls ------------------------------------------------------ */
+
+  .tool-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-left: 2px;
+  }
+
+  .tool-card {
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-primary);
+  }
+
+  .tool-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 6px 8px;
+    background: none;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    transition: background-color 0.1s;
+    cursor: default;
+  }
+
+  .tool-header-expandable {
+    cursor: pointer;
+  }
+
+  .tool-header-expandable:hover {
+    background: var(--bg-hover);
+  }
+
+  .tool-chevron {
+    display: flex;
+    align-items: center;
+    width: 12px;
+    flex-shrink: 0;
+    color: var(--text-faint);
+  }
+
+  .tool-header :global(.tool-icon) {
+    flex-shrink: 0;
+    color: var(--text-faint);
+  }
+
+  .tool-name {
+    font-weight: 500;
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: calc(var(--size-xs) * 0.95);
+    flex-shrink: 0;
+  }
+
+  .tool-args-preview {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-faint);
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: calc(var(--size-xs) * 0.9);
+  }
+
+  .tool-copy {
+    flex-shrink: 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+    margin-left: auto;
+  }
+
+  .tool-header:hover .tool-copy {
+    opacity: 1;
+  }
+
+  .tool-output {
+    position: relative;
+    border-top: 1px solid var(--border-subtle);
+    padding: 8px 10px;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .tool-output pre {
+    margin: 0;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: calc(var(--size-xs) * 0.9);
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.5;
+  }
+
+  .tool-output-copy {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .tool-output:hover .tool-output-copy {
+    opacity: 1;
+  }
+
+  .tool-output::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .tool-output::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .tool-output::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb-transparent);
+    border-radius: 2px;
+  }
+
+  /* Thinking indicator */
+  .thinking {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    padding: 4px 0;
+  }
+
+  /* Error banner */
+  .error-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    padding: 8px 12px;
+    background: var(--ui-danger-bg, rgba(248, 81, 73, 0.1));
+    color: var(--ui-danger);
+    border-radius: 8px;
+    font-size: var(--size-xs);
+    line-height: 1.4;
+  }
+
+  /* ----- Input wrapper + queue popover ----------------------------------- */
+
+  .input-wrapper {
+    flex-shrink: 0;
+  }
+
+  .queue-popover {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 0 14px;
+    border: 1px solid var(--border-muted);
+    border-bottom: none;
+    border-radius: 10px 10px 0 0;
+    background: var(--bg-elevated);
+    overflow: hidden;
+  }
+
+  .queue-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: calc(var(--size-xs) * 0.95);
+    line-height: 1.4;
+    border-bottom: 1px solid var(--border-muted);
+  }
+
+  .queue-item:last-child {
+    border-bottom: none;
+  }
+
+  .queue-item-label {
+    flex-shrink: 0;
+    font-size: calc(var(--size-xs) * 0.85);
+    font-weight: 500;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .queue-item-text {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .queue-item-remove {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-faint);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
+  }
+
+  .queue-item-remove:hover {
+    color: var(--ui-danger);
+    background: var(--bg-hover);
+  }
+
+  /* ----- Input area ------------------------------------------------------ */
+
+  .input-area {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-chrome);
+    flex-shrink: 0;
+  }
+
+  .message-input {
+    flex: 1;
+    padding: 8px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-muted);
+    border-radius: 10px;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-family: inherit;
+    line-height: 1.5;
+    resize: none;
+    overflow-y: auto;
+    min-height: 36px;
+    max-height: 120px;
+  }
+
+  .message-input::placeholder {
+    color: var(--text-faint);
+  }
+
+  .message-input:focus {
+    outline: none;
+    border-color: var(--border-emphasis);
+  }
+
+  .action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition:
+      background-color 0.15s,
+      opacity 0.15s;
+  }
+
+  .send-btn {
+    background: var(--ui-accent);
+    color: var(--bg-deepest);
+  }
+
+  .send-btn:hover:not(:disabled) {
+    background: var(--ui-accent-hover);
+  }
+
+  .send-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .stop-btn {
+    background: var(--ui-danger-bg, rgba(248, 81, 73, 0.15));
+    color: var(--ui-danger);
+  }
+
+  .stop-btn:hover:not(:disabled) {
+    background: var(--ui-danger);
+    color: white;
+  }
+
+  .stop-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* ======================================================================= */
+  /* Markdown content (assistant messages)                                   */
+  /* ======================================================================= */
+
+  .markdown-content {
+    font-size: var(--size-sm);
+    color: var(--text-primary);
+    line-height: 1.6;
+  }
+
+  .markdown-content :global(p) {
+    margin: 0 0 0.5em 0;
+  }
+
+  .markdown-content :global(p:last-child) {
+    margin-bottom: 0;
+  }
+
+  .markdown-content :global(h1),
+  .markdown-content :global(h2),
+  .markdown-content :global(h3),
+  .markdown-content :global(h4) {
+    margin: 0.75em 0 0.5em 0;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  .markdown-content :global(h1:first-child),
+  .markdown-content :global(h2:first-child),
+  .markdown-content :global(h3:first-child),
+  .markdown-content :global(h4:first-child) {
+    margin-top: 0;
+  }
+
+  .markdown-content :global(h1) {
+    font-size: 1.25em;
+  }
+  .markdown-content :global(h2) {
+    font-size: 1.15em;
+  }
+  .markdown-content :global(h3) {
+    font-size: 1.05em;
+  }
+
+  .markdown-content :global(ul),
+  .markdown-content :global(ol) {
+    margin: 0.5em 0;
+    padding-left: 1.5em;
+  }
+
+  .markdown-content :global(li) {
+    margin: 0.25em 0;
+  }
+
+  .markdown-content :global(code) {
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 0.9em;
+    background: var(--bg-elevated, var(--bg-hover));
+    padding: 0.15em 0.35em;
+    border-radius: 3px;
+  }
+
+  .markdown-content :global(pre) {
+    margin: 0.5em 0;
+    padding: 0.75em;
+    background: var(--bg-elevated, var(--bg-hover));
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+
+  .markdown-content :global(pre code) {
+    background: none;
+    padding: 0;
+    font-size: 0.85em;
+  }
+
+  .markdown-content :global(blockquote) {
+    margin: 0.5em 0;
+    padding-left: 0.75em;
+    border-left: 3px solid var(--border-muted);
+    color: var(--text-muted);
+  }
+
+  .markdown-content :global(a) {
+    color: var(--ui-accent);
+    text-decoration: none;
+  }
+
+  .markdown-content :global(a:hover) {
+    text-decoration: underline;
+  }
+
+  .markdown-content :global(strong) {
+    font-weight: 600;
+  }
+
+  .markdown-content :global(hr) {
+    margin: 0.75em 0;
+    border: none;
+    border-top: 1px solid var(--border-subtle);
+  }
+</style>

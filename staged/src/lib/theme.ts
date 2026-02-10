@@ -139,7 +139,7 @@ function rgbToHex({ r, g, b }: RGB): string {
  * Calculate relative luminance (0-1) for a color.
  * Used to determine if a theme is light or dark.
  */
-function luminance(hex: string): number {
+export function luminance(hex: string): number {
   const { r, g, b } = hexToRgb(hex);
   const [rs, gs, bs] = [r, g, b].map((c) => {
     const s = c / 255;
@@ -180,15 +180,6 @@ function overlay(hex: string, alpha: number): string {
 // =============================================================================
 // Adaptive Theme Generator
 // =============================================================================
-
-/**
- * Result of chrome/primary color calculation
- */
-interface ChromeColors {
-  chrome: string;
-  deepest: string;
-  primary: string; // May be adjusted from original if needed for contrast
-}
 
 /**
  * Binary search to find a color with target luminance by mixing toward black or white.
@@ -237,6 +228,15 @@ const CONTRAST_OFFSET = 0.0135;
  */
 function calculateLumDiff(bgLum: number): number {
   return CONTRAST_VALUE * Math.log(1 + (bgLum + CONTRAST_OFFSET) * 10);
+}
+
+/**
+ * Result of chrome/primary color calculation
+ */
+interface ChromeColors {
+  chrome: string;
+  deepest: string;
+  primary: string; // May be adjusted from original if needed for contrast
 }
 
 /**
@@ -378,17 +378,20 @@ export function createAdaptiveTheme(
     },
 
     search: {
-      // Yellow-ish highlight for search matches - visible but not overwhelming
-      matchBg: isDark ? 'rgba(250, 200, 50, 0.35)' : 'rgba(250, 200, 50, 0.5)',
-      // Orange-ish highlight for current match - more prominent
-      currentMatchBg: isDark ? 'rgba(255, 150, 50, 0.5)' : 'rgba(255, 150, 50, 0.6)',
+      // Search yellow derived from foreground warmth — mix fg toward warm tone
+      matchBg: overlay(mix(syntaxFg, isDark ? '#fac832' : '#e8b000', 0.7), isDark ? 0.35 : 0.5),
+      // Current match: warmer/more saturated variant of above
+      currentMatchBg: overlay(
+        mix(syntaxFg, isDark ? '#ff9632' : '#d07000', 0.7),
+        isDark ? 0.5 : 0.6
+      ),
     },
 
     annotation: {
-      // Semi-transparent background for blur overlay - darker for readability
-      overlayBg: isDark ? 'rgba(0, 0, 0, 0.5)' : 'rgba(255, 255, 255, 0.6)',
-      // Subtle border for overlay edges
-      border: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)',
+      // Semi-transparent overlay derived from theme background
+      overlayBg: overlay(isDark ? '#000000' : '#ffffff', isDark ? 0.5 : 0.6),
+      // Subtle border using foreground at very low opacity
+      border: overlay(syntaxFg, isDark ? 0.1 : 0.08),
     },
 
     ui: {
@@ -421,58 +424,59 @@ export function createAdaptiveTheme(
 }
 
 /**
- * Generate CSS custom properties from theme.
+ * Generate a map of CSS custom property name → value from a theme.
+ * No string parsing needed — consumers iterate the map directly.
  */
-export function themeToCssVars(t: Theme): string {
-  return `
-    --theme-is-dark: ${t.isDark ? '1' : '0'};
+export function themeToVarMap(t: Theme): Record<string, string> {
+  return {
+    '--theme-is-dark': t.isDark ? '1' : '0',
 
-    --bg-primary: ${t.bg.primary};
-    --bg-chrome: ${t.bg.chrome};
-    --bg-deepest: ${t.bg.deepest};
-    --bg-elevated: ${t.bg.elevated};
-    --bg-hover: ${t.bg.hover};
+    '--bg-primary': t.bg.primary,
+    '--bg-chrome': t.bg.chrome,
+    '--bg-deepest': t.bg.deepest,
+    '--bg-elevated': t.bg.elevated,
+    '--bg-hover': t.bg.hover,
 
-    --border-subtle: ${t.border.subtle};
-    --border-muted: ${t.border.muted};
-    --border-emphasis: ${t.border.emphasis};
+    '--border-subtle': t.border.subtle,
+    '--border-muted': t.border.muted,
+    '--border-emphasis': t.border.emphasis,
 
-    --text-primary: ${t.text.primary};
-    --text-muted: ${t.text.muted};
-    --text-faint: ${t.text.faint};
-    --text-accent: ${t.text.accent};
+    '--text-primary': t.text.primary,
+    '--text-muted': t.text.muted,
+    '--text-faint': t.text.faint,
+    '--text-accent': t.text.accent,
 
-    --status-modified: ${t.status.modified};
-    --status-added: ${t.status.added};
-    --status-deleted: ${t.status.deleted};
-    --status-renamed: ${t.status.renamed};
-    --status-untracked: ${t.status.untracked};
+    '--status-modified': t.status.modified,
+    '--status-added': t.status.added,
+    '--status-deleted': t.status.deleted,
+    '--status-renamed': t.status.renamed,
+    '--status-untracked': t.status.untracked,
 
-    --diff-added-bg: ${t.diff.addedBg};
-    --diff-removed-bg: ${t.diff.removedBg};
-    --diff-changed-bg: ${t.diff.changedBg};
-    --diff-range-border: ${t.diff.rangeBorder};
-    --diff-comment-highlight: ${t.diff.commentHighlight};
+    '--diff-added-bg': t.diff.addedBg,
+    '--diff-removed-bg': t.diff.removedBg,
+    '--diff-changed-bg': t.diff.changedBg,
+    '--diff-range-border': t.diff.rangeBorder,
+    '--diff-comment-highlight': t.diff.commentHighlight,
 
-    --search-match-bg: ${t.search.matchBg};
-    --search-current-match-bg: ${t.search.currentMatchBg};
+    '--search-match-bg': t.search.matchBg,
+    '--search-current-match-bg': t.search.currentMatchBg,
 
-    --annotation-overlay-bg: ${t.annotation.overlayBg};
-    --annotation-border: ${t.annotation.border};
+    '--annotation-overlay-bg': t.annotation.overlayBg,
+    '--annotation-border': t.annotation.border,
 
-    --ui-accent: ${t.ui.accent};
-    --ui-accent-hover: ${t.ui.accentHover};
-    --ui-danger: ${t.ui.danger};
-    --ui-danger-bg: ${t.ui.dangerBg};
-    --ui-selection: ${t.ui.selection};
+    '--ui-accent': t.ui.accent,
+    '--ui-accent-hover': t.ui.accentHover,
+    '--ui-danger': t.ui.danger,
+    '--ui-danger-bg': t.ui.dangerBg,
+    '--ui-selection': t.ui.selection,
 
-    --scrollbar-thumb: ${t.scrollbar.thumb};
-    --scrollbar-thumb-hover: ${t.scrollbar.thumbHover};
-    --scrollbar-thumb-transparent: ${t.scrollbar.thumbTransparent};
-    --scrollbar-thumb-hover-transparent: ${t.scrollbar.thumbHoverTransparent};
+    '--scrollbar-thumb': t.scrollbar.thumb,
+    '--scrollbar-thumb-hover': t.scrollbar.thumbHover,
+    '--scrollbar-thumb-transparent': t.scrollbar.thumbTransparent,
+    '--scrollbar-thumb-hover-transparent': t.scrollbar.thumbHoverTransparent,
 
-    --shadow-overlay: ${t.shadow.overlay};
-    --shadow-elevated: ${t.shadow.elevated};
-    --shadow-glow: ${t.shadow.glow};
-  `.trim();
+    '--shadow-overlay': t.shadow.overlay,
+    '--shadow-elevated': t.shadow.elevated,
+    '--shadow-glow': t.shadow.glow,
+  };
 }

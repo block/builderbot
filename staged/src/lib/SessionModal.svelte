@@ -40,7 +40,7 @@
     GitBranch,
   } from 'lucide-svelte';
   import { marked } from 'marked';
-  import DOMPurify from 'dompurify';
+  import { sanitize } from './sanitize';
   import type { Session, SessionMessage } from './types';
   import {
     cancelSession,
@@ -295,7 +295,7 @@
   }
 
   function renderMarkdown(content: string): string {
-    return DOMPurify.sanitize(marked.parse(content) as string);
+    return sanitize(marked.parse(content) as string);
   }
 
   // =========================================================================

@@ -7,7 +7,7 @@
 <script lang="ts">
   import { X } from 'lucide-svelte';
   import { marked } from 'marked';
-  import DOMPurify from 'dompurify';
+  import { sanitize } from './sanitize';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -20,7 +20,7 @@
   let { title, content, onClose }: Props = $props();
 
   function renderMarkdown(text: string): string {
-    return DOMPurify.sanitize(marked.parse(text) as string);
+    return sanitize(marked.parse(text) as string);
   }
 
   function handleKeydown(e: KeyboardEvent) {

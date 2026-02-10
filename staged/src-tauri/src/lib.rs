@@ -1128,6 +1128,11 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("Cannot get app data dir: {e}"))?;
+
+            // Ensure the app data directory exists on first launch.
+            std::fs::create_dir_all(&app_data_dir)
+                .map_err(|e| format!("Cannot create app data dir: {e}"))?;
+
             let db_path = app_data_dir.join("data.db");
 
             // Check compatibility *before* creating the store.

@@ -116,8 +116,8 @@ document.addEventListener('DOMContentLoaded', function() {
 }
 
 const pageCSS = `
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; color: #333; background: #f8f9fa; }
+* { box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 0; color: #333; background: #f8f9fa; }
 .layout { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
 
 /* Sidebar */

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/loganj/birdseye/internal/activity"
 	"github.com/loganj/birdseye/internal/cache"
 )
 
@@ -13,6 +14,7 @@ import (
 // It uses sidecar JSON files stored alongside the thoughts directory.
 type Store struct {
 	cache      *cache.Cache
+	activity   *activity.Tracker
 	mu         sync.Mutex           // serializes file writes per-project
 	heartbeats map[string]time.Time // key: "project:filePath" -> last agent poll time
 	heartMu    sync.RWMutex
@@ -70,9 +72,10 @@ type FileInReview struct {
 }
 
 // NewStore creates a new comment Store backed by the given cache.
-func NewStore(c *cache.Cache) *Store {
+func NewStore(c *cache.Cache, act *activity.Tracker) *Store {
 	return &Store{
 		cache:      c,
+		activity:   act,
 		heartbeats: make(map[string]time.Time),
 		changed:    make(chan struct{}),
 		typing:     make(map[string]time.Time),

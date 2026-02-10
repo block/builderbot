@@ -40,7 +40,7 @@ func newTestStore(t *testing.T) *Store {
 		},
 	})
 
-	return NewStore(c)
+	return NewStore(c, nil)
 }
 
 func TestCreateThread(t *testing.T) {

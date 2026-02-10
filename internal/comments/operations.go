@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/loganj/birdseye/internal/activity"
 )
 
 // CreateThread creates a new comment thread on the given file, anchored to
@@ -39,6 +41,9 @@ func (s *Store) CreateThread(projectName, filePath string, anchor Anchor, commen
 		return nil, err
 	}
 
+	if s.activity != nil {
+		s.activity.Record(activity.Comment, projectName, filePath)
+	}
 	return &thread, nil
 }
 
@@ -61,6 +66,9 @@ func (s *Store) AddComment(projectName, filePath, threadID string, comment Comme
 
 			if err := s.Save(projectName, filePath, fc); err != nil {
 				return nil, err
+			}
+			if s.activity != nil {
+				s.activity.Record(activity.Comment, projectName, filePath)
 			}
 			t := fc.Threads[i]
 			return &t, nil
@@ -85,7 +93,13 @@ func (s *Store) ResolveThread(projectName, filePath, threadID, resolvedBy string
 			fc.Threads[i].Status = "resolved"
 			fc.Threads[i].ResolvedAt = time.Now()
 			fc.Threads[i].ResolvedBy = resolvedBy
-			return s.Save(projectName, filePath, fc)
+			if err := s.Save(projectName, filePath, fc); err != nil {
+				return err
+			}
+			if s.activity != nil {
+				s.activity.Record(activity.Comment, projectName, filePath)
+			}
+			return nil
 		}
 	}
 

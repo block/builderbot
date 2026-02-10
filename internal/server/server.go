@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/loganj/birdseye/internal/activity"
 	"github.com/loganj/birdseye/internal/agents"
 	"github.com/loganj/birdseye/internal/cache"
 	"github.com/loganj/birdseye/internal/comments"
@@ -29,6 +30,7 @@ type Server struct {
 	watcher     *watcher.Watcher
 	comments    *comments.Store
 	agents      *agents.Manager
+	activity    *activity.Tracker
 	mcpHandler  http.Handler
 	mux         *http.ServeMux
 	tmpl        *template.Template
@@ -40,12 +42,13 @@ type Server struct {
 	cfgMu       sync.Mutex // protects cfg mutations
 }
 
-func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, am *agents.Manager, templateDir string, cfg *config.Config, cfgPath string) *Server {
+func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, am *agents.Manager, act *activity.Tracker, templateDir string, cfg *config.Config, cfgPath string) *Server {
 	s := &Server{
 		cache:       c,
 		watcher:     w,
 		comments:    cs,
 		agents:      am,
+		activity:    act,
 		mcpHandler:  mcpHandler,
 		mux:         http.NewServeMux(),
 		templateDir: templateDir,
@@ -820,15 +823,17 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 type APIFile struct {
-	Name       string `json:"name"`
-	Path       string `json:"path"`
-	Source     string `json:"source,omitempty"`
-	SourceType string `json:"sourceType,omitempty"`
-	SourceAuto bool   `json:"sourceAuto,omitempty"`
-	Project    string `json:"project,omitempty"`
-	Workspace  string `json:"workspace,omitempty"`
-	Age        string `json:"age"`
-	FileType   string `json:"fileType,omitempty"`
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	Source       string `json:"source,omitempty"`
+	SourceType   string `json:"sourceType,omitempty"`
+	SourceAuto   bool   `json:"sourceAuto,omitempty"`
+	Project      string `json:"project,omitempty"`
+	Workspace    string `json:"workspace,omitempty"`
+	Age          string `json:"age"`
+	FileType     string `json:"fileType,omitempty"`
+	ActivityType string `json:"activityType,omitempty"`
+	ActivityAge  string `json:"activityAge,omitempty"`
 }
 
 // APIFileGroupView is the top-level display unit returned by the project files API.
@@ -893,15 +898,17 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAPIRecent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	files := s.cache.AllFiles(50)
+	files := s.mergeRecentFiles(50)
 	result := make([]APIFile, len(files))
 	for i, f := range files {
 		result[i] = APIFile{
-			Name:     f.Name,
-			Path:     f.FullPath,
-			Project:  f.Project,
-			Age:      formatAge(f.ModTime),
-			FileType: f.FileType,
+			Name:         f.DisplayName,
+			Path:         f.FilePath,
+			Project:      f.Project,
+			Age:          f.Age,
+			FileType:     f.FileType,
+			ActivityType: f.ActivityType,
+			ActivityAge:  f.ActivityAge,
 		}
 	}
 	json.NewEncoder(w).Encode(result)

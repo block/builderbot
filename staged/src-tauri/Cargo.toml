@@ -1,6 +1,6 @@
 [package]
 name = "staged"
-version = "0.2.0"
+version = "0.3.0"
 description = "A standalone git diff viewer with staging integration"
 authors = ["baxen"]
 license = "MIT"

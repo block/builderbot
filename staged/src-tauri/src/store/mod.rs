@@ -71,7 +71,7 @@ pub enum DbCompatibility {
     Ok,
     /// Database exists with an older schema — offer to reset.
     NeedsReset {
-        /// The app version that last opened this database (e.g. "0.2.0"),
+        /// The app version that last opened this database (e.g. "0.3.0"),
         /// or "0.1.0" for pre-versioning databases.
         db_app_version: String,
     },

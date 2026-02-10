@@ -20,15 +20,31 @@ ensure-deps:
 # Run the server and open browser
 run: build
     #!/usr/bin/env bash
+    PORT=8080
+
+    # If port is in use, check if it's a birdseye instance we can take over
+    if lsof -ti:$PORT >/dev/null 2>&1; then
+        if curl -s "http://localhost:$PORT/api/projects" >/dev/null 2>&1; then
+            echo "Port $PORT held by another birdseye instance, stopping it..."
+            BLOCKING_PID=$(lsof -ti:$PORT)
+            kill $BLOCKING_PID 2>/dev/null
+            sleep 0.5
+        else
+            echo "Error: port $PORT is in use by a non-birdseye process." >&2
+            echo "Stop that process or use: ./birdseye -port <other-port>" >&2
+            exit 1
+        fi
+    fi
+
     ./birdseye &
     PID=$!
 
     # Wait for server to be ready
     echo "Waiting for server..."
-    until curl -s http://localhost:8080/ > /dev/null 2>&1; do
+    until curl -s http://localhost:$PORT/ > /dev/null 2>&1; do
         sleep 0.2
     done
-    open "http://localhost:8080"
+    open "http://localhost:$PORT"
 
     wait $PID
 

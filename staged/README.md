@@ -1,16 +1,16 @@
 # Staged
 
-A desktop diff viewer for git repositories. View any diff between refs, review changes, and prepare commits. Built with Tauri (Rust + libgit2) and Svelte.
+A desktop app for reviewing git changes, managing branches, and running AI coding sessions. Built with Tauri (Rust + libgit2) and Svelte.
 
 ## What It Does
 
-**Staged** lets you view diffs between any two git refs—branches, commits, tags, or the working tree. Select a base and head ref, browse changed files, and see side-by-side diffs with syntax highlighting.
+**Staged** is a visual workspace for git repositories. Browse diffs with syntax highlighting, manage branches and worktrees, and launch AI agent sessions to make changes — all from a single window.
 
-Key concepts:
-- **Flexible diffs**: Compare any ref to any ref (e.g., `main..HEAD`, `HEAD..@` for uncommitted changes)
-- **`@` = working tree**: Use `@` as a ref to include uncommitted changes
-- **Review sessions**: Mark files as reviewed, add comments (coming soon)
-- **File watching**: Auto-refresh when files change on disk
+- **Diff viewer** — Side-by-side diffs between any two refs (branches, commits, tags, or the working tree)
+- **Project & branch management** — Track multiple projects, create branches, and view branch timelines
+- **AI agent sessions** — Launch coding sessions with ACP-compatible agents (Goose, Claude Code, Codex, Pi) and watch changes stream in
+- **Review workflow** — Mark files as reviewed, add notes and annotations
+- **File watching** — Auto-refresh when files change on disk
 
 ## Installation
 
@@ -30,14 +30,14 @@ The installer will:
 - Install to `/Applications/staged.app`
 - Install the `staged` CLI to `/usr/local/bin`
 
-**Note**: This will build from source, which takes a few minutes. Requires git to be installed.
+**Note**: This builds from source, which takes a few minutes. Requires git to be installed.
 
 ### Command Line Usage
 
-After installation, you can launch Staged from the terminal:
+After installation, launch Staged from the terminal:
 
 ```bash
-staged              # Open in current directory
+staged                # Open in current directory
 staged /path/to/repo  # Open in specified directory
 ```
 
@@ -56,7 +56,6 @@ This project uses [Hermit](https://github.com/cashapp/hermit) to manage developm
 ```bash
 source bin/activate-hermit   # Activate hermit environment
 rustup default stable        # Set the default Rust toolchain
-lefthook install             # Install git hooks for pre-push checks
 ```
 
 After activation, `cargo`, `node`, `npm`, and `just` are all available from the hermit-managed versions.
@@ -78,7 +77,10 @@ just build      # Build for production
 just fmt        # Format all code (Rust + TypeScript/Svelte)
 just lint       # Lint Rust with clippy
 just typecheck  # Type check TypeScript + Svelte + Rust
-just check-all  # Run all checks (format, lint, typecheck)
+just check-all  # Format, lint, typecheck — run before pushing
+
+# CI (non-modifying)
+just ci         # Verify formatting, lint, typecheck — for CI/hooks
 
 # Maintenance
 just install    # Install all dependencies
@@ -87,25 +89,68 @@ just clean      # Remove build artifacts
 
 ## Architecture
 
+### Backend (Rust / Tauri)
+
 ```
 src-tauri/src/
-├── diff/           # Core diff engine
-│   ├── git.rs      # Git operations (libgit2)
-│   ├── types.rs    # Data structures
-│   ├── actions.rs  # File actions (stage, discard, etc.)
-│   ├── review.rs   # Review session storage
-│   └── watcher.rs  # File system watching
-├── lib.rs          # Tauri commands (API surface)
-└── refresh.rs      # Debounced refresh coordination
-
-src/
-├── App.svelte              # Main app shell
-└── lib/
-    ├── Sidebar.svelte      # File list with status indicators
-    ├── DiffViewer.svelte   # Side-by-side diff display
-    ├── DiffSelectorModal.svelte  # Ref picker UI
-    └── services/           # Frontend services
+├── agent/                  # AI agent integration (ACP protocol)
+│   ├── acp.rs              # ACP driver — spawns and communicates with agents
+│   ├── writer.rs           # Streams agent messages to the frontend
+│   └── mod.rs              # AgentDriver trait
+├── git/                    # Git operations (libgit2 + CLI fallback)
+│   ├── diff.rs             # Diff computation
+│   ├── commit.rs           # Commit creation
+│   ├── refs.rs             # Ref resolution
+│   ├── files.rs            # File listing and status
+│   ├── worktree.rs         # Worktree management
+│   ├── github.rs           # GitHub API (PRs)
+│   ├── cli.rs              # Git CLI fallback for operations libgit2 can't do
+│   └── types.rs            # Shared data structures
+├── store/                  # SQLite persistence layer
+│   ├── projects.rs         # Project management
+│   ├── branches.rs         # Branch tracking
+│   ├── sessions.rs         # Agent session records
+│   ├── commits.rs          # Commit metadata
+│   ├── messages.rs         # Agent message history
+│   ├── reviews.rs          # Review session storage
+│   ├── notes.rs            # Notes and annotations
+│   └── models.rs           # Database models
+├── lib.rs                  # Tauri command definitions (API surface)
+├── session_commands.rs     # Session management commands
+├── session_runner.rs       # Agent session execution
+└── recent_repos.rs         # Recent repository tracking
 ```
+
+### Frontend (Svelte + TypeScript)
+
+```
+src/
+├── App.svelte              # Main app shell and routing
+└── lib/
+    ├── DiffViewer.svelte   # Side-by-side diff display with syntax highlighting
+    ├── ProjectHome.svelte  # Project dashboard
+    ├── BranchTimeline.svelte   # Branch history and commit timeline
+    ├── SessionLauncher.svelte  # AI session creation and management
+    ├── AgentSelector.svelte    # Agent provider picker
+    ├── TopBar.svelte       # Navigation and project controls
+    ├── commands.ts         # Tauri command bindings
+    ├── types.ts            # Shared TypeScript types
+    ├── theme.ts            # Theme definitions (CSS custom properties)
+    └── ...                 # ~30 components total
+```
+
+### Key dependencies
+
+| Layer    | Dependency                | Purpose                          |
+|----------|---------------------------|----------------------------------|
+| Backend  | `git2`                    | libgit2 bindings for git ops     |
+| Backend  | `agent-client-protocol`   | ACP agent communication          |
+| Backend  | `rusqlite`                | SQLite persistence               |
+| Backend  | `notify`                  | File system watching             |
+| Backend  | `syntect`                 | Syntax highlighting              |
+| Frontend | `shiki`                   | Syntax highlighting (browser)    |
+| Frontend | `marked`                  | Markdown rendering               |
+| Frontend | `lucide-svelte`           | Icons                            |
 
 ## License
 

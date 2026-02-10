@@ -65,13 +65,13 @@ func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
 
-	// Should have 2 flat groups: Context, auth
+	// Should have 2 flat groups: auth, Context (context always last)
 	if len(groups) != 2 {
 		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
 
-	if groups[0].Name != "Context" {
-		t.Errorf("expected first group 'Context', got %q", groups[0].Name)
+	if groups[0].Name != "auth" {
+		t.Errorf("expected first group 'auth', got %q", groups[0].Name)
 	}
 	if groups[0].Source != "rp1" {
 		t.Errorf("expected source 'rp1', got %q", groups[0].Source)
@@ -80,8 +80,8 @@ func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 		t.Error("expected auto=true")
 	}
 
-	if groups[1].Name != "auth" {
-		t.Errorf("expected second group 'auth', got %q", groups[1].Name)
+	if groups[1].Name != "Context" {
+		t.Errorf("expected second group 'Context', got %q", groups[1].Name)
 	}
 }
 

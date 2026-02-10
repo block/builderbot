@@ -38,10 +38,10 @@ func TestBuildFileGroups_RP1Grouped(t *testing.T) {
 		auto      bool
 		fileCount int
 	}{
-		{"Context", "rp1", true, 1},
-		{"PRDs", "rp1", true, 1},
+		{"Blueprint", "rp1", true, 1},
 		{"auth", "rp1", true, 2},
 		{"data-layer", "rp1", true, 1},
+		{"Context", "rp1", true, 1},
 	}
 
 	for i, eg := range expectedGroups {

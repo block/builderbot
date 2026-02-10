@@ -43,7 +43,7 @@ func TestGroupRP1Paths(t *testing.T) {
 			},
 		},
 		{
-			name: "category ordering: Context, PRDs, Quick Builds, Other",
+			name: "charter and PRDs grouped into Blueprint",
 			paths: []string{
 				"work/charter.md",
 				"work/quick-builds/build-1.md",
@@ -51,14 +51,13 @@ func TestGroupRP1Paths(t *testing.T) {
 				"context/index.md",
 			},
 			expected: []FileGroup{
-				{Name: "Context", Paths: []string{"context/index.md"}},
-				{Name: "PRDs", Paths: []string{"work/prds/my-prd.md"}},
+				{Name: "Blueprint", Paths: []string{"work/charter.md", "work/prds/my-prd.md"}},
 				{Name: "Quick Builds", Paths: []string{"work/quick-builds/build-1.md"}},
-				{Name: "Other", Paths: []string{"work/charter.md"}},
+				{Name: "Context", Paths: []string{"context/index.md"}},
 			},
 		},
 		{
-			name: "categories before features, features sorted alphabetically",
+			name: "features before context, features sorted alphabetically",
 			paths: []string{
 				"context/index.md",
 				"work/features/zebra/tasks.md",
@@ -66,10 +65,10 @@ func TestGroupRP1Paths(t *testing.T) {
 				"work/prds/my-prd.md",
 			},
 			expected: []FileGroup{
-				{Name: "Context", Paths: []string{"context/index.md"}},
-				{Name: "PRDs", Paths: []string{"work/prds/my-prd.md"}},
+				{Name: "Blueprint", Paths: []string{"work/prds/my-prd.md"}},
 				{Name: "alpha", Paths: []string{"work/features/alpha/requirements.md"}},
 				{Name: "zebra", Paths: []string{"work/features/zebra/tasks.md"}},
+				{Name: "Context", Paths: []string{"context/index.md"}},
 			},
 		},
 		{
@@ -79,6 +78,45 @@ func TestGroupRP1Paths(t *testing.T) {
 			},
 			expected: []FileGroup{
 				{Name: "Other", Paths: []string{"work/features/lonely-file.md"}},
+			},
+		},
+		{
+			name: "research, reviews, content, investigations get own groups",
+			paths: []string{
+				"work/research/2025-01-topic.md",
+				"work/pr-reviews/123/review.md",
+				"work/content/blog/post.md",
+				"work/investigations/bug-42/investigation_report.md",
+			},
+			expected: []FileGroup{
+				{Name: "Research", Paths: []string{"work/research/2025-01-topic.md"}},
+				{Name: "Reviews", Paths: []string{"work/pr-reviews/123/review.md"}},
+				{Name: "Content", Paths: []string{"work/content/blog/post.md"}},
+				{Name: "Investigations", Paths: []string{"work/investigations/bug-42/investigation_report.md"}},
+			},
+		},
+		{
+			name: "full category ordering with all groups",
+			paths: []string{
+				"context/index.md",
+				"work/prds/my-prd.md",
+				"work/quick-builds/build-1.md",
+				"work/research/topic.md",
+				"work/pr-reviews/1/review.md",
+				"work/content/blog/post.md",
+				"work/investigations/bug/report.md",
+				"work/charter.md",
+				"work/features/auth/tasks.md",
+			},
+			expected: []FileGroup{
+				{Name: "Blueprint", Paths: []string{"work/prds/my-prd.md", "work/charter.md"}},
+				{Name: "Quick Builds", Paths: []string{"work/quick-builds/build-1.md"}},
+				{Name: "Research", Paths: []string{"work/research/topic.md"}},
+				{Name: "Reviews", Paths: []string{"work/pr-reviews/1/review.md"}},
+				{Name: "Content", Paths: []string{"work/content/blog/post.md"}},
+				{Name: "Investigations", Paths: []string{"work/investigations/bug/report.md"}},
+				{Name: "auth", Paths: []string{"work/features/auth/tasks.md"}},
+				{Name: "Context", Paths: []string{"context/index.md"}},
 			},
 		},
 	}
@@ -104,6 +142,61 @@ func TestGroupRP1Paths(t *testing.T) {
 						t.Errorf("group %d (%s), path %d: expected %q, got %q", i, eg.Name, j, ep, got[i].Paths[j])
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestClassifyRP1File(t *testing.T) {
+	st := GetSourceType("rp1")
+	if st == nil || st.ClassifyFile == nil {
+		t.Fatal("rp1 source type not registered or has no ClassifyFile")
+	}
+
+	tests := []struct {
+		path     string
+		expected string
+	}{
+		// context
+		{"context/index.md", "knowledge"},
+		{"context/architecture.md", "knowledge"},
+		// archives hidden
+		{"work/archives/features/old/tasks.md", ""},
+		{"work/archives/prds/old-prd/old-prd.md", ""},
+		// feature files
+		{"work/features/auth/requirements.md", "requirement"},
+		{"work/features/auth/design.md", "design"},
+		{"work/features/auth/design-decisions.md", "design"},
+		{"work/features/auth/tasks.md", "task"},
+		{"work/features/auth/field-notes.md", "field-notes"},
+		{"work/features/auth/hypotheses.md", "hypothesis"},
+		{"work/features/auth/test_report.md", "test-report"},
+		{"work/features/auth/verification-report.md", "verification"},
+		{"work/features/auth/unknown.md", "other"},
+		// work subdirectories
+		{"work/quick-builds/2025-01-build.md", "quick"},
+		{"work/prds/my-prd.md", "prd"},
+		{"work/research/2025-01-topic.md", "research"},
+		{"work/pr-reviews/123/review.md", "review"},
+		{"work/content/blog/post.md", "content"},
+		{"work/investigations/bug-42/investigation_report.md", "investigation"},
+		// charter and reports
+		{"work/charter.md", "charter"},
+		{"work/audit-report.md", "report"},
+		{"work/security-report.md", "report"},
+		{"work/strategy-report.md", "report"},
+		{"work/investigation-report.md", "report"},
+		{"work/project-overview.md", "report"},
+		// unknown top-level
+		{"work/random.md", "other"},
+		{"something-else.md", "other"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := st.ClassifyFile(tt.path)
+			if got != tt.expected {
+				t.Errorf("ClassifyFile(%q) = %q, want %q", tt.path, got, tt.expected)
 			}
 		})
 	}

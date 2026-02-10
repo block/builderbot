@@ -103,8 +103,18 @@ func init() {
 				return "quick"
 			case strings.HasPrefix(path, "work/prds/"):
 				return "prd"
+			case strings.HasPrefix(path, "work/research/"):
+				return "research"
+			case strings.HasPrefix(path, "work/pr-reviews/"):
+				return "review"
+			case strings.HasPrefix(path, "work/content/"):
+				return "content"
+			case strings.HasPrefix(path, "work/investigations/"):
+				return "investigation"
 			case path == "work/charter.md":
 				return "charter"
+			case isRP1TopLevelReport(path):
+				return "report"
 			default:
 				return "other"
 			}
@@ -121,12 +131,34 @@ func classifyRP1Feature(path string) string {
 		return "requirement"
 	case "design.md":
 		return "design"
+	case "design-decisions.md":
+		return "design"
 	case "tasks.md":
 		return "task"
 	case "field-notes.md":
 		return "field-notes"
+	case "hypotheses.md":
+		return "hypothesis"
+	case "test_report.md":
+		return "test-report"
+	case "verification-report.md":
+		return "verification"
 	default:
 		return "other"
+	}
+}
+
+// isRP1TopLevelReport returns true for known report files directly under work/.
+func isRP1TopLevelReport(path string) bool {
+	switch path {
+	case "work/audit-report.md",
+		"work/investigation-report.md",
+		"work/security-report.md",
+		"work/strategy-report.md",
+		"work/project-overview.md":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -368,10 +400,18 @@ func groupRP1Paths(paths []string) []FileGroup {
 		switch {
 		case strings.HasPrefix(p, "context/"):
 			categories["Context"] = append(categories["Context"], p)
-		case strings.HasPrefix(p, "work/prds/"):
-			categories["PRDs"] = append(categories["PRDs"], p)
+		case strings.HasPrefix(p, "work/prds/"), p == "work/charter.md":
+			categories["Blueprint"] = append(categories["Blueprint"], p)
 		case strings.HasPrefix(p, "work/quick-builds/"):
 			categories["Quick Builds"] = append(categories["Quick Builds"], p)
+		case strings.HasPrefix(p, "work/research/"):
+			categories["Research"] = append(categories["Research"], p)
+		case strings.HasPrefix(p, "work/pr-reviews/"):
+			categories["Reviews"] = append(categories["Reviews"], p)
+		case strings.HasPrefix(p, "work/content/"):
+			categories["Content"] = append(categories["Content"], p)
+		case strings.HasPrefix(p, "work/investigations/"):
+			categories["Investigations"] = append(categories["Investigations"], p)
 		case strings.HasPrefix(p, "work/features/"):
 			rest := p[len("work/features/"):]
 			parts := strings.SplitN(rest, "/", 2)
@@ -388,7 +428,7 @@ func groupRP1Paths(paths []string) []FileGroup {
 	var groups []FileGroup
 
 	// Fixed-order categories
-	for _, cat := range []string{"Context", "PRDs", "Quick Builds", "Other"} {
+	for _, cat := range []string{"Blueprint", "Quick Builds", "Research", "Reviews", "Content", "Investigations", "Other"} {
 		if files, ok := categories[cat]; ok && len(files) > 0 {
 			groups = append(groups, FileGroup{Name: cat, Paths: files})
 		}
@@ -402,6 +442,11 @@ func groupRP1Paths(paths []string) []FileGroup {
 	sort.Strings(featureIDs)
 	for _, id := range featureIDs {
 		groups = append(groups, FileGroup{Name: id, Paths: features[id]})
+	}
+
+	// Context last — least interesting for active work
+	if files, ok := categories["Context"]; ok && len(files) > 0 {
+		groups = append(groups, FileGroup{Name: "Context", Paths: files})
 	}
 
 	return groups

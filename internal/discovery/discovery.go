@@ -13,16 +13,23 @@ import (
 // SourceType defines a pluggable source type with metadata for discovery,
 // UI rendering, and file classification.
 type SourceType struct {
-	Name             string                   // unique identifier (e.g., "thoughts", "rp1")
-	DisplayName      string                   // badge text (e.g., "RPI", "RP1")
-	BadgeColor       string                   // CSS color for badge text
-	BadgeBg          string                   // CSS background for badge
-	BadgeActiveBg    string                   // CSS background when sidebar item is active
-	BadgeActiveColor string                   // CSS color when sidebar item is active
-	AutoDetectDir    string                   // directory name to look for (e.g., "thoughts", ".rp1")
-	ScanMode         string                   // "tree" (walk for .md) or "files" (explicit list)
-	DetectAtWSRoot   bool                     // also detect at workspace root level
-	ClassifyFile     func(path string) string // returns file type for a path within the source
+	Name             string                           // unique identifier (e.g., "thoughts", "rp1")
+	DisplayName      string                           // badge text (e.g., "RPI", "RP1")
+	BadgeColor       string                           // CSS color for badge text
+	BadgeBg          string                           // CSS background for badge
+	BadgeActiveBg    string                           // CSS background when sidebar item is active
+	BadgeActiveColor string                           // CSS color when sidebar item is active
+	AutoDetectDir    string                           // directory name to look for (e.g., "thoughts", ".rp1")
+	ScanMode         string                           // "tree" (walk for .md) or "files" (explicit list)
+	DetectAtWSRoot   bool                             // also detect at workspace root level
+	ClassifyFile     func(path string) string         // returns file type for a path within the source
+	GroupFiles       func(paths []string) []FileGroup // optional: groups files for display; if nil, single flat list
+}
+
+// FileGroup represents a named group of files within a source for display.
+type FileGroup struct {
+	Name  string   // display name for the group header (empty = no header)
+	Paths []string // source-relative paths in display order
 }
 
 // Built-in source types, keyed by name
@@ -102,6 +109,7 @@ func init() {
 				return "other"
 			}
 		},
+		GroupFiles: groupRP1Paths,
 	})
 }
 
@@ -351,61 +359,52 @@ func SourceConfigsToFileSources(projectPath string, configs []config.SourceConfi
 	return sources
 }
 
-// ExtractFeatureID extracts the feature ID from an RP1 feature file path.
-// Returns empty string if not a feature file.
-// Example: ".rp1/work/features/rp1-differentiation/requirements.md" -> "rp1-differentiation"
-func ExtractFeatureID(fullPath, sourceName string) string {
-	if sourceName != "rp1" {
-		return ""
+// groupRP1Paths groups RP1 source-relative paths into ordered display groups.
+func groupRP1Paths(paths []string) []FileGroup {
+	categories := map[string][]string{}
+	features := map[string][]string{}
+
+	for _, p := range paths {
+		switch {
+		case strings.HasPrefix(p, "context/"):
+			categories["Context"] = append(categories["Context"], p)
+		case strings.HasPrefix(p, "work/prds/"):
+			categories["PRDs"] = append(categories["PRDs"], p)
+		case strings.HasPrefix(p, "work/quick-builds/"):
+			categories["Quick Builds"] = append(categories["Quick Builds"], p)
+		case strings.HasPrefix(p, "work/features/"):
+			rest := p[len("work/features/"):]
+			parts := strings.SplitN(rest, "/", 2)
+			if len(parts) == 2 && parts[0] != "" {
+				features[parts[0]] = append(features[parts[0]], p)
+			} else {
+				categories["Other"] = append(categories["Other"], p)
+			}
+		default:
+			categories["Other"] = append(categories["Other"], p)
+		}
 	}
 
-	// Normalize path separators
-	path := filepath.ToSlash(fullPath)
+	var groups []FileGroup
 
-	// Match pattern: .rp1/work/features/{feature-id}/{file}
-	const prefix = ".rp1/work/features/"
-	if !strings.HasPrefix(path, prefix) {
-		return ""
+	// Fixed-order categories
+	for _, cat := range []string{"Context", "PRDs", "Quick Builds", "Other"} {
+		if files, ok := categories[cat]; ok && len(files) > 0 {
+			groups = append(groups, FileGroup{Name: cat, Paths: files})
+		}
 	}
 
-	// Extract segment after prefix
-	remainder := path[len(prefix):]
-	parts := strings.SplitN(remainder, "/", 2)
-	if len(parts) < 2 {
-		return "" // malformed: no filename after feature-id
+	// Features sorted alphabetically
+	featureIDs := make([]string, 0, len(features))
+	for id := range features {
+		featureIDs = append(featureIDs, id)
+	}
+	sort.Strings(featureIDs)
+	for _, id := range featureIDs {
+		groups = append(groups, FileGroup{Name: id, Paths: features[id]})
 	}
 
-	featureID := strings.TrimSpace(parts[0])
-	if featureID == "" {
-		return ""
-	}
-
-	return featureID
-}
-
-// DetectRP1Category categorizes non-feature RP1 files by path.
-// Returns category name or empty string if not categorized.
-func DetectRP1Category(fullPath, sourceName string) string {
-	if sourceName != "rp1" {
-		return ""
-	}
-
-	path := filepath.ToSlash(fullPath)
-
-	switch {
-	case strings.HasPrefix(path, ".rp1/context/"):
-		return "Context"
-	case strings.HasPrefix(path, ".rp1/work/prds/"):
-		return "PRDs"
-	case strings.HasPrefix(path, ".rp1/work/quick-builds/"):
-		return "Quick Builds"
-	case strings.HasPrefix(path, ".rp1/work/features/"):
-		return "" // feature files, not categorized
-	case strings.HasPrefix(path, ".rp1/work/archives/"):
-		return "" // archived, not shown
-	default:
-		return "Other"
-	}
+	return groups
 }
 
 func countMdFiles(dir string) int {

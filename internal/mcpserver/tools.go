@@ -250,27 +250,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			store.RecordHeartbeat(input.Project, f.FilePath)
 		}
 
-		// Enrich with display names
-		type enrichedFile struct {
-			FilePath    string `json:"filePath"`
-			DisplayName string `json:"displayName"`
-			OpenThreads int    `json:"openThreads"`
-		}
-		var enriched []enrichedFile
-		for _, f := range files {
-			displayName := f.FilePath
-			cachedFile := c.FindFile(input.Project, f.FilePath)
-			if cachedFile != nil {
-				displayName = cachedFile.DisplayName()
-			}
-			enriched = append(enriched, enrichedFile{
-				FilePath:    f.FilePath,
-				DisplayName: displayName,
-				OpenThreads: f.OpenThreads,
-			})
-		}
-
-		res, err := textResult(enriched)
+		res, err := textResult(files)
 		return res, nil, err
 	})
 
@@ -310,7 +290,6 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		if changed {
 			type fileWithThreads struct {
 				FilePath    string            `json:"filePath"`
-				DisplayName string            `json:"displayName"`
 				OpenThreads int               `json:"openThreads"`
 				Threads     []comments.Thread `json:"threads,omitempty"`
 			}
@@ -333,21 +312,15 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				}
 			}
 
-			// Second pass: build enriched response with display names
+			// Second pass: build response with pending threads
 			pendingByFile := make(map[string][]comments.Thread)
 			for _, p := range pending {
 				pendingByFile[p.filePath] = append(pendingByFile[p.filePath], p.thread)
 			}
 			var enrichedFiles []fileWithThreads
 			for _, f := range files {
-				displayName := f.FilePath
-				cachedFile := c.FindFile(input.Project, f.FilePath)
-				if cachedFile != nil {
-					displayName = cachedFile.DisplayName()
-				}
 				ef := fileWithThreads{
 					FilePath:    f.FilePath,
-					DisplayName: displayName,
 					OpenThreads: f.OpenThreads,
 					Threads:     pendingByFile[f.FilePath],
 				}
@@ -376,29 +349,10 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			}
 		}
 
-		type enrichedFile struct {
-			FilePath    string `json:"filePath"`
-			DisplayName string `json:"displayName"`
-			OpenThreads int    `json:"openThreads"`
-		}
-		var enriched []enrichedFile
-		for _, f := range files {
-			displayName := f.FilePath
-			cachedFile := c.FindFile(input.Project, f.FilePath)
-			if cachedFile != nil {
-				displayName = cachedFile.DisplayName()
-			}
-			enriched = append(enriched, enrichedFile{
-				FilePath:    f.FilePath,
-				DisplayName: displayName,
-				OpenThreads: f.OpenThreads,
-			})
-		}
-
 		result := map[string]any{
 			"changed": false,
 			"seq":     seq,
-			"files":   enriched,
+			"files":   files,
 		}
 		res, err := textResult(result)
 		return res, nil, err

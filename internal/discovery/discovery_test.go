@@ -4,194 +4,127 @@ import (
 	"testing"
 )
 
-func TestExtractFeatureID(t *testing.T) {
+func TestGroupRP1Paths(t *testing.T) {
+	st := GetSourceType("rp1")
+	if st == nil || st.GroupFiles == nil {
+		t.Fatal("rp1 source type not registered or has no GroupFiles")
+	}
+
 	tests := []struct {
-		name       string
-		fullPath   string
-		sourceName string
-		want       string
+		name     string
+		paths    []string
+		expected []FileGroup
 	}{
 		{
-			name:       "standard feature file",
-			fullPath:   ".rp1/work/features/rp1-differentiation/requirements.md",
-			sourceName: "rp1",
-			want:       "rp1-differentiation",
+			name:     "empty input",
+			paths:    nil,
+			expected: nil,
 		},
 		{
-			name:       "feature file with design",
-			fullPath:   ".rp1/work/features/auth-system/design.md",
-			sourceName: "rp1",
-			want:       "auth-system",
+			name: "context files",
+			paths: []string{
+				"context/index.md",
+				"context/architecture.md",
+			},
+			expected: []FileGroup{
+				{Name: "Context", Paths: []string{"context/index.md", "context/architecture.md"}},
+			},
 		},
 		{
-			name:       "feature file with nested path",
-			fullPath:   ".rp1/work/features/rp1-auto-discovery/tasks.md",
-			sourceName: "rp1",
-			want:       "rp1-auto-discovery",
+			name: "feature files grouped by feature ID",
+			paths: []string{
+				"work/features/auth/requirements.md",
+				"work/features/auth/design.md",
+				"work/features/data-layer/tasks.md",
+			},
+			expected: []FileGroup{
+				{Name: "auth", Paths: []string{"work/features/auth/requirements.md", "work/features/auth/design.md"}},
+				{Name: "data-layer", Paths: []string{"work/features/data-layer/tasks.md"}},
+			},
 		},
 		{
-			name:       "non-feature file (context)",
-			fullPath:   ".rp1/context/index.md",
-			sourceName: "rp1",
-			want:       "",
+			name: "category ordering: Context, PRDs, Quick Builds, Other",
+			paths: []string{
+				"work/charter.md",
+				"work/quick-builds/build-1.md",
+				"work/prds/my-prd.md",
+				"context/index.md",
+			},
+			expected: []FileGroup{
+				{Name: "Context", Paths: []string{"context/index.md"}},
+				{Name: "PRDs", Paths: []string{"work/prds/my-prd.md"}},
+				{Name: "Quick Builds", Paths: []string{"work/quick-builds/build-1.md"}},
+				{Name: "Other", Paths: []string{"work/charter.md"}},
+			},
 		},
 		{
-			name:       "non-feature file (prds)",
-			fullPath:   ".rp1/work/prds/my-prd.md",
-			sourceName: "rp1",
-			want:       "",
+			name: "categories before features, features sorted alphabetically",
+			paths: []string{
+				"context/index.md",
+				"work/features/zebra/tasks.md",
+				"work/features/alpha/requirements.md",
+				"work/prds/my-prd.md",
+			},
+			expected: []FileGroup{
+				{Name: "Context", Paths: []string{"context/index.md"}},
+				{Name: "PRDs", Paths: []string{"work/prds/my-prd.md"}},
+				{Name: "alpha", Paths: []string{"work/features/alpha/requirements.md"}},
+				{Name: "zebra", Paths: []string{"work/features/zebra/tasks.md"}},
+			},
 		},
 		{
-			name:       "non-rp1 source",
-			fullPath:   "thoughts/plans/foo.md",
-			sourceName: "thoughts",
-			want:       "",
-		},
-		{
-			name:       "malformed path (no filename)",
-			fullPath:   ".rp1/work/features/rp1-test",
-			sourceName: "rp1",
-			want:       "",
-		},
-		{
-			name:       "empty path",
-			fullPath:   "",
-			sourceName: "rp1",
-			want:       "",
-		},
-		{
-			name:       "feature with whitespace in ID (trimmed)",
-			fullPath:   ".rp1/work/features/ rp1-test /tasks.md",
-			sourceName: "rp1",
-			want:       "rp1-test",
+			name: "malformed feature path goes to Other",
+			paths: []string{
+				"work/features/lonely-file.md",
+			},
+			expected: []FileGroup{
+				{Name: "Other", Paths: []string{"work/features/lonely-file.md"}},
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ExtractFeatureID(tt.fullPath, tt.sourceName)
-			if got != tt.want {
-				t.Errorf("ExtractFeatureID() = %v, want %v", got, tt.want)
+			got := st.GroupFiles(tt.paths)
+
+			if len(got) != len(tt.expected) {
+				t.Fatalf("expected %d groups, got %d: %+v", len(tt.expected), len(got), got)
+			}
+
+			for i, eg := range tt.expected {
+				if got[i].Name != eg.Name {
+					t.Errorf("group %d: expected name %q, got %q", i, eg.Name, got[i].Name)
+				}
+				if len(got[i].Paths) != len(eg.Paths) {
+					t.Errorf("group %d (%s): expected %d paths, got %d", i, eg.Name, len(eg.Paths), len(got[i].Paths))
+					continue
+				}
+				for j, ep := range eg.Paths {
+					if got[i].Paths[j] != ep {
+						t.Errorf("group %d (%s), path %d: expected %q, got %q", i, eg.Name, j, ep, got[i].Paths[j])
+					}
+				}
 			}
 		})
 	}
 }
 
-func TestDetectRP1Category(t *testing.T) {
-	tests := []struct {
-		name       string
-		fullPath   string
-		sourceName string
-		want       string
-	}{
-		{
-			name:       "context file",
-			fullPath:   ".rp1/context/index.md",
-			sourceName: "rp1",
-			want:       "Context",
-		},
-		{
-			name:       "context file nested",
-			fullPath:   ".rp1/context/modules.md",
-			sourceName: "rp1",
-			want:       "Context",
-		},
-		{
-			name:       "prd file",
-			fullPath:   ".rp1/work/prds/my-prd.md",
-			sourceName: "rp1",
-			want:       "PRDs",
-		},
-		{
-			name:       "quick build file",
-			fullPath:   ".rp1/work/quick-builds/build-1.md",
-			sourceName: "rp1",
-			want:       "Quick Builds",
-		},
-		{
-			name:       "feature file (not categorized)",
-			fullPath:   ".rp1/work/features/rp1-test/requirements.md",
-			sourceName: "rp1",
-			want:       "",
-		},
-		{
-			name:       "archived file (not categorized)",
-			fullPath:   ".rp1/work/archives/old-feature/tasks.md",
-			sourceName: "rp1",
-			want:       "",
-		},
-		{
-			name:       "other rp1 file (charter)",
-			fullPath:   ".rp1/work/charter.md",
-			sourceName: "rp1",
-			want:       "Other",
-		},
-		{
-			name:       "other rp1 file (random)",
-			fullPath:   ".rp1/README.md",
-			sourceName: "rp1",
-			want:       "Other",
-		},
-		{
-			name:       "non-rp1 source",
-			fullPath:   "thoughts/plans/foo.md",
-			sourceName: "thoughts",
-			want:       "",
-		},
-		{
-			name:       "empty path",
-			fullPath:   "",
-			sourceName: "rp1",
-			want:       "Other",
-		},
+func BenchmarkGroupRP1Paths(b *testing.B) {
+	st := GetSourceType("rp1")
+	if st == nil || st.GroupFiles == nil {
+		b.Fatal("rp1 source type not registered or has no GroupFiles")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := DetectRP1Category(tt.fullPath, tt.sourceName)
-			if got != tt.want {
-				t.Errorf("DetectRP1Category() = %v, want %v", got, tt.want)
-			}
-		})
+	paths := make([]string, 60)
+	for i := 0; i < 10; i++ {
+		paths[i] = "context/file-" + string(rune('a'+i)) + ".md"
 	}
-}
-
-func BenchmarkExtractFeatureID(b *testing.B) {
-	testCases := []struct {
-		fullPath   string
-		sourceName string
-	}{
-		{".rp1/work/features/rp1-differentiation/requirements.md", "rp1"},
-		{".rp1/work/features/auth-system/design.md", "rp1"},
-		{".rp1/work/features/rp1-auto-discovery/tasks.md", "rp1"},
-		{".rp1/context/index.md", "rp1"},
-		{".rp1/work/prds/my-prd.md", "rp1"},
-		{"thoughts/plans/foo.md", "thoughts"},
+	for i := 10; i < 60; i++ {
+		paths[i] = "work/features/feature-" + string(rune('a'+i)) + "/requirements.md"
 	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tc := testCases[i%len(testCases)]
-		ExtractFeatureID(tc.fullPath, tc.sourceName)
-	}
-}
-
-func BenchmarkDetectRP1Category(b *testing.B) {
-	testCases := []struct {
-		fullPath   string
-		sourceName string
-	}{
-		{".rp1/context/index.md", "rp1"},
-		{".rp1/work/prds/my-prd.md", "rp1"},
-		{".rp1/work/quick-builds/build-1.md", "rp1"},
-		{".rp1/work/features/rp1-test/requirements.md", "rp1"},
-		{".rp1/work/charter.md", "rp1"},
-		{"thoughts/plans/foo.md", "thoughts"},
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		tc := testCases[i%len(testCases)]
-		DetectRP1Category(tc.fullPath, tc.sourceName)
+		st.GroupFiles(paths)
 	}
 }

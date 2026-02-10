@@ -97,7 +97,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		if cf.FullPath == filePath {
 			sourceType = cf.SourceType
 			fileType = cf.FileType
-			displayName = cf.DisplayName()
+			displayName = cf.Name
 			break
 		}
 	}

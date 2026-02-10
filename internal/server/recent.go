@@ -23,7 +23,7 @@ func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 			Project:     f.Project,
 			FilePath:    f.FullPath,
 			FileName:    f.Name,
-			DisplayName: f.DisplayName(),
+			DisplayName: f.Name,
 			ModTime:     f.ModTime,
 			Age:         formatAge(f.ModTime),
 			FileType:    f.FileType,

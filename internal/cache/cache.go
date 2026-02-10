@@ -24,18 +24,6 @@ type FileInfo struct {
 	Name        string
 	ModTime     time.Time
 	FileType    string // "research", "plan", or "other"
-	FeatureID   string // extracted from path for RP1 feature files (e.g., "rp1-differentiation")
-	Category    string // category for non-feature RP1 files (e.g., "Context", "PRDs", "Quick Builds", "Other")
-}
-
-// DisplayName returns the user-facing display name for the file.
-// For RP1 feature files: "{feature-id}/{filename}"
-// For all other files: "{filename}"
-func (f *FileInfo) DisplayName() string {
-	if f.FeatureID != "" {
-		return f.FeatureID + "/" + f.Name
-	}
-	return f.Name
 }
 
 // Cache holds all cached data for the server
@@ -319,8 +307,6 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					Name:        filepath.Base(path),
 					ModTime:     info.ModTime(),
 					FileType:    fileType,
-					FeatureID:   discovery.ExtractFeatureID(relToProject, source.Name),
-					Category:    discovery.DetectRP1Category(relToProject, source.Name),
 				})
 				return nil
 			})
@@ -352,8 +338,6 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					Name:        filepath.Base(filePath),
 					ModTime:     info.ModTime(),
 					FileType:    fileType,
-					FeatureID:   discovery.ExtractFeatureID(relToProject, source.Name),
-					Category:    discovery.DetectRP1Category(relToProject, source.Name),
 				})
 			}
 		}

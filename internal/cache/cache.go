@@ -265,6 +265,9 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				st := discovery.GetSourceType(source.Name)
 				if st != nil && st.ClassifyFile != nil {
 					fileType = st.ClassifyFile(relToSource)
+					if fileType == "" {
+						return nil // skip this file
+					}
 				} else {
 					if strings.Contains(relToSource, "research") {
 						fileType = "research"

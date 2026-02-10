@@ -86,18 +86,14 @@ func init() {
 		DetectAtWSRoot:   false,
 		ClassifyFile: func(path string) string {
 			switch {
+			case strings.HasPrefix(path, "work/archives/"):
+				return "" // hidden — archived features are not shown
 			case strings.HasPrefix(path, "context/"):
 				return "knowledge"
-			case strings.Contains(path, "features/") && strings.HasSuffix(path, "/requirements.md"):
-				return "requirement"
-			case strings.Contains(path, "features/") && strings.HasSuffix(path, "/design.md"):
-				return "design"
-			case strings.Contains(path, "features/") && strings.HasSuffix(path, "/tasks.md"):
-				return "task"
-			case strings.Contains(path, "features/") && strings.HasSuffix(path, "/verification-report.md"):
-				return "verification"
-			case strings.Contains(path, "features/") && strings.HasSuffix(path, "/field-notes.md"):
-				return "field-notes"
+			case strings.HasPrefix(path, "work/features/"):
+				return classifyRP1Feature(path)
+			case strings.HasPrefix(path, "work/quick-builds/"):
+				return "quick"
 			case strings.HasPrefix(path, "work/prds/"):
 				return "prd"
 			case path == "work/charter.md":
@@ -107,6 +103,23 @@ func init() {
 			}
 		},
 	})
+}
+
+// classifyRP1Feature classifies a file under work/features/{id}/ by its filename.
+func classifyRP1Feature(path string) string {
+	base := filepath.Base(path)
+	switch base {
+	case "requirements.md":
+		return "requirement"
+	case "design.md":
+		return "design"
+	case "tasks.md":
+		return "task"
+	case "field-notes.md":
+		return "field-notes"
+	default:
+		return "other"
+	}
 }
 
 // Badge holds rendering metadata for a source type badge.

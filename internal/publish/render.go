@@ -45,6 +45,7 @@ func RenderHTML(src []byte, title string) ([]byte, error) {
 <div class="layout">
 <nav class="sidebar">
 <div class="sidebar-title">%s</div>
+<button class="copy-md-btn" onclick="copyMarkdown(this)">Copy markdown</button>
 <div class="sidebar-nav">
 %s
 </div>
@@ -55,8 +56,17 @@ func RenderHTML(src []byte, title string) ([]byte, error) {
 </article>
 </main>
 </div>
+<template id="raw-markdown">%s</template>
 <script>%s</script>
 <script>
+function copyMarkdown(btn) {
+    var md = document.getElementById('raw-markdown').content.textContent;
+    navigator.clipboard.writeText(md).then(function() {
+        var orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function() { btn.textContent = orig; }, 1500);
+    });
+}
 mermaid.initialize({ startOnLoad: false, theme: 'default' });
 document.addEventListener('DOMContentLoaded', function() {
     var codeBlocks = document.querySelectorAll('code.language-mermaid');
@@ -86,6 +96,7 @@ document.addEventListener('DOMContentLoaded', function() {
 		html.EscapeString(title),
 		toc.String(),
 		htmlContent,
+		html.EscapeString(string(src)),
 		mermaidJS,
 	)
 
@@ -99,7 +110,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Ar
 
 /* Sidebar */
 .sidebar { background: #fff; border-right: 1px solid #e8e8e8; padding: 24px 16px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
-.sidebar-title { font-weight: 600; font-size: 1em; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e8e8e8; }
+.sidebar-title { font-weight: 600; font-size: 1em; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid #e8e8e8; }
+.copy-md-btn { display: block; width: 100%; padding: 6px 8px; margin-bottom: 16px; font-size: 0.8em; color: #555; background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; text-align: left; }
+.copy-md-btn:hover { background: #eee; color: #333; border-color: #ccc; }
 .sidebar-nav { display: flex; flex-direction: column; }
 .sidebar-nav a { display: block; padding: 4px 8px; font-size: 0.85em; color: #555; text-decoration: none; border-radius: 4px; line-height: 1.4; }
 .sidebar-nav a:hover { background: #f5f5f5; color: #333; }

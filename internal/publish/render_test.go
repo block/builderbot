@@ -28,12 +28,29 @@ func TestRenderHTML_BasicStructure(t *testing.T) {
 		{"toc h2 link", `href="#section-two"`},
 		{"toc level class", `class="level-2"`},
 		{"mermaid script", "mermaid.initialize"},
+		{"copy button", `class="copy-md-btn"`},
+		{"raw markdown template", `<template id="raw-markdown">`},
 	}
 
 	for _, c := range checks {
 		if !strings.Contains(html, c.substr) {
 			t.Errorf("%s: expected HTML to contain %q", c.name, c.substr)
 		}
+	}
+}
+
+func TestRenderHTML_RawMarkdownEmbedded(t *testing.T) {
+	md := []byte("# Title\n\nSome **bold** text.\n")
+
+	out, err := RenderHTML(md, "Raw Test")
+	if err != nil {
+		t.Fatalf("RenderHTML failed: %v", err)
+	}
+	html := string(out)
+
+	// The raw markdown should be HTML-escaped inside the template tag
+	if !strings.Contains(html, "Some **bold** text.") {
+		t.Error("expected raw markdown to be embedded in page")
 	}
 }
 

@@ -351,6 +351,63 @@ func SourceConfigsToFileSources(projectPath string, configs []config.SourceConfi
 	return sources
 }
 
+// ExtractFeatureID extracts the feature ID from an RP1 feature file path.
+// Returns empty string if not a feature file.
+// Example: ".rp1/work/features/rp1-differentiation/requirements.md" -> "rp1-differentiation"
+func ExtractFeatureID(fullPath, sourceName string) string {
+	if sourceName != "rp1" {
+		return ""
+	}
+
+	// Normalize path separators
+	path := filepath.ToSlash(fullPath)
+
+	// Match pattern: .rp1/work/features/{feature-id}/{file}
+	const prefix = ".rp1/work/features/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+
+	// Extract segment after prefix
+	remainder := path[len(prefix):]
+	parts := strings.SplitN(remainder, "/", 2)
+	if len(parts) < 2 {
+		return "" // malformed: no filename after feature-id
+	}
+
+	featureID := strings.TrimSpace(parts[0])
+	if featureID == "" {
+		return ""
+	}
+
+	return featureID
+}
+
+// DetectRP1Category categorizes non-feature RP1 files by path.
+// Returns category name or empty string if not categorized.
+func DetectRP1Category(fullPath, sourceName string) string {
+	if sourceName != "rp1" {
+		return ""
+	}
+
+	path := filepath.ToSlash(fullPath)
+
+	switch {
+	case strings.HasPrefix(path, ".rp1/context/"):
+		return "Context"
+	case strings.HasPrefix(path, ".rp1/work/prds/"):
+		return "PRDs"
+	case strings.HasPrefix(path, ".rp1/work/quick-builds/"):
+		return "Quick Builds"
+	case strings.HasPrefix(path, ".rp1/work/features/"):
+		return "" // feature files, not categorized
+	case strings.HasPrefix(path, ".rp1/work/archives/"):
+		return "" // archived, not shown
+	default:
+		return "Other"
+	}
+}
+
 func countMdFiles(dir string) int {
 	count := 0
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {

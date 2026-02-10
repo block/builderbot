@@ -293,15 +293,7 @@
                         <span class="file-age">{{.Age}}</span>
                         <div class="file-menu-wrap">
                             <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
-                            <div class="file-menu">
-                                <button onclick="copyFileToClipboard(this)">Copy file</button>
-                                <button onclick="copyRelative(this)">Copy relative path</button>
-                                <button onclick="copyAbsolute(this)">Copy absolute path</button>
-                                {{if eq .SourceType "files"}}<div class="menu-divider"></div>
-                                <button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>{{end}}
-                                <div class="menu-divider"></div>
-                                <button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>
-                            </div>
+                            <div class="file-menu"></div>
                         </div>
                     </div>
                 </li>
@@ -390,31 +382,6 @@
     }
 
     document.addEventListener('click', closeAllMenus);
-
-    // --- Copy actions (from file menu) ---
-    function getFileData(btn) {
-        var row = btn.closest('[data-project]');
-        return { project: row.dataset.project, path: row.dataset.path };
-    }
-
-    function copyRelative(btn) {
-        var d = getFileData(btn);
-        navigator.clipboard.writeText('@' + d.path);
-        closeAllMenus();
-    }
-
-    function copyAbsolute(btn) {
-        var row = btn.closest('[data-project-path]');
-        var d = getFileData(btn);
-        navigator.clipboard.writeText(row.dataset.projectPath + '/' + d.path);
-        closeAllMenus();
-    }
-
-    function copyFileToClipboard(btn) {
-        var d = getFileData(btn);
-        fetch('/api/copy-file?project=' + encodeURIComponent(d.project) + '&path=' + encodeURIComponent(d.path));
-        closeAllMenus();
-    }
 
     // --- Remove file from Birdseye (individual files only) ---
     function removeFileFromBirdseye(btn) {
@@ -531,6 +498,9 @@
 
     refreshAgentControls();
 
+    initFileMenus();
+    loadPublishStates();
+
     // SSE handlers
     onSSE(function(data) {
         if (data.type === 'files' && data.project === qualifiedName) debouncedRefresh('files', refreshFiles);
@@ -574,7 +544,6 @@
     }
 
     function renderFileRow(f) {
-        var isIndividual = (f.sourceType === 'files');
         return '<li class="file" data-project="' + escapeHtml(qualifiedName) + '" data-project-path="' + escapeHtml(projectPath) + '" data-path="' + escapeHtml(f.path) + '" data-source="' + escapeHtml(f.source || '') + '" data-source-type="' + escapeHtml(f.sourceType || '') + '">' +
             '<div class="file-left">' +
                 '<input type="checkbox" class="file-checkbox" />' +
@@ -585,14 +554,7 @@
                 '<span class="file-age">' + escapeHtml(f.age) + '</span>' +
                 '<div class="file-menu-wrap">' +
                     '<button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>' +
-                    '<div class="file-menu">' +
-                        '<button onclick="copyFileToClipboard(this)">Copy file</button>' +
-                        '<button onclick="copyRelative(this)">Copy relative path</button>' +
-                        '<button onclick="copyAbsolute(this)">Copy absolute path</button>' +
-                        (isIndividual ? '<div class="menu-divider"></div><button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>' : '') +
-                        '<div class="menu-divider"></div>' +
-                        '<button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>' +
-                    '</div>' +
+                    '<div class="file-menu"></div>' +
                 '</div>' +
             '</div>' +
         '</li>';
@@ -650,6 +612,8 @@
             attachFileListeners();
             clearSelection();
             applyReviewBadges();
+            initFileMenus();
+            loadPublishStates();
         } catch (err) {
             console.error('Failed to refresh files:', err);
         }

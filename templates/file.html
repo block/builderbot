@@ -496,21 +496,12 @@
 
 {{define "content"}}
     <div class="file-main" id="file-main">
-        <div class="file-toolbar">
+        <div class="file-toolbar" data-project="{{.Page.Project.QualifiedName}}" data-project-path="{{.Page.Project.Path}}" data-path="{{.Page.FilePath}}" data-source-type="{{.Page.SourceType}}">
             {{if ne .Page.FileType "other"}}<span class="file-type {{.Page.FileType}}">{{.Page.FileType}}</span>{{end}}
             <span class="toolbar-filename">{{.Page.FileName}}</span>
             <div class="file-menu-wrap">
                 <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
-                <div class="file-menu">
-                    <button onclick="copyMarkdown(this)">Copy markdown</button>
-                    <button onclick="copyFileToClipboard(this)">Copy file</button>
-                    <button onclick="copyText(this, '@{{.Page.FilePath}}')">Copy relative path</button>
-                    <button onclick="copyText(this, '{{.Page.Project.Path}}/{{.Page.FilePath}}')">Copy absolute path</button>
-                    {{if eq .Page.SourceType "files"}}<div class="menu-divider"></div>
-                    <button onclick="removeFileFromBirdseye()">Remove from Birdseye</button>{{end}}
-                    <div class="menu-divider"></div>
-                    <button class="menu-danger" onclick="confirmDeleteFile()">Delete from disk</button>
-                </div>
+                <div class="file-menu"></div>
             </div>
         </div>
 
@@ -592,25 +583,6 @@
 
     function closeAllMenus() {
         document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
-    }
-
-    function copyText(btn, text) {
-        navigator.clipboard.writeText(text);
-        closeAllMenus();
-        flashCopied(btn);
-    }
-
-    function copyMarkdown(btn) {
-        navigator.clipboard.writeText(rawMarkdown);
-        closeAllMenus();
-        flashCopied(btn);
-    }
-
-    // Copy file to clipboard (macOS)
-    function copyFileToClipboard(btn) {
-        fetch('/api/copy-file?project=' + encodeURIComponent(qualifiedName) + '&path=' + encodeURIComponent(filePath))
-            .then(function(resp) { if (resp.ok) flashCopied(btn); });
-        closeAllMenus();
     }
 
     // --- Remove from Birdseye (individually-added files only) ---
@@ -1461,11 +1433,13 @@
     }
 
     // Initial render
+    initFileMenus();
     renderMermaidBlocks();
     renderThreads(threads || [], anchorLines || {});
     renderReviewBanner();
     refreshReview();
     refreshAgentStatus();
+    loadPublishStates();
 {{end}}
 
 {{template "layout" .}}

@@ -228,6 +228,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/agents", s.handleAgentStatus)
 	s.mux.HandleFunc("/api/agents/start", s.handleAgentStart)
 	s.mux.HandleFunc("/api/agents/stop", s.handleAgentStop)
+	// Raw file content
+	s.mux.HandleFunc("/api/raw", s.handleRawFile)
+	// Publish to Blockcell
+	s.mux.HandleFunc("/api/publish", s.handlePublish)
+	s.mux.HandleFunc("/api/publish-state", s.handlePublishState)
 	// MCP (Model Context Protocol) endpoint
 	if s.mcpHandler != nil {
 		s.mux.Handle("/mcp", s.mcpHandler)

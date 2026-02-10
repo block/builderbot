@@ -1,4 +1,4 @@
-package server
+package markdown
 
 import (
 	"strconv"
@@ -34,7 +34,6 @@ func (t *sourceLineTransformer) Transform(node *ast.Document, reader text.Reader
 				lineNum := countLines(reader.Source(), line.Start) + 1
 				n.SetAttributeString("data-source-line", []byte(strconv.Itoa(lineNum)))
 			} else if n.HasChildren() {
-				// For containers like Blockquote/ListItem, use first child's line
 				first := n.FirstChild()
 				if first != nil {
 					if fLines := first.Lines(); fLines.Len() > 0 {

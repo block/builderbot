@@ -105,12 +105,8 @@ export function startSession(prompt: string, workingDir: string): Promise<Sessio
 }
 
 /** Send a follow-up message to an existing (completed/cancelled/error) session. */
-export function resumeSession(
-  sessionId: string,
-  prompt: string,
-  workingDir: string
-): Promise<void> {
-  return invoke('resume_session', { sessionId, prompt, workingDir });
+export function resumeSession(sessionId: string, prompt: string): Promise<void> {
+  return invoke('resume_session', { sessionId, prompt });
 }
 
 export function cancelSession(sessionId: string): Promise<void> {

@@ -92,14 +92,15 @@ pub fn start_session(
     working_dir: String,
 ) -> Result<store::Session, String> {
     let store = get_store(&store)?;
-    let session = store::Session::new_running(&prompt);
+    let working_dir = PathBuf::from(working_dir);
+    let session = store::Session::new_running(&prompt, &working_dir);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     session_runner::start_session(
         SessionConfig {
             session_id: session.id.clone(),
             prompt,
-            working_dir: PathBuf::from(working_dir),
+            working_dir,
             agent_session_id: None,
             pre_head_sha: None,
         },
@@ -117,6 +118,9 @@ pub fn start_session(
 /// and spawns a new goose subprocess. Uses ACP `load_session` to restore
 /// the agent's conversation history from the previous turn(s), so the
 /// agent has full context when processing the follow-up.
+///
+/// The working directory is read from the session record (set when the
+/// session was first created), so the frontend doesn't need to pass it.
 #[tauri::command]
 pub fn resume_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -124,7 +128,6 @@ pub fn resume_session(
     app_handle: tauri::AppHandle,
     session_id: String,
     prompt: String,
-    working_dir: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
 
@@ -134,6 +137,7 @@ pub fn resume_session(
         .ok_or_else(|| format!("Session not found: {}", session_id))?;
 
     let agent_session_id = session.agent_id.clone();
+    let working_dir = PathBuf::from(&session.working_dir);
 
     let transitioned = store
         .transition_to_running(&session_id)
@@ -155,7 +159,7 @@ pub fn resume_session(
         SessionConfig {
             session_id,
             prompt,
-            working_dir: PathBuf::from(working_dir),
+            working_dir,
             agent_session_id,
             pre_head_sha: None,
         },
@@ -273,7 +277,7 @@ pub fn start_branch_session(
     let full_prompt = build_full_prompt(&prompt, &branch_context, &session_type);
 
     // Create the session
-    let session = store::Session::new_running(&full_prompt);
+    let session = store::Session::new_running(&full_prompt, &worktree_path);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     // Create artifact stub and compute pre-head SHA

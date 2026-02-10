@@ -34,20 +34,10 @@
 
   interface Props {
     branch: Branch;
-    projectSubpath?: string | null;
     onDelete?: () => void;
   }
 
-  let { branch, projectSubpath, onDelete }: Props = $props();
-
-  /** Compute the effective working directory, appending project subpath if set. */
-  let effectiveWorkingDir = $derived(() => {
-    const base = branch.worktreePath ?? '/tmp';
-    if (projectSubpath) {
-      return `${base}/${projectSubpath}`;
-    }
-    return base;
-  });
+  let { branch, onDelete }: Props = $props();
 
   const menuItems: MenuItem[] = [
     { label: 'Delete Branch', icon: Trash2, danger: true, action: () => onDelete?.() },
@@ -350,7 +340,6 @@
 {#if openSessionId}
   <SessionModal
     sessionId={openSessionId}
-    workingDir={effectiveWorkingDir()}
     onClose={() => {
       openSessionId = null;
       loadTimeline();

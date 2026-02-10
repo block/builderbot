@@ -1,45 +1,17 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"html/template"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/loganj/birdseye/internal/comments"
 	"github.com/loganj/birdseye/internal/discovery"
-	"github.com/yuin/goldmark"
-	highlighting "github.com/yuin/goldmark-highlighting/v2"
-	"github.com/yuin/goldmark/extension"
-	"github.com/yuin/goldmark/parser"
-	"github.com/yuin/goldmark/renderer/html"
-)
-
-type Heading struct {
-	Level int
-	ID    string
-	Text  string
-}
-
-var md = goldmark.New(
-	goldmark.WithExtensions(
-		extension.GFM,
-		highlighting.NewHighlighting(
-			highlighting.WithStyle("dracula"),
-		),
-		&sourceLineExtension{},
-	),
-	goldmark.WithParserOptions(
-		parser.WithAutoHeadingID(),
-	),
-	goldmark.WithRendererOptions(
-		html.WithUnsafe(), // Allow raw HTML in markdown
-	),
+	"github.com/loganj/birdseye/internal/markdown"
 )
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
@@ -80,16 +52,15 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Strip YAML frontmatter
-	content = stripFrontmatter(content)
+	content = markdown.StripFrontmatter(content)
 
-	var buf bytes.Buffer
-	if err := md.Convert(content, &buf); err != nil {
+	htmlContent, err := markdown.Render(content)
+	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
 
-	htmlContent := buf.String()
-	headings := extractHeadings(htmlContent)
+	headings := markdown.ExtractHeadings(htmlContent)
 
 	// Get parent directory path for back navigation
 	parentPath := filepath.Dir(filePath)
@@ -135,7 +106,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		FileType    string
 		SourceType  string
 		Content     template.HTML
-		Headings    []Heading
+		Headings    []markdown.Heading
 		Raw         string
 		ThreadsJSON template.JS
 		AnchorLines template.JS
@@ -166,45 +137,4 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 			}()
 		}
 	}
-}
-
-func stripFrontmatter(content []byte) []byte {
-	s := string(content)
-	if !strings.HasPrefix(s, "---") {
-		return content
-	}
-
-	// Find the closing ---
-	rest := s[3:]
-	idx := strings.Index(rest, "\n---")
-	if idx == -1 {
-		return content
-	}
-
-	// Return everything after the closing ---
-	afterFrontmatter := rest[idx+4:]
-	return []byte(strings.TrimLeft(afterFrontmatter, "\n"))
-}
-
-var headingRegex = regexp.MustCompile(`<h([1-3]) id="([^"]+)"[^>]*>(.*?)</h[1-3]>`)
-var htmlTagRegex = regexp.MustCompile(`<[^>]+>`)
-
-func extractHeadings(html string) []Heading {
-	matches := headingRegex.FindAllStringSubmatch(html, -1)
-	var headings []Heading
-	for _, m := range matches {
-		level := 1
-		if m[1] == "2" {
-			level = 2
-		} else if m[1] == "3" {
-			level = 3
-		}
-		text := htmlTagRegex.ReplaceAllString(m[3], "")
-		headings = append(headings, Heading{
-			Level: level,
-			ID:    m[2],
-			Text:  strings.TrimSpace(text),
-		})
-	}
-	return headings
 }

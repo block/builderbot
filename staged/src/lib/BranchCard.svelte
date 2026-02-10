@@ -20,6 +20,7 @@
     FileDiff,
     StickyNote,
     Plus,
+    Copy,
   } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { Branch, BranchTimeline as BranchTimelineData, BranchSessionType } from './types';
@@ -39,9 +40,23 @@
 
   let { branch, onDelete }: Props = $props();
 
-  const menuItems: MenuItem[] = [
+  async function copyWorktreePath() {
+    const path = branch.worktreePath;
+    if (path) {
+      try {
+        await navigator.clipboard.writeText(path);
+      } catch {
+        // clipboard API may fail in some contexts
+      }
+    }
+  }
+
+  const menuItems: MenuItem[] = $derived([
+    ...(branch.worktreePath
+      ? [{ label: 'Copy Worktree Path', icon: Copy, action: copyWorktreePath }]
+      : []),
     { label: 'Delete Branch', icon: Trash2, danger: true, action: () => onDelete?.() },
-  ];
+  ]);
 
   let timeline = $state<BranchTimelineData | null>(null);
   let loading = $state(true);

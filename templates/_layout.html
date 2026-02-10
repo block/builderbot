@@ -797,18 +797,14 @@
         //
         // Both pages put data-project, data-project-path, data-path, and
         // data-source-type on the element that wraps the .file-menu-wrap.
-        // The optional data-has-raw-markdown flag adds "Copy markdown".
         //
         var publishURLs = {};
 
         function buildFileMenuHTML(el) {
-            var showCopyMarkdown = el.hasAttribute('data-has-raw-markdown');
             var isIndividual = el.dataset.sourceType === 'files';
             var key = (el.dataset.project || '') + '\0' + (el.dataset.path || '');
             var html = '';
-            if (showCopyMarkdown) {
-                html += '<button onclick="copyMarkdownSource(this)">Copy markdown</button>';
-            }
+            html += '<button onclick="copyMarkdownSource(this)">Copy markdown</button>';
             html += '<button onclick="copyFileToClipboard(this)">Copy file</button>';
             html += '<button onclick="copyRelative(this)">Copy relative path</button>';
             html += '<button onclick="copyAbsolute(this)">Copy absolute path</button>';
@@ -904,13 +900,20 @@
             setTimeout(function() { banner.remove(); }, 8000);
         }
 
-        // Copy raw markdown from the hidden <template> element (file page only).
-        // Pages that set data-has-raw-markdown must include <template id="raw-markdown">.
+        // Copy raw markdown. Uses the in-page <template> if present (file page),
+        // otherwise fetches from /api/raw (project page).
         function copyMarkdownSource(btn) {
-            var tmpl = document.getElementById('raw-markdown');
-            if (!tmpl) return;
-            navigator.clipboard.writeText(tmpl.content.textContent);
             document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
+            var tmpl = document.getElementById('raw-markdown');
+            if (tmpl) {
+                navigator.clipboard.writeText(tmpl.content.textContent);
+                return;
+            }
+            var el = btn.closest('[data-project]');
+            fetch('/api/raw?project=' + encodeURIComponent(el.dataset.project) + '&path=' + encodeURIComponent(el.dataset.path))
+                .then(function(r) { if (!r.ok) throw new Error('Failed'); return r.text(); })
+                .then(function(text) { navigator.clipboard.writeText(text); })
+                .catch(function(err) { alert('Failed to copy: ' + err.message); });
         }
 
         {{block "pagescript" .}}{{end}}

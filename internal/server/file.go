@@ -138,3 +138,29 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+func (s *Server) handleRawFile(w http.ResponseWriter, r *http.Request) {
+	qualifiedName := r.URL.Query().Get("project")
+	filePath := r.URL.Query().Get("path")
+	if qualifiedName == "" || filePath == "" {
+		http.Error(w, "missing project or path", http.StatusBadRequest)
+		return
+	}
+
+	project := s.cache.FindProject(qualifiedName)
+	if project == nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+
+	fullPath := filepath.Join(project.Path, filePath)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+
+	content = markdown.StripFrontmatter(content)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(content)
+}

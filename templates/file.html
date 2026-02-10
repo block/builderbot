@@ -496,7 +496,7 @@
 
 {{define "content"}}
     <div class="file-main" id="file-main">
-        <div class="file-toolbar" data-project="{{.Page.Project.QualifiedName}}" data-project-path="{{.Page.Project.Path}}" data-path="{{.Page.FilePath}}" data-source-type="{{.Page.SourceType}}" data-has-raw-markdown>
+        <div class="file-toolbar" data-project="{{.Page.Project.QualifiedName}}" data-project-path="{{.Page.Project.Path}}" data-path="{{.Page.FilePath}}" data-source-type="{{.Page.SourceType}}">
             {{if ne .Page.FileType "other"}}<span class="file-type {{.Page.FileType}}">{{.Page.FileType}}</span>{{end}}
             <span class="toolbar-filename">{{.Page.FileName}}</span>
             <div class="file-menu-wrap">

@@ -14,12 +14,20 @@
   interface Props {
     project: Project;
     branches: Branch[];
+    deletingBranches?: Set<string>;
     onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onNewBranch?: () => void;
   }
 
-  let { project, branches, onDeleteProject, onDeleteBranch, onNewBranch }: Props = $props();
+  let {
+    project,
+    branches,
+    deletingBranches = new Set(),
+    onDeleteProject,
+    onDeleteBranch,
+    onNewBranch,
+  }: Props = $props();
 
   const projectMenuItems: MenuItem[] = [
     { label: 'Remove Project', icon: Trash2, danger: true, action: () => onDeleteProject?.() },
@@ -38,7 +46,11 @@
   </div>
   <div class="branches-list">
     {#each branches as branch (branch.id)}
-      <BranchCard {branch} onDelete={() => onDeleteBranch?.(branch.id)} />
+      <BranchCard
+        {branch}
+        deleting={deletingBranches.has(branch.id)}
+        onDelete={() => onDeleteBranch?.(branch.id)}
+      />
     {/each}
     <!-- New branch button -->
     <button class="new-branch-button" onclick={() => onNewBranch?.()}>

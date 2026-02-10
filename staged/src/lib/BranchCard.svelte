@@ -35,10 +35,11 @@
 
   interface Props {
     branch: Branch;
+    deleting?: boolean;
     onDelete?: () => void;
   }
 
-  let { branch, onDelete }: Props = $props();
+  let { branch, deleting = false, onDelete }: Props = $props();
 
   async function copyWorktreePath() {
     const path = branch.worktreePath;
@@ -274,72 +275,79 @@
 
 <svelte:window onclick={handlePickerClickOutside} onkeydown={handlePickerKeydown} />
 
-<div class="branch-card">
-  <div class="card-header">
-    <div class="branch-info">
-      <GitBranch size={16} class="branch-icon" />
-      <span class="branch-name">{branch.branchName}</span>
-      <span class="branch-separator">›</span>
-      <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
+<div class="branch-card" class:deleting>
+  {#if deleting}
+    <div class="deleting-overlay">
+      <Loader2 size={16} class="spinner" />
+      <span>Deleting…</span>
     </div>
-    <div class="header-actions">
-      <button class="view-diff-btn" onclick={() => (showBranchDiff = true)} title="View diff">
-        <FileDiff size={16} />
-      </button>
-      <DropdownMenu items={menuItems} />
+  {:else}
+    <div class="card-header">
+      <div class="branch-info">
+        <GitBranch size={16} class="branch-icon" />
+        <span class="branch-name">{branch.branchName}</span>
+        <span class="branch-separator">›</span>
+        <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
+      </div>
+      <div class="header-actions">
+        <button class="view-diff-btn" onclick={() => (showBranchDiff = true)} title="View diff">
+          <FileDiff size={16} />
+        </button>
+        <DropdownMenu items={menuItems} />
+      </div>
     </div>
-  </div>
 
-  <div class="card-content">
-    {#if loading}
-      <div class="loading">
-        <Loader2 size={14} class="spinner" />
-        <span>Loading...</span>
-      </div>
-    {:else if error}
-      <div class="error">
-        <span>{error}</span>
-      </div>
-    {:else if timeline}
-      <BranchTimeline
-        {timeline}
-        onSessionClick={handleTimelineSessionClick}
-        onCommitClick={handleCommitClick}
-        onNoteClick={handleNoteClick}
-        onDeleteCommit={handleDeleteCommit}
-        onDeletePendingCommit={handleDeletePendingCommit}
-        onDeleteNote={handleDeleteNote}
-      />
-    {/if}
-  </div>
-
-  <!-- Footer with single action button -->
-  <div class="card-footer">
-    <div class="new-btn-container" bind:this={pickerRef}>
-      <button
-        class="new-btn"
-        onpointerdown={handlePointerDown}
-        onpointerup={handlePointerUp}
-        onpointerleave={handlePointerLeave}
-        disabled={showNewSession}
-        title="New commit (hold for options)"
-      >
-        <Plus size={14} />
-      </button>
-      {#if showPicker}
-        <div class="picker-dropdown">
-          <button class="picker-item" onclick={() => openNewSession('commit')}>
-            <GitCommitHorizontal size={14} />
-            <span>Commit</span>
-          </button>
-          <button class="picker-item" onclick={() => openNewSession('note')}>
-            <StickyNote size={14} />
-            <span>Note</span>
-          </button>
+    <div class="card-content">
+      {#if loading}
+        <div class="loading">
+          <Loader2 size={14} class="spinner" />
+          <span>Loading...</span>
         </div>
+      {:else if error}
+        <div class="error">
+          <span>{error}</span>
+        </div>
+      {:else if timeline}
+        <BranchTimeline
+          {timeline}
+          onSessionClick={handleTimelineSessionClick}
+          onCommitClick={handleCommitClick}
+          onNoteClick={handleNoteClick}
+          onDeleteCommit={handleDeleteCommit}
+          onDeletePendingCommit={handleDeletePendingCommit}
+          onDeleteNote={handleDeleteNote}
+        />
       {/if}
     </div>
-  </div>
+
+    <!-- Footer with single action button -->
+    <div class="card-footer">
+      <div class="new-btn-container" bind:this={pickerRef}>
+        <button
+          class="new-btn"
+          onpointerdown={handlePointerDown}
+          onpointerup={handlePointerUp}
+          onpointerleave={handlePointerLeave}
+          disabled={showNewSession}
+          title="New commit (hold for options)"
+        >
+          <Plus size={14} />
+        </button>
+        {#if showPicker}
+          <div class="picker-dropdown">
+            <button class="picker-item" onclick={() => openNewSession('commit')}>
+              <GitCommitHorizontal size={14} />
+              <span>Commit</span>
+            </button>
+            <button class="picker-item" onclick={() => openNewSession('note')}>
+              <StickyNote size={14} />
+              <span>Note</span>
+            </button>
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
 </div>
 
 {#if showBranchDiff}
@@ -409,8 +417,22 @@
     transition: border-color 0.15s ease;
   }
 
-  .branch-card:hover {
+  .branch-card:hover:not(.deleting) {
     border-color: var(--border-muted);
+  }
+
+  .branch-card.deleting {
+    opacity: 0.6;
+  }
+
+  /* Deleting overlay */
+  .deleting-overlay {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 20px 16px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
   }
 
   /* Header */

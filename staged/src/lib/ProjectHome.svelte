@@ -35,6 +35,7 @@
   // Delete confirmation state
   let projectToDelete = $state<Project | null>(null);
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
+  let deletingBranches = $state<Set<string>>(new Set());
 
   onMount(() => {
     checkStoreAndLoad();
@@ -161,8 +162,12 @@
     const { branch } = branchToDelete;
     branchToDelete = null;
 
+    // Show "Deleting…" state on the card immediately
+    deletingBranches = new Set([...deletingBranches, branch.id]);
+
     try {
       await commands.deleteBranch(branch.id);
+      // Remove the branch from the list on success
       const existing = branchesByProject.get(branch.projectId) || [];
       branchesByProject = new Map(branchesByProject).set(
         branch.projectId,
@@ -170,6 +175,10 @@
       );
     } catch (e) {
       console.error('Failed to delete branch:', e);
+    } finally {
+      const next = new Set(deletingBranches);
+      next.delete(branch.id);
+      deletingBranches = next;
     }
   }
 
@@ -268,6 +277,7 @@
           <ProjectSection
             {project}
             branches={branchesByProject.get(project.id) || []}
+            {deletingBranches}
             onDeleteProject={() => handleDeleteProjectRequest(project)}
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onNewBranch={() => handleNewBranch(project)}

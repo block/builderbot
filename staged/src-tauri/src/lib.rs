@@ -530,7 +530,7 @@ fn create_branch(
 }
 
 #[tauri::command]
-fn delete_branch(
+async fn delete_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<(), String> {

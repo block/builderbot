@@ -533,6 +533,93 @@ type ProjectFile struct {
 	FileType   string // "research", "plan", or "other"
 }
 
+// GroupedFiles represents files organized by category/feature for template rendering
+type GroupedFiles struct {
+	Groups []FileGroup
+}
+
+// FileGroup represents a category or feature group
+type FileGroup struct {
+	Type  string // "category" or "feature"
+	Name  string // category name or feature ID
+	Files []FileData
+}
+
+// FileData represents file information for template rendering
+type FileData struct {
+	Name        string
+	DisplayName string // qualified display name from FileInfo.DisplayName()
+	Path        string // FullPath for links
+	Source      string
+	SourceType  string
+	ModTime     time.Time
+	Age         string
+	FileType    string
+}
+
+// groupRP1Files groups RP1 files by category and feature for template rendering
+func groupRP1Files(files []cache.FileInfo) GroupedFiles {
+	categoryGroups := make(map[string][]cache.FileInfo)
+	featureGroups := make(map[string][]cache.FileInfo)
+
+	for _, f := range files {
+		if f.FeatureID != "" {
+			featureGroups[f.FeatureID] = append(featureGroups[f.FeatureID], f)
+		} else if f.Category != "" {
+			categoryGroups[f.Category] = append(categoryGroups[f.Category], f)
+		}
+	}
+
+	var result GroupedFiles
+
+	// Add category groups in fixed order: Context, PRDs, Quick Builds, Other
+	catOrder := []string{"Context", "PRDs", "Quick Builds", "Other"}
+	for _, cat := range catOrder {
+		if files, ok := categoryGroups[cat]; ok && len(files) > 0 {
+			result.Groups = append(result.Groups, FileGroup{
+				Type:  "category",
+				Name:  cat,
+				Files: convertToFileData(files),
+			})
+		}
+	}
+
+	// Add feature groups in alphabetical order by feature ID
+	featureIDs := make([]string, 0, len(featureGroups))
+	for id := range featureGroups {
+		featureIDs = append(featureIDs, id)
+	}
+	sort.Strings(featureIDs)
+
+	for _, id := range featureIDs {
+		result.Groups = append(result.Groups, FileGroup{
+			Type:  "feature",
+			Name:  id,
+			Files: convertToFileData(featureGroups[id]),
+		})
+	}
+
+	return result
+}
+
+// convertToFileData converts FileInfo to FileData for template rendering
+func convertToFileData(files []cache.FileInfo) []FileData {
+	result := make([]FileData, len(files))
+	for i, f := range files {
+		result[i] = FileData{
+			Name:        f.Name,
+			DisplayName: f.DisplayName(),
+			Path:        f.FullPath,
+			Source:      f.Source,
+			SourceType:  f.SourceType,
+			ModTime:     f.ModTime,
+			Age:         formatAge(f.ModTime),
+			FileType:    f.FileType,
+		}
+	}
+	return result
+}
+
 func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	// Parse /project/{qualifiedName} where qualifiedName is "workspace/project" or "project"
 	qualifiedName := strings.TrimPrefix(r.URL.Path, "/project/")
@@ -591,6 +678,19 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		sourceTypes[src.Name] = src.Type
 	}
 
+	// Prepare grouped data for RP1 files
+	var rp1Groups *GroupedFiles
+	rp1Files := make([]cache.FileInfo, 0)
+	for _, f := range cachedFiles {
+		if f.Source == "rp1" {
+			rp1Files = append(rp1Files, f)
+		}
+	}
+	if len(rp1Files) > 0 {
+		grouped := groupRP1Files(rp1Files)
+		rp1Groups = &grouped
+	}
+
 	nav := s.buildNav(project.QualifiedName())
 	nav.InProject = true
 	pageData := struct {
@@ -599,12 +699,14 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 		SourceOrder []string
 		AutoSources map[string]bool
 		SourceTypes map[string]string
+		RP1Groups   *GroupedFiles
 	}{
 		Project:     project,
 		Files:       files,
 		SourceOrder: sourceOrder,
 		AutoSources: autoSources,
 		SourceTypes: sourceTypes,
+		RP1Groups:   rp1Groups,
 	}
 	s.renderPage(w, "project.html", nav, pageData)
 }
@@ -725,6 +827,7 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 
 type APIFile struct {
 	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
 	Path        string `json:"path"`
 	Source      string `json:"source,omitempty"`
 	SourceType  string `json:"sourceType,omitempty"`
@@ -752,6 +855,7 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 	for i, f := range files {
 		result[i] = APIFile{
 			Name:        f.Name,
+			DisplayName: f.DisplayName(),
 			Path:        f.FullPath,
 			Source:      f.Source,
 			SourceType:  f.SourceType,
@@ -772,11 +876,12 @@ func (s *Server) handleAPIRecent(w http.ResponseWriter, r *http.Request) {
 	result := make([]APIFile, len(files))
 	for i, f := range files {
 		result[i] = APIFile{
-			Name:     f.Name,
-			Path:     f.FullPath,
-			Project:  f.Project,
-			Age:      formatAge(f.ModTime),
-			FileType: f.FileType,
+			Name:        f.Name,
+			DisplayName: f.DisplayName(),
+			Path:        f.FullPath,
+			Project:     f.Project,
+			Age:         formatAge(f.ModTime),
+			FileType:    f.FileType,
 		}
 	}
 	json.NewEncoder(w).Encode(result)

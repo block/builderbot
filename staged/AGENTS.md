@@ -2,7 +2,7 @@
 
 ## Commands
 
-use `just check-all` before you finalize any commit. 
+use `just check-all` before you finalize any commit.
 generally don't run the dev server unless asked, usually it is run from a UI integration.
 
 ## Backend

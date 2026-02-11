@@ -126,8 +126,6 @@
   let unlistenActionStatus: UnlistenFn | null = null;
 
   // Set up event listeners immediately (synchronously) at module level like old codebase
-  console.log('[BranchCard] Setting up listeners for branch:', branch.id, branch.branchName);
-
   listen<{
     sessionId: string;
     status: string;
@@ -138,36 +136,20 @@
     }
   }).then((unlisten) => {
     unlistenStatus = unlisten;
-    console.log('[BranchCard] Session status listener registered for:', branch.id);
   });
 
   listen<ActionStatusEvent>('action_status', (event) => {
     const payload = event.payload;
-    console.log('[BranchCard] Received action_status event:', payload);
 
     // Only process events for this branch
     if (payload.branchId !== branch.id) {
-      console.log(
-        '[BranchCard] Ignoring event for different branch:',
-        payload.branchId,
-        'vs',
-        branch.id
-      );
       return;
     }
-
-    console.log(
-      '[BranchCard] Processing action_status for branch:',
-      branch.id,
-      'status:',
-      payload.status
-    );
 
     const existingIndex = runningActions.findIndex((a) => a.executionId === payload.executionId);
 
     if (payload.status === 'running') {
       if (existingIndex === -1) {
-        console.log('[BranchCard] Adding running action:', payload.actionName);
         runningActions.push({
           executionId: payload.executionId,
           actionId: payload.actionId,
@@ -175,11 +157,6 @@
           status: 'running',
           startedAt: payload.startedAt ?? Date.now(),
         });
-        console.log(
-          '[BranchCard] runningActions now:',
-          runningActions.length,
-          runningActions.map((a) => a.actionName)
-        );
       }
     } else {
       // Action completed/failed/stopped - update status
@@ -217,7 +194,6 @@
     }
   }).then((unlisten) => {
     unlistenActionStatus = unlisten;
-    console.log('[BranchCard] Action status listener registered for:', branch.id);
   });
 
   onMount(() => {

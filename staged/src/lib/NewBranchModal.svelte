@@ -142,8 +142,6 @@
         const baseBranch = selectedBaseBranch ?? undefined;
         const branch = await commands.createBranch(project.id, branchName.trim(), baseBranch);
 
-        console.log('[NewBranchModal] Branch created:', branch.id, branch.branchName);
-
         // Capture values before modal closes
         const branchId = branch.id;
         const projectId = project.id;
@@ -153,14 +151,9 @@
         // Wait for BranchCard to be created and listeners to be set up
         // The BranchCard sets up listeners at module level, but the component needs to be created first
         setTimeout(() => {
-          console.log('[NewBranchModal] Starting prerun actions for branch:', branchId);
-          runPrerunActions(branchId, projectId)
-            .then((executionIds) => {
-              console.log('[NewBranchModal] Prerun actions started, execution IDs:', executionIds);
-            })
-            .catch((e) => {
-              console.error('[NewBranchModal] Failed to run prerun actions:', e);
-            });
+          runPrerunActions(branchId, projectId).catch((e) => {
+            console.error('[NewBranchModal] Failed to run prerun actions:', e);
+          });
         }, 150);
       } else {
         const wsName = workspaceName(branchName.trim());

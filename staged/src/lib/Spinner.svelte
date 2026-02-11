@@ -30,14 +30,19 @@
     display: inline-block;
     transform-origin: center center;
     will-change: transform;
+    /* Fix wobbling by forcing GPU acceleration and proper transform box */
+    transform: translateZ(0);
+    backface-visibility: hidden;
+    /* Ensure crisp rendering at whole pixels */
+    transform-style: preserve-3d;
   }
 
   @keyframes spin {
     from {
-      transform: rotate(0deg);
+      transform: translateZ(0) rotate(0deg);
     }
     to {
-      transform: rotate(360deg);
+      transform: translateZ(0) rotate(360deg);
     }
   }
 </style>

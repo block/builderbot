@@ -71,7 +71,9 @@
   // Dropdown state
   let showMoreMenu = $state(false);
   let expandedSubmenu = $state<string | null>(null);
+  let showActionsSubmenu = $state(false);
   let submenuCloseTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
+  let actionsSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
 
   let timeline = $state<BranchTimelineData | null>(null);
   let loading = $state(true);
@@ -280,6 +282,22 @@
     submenuCloseTimeout = setTimeout(() => {
       expandedSubmenu = null;
       submenuCloseTimeout = null;
+    }, 100);
+  }
+
+  // Actions submenu handlers
+  function handleActionsSubmenuEnter() {
+    if (actionsSubmenuTimeout) {
+      clearTimeout(actionsSubmenuTimeout);
+      actionsSubmenuTimeout = null;
+    }
+    showActionsSubmenu = true;
+  }
+
+  function handleActionsSubmenuLeave() {
+    actionsSubmenuTimeout = setTimeout(() => {
+      showActionsSubmenu = false;
+      actionsSubmenuTimeout = null;
     }, 100);
   }
 
@@ -618,56 +636,77 @@
           </button>
           {#if showMoreMenu}
             <div class="more-menu">
-              <!-- Actions in order: Run, Build, Format, Check, Test, CleanUp, Prerun -->
+              <!-- Actions submenu -->
               {#if actions.length > 0}
-                {#each ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as type}
-                  {@const typeActions =
-                    type === 'run' ? remainingRunActions : groupedActions[type]}
-                  {#if typeActions.length > 0}
-                    {#if typeActions.length >= 3}
-                      <!-- Submenu for 3+ actions -->
-                      <div class="submenu-container">
-                        <button
-                          class="more-menu-item submenu-trigger"
-                          onmouseenter={() => handleSubmenuEnter(type)}
-                          onmouseleave={handleSubmenuLeave}
-                        >
-                          <svelte:component this={getActionIcon(type)} size={14} />
-                          {getActionTypeLabel(type)}
-                          <ChevronDown size={12} class="submenu-chevron" />
-                        </button>
-                        {#if expandedSubmenu === type}
-                          <div
-                            class="submenu"
-                            role="group"
-                            onmouseenter={() => handleSubmenuEnter(type)}
-                            onmouseleave={handleSubmenuLeave}
-                          >
+                <div class="submenu-container">
+                  <button
+                    class="more-menu-item submenu-trigger"
+                    onmouseenter={handleActionsSubmenuEnter}
+                    onmouseleave={handleActionsSubmenuLeave}
+                  >
+                    <Play size={14} />
+                    Actions
+                    <ChevronDown size={12} class="submenu-chevron" />
+                  </button>
+                  {#if showActionsSubmenu}
+                    <div
+                      class="submenu"
+                      role="group"
+                      onmouseenter={handleActionsSubmenuEnter}
+                      onmouseleave={handleActionsSubmenuLeave}
+                    >
+                      <!-- Actions in order: Run, Build, Format, Check, Test, CleanUp, Prerun -->
+                      {#each ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as type}
+                        {@const typeActions =
+                          type === 'run' ? remainingRunActions : groupedActions[type]}
+                        {#if typeActions.length > 0}
+                          {#if typeActions.length >= 3}
+                            <!-- Submenu for 3+ actions -->
+                            <div class="submenu-container">
+                              <button
+                                class="more-menu-item submenu-trigger"
+                                onmouseenter={() => handleSubmenuEnter(type)}
+                                onmouseleave={handleSubmenuLeave}
+                              >
+                                <svelte:component this={getActionIcon(type)} size={14} />
+                                {getActionTypeLabel(type)}
+                                <ChevronDown size={12} class="submenu-chevron" />
+                              </button>
+                              {#if expandedSubmenu === type}
+                                <div
+                                  class="submenu"
+                                  role="group"
+                                  onmouseenter={() => handleSubmenuEnter(type)}
+                                  onmouseleave={handleSubmenuLeave}
+                                >
+                                  {#each typeActions as action (action.id)}
+                                    {@const Icon = getActionIcon(type)}
+                                    <button
+                                      class="more-menu-item"
+                                      onclick={() => handleRunAction(action)}
+                                    >
+                                      <Icon size={14} />
+                                      {action.name}
+                                    </button>
+                                  {/each}
+                                </div>
+                              {/if}
+                            </div>
+                          {:else}
+                            <!-- Direct items for <3 actions -->
                             {#each typeActions as action (action.id)}
                               {@const Icon = getActionIcon(type)}
-                              <button
-                                class="more-menu-item"
-                                onclick={() => handleRunAction(action)}
-                              >
+                              <button class="more-menu-item action-item" onclick={() => handleRunAction(action)}>
                                 <Icon size={14} />
                                 {action.name}
                               </button>
                             {/each}
-                          </div>
+                          {/if}
                         {/if}
-                      </div>
-                    {:else}
-                      <!-- Direct items for <3 actions -->
-                      {#each typeActions as action (action.id)}
-                        {@const Icon = getActionIcon(type)}
-                        <button class="more-menu-item action-item" onclick={() => handleRunAction(action)}>
-                          <Icon size={14} />
-                          {action.name}
-                        </button>
                       {/each}
-                    {/if}
+                    </div>
                   {/if}
-                {/each}
+                </div>
               {/if}
 
               <!-- Copy Worktree Path if available -->

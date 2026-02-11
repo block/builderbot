@@ -28,6 +28,7 @@
     type Token,
   } from './services/highlighter';
   import { createScrollController } from './services/scrollController.svelte';
+  import { setupMarkdownScrollSync } from './services/markdownScrollSync';
   import {
     ConnectorRendererCanvas,
     type CommentHighlightInfo,
@@ -99,6 +100,8 @@
   let afterPane: HTMLDivElement | null = $state(null);
   let connectorCanvas: HTMLCanvasElement | null = $state(null);
   let diffViewerEl: HTMLDivElement | null = $state(null);
+  let beforeMarkdownArea: HTMLDivElement | null = $state(null);
+  let afterMarkdownArea: HTMLDivElement | null = $state(null);
 
   /** Tracked width of afterPane for annotation overlays. */
   let afterPaneWidth = $state(0);
@@ -610,6 +613,14 @@
     if (diff && connectorCanvas) {
       scheduleConnectorRedraw();
     }
+  });
+
+  // Proportional scroll sync for markdown preview mode
+  $effect(() => {
+    if (!(isMarkdownFile && markdownPreview && beforeMarkdownArea && afterMarkdownArea)) {
+      return;
+    }
+    return setupMarkdownScrollSync(beforeMarkdownArea, afterMarkdownArea);
   });
 
   // ==========================================================================
@@ -1404,6 +1415,7 @@
             class="code-area"
             class:markdown-mode={isMarkdownFile && markdownPreview}
             onwheel={isMarkdownFile && markdownPreview ? undefined : handleBeforeWheel}
+            bind:this={beforeMarkdownArea}
           >
             {#if isMarkdownFile && markdownPreview}
               <div class="markdown-preview-container">
@@ -1566,6 +1578,7 @@
             class="code-area"
             class:markdown-mode={isMarkdownFile && markdownPreview}
             onwheel={isMarkdownFile && markdownPreview ? undefined : handleAfterWheel}
+            bind:this={afterMarkdownArea}
           >
             {#if isMarkdownFile && markdownPreview}
               <div class="markdown-preview-container">

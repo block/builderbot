@@ -47,7 +47,7 @@ impl Store {
             "SELECT id, project_id, branch_name, base_branch, pr_number,
                     branch_type, workspace_name, workspace_status, agent,
                     created_at, updated_at
-             FROM branches WHERE project_id = ?1 ORDER BY created_at DESC",
+             FROM branches WHERE project_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![project_id], Self::row_to_branch)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

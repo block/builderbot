@@ -37,10 +37,10 @@ use acp_client::{find_acp_agent, run_acp_prompt_raw};
 use std::path::Path;
 
 #[tokio::main]
-async fn main() -> Result<(), String> {
+async fn main() -> anyhow::Result<()> {
     // Find an available ACP agent
     let agent = find_acp_agent()
-        .ok_or("No ACP agent found. Install goose or claude-code-acp.")?;
+        .ok_or_else(|| anyhow::anyhow!("No ACP agent found. Install goose or claude-code-acp."))?;
 
     // Send a prompt and get a response
     let response = run_acp_prompt_raw(
@@ -81,7 +81,7 @@ if let Some(agent) = find_acp_agent_by_id("goose") {
 
 ### Prompt Functions
 
-- `run_acp_prompt_raw(agent, working_dir, prompt) -> Result<String, String>` - Send a one-shot prompt
+- `run_acp_prompt_raw(agent, working_dir, prompt) -> anyhow::Result<String>` - Send a one-shot prompt
 
 ### Types
 
@@ -129,13 +129,11 @@ pub struct AcpAiProvider {
 
 #[async_trait]
 impl AiProvider for AcpAiProvider {
-    async fn prompt(&self, prompt: String) -> Result<String> {
+    async fn prompt(&self, prompt: String) -> anyhow::Result<String> {
         let agent = find_acp_agent()
             .ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
 
-        run_acp_prompt_raw(&agent, &self.working_dir, &prompt)
-            .await
-            .map_err(|e| anyhow::anyhow!("ACP prompt failed: {}", e))
+        run_acp_prompt_raw(&agent, &self.working_dir, &prompt).await
     }
 }
 ```
@@ -150,7 +148,9 @@ async fn ask_ai(question: String) -> Result<String, String> {
     let agent = find_acp_agent()
         .ok_or("No ACP agent installed")?;
 
-    run_acp_prompt_raw(&agent, Path::new("."), &question).await
+    run_acp_prompt_raw(&agent, Path::new("."), &question)
+        .await
+        .map_err(|e| e.to_string())
 }
 ```
 
@@ -179,7 +179,12 @@ The crate uses `spawn_blocking` with a `LocalSet` to handle the ACP protocol's `
 
 ## Error Handling
 
-Errors are returned as `Result<T, String>` with descriptive messages:
+The crate uses `anyhow::Result<T>` internally for better error context and chaining. This provides:
+- Clear error messages with contextual information
+- Error chain tracing for debugging
+- Easy conversion to `String` at API boundaries (e.g., Tauri commands) using `.map_err(|e| e.to_string())`
+
+Common error messages:
 - "No ACP agent found" - No compatible agent installed
 - "Failed to spawn {agent}" - Agent process failed to start
 - "Failed to initialize ACP connection" - Protocol handshake failed

@@ -18,8 +18,8 @@
 //! use std::path::Path;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), String> {
-//!     let agent = find_acp_agent().ok_or("No ACP agent found")?;
+//! async fn main() -> anyhow::Result<()> {
+//!     let agent = find_acp_agent().ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
 //!     let response = run_acp_prompt_raw(&agent, Path::new("."), "Hello!").await?;
 //!     println!("Agent response: {}", response);
 //!     Ok(())
@@ -36,6 +36,7 @@ use agent_client_protocol::{
     Result as AcpResult, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
     TextContent,
 };
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio::process::Command;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -320,7 +321,7 @@ pub async fn run_acp_prompt_raw(
     agent: &AcpAgent,
     working_dir: &Path,
     prompt: &str,
-) -> Result<String, String> {
+) -> Result<String> {
     let agent_path = agent.path().to_path_buf();
     let agent_name = agent.name().to_string();
     let agent_args: Vec<String> = agent.acp_args().iter().map(|s| s.to_string()).collect();
@@ -334,7 +335,7 @@ pub async fn run_acp_prompt_raw(
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| format!("Failed to create runtime: {e}"))?;
+            .context("Failed to create runtime")?;
 
         // Run the ACP session on a LocalSet
         let local = tokio::task::LocalSet::new();
@@ -344,7 +345,7 @@ pub async fn run_acp_prompt_raw(
         })
     })
     .await
-    .map_err(|e| format!("Task join error: {e}"))?
+    .context("Task join error")?
 }
 
 /// Internal function to run the ACP session (runs on LocalSet)
@@ -354,7 +355,7 @@ async fn run_acp_session_inner(
     agent_args: &[String],
     working_dir: &Path,
     prompt: &str,
-) -> Result<String, String> {
+) -> Result<String> {
     // Spawn the agent process with ACP mode
     let mut cmd = Command::new(agent_path);
     cmd.args(agent_args)
@@ -366,17 +367,17 @@ async fn run_acp_session_inner(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to spawn {agent_name}: {e}"))?;
+        .with_context(|| format!("Failed to spawn {agent_name}"))?;
 
     // Get stdin/stdout
     let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| "Failed to get stdin from agent process".to_string())?;
+        .context("Failed to get stdin from agent process")?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "Failed to get stdout from agent process".to_string())?;
+        .context("Failed to get stdout from agent process")?;
 
     // Convert to futures-compatible async read/write
     let stdin_compat = stdin.compat_write();
@@ -406,13 +407,13 @@ async fn run_acp_session_inner(
     let _init_response = connection
         .initialize(init_request)
         .await
-        .map_err(|e| format!("Failed to initialize ACP connection: {e:?}"))?;
+        .context("Failed to initialize ACP connection")?;
 
     // Create new session
     let session_response = connection
         .new_session(NewSessionRequest::new(working_dir.to_path_buf()))
         .await
-        .map_err(|e| format!("Failed to create ACP session: {e:?}"))?;
+        .context("Failed to create ACP session")?;
 
     let session_id = session_response.session_id;
 
@@ -428,13 +429,9 @@ async fn run_acp_session_inner(
     let _ = child.kill().await;
 
     // Handle result
-    match prompt_result {
-        Ok(_) => {
-            let response = client.get_response().await;
-            Ok(response)
-        }
-        Err(e) => Err(format!("Failed to send prompt: {e:?}")),
-    }
+    prompt_result.context("Failed to send prompt")?;
+    let response = client.get_response().await;
+    Ok(response)
 }
 
 #[cfg(test)]

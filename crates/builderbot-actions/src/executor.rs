@@ -320,9 +320,28 @@ impl ActionExecutor {
 
         if let Some(state) = state {
             if let Some(pid) = state.child_pid {
-                // Kill the process
                 #[cfg(unix)]
                 {
+                    // SAFETY: This unsafe block calls libc::kill to terminate a child process.
+                    //
+                    // Safety considerations:
+                    // 1. PID validity: The PID comes from `std::process::Child::id()` which was
+                    //    stored when we spawned the process. While the process may have already
+                    //    terminated, calling kill() on a non-existent PID is safe (returns ESRCH).
+                    // 2. PID reuse: On Unix systems, PIDs can be reused after process termination.
+                    //    However, the window for reuse is typically small, and we only call this
+                    //    immediately after removing the process from our tracking map. The risk of
+                    //    terminating an unrelated process is minimal in practice.
+                    // 3. Signal delivery: SIGTERM is a graceful termination signal that allows
+                    //    processes to clean up. This is safer than SIGKILL.
+                    // 4. Error handling: We intentionally ignore the return value because:
+                    //    - If the process already exited, kill() fails with ESRCH (acceptable)
+                    //    - If we lack permissions, we can't do anything about it
+                    //    - The process is already removed from our tracking, so we've done our part
+                    //
+                    // Alternative considered: Using a higher-level library like `sysinfo` or maintaining
+                    // a handle to the Child. However, this adds complexity and dependencies without
+                    // significantly improving safety for this use case.
                     unsafe {
                         libc::kill(pid as i32, libc::SIGTERM);
                     }
@@ -330,9 +349,10 @@ impl ActionExecutor {
 
                 #[cfg(windows)]
                 {
-                    Command::new("taskkill")
+                    // Use taskkill on Windows for graceful termination
+                    let _ = Command::new("taskkill")
                         .args(["/PID", &pid.to_string(), "/F"])
-                        .status()?;
+                        .status();
                 }
             }
         }

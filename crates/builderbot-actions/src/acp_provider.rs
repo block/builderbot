@@ -52,8 +52,6 @@ impl AiProvider for AcpAiProvider {
         let agent = acp_client::find_acp_agent()
             .ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
 
-        acp_client::run_acp_prompt_raw(&agent, &self.working_dir, &prompt)
-            .await
-            .map_err(|e| anyhow::anyhow!("ACP prompt failed: {}", e))
+        acp_client::run_acp_prompt_raw(&agent, &self.working_dir, &prompt).await
     }
 }

@@ -40,7 +40,7 @@ The response must be a JSON array of action objects. Each action object must hav
 - command: string (exact shell command to run, e.g., "npm test", "just build")
 - actionType: string (one of: "prerun", "run", "build", "format", "check", "test", "cleanUp")
 - autoCommit: boolean (true if action modifies files and should auto-commit)
-- source: string (which file this was detected from, e.g., "package.json", "justfile")
+- source: string (which file this was detected from, e.g., "package.json", "justfile", "subdir/justfile")
 
 Action type guidelines:
 - "prerun": Commands that should run automatically on worktree creation (like "npm install", "yarn", "pnpm install", "lefthook install")
@@ -54,6 +54,13 @@ Action type guidelines:
 Special instructions for lefthook:
 - If lefthook.yml is present in the project, ALWAYS include "lefthook install" as a prerun action
 - This ensures git hooks are properly installed in each new worktree
+
+Special instructions for subdirectory build files:
+- If justfile/Justfile/Makefile/makefile files are found in subdirectories, detect actions from them
+- For commands from subdirectory build files, prefix the command with "cd <subpath> && "
+- Example: if "staged/justfile" contains a "dev" target, the command should be "cd staged && just dev"
+- Include the subdirectory path in the source field (e.g., "source": "staged/justfile")
+- This allows running commands in the correct directory context
 
 Action ordering (list most important first):
 - Primary dev commands should come first (like "dev", "start")
@@ -101,6 +108,13 @@ Return ONLY a JSON array with detected actions. Example (ordered by importance):
     "source": "package.json"
   },
   {
+    "name": "Subproject Dev",
+    "command": "cd staged && just dev",
+    "actionType": "run",
+    "autoCommit": false,
+    "source": "staged/justfile"
+  },
+  {
     "name": "Test",
     "command": "npm test",
     "actionType": "test",
@@ -113,6 +127,13 @@ Return ONLY a JSON array with detected actions. Example (ordered by importance):
     "actionType": "build",
     "autoCommit": false,
     "source": "package.json"
+  },
+  {
+    "name": "Subproject Format",
+    "command": "cd app && make fmt",
+    "actionType": "format",
+    "autoCommit": true,
+    "source": "app/Makefile"
   },
   {
     "name": "Format",
@@ -164,9 +185,25 @@ impl ActionDetector {
     }
 }
 
-/// Collect a list of files in the directory
+/// Collect a list of files in the directory (recursively up to 2 levels)
 fn collect_file_list(dir: &Path) -> Result<String> {
     let mut files = Vec::new();
+    collect_file_list_recursive(dir, "", &mut files, 0, 2)?;
+    files.sort();
+    Ok(files.join("\n"))
+}
+
+/// Recursively collect file listings with indentation
+fn collect_file_list_recursive(
+    dir: &Path,
+    prefix: &str,
+    files: &mut Vec<String>,
+    depth: usize,
+    max_depth: usize,
+) -> Result<()> {
+    if depth >= max_depth {
+        return Ok(());
+    }
 
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -175,21 +212,33 @@ fn collect_file_list(dir: &Path) -> Result<String> {
                 let name_str = name.to_string_lossy();
 
                 // Skip hidden files and common directories
-                if name_str.starts_with('.') || name_str == "node_modules" || name_str == "target" {
+                if name_str.starts_with('.')
+                    || name_str == "node_modules"
+                    || name_str == "target"
+                    || name_str == "dist"
+                    || name_str == "build"
+                {
                     continue;
                 }
 
+                let full_path = if prefix.is_empty() {
+                    name_str.to_string()
+                } else {
+                    format!("{}/{}", prefix, name_str)
+                };
+
                 if file_type.is_file() {
-                    files.push(name_str.to_string());
+                    files.push(full_path);
                 } else if file_type.is_dir() {
-                    files.push(format!("{}/", name_str));
+                    files.push(format!("{}/", full_path));
+                    // Recurse into subdirectory
+                    collect_file_list_recursive(&entry.path(), &full_path, files, depth + 1, max_depth)?;
                 }
             }
         }
     }
 
-    files.sort();
-    Ok(files.join("\n"))
+    Ok(())
 }
 
 /// Collect contents of relevant build/config files
@@ -214,6 +263,7 @@ fn collect_relevant_files(dir: &Path) -> Result<String> {
 
     let mut contents = Vec::new();
 
+    // Collect files from root directory
     for file_name in &relevant_files {
         let file_path = dir.join(file_name);
         if file_path.exists() {
@@ -229,11 +279,77 @@ fn collect_relevant_files(dir: &Path) -> Result<String> {
         }
     }
 
+    // Recursively search subdirectories for justfiles and makefiles (up to 2 levels deep)
+    let build_files = ["justfile", "Justfile", "Makefile", "makefile"];
+    collect_subdirectory_build_files(dir, &build_files, &mut contents, 0, 2)?;
+
     if contents.is_empty() {
         Ok("No relevant build files found.".to_string())
     } else {
         Ok(contents.join("\n"))
     }
+}
+
+/// Recursively collect justfiles and makefiles from subdirectories
+fn collect_subdirectory_build_files(
+    dir: &Path,
+    build_files: &[&str],
+    contents: &mut Vec<String>,
+    depth: usize,
+    max_depth: usize,
+) -> Result<()> {
+    // Don't go too deep to avoid excessive scanning
+    if depth >= max_depth {
+        return Ok(());
+    }
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+
+                // Skip hidden directories, node_modules, target, etc.
+                if name_str.starts_with('.')
+                    || name_str == "node_modules"
+                    || name_str == "target"
+                    || name_str == "dist"
+                    || name_str == "build"
+                    || name_str == ".git"
+                {
+                    continue;
+                }
+
+                if file_type.is_dir() {
+                    let subdir = entry.path();
+
+                    // Check if this subdirectory contains any build files
+                    for build_file in build_files {
+                        let build_file_path = subdir.join(build_file);
+                        if build_file_path.exists() {
+                            if let Ok(content) = std::fs::read_to_string(&build_file_path) {
+                                // Get relative path from base dir
+                                if let Ok(rel_path) = build_file_path.strip_prefix(dir) {
+                                    let rel_path_str = rel_path.to_string_lossy();
+                                    let truncated = if content.len() > 4000 {
+                                        format!("{}... (truncated)", &content[..4000])
+                                    } else {
+                                        content
+                                    };
+                                    contents.push(format!("=== {} ===\n{}\n", rel_path_str, truncated));
+                                }
+                            }
+                        }
+                    }
+
+                    // Recurse into subdirectory
+                    collect_subdirectory_build_files(&subdir, build_files, contents, depth + 1, max_depth)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Parse the AI response and extract suggested actions

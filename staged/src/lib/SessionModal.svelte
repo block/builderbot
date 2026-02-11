@@ -135,7 +135,7 @@
         const msgs = await getSessionMessages(sessionId);
         if (msgs.length > 0) {
           messages = msgs;
-          scrollToBottom();
+          scrollToBottomIfNear();
         }
       } else {
         const lastId = messages[messages.length - 1].id;
@@ -144,7 +144,7 @@
           const prev = messages.slice(0, -1);
           messages = [...prev, ...updated];
           if (updated.length > 1 || updated[0].id !== lastId) {
-            scrollToBottom();
+            scrollToBottomIfNear();
           }
         }
       }
@@ -286,12 +286,29 @@
   // Helpers
   // =========================================================================
 
+  /** Whether the user is scrolled near the bottom (within 80px). */
+  let isNearBottom = $state(true);
+
+  function handleScroll() {
+    if (!messagesEl) return;
+    const { scrollTop, scrollHeight, clientHeight } = messagesEl;
+    isNearBottom = scrollHeight - scrollTop - clientHeight < 80;
+  }
+
+  /** Scroll to bottom unconditionally (e.g. initial load, user sends message). */
   function scrollToBottom() {
     tick().then(() => {
       if (messagesEl) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
       }
     });
+  }
+
+  /** Scroll to bottom only if the user hasn't scrolled up. */
+  function scrollToBottomIfNear() {
+    if (isNearBottom) {
+      scrollToBottom();
+    }
   }
 
   function renderMarkdown(content: string): string {
@@ -501,7 +518,7 @@
     </header>
 
     <!-- Messages area -->
-    <div class="modal-content" bind:this={messagesEl}>
+    <div class="modal-content" bind:this={messagesEl} onscroll={handleScroll}>
       {#if loading}
         <div class="center-state">
           <Loader2 size={24} class="spinning" />

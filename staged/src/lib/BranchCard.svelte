@@ -602,7 +602,7 @@
           </div>
         {/each}
         <!-- Primary run action button -->
-        {#if primaryRunAction}
+        {#if primaryRunAction && branch.branchType === 'local'}
           <div class="primary-action-container">
             <button
               class="primary-action-button"
@@ -638,7 +638,7 @@
           {#if showMoreMenu}
             <div class="more-menu">
               <!-- Actions submenu -->
-              {#if actions.length > 0}
+              {#if actions.length > 0 && branch.branchType === 'local'}
                 <div class="submenu-container">
                   <button
                     class="more-menu-item submenu-trigger"

@@ -25,6 +25,10 @@ release:
 test:
     cargo test
 
+# Format all workspace crates
+fmt:
+    cargo fmt --all
+
 # Install the summarize binary to ~/.cargo/bin
 install:
     cargo install --path crates/summarize

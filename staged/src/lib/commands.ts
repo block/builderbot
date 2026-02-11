@@ -102,11 +102,6 @@ export function pollWorkspaceStatus(branchId: string): Promise<string> {
   return invoke('poll_workspace_status', { branchId });
 }
 
-/** Send a prompt to a remote branch's running workspace agent. Returns the agent's response. */
-export function sendWorkspacePrompt(branchId: string, prompt: string): Promise<string> {
-  return invoke('send_workspace_prompt', { branchId, prompt });
-}
-
 // =============================================================================
 // Timeline
 // =============================================================================

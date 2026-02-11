@@ -4,7 +4,7 @@
 //! workspaces. Each function shells out to the `blox` CLI and parses
 //! the result.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::process::Command;
 use thiserror::Error;
 
@@ -25,7 +25,7 @@ pub enum BloxError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_status")]
     pub status: Option<String>,
     /// Catch-all for any other fields the CLI returns.
     #[serde(flatten)]
@@ -36,10 +36,39 @@ pub struct WorkspaceInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceListEntry {
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_status")]
     pub status: Option<String>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
+}
+
+/// Blox returns status as an integer enum. Map known codes to strings
+/// that match our `WorkspaceStatus` values; fall back to the raw number.
+fn status_code_to_string(code: u64) -> String {
+    match code {
+        0 => "unknown".to_string(),
+        1 => "starting".to_string(),
+        2 => "stopped".to_string(),
+        3 => "running".to_string(),
+        4 => "error".to_string(),
+        other => format!("unknown({other})"),
+    }
+}
+
+/// Deserialize status from either a string or an integer.
+fn deserialize_status<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match val {
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(serde_json::Value::Number(n)) => {
+            Ok(Some(status_code_to_string(n.as_u64().unwrap_or(0))))
+        }
+        Some(other) => Ok(Some(other.to_string())),
+    }
 }
 
 /// Run a blox command and return stdout as a string.
@@ -97,15 +126,6 @@ pub fn ws_info(name: &str) -> Result<WorkspaceInfo, BloxError> {
 pub fn ws_list() -> Result<Vec<WorkspaceListEntry>, BloxError> {
     let stdout = run(&["ws", "list", "--json"])?;
     serde_json::from_str(&stdout).map_err(|e| BloxError::ParseError(format!("{e}\nRaw: {stdout}")))
-}
-
-// Phase 2: Agent interaction — will be wired to a Tauri command once
-// the frontend has a prompt UI for remote branches.
-/// Send a prompt to a running Blox workspace.
-///
-/// Runs: `blox ws prompt <name> <prompt>`
-pub fn ws_prompt(name: &str, prompt: &str) -> Result<String, BloxError> {
-    run(&["ws", "prompt", name, prompt])
 }
 
 // Phase 3: Pause/resume lifecycle — workspaces auto-suspend after idle;

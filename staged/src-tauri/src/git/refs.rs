@@ -113,6 +113,12 @@ pub fn merge_base(repo: &Path, ref1: &str, ref2: &str) -> Result<String, GitErro
     Ok(output.trim().to_string())
 }
 
+/// Get the URL of a named remote (e.g. "origin").
+pub fn get_remote_url(repo: &Path, remote: &str) -> Result<String, GitError> {
+    let output = cli::run(repo, &["remote", "get-url", remote])?;
+    Ok(output.trim().to_string())
+}
+
 /// Resolve a ref to its full SHA
 pub fn resolve_ref(repo: &Path, reference: &str) -> Result<String, GitError> {
     let output = cli::run(repo, &["rev-parse", reference])?;

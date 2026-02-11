@@ -64,7 +64,13 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
         id: "goose",
         label: "Goose",
         command: "goose",
-        acp_args: &["acp", "--with-builtin", "developer,extensionmanager"],
+        acp_args: &[
+            "acp",
+            "--with-builtin",
+            "developer",
+            "--with-builtin",
+            "extensionmanager",
+        ],
     },
     KnownAgent {
         id: "claude",
@@ -167,6 +173,45 @@ impl AcpDriver {
                 .to_string(),
         )
     }
+
+    /// Create a driver that proxies through `blox acp <workspace>`.
+    ///
+    /// This speaks the same ACP protocol over stdio, but the subprocess
+    /// is `blox acp <workspace_name>` instead of a local agent binary.
+    /// An optional `--command` flag is derived from the agent ID so the
+    /// remote workspace spawns the right agent.
+    pub fn for_workspace(workspace_name: &str, agent_id: Option<&str>) -> Result<Self, String> {
+        let binary_path = find_command("blox").ok_or_else(|| {
+            "Could not find `blox` binary. Install it and ensure it's on your PATH.".to_string()
+        })?;
+
+        let mut args = vec!["acp".to_string(), workspace_name.to_string()];
+
+        // Map the agent ID to the command string the remote workspace needs.
+        if let Some(id) = agent_id {
+            if let Some(cmd) = blox_acp_command(id) {
+                args.push(format!("--command={cmd}"));
+            }
+        }
+
+        Ok(Self {
+            binary_path,
+            acp_args: args,
+            agent_label: "Blox".to_string(),
+        })
+    }
+}
+
+/// Map an agent ID to the `--command` value for `blox acp`.
+///
+/// Returns `None` if the agent uses the workspace default (no flag needed).
+fn blox_acp_command(agent_id: &str) -> Option<String> {
+    KNOWN_AGENTS.iter().find(|a| a.id == agent_id).map(|a| {
+        // Build "command,arg1,arg2,..." from the command name and acp_args.
+        let mut parts = vec![a.command];
+        parts.extend(a.acp_args.iter().copied());
+        parts.join(",")
+    })
 }
 
 impl AgentDriver for AcpDriver {

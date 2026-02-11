@@ -1,32 +1,43 @@
 <!--
   RemoteBranchCard.svelte - Card display for a remote Blox workspace branch
 
-  Shows branch name, workspace status badge, agent type, and a prompt
-  interface for interacting with the remote agent.
+  Shows branch name, workspace status badge, agent type, and — when the
+  workspace is running — a full timeline + session UI matching BranchCard.
 
   Lifecycle:
   - Starting: shows spinner, polls every 3s until Running
-  - Running: shows prompt input + conversation history
+  - Running: shows timeline, New button (commit/note via blox acp sessions)
   - Stopped: shows restart hint
   - Error: shows error state
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import {
-    GitBranch,
     Cloud,
     Loader2,
     Trash2,
-    Send,
     AlertCircle,
     CircleCheck,
     CirclePause,
     Bot,
     Copy,
+    GitCommitHorizontal,
+    StickyNote,
+    Plus,
   } from 'lucide-svelte';
-  import type { Branch, WorkspaceStatus } from './types';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import type {
+    Branch,
+    BranchTimeline as BranchTimelineData,
+    BranchSessionType,
+    WorkspaceStatus,
+  } from './types';
   import * as commands from './commands';
+  import BranchTimeline from './BranchTimeline.svelte';
   import DropdownMenu, { type MenuItem } from './DropdownMenu.svelte';
+  import SessionModal from './SessionModal.svelte';
+  import NewSessionModal from './NewSessionModal.svelte';
+  import NoteModal from './NoteModal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
 
   interface Props {
@@ -38,19 +49,34 @@
   let { branch, deleting = false, onDelete }: Props = $props();
 
   // Reactive workspace status (updated by polling)
-  // Initialise from the prop; overwritten by poll results.
   let polledStatus = $state<WorkspaceStatus | null>(null);
   let status = $derived<WorkspaceStatus | null>(polledStatus ?? branch.workspaceStatus);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-  // Prompt UI state
-  let promptText = $state('');
-  let sending = $state(false);
-  let messages = $state<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
-  let messagesEl: HTMLDivElement | null = $state(null);
-
   // Error state
   let error = $state<string | null>(null);
+
+  // Timeline state
+  let timeline = $state<BranchTimelineData | null>(null);
+  let timelineLoading = $state(true);
+  let timelineError = $state<string | null>(null);
+
+  // New session modal state
+  let showNewSession = $state(false);
+  let newSessionMode = $state<BranchSessionType>('commit');
+  let draftPrompt = $state('');
+
+  // Long-press picker state
+  let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  let showPicker = $state(false);
+  let pickerRef = $state<HTMLDivElement | null>(null);
+  let didLongPress = false;
+
+  // Session modal (opened from timeline or after starting a session)
+  let openSessionId = $state<string | null>(null);
+
+  // Note modal
+  let openNote = $state<{ title: string; content: string } | null>(null);
 
   // Confirm delete dialog
   let confirmDelete = $state<{
@@ -58,6 +84,9 @@
     message: string;
     onConfirm: () => void;
   } | null>(null);
+
+  // Listen for session completion to refresh timeline
+  let unlistenStatus: UnlistenFn | null = null;
 
   const menuItems: MenuItem[] = $derived([
     ...(branch.workspaceName
@@ -103,10 +132,15 @@
     if (status === 'starting') {
       startPolling();
     }
+    if (status === 'running') {
+      loadTimeline();
+    }
+    listenForStatusChanges();
   });
 
   onDestroy(() => {
     stopPolling();
+    unlistenStatus?.();
   });
 
   function startPolling() {
@@ -115,7 +149,10 @@
       try {
         const newStatus = (await commands.pollWorkspaceStatus(branch.id)) as WorkspaceStatus;
         polledStatus = newStatus;
-        if (newStatus !== 'starting') {
+        if (newStatus === 'running') {
+          stopPolling();
+          loadTimeline();
+        } else if (newStatus !== 'starting') {
           stopPolling();
         }
       } catch (e) {
@@ -135,46 +172,148 @@
   }
 
   // =========================================================================
-  // Prompt handling
+  // Timeline
   // =========================================================================
 
-  async function handleSendPrompt() {
-    const text = promptText.trim();
-    if (!text || sending || status !== 'running') return;
-
-    sending = true;
-    error = null;
-    messages = [...messages, { role: 'user', content: text }];
-    promptText = '';
-    scrollToBottom();
-
-    try {
-      const response = await commands.sendWorkspacePrompt(branch.id, text);
-      messages = [...messages, { role: 'assistant', content: response }];
-      scrollToBottom();
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-      // Remove the user message on error so they can retry
-      messages = messages.slice(0, -1);
-      promptText = text;
-    } finally {
-      sending = false;
-    }
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendPrompt();
-    }
-  }
-
-  function scrollToBottom() {
-    requestAnimationFrame(() => {
-      if (messagesEl) {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+  async function listenForStatusChanges() {
+    unlistenStatus = await listen<{
+      sessionId: string;
+      status: string;
+    }>('session-status-changed', (event) => {
+      const { status } = event.payload;
+      if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        loadTimeline();
       }
     });
+  }
+
+  async function loadTimeline() {
+    timelineLoading = true;
+    timelineError = null;
+    try {
+      timeline = await commands.getBranchTimeline(branch.id);
+    } catch (e) {
+      timelineError = e instanceof Error ? e.message : String(e);
+    } finally {
+      timelineLoading = false;
+    }
+  }
+
+  // =========================================================================
+  // New session modal
+  // =========================================================================
+
+  function openNewSession(mode: BranchSessionType) {
+    newSessionMode = mode;
+    showNewSession = true;
+    showPicker = false;
+  }
+
+  function handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType }) {
+    draftPrompt = draft.prompt;
+    newSessionMode = draft.mode;
+    showNewSession = false;
+  }
+
+  function handleNewSessionStarted(_result: { sessionId: string; artifactId: string }) {
+    showNewSession = false;
+    draftPrompt = '';
+    loadTimeline();
+  }
+
+  // =========================================================================
+  // Long-press button logic
+  // =========================================================================
+
+  function handlePointerDown() {
+    didLongPress = false;
+    longPressTimer = setTimeout(() => {
+      didLongPress = true;
+      showPicker = true;
+    }, 400);
+  }
+
+  function handlePointerUp() {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+    if (!didLongPress && !showPicker) {
+      openNewSession('commit');
+    }
+  }
+
+  function handlePointerLeave() {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+  }
+
+  function handlePickerClickOutside(e: MouseEvent) {
+    if (showPicker && pickerRef && !pickerRef.contains(e.target as Node)) {
+      showPicker = false;
+    }
+  }
+
+  function handlePickerKeydown(e: KeyboardEvent) {
+    if (showPicker && e.key === 'Escape') {
+      showPicker = false;
+      e.stopPropagation();
+    }
+  }
+
+  // =========================================================================
+  // Timeline item interactions
+  // =========================================================================
+
+  function handleTimelineSessionClick(sessionId: string) {
+    openSessionId = sessionId;
+  }
+
+  function handleNoteClick(_noteId: string, title: string, content: string) {
+    openNote = { title, content };
+  }
+
+  function handleDeleteNote(noteId: string, sessionId?: string) {
+    confirmDelete = {
+      title: 'Delete Note',
+      message:
+        'Are you sure you want to delete this note?' +
+        (sessionId ? ' The linked session will also be deleted.' : ''),
+      onConfirm: async () => {
+        confirmDelete = null;
+        try {
+          if (sessionId) {
+            try {
+              await commands.cancelSession(sessionId);
+            } catch {
+              // Session may already be finished
+            }
+          }
+          await commands.deleteNote(noteId, !!sessionId);
+          loadTimeline();
+        } catch (e) {
+          console.error('Failed to delete note:', e);
+        }
+      },
+    };
+  }
+
+  async function handleDeletePendingCommit(commitId: string, sessionId?: string) {
+    try {
+      if (sessionId) {
+        try {
+          await commands.cancelSession(sessionId);
+        } catch {
+          // Session may already be finished
+        }
+      }
+      await commands.deletePendingCommit(commitId, !!sessionId);
+      loadTimeline();
+    } catch (e) {
+      console.error('Failed to delete pending commit:', e);
+    }
   }
 
   // =========================================================================
@@ -201,6 +340,8 @@
     return agent.charAt(0).toUpperCase() + agent.slice(1);
   }
 </script>
+
+<svelte:window onclick={handlePickerClickOutside} onkeydown={handlePickerKeydown} />
 
 <div class="branch-card remote" class:deleting>
   {#if deleting}
@@ -258,67 +399,25 @@
           <span class="status-hint">This usually takes 30–60 seconds</span>
         </div>
       {:else if status === 'running'}
-        <!-- Conversation history -->
-        {#if messages.length > 0}
-          <div class="messages" bind:this={messagesEl}>
-            {#each messages as msg}
-              <div
-                class="message"
-                class:user={msg.role === 'user'}
-                class:assistant={msg.role === 'assistant'}
-              >
-                <div class="message-role">
-                  {msg.role === 'user' ? 'You' : agentLabel(branch.agent)}
-                </div>
-                <div class="message-content">{msg.content}</div>
-              </div>
-            {/each}
-            {#if sending}
-              <div class="message assistant">
-                <div class="message-role">{agentLabel(branch.agent)}</div>
-                <div class="message-content thinking">
-                  <Loader2 size={14} class="spinner" />
-                  <span>Thinking…</span>
-                </div>
-              </div>
-            {/if}
+        <!-- Timeline UI (same pattern as BranchCard) -->
+        {#if timelineLoading}
+          <div class="loading">
+            <Loader2 size={14} class="spinner" />
+            <span>Loading...</span>
           </div>
-        {:else}
-          <div class="empty-state">
-            <span class="empty-text">Workspace is ready. Send a prompt to start working.</span>
+        {:else if timelineError}
+          <div class="timeline-error">
+            <span>{timelineError}</span>
           </div>
+        {:else if timeline}
+          <BranchTimeline
+            {timeline}
+            onSessionClick={handleTimelineSessionClick}
+            onNoteClick={handleNoteClick}
+            onDeletePendingCommit={handleDeletePendingCommit}
+            onDeleteNote={handleDeleteNote}
+          />
         {/if}
-
-        {#if error}
-          <div class="error-banner">
-            <AlertCircle size={14} />
-            <span>{error}</span>
-          </div>
-        {/if}
-
-        <!-- Prompt input -->
-        <div class="prompt-bar">
-          <textarea
-            class="prompt-input"
-            bind:value={promptText}
-            onkeydown={handleKeydown}
-            placeholder="Send a task to {agentLabel(branch.agent)}…"
-            rows={1}
-            disabled={sending}
-          ></textarea>
-          <button
-            class="send-btn"
-            onclick={handleSendPrompt}
-            disabled={!promptText.trim() || sending}
-            title="Send prompt"
-          >
-            {#if sending}
-              <Loader2 size={16} class="spinner" />
-            {:else}
-              <Send size={16} />
-            {/if}
-          </button>
-        </div>
       {:else if status === 'stopped'}
         <div class="status-view stopped-view">
           <CirclePause size={20} />
@@ -341,8 +440,62 @@
         </div>
       {/if}
     </div>
+
+    <!-- Footer with New button (only when running) -->
+    {#if status === 'running'}
+      <div class="card-footer">
+        <div class="new-btn-container" bind:this={pickerRef}>
+          <button
+            class="new-btn"
+            onpointerdown={handlePointerDown}
+            onpointerup={handlePointerUp}
+            onpointerleave={handlePointerLeave}
+            disabled={showNewSession}
+            title="New commit (hold for options)"
+          >
+            <Plus size={14} />
+          </button>
+          {#if showPicker}
+            <div class="picker-dropdown">
+              <button class="picker-item" onclick={() => openNewSession('commit')}>
+                <GitCommitHorizontal size={14} />
+                <span>Commit</span>
+              </button>
+              <button class="picker-item" onclick={() => openNewSession('note')}>
+                <StickyNote size={14} />
+                <span>Note</span>
+              </button>
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
   {/if}
 </div>
+
+{#if openNote}
+  <NoteModal title={openNote.title} content={openNote.content} onClose={() => (openNote = null)} />
+{/if}
+
+{#if showNewSession}
+  <NewSessionModal
+    {branch}
+    mode={newSessionMode}
+    initialPrompt={draftPrompt}
+    onClose={handleNewSessionClose}
+    onStarted={handleNewSessionStarted}
+  />
+{/if}
+
+{#if openSessionId}
+  <SessionModal
+    sessionId={openSessionId}
+    onClose={() => {
+      openSessionId = null;
+      loadTimeline();
+    }}
+  />
+{/if}
 
 {#if confirmDelete}
   <ConfirmDialog
@@ -484,7 +637,22 @@
   .card-content {
     display: flex;
     flex-direction: column;
+    padding: 16px;
     min-height: 80px;
+  }
+
+  /* Timeline loading / error */
+  .loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+  }
+
+  .timeline-error {
+    color: var(--ui-danger);
+    font-size: var(--size-sm);
   }
 
   /* Status views (starting, stopped, error) */
@@ -522,147 +690,90 @@
     max-width: 280px;
   }
 
-  /* Messages */
-  .messages {
+  /* Footer */
+  .card-footer {
     display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding: 16px;
-    max-height: 300px;
-    overflow-y: auto;
+    justify-content: flex-end;
+    padding: 6px 12px;
   }
 
-  .message {
+  /* Single "New" button with long-press picker */
+  .new-btn-container {
+    position: relative;
+  }
+
+  .new-btn {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    background: none;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
   }
 
-  .message-role {
-    font-size: var(--size-xs);
-    font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-
-  .message-content {
-    font-size: var(--size-sm);
+  .new-btn:hover:not(:disabled) {
     color: var(--text-primary);
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
+    border-color: var(--border-muted);
+    background: var(--bg-hover);
   }
 
-  .message.user .message-content {
-    background-color: var(--bg-hover);
-    padding: 8px 12px;
+  .new-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  /* Long-press picker dropdown */
+  .picker-dropdown {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    right: 0;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-muted);
     border-radius: 8px;
-  }
-
-  .message.assistant .message-content {
+    box-shadow:
+      0 4px 12px rgba(0, 0, 0, 0.12),
+      0 1px 4px rgba(0, 0, 0, 0.08);
+    overflow: hidden;
+    z-index: 100;
+    min-width: 120px;
     padding: 4px 0;
   }
 
-  .message-content.thinking {
+  .picker-item {
     display: flex;
     align-items: center;
     gap: 8px;
-    color: var(--text-muted);
-    font-style: italic;
-  }
-
-  /* Empty state */
-  .empty-state {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px 16px;
-  }
-
-  .empty-text {
-    font-size: var(--size-sm);
-    color: var(--text-muted);
-  }
-
-  /* Error banner */
-  .error-banner {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 0 16px 8px;
-    padding: 8px 12px;
-    background-color: rgba(248, 81, 73, 0.08);
-    border-radius: 6px;
-    font-size: var(--size-xs);
-    color: var(--ui-danger);
-  }
-
-  .error-banner :global(svg) {
-    flex-shrink: 0;
-  }
-
-  /* Prompt bar */
-  .prompt-bar {
-    display: flex;
-    align-items: flex-end;
-    gap: 8px;
-    padding: 12px 16px;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .prompt-input {
-    flex: 1;
-    padding: 8px 12px;
-    background-color: var(--bg-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    font-size: var(--size-sm);
-    font-family: inherit;
-    color: var(--text-primary);
-    outline: none;
-    resize: none;
-    min-height: 36px;
-    max-height: 120px;
-    line-height: 1.4;
-    transition: border-color 0.15s;
-  }
-
-  .prompt-input:focus {
-    border-color: var(--ui-accent);
-  }
-
-  .prompt-input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .prompt-input:disabled {
-    opacity: 0.5;
-  }
-
-  .send-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    background-color: var(--ui-accent);
+    width: 100%;
+    padding: 7px 12px;
+    background: transparent;
     border: none;
-    border-radius: 8px;
-    color: var(--bg-deepest);
+    color: var(--text-primary);
+    font-size: var(--size-sm);
     cursor: pointer;
+    transition: background-color 0.1s;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .picker-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .picker-item :global(svg) {
+    color: var(--text-muted);
     flex-shrink: 0;
-    transition: background-color 0.15s;
-  }
-
-  .send-btn:hover:not(:disabled) {
-    background-color: var(--ui-accent-hover);
-  }
-
-  .send-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
   }
 
   :global(.spinner) {

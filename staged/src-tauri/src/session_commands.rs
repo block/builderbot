@@ -128,6 +128,7 @@ pub fn start_session(
             agent_session_id: None,
             pre_head_sha: None,
             provider,
+            workspace_name: None,
         },
         store,
         app_handle,
@@ -191,6 +192,7 @@ pub fn resume_session(
             agent_session_id,
             pre_head_sha: None,
             provider,
+            workspace_name: None,
         },
         store,
         app_handle,
@@ -266,6 +268,10 @@ pub struct BranchSessionResponse {
 ///
 /// This builds the full prompt (action tag + branch history + user prompt),
 /// creates the artifact stub, and kicks off the agent in the branch's workdir.
+///
+/// For remote branches (those with a `workspace_name`), the session runs via
+/// `blox acp` instead of a local agent binary. Branch context and commit
+/// detection are skipped since there is no local worktree.
 #[tauri::command(rename_all = "camelCase")]
 pub fn start_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -278,7 +284,7 @@ pub fn start_branch_session(
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
 
-    // Resolve branch → project → workdir
+    // Resolve branch → project
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
@@ -289,25 +295,34 @@ pub fn start_branch_session(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
-    let workdir = store
-        .get_workdir_for_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("No worktree for branch: {}", branch_id))?;
+    let is_remote = branch.workspace_name.is_some();
 
-    let mut worktree_path = PathBuf::from(&workdir.path);
-    if let Some(ref subpath) = project.subpath {
-        worktree_path = worktree_path.join(subpath);
-    }
+    // Resolve working directory and branch context.
+    // Remote branches have no local worktree — use the project's repo path
+    // as a valid cwd for the blox subprocess, and skip branch context.
+    let (working_dir, branch_context) = if is_remote {
+        let repo_path = PathBuf::from(&project.repo_path);
+        (repo_path, String::new())
+    } else {
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {}", branch_id))?;
 
-    // Build branch history context
-    let branch_context =
-        build_branch_context(&worktree_path, &branch.base_branch, &store, &branch_id);
+        let mut worktree_path = PathBuf::from(&workdir.path);
+        if let Some(ref subpath) = project.subpath {
+            worktree_path = worktree_path.join(subpath);
+        }
+
+        let ctx = build_branch_context(&worktree_path, &branch.base_branch, &store, &branch_id);
+        (worktree_path, ctx)
+    };
 
     // Build the full prompt with action tag + context
     let full_prompt = build_full_prompt(&prompt, &branch_context, &session_type);
 
     // Create the session
-    let mut session = store::Session::new_running(&full_prompt, &worktree_path);
+    let mut session = store::Session::new_running(&full_prompt, &working_dir);
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -323,20 +338,35 @@ pub fn start_branch_session(
         BranchSessionType::Commit => {
             let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
             store.create_commit(&commit).map_err(|e| e.to_string())?;
-            let head_sha = git::get_head_sha(&worktree_path)
-                .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?;
-            (commit.id, Some(head_sha))
+            // Remote branches have no local HEAD to compare against
+            let head_sha = if is_remote {
+                None
+            } else {
+                Some(
+                    git::get_head_sha(&working_dir)
+                        .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?,
+                )
+            };
+            (commit.id, head_sha)
         }
+    };
+
+    // For remote branches, pass the workspace name and agent ID as the provider
+    let effective_provider = if is_remote {
+        branch.agent.clone()
+    } else {
+        provider
     };
 
     session_runner::start_session(
         SessionConfig {
             session_id: session.id.clone(),
             prompt: full_prompt,
-            working_dir: worktree_path.clone(),
+            working_dir,
             agent_session_id: None,
             pre_head_sha,
-            provider,
+            provider: effective_provider,
+            workspace_name: branch.workspace_name.clone(),
         },
         store,
         app_handle,

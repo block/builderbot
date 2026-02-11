@@ -134,6 +134,9 @@ pub struct SessionConfig {
     /// ACP provider ID (e.g. "goose", "claude"). When `None`, the first
     /// available provider is used.
     pub provider: Option<String>,
+    /// When set, the session runs via `blox acp <workspace_name>` instead
+    /// of a local agent binary. Commit detection is skipped (no local git).
+    pub workspace_name: Option<String>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -151,9 +154,13 @@ pub fn start_session(
     registry: Arc<SessionRegistry>,
 ) -> Result<(), String> {
     // Create the driver eagerly so we fail fast if the agent isn't found.
-    let driver = match &config.provider {
-        Some(id) => AcpDriver::new(id)?,
-        None => AcpDriver::first_available()?,
+    let driver = if let Some(ref ws_name) = config.workspace_name {
+        AcpDriver::for_workspace(ws_name, config.provider.as_deref())?
+    } else {
+        match &config.provider {
+            Some(id) => AcpDriver::new(id)?,
+            None => AcpDriver::first_available()?,
+        }
     };
 
     // Persist the user message right away so it's visible immediately.
@@ -223,11 +230,18 @@ pub fn start_session(
 
         // Run post-completion hooks before transitioning status.
         // These detect artifacts produced by the session (commits, notes).
+        // For remote workspaces, skip commit detection (no local git) but
+        // still run note extraction (reads from session messages in the DB).
         if new_status == "completed" {
+            let effective_pre_head = if config.workspace_name.is_some() {
+                None // no local HEAD to compare against
+            } else {
+                config.pre_head_sha.as_deref()
+            };
             run_post_completion_hooks(
                 &session_id_for_status,
                 &config.working_dir,
-                config.pre_head_sha.as_deref(),
+                effective_pre_head,
                 &store_for_status,
             );
         }

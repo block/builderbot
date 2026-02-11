@@ -1385,6 +1385,7 @@ struct OpenerApp {
 }
 
 /// Known applications with their bundle IDs (macOS).
+#[cfg(target_os = "macos")]
 const KNOWN_OPENERS: &[(&str, &str)] = &[
     // Terminals
     ("terminal", "com.apple.Terminal"),
@@ -1453,6 +1454,7 @@ async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
 }
 
 /// Convert app ID to a human-readable name.
+#[cfg(target_os = "macos")]
 fn prettify_app_name(id: &str) -> String {
     match id {
         "vscode" => "VS Code",
@@ -1487,6 +1489,7 @@ fn prettify_app_name(id: &str) -> String {
 /// On macOS, uses the `open -b` command with the app's bundle ID.
 /// On other platforms, returns an error.
 #[tauri::command]
+#[allow(unused_variables)]
 async fn open_in_app(path: String, app_id: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {

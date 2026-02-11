@@ -136,7 +136,11 @@
   $effect(() => {
     const branchId = branch.id;
     const branchName = branch.branchName;
-    console.log('[BranchCard] Setting up listeners for branch:', () => branchId, () => branchName);
+    console.log(
+      '[BranchCard] Setting up listeners for branch:',
+      () => branchId,
+      () => branchName
+    );
 
     listen<{
       sessionId: string;

@@ -165,8 +165,12 @@
         runningActions[existingIndex].exitCode = payload.exitCode;
         runningActions[existingIndex].completedAt = payload.completedAt;
 
-        // Auto-remove successful completions (with fade for secondary, instant for primary)
-        if (payload.status === 'completed') {
+        // Auto-remove completed/failed/stopped actions (with fade for secondary, instant for primary)
+        if (
+          payload.status === 'completed' ||
+          payload.status === 'failed' ||
+          payload.status === 'stopped'
+        ) {
           const action = runningActions[existingIndex];
           const isPrimaryAction = primaryRunAction && action.actionId === primaryRunAction.id;
 
@@ -288,11 +292,11 @@
   async function handleRunAction(action: ProjectAction) {
     showMoreMenu = false;
 
-    // Check if this action is already running
+    // Check if this action is currently running
     const existingExecution = runningActions.find((a) => a.actionId === action.id);
 
-    if (existingExecution) {
-      // Action already running, open modal to view output
+    if (existingExecution && existingExecution.status === 'running') {
+      // Action currently running, open modal to view output
       actionOutputModal = {
         executionId: existingExecution.executionId,
         actionName: action.name,

@@ -614,7 +614,7 @@
     display: flex;
     align-items: stretch;
     justify-content: center;
-    padding: 52px 0 0 0;
+    padding: 40px 0 0 0;
   }
 
   .diff-modal {
@@ -624,7 +624,7 @@
     width: 100%;
     height: 100%;
     background-color: var(--bg-chrome);
-    border-radius: 12px 12px 0 0;
+    border-radius: 0;
     border: none;
     box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
     overflow: hidden;

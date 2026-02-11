@@ -23,6 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/block/builderbot/main/staged/instal
 ```
 
 The installer will:
+
 - Clone the repository
 - Set up the Hermit development environment
 - Install dependencies
@@ -141,16 +142,16 @@ src/
 
 ### Key dependencies
 
-| Layer    | Dependency                | Purpose                          |
-|----------|---------------------------|----------------------------------|
-| Backend  | `git2`                    | libgit2 bindings for git ops     |
-| Backend  | `agent-client-protocol`   | ACP agent communication          |
-| Backend  | `rusqlite`                | SQLite persistence               |
-| Backend  | `notify`                  | File system watching             |
-| Backend  | `syntect`                 | Syntax highlighting              |
-| Frontend | `shiki`                   | Syntax highlighting (browser)    |
-| Frontend | `marked`                  | Markdown rendering               |
-| Frontend | `lucide-svelte`           | Icons                            |
+| Layer    | Dependency              | Purpose                       |
+| -------- | ----------------------- | ----------------------------- |
+| Backend  | `git2`                  | libgit2 bindings for git ops  |
+| Backend  | `agent-client-protocol` | ACP agent communication       |
+| Backend  | `rusqlite`              | SQLite persistence            |
+| Backend  | `notify`                | File system watching          |
+| Backend  | `syntect`               | Syntax highlighting           |
+| Frontend | `shiki`                 | Syntax highlighting (browser) |
+| Frontend | `marked`                | Markdown rendering            |
+| Frontend | `lucide-svelte`         | Icons                         |
 
 ## License
 

@@ -72,11 +72,11 @@ CREATE TABLE branches (
 No strategy enum needed. The mode is determined by how many workdirs a project
 has and how they're provisioned:
 
-| Mode | Workdirs | Parallelism | How it works |
-|------|----------|-------------|--------------|
-| **Full** (current default) | 1 per branch | Unlimited | Creating a branch also creates a workdir via `git worktree add`. 1:1 lifetime. |
-| **Shared** (monorepo) | 1 total (the repo itself) | Serial | All branches share the repo checkout. Activating a branch does `git checkout` in that workdir. Only one branch active at a time. |
-| **Pool** (future) | Fixed N (e.g. 3-4) | Up to N | User pre-creates a few persistent worktrees. Branches claim an available workdir when they need one, release when done. |
+| Mode                       | Workdirs                  | Parallelism | How it works                                                                                                                     |
+| -------------------------- | ------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **Full** (current default) | 1 per branch              | Unlimited   | Creating a branch also creates a workdir via `git worktree add`. 1:1 lifetime.                                                   |
+| **Shared** (monorepo)      | 1 total (the repo itself) | Serial      | All branches share the repo checkout. Activating a branch does `git checkout` in that workdir. Only one branch active at a time. |
+| **Pool** (future)          | Fixed N (e.g. 3-4)        | Up to N     | User pre-creates a few persistent worktrees. Branches claim an available workdir when they need one, release when done.          |
 
 ### Key Query: "Where do I run git for this branch?"
 
@@ -107,7 +107,7 @@ workdir" and the scheduler retries when one frees up.
 ## What to Do Now (Before Implementing Shared/Pool)
 
 The current model only needs to support "full" mode today. The question is:
-what do we change *now* so that adding workdirs later is easy and doesn't
+what do we change _now_ so that adding workdirs later is easy and doesn't
 require a painful migration?
 
 ### Recommended: introduce `workdirs` now, keep it 1:1
@@ -178,9 +178,9 @@ Introducing the workdir table now means:
 ### What about the main repo checkout?
 
 When a project is created in "full" mode, the main repo checkout at
-`project.repo_path` is *not* tracked as a workdir. It's just where we run
+`project.repo_path` is _not_ tracked as a workdir. It's just where we run
 `git worktree add` from. Workdirs are only the locations we manage.
 
-When we later add "shared" mode, the repo path itself *becomes* the single
+When we later add "shared" mode, the repo path itself _becomes_ the single
 workdir. That's when we create a workdir row pointing to `project.repo_path`.
 This is a clean additive change — no existing rows need updating.

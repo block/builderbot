@@ -64,7 +64,13 @@ const KNOWN_AGENTS: &[KnownAgent] = &[
         id: "goose",
         label: "Goose",
         command: "goose",
-        acp_args: &["acp", "--with-builtin", "developer,extensionmanager"],
+        acp_args: &[
+            "acp",
+            "--with-builtin",
+            "developer",
+            "--with-builtin",
+            "extensionmanager",
+        ],
     },
     KnownAgent {
         id: "claude",
@@ -120,6 +126,10 @@ pub struct AcpDriver {
     binary_path: PathBuf,
     acp_args: Vec<String>,
     agent_label: String,
+    /// When true, this driver proxies through a remote Blox workspace.
+    /// The local `working_dir` should NOT be sent in ACP session requests
+    /// because it doesn't exist on the remote machine.
+    is_remote: bool,
 }
 
 impl AcpDriver {
@@ -145,6 +155,7 @@ impl AcpDriver {
             binary_path,
             acp_args: agent.acp_args.iter().map(|s| s.to_string()).collect(),
             agent_label: agent.label.to_string(),
+            is_remote: false,
         })
     }
 
@@ -159,6 +170,7 @@ impl AcpDriver {
                     binary_path: path,
                     acp_args: agent.acp_args.iter().map(|s| s.to_string()).collect(),
                     agent_label: agent.label.to_string(),
+                    is_remote: false,
                 });
             }
         }
@@ -167,6 +179,46 @@ impl AcpDriver {
                 .to_string(),
         )
     }
+
+    /// Create a driver that proxies through `blox acp <workspace>`.
+    ///
+    /// This speaks the same ACP protocol over stdio, but the subprocess
+    /// is `blox acp <workspace_name>` instead of a local agent binary.
+    /// An optional `--command` flag is derived from the agent ID so the
+    /// remote workspace spawns the right agent.
+    pub fn for_workspace(workspace_name: &str, agent_id: Option<&str>) -> Result<Self, String> {
+        let binary_path = find_command("blox").ok_or_else(|| {
+            "Could not find `blox` binary. Install it and ensure it's on your PATH.".to_string()
+        })?;
+
+        let mut args = vec!["acp".to_string(), workspace_name.to_string()];
+
+        // Map the agent ID to the command string the remote workspace needs.
+        if let Some(id) = agent_id {
+            if let Some(cmd) = blox_acp_command(id) {
+                args.push(format!("--command={cmd}"));
+            }
+        }
+
+        Ok(Self {
+            binary_path,
+            acp_args: args,
+            agent_label: "Blox".to_string(),
+            is_remote: true,
+        })
+    }
+}
+
+/// Map an agent ID to the `--command` value for `blox acp`.
+///
+/// Returns `None` if the agent uses the workspace default (no flag needed).
+fn blox_acp_command(agent_id: &str) -> Option<String> {
+    KNOWN_AGENTS.iter().find(|a| a.id == agent_id).map(|a| {
+        // Build "command,arg1,arg2,..." from the command name and acp_args.
+        let mut parts = vec![a.command];
+        parts.extend(a.acp_args.iter().copied());
+        parts.join(",")
+    })
 }
 
 impl AgentDriver for AcpDriver {
@@ -224,6 +276,14 @@ impl AgentDriver for AcpDriver {
             }
         });
 
+        // For remote workspaces, don't send the local path in ACP session
+        // requests — the remote agent should use its own workspace directory.
+        let acp_working_dir = if self.is_remote {
+            PathBuf::from(".")
+        } else {
+            working_dir.to_path_buf()
+        };
+
         // Race the protocol against cancellation.
         let protocol_result = tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -232,7 +292,7 @@ impl AgentDriver for AcpDriver {
                 return Ok(());
             }
             result = run_acp_protocol(
-                &connection, working_dir, prompt, store,
+                &connection, &acp_working_dir, prompt, store,
                 session_id, agent_session_id, &handler,
             ) => result,
         };
@@ -376,6 +436,10 @@ async fn run_acp_protocol(
 
 /// Initialize the ACP connection and either create a new session or load
 /// an existing one. Returns the ACP session ID to use for the prompt.
+///
+/// The caller is responsible for passing the correct `working_dir`: the
+/// local worktree path for local agents, or `"."` for remote Blox
+/// workspaces (so the remote agent uses its own workspace directory).
 async fn setup_acp_session(
     connection: &ClientSideConnection,
     working_dir: &Path,

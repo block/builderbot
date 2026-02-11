@@ -581,11 +581,21 @@ async fn create_remote_branch(
     );
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
+    // Resolve the source to an HTTPS git URL. The frontend passes the
+    // local repo path, but blox needs a fetchable HTTPS URL.
+    let resolved_source = match source {
+        Some(_) => git::get_remote_url(repo_path, "origin")
+            .ok()
+            .filter(|u| !u.is_empty())
+            .map(|u| ssh_url_to_https(&u)),
+        None => None,
+    };
+
     // Kick off the Blox workspace. `ws_start` tells the platform to begin
     // provisioning but the workspace won't be fully ready yet — status
     // stays as `Starting`. The frontend should poll `get_workspace_info`
     // and update the status to `Running` once the platform reports ready.
-    match blox::ws_start(&workspace_name, source.as_deref()) {
+    match blox::ws_start(&workspace_name, resolved_source.as_deref()) {
         Ok(_) => Ok(to_branch_with_workdir(branch, None)),
         Err(e) => {
             // Update status to Error but keep the branch record
@@ -662,46 +672,6 @@ async fn poll_workspace_status(
         .map_err(|e| e.to_string())?;
 
     Ok(new_status.as_str().to_string())
-}
-
-/// Send a prompt to a remote branch's Blox workspace agent.
-///
-/// The workspace must be in `Running` status. Returns the agent's response text.
-#[tauri::command(rename_all = "camelCase")]
-async fn send_workspace_prompt(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
-    prompt: String,
-) -> Result<String, String> {
-    let store = get_store(&store)?;
-
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
-
-    if branch.branch_type != store::BranchType::Remote {
-        return Err("Cannot send workspace prompt to a local branch".into());
-    }
-
-    let ws_name = branch
-        .workspace_name
-        .as_deref()
-        .ok_or("Branch has no workspace name")?;
-
-    // Check that the workspace is running
-    if branch.workspace_status != Some(store::WorkspaceStatus::Running) {
-        return Err(format!(
-            "Workspace is not running (status: {})",
-            branch
-                .workspace_status
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("unknown")
-        ));
-    }
-
-    blox::ws_prompt(ws_name, &prompt).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1079,6 +1049,26 @@ fn get_branch_timeline(
         notes,
         reviews,
     })
+}
+
+/// Convert an SSH-style git URL to HTTPS.
+///
+/// `git@github.com:owner/repo.git` → `https://github.com/owner/repo.git`
+///
+/// If the URL is already HTTPS (or unrecognised), return it unchanged.
+fn ssh_url_to_https(url: &str) -> String {
+    let url = url.trim();
+    // Match: [user@]host:path (SSH shorthand used by GitHub, GitLab, etc.)
+    if let Some(colon) = url.find(':') {
+        let before_colon = &url[..colon];
+        // Must contain '@' and no '/' (to distinguish from https://…)
+        if before_colon.contains('@') && !before_colon.contains('/') {
+            let host = before_colon.rsplit('@').next().unwrap_or(before_colon);
+            let path = &url[colon + 1..];
+            return format!("https://{host}/{path}");
+        }
+    }
+    url.to_string()
 }
 
 // =============================================================================
@@ -1482,7 +1472,6 @@ pub fn run() {
             delete_branch,
             get_workspace_info,
             poll_workspace_status,
-            send_workspace_prompt,
             list_project_actions,
             create_project_action,
             update_project_action,

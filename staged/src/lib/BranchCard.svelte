@@ -1018,10 +1018,22 @@
     border: 1px solid var(--border-muted);
     border-radius: 8px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    overflow-y: auto;
     max-height: 400px;
     z-index: 101;
     min-width: 160px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Enable scrolling for first-level submenus only (direct children of more-menu) */
+  .more-menu > .submenu-container > .submenu {
+    overflow-y: auto;
+    overflow-x: visible;
+  }
+
+  /* Nested submenus (level 2+) should not scroll, only overflow */
+  .submenu .submenu {
+    overflow: visible;
   }
 
   :global(.branch-icon) {

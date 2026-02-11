@@ -61,8 +61,9 @@ jobs:
           cd .. && cargo fmt --all --check
           cd staged/src-tauri && cargo fmt --check
 
-      - name: Clippy and check (Rust only)
-        working-directory: staged/src-tauri
+      - name: Clippy and check (Rust only - all crates)
         run: |
-          cargo clippy -- -D warnings
-          cargo check
+          cd .. && cargo clippy --all -- -D warnings
+          cd .. && cargo check --all
+          cd staged/src-tauri && cargo clippy -- -D warnings
+          cd staged/src-tauri && cargo check

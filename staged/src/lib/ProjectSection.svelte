@@ -9,6 +9,7 @@
   import type { Project, Branch } from './types';
   import { projectDisplayName } from './utils';
   import BranchCard from './BranchCard.svelte';
+  import RemoteBranchCard from './RemoteBranchCard.svelte';
   import DropdownMenu, { type MenuItem } from './DropdownMenu.svelte';
 
   interface Props {
@@ -46,11 +47,19 @@
   </div>
   <div class="branches-list">
     {#each branches as branch (branch.id)}
-      <BranchCard
-        {branch}
-        deleting={deletingBranches.has(branch.id)}
-        onDelete={() => onDeleteBranch?.(branch.id)}
-      />
+      {#if branch.branchType === 'remote'}
+        <RemoteBranchCard
+          {branch}
+          deleting={deletingBranches.has(branch.id)}
+          onDelete={() => onDeleteBranch?.(branch.id)}
+        />
+      {:else}
+        <BranchCard
+          {branch}
+          deleting={deletingBranches.has(branch.id)}
+          onDelete={() => onDeleteBranch?.(branch.id)}
+        />
+      {/if}
     {/each}
     <!-- New branch button -->
     <button class="new-branch-button" onclick={() => onNewBranch?.()}>

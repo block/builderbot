@@ -87,10 +87,105 @@ fn test_branch_crud() {
     let fetched = store.get_branch(&branch.id).unwrap().unwrap();
     assert_eq!(fetched.branch_name, "feature");
     assert_eq!(fetched.pr_number, Some(42));
+    assert_eq!(fetched.branch_type, BranchType::Local);
+    assert!(fetched.workspace_name.is_none());
+    assert!(fetched.workspace_status.is_none());
+    assert!(fetched.agent.is_none());
 
     store.update_branch_base(&branch.id, "develop").unwrap();
     let updated = store.get_branch(&branch.id).unwrap().unwrap();
     assert_eq!(updated.base_branch, "develop");
+}
+
+#[test]
+fn test_remote_branch_crud() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let branch = Branch::new_remote(
+        &project.id,
+        "remote-feature",
+        "main",
+        "my-workspace",
+        "goose",
+    );
+    store.create_branch(&branch).unwrap();
+
+    let fetched = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(fetched.branch_name, "remote-feature");
+    assert_eq!(fetched.branch_type, BranchType::Remote);
+    assert_eq!(fetched.workspace_name.as_deref(), Some("my-workspace"));
+    assert_eq!(fetched.workspace_status, Some(WorkspaceStatus::Starting));
+    assert_eq!(fetched.agent.as_deref(), Some("goose"));
+}
+
+#[test]
+fn test_update_workspace_status() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let branch = Branch::new_remote(
+        &project.id,
+        "remote-feature",
+        "main",
+        "my-workspace",
+        "goose",
+    );
+    store.create_branch(&branch).unwrap();
+
+    // Starts as Starting
+    let fetched = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(fetched.workspace_status, Some(WorkspaceStatus::Starting));
+
+    // Transition to Running
+    store
+        .update_branch_workspace_status(&branch.id, &WorkspaceStatus::Running)
+        .unwrap();
+    let running = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(running.workspace_status, Some(WorkspaceStatus::Running));
+
+    // Transition to Stopped
+    store
+        .update_branch_workspace_status(&branch.id, &WorkspaceStatus::Stopped)
+        .unwrap();
+    let stopped = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(stopped.workspace_status, Some(WorkspaceStatus::Stopped));
+
+    // Transition to Error
+    store
+        .update_branch_workspace_status(&branch.id, &WorkspaceStatus::Error)
+        .unwrap();
+    let errored = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(errored.workspace_status, Some(WorkspaceStatus::Error));
+}
+
+#[test]
+fn test_list_branches_includes_both_types() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("/tmp/test-repo");
+    store.create_project(&project).unwrap();
+
+    let local = Branch::new(&project.id, "local-feature", "main");
+    let remote = Branch::new_remote(&project.id, "remote-feature", "main", "ws-1", "goose");
+    store.create_branch(&local).unwrap();
+    store.create_branch(&remote).unwrap();
+
+    let branches = store.list_branches_for_project(&project.id).unwrap();
+    assert_eq!(branches.len(), 2);
+
+    let local_branch = branches
+        .iter()
+        .find(|b| b.branch_name == "local-feature")
+        .unwrap();
+    let remote_branch = branches
+        .iter()
+        .find(|b| b.branch_name == "remote-feature")
+        .unwrap();
+    assert_eq!(local_branch.branch_type, BranchType::Local);
+    assert_eq!(remote_branch.branch_type, BranchType::Remote);
+    assert_eq!(remote_branch.workspace_name.as_deref(), Some("ws-1"));
 }
 
 #[test]

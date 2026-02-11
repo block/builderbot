@@ -12,12 +12,19 @@ export interface Project {
   updatedAt: number;
 }
 
+export type BranchType = 'local' | 'remote';
+export type WorkspaceStatus = 'starting' | 'running' | 'stopped' | 'error';
+
 export interface Branch {
   id: string;
   projectId: string;
   branchName: string;
   baseBranch: string;
   prNumber: number | null;
+  branchType: BranchType;
+  workspaceName: string | null;
+  workspaceStatus: WorkspaceStatus | null;
+  agent: string | null;
   worktreePath: string | null;
   createdAt: number;
   updatedAt: number;
@@ -199,6 +206,17 @@ export interface Review {
   referenceFiles: string[];
   createdAt: number;
   updatedAt: number;
+}
+
+// =============================================================================
+// Blox workspace types
+// =============================================================================
+
+/** Workspace info returned from `blox ws info`. */
+export interface WorkspaceInfo {
+  name: string;
+  status: string | null;
+  [key: string]: unknown;
 }
 
 // =============================================================================

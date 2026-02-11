@@ -1,13 +1,23 @@
 <!--
-  NewBranchModal.svelte - Create a new branch with worktree
+  NewBranchModal.svelte - Create a new branch (local worktree or remote Blox workspace)
 
-  Simple version: branch name input + auto-sanitize + base branch picker + create.
-  Skipped: repo picker (always scoped to a project), PR/issue workflows.
+  Two modes toggled by a segmented control:
+  - Local: branch name + base branch picker → creates git worktree
+  - Remote: branch name + agent picker → starts a Blox workspace
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { X, GitBranch, Search, ChevronsUpDown, Check, Loader2 } from 'lucide-svelte';
-  import type { Branch, Project } from './types';
+  import {
+    X,
+    GitBranch,
+    Search,
+    ChevronsUpDown,
+    Check,
+    Loader2,
+    Monitor,
+    Cloud,
+  } from 'lucide-svelte';
+  import type { Branch, Project, BranchType } from './types';
   import * as commands from './commands';
 
   interface Props {
@@ -17,6 +27,9 @@
   }
 
   let { project, onCreated, onClose }: Props = $props();
+
+  // Branch type toggle
+  let branchType = $state<BranchType>('local');
 
   // State
   let branchTitle = $state('');
@@ -32,6 +45,13 @@
   let availableBranches = $state<string[]>([]);
   let baseSearchQuery = $state('');
   let baseSelectedIndex = $state(0);
+
+  // Agent picker (remote only)
+  let selectedAgent = $state('goose');
+  const agents = [
+    { id: 'goose', label: 'Goose' },
+    { id: 'claude', label: 'Claude' },
+  ];
 
   let branchInputEl: HTMLInputElement | null = $state(null);
   let baseSearchEl: HTMLInputElement | null = $state(null);
@@ -57,6 +77,14 @@
   }
 
   let branchName = $derived(sanitizeBranchName(branchTitle));
+
+  /** Generate a workspace name from the branch name. */
+  function workspaceName(name: string): string {
+    if (!name) return '';
+    // Prefix with repo name for uniqueness
+    const repo = repoName(project.repoPath);
+    return `${repo}-${name}`;
+  }
 
   onMount(async () => {
     // Detect default branch
@@ -109,9 +137,22 @@
     error = null;
 
     try {
-      const baseBranch = selectedBaseBranch ?? undefined;
-      const branch = await commands.createBranch(project.id, branchName.trim(), baseBranch);
-      onCreated(branch);
+      if (branchType === 'local') {
+        const baseBranch = selectedBaseBranch ?? undefined;
+        const branch = await commands.createBranch(project.id, branchName.trim(), baseBranch);
+        onCreated(branch);
+      } else {
+        const wsName = workspaceName(branchName.trim());
+        const branch = await commands.createRemoteBranch(
+          project.id,
+          branchName.trim(),
+          wsName,
+          selectedBaseBranch ?? undefined,
+          selectedAgent,
+          project.repoPath
+        );
+        onCreated(branch);
+      }
     } catch (e) {
       if (typeof e === 'string') {
         error = e;
@@ -190,21 +231,62 @@
     </div>
 
     <div class="modal-body">
+      <!-- Branch type toggle -->
+      <div class="type-toggle">
+        <button
+          class="toggle-option"
+          class:active={branchType === 'local'}
+          onclick={() => (branchType = 'local')}
+        >
+          <Monitor size={14} />
+          Local
+        </button>
+        <button
+          class="toggle-option"
+          class:active={branchType === 'remote'}
+          onclick={() => (branchType = 'remote')}
+        >
+          <Cloud size={14} />
+          Remote
+        </button>
+      </div>
+
       <div class="selected-info">
         <div class="info-row">
           <GitBranch size={14} />
           <span class="info-label">Repository:</span>
           <span class="info-value">{repoName(project.repoPath)}</span>
         </div>
-        <button class="info-row base-row" onclick={toggleBasePicker}>
-          <GitBranch size={14} class="base-icon" />
-          <span class="info-label">Base:</span>
-          <span class="info-value">{formatBranchName(effectiveBaseBranch)}</span>
-          <ChevronsUpDown size={12} class="base-chevron" />
-        </button>
+        {#if branchType === 'local'}
+          <button class="info-row base-row" onclick={toggleBasePicker}>
+            <GitBranch size={14} class="base-icon" />
+            <span class="info-label">Base:</span>
+            <span class="info-value">{formatBranchName(effectiveBaseBranch)}</span>
+            <ChevronsUpDown size={12} class="base-chevron" />
+          </button>
+        {:else}
+          <div class="info-row">
+            <Cloud size={14} />
+            <span class="info-label">Agent:</span>
+            <div class="agent-picker">
+              {#each agents as agent (agent.id)}
+                <button
+                  class="agent-option"
+                  class:selected={selectedAgent === agent.id}
+                  onclick={() => (selectedAgent = agent.id)}
+                >
+                  {agent.label}
+                  {#if selectedAgent === agent.id}
+                    <Check size={12} />
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
 
-      {#if showBasePicker}
+      {#if showBasePicker && branchType === 'local'}
         <!-- Base branch picker -->
         <div class="base-picker">
           <div class="base-search-container">
@@ -243,7 +325,7 @@
             bind:value={branchTitle}
             id="branch-title"
             type="text"
-            placeholder="Fix login issue"
+            placeholder={branchType === 'local' ? 'Fix login issue' : 'Add user auth'}
             class="branch-input"
             autocomplete="off"
             autocorrect="off"
@@ -254,6 +336,12 @@
             <div class="branch-preview">
               <GitBranch size={12} />
               <span>{branchName || '...'}</span>
+            </div>
+          {/if}
+          {#if branchType === 'remote' && branchName}
+            <div class="workspace-preview">
+              <Cloud size={12} />
+              <span>Workspace: {workspaceName(branchName)}</span>
             </div>
           {/if}
         </div>
@@ -267,9 +355,11 @@
           <button class="create-button" onclick={handleCreate} disabled={!branchName || creating}>
             {#if creating}
               <Loader2 size={14} class="spinner" />
-              Creating...
-            {:else}
+              {branchType === 'local' ? 'Creating...' : 'Starting...'}
+            {:else if branchType === 'local'}
               Create Branch
+            {:else}
+              Start Workspace
             {/if}
           </button>
         </div>
@@ -343,6 +433,46 @@
     gap: 16px;
   }
 
+  /* Branch type toggle */
+  .type-toggle {
+    display: flex;
+    gap: 2px;
+    padding: 3px;
+    background-color: var(--bg-hover);
+    border-radius: 8px;
+  }
+
+  .toggle-option {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 7px 12px;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    font-size: var(--size-sm);
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .toggle-option:hover:not(.active) {
+    color: var(--text-primary);
+  }
+
+  .toggle-option.active {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  }
+
+  .toggle-option :global(svg) {
+    flex-shrink: 0;
+  }
+
   .selected-info {
     display: flex;
     flex-direction: column;
@@ -398,6 +528,43 @@
 
   .base-row:hover :global(.base-chevron) {
     color: var(--text-muted);
+  }
+
+  /* Agent picker */
+  .agent-picker {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  .agent-option {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    background: transparent;
+    border: 1px solid var(--border-subtle);
+    border-radius: 4px;
+    font-size: var(--size-xs);
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .agent-option:hover:not(.selected) {
+    border-color: var(--border-muted);
+    color: var(--text-primary);
+  }
+
+  .agent-option.selected {
+    border-color: var(--ui-accent);
+    color: var(--ui-accent);
+    background-color: rgba(63, 185, 80, 0.06);
+  }
+
+  .agent-option :global(svg) {
+    color: var(--ui-accent);
   }
 
   /* Base branch picker */
@@ -530,6 +697,24 @@
   .branch-preview span {
     font-family: 'SF Mono', 'Menlo', monospace;
     color: var(--text-muted);
+  }
+
+  .workspace-preview {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+  }
+
+  .workspace-preview :global(svg) {
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+
+  .workspace-preview span {
+    font-family: 'SF Mono', 'Menlo', monospace;
   }
 
   .error-message {

@@ -20,6 +20,7 @@ import type {
   File,
   Review,
   Comment,
+  WorkspaceInfo,
 } from './types';
 
 // =============================================================================
@@ -68,8 +69,42 @@ export function createBranch(
   return invoke('create_branch', { projectId, branchName, baseBranch });
 }
 
+/** Create a remote branch backed by a Blox workspace. */
+export function createRemoteBranch(
+  projectId: string,
+  branchName: string,
+  workspaceName: string,
+  baseBranch?: string,
+  agent?: string,
+  source?: string
+): Promise<Branch> {
+  return invoke('create_remote_branch', {
+    projectId,
+    branchName,
+    baseBranch,
+    workspaceName,
+    agent,
+    source,
+  });
+}
+
 export function deleteBranch(branchId: string): Promise<void> {
   return invoke('delete_branch', { branchId });
+}
+
+/** Get info about a remote branch's Blox workspace. */
+export function getWorkspaceInfo(branchId: string): Promise<WorkspaceInfo> {
+  return invoke('get_workspace_info', { branchId });
+}
+
+/** Poll a remote branch's workspace status, update the DB, and return the new status string. */
+export function pollWorkspaceStatus(branchId: string): Promise<string> {
+  return invoke('poll_workspace_status', { branchId });
+}
+
+/** Send a prompt to a remote branch's running workspace agent. Returns the agent's response. */
+export function sendWorkspacePrompt(branchId: string, prompt: string): Promise<string> {
+  return invoke('send_workspace_prompt', { branchId, prompt });
 }
 
 // =============================================================================

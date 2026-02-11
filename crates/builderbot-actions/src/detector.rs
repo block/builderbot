@@ -43,13 +43,17 @@ The response must be a JSON array of action objects. Each action object must hav
 - source: string (which file this was detected from, e.g., "package.json", "justfile")
 
 Action type guidelines:
-- "prerun": Commands that should run automatically on worktree creation (like "npm install", "yarn", "pnpm install")
+- "prerun": Commands that should run automatically on worktree creation (like "npm install", "yarn", "pnpm install", "lefthook install")
 - "build": Commands that compile or build the project (like "npm run build", "cargo build", "just build", "make build")
 - "format": Commands that auto-fix code (like "just fmt", "just lint-fix", "prettier --write", "cargo fmt", "ruff format")
 - "check": Commands that validate without modifying (like "eslint", "cargo clippy", "mypy")
 - "test": Commands that run tests (like "npm test", "cargo test", "pytest")
 - "cleanUp": Commands that clean up build artifacts (like "npm run clean", "cargo clean", "rm -rf dist")
 - "run": Development servers and other commands (like "npm run dev", "npm start", "just run", "storybook")
+
+Special instructions for lefthook:
+- If lefthook.yml is present in the project, ALWAYS include "lefthook install" as a prerun action
+- This ensures git hooks are properly installed in each new worktree
 
 Action ordering (list most important first):
 - Primary dev commands should come first (like "dev", "start")
@@ -81,6 +85,13 @@ Return ONLY a JSON array with detected actions. Example (ordered by importance):
     "actionType": "prerun",
     "autoCommit": false,
     "source": "package.json"
+  },
+  {
+    "name": "Install Lefthook",
+    "command": "lefthook install",
+    "actionType": "prerun",
+    "autoCommit": false,
+    "source": "lefthook.yml"
   },
   {
     "name": "Dev",
@@ -198,6 +209,7 @@ fn collect_relevant_files(dir: &Path) -> Result<String> {
         "eslint.config.js",
         ".prettierrc",
         ".prettierrc.json",
+        "lefthook.yml",
     ];
 
     let mut contents = Vec::new();

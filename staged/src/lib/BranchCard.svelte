@@ -125,7 +125,7 @@
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenActionStatus: UnlistenFn | null = null;
 
-  // Set up event listeners immediately (synchronously) at module level like old codebase
+  // Set up event listeners immediately (synchronously) at module level
   listen<{
     sessionId: string;
     status: string;

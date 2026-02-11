@@ -129,7 +129,7 @@
   $effect(() => {
     const branchId = branch.id;
     const branchName = branch.branchName;
-    console.log('[BranchCard] Setting up listeners for branch:', branchId, branchName);
+    console.log('[BranchCard] Setting up listeners for branch:', () => branchId, () => branchName);
 
     listen<{
       sessionId: string;
@@ -141,7 +141,7 @@
       }
     }).then((unlisten) => {
       unlistenStatus = unlisten;
-      console.log('[BranchCard] Session status listener registered for:', branchId);
+      console.log('[BranchCard] Session status listener registered for:', () => branchId);
     });
 
     listen<ActionStatusEvent>('action_status', (event) => {
@@ -154,14 +154,14 @@
           '[BranchCard] Ignoring event for different branch:',
           payload.branchId,
           'vs',
-          branchId
+          () => branchId
         );
         return;
       }
 
       console.log(
         '[BranchCard] Processing action_status for branch:',
-        branchId,
+        () => branchId,
         'status:',
         payload.status
       );
@@ -222,7 +222,7 @@
       }
     }).then((unlisten) => {
       unlistenActionStatus = unlisten;
-      console.log('[BranchCard] Action status listener registered for:', branchId);
+      console.log('[BranchCard] Action status listener registered for:', () => branchId);
     });
 
     return () => {

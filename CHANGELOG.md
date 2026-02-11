@@ -1,12 +1,5 @@
 # Changelog
 
-## Feb 10, 2026
-
-- **[RP1](https://rp1.run) support** — Auto-detects `.rp1` trees and organizes files by type (features, issues, context, quick builds) with grouped display and badges
-- **Bulk action improvements** — Select multiple files or entire sources to delete or manage in bulk, with a selection bar showing singular/plural counts
-- **Fix: comment anchoring** — Comments on markdown with bold, italic, or link formatting now anchor correctly
-- **Fix: stable dev port** — Dev server keeps a stable port instead of hopping on restart
-
 ## Feb 9, 2026
 
 - **Publish to Blockcell** — Publish any document as a standalone HTML site with TOC sidebar, Mermaid diagram support, and a copy-markdown button

@@ -616,6 +616,93 @@ async fn get_workspace_info(
     blox::ws_info(&ws_name).map_err(|e| e.to_string())
 }
 
+/// Poll a remote branch's workspace status, update the DB, and return the new status.
+///
+/// This is the primary mechanism for the frontend to detect when a workspace
+/// transitions from `Starting` to `Running` (or `Error`). It queries the
+/// Blox CLI, maps the reported status to our `WorkspaceStatus` enum, persists
+/// the change, and returns the updated status string.
+#[tauri::command(rename_all = "camelCase")]
+async fn poll_workspace_status(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+
+    let ws_name = branch
+        .workspace_name
+        .as_deref()
+        .ok_or("Branch is not a remote workspace branch")?;
+
+    let info = blox::ws_info(ws_name).map_err(|e| e.to_string())?;
+
+    // Map the CLI-reported status to our enum
+    let new_status = match info.status.as_deref() {
+        Some("running") | Some("Running") => store::WorkspaceStatus::Running,
+        Some("stopped") | Some("Stopped") => store::WorkspaceStatus::Stopped,
+        Some("starting") | Some("Starting") | Some("provisioning") | Some("Provisioning") => {
+            store::WorkspaceStatus::Starting
+        }
+        Some("error") | Some("Error") | Some("failed") | Some("Failed") => {
+            store::WorkspaceStatus::Error
+        }
+        // If the CLI returns an unrecognized status, keep it as Starting
+        // (optimistic — the workspace may still be booting)
+        _ => store::WorkspaceStatus::Starting,
+    };
+
+    store
+        .update_branch_workspace_status(&branch_id, &new_status)
+        .map_err(|e| e.to_string())?;
+
+    Ok(new_status.as_str().to_string())
+}
+
+/// Send a prompt to a remote branch's Blox workspace agent.
+///
+/// The workspace must be in `Running` status. Returns the agent's response text.
+#[tauri::command(rename_all = "camelCase")]
+async fn send_workspace_prompt(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    prompt: String,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+
+    if branch.branch_type != store::BranchType::Remote {
+        return Err("Cannot send workspace prompt to a local branch".into());
+    }
+
+    let ws_name = branch
+        .workspace_name
+        .as_deref()
+        .ok_or("Branch has no workspace name")?;
+
+    // Check that the workspace is running
+    if branch.workspace_status != Some(store::WorkspaceStatus::Running) {
+        return Err(format!(
+            "Workspace is not running (status: {})",
+            branch
+                .workspace_status
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("unknown")
+        ));
+    }
+
+    blox::ws_prompt(ws_name, &prompt).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn delete_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -1310,6 +1397,8 @@ pub fn run() {
             create_remote_branch,
             delete_branch,
             get_workspace_info,
+            poll_workspace_status,
+            send_workspace_prompt,
             get_branch_timeline,
             delete_note,
             delete_commit,

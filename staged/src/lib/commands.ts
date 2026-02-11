@@ -97,6 +97,16 @@ export function getWorkspaceInfo(branchId: string): Promise<WorkspaceInfo> {
   return invoke('get_workspace_info', { branchId });
 }
 
+/** Poll a remote branch's workspace status, update the DB, and return the new status string. */
+export function pollWorkspaceStatus(branchId: string): Promise<string> {
+  return invoke('poll_workspace_status', { branchId });
+}
+
+/** Send a prompt to a remote branch's running workspace agent. Returns the agent's response. */
+export function sendWorkspacePrompt(branchId: string, prompt: string): Promise<string> {
+  return invoke('send_workspace_prompt', { branchId, prompt });
+}
+
 // =============================================================================
 // Timeline
 // =============================================================================

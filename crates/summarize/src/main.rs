@@ -51,14 +51,19 @@ async fn main() -> Result<()> {
     // Resolve prompt
     let prompt = match (&cli.prompt, &cli.prompt_file) {
         (Some(text), _) => text.clone(),
-        (_, Some(path)) => std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("Failed to read prompt file '{}': {}", path.display(), e))?,
+        (_, Some(path)) => std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!("Failed to read prompt file '{}': {}", path.display(), e)
+        })?,
         (None, None) => anyhow::bail!("Must provide either --prompt or --prompt-file"),
     };
 
     // Collect files
     let working_dir = std::env::current_dir()?;
-    let extensions = if cli.ext.is_empty() { None } else { Some(cli.ext) };
+    let extensions = if cli.ext.is_empty() {
+        None
+    } else {
+        Some(cli.ext)
+    };
     let collected = files::collect_files(&cli.paths, &working_dir, &extensions)
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -69,10 +74,7 @@ async fn main() -> Result<()> {
     let total_lines: usize = collected.iter().map(|f| f.lines).sum();
     let file_count = collected.len();
 
-    eprintln!(
-        "Collected {} files ({} lines)",
-        file_count, total_lines
-    );
+    eprintln!("Collected {} files ({} lines)", file_count, total_lines);
 
     // Build the full prompt with file contents
     let full_prompt = files::build_prompt(&collected, &prompt, &working_dir);
@@ -90,7 +92,10 @@ async fn main() -> Result<()> {
     match cli.output {
         OutputFormat::Text => {
             println!("{}", response);
-            eprintln!("\n---\nAnalyzed {} files ({} lines)", file_count, total_lines);
+            eprintln!(
+                "\n---\nAnalyzed {} files ({} lines)",
+                file_count, total_lines
+            );
         }
         OutputFormat::Json => {
             let output = serde_json::json!({

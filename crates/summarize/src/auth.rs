@@ -52,10 +52,11 @@ impl Auth {
             }
         }
 
-        let host = std::env::var("DATABRICKS_HOST")
-            .map_err(|_| anyhow::anyhow!(
+        let host = std::env::var("DATABRICKS_HOST").map_err(|_| {
+            anyhow::anyhow!(
                 "Must set either DATABRICKS_TOKEN or DATABRICKS_HOST environment variable"
-            ))?;
+            )
+        })?;
 
         if host.is_empty() {
             anyhow::bail!("DATABRICKS_HOST is empty");
@@ -223,12 +224,11 @@ impl OAuthFlow {
             .map(|s| s.to_string())
             .or_else(|| old_refresh_token.map(|s| s.to_string()));
 
-        let expires_at =
-            if let Some(expires_in) = resp.get("expires_in").and_then(|v| v.as_u64()) {
-                Some(Utc::now() + chrono::Duration::seconds(expires_in as i64))
-            } else {
-                None
-            };
+        let expires_at = if let Some(expires_in) = resp.get("expires_in").and_then(|v| v.as_u64()) {
+            Some(Utc::now() + chrono::Duration::seconds(expires_in as i64))
+        } else {
+            None
+        };
 
         Ok(TokenData {
             access_token,

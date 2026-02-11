@@ -3,6 +3,7 @@
 //! Tauri commands for the new frontend, built incrementally.
 //! See `src-archive/lib.rs` for the previous implementation.
 
+pub mod actions;
 pub mod agent;
 pub mod blox;
 pub mod git;
@@ -752,6 +753,88 @@ async fn delete_branch(
 }
 
 // =============================================================================
+// Project Actions commands
+// =============================================================================
+
+#[tauri::command]
+fn list_project_actions(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+) -> Result<Vec<store::models::ProjectAction>, String> {
+    let store = get_store(&store)?;
+    store
+        .list_project_actions(&project_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn create_project_action(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    name: String,
+    command: String,
+    action_type: String,
+    sort_order: i32,
+    auto_commit: bool,
+) -> Result<store::models::ProjectAction, String> {
+    let store = get_store(&store)?;
+    let parsed_type = builderbot_actions::ActionType::parse(&action_type)
+        .ok_or_else(|| format!("Invalid action type: {}", action_type))?;
+    let action =
+        store::models::ProjectAction::new(project_id, name, command, parsed_type, sort_order)
+            .with_auto_commit(auto_commit);
+    store
+        .create_project_action(&action)
+        .map_err(|e| e.to_string())?;
+    Ok(action)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn update_project_action(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    action_id: String,
+    name: String,
+    command: String,
+    action_type: String,
+    sort_order: i32,
+    auto_commit: bool,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    let action = store
+        .get_project_action(&action_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Action not found: {}", action_id))?;
+
+    let updated = store::models::ProjectAction {
+        id: action.id,
+        project_id: action.project_id,
+        name,
+        command,
+        action_type: builderbot_actions::ActionType::parse(&action_type)
+            .ok_or_else(|| format!("Invalid action type: {}", action_type))?,
+        sort_order,
+        auto_commit,
+        created_at: action.created_at,
+        updated_at: store::now_timestamp(),
+    };
+
+    store
+        .update_project_action(&updated)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn delete_project_action(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    action_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    store
+        .delete_project_action(&action_id)
+        .map_err(|e| e.to_string())
+}
+
+// =============================================================================
 // Timeline commands
 // =============================================================================
 
@@ -1368,6 +1451,7 @@ pub fn run() {
 
             app.manage(store_slot);
             app.manage(Arc::new(session_runner::SessionRegistry::new()));
+            app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(DbState {
                 db_path,
                 needs_reset: Mutex::new(reset_info),
@@ -1399,6 +1483,10 @@ pub fn run() {
             get_workspace_info,
             poll_workspace_status,
             send_workspace_prompt,
+            list_project_actions,
+            create_project_action,
+            update_project_action,
+            delete_project_action,
             get_branch_timeline,
             delete_note,
             delete_commit,
@@ -1415,6 +1503,13 @@ pub fn run() {
             session_commands::cancel_session,
             session_commands::delete_session,
             session_commands::start_branch_session,
+            // Actions
+            actions::commands::detect_project_actions,
+            actions::commands::run_branch_action,
+            actions::commands::stop_branch_action,
+            actions::commands::get_running_branch_actions,
+            actions::commands::get_action_output_buffer,
+            actions::commands::run_prerun_actions,
             // Diff
             get_diff_files,
             get_file_diff,

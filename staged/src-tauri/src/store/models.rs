@@ -474,45 +474,8 @@ impl Note {
 // Project Actions
 // =============================================================================
 
-/// Action types for project actions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ActionType {
-    Build,
-    Test,
-    Format,
-    Lint,
-    Typecheck,
-    Prerun,
-    Custom,
-}
-
-impl ActionType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Build => "build",
-            Self::Test => "test",
-            Self::Format => "format",
-            Self::Lint => "lint",
-            Self::Typecheck => "typecheck",
-            Self::Prerun => "prerun",
-            Self::Custom => "custom",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "build" => Some(Self::Build),
-            "test" => Some(Self::Test),
-            "format" => Some(Self::Format),
-            "lint" => Some(Self::Lint),
-            "typecheck" => Some(Self::Typecheck),
-            "prerun" => Some(Self::Prerun),
-            "custom" => Some(Self::Custom),
-            _ => None,
-        }
-    }
-}
+/// Re-export ActionType from builderbot-actions crate as the single source of truth.
+pub use builderbot_actions::ActionType;
 
 /// A configurable project action (build, test, format, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]

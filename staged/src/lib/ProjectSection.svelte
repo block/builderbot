@@ -5,12 +5,13 @@
   Includes a "New Branch" dashed button at the bottom.
 -->
 <script lang="ts">
-  import { Folder, Trash2, Plus } from 'lucide-svelte';
+  import { Folder, Trash2, Plus, Settings } from 'lucide-svelte';
   import type { Project, Branch } from './types';
   import { projectDisplayName } from './utils';
   import BranchCard from './BranchCard.svelte';
   import RemoteBranchCard from './RemoteBranchCard.svelte';
   import DropdownMenu, { type MenuItem } from './DropdownMenu.svelte';
+  import ProjectSettingsModal from './ProjectSettingsModal.svelte';
 
   interface Props {
     project: Project;
@@ -30,7 +31,16 @@
     onNewBranch,
   }: Props = $props();
 
+  let showProjectSettings = $state(false);
+
   const projectMenuItems: MenuItem[] = [
+    {
+      label: 'Actions',
+      icon: Settings,
+      action: () => {
+        showProjectSettings = true;
+      },
+    },
     { label: 'Remove Project', icon: Trash2, danger: true, action: () => onDeleteProject?.() },
   ];
 </script>
@@ -68,6 +78,15 @@
     </button>
   </div>
 </div>
+
+{#if showProjectSettings}
+  <ProjectSettingsModal
+    {project}
+    onClose={() => {
+      showProjectSettings = false;
+    }}
+  />
+{/if}
 
 <style>
   .project-section {

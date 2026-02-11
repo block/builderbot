@@ -91,7 +91,7 @@ impl Store {
             project_id: row.get(1)?,
             name: row.get(2)?,
             command: row.get(3)?,
-            action_type: ActionType::parse(&action_type_str).unwrap_or(ActionType::Custom),
+            action_type: ActionType::parse(&action_type_str).unwrap_or(ActionType::Run),
             sort_order: row.get(5)?,
             auto_commit: auto_commit != 0,
             created_at: row.get(7)?,

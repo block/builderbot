@@ -19,6 +19,7 @@
   } from 'lucide-svelte';
   import type { Branch, Project, BranchType } from './types';
   import * as commands from './commands';
+  import { runPrerunActions } from './services/actions';
 
   interface Props {
     project: Project;
@@ -140,7 +141,27 @@
       if (branchType === 'local') {
         const baseBranch = selectedBaseBranch ?? undefined;
         const branch = await commands.createBranch(project.id, branchName.trim(), baseBranch);
+
+        console.log('[NewBranchModal] Branch created:', branch.id, branch.branchName);
+
+        // Capture values before modal closes
+        const branchId = branch.id;
+        const projectId = project.id;
+
         onCreated(branch);
+
+        // Wait for BranchCard to be created and listeners to be set up
+        // The BranchCard sets up listeners at module level, but the component needs to be created first
+        setTimeout(() => {
+          console.log('[NewBranchModal] Starting prerun actions for branch:', branchId);
+          runPrerunActions(branchId, projectId)
+            .then((executionIds) => {
+              console.log('[NewBranchModal] Prerun actions started, execution IDs:', executionIds);
+            })
+            .catch((e) => {
+              console.error('[NewBranchModal] Failed to run prerun actions:', e);
+            });
+        }, 150);
       } else {
         const wsName = workspaceName(branchName.trim());
         const branch = await commands.createRemoteBranch(

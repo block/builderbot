@@ -70,14 +70,14 @@ check_prerequisites() {
 
 # Clone repository
 clone_repo() {
-    REPO_URL="https://github.com/baxen/staged.git"
+    REPO_URL="https://github.com/block/builderbot.git"
     TEMP_DIR=$(mktemp -d)
 
     print_info "Cloning repository to $TEMP_DIR..."
 
     if git clone --depth 1 "$REPO_URL" "$TEMP_DIR" > /dev/null 2>&1; then
         print_success "Repository cloned"
-        cd "$TEMP_DIR"
+        cd "$TEMP_DIR/staged"
     else
         print_error "Failed to clone repository"
         exit 1

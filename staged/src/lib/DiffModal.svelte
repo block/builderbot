@@ -12,6 +12,7 @@
   - reviewState: lazy review creation, comments, reviewed paths, reference files
 -->
 <script lang="ts">
+  import { onMount } from 'svelte';
   import {
     X,
     Loader2,
@@ -303,6 +304,11 @@
       onClose();
     }
   }
+
+  onMount(() => {
+    document.addEventListener('keydown', handleKeydown);
+    return () => document.removeEventListener('keydown', handleKeydown);
+  });
 </script>
 
 {#snippet fileIcon(file: FileEntry, showReviewedSection: boolean)}
@@ -424,22 +430,9 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="diff-modal-backdrop" onkeydown={handleKeydown}>
   <div class="diff-modal">
-    <!-- Header -->
-    <div class="modal-header">
-      <div class="header-info">
-        <span class="file-count">
-          {diffViewer.state.files.length} file{diffViewer.state.files.length !== 1 ? 's' : ''} changed
-        </span>
-        {#if currentComments.length}
-          <span class="comment-count">
-            · {currentComments.length} comment{currentComments.length !== 1 ? 's' : ''}
-          </span>
-        {/if}
-      </div>
-      <button class="close-btn" onclick={onClose} title="Close (Esc)">
-        <X size={18} />
-      </button>
-    </div>
+    <button class="close-btn" onclick={onClose} title="Close (Esc)">
+      <X size={18} />
+    </button>
 
     <div class="modal-body">
       <!-- Diff viewer -->
@@ -619,56 +612,38 @@
     z-index: 1000;
     background-color: rgba(0, 0, 0, 0.6);
     display: flex;
-    align-items: center;
+    align-items: stretch;
     justify-content: center;
-    padding: 24px;
+    padding: 40px 0 0 0;
   }
 
   .diff-modal {
     display: flex;
     flex-direction: column;
+    position: relative;
     width: 100%;
     height: 100%;
-    max-width: calc(100vw - 48px);
-    max-height: calc(100vh - 48px);
     background-color: var(--bg-chrome);
-    border-radius: 12px;
-    border: 1px solid var(--border-muted);
+    border-radius: 0;
+    border: none;
     box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
     overflow: hidden;
   }
 
   /* ========================================================================
-   * Header
+   * Close button (floating top-right)
    * ====================================================================== */
 
-  .modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 16px;
-    border-bottom: 1px solid var(--border-subtle);
-    flex-shrink: 0;
-  }
-
-  .header-info {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--size-sm);
-    color: var(--text-muted);
-  }
-
-  .comment-count {
-    color: var(--text-faint);
-  }
-
   .close-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 10;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 6px;
-    background: none;
+    background: var(--bg-chrome);
     border: none;
     border-radius: 6px;
     color: var(--text-muted);
@@ -701,7 +676,7 @@
   .file-sidebar {
     width: 240px;
     flex-shrink: 0;
-    border-left: 1px solid var(--border-subtle);
+    border-left: none;
     overflow-y: auto;
     overflow-x: hidden;
   }

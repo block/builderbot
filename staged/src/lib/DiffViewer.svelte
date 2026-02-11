@@ -16,7 +16,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { MessageSquarePlus, MessageSquare, X } from 'lucide-svelte';
+  import { MessageSquarePlus, MessageSquare, X, FileText, Code } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from './sanitize';
   import type { FileDiff, Alignment, Comment, Span, SmartDiffAnnotation } from './types';
@@ -28,6 +28,7 @@
     type Token,
   } from './services/highlighter';
   import { createScrollController } from './services/scrollController.svelte';
+  import { setupMarkdownScrollSync } from './services/markdownScrollSync';
   import {
     ConnectorRendererCanvas,
     type CommentHighlightInfo,
@@ -99,6 +100,8 @@
   let afterPane: HTMLDivElement | null = $state(null);
   let connectorCanvas: HTMLCanvasElement | null = $state(null);
   let diffViewerEl: HTMLDivElement | null = $state(null);
+  let beforeMarkdownArea: HTMLDivElement | null = $state(null);
+  let afterMarkdownArea: HTMLDivElement | null = $state(null);
 
   /** Tracked width of afterPane for annotation overlays. */
   let afterPaneWidth = $state(0);
@@ -610,6 +613,14 @@
     if (diff && connectorCanvas) {
       scheduleConnectorRedraw();
     }
+  });
+
+  // Proportional scroll sync for markdown preview mode
+  $effect(() => {
+    if (!(isMarkdownFile && markdownPreview && beforeMarkdownArea && afterMarkdownArea)) {
+      return;
+    }
+    return setupMarkdownScrollSync(beforeMarkdownArea, afterMarkdownArea);
   });
 
   // ==========================================================================
@@ -1396,7 +1407,7 @@
                 onclick={() => (markdownPreview = !markdownPreview)}
                 title={markdownPreview ? 'Show code' : 'Preview markdown'}
               >
-                {markdownPreview ? '{ }' : '📄'}
+                {#if markdownPreview}<Code size={14} />{:else}<FileText size={14} />{/if}
               </button>
             {/if}
           </div>
@@ -1404,6 +1415,7 @@
             class="code-area"
             class:markdown-mode={isMarkdownFile && markdownPreview}
             onwheel={isMarkdownFile && markdownPreview ? undefined : handleBeforeWheel}
+            bind:this={beforeMarkdownArea}
           >
             {#if isMarkdownFile && markdownPreview}
               <div class="markdown-preview-container">
@@ -1558,7 +1570,7 @@
                 onclick={() => (markdownPreview = !markdownPreview)}
                 title={markdownPreview ? 'Show code' : 'Preview markdown'}
               >
-                {markdownPreview ? '{ }' : '📄'}
+                {#if markdownPreview}<Code size={14} />{:else}<FileText size={14} />{/if}
               </button>
             {/if}
           </div>
@@ -1566,6 +1578,7 @@
             class="code-area"
             class:markdown-mode={isMarkdownFile && markdownPreview}
             onwheel={isMarkdownFile && markdownPreview ? undefined : handleAfterWheel}
+            bind:this={afterMarkdownArea}
           >
             {#if isMarkdownFile && markdownPreview}
               <div class="markdown-preview-container">
@@ -1937,7 +1950,7 @@
     gap: 8px;
     padding: 8px 12px;
     flex-shrink: 0;
-    border-bottom: 1px solid var(--border-subtle);
+    border-bottom: none;
   }
 
   .pane-label {
@@ -2270,8 +2283,7 @@
     transform: translateY(-100%);
     z-index: 100;
     background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-bottom: none;
+    border: none;
     border-radius: 4px 4px 0 0;
   }
 
@@ -2307,8 +2319,7 @@
     transform: translateY(-100%);
     z-index: 100;
     background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-bottom: none;
+    border: none;
     border-radius: 4px 4px 0 0;
     padding: 0 4px;
   }

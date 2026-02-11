@@ -70,9 +70,7 @@
 
   // Dropdown state
   let showMoreMenu = $state(false);
-  let expandedSubmenu = $state<string | null>(null);
   let showActionsSubmenu = $state(false);
-  let submenuCloseTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
   let actionsSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
 
   let timeline = $state<BranchTimelineData | null>(null);
@@ -268,22 +266,6 @@
   let remainingRunActions = $derived.by(() => {
     return groupedActions.run.slice(1);
   });
-
-  // Submenu handlers with delay to prevent flashing
-  function handleSubmenuEnter(type: string) {
-    if (submenuCloseTimeout) {
-      clearTimeout(submenuCloseTimeout);
-      submenuCloseTimeout = null;
-    }
-    expandedSubmenu = type;
-  }
-
-  function handleSubmenuLeave() {
-    submenuCloseTimeout = setTimeout(() => {
-      expandedSubmenu = null;
-      submenuCloseTimeout = null;
-    }, 100);
-  }
 
   // Actions submenu handlers
   function handleActionsSubmenuEnter() {
@@ -660,48 +642,14 @@
                         {@const typeActions =
                           type === 'run' ? remainingRunActions : groupedActions[type]}
                         {#if typeActions.length > 0}
-                          {#if typeActions.length >= 3}
-                            <!-- Submenu for 3+ actions -->
-                            <div class="submenu-container">
-                              <button
-                                class="more-menu-item submenu-trigger"
-                                onmouseenter={() => handleSubmenuEnter(type)}
-                                onmouseleave={handleSubmenuLeave}
-                              >
-                                <svelte:component this={getActionIcon(type)} size={14} />
-                                {getActionTypeLabel(type)}
-                                <ChevronDown size={12} class="submenu-chevron" />
-                              </button>
-                              {#if expandedSubmenu === type}
-                                <div
-                                  class="submenu"
-                                  role="group"
-                                  onmouseenter={() => handleSubmenuEnter(type)}
-                                  onmouseleave={handleSubmenuLeave}
-                                >
-                                  {#each typeActions as action (action.id)}
-                                    {@const Icon = getActionIcon(type)}
-                                    <button
-                                      class="more-menu-item"
-                                      onclick={() => handleRunAction(action)}
-                                    >
-                                      <Icon size={14} />
-                                      {action.name}
-                                    </button>
-                                  {/each}
-                                </div>
-                              {/if}
-                            </div>
-                          {:else}
-                            <!-- Direct items for <3 actions -->
-                            {#each typeActions as action (action.id)}
-                              {@const Icon = getActionIcon(type)}
-                              <button class="more-menu-item action-item" onclick={() => handleRunAction(action)}>
-                                <Icon size={14} />
-                                {action.name}
-                              </button>
-                            {/each}
-                          {/if}
+                          <!-- All actions shown directly -->
+                          {#each typeActions as action (action.id)}
+                            {@const Icon = getActionIcon(type)}
+                            <button class="more-menu-item action-item" onclick={() => handleRunAction(action)}>
+                              <Icon size={14} />
+                              {action.name}
+                            </button>
+                          {/each}
                         {/if}
                       {/each}
                     </div>
@@ -1025,15 +973,10 @@
     flex-direction: column;
   }
 
-  /* Enable scrolling for first-level submenus only (direct children of more-menu) */
+  /* Enable scrolling for actions submenu */
   .more-menu > .submenu-container > .submenu {
     overflow-y: auto;
     overflow-x: visible;
-  }
-
-  /* Nested submenus (level 2+) should not scroll, only overflow */
-  .submenu .submenu {
-    overflow: visible;
   }
 
   :global(.branch-icon) {

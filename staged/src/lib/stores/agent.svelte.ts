@@ -58,6 +58,11 @@ export const KNOWN_AGENTS: KnownAgent[] = [
   },
 ];
 
+/** Agents always available on remote Blox workstations, regardless of local installs. */
+export const REMOTE_AGENTS: KnownAgent[] = KNOWN_AGENTS.filter((a) =>
+  ['goose', 'claude', 'amp'].includes(a.id)
+);
+
 // =============================================================================
 // Reactive discovery cache
 // =============================================================================

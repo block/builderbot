@@ -24,11 +24,12 @@
     branch: Branch;
     mode: BranchSessionType;
     initialPrompt?: string;
+    remote?: boolean;
     onClose: (draft: { prompt: string; mode: BranchSessionType }) => void;
     onStarted: (result: { sessionId: string; artifactId: string }) => void;
   }
 
-  let { branch, mode, initialPrompt = '', onClose, onStarted }: Props = $props();
+  let { branch, mode, initialPrompt = '', remote = false, onClose, onStarted }: Props = $props();
 
   let prompt = $state('');
   let currentMode = $state<BranchSessionType>('commit');
@@ -177,7 +178,7 @@
       {/if}
 
       <div class="form-actions">
-        <AgentSelector disabled={starting} />
+        <AgentSelector disabled={starting} {remote} />
         <div class="form-actions-right">
           <button type="button" class="cancel-btn" onclick={handleClose} disabled={starting}>
             Cancel

@@ -124,7 +124,7 @@ impl AcpDriver {
                 is_remote: false,
             })
             .ok_or_else(|| {
-                "No ACP agent found. Install Goose, Claude Code, Codex, or Pi and ensure it's on your PATH."
+                "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
                     .to_string()
             })
     }

@@ -160,7 +160,7 @@ impl MessageWriter {
 
 // Implement the acp_client MessageWriter trait for our MessageWriter
 #[async_trait]
-impl acp_client::driver::MessageWriter for MessageWriter {
+impl acp_client::MessageWriter for MessageWriter {
     async fn append_text(&self, text: &str) {
         self.append_text(text).await
     }

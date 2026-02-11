@@ -37,6 +37,6 @@ mod simple;
 mod types;
 
 // Re-export the main API
-pub use driver::{AcpDriver, AgentDriver, MessageWriter};
+pub use driver::{AcpDriver, AgentDriver, MessageWriter, Store};
 pub use simple::run_acp_prompt_raw;
 pub use types::{discover_providers, find_acp_agent, find_acp_agent_by_id, AcpAgent, AcpProviderInfo};

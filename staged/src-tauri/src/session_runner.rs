@@ -186,13 +186,17 @@ pub fn start_session(
                 Arc::clone(&store),
             ));
 
+            // Cast to trait objects for the driver
+            let store_trait: Arc<dyn acp_client::Store> = store;
+            let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
+
             driver
                 .run(
                     &config.session_id,
                     &config.prompt,
                     &config.working_dir,
-                    &store,
-                    &writer,
+                    &store_trait,
+                    &writer_trait,
                     &cancel_token,
                     config.agent_session_id.as_deref(),
                 )

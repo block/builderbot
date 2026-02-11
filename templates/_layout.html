@@ -789,6 +789,7 @@
                 var cb = file.querySelector('.file-checkbox');
                 file.classList.toggle('selected', cb && cb.checked);
             });
+            if (typeof syncSourceCheckboxes === 'function') syncSourceCheckboxes();
             if (typeof onSelectionChanged === 'function') onSelectionChanged();
         }
 
@@ -804,6 +805,7 @@
 
         function clearSelection() {
             document.querySelectorAll('.file-checkbox:checked').forEach(function(cb) { cb.checked = false; });
+            document.querySelectorAll('.source-checkbox').forEach(function(cb) { cb.checked = false; cb.indeterminate = false; });
             updateSelectionBar();
         }
 

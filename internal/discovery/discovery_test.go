@@ -38,8 +38,8 @@ func TestGroupRP1Paths(t *testing.T) {
 				"work/features/data-layer/tasks.md",
 			},
 			expected: []FileGroup{
-				{Name: "auth", Paths: []string{"work/features/auth/requirements.md", "work/features/auth/design.md"}},
-				{Name: "data-layer", Paths: []string{"work/features/data-layer/tasks.md"}},
+				{Name: "Feature: auth", Paths: []string{"work/features/auth/requirements.md", "work/features/auth/design.md"}},
+				{Name: "Feature: data-layer", Paths: []string{"work/features/data-layer/tasks.md"}},
 			},
 		},
 		{
@@ -66,8 +66,8 @@ func TestGroupRP1Paths(t *testing.T) {
 			},
 			expected: []FileGroup{
 				{Name: "Blueprint", Paths: []string{"work/prds/my-prd.md"}},
-				{Name: "alpha", Paths: []string{"work/features/alpha/requirements.md"}},
-				{Name: "zebra", Paths: []string{"work/features/zebra/tasks.md"}},
+				{Name: "Feature: alpha", Paths: []string{"work/features/alpha/requirements.md"}},
+				{Name: "Feature: zebra", Paths: []string{"work/features/zebra/tasks.md"}},
 				{Name: "Context", Paths: []string{"context/index.md"}},
 			},
 		},
@@ -81,18 +81,18 @@ func TestGroupRP1Paths(t *testing.T) {
 			},
 		},
 		{
-			name: "research, reviews, content, investigations get own groups",
+			name: "research, reviews, content, issues get own groups",
 			paths: []string{
 				"work/research/2025-01-topic.md",
 				"work/pr-reviews/123/review.md",
 				"work/content/blog/post.md",
-				"work/investigations/bug-42/investigation_report.md",
+				"work/issues/bug-42/investigation_report.md",
 			},
 			expected: []FileGroup{
 				{Name: "Research", Paths: []string{"work/research/2025-01-topic.md"}},
 				{Name: "Reviews", Paths: []string{"work/pr-reviews/123/review.md"}},
 				{Name: "Content", Paths: []string{"work/content/blog/post.md"}},
-				{Name: "Investigations", Paths: []string{"work/investigations/bug-42/investigation_report.md"}},
+				{Name: "Issue: bug-42", Paths: []string{"work/issues/bug-42/investigation_report.md"}},
 			},
 		},
 		{
@@ -104,7 +104,7 @@ func TestGroupRP1Paths(t *testing.T) {
 				"work/research/topic.md",
 				"work/pr-reviews/1/review.md",
 				"work/content/blog/post.md",
-				"work/investigations/bug/report.md",
+				"work/issues/bug/report.md",
 				"work/charter.md",
 				"work/features/auth/tasks.md",
 			},
@@ -114,8 +114,8 @@ func TestGroupRP1Paths(t *testing.T) {
 				{Name: "Research", Paths: []string{"work/research/topic.md"}},
 				{Name: "Reviews", Paths: []string{"work/pr-reviews/1/review.md"}},
 				{Name: "Content", Paths: []string{"work/content/blog/post.md"}},
-				{Name: "Investigations", Paths: []string{"work/investigations/bug/report.md"}},
-				{Name: "auth", Paths: []string{"work/features/auth/tasks.md"}},
+				{Name: "Issue: bug", Paths: []string{"work/issues/bug/report.md"}},
+				{Name: "Feature: auth", Paths: []string{"work/features/auth/tasks.md"}},
 				{Name: "Context", Paths: []string{"context/index.md"}},
 			},
 		},
@@ -163,6 +163,9 @@ func TestClassifyRP1File(t *testing.T) {
 		// archives hidden
 		{"work/archives/features/old/tasks.md", ""},
 		{"work/archives/prds/old-prd/old-prd.md", ""},
+		// worktrees and notes hidden
+		{"work/worktrees/feature-branch/main.go", ""},
+		{"work/notes/internal-note.md", ""},
 		// feature files
 		{"work/features/auth/requirements.md", "requirement"},
 		{"work/features/auth/design.md", "design"},
@@ -179,7 +182,11 @@ func TestClassifyRP1File(t *testing.T) {
 		{"work/research/2025-01-topic.md", "research"},
 		{"work/pr-reviews/123/review.md", "review"},
 		{"work/content/blog/post.md", "content"},
-		{"work/investigations/bug-42/investigation_report.md", "investigation"},
+		{"work/issues/bug-42/investigation_report.md", "investigation"},
+		{"work/issues/bug-42/root_cause_analysis.md", "analysis"},
+		{"work/issues/bug-42/implementation_plan.md", "plan"},
+		{"work/issues/bug-42/evidence/key_findings.md", "evidence"},
+		{"work/issues/bug-42/unknown.md", "other"},
 		// charter and reports
 		{"work/charter.md", "charter"},
 		{"work/audit-report.md", "report"},

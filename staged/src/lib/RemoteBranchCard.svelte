@@ -38,7 +38,9 @@
   let { branch, deleting = false, onDelete }: Props = $props();
 
   // Reactive workspace status (updated by polling)
-  let status = $state<WorkspaceStatus | null>(branch.workspaceStatus);
+  // Initialise from the prop; overwritten by poll results.
+  let polledStatus = $state<WorkspaceStatus | null>(null);
+  let status = $derived<WorkspaceStatus | null>(polledStatus ?? branch.workspaceStatus);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   // Prompt UI state
@@ -112,13 +114,13 @@
     pollTimer = setInterval(async () => {
       try {
         const newStatus = (await commands.pollWorkspaceStatus(branch.id)) as WorkspaceStatus;
-        status = newStatus;
+        polledStatus = newStatus;
         if (newStatus !== 'starting') {
           stopPolling();
         }
       } catch (e) {
         console.error('Failed to poll workspace status:', e);
-        status = 'error';
+        polledStatus = 'error';
         error = e instanceof Error ? e.message : String(e);
         stopPolling();
       }

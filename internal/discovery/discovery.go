@@ -95,6 +95,10 @@ func init() {
 			switch {
 			case strings.HasPrefix(path, "work/archives/"):
 				return "" // hidden — archived features are not shown
+			case strings.HasPrefix(path, "work/worktrees/"):
+				return "" // hidden — git worktrees for agent execution
+			case strings.HasPrefix(path, "work/notes/"):
+				return "" // hidden — internal tooling notes
 			case strings.HasPrefix(path, "context/"):
 				return "knowledge"
 			case strings.HasPrefix(path, "work/features/"):
@@ -109,8 +113,8 @@ func init() {
 				return "review"
 			case strings.HasPrefix(path, "work/content/"):
 				return "content"
-			case strings.HasPrefix(path, "work/investigations/"):
-				return "investigation"
+			case strings.HasPrefix(path, "work/issues/"):
+				return classifyRP1Issue(path)
 			case path == "work/charter.md":
 				return "charter"
 			case isRP1TopLevelReport(path):
@@ -144,6 +148,24 @@ func classifyRP1Feature(path string) string {
 	case "verification-report.md":
 		return "verification"
 	default:
+		return "other"
+	}
+}
+
+// classifyRP1Issue classifies a file under work/issues/{id}/ by its filename.
+func classifyRP1Issue(path string) string {
+	base := filepath.Base(path)
+	switch base {
+	case "investigation_report.md":
+		return "investigation"
+	case "root_cause_analysis.md":
+		return "analysis"
+	case "implementation_plan.md":
+		return "plan"
+	default:
+		if strings.Contains(path, "/evidence/") {
+			return "evidence"
+		}
 		return "other"
 	}
 }
@@ -395,6 +417,7 @@ func SourceConfigsToFileSources(projectPath string, configs []config.SourceConfi
 func groupRP1Paths(paths []string) []FileGroup {
 	categories := map[string][]string{}
 	features := map[string][]string{}
+	issues := map[string][]string{}
 
 	for _, p := range paths {
 		switch {
@@ -410,8 +433,14 @@ func groupRP1Paths(paths []string) []FileGroup {
 			categories["Reviews"] = append(categories["Reviews"], p)
 		case strings.HasPrefix(p, "work/content/"):
 			categories["Content"] = append(categories["Content"], p)
-		case strings.HasPrefix(p, "work/investigations/"):
-			categories["Investigations"] = append(categories["Investigations"], p)
+		case strings.HasPrefix(p, "work/issues/"):
+			rest := p[len("work/issues/"):]
+			parts := strings.SplitN(rest, "/", 2)
+			if len(parts) == 2 && parts[0] != "" {
+				issues[parts[0]] = append(issues[parts[0]], p)
+			} else {
+				categories["Other"] = append(categories["Other"], p)
+			}
 		case strings.HasPrefix(p, "work/features/"):
 			rest := p[len("work/features/"):]
 			parts := strings.SplitN(rest, "/", 2)
@@ -428,10 +457,20 @@ func groupRP1Paths(paths []string) []FileGroup {
 	var groups []FileGroup
 
 	// Fixed-order categories
-	for _, cat := range []string{"Blueprint", "Quick Builds", "Research", "Reviews", "Content", "Investigations", "Other"} {
+	for _, cat := range []string{"Blueprint", "Quick Builds", "Research", "Reviews", "Content", "Other"} {
 		if files, ok := categories[cat]; ok && len(files) > 0 {
 			groups = append(groups, FileGroup{Name: cat, Paths: files})
 		}
+	}
+
+	// Issues sorted alphabetically
+	issueIDs := make([]string, 0, len(issues))
+	for id := range issues {
+		issueIDs = append(issueIDs, id)
+	}
+	sort.Strings(issueIDs)
+	for _, id := range issueIDs {
+		groups = append(groups, FileGroup{Name: "Issue: " + id, Paths: issues[id]})
 	}
 
 	// Features sorted alphabetically
@@ -441,7 +480,7 @@ func groupRP1Paths(paths []string) []FileGroup {
 	}
 	sort.Strings(featureIDs)
 	for _, id := range featureIDs {
-		groups = append(groups, FileGroup{Name: id, Paths: features[id]})
+		groups = append(groups, FileGroup{Name: "Feature: " + id, Paths: features[id]})
 	}
 
 	// Context last — least interesting for active work

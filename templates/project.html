@@ -260,6 +260,17 @@
     .add-source-btn:hover { color: #666; text-decoration: none; }
     .main-content { scroll-behavior: smooth; }
 
+    /* Sidebar source type tags */
+    .sidebar-card-nav a { display: flex; align-items: center; gap: 6px; }
+    .sidebar-source-tag {
+        font-size: 0.7em;
+        font-weight: 600;
+        padding: 1px 4px;
+        border-radius: 3px;
+        letter-spacing: 0.3px;
+        flex-shrink: 0;
+    }
+
 {{end}}
 
 {{define "sidebar_extra"}}
@@ -268,7 +279,7 @@
         <div class="sidebar-card-title">Sources</div>
         <nav class="sidebar-card-nav">
             {{range .Page.Groups}}
-            <a href="#source-{{.Name}}">{{.Name}}</a>
+            <a href="#source-{{.Name}}">{{if .BadgeText}}<span class="sidebar-source-tag" style="color:{{.BadgeColor}};background:{{.BadgeBg}}">{{.BadgeText}}</span>{{end}}{{.Name}}</a>
             {{end}}
         </nav>
     </div>

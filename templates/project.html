@@ -75,15 +75,31 @@
         pointer-events: none;
     }
 
-    /* Source section headers */
-    .source-section { margin-bottom: 24px; }
+    /* Source sections as boxed containers */
+    .source-section {
+        margin-bottom: 16px;
+        border: 1px solid #e8e8e8;
+        border-radius: 6px;
+        background: #fff;
+        overflow: hidden;
+        transition: border-color 0.15s, background-color 0.15s;
+    }
+    .source-section.selected {
+        border-color: #0066cc;
+        background: #f0f7ff;
+    }
     .source-header {
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 0 0 8px 0;
+        padding: 10px 16px;
         position: relative;
+        cursor: pointer;
+        user-select: none;
     }
+    .source-header:hover { background: #fafafa; }
+    .source-section.selected .source-header { background: #f0f7ff; }
+    .source-checkbox { display: none; }
     .source-header-label {
         font-size: 0.8em;
         font-weight: 600;
@@ -104,6 +120,23 @@
         text-transform: none;
         letter-spacing: 0;
         color: #aaa;
+    }
+
+    /* File rows within source boxes - override shared card styles */
+    .source-section .file-checkbox { display: none; }
+    .source-section .file {
+        margin-bottom: 0;
+        border: none;
+        border-radius: 0;
+        border-top: 1px solid #f0f0f0;
+    }
+    .source-section .file:hover {
+        border-color: #f0f0f0;
+        background: #f8f9fa;
+    }
+    .source-section .file.selected {
+        background: #f0f7ff;
+        border-color: #f0f0f0;
     }
 
     /* Source three-dot menu */
@@ -144,6 +177,12 @@
         cursor: pointer;
     }
     .source-header-menu button:hover { background: #f5f5f5; }
+    .source-header-menu .menu-divider {
+        border-top: 1px solid #eee;
+        margin: 4px 0;
+    }
+    .source-header-menu .menu-danger { color: #cf222e; }
+    .source-header-menu .menu-danger:hover { background: #fff5f5; }
 
     /* File three-dot menu */
     .file-dots {
@@ -293,13 +332,21 @@
         {{range $group := .Page.Groups}}
         <div class="source-section" id="source-{{$group.Name}}" data-source="{{$group.Source}}" data-source-type="{{$group.SourceType}}">
             <div class="source-header">
+                <input type="checkbox" class="source-checkbox" />
                 {{if $group.BadgeText}}<span class="source-badge" style="color:{{$group.BadgeColor}};background:{{$group.BadgeBg}}">{{$group.BadgeText}}</span>{{end}}
                 <span class="source-header-label">{{$group.Name}}</span>
-                {{if $group.Auto}}<span class="auto-badge">(auto)</span>
-                {{else}}{{if ne $group.SourceType "files"}}<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>
+                {{if $group.Auto}}<span class="auto-badge">(auto)</span>{{end}}
+                <button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>
                 <div class="source-header-menu">
-                    <button onclick="removeSource('{{$group.Source}}')">Remove from Birdseye</button>
-                </div>{{end}}{{end}}
+                    <button onclick="copySourceRelative(this)">Copy relative paths</button>
+                    <button onclick="copySourceAbsolute(this)">Copy absolute paths</button>
+                    <div class="menu-divider"></div>
+                    <button onclick="publishSource(this)">Publish</button>
+                    {{if and (not $group.Auto) (ne $group.SourceType "files")}}<div class="menu-divider"></div>
+                    <button onclick="removeSource('{{$group.Source}}')">Remove from Birdseye</button>{{end}}
+                    <div class="menu-divider"></div>
+                    <button class="menu-danger" onclick="confirmDeleteSource(this)">Delete from disk</button>
+                </div>
             </div>
             <ul class="files">
                 {{range $group.Files}}
@@ -387,7 +434,41 @@
                 updateSelectionBar();
             });
         });
+        attachSourceListeners();
     }
+
+    function attachSourceListeners() {
+        document.querySelectorAll('.source-checkbox').forEach(function(cb) {
+            cb.addEventListener('change', function() {
+                var section = cb.closest('.source-section');
+                var fileCbs = section.querySelectorAll('.file-checkbox');
+                fileCbs.forEach(function(fcb) { fcb.checked = cb.checked; });
+                updateSelectionBar();
+            });
+            // Click on source header row (not on specific controls) toggles the checkbox
+            var header = cb.closest('.source-header');
+            header.addEventListener('click', function(e) {
+                if (e.target.tagName === 'BUTTON' || e.target.type === 'checkbox' || e.target.closest('.source-header-menu')) return;
+                cb.checked = !cb.checked;
+                cb.dispatchEvent(new Event('change'));
+            });
+        });
+    }
+
+    function syncSourceCheckboxes() {
+        document.querySelectorAll('.source-section').forEach(function(section) {
+            var scb = section.querySelector('.source-checkbox');
+            if (!scb) return;
+            var fileCbs = section.querySelectorAll('.file-checkbox');
+            if (fileCbs.length === 0) { scb.checked = false; scb.indeterminate = false; return; }
+            var checked = 0;
+            fileCbs.forEach(function(cb) { if (cb.checked) checked++; });
+            scb.checked = checked === fileCbs.length;
+            scb.indeterminate = checked > 0 && checked < fileCbs.length;
+            section.classList.toggle('selected', checked === fileCbs.length);
+        });
+    }
+
     attachFileListeners();
 
     // --- Menus ---
@@ -591,6 +672,60 @@
         });
     }
 
+    // --- Source-level bulk actions ---
+    function getSourceFiles(btn) {
+        var section = btn.closest('.source-section');
+        return Array.from(section.querySelectorAll('.file')).map(function(file) {
+            return {
+                project: file.dataset.project,
+                projectPath: file.dataset.projectPath,
+                path: file.dataset.path,
+                sourceType: file.dataset.sourceType
+            };
+        });
+    }
+
+    function copySourceRelative(btn) {
+        closeAllMenus();
+        var paths = getSourceFiles(btn).map(function(f) { return '@' + f.path; });
+        navigator.clipboard.writeText(paths.join('\n'));
+    }
+
+    function copySourceAbsolute(btn) {
+        closeAllMenus();
+        var paths = getSourceFiles(btn).map(function(f) { return f.projectPath + '/' + f.path; });
+        navigator.clipboard.writeText(paths.join('\n'));
+    }
+
+    function publishSource(btn) {
+        closeAllMenus();
+        var files = getSourceFiles(btn);
+        Promise.allSettled(files.map(function(f) {
+            return fetch('/api/publish', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({project: f.project, path: f.path})
+            })
+            .then(function(r) { if (!r.ok) throw new Error('Failed'); return r.json(); })
+            .then(function(data) { publishURLs[f.project + '\0' + f.path] = data.url; });
+        }))
+        .then(function(results) {
+            var failed = results.filter(function(r) { return r.status === 'rejected'; }).length;
+            if (failed > 0) alert(failed + ' file(s) failed to publish.');
+        });
+    }
+
+    function confirmDeleteSource(btn) {
+        closeAllMenus();
+        var files = getSourceFiles(btn);
+        if (files.length === 0) return;
+        pendingDeletes = files.map(function(f) { return {project: f.project, path: f.path}; });
+        document.getElementById('deleteFileName').textContent = files.length + ' file' + (files.length === 1 ? '' : 's');
+        document.getElementById('confirmDeleteBtn').disabled = false;
+        document.getElementById('confirmDeleteBtn').textContent = 'Delete from disk';
+        document.getElementById('deleteFileModal').classList.add('open');
+    }
+
     function onSelectionChanged() {
         var removeBtn = document.getElementById('removeSelectedBtn');
         if (!removeBtn) return;
@@ -730,16 +865,25 @@
                 groups.forEach(function(group) {
                     html += '<div class="source-section" id="source-' + escapeHtml(group.name) + '" data-source="' + escapeHtml(group.source) + '" data-source-type="' + escapeHtml(group.sourceType) + '">';
                     html += '<div class="source-header">';
+                    html += '<input type="checkbox" class="source-checkbox" />';
                     if (group.badgeText) {
                         html += '<span class="source-badge" style="color:' + escapeHtml(group.badgeColor) + ';background:' + escapeHtml(group.badgeBg) + '">' + escapeHtml(group.badgeText) + '</span>';
                     }
                     html += '<span class="source-header-label">' + escapeHtml(group.name) + '</span>';
-                    if (group.auto) {
-                        html += '<span class="auto-badge">(auto)</span>';
-                    } else if (group.sourceType !== 'files') {
-                        html += '<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>';
-                        html += '<div class="source-header-menu"><button onclick="removeSource(\'' + escapeHtml(group.source) + '\')">Remove from Birdseye</button></div>';
+                    if (group.auto) html += '<span class="auto-badge">(auto)</span>';
+                    html += '<button class="source-dots" onclick="toggleSourceMenu(event)">&#8942;</button>';
+                    html += '<div class="source-header-menu">';
+                    html += '<button onclick="copySourceRelative(this)">Copy relative paths</button>';
+                    html += '<button onclick="copySourceAbsolute(this)">Copy absolute paths</button>';
+                    html += '<div class="menu-divider"></div>';
+                    html += '<button onclick="publishSource(this)">Publish</button>';
+                    if (!group.auto && group.sourceType !== 'files') {
+                        html += '<div class="menu-divider"></div>';
+                        html += '<button onclick="removeSource(\'' + escapeHtml(group.source) + '\')">Remove from Birdseye</button>';
                     }
+                    html += '<div class="menu-divider"></div>';
+                    html += '<button class="menu-danger" onclick="confirmDeleteSource(this)">Delete from disk</button>';
+                    html += '</div>';
                     html += '</div>';
                     html += '<ul class="files">';
                     (group.files || []).forEach(function(f) { html += renderFileRow(f); });

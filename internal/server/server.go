@@ -1076,6 +1076,9 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Deleted file: %s", fullPath)
 
+	// Clean up empty parent directories, stopping at the project root
+	removeEmptyParents(filepath.Dir(fullPath), project.Path)
+
 	// If this was an individually-added file, also remove from config
 	s.cfgMu.Lock()
 	s.removeFileFromConfig(project, filePath)
@@ -1088,6 +1091,22 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	s.cache.RefreshProject(qualifiedName)
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventFilesChanged, Project: qualifiedName})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeEmptyParents removes empty directories from dir up to (but not
+// including) stopAt. This is used after file deletion to clean up directories
+// that are now empty. It stops as soon as it encounters a non-empty directory
+// or reaches the stopAt boundary.
+func removeEmptyParents(dir, stopAt string) {
+	dir = filepath.Clean(dir)
+	stopAt = filepath.Clean(stopAt)
+	for dir != stopAt && strings.HasPrefix(dir, stopAt+"/") {
+		if err := os.Remove(dir); err != nil {
+			break // not empty or permission error
+		}
+		log.Printf("Removed empty directory: %s", dir)
+		dir = filepath.Dir(dir)
+	}
 }
 
 // Helper for templates - kept for backward compat

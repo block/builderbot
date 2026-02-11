@@ -1014,7 +1014,7 @@
     }
 
     function computeAnchor(sel, selectedText) {
-        var anchor = { selectedText: selectedText, before: '', after: '', headingPath: '' };
+        var anchor = { selectedText: selectedText, before: '', after: '', headingPath: '', startLine: 0 };
         var contentEl = document.getElementById('content');
         var startNode = sel.anchorNode;
         var endNode = sel.focusNode;
@@ -1032,6 +1032,9 @@
 
         var startLine = findSourceLine(startNode);
         var endLine = findSourceLine(endNode);
+
+        // Always store startLine for fallback anchoring when text matching fails
+        if (startLine > 0) anchor.startLine = startLine;
 
         var occurrenceIndex = 0;
         var blockEl = startNode.nodeType === 3 ? startNode.parentElement : startNode;
@@ -1193,7 +1196,9 @@
                 scopeEl = bestEl;
             }
             if (!scopeEl) scopeEl = content;
-            highlightTextInElement(scopeEl, selectedText, t.id, t.status);
+            if (!highlightTextInElement(scopeEl, selectedText, t.id, t.status) && scopeEl !== content) {
+                highlightTextInElement(content, selectedText, t.id, t.status);
+            }
         });
     }
 
@@ -1209,8 +1214,34 @@
             nodeMap.push({ node: node, start: start, end: concat.length });
         });
         var matchIdx = concat.indexOf(text);
-        if (matchIdx === -1) return;
-        var matchEnd = matchIdx + text.length;
+        var matchEnd;
+        if (matchIdx >= 0) {
+            matchEnd = matchIdx + text.length;
+        } else {
+            // sel.toString() collapses whitespace but DOM text nodes preserve it.
+            // Normalize both sides and retry.
+            var normConcat = '';
+            var normToOrig = [];
+            var lastWasSpace = false;
+            for (var i = 0; i < concat.length; i++) {
+                if (/\s/.test(concat[i])) {
+                    if (!lastWasSpace) {
+                        normConcat += ' ';
+                        normToOrig.push(i);
+                        lastWasSpace = true;
+                    }
+                } else {
+                    normConcat += concat[i];
+                    normToOrig.push(i);
+                    lastWasSpace = false;
+                }
+            }
+            var normText = text.replace(/\s+/g, ' ');
+            var normIdx = normConcat.indexOf(normText);
+            if (normIdx === -1) return false;
+            matchIdx = normToOrig[normIdx];
+            matchEnd = normToOrig[normIdx + normText.length - 1] + 1;
+        }
         for (var i = nodeMap.length - 1; i >= 0; i--) {
             var entry = nodeMap[i];
             if (entry.end <= matchIdx || entry.start >= matchEnd) continue;
@@ -1230,6 +1261,7 @@
             parent.insertBefore(mark, node.nextSibling);
             if (beforeText) { node.nodeValue = beforeText; } else { parent.removeChild(node); }
         }
+        return true;
     }
 
     function highlightThread(threadId) { activateThread(threadId, 'comment'); }
@@ -1280,6 +1312,11 @@
     function resolveAnchorsToLines(threadList, markdown) {
         var result = {};
         threadList.forEach(function(t) {
+            if (t.anchor && t.anchor.startLine > 0) {
+                result[t.id] = t.anchor.startLine;
+                return;
+            }
+            // Backward compat: text matching for old anchors without startLine
             var offset = resolveAnchor(markdown, t.anchor);
             if (offset < 0) { result[t.id] = -1; return; }
             var line = 1;

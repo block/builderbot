@@ -215,6 +215,15 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				afterEnd = len(markdown)
 			}
 			anchor.After = markdown[afterStart:afterEnd]
+
+			// Store line number for fallback anchoring
+			line := 1
+			for i := 0; i < idx; i++ {
+				if markdown[i] == '\n' {
+					line++
+				}
+			}
+			anchor.StartLine = line
 		}
 
 		comment := comments.Comment{

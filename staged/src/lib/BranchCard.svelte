@@ -34,6 +34,7 @@
     Zap,
     Wand2,
     MoreVertical,
+    ExternalLink,
   } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { Branch, BranchTimeline as BranchTimelineData, BranchSessionType } from './types';
@@ -47,6 +48,8 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import ActionOutputModal from './ActionOutputModal.svelte';
   import { runBranchAction, type ActionStatusEvent } from './services/actions';
+  import type { OpenerApp } from './services/branch';
+  import * as branchService from './services/branch';
 
   interface Props {
     branch: Branch;
@@ -72,6 +75,11 @@
   let showMoreMenu = $state(false);
   let showActionsSubmenu = $state(false);
   let actionsSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
+
+  // Open In submenu state
+  let openerApps = $state<OpenerApp[]>([]);
+  let showOpenInSubmenu = $state(false);
+  let openInSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
 
   let timeline = $state<BranchTimelineData | null>(null);
   let loading = $state(true);
@@ -199,6 +207,13 @@
   onMount(() => {
     loadTimeline();
     loadActions();
+
+    // Load available openers for "Open In" menu
+    if (branch.worktreePath) {
+      branchService.getAvailableOpeners().then((apps) => {
+        openerApps = apps;
+      });
+    }
   });
 
   onDestroy(() => {
@@ -273,6 +288,54 @@
     }, 100);
   }
 
+  // Open In submenu handlers
+  function handleOpenInSubmenuEnter() {
+    if (openInSubmenuTimeout) {
+      clearTimeout(openInSubmenuTimeout);
+      openInSubmenuTimeout = null;
+    }
+    showOpenInSubmenu = true;
+  }
+
+  function handleOpenInSubmenuLeave() {
+    openInSubmenuTimeout = setTimeout(() => {
+      showOpenInSubmenu = false;
+      openInSubmenuTimeout = null;
+    }, 100);
+  }
+
+  async function handleOpenInApp(appId: string) {
+    showMoreMenu = false;
+    showOpenInSubmenu = false;
+
+    if (!branch.worktreePath) {
+      console.error('No worktree path available');
+      return;
+    }
+
+    try {
+      await branchService.openInApp(branch.worktreePath, appId);
+    } catch (e) {
+      console.error('Failed to open in app:', e);
+    }
+  }
+
+  async function handleCopyPath() {
+    showMoreMenu = false;
+    showOpenInSubmenu = false;
+
+    if (!branch.worktreePath) {
+      console.error('No worktree path available');
+      return;
+    }
+
+    try {
+      await branchService.copyPathToClipboard(branch.worktreePath);
+    } catch (e) {
+      console.error('Failed to copy path:', e);
+    }
+  }
+
   // Track the primary action's execution status
   let primaryActionExecution = $derived.by(() => {
     if (!primaryRunAction) return null;
@@ -324,6 +387,10 @@
     const target = e.target as HTMLElement;
     if (!target.closest('.more-menu-container')) {
       showMoreMenu = false;
+    }
+    // Close Open In submenu when clicking outside
+    if (!target.closest('.submenu-container')) {
+      showOpenInSubmenu = false;
     }
   }
 
@@ -649,8 +716,43 @@
                 </div>
               {/if}
 
-              <!-- Copy Worktree Path if available -->
-              {#if branch.worktreePath}
+              <!-- Open In submenu -->
+              {#if branch.worktreePath && openerApps.length > 0}
+                <div class="menu-separator"></div>
+                <div class="submenu-container">
+                  <button
+                    class="more-menu-item submenu-trigger"
+                    onmouseenter={handleOpenInSubmenuEnter}
+                    onmouseleave={handleOpenInSubmenuLeave}
+                  >
+                    <ExternalLink size={14} />
+                    Open In
+                    <ChevronDown size={12} class="submenu-chevron" />
+                  </button>
+                  {#if showOpenInSubmenu}
+                    <div
+                      class="submenu"
+                      role="group"
+                      onmouseenter={handleOpenInSubmenuEnter}
+                      onmouseleave={handleOpenInSubmenuLeave}
+                    >
+                      {#each openerApps as app (app.id)}
+                        <button class="more-menu-item" onclick={() => handleOpenInApp(app.id)}>
+                          {app.name}
+                        </button>
+                      {/each}
+                      <div class="menu-separator"></div>
+                      <button class="more-menu-item" onclick={handleCopyPath}>
+                        <Copy size={14} />
+                        Copy Path
+                      </button>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+
+              <!-- Copy Worktree Path if available (fallback if no openers) -->
+              {#if branch.worktreePath && openerApps.length === 0}
                 <div class="menu-separator"></div>
                 <button class="more-menu-item" onclick={copyWorktreePath}>
                   <Copy size={14} />

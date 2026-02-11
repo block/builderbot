@@ -13,7 +13,8 @@
     onStarted     — called with { sessionId, artifactId } on successful start
 -->
 <script lang="ts">
-  import { X, GitCommitHorizontal, StickyNote, GitBranch, Loader2, Send } from 'lucide-svelte';
+  import { X, GitCommitHorizontal, StickyNote, GitBranch, Send } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import type { Branch, BranchSessionType } from './types';
   import * as commands from './commands';
   import AgentSelector from './AgentSelector.svelte';
@@ -183,7 +184,7 @@
           </button>
           <button type="submit" class="submit-btn" disabled={starting || !prompt.trim()}>
             {#if starting}
-              <Loader2 size={14} class="spinning" />
+              <Spinner size={14} />
               Starting…
             {:else}
               <Send size={14} />
@@ -439,14 +440,5 @@
   :global(.spinning) {
     animation: spin 1s linear infinite;
     transform-origin: center;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

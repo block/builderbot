@@ -10,11 +10,11 @@
     GitCommit,
     FileText,
     FileSearch,
-    Loader2,
     MessageSquare,
     Trash2,
     AlertTriangle,
   } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
 
   export type TimelineItemType =
     | 'commit'
@@ -94,9 +94,9 @@
       class:failed-icon={isFailed}
     >
       {#if type === 'pending-commit'}
-        <Loader2 size={12} class="spinner" />
+        <Spinner size={12} />
       {:else if type === 'generating-note'}
-        <Loader2 size={12} class="spinner" />
+        <Spinner size={12} />
       {:else if type === 'failed-commit' || type === 'failed-note'}
         <AlertTriangle size={12} />
       {:else if type === 'commit'}
@@ -329,11 +329,6 @@
   .delete-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
-  }
-
-  :global(.spinner) {
-    animation: spin 1s linear infinite;
-    flex-shrink: 0;
   }
 
   @keyframes pulse {

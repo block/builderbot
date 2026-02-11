@@ -27,7 +27,6 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import {
     X,
-    Loader2,
     AlertCircle,
     CircleStop,
     Send,
@@ -39,6 +38,7 @@
     Zap,
     GitBranch,
   } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import { marked } from 'marked';
   import { sanitize } from './sanitize';
   import type { Session, SessionMessage } from './types';
@@ -533,7 +533,7 @@
     <div class="modal-content" bind:this={messagesEl} onscroll={handleScroll}>
       {#if loading}
         <div class="center-state">
-          <Loader2 size={24} class="spinning" />
+          <Spinner size={24} />
           <span>Loading session…</span>
         </div>
       {:else if error}
@@ -543,7 +543,7 @@
         </div>
       {:else if grouped.length === 0 && isLive}
         <div class="center-state">
-          <Loader2 size={20} class="spinning" />
+          <Spinner size={20} />
           <span>Waiting for response…</span>
         </div>
       {:else if grouped.length === 0}
@@ -697,7 +697,7 @@
 
           {#if isLive}
             <div class="thinking">
-              <Loader2 size={14} class="spinning" />
+              <Spinner size={14} />
               <span>Thinking…</span>
             </div>
           {/if}
@@ -751,7 +751,7 @@
             title="Stop session"
           >
             {#if cancelling}
-              <Loader2 size={16} class="spinning" />
+              <Spinner size={16} />
             {:else}
               <CircleStop size={16} />
             {/if}

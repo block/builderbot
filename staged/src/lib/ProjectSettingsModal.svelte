@@ -13,11 +13,11 @@
     Zap,
     Plus,
     Trash2,
-    Loader2,
     Save,
     Pencil,
     Code2,
   } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import type { Project } from './types';
   import type { ProjectAction } from './commands';
   import * as commands from './commands';
@@ -256,7 +256,7 @@
         <div class="actions-header">
           <button class="secondary-btn" onclick={detectActions} disabled={detecting}>
             {#if detecting}
-              <Loader2 size={14} class="spinner" />
+              <Spinner size={14} />
             {:else}
               <Zap size={14} />
             {/if}
@@ -270,7 +270,7 @@
 
         {#if loadingActions}
           <div class="loading-state">
-            <Loader2 size={24} />
+            <Spinner size={24} />
             <span>Loading...</span>
           </div>
         {:else if actions.length === 0}
@@ -785,14 +785,5 @@
   .actions-header :global(.spinner),
   .primary-btn :global(.spinner) {
     animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

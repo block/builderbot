@@ -11,10 +11,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { Plus, X, Loader2, CheckCircle, AlertCircle, Ban, Eye, Trash2 } from 'lucide-svelte';
+  import { Plus, X, CheckCircle, AlertCircle, Ban, Eye, Trash2 } from 'lucide-svelte';
   import type { Session, SessionStatus } from './types';
   import { startSession, deleteSession } from './commands';
   import SessionModal from './SessionModal.svelte';
+  import Spinner from './Spinner.svelte';
   import { preferences } from './stores/preferences.svelte';
 
   interface Props {
@@ -119,14 +120,14 @@
 
   function statusIcon(status: SessionStatus) {
     switch (status) {
-      case 'running':
-        return Loader2;
       case 'completed':
         return CheckCircle;
       case 'error':
         return AlertCircle;
       case 'cancelled':
         return Ban;
+      default:
+        return null;
     }
   }
 
@@ -168,7 +169,7 @@
       title="Create session"
     >
       {#if creating}
-        <Loader2 size={14} class="spinning" />
+        <Spinner size={14} />
       {:else}
         <Plus size={14} />
       {/if}
@@ -186,7 +187,11 @@
         {@const Icon = statusIcon(s.status)}
         <div class="session-row">
           <div class="session-indicator {statusClass(s.status)}">
-            <Icon size={12} class={s.status === 'running' ? 'spinning' : ''} />
+            {#if s.status === 'running'}
+              <Spinner size={12} />
+            {:else if Icon}
+              <Icon size={12} />
+            {/if}
           </div>
           <div class="session-info">
             <span class="session-prompt">{s.prompt}</span>

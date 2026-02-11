@@ -108,6 +108,6 @@ pub fn ws_prompt(name: &str, prompt: &str) -> Result<String, BloxError> {
     run(&["ws", "prompt", name, prompt])
 }
 
-// Phase 3: Pause/resume lifecycle — `blox ws stop` will be needed here
-// to support stopping workspaces without destroying them. The original
-// design note also describes deletion as a two-step stop+rm flow.
+// Phase 3: Pause/resume lifecycle — workspaces auto-suspend after idle;
+// use `blox ws resume <name>` to bring them back. There is no explicit
+// `blox ws stop` command. Deletion is a single `blox ws delete` call.

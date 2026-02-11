@@ -30,11 +30,7 @@ pub struct ActionMetadata {
 }
 
 /// Internal state for a running action
-#[allow(dead_code)]
 struct RunningActionState {
-    execution_id: String,
-    action_metadata: ActionMetadata,
-    started_at: i64,
     child_pid: Option<u32>,
     output_buffer: Arc<Mutex<Vec<OutputChunk>>>,
 }
@@ -134,9 +130,6 @@ impl ActionExecutor {
             running.insert(
                 execution_id.clone(),
                 RunningActionState {
-                    execution_id: execution_id.clone(),
-                    action_metadata: metadata.clone(),
-                    started_at,
                     child_pid: Some(child_pid),
                     output_buffer: output_buffer.clone(),
                 },

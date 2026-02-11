@@ -82,6 +82,7 @@
       const existingCommands = new Set(actions.map((a) => a.command));
       let nextSortOrder = Math.max(...actions.map((a) => a.sortOrder), 0) + 1;
 
+      let actionsAdded = false;
       for (const suggestion of suggested) {
         if (!existingCommands.has(suggestion.command)) {
           const newAction = await commands.createProjectAction(
@@ -93,7 +94,15 @@
             suggestion.autoCommit
           );
           actions = [...actions, newAction];
+          actionsAdded = true;
         }
+      }
+
+      // Notify all BranchCard components to reload actions if any were added
+      if (actionsAdded) {
+        window.dispatchEvent(
+          new CustomEvent('project-actions-changed', { detail: { projectId: project.id } })
+        );
       }
     } catch (e) {
       console.error('Failed to detect actions:', e);
@@ -166,6 +175,10 @@
         );
       }
       editingAction = null;
+      // Notify all BranchCard components to reload actions
+      window.dispatchEvent(
+        new CustomEvent('project-actions-changed', { detail: { projectId: project.id } })
+      );
     } catch (e) {
       console.error('Failed to save action:', e);
     }
@@ -175,6 +188,10 @@
     try {
       await commands.deleteProjectAction(actionId);
       actions = actions.filter((a) => a.id !== actionId);
+      // Notify all BranchCard components to reload actions
+      window.dispatchEvent(
+        new CustomEvent('project-actions-changed', { detail: { projectId: project.id } })
+      );
     } catch (e) {
       console.error('Failed to delete action:', e);
     }

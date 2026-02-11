@@ -11,7 +11,7 @@
   - Each item shows session + delete actions on hover
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import {
     GitBranch,
     GitCommitHorizontal,
@@ -126,6 +126,13 @@
   let unlistenActionStatus: UnlistenFn | null = null;
 
   // Set up event listeners immediately (synchronously) at module level like old codebase
+  // Listen for project actions changes to refresh actions list
+  function handleActionsChanged(event: CustomEvent) {
+    if (event.detail?.projectId === branch.projectId) {
+      loadActions();
+    }
+  }
+
   $effect(() => {
     const branchId = branch.id;
     const branchName = branch.branchName;
@@ -234,8 +241,16 @@
   onMount(() => {
     loadTimeline();
     loadActions();
+    // Listen for actions changes
+    window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
   });
 
+  onDestroy(() => {
+    unlistenStatus?.();
+    unlistenActionStatus?.();
+    // Clean up actions listener
+    window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
+  });
   async function loadTimeline() {
     loading = true;
     error = null;

@@ -33,6 +33,7 @@
     Zap,
     Wand2,
     MoreVertical,
+    ExternalLink,
   } from 'lucide-svelte';
   import Spinner from './Spinner.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -47,6 +48,12 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import ActionOutputModal from './ActionOutputModal.svelte';
   import { runBranchAction, type ActionStatusEvent } from './services/actions';
+  import {
+    getAvailableOpeners,
+    openInApp,
+    copyPathToClipboard,
+    type OpenerApp,
+  } from './services/branch';
 
   interface Props {
     branch: Branch;
@@ -56,22 +63,13 @@
 
   let { branch, deleting = false, onDelete }: Props = $props();
 
-  async function copyWorktreePath() {
-    showMoreMenu = false;
-    const path = branch.worktreePath;
-    if (path) {
-      try {
-        await navigator.clipboard.writeText(path);
-      } catch {
-        // clipboard API may fail in some contexts
-      }
-    }
-  }
-
   // Dropdown state
   let showMoreMenu = $state(false);
   let showActionsSubmenu = $state(false);
   let actionsSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
+  let showOpenInSubmenu = $state(false);
+  let openInSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
+  let openerApps = $state<OpenerApp[]>([]);
 
   let timeline = $state<BranchTimelineData | null>(null);
   let loading = $state(true);
@@ -136,7 +134,11 @@
   $effect(() => {
     const branchId = branch.id;
     const branchName = branch.branchName;
-    console.log('[BranchCard] Setting up listeners for branch:', () => branchId, () => branchName);
+    console.log(
+      '[BranchCard] Setting up listeners for branch:',
+      () => branchId,
+      () => branchName
+    );
 
     listen<{
       sessionId: string;
@@ -241,6 +243,7 @@
   onMount(() => {
     loadTimeline();
     loadActions();
+    getAvailableOpeners().then((apps) => (openerApps = apps));
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
   });
@@ -316,6 +319,38 @@
       showActionsSubmenu = false;
       actionsSubmenuTimeout = null;
     }, 100);
+  }
+
+  // Open In submenu handlers
+  function handleOpenInSubmenuEnter() {
+    if (openInSubmenuTimeout) {
+      clearTimeout(openInSubmenuTimeout);
+      openInSubmenuTimeout = null;
+    }
+    showOpenInSubmenu = true;
+  }
+
+  function handleOpenInSubmenuLeave() {
+    openInSubmenuTimeout = setTimeout(() => {
+      showOpenInSubmenu = false;
+      openInSubmenuTimeout = null;
+    }, 100);
+  }
+
+  async function handleOpenInApp(appId: string) {
+    showMoreMenu = false;
+    showOpenInSubmenu = false;
+    if (branch.worktreePath) {
+      await openInApp(branch.worktreePath, appId);
+    }
+  }
+
+  async function handleCopyPath() {
+    showMoreMenu = false;
+    showOpenInSubmenu = false;
+    if (branch.worktreePath) {
+      await copyPathToClipboard(branch.worktreePath);
+    }
   }
 
   // Track the primary action's execution status
@@ -697,10 +732,42 @@
                 </div>
               {/if}
 
-              <!-- Copy Worktree Path if available -->
-              {#if branch.worktreePath}
+              <!-- Open In submenu -->
+              {#if branch.worktreePath && openerApps.length > 0}
                 <div class="menu-separator"></div>
-                <button class="more-menu-item" onclick={copyWorktreePath}>
+                <div class="submenu-container">
+                  <button
+                    class="more-menu-item submenu-trigger"
+                    onmouseenter={handleOpenInSubmenuEnter}
+                    onmouseleave={handleOpenInSubmenuLeave}
+                  >
+                    <ExternalLink size={14} />
+                    Open In
+                    <ChevronDown size={12} class="submenu-chevron" />
+                  </button>
+                  {#if showOpenInSubmenu}
+                    <div
+                      class="submenu"
+                      role="group"
+                      onmouseenter={handleOpenInSubmenuEnter}
+                      onmouseleave={handleOpenInSubmenuLeave}
+                    >
+                      {#each openerApps as app (app.id)}
+                        <button class="more-menu-item" onclick={() => handleOpenInApp(app.id)}>
+                          {app.name}
+                        </button>
+                      {/each}
+                      <div class="menu-separator"></div>
+                      <button class="more-menu-item" onclick={handleCopyPath}>
+                        <Copy size={14} />
+                        Copy Path
+                      </button>
+                    </div>
+                  {/if}
+                </div>
+              {:else if branch.worktreePath}
+                <div class="menu-separator"></div>
+                <button class="more-menu-item" onclick={handleCopyPath}>
                   <Copy size={14} />
                   Copy Worktree Path
                 </button>

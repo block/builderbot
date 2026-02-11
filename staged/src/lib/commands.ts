@@ -68,8 +68,39 @@ export function createBranch(
   return invoke('create_branch', { projectId, branchName, baseBranch });
 }
 
+/** Create a remote branch backed by a Blox workspace. */
+export function createRemoteBranch(
+  projectId: string,
+  branchName: string,
+  workspaceName: string,
+  baseBranch?: string,
+  agent?: string,
+  source?: string
+): Promise<Branch> {
+  return invoke('create_remote_branch', {
+    projectId,
+    branchName,
+    baseBranch,
+    workspaceName,
+    agent,
+    source,
+  });
+}
+
 export function deleteBranch(branchId: string): Promise<void> {
   return invoke('delete_branch', { branchId });
+}
+
+/** Get info about a remote branch's Blox workspace. */
+export function getWorkspaceInfo(branchId: string): Promise<WorkspaceInfo> {
+  return invoke('get_workspace_info', { branchId });
+}
+
+/** Workspace info returned from `blox ws info`. */
+export interface WorkspaceInfo {
+  name: string;
+  status: string | null;
+  [key: string]: unknown;
 }
 
 // =============================================================================

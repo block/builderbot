@@ -4,6 +4,7 @@
 //! See `src-archive/lib.rs` for the previous implementation.
 
 pub mod agent;
+pub mod blox;
 pub mod git;
 mod recent_repos;
 pub mod session_commands;
@@ -55,6 +56,10 @@ pub struct BranchWithWorkdir {
     pub branch_name: String,
     pub base_branch: String,
     pub pr_number: Option<u64>,
+    pub branch_type: String,
+    pub workspace_name: Option<String>,
+    pub workspace_status: Option<String>,
+    pub agent: Option<String>,
     pub worktree_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -447,6 +452,27 @@ fn delete_project(
 // Branch commands
 // =============================================================================
 
+/// Helper to convert a Branch + optional Workdir into a BranchWithWorkdir.
+fn to_branch_with_workdir(
+    branch: store::Branch,
+    workdir_path: Option<String>,
+) -> BranchWithWorkdir {
+    BranchWithWorkdir {
+        id: branch.id,
+        project_id: branch.project_id,
+        branch_name: branch.branch_name,
+        base_branch: branch.base_branch,
+        pr_number: branch.pr_number,
+        branch_type: branch.branch_type.as_str().to_string(),
+        workspace_name: branch.workspace_name,
+        workspace_status: branch.workspace_status.map(|s| s.as_str().to_string()),
+        agent: branch.agent,
+        worktree_path: workdir_path,
+        created_at: branch.created_at,
+        updated_at: branch.updated_at,
+    }
+}
+
 #[tauri::command]
 fn list_branches_for_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -463,16 +489,7 @@ fn list_branches_for_project(
             .get_workdir_for_branch(&branch.id)
             .map_err(|e| e.to_string())?;
 
-        result.push(BranchWithWorkdir {
-            id: branch.id,
-            project_id: branch.project_id,
-            branch_name: branch.branch_name,
-            base_branch: branch.base_branch,
-            pr_number: branch.pr_number,
-            worktree_path: workdir.map(|w| w.path),
-            created_at: branch.created_at,
-            updated_at: branch.updated_at,
-        });
+        result.push(to_branch_with_workdir(branch, workdir.map(|w| w.path)));
     }
     Ok(result)
 }
@@ -517,16 +534,96 @@ fn create_branch(
     let workdir = store::Workdir::new(&project_id, &worktree_str).with_branch(&branch.id);
     store.create_workdir(&workdir).map_err(|e| e.to_string())?;
 
-    Ok(BranchWithWorkdir {
-        id: branch.id,
-        project_id: branch.project_id,
-        branch_name: branch.branch_name,
-        base_branch: branch.base_branch,
-        pr_number: branch.pr_number,
-        worktree_path: Some(worktree_str),
-        created_at: branch.created_at,
-        updated_at: branch.updated_at,
-    })
+    Ok(to_branch_with_workdir(branch, Some(worktree_str)))
+}
+
+/// Create a remote branch backed by a Blox workspace.
+///
+/// This creates the branch record with type=remote, starts a Blox workspace
+/// via `blox ws start`, and stores the workspace metadata on the branch.
+/// No local worktree or workdir is created.
+#[tauri::command(rename_all = "camelCase")]
+async fn create_remote_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    branch_name: String,
+    base_branch: Option<String>,
+    workspace_name: String,
+    agent: Option<String>,
+    source: Option<String>,
+) -> Result<BranchWithWorkdir, String> {
+    let store = get_store(&store)?;
+
+    // Get the project to find its repo path
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", project_id))?;
+
+    let repo_path = Path::new(&project.repo_path);
+
+    // Detect default branch if none specified
+    let effective_base = match base_branch {
+        Some(b) => b,
+        None => git::detect_default_branch(repo_path).map_err(|e| e.to_string())?,
+    };
+
+    let effective_agent = agent.unwrap_or_else(|| "goose".to_string());
+
+    // Create the branch record (starts in Starting status)
+    let branch = store::Branch::new_remote(
+        &project_id,
+        &branch_name,
+        &effective_base,
+        &workspace_name,
+        &effective_agent,
+    );
+    store.create_branch(&branch).map_err(|e| e.to_string())?;
+
+    // Start the Blox workspace
+    match blox::ws_start(&workspace_name, source.as_deref()) {
+        Ok(_) => {
+            // Update status to Running
+            store
+                .update_branch_workspace_status(&branch.id, &store::WorkspaceStatus::Running)
+                .map_err(|e| e.to_string())?;
+
+            // Re-fetch to get updated status
+            let updated = store
+                .get_branch(&branch.id)
+                .map_err(|e| e.to_string())?
+                .ok_or("Branch disappeared after creation")?;
+
+            Ok(to_branch_with_workdir(updated, None))
+        }
+        Err(e) => {
+            // Update status to Error but keep the branch record
+            let _ =
+                store.update_branch_workspace_status(&branch.id, &store::WorkspaceStatus::Error);
+
+            Err(format!("Failed to start workspace: {e}"))
+        }
+    }
+}
+
+/// Get info about a remote branch's Blox workspace.
+#[tauri::command(rename_all = "camelCase")]
+async fn get_workspace_info(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<blox::WorkspaceInfo, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
+
+    let ws_name = branch
+        .workspace_name
+        .ok_or("Branch is not a remote workspace branch")?;
+
+    blox::ws_info(&ws_name)
 }
 
 #[tauri::command]
@@ -542,22 +639,35 @@ async fn delete_branch(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {}", branch_id))?;
 
-    // Get the project for the repo path
-    let project = store
-        .get_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+    match branch.branch_type {
+        store::BranchType::Local => {
+            // Get the project for the repo path
+            let project = store
+                .get_project(&branch.project_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
-    // Get the workdir (if any) so we can remove the worktree
-    let workdir = store
-        .get_workdir_for_branch(&branch_id)
-        .map_err(|e| e.to_string())?;
+            // Get the workdir (if any) so we can remove the worktree
+            let workdir = store
+                .get_workdir_for_branch(&branch_id)
+                .map_err(|e| e.to_string())?;
 
-    if let Some(ref wd) = workdir {
-        let repo_path = Path::new(&project.repo_path);
-        let worktree_path = Path::new(&wd.path);
-        git::remove_worktree(repo_path, worktree_path).map_err(|e| e.to_string())?;
-        store.delete_workdir(&wd.id).map_err(|e| e.to_string())?;
+            if let Some(ref wd) = workdir {
+                let repo_path = Path::new(&project.repo_path);
+                let worktree_path = Path::new(&wd.path);
+                git::remove_worktree(repo_path, worktree_path).map_err(|e| e.to_string())?;
+                store.delete_workdir(&wd.id).map_err(|e| e.to_string())?;
+            }
+        }
+        store::BranchType::Remote => {
+            // Delete the Blox workspace
+            if let Some(ref ws_name) = branch.workspace_name {
+                // Best-effort: log but don't fail if workspace is already gone
+                if let Err(e) = blox::ws_delete(ws_name) {
+                    log::warn!("Failed to delete workspace {}: {}", ws_name, e);
+                }
+            }
+        }
     }
 
     // Delete the branch record (cascades to commits, notes, reviews)
@@ -1207,7 +1317,9 @@ pub fn run() {
             delete_project,
             list_branches_for_project,
             create_branch,
+            create_remote_branch,
             delete_branch,
+            get_workspace_info,
             get_branch_timeline,
             delete_note,
             delete_commit,

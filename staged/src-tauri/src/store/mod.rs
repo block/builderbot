@@ -59,7 +59,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -235,13 +235,17 @@ impl Store {
             );
 
             CREATE TABLE IF NOT EXISTS branches (
-                id              TEXT PRIMARY KEY,
-                project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                branch_name     TEXT NOT NULL,
-                base_branch     TEXT NOT NULL,
-                pr_number       INTEGER,
-                created_at      INTEGER NOT NULL,
-                updated_at      INTEGER NOT NULL,
+                id                  TEXT PRIMARY KEY,
+                project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                branch_name         TEXT NOT NULL,
+                base_branch         TEXT NOT NULL,
+                pr_number           INTEGER,
+                branch_type         TEXT NOT NULL DEFAULT 'local',
+                workspace_name      TEXT,
+                workspace_status    TEXT,
+                agent               TEXT,
+                created_at          INTEGER NOT NULL,
+                updated_at          INTEGER NOT NULL,
                 UNIQUE(project_id, branch_name)
             );
 

@@ -12,12 +12,19 @@ export interface Project {
   updatedAt: number;
 }
 
+export type BranchType = 'local' | 'remote';
+export type WorkspaceStatus = 'starting' | 'running' | 'stopped' | 'error';
+
 export interface Branch {
   id: string;
   projectId: string;
   branchName: string;
   baseBranch: string;
   prNumber: number | null;
+  branchType: BranchType;
+  workspaceName: string | null;
+  workspaceStatus: WorkspaceStatus | null;
+  agent: string | null;
   worktreePath: string | null;
   createdAt: number;
   updatedAt: number;

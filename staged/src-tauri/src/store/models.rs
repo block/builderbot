@@ -46,8 +46,74 @@ impl Project {
 // Branches
 // =============================================================================
 
+/// Whether a branch is backed by a local git worktree or a remote Blox workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BranchType {
+    /// Local git worktree on this machine.
+    Local,
+    /// Remote Blox workspace.
+    Remote,
+}
+
+impl BranchType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "local" => Some(Self::Local),
+            "remote" => Some(Self::Remote),
+            _ => None,
+        }
+    }
+}
+
+/// Lifecycle status of a remote Blox workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceStatus {
+    /// Workspace is being provisioned.
+    Starting,
+    /// Workspace is running and ready.
+    Running,
+    /// Workspace has been stopped (can be restarted).
+    Stopped,
+    /// Workspace encountered an error.
+    Error,
+}
+
+impl WorkspaceStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Error => "error",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "starting" => Some(Self::Starting),
+            "running" => Some(Self::Running),
+            "stopped" => Some(Self::Stopped),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+}
+
 /// A logical branch we manage. The branch's working directory (if any) is
 /// tracked separately in the `workdirs` table — see `Workdir`.
+///
+/// Branches can be **local** (backed by a git worktree on this machine) or
+/// **remote** (backed by a Blox workspace). Remote branches store additional
+/// metadata: the workspace name, its lifecycle status, and the agent type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Branch {
@@ -56,11 +122,20 @@ pub struct Branch {
     pub branch_name: String,
     pub base_branch: String,
     pub pr_number: Option<u64>,
+    /// Whether this branch is local or remote. Defaults to `Local`.
+    pub branch_type: BranchType,
+    /// The Blox workspace name (remote branches only).
+    pub workspace_name: Option<String>,
+    /// Current lifecycle status of the workspace (remote branches only).
+    pub workspace_status: Option<WorkspaceStatus>,
+    /// The agent running on the workspace, e.g. "goose" or "claude" (remote only).
+    pub agent: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 impl Branch {
+    /// Create a new local branch.
     pub fn new(project_id: &str, branch_name: &str, base_branch: &str) -> Self {
         let now = now_timestamp();
         Self {
@@ -69,6 +144,34 @@ impl Branch {
             branch_name: branch_name.to_string(),
             base_branch: base_branch.to_string(),
             pr_number: None,
+            branch_type: BranchType::Local,
+            workspace_name: None,
+            workspace_status: None,
+            agent: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Create a new remote branch backed by a Blox workspace.
+    pub fn new_remote(
+        project_id: &str,
+        branch_name: &str,
+        base_branch: &str,
+        workspace_name: &str,
+        agent: &str,
+    ) -> Self {
+        let now = now_timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            project_id: project_id.to_string(),
+            branch_name: branch_name.to_string(),
+            base_branch: base_branch.to_string(),
+            pr_number: None,
+            branch_type: BranchType::Remote,
+            workspace_name: Some(workspace_name.to_string()),
+            workspace_status: Some(WorkspaceStatus::Starting),
+            agent: Some(agent.to_string()),
             created_at: now,
             updated_at: now,
         }

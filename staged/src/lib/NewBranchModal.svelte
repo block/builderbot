@@ -256,17 +256,15 @@
           <span class="info-label">Repository:</span>
           <span class="info-value">{repoName(project.repoPath)}</span>
         </div>
-        {#if branchType === 'local'}
-          <button class="info-row base-row" onclick={toggleBasePicker}>
-            <GitBranch size={14} class="base-icon" />
-            <span class="info-label">Base:</span>
-            <span class="info-value">{formatBranchName(effectiveBaseBranch)}</span>
-            <ChevronsUpDown size={12} class="base-chevron" />
-          </button>
-        {/if}
+        <button class="info-row base-row" onclick={toggleBasePicker}>
+          <GitBranch size={14} class="base-icon" />
+          <span class="info-label">Base:</span>
+          <span class="info-value">{formatBranchName(effectiveBaseBranch)}</span>
+          <ChevronsUpDown size={12} class="base-chevron" />
+        </button>
       </div>
 
-      {#if showBasePicker && branchType === 'local'}
+      {#if showBasePicker}
         <!-- Base branch picker -->
         <div class="base-picker">
           <div class="base-search-container">

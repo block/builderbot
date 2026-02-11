@@ -240,7 +240,7 @@ impl AgentDriver for SimpleDriverWrapper {
 /// # Returns
 ///
 /// The agent's text response
-pub async fn run_acp_prompt_raw(
+pub async fn run_acp_prompt(
     agent: &AcpAgent,
     working_dir: &Path,
     prompt: &str,

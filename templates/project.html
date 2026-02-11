@@ -81,7 +81,6 @@
         border: 1px solid #e8e8e8;
         border-radius: 6px;
         background: #fff;
-        overflow: hidden;
         transition: border-color 0.15s, background-color 0.15s;
     }
     .source-section.selected {
@@ -98,7 +97,9 @@
         user-select: none;
     }
     .source-header:hover { background: #fafafa; }
+    .source-header { border-radius: 6px 6px 0 0; }
     .source-section.selected .source-header { background: #f0f7ff; }
+    .source-section .file:last-child { border-radius: 0 0 6px 6px; }
     .source-checkbox { display: none; }
     .source-header-label {
         font-size: 0.8em;
@@ -342,8 +343,8 @@
                     <button onclick="copySourceAbsolute(this)">Copy absolute paths</button>
                     <div class="menu-divider"></div>
                     <button onclick="publishSource(this)">Publish</button>
-                    {{if and (not $group.Auto) (ne $group.SourceType "files")}}<div class="menu-divider"></div>
-                    <button onclick="removeSource('{{$group.Source}}')">Remove from Birdseye</button>{{end}}
+                    {{if not $group.Auto}}<div class="menu-divider"></div>
+                    <button onclick="removeSourceFromBirdseye(this)">Remove from Birdseye</button>{{end}}
                     <div class="menu-divider"></div>
                     <button class="menu-danger" onclick="confirmDeleteSource(this)">Delete from disk</button>
                 </div>
@@ -715,6 +716,31 @@
         });
     }
 
+    function removeSourceFromBirdseye(btn) {
+        var section = btn.closest('.source-section');
+        var sourceType = section.dataset.sourceType;
+        var source = section.dataset.source;
+        closeAllMenus();
+        if (sourceType === 'files') {
+            var files = getSourceFiles(btn);
+            if (!confirm('Remove ' + files.length + ' file(s) from Birdseye?\nNo files will be deleted.')) return;
+            Promise.allSettled(files.map(function(f) {
+                return fetch('/api/sources', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({project: f.project, file: f.path})
+                }).then(function(r) { if (!r.ok) throw new Error('Failed'); });
+            }))
+            .then(function(results) {
+                var failed = results.filter(function(r) { return r.status === 'rejected'; }).length;
+                debouncedRefresh('files', refreshFiles);
+                if (failed > 0) alert(failed + ' file(s) failed to remove.');
+            });
+        } else {
+            removeSource(source);
+        }
+    }
+
     function confirmDeleteSource(btn) {
         closeAllMenus();
         var files = getSourceFiles(btn);
@@ -877,9 +903,9 @@
                     html += '<button onclick="copySourceAbsolute(this)">Copy absolute paths</button>';
                     html += '<div class="menu-divider"></div>';
                     html += '<button onclick="publishSource(this)">Publish</button>';
-                    if (!group.auto && group.sourceType !== 'files') {
+                    if (!group.auto) {
                         html += '<div class="menu-divider"></div>';
-                        html += '<button onclick="removeSource(\'' + escapeHtml(group.source) + '\')">Remove from Birdseye</button>';
+                        html += '<button onclick="removeSourceFromBirdseye(this)">Remove from Birdseye</button>';
                     }
                     html += '<div class="menu-divider"></div>';
                     html += '<button class="menu-danger" onclick="confirmDeleteSource(this)">Delete from disk</button>';

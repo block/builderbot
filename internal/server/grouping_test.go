@@ -39,8 +39,8 @@ func TestBuildFileGroups_RP1Grouped(t *testing.T) {
 		fileCount int
 	}{
 		{"Blueprint", "rp1", true, 1},
-		{"auth", "rp1", true, 2},
-		{"data-layer", "rp1", true, 1},
+		{"Feature: auth", "rp1", true, 2},
+		{"Feature: data-layer", "rp1", true, 1},
 		{"Context", "rp1", true, 1},
 	}
 

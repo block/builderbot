@@ -70,8 +70,8 @@ func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
 
-	if groups[0].Name != "auth" {
-		t.Errorf("expected first group 'auth', got %q", groups[0].Name)
+	if groups[0].Name != "Feature: auth" {
+		t.Errorf("expected first group 'Feature: auth', got %q", groups[0].Name)
 	}
 	if groups[0].Source != "rp1" {
 		t.Errorf("expected source 'rp1', got %q", groups[0].Source)

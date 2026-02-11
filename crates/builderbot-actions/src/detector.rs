@@ -241,7 +241,7 @@ fn collect_file_list_recursive(
     Ok(())
 }
 
-/// Collect contents of relevant build/config files
+/// Collect contents of relevant build/config files from root directory only
 fn collect_relevant_files(dir: &Path) -> Result<String> {
     let relevant_files = [
         "package.json",
@@ -263,7 +263,8 @@ fn collect_relevant_files(dir: &Path) -> Result<String> {
 
     let mut contents = Vec::new();
 
-    // Collect files from root directory
+    // Collect files from root directory only
+    // The AI agent will be instructed to search subdirectories if needed
     for file_name in &relevant_files {
         let file_path = dir.join(file_name);
         if file_path.exists() {
@@ -279,10 +280,6 @@ fn collect_relevant_files(dir: &Path) -> Result<String> {
         }
     }
 
-    // Recursively search subdirectories for justfiles and makefiles (up to 2 levels deep)
-    let build_files = ["justfile", "Justfile", "Makefile", "makefile"];
-    collect_subdirectory_build_files(dir, &build_files, &mut contents, 0, 2)?;
-
     if contents.is_empty() {
         Ok("No relevant build files found.".to_string())
     } else {
@@ -290,67 +287,6 @@ fn collect_relevant_files(dir: &Path) -> Result<String> {
     }
 }
 
-/// Recursively collect justfiles and makefiles from subdirectories
-fn collect_subdirectory_build_files(
-    dir: &Path,
-    build_files: &[&str],
-    contents: &mut Vec<String>,
-    depth: usize,
-    max_depth: usize,
-) -> Result<()> {
-    // Don't go too deep to avoid excessive scanning
-    if depth >= max_depth {
-        return Ok(());
-    }
-
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if let Ok(file_type) = entry.file_type() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-
-                // Skip hidden directories, node_modules, target, etc.
-                if name_str.starts_with('.')
-                    || name_str == "node_modules"
-                    || name_str == "target"
-                    || name_str == "dist"
-                    || name_str == "build"
-                    || name_str == ".git"
-                {
-                    continue;
-                }
-
-                if file_type.is_dir() {
-                    let subdir = entry.path();
-
-                    // Check if this subdirectory contains any build files
-                    for build_file in build_files {
-                        let build_file_path = subdir.join(build_file);
-                        if build_file_path.exists() {
-                            if let Ok(content) = std::fs::read_to_string(&build_file_path) {
-                                // Get relative path from base dir
-                                if let Ok(rel_path) = build_file_path.strip_prefix(dir) {
-                                    let rel_path_str = rel_path.to_string_lossy();
-                                    let truncated = if content.len() > 4000 {
-                                        format!("{}... (truncated)", &content[..4000])
-                                    } else {
-                                        content
-                                    };
-                                    contents.push(format!("=== {} ===\n{}\n", rel_path_str, truncated));
-                                }
-                            }
-                        }
-                    }
-
-                    // Recurse into subdirectory
-                    collect_subdirectory_build_files(&subdir, build_files, contents, depth + 1, max_depth)?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
 
 /// Parse the AI response and extract suggested actions
 fn parse_ai_response(response: &str) -> Result<Vec<SuggestedAction>> {

@@ -16,7 +16,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { MessageSquarePlus, MessageSquare, X } from 'lucide-svelte';
+  import { MessageSquarePlus, MessageSquare, X, FileText, Code } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from './sanitize';
   import type { FileDiff, Alignment, Comment, Span, SmartDiffAnnotation } from './types';
@@ -1396,7 +1396,7 @@
                 onclick={() => (markdownPreview = !markdownPreview)}
                 title={markdownPreview ? 'Show code' : 'Preview markdown'}
               >
-                {markdownPreview ? '{ }' : '📄'}
+                {#if markdownPreview}<Code size={14} />{:else}<FileText size={14} />{/if}
               </button>
             {/if}
           </div>
@@ -1558,7 +1558,7 @@
                 onclick={() => (markdownPreview = !markdownPreview)}
                 title={markdownPreview ? 'Show code' : 'Preview markdown'}
               >
-                {markdownPreview ? '{ }' : '📄'}
+                {#if markdownPreview}<Code size={14} />{:else}<FileText size={14} />{/if}
               </button>
             {/if}
           </div>

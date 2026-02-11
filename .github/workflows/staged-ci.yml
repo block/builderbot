@@ -56,9 +56,13 @@ jobs:
       # TODO: Re-enable full check-all once npm lockfile is compatible with CI
       # - name: Check all (fmt, lint, typecheck)
       #   run: just check-all
-      - name: Check (Rust only — fmt, lint, typecheck)
+      - name: Format check (all Rust crates)
+        run: |
+          cargo fmt --all --check
+          cd staged/src-tauri && cargo fmt --check
+
+      - name: Clippy and check (Rust only)
         working-directory: staged/src-tauri
         run: |
-          cargo fmt --check
           cargo clippy -- -D warnings
           cargo check

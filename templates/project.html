@@ -80,9 +80,10 @@
         margin-bottom: 16px;
         border: 1px solid #e8e8e8;
         border-radius: 6px;
-        background: #fff;
-        transition: border-color 0.15s, background-color 0.15s;
+        background: #f8f9fa;
+        transition: border-color 0.15s;
     }
+    .source-section:hover { border-color: #0066cc; }
     .source-section.selected {
         border-color: #0066cc;
         background: #f0f7ff;
@@ -96,7 +97,7 @@
         cursor: pointer;
         user-select: none;
     }
-    .source-header:hover { background: #fafafa; }
+    .source-header:hover { background: #e8e8e8; }
     .source-header { border-radius: 6px 6px 0 0; }
     .source-section.selected .source-header { background: #f0f7ff; }
     .source-section .file:last-child { border-radius: 0 0 6px 6px; }
@@ -130,10 +131,11 @@
         border: none;
         border-radius: 0;
         border-top: 1px solid #f0f0f0;
+        background: transparent;
     }
     .source-section .file:hover {
         border-color: #f0f0f0;
-        background: #f8f9fa;
+        background: #e8e8e8;
     }
     .source-section .file.selected {
         background: #f0f7ff;

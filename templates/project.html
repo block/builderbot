@@ -403,7 +403,7 @@
     </div>
 
     <div class="selection-bar" id="selectionBar">
-        <span class="count"><span id="selectedCount">0</span> selected</span>
+        <span class="count"><span id="selectedCount">0 files</span> selected</span>
         <div class="selection-dropdown">
             <button onclick="toggleSelectionDropdown(event)">Copy &#9662;</button>
             <div class="selection-dropdown-menu">
@@ -753,11 +753,28 @@
     }
 
     function onSelectionChanged() {
-        var removeBtn = document.getElementById('removeSelectedBtn');
-        if (!removeBtn) return;
         var files = getSelectedFiles();
-        var hasIndividual = files.some(function(f) { return f.sourceType === 'files'; });
-        removeBtn.style.display = hasIndividual ? '' : 'none';
+        var n = files.length;
+        var plural = n !== 1;
+
+        var removeBtn = document.getElementById('removeSelectedBtn');
+        if (removeBtn) {
+            var hasIndividual = files.some(function(f) { return f.sourceType === 'files'; });
+            removeBtn.style.display = hasIndividual ? '' : 'none';
+        }
+
+        // Update labels for singular/plural
+        var countEl = document.getElementById('selectedCount');
+        if (countEl) countEl.textContent = n + ' file' + (plural ? 's' : '');
+
+        var menuBtns = document.querySelectorAll('.selection-dropdown-menu button');
+        menuBtns.forEach(function(btn) {
+            var fn = btn.getAttribute('onclick') || '';
+            if (fn.indexOf('copySelectedMarkdown') >= 0) btn.textContent = 'Copy markdown';
+            else if (fn.indexOf('copySelectedFiles') >= 0) btn.textContent = plural ? 'Copy files' : 'Copy file';
+            else if (fn.indexOf('copySelectedRelative') >= 0) btn.textContent = plural ? 'Copy relative paths' : 'Copy relative path';
+            else if (fn.indexOf('copySelectedAbsolute') >= 0) btn.textContent = plural ? 'Copy absolute paths' : 'Copy absolute path';
+        });
     }
 
     // --- Agent controls ---

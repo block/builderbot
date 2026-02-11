@@ -40,7 +40,7 @@ func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 		WorkspaceName: "test",
 		Origin:        "workspace",
 		Sources: []discovery.FileSource{
-			{Name: "rp1", Type: "tree", RootPath: "/tmp/test/.rp1", Auto: true},
+			{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
 		},
 	}
 	c.SetProjects([]discovery.Project{project})

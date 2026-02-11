@@ -24,6 +24,7 @@ type SourceType struct {
 	DetectAtWSRoot   bool                             // also detect at workspace root level
 	ClassifyFile     func(path string) string         // returns file type for a path within the source
 	GroupFiles       func(paths []string) []FileGroup // optional: groups files for display; if nil, single flat list
+	ShowDirHeadings  bool                             // show directory headings above files in each subdirectory
 }
 
 // FileGroup represents a named group of files within a source for display.
@@ -125,6 +126,11 @@ func init() {
 		},
 		GroupFiles: groupRP1Paths,
 	})
+
+	RegisterSourceType(&SourceType{
+		Name:            "manual",
+		ShowDirHeadings: true,
+	})
 }
 
 // classifyRP1Feature classifies a file under work/features/{id}/ by its filename.
@@ -195,11 +201,12 @@ type Badge struct {
 
 // FileSource represents a set of files to display for a project.
 type FileSource struct {
-	Name     string   // display name (e.g., "thoughts", "docs")
-	Type     string   // "tree" or "files"
-	RootPath string   // absolute path to tree root (for thoughts/tree types)
-	Files    []string // absolute paths (for "files" type)
-	Auto     bool     // true if auto-detected (thoughts/), false if user-added
+	Name           string   // display name (e.g., "thoughts", "docs")
+	Type           string   // "tree" or "files"
+	SourceTypeName string   // registered SourceType name (e.g., "thoughts", "rp1", "manual")
+	RootPath       string   // absolute path to tree root (for thoughts/tree types)
+	Files          []string // absolute paths (for "files" type)
+	Auto           bool     // true if auto-detected (thoughts/), false if user-added
 }
 
 type Project struct {
@@ -281,10 +288,11 @@ func DetectSources(projectPath string) []FileSource {
 		dirPath := filepath.Join(projectPath, st.AutoDetectDir)
 		if info, err := os.Stat(dirPath); err == nil && info.IsDir() {
 			sources = append(sources, FileSource{
-				Name:     st.Name,
-				Type:     st.ScanMode,
-				RootPath: dirPath,
-				Auto:     true,
+				Name:           st.Name,
+				Type:           st.ScanMode,
+				SourceTypeName: st.Name,
+				RootPath:       dirPath,
+				Auto:           true,
 			})
 		}
 	}
@@ -327,10 +335,11 @@ func DiscoverWorkspace(workspacePath, workspaceName string) ([]Project, error) {
 		dirPath := filepath.Join(workspacePath, st.AutoDetectDir)
 		if info, err := os.Stat(dirPath); err == nil && info.IsDir() {
 			rootSources = append(rootSources, FileSource{
-				Name:     st.Name,
-				Type:     st.ScanMode,
-				RootPath: dirPath,
-				Auto:     true,
+				Name:           st.Name,
+				Type:           st.ScanMode,
+				SourceTypeName: st.Name,
+				RootPath:       dirPath,
+				Auto:           true,
 			})
 		}
 	}
@@ -390,9 +399,10 @@ func SourceConfigsToFileSources(projectPath string, configs []config.SourceConfi
 	var sources []FileSource
 	for _, src := range configs {
 		fs := FileSource{
-			Name: src.Name,
-			Type: src.Type,
-			Auto: false,
+			Name:           src.Name,
+			Type:           src.Type,
+			SourceTypeName: "manual",
+			Auto:           false,
 		}
 		if src.Type == "tree" {
 			fs.RootPath = filepath.Join(projectPath, src.Path)

@@ -9,7 +9,7 @@
   import { onMount } from 'svelte';
   import { X, GitBranch, Search, ChevronsUpDown, Check, Monitor, Cloud } from 'lucide-svelte';
   import Spinner from './Spinner.svelte';
-  import type { Branch, Project, BranchType } from './types';
+  import type { Branch, BranchRef, Project, BranchType } from './types';
   import * as commands from './commands';
   import { runPrerunActions } from './services/actions';
 
@@ -35,7 +35,7 @@
 
   // Base branch picker
   let showBasePicker = $state(false);
-  let availableBranches = $state<string[]>([]);
+  let allBranchRefs = $state<BranchRef[]>([]);
   let baseSearchQuery = $state('');
   let baseSelectedIndex = $state(0);
 
@@ -43,6 +43,15 @@
   let baseSearchEl: HTMLInputElement | null = $state(null);
 
   let effectiveBaseBranch = $derived(selectedBaseBranch ?? detectedDefaultBranch ?? 'main');
+
+  // For remote branches, only show remote-tracking refs (branches that exist on the remote).
+  // For local branches, show all refs.
+  let availableBranches = $derived.by(() => {
+    if (branchType === 'remote') {
+      return allBranchRefs.filter((r) => r.isRemote).map((r) => r.name);
+    }
+    return allBranchRefs.map((r) => r.name);
+  });
 
   let filteredBranches = $derived.by(() => {
     if (!baseSearchQuery) return availableBranches;
@@ -82,10 +91,9 @@
 
     // Load available branches
     try {
-      const refs = await commands.listGitBranches(project.repoPath);
-      availableBranches = refs.map((r) => r.name);
+      allBranchRefs = await commands.listGitBranches(project.repoPath);
     } catch {
-      availableBranches = [];
+      allBranchRefs = [];
     }
   });
 
@@ -235,7 +243,10 @@
         <button
           class="toggle-option"
           class:active={branchType === 'local'}
-          onclick={() => (branchType = 'local')}
+          onclick={() => {
+            branchType = 'local';
+            selectedBaseBranch = null;
+          }}
         >
           <Monitor size={14} />
           Local
@@ -243,7 +254,10 @@
         <button
           class="toggle-option"
           class:active={branchType === 'remote'}
-          onclick={() => (branchType = 'remote')}
+          onclick={() => {
+            branchType = 'remote';
+            selectedBaseBranch = null;
+          }}
         >
           <Cloud size={14} />
           Remote

@@ -68,12 +68,17 @@ pub struct BranchRef {
 /// List branches (local and remote) for base branch selection.
 /// Returns branches sorted with local first, then remote.
 /// Filters out HEAD references.
+/// Prunes stale remote-tracking refs first so deleted remote branches don't appear.
 pub fn list_branches(repo: &Path) -> Result<Vec<BranchRef>, GitError> {
+    // Prune stale remote-tracking refs (branches deleted on the remote).
+    // Best-effort: ignore errors (e.g. no network, no remote configured).
+    let _ = cli::run(repo, &["remote", "prune", "origin"]);
+
     let output = cli::run(
         repo,
         &[
             "for-each-ref",
-            "--format=%(refname:short)",
+            "--format=%(refname:short)\t%(refname)",
             "refs/heads",
             "refs/remotes",
         ],
@@ -82,18 +87,19 @@ pub fn list_branches(repo: &Path) -> Result<Vec<BranchRef>, GitError> {
     let mut branches: Vec<BranchRef> = output
         .lines()
         .filter(|s| !s.is_empty() && !s.ends_with("/HEAD"))
-        .map(|name| {
-            let is_remote = name.contains('/');
+        .filter_map(|line| {
+            let (short, full) = line.split_once('\t')?;
+            let is_remote = full.starts_with("refs/remotes/");
             let remote = if is_remote {
-                name.split('/').next().map(String::from)
+                short.split('/').next().map(String::from)
             } else {
                 None
             };
-            BranchRef {
-                name: name.to_string(),
+            Some(BranchRef {
+                name: short.to_string(),
                 is_remote,
                 remote,
-            }
+            })
         })
         .collect();
 

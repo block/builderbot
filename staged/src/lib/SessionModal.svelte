@@ -286,13 +286,24 @@
   // Helpers
   // =========================================================================
 
-  /** Whether the user is scrolled near the bottom (within 80px). */
-  let isNearBottom = $state(true);
+  /** Whether the user has intentionally scrolled up (disables auto-scroll). */
+  let userScrolledUp = $state(false);
+  let lastScrollTop = 0;
 
   function handleScroll() {
     if (!messagesEl) return;
     const { scrollTop, scrollHeight, clientHeight } = messagesEl;
-    isNearBottom = scrollHeight - scrollTop - clientHeight < 80;
+    const atBottom = scrollHeight - scrollTop - clientHeight < 1;
+
+    if (scrollTop < lastScrollTop && !atBottom) {
+      // Scroll position moved upward — user scrolled up (any input method)
+      userScrolledUp = true;
+    }
+    if (atBottom) {
+      // They're back at bottom — re-enable auto-scroll
+      userScrolledUp = false;
+    }
+    lastScrollTop = scrollTop;
   }
 
   /** Scroll to bottom unconditionally (e.g. initial load, user sends message). */
@@ -300,13 +311,14 @@
     tick().then(() => {
       if (messagesEl) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
+        userScrolledUp = false;
       }
     });
   }
 
-  /** Scroll to bottom only if the user hasn't scrolled up. */
+  /** Scroll to bottom only if the user hasn't intentionally scrolled up. */
   function scrollToBottomIfNear() {
-    if (isNearBottom) {
+    if (!userScrolledUp) {
       scrollToBottom();
     }
   }

@@ -704,11 +704,15 @@ async fn create_remote_branch(
     // Resolve the source to an HTTPS git URL. The frontend passes the
     // local repo path, but blox needs a fetchable HTTPS URL.
     // Append ?ref=<branch> so the workspace checks out the correct base.
+    // Strip the "origin/" prefix since blox expects a plain branch name.
+    let ref_name = effective_base
+        .strip_prefix("origin/")
+        .unwrap_or(&effective_base);
     let resolved_source = match source {
         Some(_) => git::get_remote_url(repo_path, "origin")
             .ok()
             .filter(|u| !u.is_empty())
-            .map(|u| format!("{}?ref={}", ssh_url_to_https(&u), effective_base)),
+            .map(|u| format!("{}?ref={}", ssh_url_to_https(&u), ref_name)),
         None => None,
     };
 

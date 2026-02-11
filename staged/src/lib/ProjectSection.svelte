@@ -5,7 +5,7 @@
   Includes a "New Branch" dashed button at the bottom.
 -->
 <script lang="ts">
-  import { Folder, Trash2, Plus, Settings } from 'lucide-svelte';
+  import { Folder, Trash2, Plus, Settings, Loader2 } from 'lucide-svelte';
   import type { Project, Branch } from './types';
   import { projectDisplayName } from './utils';
   import BranchCard from './BranchCard.svelte';
@@ -17,6 +17,7 @@
     project: Project;
     branches: Branch[];
     deletingBranches?: Set<string>;
+    detecting?: boolean;
     onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onNewBranch?: () => void;
@@ -26,6 +27,7 @@
     project,
     branches,
     deletingBranches = new Set(),
+    detecting = false,
     onDeleteProject,
     onDeleteBranch,
     onNewBranch,
@@ -53,6 +55,12 @@
         <span class="menu-icon"><DropdownMenu items={projectMenuItems} align="left" /></span>
       </div>
       <span class="project-name">{projectDisplayName(project)}</span>
+      {#if detecting}
+        <div class="detecting-status">
+          <Loader2 size={12} class="spinner" />
+          <span>Detecting actions...</span>
+        </div>
+      {/if}
     </div>
   </div>
   <div class="branches-list">
@@ -82,6 +90,7 @@
 {#if showProjectSettings}
   <ProjectSettingsModal
     {project}
+    {detecting}
     onClose={() => {
       showProjectSettings = false;
     }}
@@ -148,6 +157,31 @@
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;
+  }
+
+  .detecting-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 12px;
+    padding: 4px 10px;
+    background-color: var(--bg-hover);
+    border-radius: 4px;
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+  }
+
+  .detecting-status :global(.spinner) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .branches-list {

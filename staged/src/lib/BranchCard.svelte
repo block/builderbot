@@ -11,7 +11,7 @@
   - Each item shows session + delete actions on hover
 -->
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import {
     GitBranch,
     GitCommitHorizontal,
@@ -34,7 +34,6 @@
     Zap,
     Wand2,
     MoreVertical,
-    ExternalLink,
   } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { Branch, BranchTimeline as BranchTimelineData, BranchSessionType } from './types';
@@ -48,8 +47,6 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import ActionOutputModal from './ActionOutputModal.svelte';
   import { runBranchAction, type ActionStatusEvent } from './services/actions';
-  import type { OpenerApp } from './services/branch';
-  import * as branchService from './services/branch';
 
   interface Props {
     branch: Branch;
@@ -75,11 +72,6 @@
   let showMoreMenu = $state(false);
   let showActionsSubmenu = $state(false);
   let actionsSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
-
-  // Open In submenu state
-  let openerApps = $state<OpenerApp[]>([]);
-  let showOpenInSubmenu = $state(false);
-  let openInSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
 
   let timeline = $state<BranchTimelineData | null>(null);
   let loading = $state(true);
@@ -133,92 +125,115 @@
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenActionStatus: UnlistenFn | null = null;
 
-  // Set up event listeners immediately (synchronously) at module level
-  listen<{
-    sessionId: string;
-    status: string;
-  }>('session-status-changed', (event) => {
-    const { status } = event.payload;
-    if (status === 'completed' || status === 'error' || status === 'cancelled') {
-      loadTimeline();
-    }
-  }).then((unlisten) => {
-    unlistenStatus = unlisten;
-  });
+  // Set up event listeners immediately (synchronously) at module level like old codebase
+  $effect(() => {
+    const branchId = branch.id;
+    const branchName = branch.branchName;
+    console.log('[BranchCard] Setting up listeners for branch:', branchId, branchName);
 
-  listen<ActionStatusEvent>('action_status', (event) => {
-    const payload = event.payload;
-
-    // Only process events for this branch
-    if (payload.branchId !== branch.id) {
-      return;
-    }
-
-    const existingIndex = runningActions.findIndex((a) => a.executionId === payload.executionId);
-
-    if (payload.status === 'running') {
-      if (existingIndex === -1) {
-        runningActions.push({
-          executionId: payload.executionId,
-          actionId: payload.actionId,
-          actionName: payload.actionName,
-          status: 'running',
-          startedAt: payload.startedAt ?? Date.now(),
-        });
+    listen<{
+      sessionId: string;
+      status: string;
+    }>('session-status-changed', (event) => {
+      const { status } = event.payload;
+      if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        loadTimeline();
       }
-    } else {
-      // Action completed/failed/stopped - update status
-      if (existingIndex !== -1) {
-        runningActions[existingIndex].status = payload.status as any;
-        runningActions[existingIndex].exitCode = payload.exitCode;
-        runningActions[existingIndex].completedAt = payload.completedAt;
+    }).then((unlisten) => {
+      unlistenStatus = unlisten;
+      console.log('[BranchCard] Session status listener registered for:', branchId);
+    });
 
-        // Auto-remove only completed and stopped actions (not failed)
-        if (payload.status === 'completed' || payload.status === 'stopped') {
-          const action = runningActions[existingIndex];
-          const isPrimaryAction = primaryRunAction && action.actionId === primaryRunAction.id;
+    listen<ActionStatusEvent>('action_status', (event) => {
+      const payload = event.payload;
+      console.log('[BranchCard] Received action_status event:', payload);
 
-          setTimeout(
-            () => {
-              const foundAction = runningActions.find((a) => a.executionId === payload.executionId);
-              if (foundAction && !isPrimaryAction) {
-                // Secondary actions fade out
-                foundAction.fading = true;
-              }
-              // Remove after animation completes (or immediately for primary)
-              setTimeout(
-                () => {
-                  runningActions = runningActions.filter(
-                    (a) => a.executionId !== payload.executionId
-                  );
-                },
-                isPrimaryAction ? 0 : 300
-              ); // Match CSS transition duration for secondary
-            },
-            isPrimaryAction ? 1000 : 2000
-          ); // Shorter display time for primary action
+      // Only process events for this branch
+      if (payload.branchId !== branchId) {
+        console.log(
+          '[BranchCard] Ignoring event for different branch:',
+          payload.branchId,
+          'vs',
+          branchId
+        );
+        return;
+      }
+
+      console.log(
+        '[BranchCard] Processing action_status for branch:',
+        branchId,
+        'status:',
+        payload.status
+      );
+
+      const existingIndex = runningActions.findIndex((a) => a.executionId === payload.executionId);
+
+      if (payload.status === 'running') {
+        if (existingIndex === -1) {
+          console.log('[BranchCard] Adding running action:', payload.actionName);
+          runningActions.push({
+            executionId: payload.executionId,
+            actionId: payload.actionId,
+            actionName: payload.actionName,
+            status: 'running',
+            startedAt: payload.startedAt ?? Date.now(),
+          });
+          console.log(
+            '[BranchCard] runningActions now:',
+            runningActions.length,
+            runningActions.map((a) => a.actionName)
+          );
+        }
+      } else {
+        // Action completed/failed/stopped - update status
+        if (existingIndex !== -1) {
+          runningActions[existingIndex].status = payload.status as any;
+          runningActions[existingIndex].exitCode = payload.exitCode;
+          runningActions[existingIndex].completedAt = payload.completedAt;
+
+          // Auto-remove successful completions (with fade for secondary, instant for primary)
+          if (payload.status === 'completed') {
+            const action = runningActions[existingIndex];
+            const isPrimaryAction = primaryRunAction && action.actionId === primaryRunAction.id;
+
+            setTimeout(
+              () => {
+                const foundAction = runningActions.find(
+                  (a) => a.executionId === payload.executionId
+                );
+                if (foundAction && !isPrimaryAction) {
+                  // Secondary actions fade out
+                  foundAction.fading = true;
+                }
+                // Remove after animation completes (or immediately for primary)
+                setTimeout(
+                  () => {
+                    runningActions = runningActions.filter(
+                      (a) => a.executionId !== payload.executionId
+                    );
+                  },
+                  isPrimaryAction ? 0 : 300
+                ); // Match CSS transition duration for secondary
+              },
+              isPrimaryAction ? 1000 : 2000
+            ); // Shorter display time for primary action
+          }
         }
       }
-    }
-  }).then((unlisten) => {
-    unlistenActionStatus = unlisten;
+    }).then((unlisten) => {
+      unlistenActionStatus = unlisten;
+      console.log('[BranchCard] Action status listener registered for:', branchId);
+    });
+
+    return () => {
+      unlistenStatus?.();
+      unlistenActionStatus?.();
+    };
   });
 
   onMount(() => {
     loadTimeline();
     loadActions();
-
-    // Load available openers for "Open In" menu
-    if (branch.worktreePath) {
-      branchService.getAvailableOpeners().then((apps) => {
-        openerApps = apps;
-      });
-    }
-  });
-
-  onDestroy(() => {
-    unlistenStatus?.();
-    unlistenActionStatus?.();
   });
 
   async function loadTimeline() {
@@ -288,54 +303,6 @@
     }, 100);
   }
 
-  // Open In submenu handlers
-  function handleOpenInSubmenuEnter() {
-    if (openInSubmenuTimeout) {
-      clearTimeout(openInSubmenuTimeout);
-      openInSubmenuTimeout = null;
-    }
-    showOpenInSubmenu = true;
-  }
-
-  function handleOpenInSubmenuLeave() {
-    openInSubmenuTimeout = setTimeout(() => {
-      showOpenInSubmenu = false;
-      openInSubmenuTimeout = null;
-    }, 100);
-  }
-
-  async function handleOpenInApp(appId: string) {
-    showMoreMenu = false;
-    showOpenInSubmenu = false;
-
-    if (!branch.worktreePath) {
-      console.error('No worktree path available');
-      return;
-    }
-
-    try {
-      await branchService.openInApp(branch.worktreePath, appId);
-    } catch (e) {
-      console.error('Failed to open in app:', e);
-    }
-  }
-
-  async function handleCopyPath() {
-    showMoreMenu = false;
-    showOpenInSubmenu = false;
-
-    if (!branch.worktreePath) {
-      console.error('No worktree path available');
-      return;
-    }
-
-    try {
-      await branchService.copyPathToClipboard(branch.worktreePath);
-    } catch (e) {
-      console.error('Failed to copy path:', e);
-    }
-  }
-
   // Track the primary action's execution status
   let primaryActionExecution = $derived.by(() => {
     if (!primaryRunAction) return null;
@@ -351,22 +318,16 @@
   async function handleRunAction(action: ProjectAction) {
     showMoreMenu = false;
 
-    // Check if this action is currently running
+    // Check if this action is already running
     const existingExecution = runningActions.find((a) => a.actionId === action.id);
 
-    if (existingExecution && existingExecution.status === 'running') {
-      // Action currently running, open modal to view output
+    if (existingExecution) {
+      // Action already running, open modal to view output
       actionOutputModal = {
         executionId: existingExecution.executionId,
         actionName: action.name,
       };
       return;
-    }
-
-    // If the same action has a previous execution (completed, failed, or stopped),
-    // remove it before starting a new one
-    if (existingExecution) {
-      runningActions = runningActions.filter((a) => a.actionId !== action.id);
     }
 
     // Start the action silently (don't open modal)
@@ -388,20 +349,11 @@
     };
   }
 
-  // Handle removing a failed action execution
-  function handleRemoveExecution(executionId: string) {
-    runningActions = runningActions.filter((a) => a.executionId !== executionId);
-  }
-
   // Close dropdowns when clicking outside
   function handleClickOutside(e: MouseEvent) {
     const target = e.target as HTMLElement;
     if (!target.closest('.more-menu-container')) {
       showMoreMenu = false;
-    }
-    // Close Open In submenu when clicking outside
-    if (!target.closest('.submenu-container')) {
-      showOpenInSubmenu = false;
     }
   }
 
@@ -727,43 +679,8 @@
                 </div>
               {/if}
 
-              <!-- Open In submenu -->
-              {#if branch.worktreePath && openerApps.length > 0}
-                <div class="menu-separator"></div>
-                <div class="submenu-container">
-                  <button
-                    class="more-menu-item submenu-trigger"
-                    onmouseenter={handleOpenInSubmenuEnter}
-                    onmouseleave={handleOpenInSubmenuLeave}
-                  >
-                    <ExternalLink size={14} />
-                    Open In
-                    <ChevronDown size={12} class="submenu-chevron" />
-                  </button>
-                  {#if showOpenInSubmenu}
-                    <div
-                      class="submenu"
-                      role="group"
-                      onmouseenter={handleOpenInSubmenuEnter}
-                      onmouseleave={handleOpenInSubmenuLeave}
-                    >
-                      {#each openerApps as app (app.id)}
-                        <button class="more-menu-item" onclick={() => handleOpenInApp(app.id)}>
-                          {app.name}
-                        </button>
-                      {/each}
-                      <div class="menu-separator"></div>
-                      <button class="more-menu-item" onclick={handleCopyPath}>
-                        <Copy size={14} />
-                        Copy Path
-                      </button>
-                    </div>
-                  {/if}
-                </div>
-              {/if}
-
-              <!-- Copy Worktree Path if available (fallback if no openers) -->
-              {#if branch.worktreePath && openerApps.length === 0}
+              <!-- Copy Worktree Path if available -->
+              {#if branch.worktreePath}
                 <div class="menu-separator"></div>
                 <button class="more-menu-item" onclick={copyWorktreePath}>
                   <Copy size={14} />
@@ -898,7 +815,6 @@
     executionId={actionOutputModal.executionId}
     actionName={actionOutputModal.actionName}
     onClose={() => (actionOutputModal = null)}
-    onRemove={handleRemoveExecution}
   />
 {/if}
 

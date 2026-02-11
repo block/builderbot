@@ -37,6 +37,9 @@
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
 
+  // Action detection state
+  let detectingProjectIds = $state<Set<string>>(new Set());
+
   onMount(() => {
     checkStoreAndLoad();
 
@@ -113,6 +116,16 @@
     projects = [...projects, project];
     branchesByProject = new Map(branchesByProject).set(project.id, []);
     showNewProjectModal = false;
+  }
+
+  function handleProjectDetecting(projectId: string, detecting: boolean) {
+    if (detecting) {
+      detectingProjectIds = new Set([...detectingProjectIds, projectId]);
+    } else {
+      const next = new Set(detectingProjectIds);
+      next.delete(projectId);
+      detectingProjectIds = next;
+    }
   }
 
   function handleDeleteProjectRequest(project: Project) {
@@ -278,6 +291,7 @@
             {project}
             branches={branchesByProject.get(project.id) || []}
             {deletingBranches}
+            detecting={detectingProjectIds.has(project.id)}
             onDeleteProject={() => handleDeleteProjectRequest(project)}
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onNewBranch={() => handleNewBranch(project)}
@@ -290,7 +304,11 @@
 
 <!-- New project modal -->
 {#if showNewProjectModal}
-  <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
+  <NewProjectModal
+    onCreated={handleProjectCreated}
+    onDetecting={handleProjectDetecting}
+    onClose={() => (showNewProjectModal = false)}
+  />
 {/if}
 
 <!-- New branch modal -->

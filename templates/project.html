@@ -86,7 +86,6 @@
     .source-section:hover { border-color: #0066cc; }
     .source-section.selected {
         border-color: #0066cc;
-        background: #f0f7ff;
     }
     .source-header {
         display: flex;
@@ -97,9 +96,9 @@
         cursor: pointer;
         user-select: none;
     }
-    .source-header:hover { background: #e8e8e8; }
+    .source-header:hover { background: #eff0f1; }
     .source-header { border-radius: 6px 6px 0 0; }
-    .source-section.selected .source-header { background: #f0f7ff; }
+    .source-section.all-selected .source-header { background: #e8f0fe; }
     .source-section .file:last-child { border-radius: 0 0 6px 6px; }
     .source-checkbox { display: none; }
     .source-header-label {
@@ -135,10 +134,10 @@
     }
     .source-section .file:hover {
         border-color: #f0f0f0;
-        background: #e8e8e8;
+        background: #eff0f1;
     }
     .source-section .file.selected {
-        background: #f0f7ff;
+        background: #e8f0fe;
         border-color: #f0f0f0;
     }
 
@@ -468,7 +467,8 @@
             fileCbs.forEach(function(cb) { if (cb.checked) checked++; });
             scb.checked = checked === fileCbs.length;
             scb.indeterminate = checked > 0 && checked < fileCbs.length;
-            section.classList.toggle('selected', checked === fileCbs.length);
+            section.classList.toggle('selected', checked > 0);
+            section.classList.toggle('all-selected', checked === fileCbs.length);
         });
     }
 

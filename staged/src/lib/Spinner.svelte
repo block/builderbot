@@ -26,23 +26,28 @@
   :global(.spinner) {
     animation: spin 1s linear infinite;
     flex-shrink: 0;
-    /* Prevent wobbling by ensuring the icon is centered and uses transform-origin */
     display: inline-block;
+    /* Center the rotation precisely */
     transform-origin: center center;
+    /* Force GPU acceleration and create own compositing layer */
+    transform: translate3d(0, 0, 0);
     will-change: transform;
-    /* Fix wobbling by forcing GPU acceleration and proper transform box */
-    transform: translateZ(0);
     backface-visibility: hidden;
-    /* Ensure crisp rendering at whole pixels */
-    transform-style: preserve-3d;
+    /* Prevent subpixel wobble */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Ensure the element stays in its own layer */
+    isolation: isolate;
+    /* Round to whole pixels */
+    transform-box: fill-box;
   }
 
   @keyframes spin {
     from {
-      transform: translateZ(0) rotate(0deg);
+      transform: translate3d(0, 0, 0) rotate(0deg);
     }
     to {
-      transform: translateZ(0) rotate(360deg);
+      transform: translate3d(0, 0, 0) rotate(360deg);
     }
   }
 </style>

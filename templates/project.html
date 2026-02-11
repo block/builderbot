@@ -356,7 +356,18 @@
 
     <div class="selection-bar" id="selectionBar">
         <span class="count"><span id="selectedCount">0</span> selected</span>
-        <button onclick="copySelected()">Copy paths</button>
+        <div class="selection-dropdown">
+            <button onclick="toggleSelectionDropdown(event)">Copy &#9662;</button>
+            <div class="selection-dropdown-menu">
+                <button onclick="copySelectedMarkdown()">Copy markdown</button>
+                <button onclick="copySelectedFiles()">Copy files</button>
+                <button onclick="copySelectedRelative()">Copy relative paths</button>
+                <button onclick="copySelectedAbsolute()">Copy absolute paths</button>
+            </div>
+        </div>
+        <button id="publishSelectedBtn" onclick="publishSelected()">Publish</button>
+        <button id="removeSelectedBtn" onclick="removeSelected()" style="display:none">Remove</button>
+        <button class="danger-btn" onclick="confirmDeleteSelected()">Delete</button>
         <button class="clear-btn" onclick="clearSelection()">Clear</button>
     </div>
 {{end}}
@@ -422,16 +433,24 @@
     }
 
     // --- Delete file from disk ---
-    var pendingDelete = { project: '', path: '', name: '' };
+    var pendingDeletes = [];
 
     function confirmDeleteFile(btn) {
         var d = getFileData(btn);
         var row = btn.closest('.file');
-        pendingDelete.project = d.project;
-        pendingDelete.path = d.path;
-        pendingDelete.name = row.querySelector('.file-name a').textContent;
+        pendingDeletes = [{project: d.project, path: d.path}];
         closeAllMenus();
-        document.getElementById('deleteFileName').textContent = pendingDelete.name;
+        document.getElementById('deleteFileName').textContent = row.querySelector('.file-name a').textContent;
+        document.getElementById('confirmDeleteBtn').disabled = false;
+        document.getElementById('confirmDeleteBtn').textContent = 'Delete from disk';
+        document.getElementById('deleteFileModal').classList.add('open');
+    }
+
+    function confirmDeleteSelected() {
+        var files = getSelectedFiles();
+        if (files.length === 0) return;
+        pendingDeletes = files.map(function(f) { return {project: f.project, path: f.path}; });
+        document.getElementById('deleteFileName').textContent = files.length + ' file' + (files.length === 1 ? '' : 's');
         document.getElementById('confirmDeleteBtn').disabled = false;
         document.getElementById('confirmDeleteBtn').textContent = 'Delete from disk';
         document.getElementById('deleteFileModal').classList.add('open');
@@ -446,19 +465,138 @@
         btn.disabled = true;
         btn.textContent = 'Deleting...';
 
-        fetch('/api/delete-file?project=' + encodeURIComponent(pendingDelete.project) + '&path=' + encodeURIComponent(pendingDelete.path), {
-            method: 'POST'
-        })
-        .then(function(r) {
-            if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+        Promise.allSettled(pendingDeletes.map(function(d) {
+            return fetch('/api/delete-file?project=' + encodeURIComponent(d.project) + '&path=' + encodeURIComponent(d.path), {method: 'POST'})
+                .then(function(r) {
+                    if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
+                });
+        }))
+        .then(function(results) {
+            var failed = results.filter(function(r) { return r.status === 'rejected'; });
             closeDeleteFileDialog();
+            clearSelection();
             debouncedRefresh('files', refreshFiles);
-        })
-        .catch(function(err) {
-            alert('Failed to delete: ' + err.message);
-            btn.disabled = false;
-            btn.textContent = 'Delete from disk';
+            if (failed.length > 0) alert(failed.length + ' file(s) failed to delete.');
         });
+    }
+
+    // --- Batch selection operations ---
+    function getSelectedFiles() {
+        return Array.from(document.querySelectorAll('.file-checkbox:checked')).map(function(cb) {
+            var file = cb.closest('.file');
+            return {
+                project: file.dataset.project,
+                projectPath: file.dataset.projectPath,
+                path: file.dataset.path,
+                sourceType: file.dataset.sourceType
+            };
+        });
+    }
+
+    function toggleSelectionDropdown(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.target.closest('.selection-dropdown').classList.toggle('open');
+    }
+
+    function closeSelectionDropdown() {
+        document.querySelectorAll('.selection-dropdown.open').forEach(function(d) { d.classList.remove('open'); });
+    }
+
+    function flashSelectionCopied() {
+        var btn = document.querySelector('.selection-dropdown > button');
+        if (!btn) return;
+        var orig = btn.innerHTML;
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(function() { btn.innerHTML = orig; btn.classList.remove('copied'); }, 1500);
+    }
+
+    function copySelectedMarkdown() {
+        closeSelectionDropdown();
+        var files = getSelectedFiles();
+        Promise.all(files.map(function(f) {
+            return fetch('/api/raw?project=' + encodeURIComponent(f.project) + '&path=' + encodeURIComponent(f.path))
+                .then(function(r) { return r.text(); });
+        }))
+        .then(function(texts) {
+            navigator.clipboard.writeText(texts.join('\n\n---\n\n'));
+            flashSelectionCopied();
+        })
+        .catch(function(err) { alert('Failed to copy: ' + err.message); });
+    }
+
+    function copySelectedFiles() {
+        closeSelectionDropdown();
+        var files = getSelectedFiles();
+        files.forEach(function(f) {
+            fetch('/api/copy-file?project=' + encodeURIComponent(f.project) + '&path=' + encodeURIComponent(f.path));
+        });
+        flashSelectionCopied();
+    }
+
+    function copySelectedRelative() {
+        closeSelectionDropdown();
+        var paths = getSelectedFiles().map(function(f) { return '@' + f.path; });
+        navigator.clipboard.writeText(paths.join('\n'));
+        flashSelectionCopied();
+    }
+
+    function copySelectedAbsolute() {
+        closeSelectionDropdown();
+        var paths = getSelectedFiles().map(function(f) { return f.projectPath + '/' + f.path; });
+        navigator.clipboard.writeText(paths.join('\n'));
+        flashSelectionCopied();
+    }
+
+    function publishSelected() {
+        var files = getSelectedFiles();
+        if (files.length === 0) return;
+        var btn = document.getElementById('publishSelectedBtn');
+        btn.textContent = 'Publishing...';
+        btn.disabled = true;
+        Promise.allSettled(files.map(function(f) {
+            return fetch('/api/publish', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({project: f.project, path: f.path})
+            })
+            .then(function(r) { if (!r.ok) throw new Error('Failed'); return r.json(); })
+            .then(function(data) { publishURLs[f.project + '\0' + f.path] = data.url; });
+        }))
+        .then(function(results) {
+            var failed = results.filter(function(r) { return r.status === 'rejected'; }).length;
+            btn.textContent = 'Published!';
+            btn.disabled = false;
+            setTimeout(function() { btn.textContent = 'Publish'; }, 1500);
+            if (failed > 0) alert(failed + ' file(s) failed to publish.');
+        });
+    }
+
+    function removeSelected() {
+        var files = getSelectedFiles().filter(function(f) { return f.sourceType === 'files'; });
+        if (files.length === 0) return;
+        Promise.allSettled(files.map(function(f) {
+            return fetch('/api/sources', {
+                method: 'DELETE',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({project: f.project, file: f.path})
+            }).then(function(r) { if (!r.ok) throw new Error('Failed'); });
+        }))
+        .then(function(results) {
+            var failed = results.filter(function(r) { return r.status === 'rejected'; }).length;
+            clearSelection();
+            debouncedRefresh('files', refreshFiles);
+            if (failed > 0) alert(failed + ' file(s) failed to remove.');
+        });
+    }
+
+    function onSelectionChanged() {
+        var removeBtn = document.getElementById('removeSelectedBtn');
+        if (!removeBtn) return;
+        var files = getSelectedFiles();
+        var hasIndividual = files.some(function(f) { return f.sourceType === 'files'; });
+        removeBtn.style.display = hasIndividual ? '' : 'none';
     }
 
     // --- Agent controls ---

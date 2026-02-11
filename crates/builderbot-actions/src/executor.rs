@@ -386,6 +386,13 @@ impl ActionExecutor {
         let running = self.running.lock().unwrap();
         running.keys().cloned().collect()
     }
+
+    /// Clear buffered output for a completed execution
+    /// This removes the output from the completed actions map
+    pub fn clear_execution(&self, execution_id: &str) -> bool {
+        let mut completed = self.completed.lock().unwrap();
+        completed.remove(execution_id).is_some()
+    }
 }
 
 /// Get current timestamp in milliseconds

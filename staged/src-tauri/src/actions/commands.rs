@@ -138,6 +138,15 @@ pub fn get_action_output_buffer(
     Ok(executor.get_buffered_output(&execution_id))
 }
 
+/// Clear buffered output for a completed execution
+#[tauri::command]
+pub fn clear_action_execution(
+    execution_id: String,
+    executor: State<'_, Arc<ActionExecutor>>,
+) -> Result<bool, String> {
+    Ok(executor.clear_execution(&execution_id))
+}
+
 /// Run all prerun actions for a branch after creation
 #[tauri::command]
 pub async fn run_prerun_actions(

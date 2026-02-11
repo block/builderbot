@@ -165,12 +165,8 @@
         runningActions[existingIndex].exitCode = payload.exitCode;
         runningActions[existingIndex].completedAt = payload.completedAt;
 
-        // Auto-remove completed/failed/stopped actions (with fade for secondary, instant for primary)
-        if (
-          payload.status === 'completed' ||
-          payload.status === 'failed' ||
-          payload.status === 'stopped'
-        ) {
+        // Auto-remove only completed and stopped actions (not failed)
+        if (payload.status === 'completed' || payload.status === 'stopped') {
           const action = runningActions[existingIndex];
           const isPrimaryAction = primaryRunAction && action.actionId === primaryRunAction.id;
 
@@ -304,6 +300,12 @@
       return;
     }
 
+    // If the same action has a previous execution (completed, failed, or stopped),
+    // remove it before starting a new one
+    if (existingExecution) {
+      runningActions = runningActions.filter((a) => a.actionId !== action.id);
+    }
+
     // Start the action silently (don't open modal)
     try {
       const executionId = await runBranchAction(branch.id, action.id);
@@ -321,6 +323,11 @@
       executionId: execution.executionId,
       actionName: execution.actionName,
     };
+  }
+
+  // Handle removing a failed action execution
+  function handleRemoveExecution(executionId: string) {
+    runningActions = runningActions.filter((a) => a.executionId !== executionId);
   }
 
   // Close dropdowns when clicking outside
@@ -789,6 +796,7 @@
     executionId={actionOutputModal.executionId}
     actionName={actionOutputModal.actionName}
     onClose={() => (actionOutputModal = null)}
+    onRemove={handleRemoveExecution}
   />
 {/if}
 

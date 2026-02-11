@@ -1509,6 +1509,7 @@ pub fn run() {
             actions::commands::stop_branch_action,
             actions::commands::get_running_branch_actions,
             actions::commands::get_action_output_buffer,
+            actions::commands::clear_action_execution,
             actions::commands::run_prerun_actions,
             // Diff
             get_diff_files,

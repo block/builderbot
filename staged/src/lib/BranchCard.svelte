@@ -129,7 +129,11 @@
   $effect(() => {
     const branchId = branch.id;
     const branchName = branch.branchName;
-    console.log('[BranchCard] Setting up listeners for branch:', () => branchId, () => branchName);
+    console.log(
+      '[BranchCard] Setting up listeners for branch:',
+      () => branchId,
+      () => branchName
+    );
 
     listen<{
       sessionId: string;
@@ -1229,11 +1233,6 @@
 
   .picker-item :global(svg) {
     color: var(--text-muted);
-    flex-shrink: 0;
-  }
-
-  :global(.spinner) {
-    animation: spin 1s linear infinite;
     flex-shrink: 0;
   }
 </style>

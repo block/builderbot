@@ -1121,9 +1121,4 @@
     min-width: 0;
     overflow: hidden;
   }
-
-  :global(.spinner) {
-    animation: spin 1s linear infinite;
-    flex-shrink: 0;
-  }
 </style>

@@ -794,10 +794,4 @@
     border-radius: 6px;
     border-left: 3px solid var(--color-warning);
   }
-
-  .loading-state :global(svg),
-  .actions-header :global(.spinner),
-  .primary-btn :global(.spinner) {
-    animation: spin 1s linear infinite;
-  }
 </style>

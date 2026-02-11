@@ -5,13 +5,14 @@
   Includes a "New Branch" dashed button at the bottom.
 -->
 <script lang="ts">
-  import { Folder, Trash2, Plus, Settings, Loader2 } from 'lucide-svelte';
+  import { Folder, Trash2, Plus, Settings } from 'lucide-svelte';
   import type { Project, Branch } from './types';
   import { projectDisplayName } from './utils';
   import BranchCard from './BranchCard.svelte';
   import RemoteBranchCard from './RemoteBranchCard.svelte';
   import DropdownMenu, { type MenuItem } from './DropdownMenu.svelte';
   import ProjectSettingsModal from './ProjectSettingsModal.svelte';
+  import Spinner from './Spinner.svelte';
 
   interface Props {
     project: Project;
@@ -57,7 +58,7 @@
       <span class="project-name">{projectDisplayName(project)}</span>
       {#if detecting}
         <div class="detecting-status">
-          <Loader2 size={12} class="spinner" />
+          <Spinner size={12} />
           <span>Detecting actions...</span>
         </div>
       {/if}
@@ -169,19 +170,6 @@
     border-radius: 4px;
     font-size: var(--size-xs);
     color: var(--text-muted);
-  }
-
-  .detecting-status :global(.spinner) {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
   }
 
   .branches-list {

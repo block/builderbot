@@ -767,9 +767,4 @@
     color: var(--text-muted);
     flex-shrink: 0;
   }
-
-  :global(.spinner) {
-    animation: spin 1s linear infinite;
-    flex-shrink: 0;
-  }
 </style>

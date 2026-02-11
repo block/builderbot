@@ -90,6 +90,7 @@
 {#if showProjectSettings}
   <ProjectSettingsModal
     {project}
+    {detecting}
     onClose={() => {
       showProjectSettings = false;
     }}

@@ -26,15 +26,16 @@
 
   interface Props {
     project: Project;
+    detecting?: boolean;
     onClose: () => void;
   }
 
-  let { project, onClose }: Props = $props();
+  let { project, detecting: externalDetecting = false, onClose }: Props = $props();
 
   // Actions state
   let actions = $state<ProjectAction[]>([]);
   let loadingActions = $state(false);
-  let detecting = $state(false);
+  let internalDetecting = $state(false);
   let editingAction = $state<ProjectAction | null>(null);
   let editForm = $state({
     name: '',
@@ -43,9 +44,22 @@
     autoCommit: false,
   });
 
+  // Combine internal and external detecting states
+  let detecting = $derived(internalDetecting || externalDetecting);
+
   // Load actions on mount
   onMount(() => {
     loadActions();
+  });
+
+  // Track previous detecting state to detect when external detection completes
+  let previousExternalDetecting = $state(false);
+  $effect(() => {
+    // When external detection changes from true to false, reload actions
+    if (previousExternalDetecting && !externalDetecting) {
+      loadActions();
+    }
+    previousExternalDetecting = externalDetecting;
   });
 
   async function loadActions() {
@@ -60,7 +74,7 @@
   }
 
   async function detectActions() {
-    detecting = true;
+    internalDetecting = true;
     try {
       const suggested = await detectProjectActions(project.id);
 
@@ -84,7 +98,7 @@
     } catch (e) {
       console.error('Failed to detect actions:', e);
     } finally {
-      detecting = false;
+      internalDetecting = false;
     }
   }
 

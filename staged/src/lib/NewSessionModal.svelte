@@ -436,9 +436,4 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-
-  :global(.spinning) {
-    animation: spin 1s linear infinite;
-    transform-origin: center;
-  }
 </style>

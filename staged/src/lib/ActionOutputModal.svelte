@@ -526,8 +526,4 @@
   .output-line.stderr {
     color: #9ca3af;
   }
-
-  :global(.spinning) {
-    animation: spin 1s linear infinite;
-  }
 </style>

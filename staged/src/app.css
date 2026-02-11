@@ -107,21 +107,3 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--scrollbar-thumb-hover);
 }
-
-/* ── Shared animations ── */
-
-.spinner,
-.spinning {
-  animation: spin 1s linear infinite;
-  transform-origin: center;
-  flex-shrink: 0;
-}
-
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}

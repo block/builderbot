@@ -20,6 +20,7 @@ import type {
   File,
   Review,
   Comment,
+  WorkspaceInfo,
 } from './types';
 
 // =============================================================================
@@ -94,13 +95,6 @@ export function deleteBranch(branchId: string): Promise<void> {
 /** Get info about a remote branch's Blox workspace. */
 export function getWorkspaceInfo(branchId: string): Promise<WorkspaceInfo> {
   return invoke('get_workspace_info', { branchId });
-}
-
-/** Workspace info returned from `blox ws info`. */
-export interface WorkspaceInfo {
-  name: string;
-  status: string | null;
-  [key: string]: unknown;
 }
 
 // =============================================================================

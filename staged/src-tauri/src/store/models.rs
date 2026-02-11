@@ -1,6 +1,7 @@
 //! Domain types for Staged persistence.
 
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -63,12 +64,16 @@ impl BranchType {
             Self::Remote => "remote",
         }
     }
+}
 
-    pub fn parse(s: &str) -> Option<Self> {
+impl FromStr for BranchType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "local" => Some(Self::Local),
-            "remote" => Some(Self::Remote),
-            _ => None,
+            "local" => Ok(Self::Local),
+            "remote" => Ok(Self::Remote),
+            other => Err(format!("unknown branch type: {other}")),
         }
     }
 }
@@ -96,14 +101,18 @@ impl WorkspaceStatus {
             Self::Error => "error",
         }
     }
+}
 
-    pub fn parse(s: &str) -> Option<Self> {
+impl FromStr for WorkspaceStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "starting" => Some(Self::Starting),
-            "running" => Some(Self::Running),
-            "stopped" => Some(Self::Stopped),
-            "error" => Some(Self::Error),
-            _ => None,
+            "starting" => Ok(Self::Starting),
+            "running" => Ok(Self::Running),
+            "stopped" => Ok(Self::Stopped),
+            "error" => Ok(Self::Error),
+            other => Err(format!("unknown workspace status: {other}")),
         }
     }
 }

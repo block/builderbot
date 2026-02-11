@@ -209,6 +209,17 @@ export interface Review {
 }
 
 // =============================================================================
+// Blox workspace types
+// =============================================================================
+
+/** Workspace info returned from `blox ws info`. */
+export interface WorkspaceInfo {
+  name: string;
+  status: string | null;
+  [key: string]: unknown;
+}
+
+// =============================================================================
 // Annotation types (render infrastructure — not wired to any AI backend yet)
 // =============================================================================
 

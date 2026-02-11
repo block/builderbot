@@ -56,9 +56,9 @@ pub struct BranchWithWorkdir {
     pub branch_name: String,
     pub base_branch: String,
     pub pr_number: Option<u64>,
-    pub branch_type: String,
+    pub branch_type: store::BranchType,
     pub workspace_name: Option<String>,
-    pub workspace_status: Option<String>,
+    pub workspace_status: Option<store::WorkspaceStatus>,
     pub agent: Option<String>,
     pub worktree_path: Option<String>,
     pub created_at: i64,
@@ -463,9 +463,9 @@ fn to_branch_with_workdir(
         branch_name: branch.branch_name,
         base_branch: branch.base_branch,
         pr_number: branch.pr_number,
-        branch_type: branch.branch_type.as_str().to_string(),
+        branch_type: branch.branch_type,
         workspace_name: branch.workspace_name,
-        workspace_status: branch.workspace_status.map(|s| s.as_str().to_string()),
+        workspace_status: branch.workspace_status,
         agent: branch.agent,
         worktree_path: workdir_path,
         created_at: branch.created_at,
@@ -580,22 +580,12 @@ async fn create_remote_branch(
     );
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
-    // Start the Blox workspace
+    // Kick off the Blox workspace. `ws_start` tells the platform to begin
+    // provisioning but the workspace won't be fully ready yet — status
+    // stays as `Starting`. The frontend should poll `get_workspace_info`
+    // and update the status to `Running` once the platform reports ready.
     match blox::ws_start(&workspace_name, source.as_deref()) {
-        Ok(_) => {
-            // Update status to Running
-            store
-                .update_branch_workspace_status(&branch.id, &store::WorkspaceStatus::Running)
-                .map_err(|e| e.to_string())?;
-
-            // Re-fetch to get updated status
-            let updated = store
-                .get_branch(&branch.id)
-                .map_err(|e| e.to_string())?
-                .ok_or("Branch disappeared after creation")?;
-
-            Ok(to_branch_with_workdir(updated, None))
-        }
+        Ok(_) => Ok(to_branch_with_workdir(branch, None)),
         Err(e) => {
             // Update status to Error but keep the branch record
             let _ =
@@ -623,7 +613,7 @@ async fn get_workspace_info(
         .workspace_name
         .ok_or("Branch is not a remote workspace branch")?;
 
-    blox::ws_info(&ws_name)
+    blox::ws_info(&ws_name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

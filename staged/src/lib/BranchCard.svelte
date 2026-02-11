@@ -125,11 +125,6 @@
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenActionStatus: UnlistenFn | null = null;
 
-  // Set up event listeners immediately (synchronously) at module level like old codebase
-  (() => {
-    console.log('[BranchCard] Setting up listeners for branch:', branch.id, branch.branchName);
-  })();
-
   listen<{
     sessionId: string;
     status: string;

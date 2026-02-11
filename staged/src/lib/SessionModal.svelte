@@ -135,7 +135,7 @@
         const msgs = await getSessionMessages(sessionId);
         if (msgs.length > 0) {
           messages = msgs;
-          scrollToBottom();
+          scrollToBottomIfNear();
         }
       } else {
         const lastId = messages[messages.length - 1].id;
@@ -144,7 +144,7 @@
           const prev = messages.slice(0, -1);
           messages = [...prev, ...updated];
           if (updated.length > 1 || updated[0].id !== lastId) {
-            scrollToBottom();
+            scrollToBottomIfNear();
           }
         }
       }
@@ -286,12 +286,41 @@
   // Helpers
   // =========================================================================
 
+  /** Whether the user has intentionally scrolled up (disables auto-scroll). */
+  let userScrolledUp = $state(false);
+  let lastScrollTop = 0;
+
+  function handleScroll() {
+    if (!messagesEl) return;
+    const { scrollTop, scrollHeight, clientHeight } = messagesEl;
+    const atBottom = scrollHeight - scrollTop - clientHeight < 1;
+
+    if (scrollTop < lastScrollTop && !atBottom) {
+      // Scroll position moved upward — user scrolled up (any input method)
+      userScrolledUp = true;
+    }
+    if (atBottom) {
+      // They're back at bottom — re-enable auto-scroll
+      userScrolledUp = false;
+    }
+    lastScrollTop = scrollTop;
+  }
+
+  /** Scroll to bottom unconditionally (e.g. initial load, user sends message). */
   function scrollToBottom() {
     tick().then(() => {
       if (messagesEl) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
+        userScrolledUp = false;
       }
     });
+  }
+
+  /** Scroll to bottom only if the user hasn't intentionally scrolled up. */
+  function scrollToBottomIfNear() {
+    if (!userScrolledUp) {
+      scrollToBottom();
+    }
   }
 
   function renderMarkdown(content: string): string {
@@ -501,7 +530,7 @@
     </header>
 
     <!-- Messages area -->
-    <div class="modal-content" bind:this={messagesEl}>
+    <div class="modal-content" bind:this={messagesEl} onscroll={handleScroll}>
       {#if loading}
         <div class="center-state">
           <Loader2 size={24} class="spinning" />

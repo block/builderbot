@@ -6,11 +6,12 @@
   2. Confirmation with optional subpath, then create
 -->
 <script lang="ts">
-  import { X, GitBranch } from 'lucide-svelte';
+  import { X, GitBranch, Folder } from 'lucide-svelte';
   import type { Project } from './types';
   import * as commands from './commands';
   import FolderPickerModal from './FolderPickerModal.svelte';
   import { detectProjectActions } from './services/actions';
+  import { listDirectory, type DirEntry } from './services/files';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -24,6 +25,90 @@
   let subpath = $state('');
   let saving = $state(false);
   let error = $state<string | null>(null);
+
+  // Subfolder autocomplete state
+  let suggestions = $state<DirEntry[]>([]);
+  let showDropdown = $state(false);
+  let selectedIndex = $state(0);
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let subpathInputEl: HTMLInputElement | null = $state(null);
+
+  /** Split subpath into the parent directory to list and trailing partial to filter by. */
+  function getSubpathContext(value: string): { parentDir: string; partial: string } {
+    const lastSlash = value.lastIndexOf('/');
+    if (lastSlash === -1) return { parentDir: '', partial: value };
+    return { parentDir: value.slice(0, lastSlash), partial: value.slice(lastSlash + 1) };
+  }
+
+  /** Load directory suggestions based on current subpath value. */
+  async function loadSuggestions() {
+    if (!selectedRepo) return;
+    const { parentDir, partial } = getSubpathContext(subpath);
+    const listPath = parentDir ? `${selectedRepo}/${parentDir}` : selectedRepo;
+
+    try {
+      const entries = await listDirectory(listPath);
+      const dirs = entries.filter((e) => e.isDir);
+      const lower = partial.toLowerCase();
+      suggestions = lower ? dirs.filter((d) => d.name.toLowerCase().startsWith(lower)) : dirs;
+      selectedIndex = 0;
+      showDropdown = suggestions.length > 0;
+    } catch {
+      suggestions = [];
+      showDropdown = false;
+    }
+  }
+
+  /** Select a suggestion, filling the subpath and loading next level. */
+  function selectSuggestion(entry: DirEntry) {
+    const { parentDir } = getSubpathContext(subpath);
+    subpath = parentDir ? `${parentDir}/${entry.name}/` : `${entry.name}/`;
+    showDropdown = false;
+    suggestions = [];
+    // Load next level after selection
+    loadSuggestions();
+    subpathInputEl?.focus();
+  }
+
+  function handleSubpathInput() {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(loadSuggestions, 150);
+  }
+
+  function handleSubpathFocus() {
+    handleSubpathInput();
+  }
+
+  function handleSubpathBlur() {
+    // Delay hiding so click on suggestion can register
+    setTimeout(() => {
+      showDropdown = false;
+    }, 200);
+  }
+
+  function handleSubpathKeydown(e: KeyboardEvent) {
+    if (!showDropdown) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      selectedIndex = Math.min(selectedIndex + 1, suggestions.length - 1);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      selectedIndex = Math.max(selectedIndex - 1, 0);
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      if (suggestions[selectedIndex]) {
+        e.preventDefault();
+        e.stopPropagation();
+        selectSuggestion(suggestions[selectedIndex]);
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      showDropdown = false;
+    }
+  }
 
   function handleRepoSelected(path: string) {
     selectedRepo = path;
@@ -150,17 +235,42 @@
         <div class="form-group">
           <label for="project-subpath">Subpath <span class="optional-label">(optional)</span></label
           >
-          <input
-            bind:value={subpath}
-            id="project-subpath"
-            type="text"
-            placeholder="e.g., packages/frontend"
-            disabled={saving}
-            autocomplete="off"
-            autocorrect="off"
-            autocapitalize="off"
-            spellcheck="false"
-          />
+          <div class="subpath-wrapper">
+            <input
+              bind:this={subpathInputEl}
+              bind:value={subpath}
+              id="project-subpath"
+              type="text"
+              placeholder="e.g., packages/frontend"
+              disabled={saving}
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              oninput={handleSubpathInput}
+              onfocus={handleSubpathFocus}
+              onblur={handleSubpathBlur}
+              onkeydown={handleSubpathKeydown}
+            />
+            {#if showDropdown && suggestions.length > 0}
+              <div class="subpath-suggestions">
+                {#each suggestions as entry, i (entry.path)}
+                  <button
+                    class="suggestion-item"
+                    class:selected={i === selectedIndex}
+                    onmousedown={(e) => {
+                      e.preventDefault();
+                      selectSuggestion(entry);
+                    }}
+                    onmouseenter={() => (selectedIndex = i)}
+                  >
+                    <Folder size={14} />
+                    <span class="suggestion-name">{entry.name}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
           <span class="help-text">
             For monorepos: subdirectory to use as working directory for AI sessions
           </span>
@@ -304,6 +414,57 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  .subpath-wrapper {
+    position: relative;
+  }
+
+  .subpath-suggestions {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    margin-top: 4px;
+    background-color: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    box-shadow: var(--shadow-elevated);
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 10;
+    padding: 4px 0;
+  }
+
+  .suggestion-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 12px;
+    background: none;
+    border: none;
+    text-align: left;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    cursor: pointer;
+    transition: background-color 0.1s;
+  }
+
+  .suggestion-item:hover,
+  .suggestion-item.selected {
+    background-color: var(--bg-hover);
+  }
+
+  .suggestion-item :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+
+  .suggestion-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .form-group label {

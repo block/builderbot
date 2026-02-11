@@ -333,11 +333,9 @@
           <button class="create-button" onclick={handleCreate} disabled={!branchName || creating}>
             {#if creating}
               <Spinner size={14} />
-              {branchType === 'local' ? 'Creating...' : 'Starting...'}
-            {:else if branchType === 'local'}
-              Create Branch
+              Creating...
             {:else}
-              Start Workspace
+              Create Branch
             {/if}
           </button>
         </div>

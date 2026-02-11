@@ -10,13 +10,15 @@
   import type { Project } from './types';
   import * as commands from './commands';
   import FolderPickerModal from './FolderPickerModal.svelte';
+  import { detectProjectActions } from './services/actions';
 
   interface Props {
     onCreated: (project: Project) => void;
+    onDetecting: (projectId: string, detecting: boolean) => void;
     onClose: () => void;
   }
 
-  let { onCreated, onClose }: Props = $props();
+  let { onCreated, onDetecting, onClose }: Props = $props();
 
   let selectedRepo = $state<string | null>(null);
   let subpath = $state('');
@@ -37,6 +39,11 @@
     try {
       const normalizedSubpath = subpath.trim().replace(/^\/+|\/+$/g, '') || undefined;
       const project = await commands.createProject(selectedRepo, normalizedSubpath);
+
+      // Auto-trigger action detection in background
+      detectAndSaveActions(project.id).catch(() => {}); // Silent failure
+      onDetecting(project.id, true);
+
       onCreated(project);
     } catch (e) {
       if (typeof e === 'string') {
@@ -47,6 +54,27 @@
         error = String(e);
       }
       saving = false;
+    }
+  }
+
+  async function detectAndSaveActions(projectId: string) {
+    try {
+      const suggested = await detectProjectActions(projectId);
+
+      // Save suggested actions
+      for (let i = 0; i < suggested.length; i++) {
+        const action = suggested[i];
+        await commands.createProjectAction(
+          projectId,
+          action.name,
+          action.command,
+          action.actionType,
+          i,
+          action.autoCommit
+        );
+      }
+    } finally {
+      onDetecting(projectId, false);
     }
   }
 

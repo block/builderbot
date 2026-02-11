@@ -103,15 +103,7 @@
       icon: Trash2,
       danger: true,
       action: () => {
-        confirmDelete = {
-          title: 'Delete Remote Branch',
-          message:
-            'This will delete the Blox workspace and remove the branch. This action cannot be undone.',
-          onConfirm: async () => {
-            confirmDelete = null;
-            onDelete?.();
-          },
-        };
+        onDelete?.();
       },
     },
   ]);

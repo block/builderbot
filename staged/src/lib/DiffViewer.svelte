@@ -1937,7 +1937,7 @@
     gap: 8px;
     padding: 8px 12px;
     flex-shrink: 0;
-    border-bottom: 1px solid var(--border-subtle);
+    border-bottom: none;
   }
 
   .pane-label {
@@ -2270,8 +2270,7 @@
     transform: translateY(-100%);
     z-index: 100;
     background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-bottom: none;
+    border: none;
     border-radius: 4px 4px 0 0;
   }
 
@@ -2307,8 +2306,7 @@
     transform: translateY(-100%);
     z-index: 100;
     background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-bottom: none;
+    border: none;
     border-radius: 4px 4px 0 0;
     padding: 0 4px;
   }

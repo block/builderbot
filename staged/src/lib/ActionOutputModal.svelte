@@ -20,7 +20,8 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { X, Loader2, AlertCircle, CircleStop, CheckCircle, XCircle } from 'lucide-svelte';
+  import { X, AlertCircle, CircleStop, CheckCircle, XCircle } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import Convert from 'ansi-to-html';
   import { sanitize } from './sanitize';
   import type {
@@ -217,14 +218,14 @@
 
   function getStatusIcon(s: ActionStatus) {
     switch (s) {
-      case 'running':
-        return Loader2;
       case 'completed':
         return CheckCircle;
       case 'failed':
         return XCircle;
       case 'stopped':
         return CircleStop;
+      default:
+        return null;
     }
   }
 
@@ -273,7 +274,11 @@
         {#if status}
           {@const StatusIcon = getStatusIcon(status)}
           <div class="status-badge {getStatusClass(status)}">
-            <StatusIcon size={12} class={status === 'running' ? 'spinning' : ''} />
+            {#if status === 'running'}
+              <Spinner size={12} />
+            {:else if StatusIcon}
+              <StatusIcon size={12} />
+            {/if}
             <span>{getStatusLabel(status)}</span>
           </div>
         {/if}
@@ -300,7 +305,7 @@
     <div class="modal-content" bind:this={outputEl} onscroll={handleScroll}>
       {#if loading}
         <div class="center-state">
-          <Loader2 size={24} class="spinning" />
+          <Spinner size={24} />
           <span>Loading output…</span>
         </div>
       {:else if error}
@@ -520,18 +525,5 @@
 
   .output-line.stderr {
     color: #9ca3af;
-  }
-
-  :global(.spinning) {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

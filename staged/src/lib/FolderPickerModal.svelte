@@ -9,7 +9,8 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Folder, X, ChevronRight, Home, Search, Loader2, GitBranch } from 'lucide-svelte';
+  import { Folder, X, ChevronRight, Home, Search, GitBranch } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import {
     listDirectory,
     getHomeDir,
@@ -290,7 +291,7 @@
     <div class="search-container">
       <div class="search-icon">
         {#if searching}
-          <Loader2 size={16} class="spinner" />
+          <Spinner size={16} />
         {:else}
           <Search size={16} />
         {/if}
@@ -324,7 +325,7 @@
             <GitBranch size={12} />
             <span>Suggested</span>
             {#if spotlightLoading}
-              <Loader2 size={12} class="spinner" />
+              <Spinner size={12} />
             {/if}
           </div>
           {#if spotlightLoading && filteredSpotlight.length === 0}

@@ -7,16 +7,8 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import {
-    X,
-    GitBranch,
-    Search,
-    ChevronsUpDown,
-    Check,
-    Loader2,
-    Monitor,
-    Cloud,
-  } from 'lucide-svelte';
+  import { X, GitBranch, Search, ChevronsUpDown, Check, Monitor, Cloud } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import type { Branch, Project, BranchType } from './types';
   import * as commands from './commands';
   import { runPrerunActions } from './services/actions';
@@ -368,7 +360,7 @@
           <button class="cancel-button" onclick={onClose}>Cancel</button>
           <button class="create-button" onclick={handleCreate} disabled={!branchName || creating}>
             {#if creating}
-              <Loader2 size={14} class="spinner" />
+              <Spinner size={14} />
               {branchType === 'local' ? 'Creating...' : 'Starting...'}
             {:else if branchType === 'local'}
               Create Branch

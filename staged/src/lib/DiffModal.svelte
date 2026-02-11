@@ -15,7 +15,6 @@
   import { onMount } from 'svelte';
   import {
     X,
-    Loader2,
     Check,
     RotateCcw,
     ChevronRight,
@@ -29,6 +28,7 @@
     CircleMinus,
     CircleArrowUp,
   } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import DiffViewer from './DiffViewer.svelte';
   import { createDiffViewerState, fileSummaryPath } from './stores/diffViewerState.svelte';
   import { createReviewState } from './stores/reviewState.svelte';
@@ -453,7 +453,7 @@
       <div class="file-sidebar">
         {#if diffViewer.state.loading}
           <div class="sidebar-loading">
-            <Loader2 size={14} class="spinner" />
+            <Spinner size={14} />
             <span>Loading files...</span>
           </div>
         {:else if diffViewer.state.error}
@@ -1125,14 +1125,5 @@
   :global(.spinner) {
     animation: spin 1s linear infinite;
     flex-shrink: 0;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

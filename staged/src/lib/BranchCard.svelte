@@ -15,7 +15,6 @@
   import {
     GitBranch,
     GitCommitHorizontal,
-    Loader2,
     Trash2,
     FileDiff,
     StickyNote,
@@ -35,6 +34,7 @@
     Wand2,
     MoreVertical,
   } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { Branch, BranchTimeline as BranchTimelineData, BranchSessionType } from './types';
   import * as commands from './commands';
@@ -566,7 +566,7 @@
 <div class="branch-card" class:deleting>
   {#if deleting}
     <div class="deleting-overlay">
-      <Loader2 size={16} class="spinner" />
+      <Spinner size={16} />
       <span>Deleting…</span>
     </div>
   {:else}
@@ -589,7 +589,7 @@
               title="View output"
             >
               {#if execution.status === 'running'}
-                <Loader2 size={12} class="spinner" />
+                <Spinner size={12} />
               {:else if execution.status === 'completed'}
                 <CheckCircle size={12} />
               {:else if execution.status === 'failed'}
@@ -616,7 +616,7 @@
               title={primaryActionExecution ? 'View output' : `Run ${primaryRunAction.name}`}
             >
               {#if primaryActionExecution?.status === 'running'}
-                <Loader2 size={13} class="spinner" />
+                <Spinner size={13} />
               {:else if primaryActionExecution?.status === 'completed'}
                 <CheckCircle size={13} />
               {:else if primaryActionExecution?.status === 'failed'}
@@ -703,7 +703,7 @@
     <div class="card-content">
       {#if loading}
         <div class="loading">
-          <Loader2 size={14} class="spinner" />
+          <Spinner size={14} />
           <span>Loading...</span>
         </div>
       {:else if error}
@@ -1235,14 +1235,5 @@
   :global(.spinner) {
     animation: spin 1s linear infinite;
     flex-shrink: 0;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

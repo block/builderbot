@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { Check, ExternalLink, RefreshCw } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import { agentState, refreshProviders, KNOWN_AGENTS } from './stores/agent.svelte';
   import { preferences, setAiAgent } from './stores/preferences.svelte';
   import { openUrl } from './commands';
@@ -55,7 +56,11 @@
   <div class="dropdown-header">
     <span class="header-label">AI Agents</span>
     <button class="refresh-btn" onclick={refresh} disabled={refreshing} title="Re-scan for agents">
-      <span class="spin-icon" class:spinning={refreshing}><RefreshCw size={12} /></span>
+      {#if refreshing}
+        <Spinner size={12} icon="refresh" />
+      {:else}
+        <RefreshCw size={12} />
+      {/if}
     </button>
   </div>
 
@@ -235,24 +240,5 @@
   .install-link:hover {
     color: var(--text-primary);
     background-color: var(--bg-hover);
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  .spin-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .spin-icon.spinning {
-    animation: spin 1s linear infinite;
   }
 </style>

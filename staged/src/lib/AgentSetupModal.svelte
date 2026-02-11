@@ -10,6 +10,7 @@
 -->
 <script lang="ts">
   import { RefreshCw, ExternalLink, Bot, X } from 'lucide-svelte';
+  import Spinner from './Spinner.svelte';
   import { agentState, refreshProviders, KNOWN_AGENTS } from './stores/agent.svelte';
   import { openUrl } from './commands';
 
@@ -74,7 +75,11 @@
 
     <footer class="modal-footer">
       <button class="refresh-btn" onclick={refresh} disabled={refreshing}>
-        <span class="spin-icon" class:spinning={refreshing}><RefreshCw size={14} /></span>
+        {#if refreshing}
+          <Spinner size={14} icon="refresh" />
+        {:else}
+          <RefreshCw size={14} />
+        {/if}
         {refreshing ? 'Checking…' : 'Refresh'}
       </button>
       <button class="dismiss-btn" onclick={onClose}>Dismiss</button>
@@ -267,24 +272,5 @@
   .dismiss-btn:hover {
     color: var(--text-primary);
     border-color: var(--border-emphasis);
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  .spin-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .spin-icon.spinning {
-    animation: spin 1s linear infinite;
   }
 </style>

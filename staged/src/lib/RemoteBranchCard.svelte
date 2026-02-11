@@ -14,7 +14,6 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     Cloud,
-    Loader2,
     Trash2,
     AlertCircle,
     CircleCheck,
@@ -26,6 +25,7 @@
     Plus,
   } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import Spinner from './Spinner.svelte';
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
@@ -346,7 +346,7 @@
 <div class="branch-card remote" class:deleting>
   {#if deleting}
     <div class="deleting-overlay">
-      <Loader2 size={16} class="spinner" />
+      <Spinner size={16} />
       <span>Deleting…</span>
     </div>
   {:else}
@@ -365,7 +365,7 @@
           class:error={status === 'error'}
         >
           {#if status === 'starting'}
-            <Loader2 size={12} class="spinner" />
+            <Spinner size={12} />
           {:else if status === 'running'}
             <CircleCheck size={12} />
           {:else if status === 'stopped'}
@@ -394,7 +394,7 @@
     <div class="card-content">
       {#if status === 'starting'}
         <div class="status-view starting-view">
-          <Loader2 size={20} class="spinner" />
+          <Spinner size={20} />
           <span class="status-text">Provisioning workspace…</span>
           <span class="status-hint">This usually takes 30–60 seconds</span>
         </div>
@@ -402,7 +402,7 @@
         <!-- Timeline UI (same pattern as BranchCard) -->
         {#if timelineLoading}
           <div class="loading">
-            <Loader2 size={14} class="spinner" />
+            <Spinner size={14} />
             <span>Loading...</span>
           </div>
         {:else if timelineError}
@@ -779,14 +779,5 @@
   :global(.spinner) {
     animation: spin 1s linear infinite;
     flex-shrink: 0;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

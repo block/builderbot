@@ -53,7 +53,10 @@ impl TauriExecutionListener {
 impl ExecutionListener for TauriExecutionListener {
     async fn on_event(&self, event: ExecutionEvent) {
         match event {
-            ExecutionEvent::Started { execution_id, started_at } => {
+            ExecutionEvent::Started {
+                execution_id,
+                started_at,
+            } => {
                 // We emit running status immediately
                 let _ = self.app.emit(
                     "action_status",

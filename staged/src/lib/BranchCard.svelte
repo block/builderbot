@@ -147,11 +147,21 @@
 
     // Only process events for this branch
     if (payload.branchId !== branch.id) {
-      console.log('[BranchCard] Ignoring event for different branch:', payload.branchId, 'vs', branch.id);
+      console.log(
+        '[BranchCard] Ignoring event for different branch:',
+        payload.branchId,
+        'vs',
+        branch.id
+      );
       return;
     }
 
-    console.log('[BranchCard] Processing action_status for branch:', branch.id, 'status:', payload.status);
+    console.log(
+      '[BranchCard] Processing action_status for branch:',
+      branch.id,
+      'status:',
+      payload.status
+    );
 
     const existingIndex = runningActions.findIndex((a) => a.executionId === payload.executionId);
 
@@ -165,7 +175,11 @@
           status: 'running',
           startedAt: payload.startedAt ?? Date.now(),
         });
-        console.log('[BranchCard] runningActions now:', runningActions.length, runningActions.map(a => a.actionName));
+        console.log(
+          '[BranchCard] runningActions now:',
+          runningActions.length,
+          runningActions.map((a) => a.actionName)
+        );
       }
     } else {
       // Action completed/failed/stopped - update status
@@ -294,7 +308,6 @@
     if (!primaryRunAction) return runningActions;
     return runningActions.filter((a) => a.actionId !== primaryRunAction.id);
   });
-
 
   async function handleRunAction(action: ProjectAction) {
     showMoreMenu = false;
@@ -645,7 +658,10 @@
                           <!-- All actions shown directly -->
                           {#each typeActions as action (action.id)}
                             {@const Icon = getActionIcon(type)}
-                            <button class="more-menu-item action-item" onclick={() => handleRunAction(action)}>
+                            <button
+                              class="more-menu-item action-item"
+                              onclick={() => handleRunAction(action)}
+                            >
                               <Icon size={14} />
                               {action.name}
                             </button>

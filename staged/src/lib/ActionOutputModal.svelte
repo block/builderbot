@@ -177,8 +177,7 @@
   function handleScroll() {
     if (outputEl) {
       // Check if user is at the bottom (within 50px)
-      const isAtBottom =
-        outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight < 50;
+      const isAtBottom = outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight < 50;
       shouldAutoScroll = isAtBottom;
     }
   }

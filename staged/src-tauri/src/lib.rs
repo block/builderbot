@@ -780,14 +780,9 @@ fn create_project_action(
     let store = get_store(&store)?;
     let parsed_type = builderbot_actions::ActionType::parse(&action_type)
         .ok_or_else(|| format!("Invalid action type: {}", action_type))?;
-    let action = store::models::ProjectAction::new(
-        project_id,
-        name,
-        command,
-        parsed_type,
-        sort_order,
-    )
-    .with_auto_commit(auto_commit);
+    let action =
+        store::models::ProjectAction::new(project_id, name, command, parsed_type, sort_order)
+            .with_auto_commit(auto_commit);
     store
         .create_project_action(&action)
         .map_err(|e| e.to_string())?;

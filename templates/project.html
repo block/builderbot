@@ -2,6 +2,19 @@
 
 {{define "pagestyle"}}
     .files { list-style: none; padding: 0; margin: 0; }
+    .dir-heading {
+        font-size: 0.75em;
+        font-weight: 600;
+        color: #999;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+        padding: 6px 16px 2px;
+        border-top: 1px solid #f0f0f0;
+        cursor: default;
+    }
+    .dir-heading:first-child {
+        border-top: none;
+    }
     .file-age {
         color: #888;
         font-size: 0.85em;
@@ -80,7 +93,7 @@
         margin-bottom: 16px;
         border: 1px solid #e8e8e8;
         border-radius: 6px;
-        background: #f8f9fa;
+        background: #fff;
         transition: border-color 0.15s;
     }
     .source-section:hover { border-color: #0066cc; }
@@ -352,6 +365,7 @@
             </div>
             <ul class="files">
                 {{range $group.Files}}
+                {{if .ShowDir}}<li class="dir-heading">{{.Dir}}</li>{{end}}
                 <li class="file" data-project="{{$.Page.Project.QualifiedName}}" data-project-path="{{$.Page.Project.Path}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
                     <div class="file-left">
                         <input type="checkbox" class="file-checkbox" />
@@ -931,7 +945,14 @@
                     html += '</div>';
                     html += '</div>';
                     html += '<ul class="files">';
-                    (group.files || []).forEach(function(f) { html += renderFileRow(f); });
+                    var prevDir = '';
+                    (group.files || []).forEach(function(f) {
+                        if (f.dir && f.dir !== prevDir) {
+                            html += '<li class="dir-heading">' + escapeHtml(f.dir) + '</li>';
+                        }
+                        prevDir = f.dir || '';
+                        html += renderFileRow(f);
+                    });
                     html += '</ul>';
                     html += '</div>';
                 });

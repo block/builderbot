@@ -41,9 +41,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::acp::AcpDriver;
-use crate::agent::writer::MessageWriter;
-use crate::agent::AgentDriver;
+use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
 use crate::store::{MessageRole, SessionStatus, Store};
 
 // =============================================================================

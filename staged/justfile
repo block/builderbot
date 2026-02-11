@@ -47,11 +47,13 @@ build:
 
 # Auto-format all code
 fmt:
+    cd .. && cargo fmt --all
     cd src-tauri && cargo fmt
     npx prettier --write "src/**/*.{ts,svelte,css,html}"
 
 # Verify formatting without modifying files (used by CI/hooks)
 fmt-check:
+    cd .. && cargo fmt --all --check
     cd src-tauri && cargo fmt --check
     npx prettier --check "src/**/*.{ts,svelte,css,html}"
 

@@ -3,7 +3,7 @@
 
   Two modes toggled by a segmented control:
   - Local: branch name + base branch picker → creates git worktree
-  - Remote: branch name + agent picker → starts a Blox workspace
+  - Remote: branch name → starts a Blox workspace
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -38,13 +38,6 @@
   let availableBranches = $state<string[]>([]);
   let baseSearchQuery = $state('');
   let baseSelectedIndex = $state(0);
-
-  // Agent picker (remote only)
-  let selectedAgent = $state('goose');
-  const agents = [
-    { id: 'goose', label: 'Goose' },
-    { id: 'claude', label: 'Claude' },
-  ];
 
   let branchInputEl: HTMLInputElement | null = $state(null);
   let baseSearchEl: HTMLInputElement | null = $state(null);
@@ -154,7 +147,7 @@
           branchName.trim(),
           wsName,
           selectedBaseBranch ?? undefined,
-          selectedAgent,
+          undefined,
           project.repoPath
         );
         onCreated(branch);
@@ -263,36 +256,15 @@
           <span class="info-label">Repository:</span>
           <span class="info-value">{repoName(project.repoPath)}</span>
         </div>
-        {#if branchType === 'local'}
-          <button class="info-row base-row" onclick={toggleBasePicker}>
-            <GitBranch size={14} class="base-icon" />
-            <span class="info-label">Base:</span>
-            <span class="info-value">{formatBranchName(effectiveBaseBranch)}</span>
-            <ChevronsUpDown size={12} class="base-chevron" />
-          </button>
-        {:else}
-          <div class="info-row">
-            <Cloud size={14} />
-            <span class="info-label">Agent:</span>
-            <div class="agent-picker">
-              {#each agents as agent (agent.id)}
-                <button
-                  class="agent-option"
-                  class:selected={selectedAgent === agent.id}
-                  onclick={() => (selectedAgent = agent.id)}
-                >
-                  {agent.label}
-                  {#if selectedAgent === agent.id}
-                    <Check size={12} />
-                  {/if}
-                </button>
-              {/each}
-            </div>
-          </div>
-        {/if}
+        <button class="info-row base-row" onclick={toggleBasePicker}>
+          <GitBranch size={14} class="base-icon" />
+          <span class="info-label">Base:</span>
+          <span class="info-value">{formatBranchName(effectiveBaseBranch)}</span>
+          <ChevronsUpDown size={12} class="base-chevron" />
+        </button>
       </div>
 
-      {#if showBasePicker && branchType === 'local'}
+      {#if showBasePicker}
         <!-- Base branch picker -->
         <div class="base-picker">
           <div class="base-search-container">
@@ -361,11 +333,9 @@
           <button class="create-button" onclick={handleCreate} disabled={!branchName || creating}>
             {#if creating}
               <Spinner size={14} />
-              {branchType === 'local' ? 'Creating...' : 'Starting...'}
-            {:else if branchType === 'local'}
-              Create Branch
+              Creating...
             {:else}
-              Start Workspace
+              Create Branch
             {/if}
           </button>
         </div>
@@ -534,43 +504,6 @@
 
   .base-row:hover :global(.base-chevron) {
     color: var(--text-muted);
-  }
-
-  /* Agent picker */
-  .agent-picker {
-    display: flex;
-    gap: 4px;
-    margin-left: auto;
-  }
-
-  .agent-option {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 10px;
-    background: transparent;
-    border: 1px solid var(--border-subtle);
-    border-radius: 4px;
-    font-size: var(--size-xs);
-    font-weight: 500;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .agent-option:hover:not(.selected) {
-    border-color: var(--border-muted);
-    color: var(--text-primary);
-  }
-
-  .agent-option.selected {
-    border-color: var(--ui-accent);
-    color: var(--ui-accent);
-    background-color: rgba(63, 185, 80, 0.06);
-  }
-
-  .agent-option :global(svg) {
-    color: var(--ui-accent);
   }
 
   /* Base branch picker */

@@ -116,6 +116,66 @@ export function getBranchTimeline(branchId: string): Promise<BranchTimeline> {
 }
 
 // =============================================================================
+// Actions
+// =============================================================================
+
+export interface ProjectAction {
+  id: string;
+  projectId: string;
+  name: string;
+  command: string;
+  actionType: string;
+  sortOrder: number;
+  autoCommit: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function listProjectActions(projectId: string): Promise<ProjectAction[]> {
+  return invoke('list_project_actions', { projectId });
+}
+
+export function createProjectAction(
+  projectId: string,
+  name: string,
+  command: string,
+  actionType: string,
+  sortOrder: number,
+  autoCommit: boolean
+): Promise<ProjectAction> {
+  return invoke('create_project_action', {
+    projectId,
+    name,
+    command,
+    actionType,
+    sortOrder,
+    autoCommit,
+  });
+}
+
+export function updateProjectAction(
+  actionId: string,
+  name: string,
+  command: string,
+  actionType: string,
+  sortOrder: number,
+  autoCommit: boolean
+): Promise<void> {
+  return invoke('update_project_action', {
+    actionId,
+    name,
+    command,
+    actionType,
+    sortOrder,
+    autoCommit,
+  });
+}
+
+export function deleteProjectAction(actionId: string): Promise<void> {
+  return invoke('delete_project_action', { actionId });
+}
+
+// =============================================================================
 // Utilities
 // =============================================================================
 

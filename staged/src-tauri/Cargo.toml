@@ -52,6 +52,11 @@ open = "5"
 # Agent Client Protocol (ACP) for AI integration
 agent-client-protocol = "0.9"
 
+# Actions framework
+builderbot-actions = { path = "../../crates/builderbot-actions" }
+acp-client = { path = "../../crates/acp-client" }
+which = "7.0"
+
 # MCP Bridge for automation/testing (debug only)
 tauri-plugin-mcp-bridge = "0.8.1"
 async-trait = "0.1"

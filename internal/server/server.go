@@ -529,6 +529,8 @@ func computeProjectAge(p discovery.Project) string {
 type ProjectFile struct {
 	Name       string
 	Path       string
+	Dir        string // source-relative directory (empty for root files)
+	ShowDir    bool   // true on first file of each new directory
 	Source     string // source name (e.g., "thoughts", "docs")
 	SourceType string // "thoughts", "tree", or "files"
 	ModTime    time.Time
@@ -547,6 +549,31 @@ type FileGroupView struct {
 	BadgeColor string // CSS color for badge text
 	BadgeBg    string // CSS background for badge
 	Files      []ProjectFile
+}
+
+// sortAndMarkDirs sorts files by directory then name, and sets ShowDir=true
+// on the first file of each non-empty directory.
+func sortAndMarkDirs(files []ProjectFile) {
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].Dir != files[j].Dir {
+			// Empty dir (root files) sorts first
+			if files[i].Dir == "" {
+				return true
+			}
+			if files[j].Dir == "" {
+				return false
+			}
+			return files[i].Dir < files[j].Dir
+		}
+		return files[i].Name < files[j].Name
+	})
+	prevDir := ""
+	for i := range files {
+		if files[i].Dir != "" && files[i].Dir != prevDir {
+			files[i].ShowDir = true
+		}
+		prevDir = files[i].Dir
+	}
 }
 
 // buildFileGroups produces a flat list of display groups for a project.
@@ -573,7 +600,7 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 			continue
 		}
 
-		st := discovery.GetSourceType(src.Name)
+		st := discovery.GetSourceType(src.SourceTypeName)
 
 		// Badge info from registered source type
 		var badgeText, badgeColor, badgeBg string
@@ -629,7 +656,7 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 				BadgeBg:    badgeBg,
 			}
 			for _, f := range srcFiles {
-				gv.Files = append(gv.Files, ProjectFile{
+				pf := ProjectFile{
 					Name:       f.Name,
 					Path:       f.FullPath,
 					Source:     f.Source,
@@ -637,7 +664,17 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 					ModTime:    f.ModTime,
 					Age:        formatAge(f.ModTime),
 					FileType:   f.FileType,
-				})
+				}
+				if st != nil && st.ShowDirHeadings {
+					pf.Dir = filepath.Dir(f.Path)
+					if pf.Dir == "." {
+						pf.Dir = ""
+					}
+				}
+				gv.Files = append(gv.Files, pf)
+			}
+			if st != nil && st.ShowDirHeadings {
+				sortAndMarkDirs(gv.Files)
 			}
 			groups = append(groups, gv)
 		}
@@ -825,6 +862,7 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 type APIFile struct {
 	Name         string `json:"name"`
 	Path         string `json:"path"`
+	Dir          string `json:"dir,omitempty"`
 	Source       string `json:"source,omitempty"`
 	SourceType   string `json:"sourceType,omitempty"`
 	SourceAuto   bool   `json:"sourceAuto,omitempty"`
@@ -883,6 +921,7 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 			apiGroup.Files = append(apiGroup.Files, APIFile{
 				Name:       f.Name,
 				Path:       f.Path,
+				Dir:        f.Dir,
 				Source:     f.Source,
 				SourceType: f.SourceType,
 				SourceAuto: g.Auto,

@@ -13,7 +13,7 @@ func TestBuildFileGroups_RP1Grouped(t *testing.T) {
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
-			{Name: "rp1", Type: "tree", RootPath: "/tmp/test/.rp1", Auto: true},
+			{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
 		},
 	}
 
@@ -65,7 +65,7 @@ func TestBuildFileGroups_ThoughtsFlat(t *testing.T) {
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
-			{Name: "thoughts", Type: "tree", RootPath: "/tmp/test/thoughts", Auto: true},
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
 		},
 	}
 
@@ -96,8 +96,8 @@ func TestBuildFileGroups_MultipleSources(t *testing.T) {
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
-			{Name: "thoughts", Type: "tree", RootPath: "/tmp/test/thoughts", Auto: true},
-			{Name: "rp1", Type: "tree", RootPath: "/tmp/test/.rp1", Auto: true},
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
+			{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
 		},
 	}
 
@@ -126,8 +126,8 @@ func TestBuildFileGroups_EmptySourceSkipped(t *testing.T) {
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
-			{Name: "thoughts", Type: "tree", RootPath: "/tmp/test/thoughts", Auto: true},
-			{Name: "rp1", Type: "tree", RootPath: "/tmp/test/.rp1", Auto: true},
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
+			{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
 		},
 	}
 
@@ -143,5 +143,73 @@ func TestBuildFileGroups_EmptySourceSkipped(t *testing.T) {
 	}
 	if groups[0].Name != "thoughts" {
 		t.Errorf("expected group 'thoughts', got %q", groups[0].Name)
+	}
+}
+
+func TestBuildFileGroups_ManualSourceDirHeadings(t *testing.T) {
+	project := &discovery.Project{
+		Name: "test-project",
+		Path: "/tmp/test",
+		Sources: []discovery.FileSource{
+			{Name: "docs", Type: "tree", SourceTypeName: "manual", RootPath: "/tmp/test/docs", Auto: false},
+		},
+	}
+
+	files := []cache.FileInfo{
+		{Source: "docs", Path: "root.md", FullPath: "docs/root.md", Name: "root.md", FileType: "other", ModTime: time.Now()},
+		{Source: "docs", Path: "guides/setup.md", FullPath: "docs/guides/setup.md", Name: "setup.md", FileType: "other", ModTime: time.Now()},
+		{Source: "docs", Path: "guides/deploy.md", FullPath: "docs/guides/deploy.md", Name: "deploy.md", FileType: "other", ModTime: time.Now()},
+		{Source: "docs", Path: "api/endpoints.md", FullPath: "docs/api/endpoints.md", Name: "endpoints.md", FileType: "other", ModTime: time.Now()},
+	}
+
+	groups := buildFileGroups(project, files)
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+
+	g := groups[0]
+	if len(g.Files) != 4 {
+		t.Fatalf("expected 4 files, got %d", len(g.Files))
+	}
+
+	// Root file first (Dir=""), then api/, then guides/ (sorted)
+	if g.Files[0].Dir != "" {
+		t.Errorf("file 0: expected Dir='', got %q", g.Files[0].Dir)
+	}
+	if g.Files[1].Dir != "api" || !g.Files[1].ShowDir {
+		t.Errorf("file 1: expected Dir='api' ShowDir=true, got Dir=%q ShowDir=%v", g.Files[1].Dir, g.Files[1].ShowDir)
+	}
+	if g.Files[2].Dir != "guides" || !g.Files[2].ShowDir {
+		t.Errorf("file 2: expected Dir='guides' ShowDir=true, got Dir=%q ShowDir=%v", g.Files[2].Dir, g.Files[2].ShowDir)
+	}
+	if g.Files[3].Dir != "guides" || g.Files[3].ShowDir {
+		t.Errorf("file 3: expected Dir='guides' ShowDir=false, got Dir=%q ShowDir=%v", g.Files[3].Dir, g.Files[3].ShowDir)
+	}
+}
+
+func TestBuildFileGroups_ThoughtsNoDirHeadings(t *testing.T) {
+	project := &discovery.Project{
+		Name: "test-project",
+		Path: "/tmp/test",
+		Sources: []discovery.FileSource{
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
+		},
+	}
+
+	files := []cache.FileInfo{
+		{Source: "thoughts", Path: "plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: time.Now()},
+		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: time.Now()},
+	}
+
+	groups := buildFileGroups(project, files)
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	for i, f := range groups[0].Files {
+		if f.Dir != "" || f.ShowDir {
+			t.Errorf("file %d: thoughts should have no Dir/ShowDir, got Dir=%q ShowDir=%v", i, f.Dir, f.ShowDir)
+		}
 	}
 }

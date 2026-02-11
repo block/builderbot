@@ -320,8 +320,10 @@
 <!-- Delete branch confirmation -->
 {#if branchToDelete}
   <ConfirmDialog
-    title="Delete Branch"
-    message={`Delete branch "${branchToDelete.branch.branchName}" and its worktree? This cannot be undone.`}
+    title={branchToDelete.branch.branchType === 'remote' ? 'Delete Remote Branch' : 'Delete Branch'}
+    message={branchToDelete.branch.branchType === 'remote'
+      ? `Delete branch "${branchToDelete.branch.branchName}" and stop its workspace? The workspace may be reused later, but session history will be lost.`
+      : `Delete branch "${branchToDelete.branch.branchName}" and its worktree? This cannot be undone.`}
     confirmLabel="Delete"
     danger={true}
     onConfirm={confirmDeleteBranch}

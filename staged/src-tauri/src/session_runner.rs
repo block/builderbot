@@ -276,8 +276,10 @@ fn run_post_completion_hooks(
                     }
                 }
                 Ok(_) => {
-                    log::info!("Session {session_id}: no new commit (HEAD unchanged), cleaning up pending commit");
-                    let _ = store.delete_commit(&pending_commit.id);
+                    // Leave the pending commit record in the DB so it appears
+                    // as a failed-commit in the timeline (warning icon). The
+                    // user can choose to retry via the session or delete it.
+                    log::info!("Session {session_id}: no new commit (HEAD unchanged), leaving pending commit as failed");
                 }
                 Err(e) => {
                     log::error!("Failed to get HEAD SHA after session: {e}");

@@ -73,11 +73,9 @@ pub async fn complete(model: &str, prompt: &str) -> Result<String> {
 /// For OAuth, the host is already embedded in the auth config.
 fn resolve_host(auth: &Auth) -> Result<String> {
     match auth {
-        Auth::Token(_) => {
-            std::env::var("DATABRICKS_HOST").map_err(|_| {
-                anyhow::anyhow!("DATABRICKS_HOST must be set when using DATABRICKS_TOKEN auth")
-            })
-        }
+        Auth::Token(_) => std::env::var("DATABRICKS_HOST").map_err(|_| {
+            anyhow::anyhow!("DATABRICKS_HOST must be set when using DATABRICKS_TOKEN auth")
+        }),
         Auth::OAuth { host, .. } => Ok(host.clone()),
     }
 }

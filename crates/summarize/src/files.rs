@@ -73,8 +73,7 @@ fn collect_from_dir(
     extensions: &Option<Vec<String>>,
     gitignore: &Gitignore,
 ) -> Result<(), String> {
-    let entries =
-        std::fs::read_dir(dir).map_err(|e| format!("Failed to read directory: {}", e))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("Failed to read directory: {}", e))?;
 
     let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.file_name());
@@ -131,11 +130,7 @@ pub fn build_prompt(files: &[FileContent], question: &str, working_dir: &Path) -
 
     for file in files {
         let display_path = file.path.strip_prefix(working_dir).unwrap_or(&file.path);
-        let ext = file
-            .path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = file.path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         prompt.push_str(&format!(
             "### {} ({} lines)\n```{}\n{}\n```\n\n",
@@ -164,15 +159,15 @@ mod tests {
             "fn main() {\n    println!(\"Hello\");\n}\n",
         )
         .unwrap();
-        fs::write(
-            dir.path().join("src/lib.rs"),
-            "pub struct Foo;\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "pub struct Foo;\n").unwrap();
 
         fs::write(dir.path().join(".gitignore"), "node_modules/\n*.log\n").unwrap();
         fs::create_dir_all(dir.path().join("node_modules")).unwrap();
-        fs::write(dir.path().join("node_modules/pkg.js"), "module.exports = {}").unwrap();
+        fs::write(
+            dir.path().join("node_modules/pkg.js"),
+            "module.exports = {}",
+        )
+        .unwrap();
         fs::write(dir.path().join("debug.log"), "some logs").unwrap();
 
         dir
@@ -191,8 +186,12 @@ mod tests {
     fn test_collect_files_respects_gitignore() {
         let dir = setup_test_dir();
         let files = collect_files(&[".".to_string()], dir.path(), &None).unwrap();
-        assert!(!files.iter().any(|f| f.path.to_string_lossy().contains("node_modules")));
-        assert!(!files.iter().any(|f| f.path.to_string_lossy().contains(".log")));
+        assert!(!files
+            .iter()
+            .any(|f| f.path.to_string_lossy().contains("node_modules")));
+        assert!(!files
+            .iter()
+            .any(|f| f.path.to_string_lossy().contains(".log")));
     }
 
     #[test]

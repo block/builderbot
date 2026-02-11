@@ -49,8 +49,8 @@ impl AcpAiProvider {
 #[async_trait]
 impl AiProvider for AcpAiProvider {
     async fn prompt(&self, prompt: String) -> Result<String> {
-        let agent = acp_client::find_acp_agent()
-            .ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
+        let agent =
+            acp_client::find_acp_agent().ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
 
         acp_client::run_acp_prompt_raw(&agent, &self.working_dir, &prompt).await
     }

@@ -70,14 +70,22 @@ func ResolveAnchor(markdown string, anchor Anchor) int {
 // ResolveAnchorsToLines takes threads and markdown source, returns a map
 // of threadID -> line number (1-indexed). Threads that can't be anchored
 // are mapped to -1.
+//
+// StartLine is the primary mechanism — it records which rendered element the
+// comment was attached to. Text matching against raw markdown is only used
+// as backward compat for old anchors that lack StartLine.
 func ResolveAnchorsToLines(threads []Thread, markdown string) map[string]int {
 	result := make(map[string]int, len(threads))
 	for _, t := range threads {
+		if t.Anchor.StartLine > 0 {
+			result[t.ID] = t.Anchor.StartLine
+			continue
+		}
+		// Backward compat: text matching for anchors without StartLine
 		offset := ResolveAnchor(markdown, t.Anchor)
 		if offset < 0 {
 			result[t.ID] = -1
 		} else {
-			// Count newlines before offset to get line number (1-indexed)
 			line := 1
 			for i := 0; i < offset && i < len(markdown); i++ {
 				if markdown[i] == '\n' {

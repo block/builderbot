@@ -48,6 +48,7 @@ type Anchor struct {
 	Before       string `json:"before,omitempty"`
 	After        string `json:"after,omitempty"`
 	HeadingPath  string `json:"headingPath,omitempty"`
+	StartLine    int    `json:"startLine,omitempty"`
 }
 
 // Comment is a single message within a thread.

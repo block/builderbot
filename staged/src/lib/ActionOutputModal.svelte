@@ -32,6 +32,7 @@
   import {
     getActionOutputBuffer,
     stopBranchAction,
+    clearActionExecution,
     listenToActionOutput,
     listenToActionStatus,
   } from './services/actions';
@@ -40,9 +41,10 @@
     executionId: string;
     actionName: string;
     onClose: () => void;
+    onRemove?: (executionId: string) => void;
   }
 
-  let { executionId, actionName, onClose }: Props = $props();
+  let { executionId, actionName, onClose, onRemove }: Props = $props();
 
   // =========================================================================
   // State
@@ -188,6 +190,20 @@
     }
   }
 
+  async function handleRemove() {
+    try {
+      // Clear the execution from the backend
+      await clearActionExecution(executionId);
+      // Notify parent to remove from UI
+      onRemove?.(executionId);
+      // Close the modal
+      onClose();
+    } catch (e: any) {
+      error = e?.message || 'Failed to remove execution';
+      console.error('Failed to remove execution:', e);
+    }
+  }
+
   // =========================================================================
   // Rendering helpers
   // =========================================================================
@@ -267,6 +283,11 @@
           <button class="stop-btn" onclick={handleStop} title="Stop action">
             <CircleStop size={14} />
             <span>Stop</span>
+          </button>
+        {/if}
+        {#if status === 'failed' && onRemove}
+          <button class="remove-btn" onclick={handleRemove} title="Remove this failed run">
+            <span>Remove</span>
           </button>
         {/if}
         <button class="close-btn" onclick={onClose} title="Close (Esc)">
@@ -416,6 +437,26 @@
   .stop-btn:hover {
     background: rgba(239, 68, 68, 0.15);
     border-color: rgba(239, 68, 68, 0.3);
+  }
+
+  .remove-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .remove-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-focus);
   }
 
   .close-btn {

@@ -110,6 +110,14 @@ export function getActionOutputBuffer(executionId: string): Promise<OutputChunk[
 }
 
 /**
+ * Clear buffered output for a completed action execution.
+ * Returns true if the execution was found and cleared, false otherwise.
+ */
+export function clearActionExecution(executionId: string): Promise<boolean> {
+  return invoke<boolean>('clear_action_execution', { executionId });
+}
+
+/**
  * Run all prerun actions for a branch after creation.
  * Returns an array of execution IDs for the started actions.
  */

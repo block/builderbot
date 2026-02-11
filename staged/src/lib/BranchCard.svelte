@@ -173,8 +173,8 @@
         runningActions[existingIndex].exitCode = payload.exitCode;
         runningActions[existingIndex].completedAt = payload.completedAt;
 
-        // Auto-remove successful completions (with fade for secondary, instant for primary)
-        if (payload.status === 'completed') {
+        // Auto-remove only completed and stopped actions (not failed)
+        if (payload.status === 'completed' || payload.status === 'stopped') {
           const action = runningActions[existingIndex];
           const isPrimaryAction = primaryRunAction && action.actionId === primaryRunAction.id;
 
@@ -351,16 +351,22 @@
   async function handleRunAction(action: ProjectAction) {
     showMoreMenu = false;
 
-    // Check if this action is already running
+    // Check if this action is currently running
     const existingExecution = runningActions.find((a) => a.actionId === action.id);
 
-    if (existingExecution) {
-      // Action already running, open modal to view output
+    if (existingExecution && existingExecution.status === 'running') {
+      // Action currently running, open modal to view output
       actionOutputModal = {
         executionId: existingExecution.executionId,
         actionName: action.name,
       };
       return;
+    }
+
+    // If the same action has a previous execution (completed, failed, or stopped),
+    // remove it before starting a new one
+    if (existingExecution) {
+      runningActions = runningActions.filter((a) => a.actionId !== action.id);
     }
 
     // Start the action silently (don't open modal)
@@ -380,6 +386,11 @@
       executionId: execution.executionId,
       actionName: execution.actionName,
     };
+  }
+
+  // Handle removing a failed action execution
+  function handleRemoveExecution(executionId: string) {
+    runningActions = runningActions.filter((a) => a.executionId !== executionId);
   }
 
   // Close dropdowns when clicking outside
@@ -887,6 +898,7 @@
     executionId={actionOutputModal.executionId}
     actionName={actionOutputModal.actionName}
     onClose={() => (actionOutputModal = null)}
+    onRemove={handleRemoveExecution}
   />
 {/if}
 

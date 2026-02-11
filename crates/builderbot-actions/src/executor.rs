@@ -38,6 +38,7 @@ struct RunningActionState {
 /// Manages action execution with real-time output streaming
 pub struct ActionExecutor {
     running: Arc<Mutex<HashMap<String, RunningActionState>>>,
+    completed: Arc<Mutex<HashMap<String, Vec<OutputChunk>>>>,
 }
 
 impl Default for ActionExecutor {
@@ -51,6 +52,7 @@ impl ActionExecutor {
     pub fn new() -> Self {
         Self {
             running: Arc::new(Mutex::new(HashMap::new())),
+            completed: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -246,6 +248,7 @@ impl ActionExecutor {
         // Spawn thread to wait for completion
         let exec_id = execution_id.clone();
         let running_clone = self.running.clone();
+        let completed_clone = self.completed.clone();
         let working_dir_clone = working_dir.clone();
         let auto_commit = metadata.auto_commit;
         let action_name = metadata.action_name.clone();
@@ -256,10 +259,14 @@ impl ActionExecutor {
             let exit_code = exit_status.as_ref().ok().and_then(|s| s.code());
             let completed_at = now_timestamp();
 
-            // Remove from running actions
+            // Move output buffer to completed actions map and remove from running
             {
                 let mut running = running_clone.lock().unwrap();
-                running.remove(&exec_id);
+                if let Some(state) = running.remove(&exec_id) {
+                    let output = state.output_buffer.lock().unwrap().clone();
+                    let mut completed = completed_clone.lock().unwrap();
+                    completed.insert(exec_id.clone(), output);
+                }
             }
 
             let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
@@ -355,13 +362,17 @@ impl ActionExecutor {
 
     /// Get buffered output for an execution
     pub fn get_buffered_output(&self, execution_id: &str) -> Option<Vec<OutputChunk>> {
+        // First check running actions
         let running = self.running.lock().unwrap();
         if let Some(state) = running.get(execution_id) {
             let buffer = state.output_buffer.lock().unwrap();
-            Some(buffer.clone())
-        } else {
-            None
+            return Some(buffer.clone());
         }
+        drop(running);
+
+        // If not running, check completed actions
+        let completed = self.completed.lock().unwrap();
+        completed.get(execution_id).cloned()
     }
 
     /// Check if an action is currently running
@@ -374,6 +385,13 @@ impl ActionExecutor {
     pub fn get_running_ids(&self) -> Vec<String> {
         let running = self.running.lock().unwrap();
         running.keys().cloned().collect()
+    }
+
+    /// Clear buffered output for a completed execution
+    /// This removes the output from the completed actions map
+    pub fn clear_execution(&self, execution_id: &str) -> bool {
+        let mut completed = self.completed.lock().unwrap();
+        completed.remove(execution_id).is_some()
     }
 }
 

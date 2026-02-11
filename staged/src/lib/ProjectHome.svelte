@@ -144,7 +144,7 @@
 
   function handleBranchCreated(branch: Branch) {
     const existing = branchesByProject.get(branch.projectId) || [];
-    branchesByProject = new Map(branchesByProject).set(branch.projectId, [branch, ...existing]);
+    branchesByProject = new Map(branchesByProject).set(branch.projectId, [...existing, branch]);
     showNewBranchModal = false;
     newBranchProject = null;
   }

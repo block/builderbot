@@ -772,21 +772,21 @@
     <div class="card-footer">
       <div class="new-btn-group">
         <button
-          class="new-item-btn"
+          class="new-item-btn note-btn"
           onclick={() => openNewSession('note')}
           disabled={showNewSession}
           title="New note"
         >
-          <StickyNote size={13} />
+          <span class="btn-icon note-icon"><StickyNote size={13} /></span>
           <span>New note</span>
         </button>
         <button
-          class="new-item-btn"
+          class="new-item-btn commit-btn"
           onclick={() => openNewSession('commit')}
           disabled={showNewSession}
           title="New commit"
         >
-          <GitCommitHorizontal size={13} />
+          <span class="btn-icon commit-icon"><GitCommitHorizontal size={13} /></span>
           <span>New commit</span>
         </button>
       </div>
@@ -1233,6 +1233,26 @@
 
   .new-item-btn :global(svg) {
     flex-shrink: 0;
+  }
+
+  /* Icon wrapper with tinted background */
+  .btn-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+  }
+
+  .btn-icon.note-icon {
+    background-color: var(--note-bg);
+    color: var(--note-color);
+  }
+
+  .btn-icon.commit-icon {
+    background-color: var(--commit-bg);
+    color: var(--commit-color);
   }
 
   :global(.spinner) {

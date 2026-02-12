@@ -1,13 +1,14 @@
 <!--
   NewSessionModal.svelte — Start a new commit or note session on a branch
 
-  A focused modal with a prompt textarea and mode toggle (commit/note).
+  A focused modal with a prompt textarea. The mode (commit or note) is
+  determined by the caller and displayed as a static title in the header.
   On close, returns whatever text was typed and the current mode so the
   caller can restore state if the user re-opens the modal.
 
   Props:
     branch        — the branch to create a session on
-    mode          — initial mode: 'commit' or 'note'
+    mode          — 'commit' or 'note' (shown as title, not togglable)
     initialPrompt — pre-fill the textarea (e.g. from a previous close)
     onClose       — called with { prompt, mode } when dismissed
     onStarted     — called with { sessionId, artifactId } on successful start
@@ -60,10 +61,6 @@
       el.selectionStart = el.selectionEnd = el.value.length;
     }
   });
-
-  function toggleMode() {
-    currentMode = currentMode === 'commit' ? 'note' : 'commit';
-  }
 
   async function handleSubmit(e?: Event) {
     e?.preventDefault();
@@ -130,24 +127,14 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
     <header class="modal-header">
-      <div class="header-content">
-        <!-- Mode toggle -->
-        <button
-          type="button"
-          class="mode-toggle"
-          onclick={toggleMode}
-          disabled={starting}
-          title="Switch to {isCommit ? 'note' : 'commit'}"
-        >
-          <span class="mode-option" class:active={isCommit}>
-            <GitCommitHorizontal size={14} />
-            <span>Commit</span>
-          </span>
-          <span class="mode-option" class:active={!isCommit}>
-            <StickyNote size={14} />
-            <span>Note</span>
-          </span>
-        </button>
+      <div class="header-title">
+        {#if isCommit}
+          <GitCommitHorizontal size={14} />
+          <span>New commit</span>
+        {:else}
+          <StickyNote size={14} />
+          <span>New note</span>
+        {/if}
       </div>
       <button class="close-btn" onclick={handleClose} title="Close (Esc)">
         <X size={18} />
@@ -230,9 +217,18 @@
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .header-content {
+  .header-title {
     display: flex;
     align-items: center;
+    gap: 6px;
+    font-size: var(--size-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .header-title :global(svg) {
+    color: var(--text-muted);
+    flex-shrink: 0;
   }
 
   .close-btn {
@@ -253,52 +249,6 @@
   .close-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
-  }
-
-  /* Mode toggle — pill-shaped segmented control */
-  .mode-toggle {
-    display: flex;
-    align-items: center;
-    gap: 0;
-    padding: 2px;
-    background: var(--bg-hover);
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    cursor: pointer;
-    transition: border-color 0.15s;
-  }
-
-  .mode-toggle:hover:not(:disabled) {
-    border-color: var(--border-muted);
-  }
-
-  .mode-toggle:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .mode-option {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 5px 10px;
-    border-radius: 6px;
-    font-size: var(--size-sm);
-    font-weight: 500;
-    color: var(--text-faint);
-    transition:
-      color 0.15s,
-      background-color 0.15s;
-  }
-
-  .mode-option :global(svg) {
-    flex-shrink: 0;
-  }
-
-  .mode-option.active {
-    color: var(--text-primary);
-    background: var(--bg-primary);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   }
 
   /* Body */

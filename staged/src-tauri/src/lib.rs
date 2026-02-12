@@ -779,9 +779,16 @@ async fn start_workspace(
     match blox::ws_start(ws_name, resolved_source.as_deref()) {
         Ok(_) => Ok(()),
         Err(e) => {
-            let _ =
-                store.update_branch_workspace_status(&branch.id, &store::WorkspaceStatus::Error);
-            Err(format!("Failed to start workspace: {e}"))
+            // Don't set Error status here — `blox ws start` can fail (e.g.
+            // timeout, transient network issue) even though the workspace was
+            // created and is still booting. Let the frontend's status polling
+            // determine the real state; it will keep polling while the DB says
+            // Starting and will eventually converge on the correct status.
+            log::warn!(
+                "blox ws start failed for '{}', leaving status as Starting for polling to resolve: {e}",
+                ws_name
+            );
+            Ok(())
         }
     }
 }

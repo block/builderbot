@@ -434,6 +434,6 @@ export function hasUnpushedCommits(branchId: string): Promise<boolean> {
 }
 
 /** Push a branch to its remote (git push -u origin <branch>). */
-export function pushBranch(branchId: string, force?: boolean): Promise<void> {
-  return invoke('push_branch_cmd', { branchId, force: force ?? false });
+export function pushBranch(branchId: string): Promise<void> {
+  return invoke('push_branch_cmd', { branchId });
 }

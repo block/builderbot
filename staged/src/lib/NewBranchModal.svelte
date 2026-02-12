@@ -62,10 +62,11 @@
   let pullRequests = $state<PullRequest[]>([]);
   let issues = $state<Issue[]>([]);
   let githubSearchQuery = $state('');
-  let githubLoading = $state(false);
   let githubError = $state<string | null>(null);
   let githubSelectedIndex = $state(0);
+  let prsLoading = $state(false);
   let prsLoaded = $state(false);
+  let issuesLoading = $state(false);
   let issuesLoaded = $state(false);
 
   let githubSearchEl: HTMLInputElement | null = $state(null);
@@ -111,6 +112,7 @@
   });
 
   let currentGithubList = $derived(githubTab === 'pr' ? filteredPullRequests : filteredIssues);
+  let githubLoading = $derived(githubTab === 'pr' ? prsLoading : issuesLoading);
 
   /**
    * Sanitize a branch title into a valid git branch name.
@@ -186,20 +188,21 @@
 
   async function openGithubPicker() {
     showGithubPicker = true;
+    githubTab = 'pr';
     githubSearchQuery = '';
     githubSelectedIndex = 0;
     githubError = null;
 
     // Load PRs if not already loaded
     if (!prsLoaded) {
-      githubLoading = true;
+      prsLoading = true;
       try {
         pullRequests = await commands.listPullRequests(project.repoPath);
         prsLoaded = true;
       } catch (e) {
         githubError = typeof e === 'string' ? e : String(e);
       } finally {
-        githubLoading = false;
+        prsLoading = false;
       }
     }
   }
@@ -207,17 +210,28 @@
   async function switchGithubTab(tab: 'pr' | 'issue') {
     githubTab = tab;
     githubSelectedIndex = 0;
+    githubSearchQuery = '';
     githubError = null;
 
     if (tab === 'issue' && !issuesLoaded) {
-      githubLoading = true;
+      issuesLoading = true;
       try {
         issues = await commands.listIssues(project.repoPath);
         issuesLoaded = true;
       } catch (e) {
         githubError = typeof e === 'string' ? e : String(e);
       } finally {
-        githubLoading = false;
+        issuesLoading = false;
+      }
+    } else if (tab === 'pr' && !prsLoaded) {
+      prsLoading = true;
+      try {
+        pullRequests = await commands.listPullRequests(project.repoPath);
+        prsLoaded = true;
+      } catch (e) {
+        githubError = typeof e === 'string' ? e : String(e);
+      } finally {
+        prsLoading = false;
       }
     }
   }
@@ -907,19 +921,23 @@
   .github-import-button {
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
-    padding: 0;
+    padding: 8px 12px;
     background: transparent;
-    border: none;
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
     color: var(--text-muted);
     font-size: var(--size-sm);
     cursor: pointer;
-    transition: color 0.15s;
-    align-self: flex-start;
+    transition: all 0.15s;
+    width: 100%;
   }
 
   .github-import-button:hover {
     color: var(--text-primary);
+    border-color: var(--border-emphasis);
+    background-color: var(--bg-hover);
   }
 
   .github-import-button :global(svg) {

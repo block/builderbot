@@ -141,10 +141,18 @@
           stopPolling();
         }
       } catch (e) {
-        console.error('Failed to poll workspace status:', e);
-        polledStatus = 'error';
-        error = e instanceof Error ? e.message : String(e);
-        stopPolling();
+        // During initial creation, `blox ws start` may still be running
+        // when the first poll fires. The backend tolerates this when the
+        // DB status is Starting, but as a safety net we also keep polling
+        // on the frontend side if our local status is still 'starting'.
+        if (status === 'starting') {
+          console.debug('Poll failed while starting (workspace may not exist yet), retrying…', e);
+        } else {
+          console.error('Failed to poll workspace status:', e);
+          polledStatus = 'error';
+          error = e instanceof Error ? e.message : String(e);
+          stopPolling();
+        }
       }
     }, 3000);
   }

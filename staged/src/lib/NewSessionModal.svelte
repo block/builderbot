@@ -138,11 +138,11 @@
           disabled={starting}
           title="Switch to {isCommit ? 'note' : 'commit'}"
         >
-          <span class="mode-option" class:active={isCommit}>
+          <span class="mode-option commit-mode" class:active={isCommit}>
             <GitCommitHorizontal size={14} />
             <span>Commit</span>
           </span>
-          <span class="mode-option" class:active={!isCommit}>
+          <span class="mode-option note-mode" class:active={!isCommit}>
             <StickyNote size={14} />
             <span>Note</span>
           </span>
@@ -298,6 +298,23 @@
     color: var(--text-primary);
     background: var(--bg-primary);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  }
+
+  /* Commit/Note color accents for active mode */
+  .mode-option.active.commit-mode {
+    color: var(--commit-color);
+  }
+
+  .mode-option.active.commit-mode :global(svg) {
+    color: var(--commit-color);
+  }
+
+  .mode-option.active.note-mode {
+    color: var(--note-color);
+  }
+
+  .mode-option.active.note-mode :global(svg) {
+    color: var(--note-color);
   }
 
   /* Body */

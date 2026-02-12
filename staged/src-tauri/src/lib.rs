@@ -658,11 +658,10 @@ fn create_branch(
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
 }
 
-/// Create a remote branch backed by a Blox workspace.
+/// Create a remote branch record.
 ///
-/// This creates the branch record with type=remote, starts a Blox workspace
-/// via `blox ws start`, and stores the workspace metadata on the branch.
-/// No local worktree or workdir is created.
+/// Creates the branch DB record with type=remote and status=Starting.
+/// No workspace is started here — call `start_workspace` separately.
 #[tauri::command(rename_all = "camelCase")]
 async fn create_remote_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -671,11 +670,10 @@ async fn create_remote_branch(
     base_branch: Option<String>,
     workspace_name: String,
     agent: Option<String>,
-    source: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
 
-    // Get the project to find its repo path
+    // Get the project to find its repo path (needed for default branch detection)
     let project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
@@ -701,32 +699,53 @@ async fn create_remote_branch(
     );
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
-    // Resolve the source to an HTTPS git URL. The frontend passes the
-    // local repo path, but blox needs a fetchable HTTPS URL.
-    // Append ?ref=<branch> so the workspace checks out the correct base.
-    // Strip the "origin/" prefix since blox expects a plain branch name.
-    let ref_name = effective_base
-        .strip_prefix("origin/")
-        .unwrap_or(&effective_base);
-    let resolved_source = match source {
-        Some(_) => git::get_remote_url(repo_path, "origin")
-            .ok()
-            .filter(|u| !u.is_empty())
-            .map(|u| format!("{}?ref={}", ssh_url_to_https(&u), ref_name)),
-        None => None,
-    };
+    Ok(to_branch_with_workdir(branch, None))
+}
 
-    // Kick off the Blox workspace. `ws_start` tells the platform to begin
-    // provisioning but the workspace won't be fully ready yet — status
-    // stays as `Starting`. The frontend should poll `get_workspace_info`
-    // and update the status to `Running` once the platform reports ready.
-    match blox::ws_start(&workspace_name, resolved_source.as_deref()) {
-        Ok(_) => Ok(to_branch_with_workdir(branch, None)),
+/// Start the Blox workspace for a remote branch.
+///
+/// Separated from `create_remote_branch` so the frontend can dismiss the
+/// dialog immediately and show the card in its "Provisioning…" state while
+/// this runs in the background.
+#[tauri::command(rename_all = "camelCase")]
+async fn start_workspace(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let repo_path = Path::new(&project.repo_path);
+
+    let ws_name = branch
+        .workspace_name
+        .as_deref()
+        .ok_or("Branch has no workspace name")?;
+
+    // Resolve the source to an HTTPS git URL with ?ref=<base_branch>.
+    let ref_name = branch
+        .base_branch
+        .strip_prefix("origin/")
+        .unwrap_or(&branch.base_branch);
+    let resolved_source = git::get_remote_url(repo_path, "origin")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .map(|u| format!("{}?ref={}", ssh_url_to_https(&u), ref_name));
+
+    match blox::ws_start(ws_name, resolved_source.as_deref()) {
+        Ok(_) => Ok(()),
         Err(e) => {
-            // Update status to Error but keep the branch record
             let _ =
                 store.update_branch_workspace_status(&branch.id, &store::WorkspaceStatus::Error);
-
             Err(format!("Failed to start workspace: {e}"))
         }
     }
@@ -777,10 +796,19 @@ async fn poll_workspace_status(
 
     let info = blox::ws_info(ws_name).map_err(|e| e.to_string())?;
 
-    // Map the CLI-reported status to our enum
+    // Map the CLI-reported status to our enum.
+    // During initial startup, Blox may briefly report "stopped" before the
+    // workspace transitions to "running". If the DB still says Starting,
+    // treat a Blox "stopped" as still Starting so we keep polling.
     let new_status = match info.status.as_deref() {
         Some("running") | Some("Running") => store::WorkspaceStatus::Running,
-        Some("stopped") | Some("Stopped") => store::WorkspaceStatus::Stopped,
+        Some("stopped") | Some("Stopped") => {
+            if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
+                store::WorkspaceStatus::Starting
+            } else {
+                store::WorkspaceStatus::Stopped
+            }
+        }
         Some("starting") | Some("Starting") | Some("provisioning") | Some("Provisioning") => {
             store::WorkspaceStatus::Starting
         }
@@ -1754,6 +1782,7 @@ pub fn run() {
             list_branches_for_project,
             create_branch,
             create_remote_branch,
+            start_workspace,
             delete_branch,
             get_workspace_info,
             poll_workspace_status,

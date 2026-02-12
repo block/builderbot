@@ -70,7 +70,8 @@
   // PR button state
   // =========================================================================
   type PrState = 'idle' | 'creating' | 'error' | 'created';
-  let prState = $state<PrState>(branch.prNumber ? 'created' : 'idle');
+  let prStateOverride = $state<PrState | null>(null);
+  let prState = $derived<PrState>(prStateOverride ?? (branch.prNumber ? 'created' : 'idle'));
   let prSessionId = $state<string | null>(null);
   let prError = $state<string | null>(null);
   let prUrl = $state<string | null>(null);
@@ -618,7 +619,7 @@
   async function handleCreatePr() {
     if (prState === 'creating') return;
 
-    prState = 'creating';
+    prStateOverride = 'creating';
     prError = null;
     prUrl = null;
 
@@ -631,7 +632,7 @@
       prSessionId = sessionId;
       // The session-status-changed listener will handle completion
     } catch (e) {
-      prState = 'error';
+      prStateOverride = 'error';
       prError = e instanceof Error ? e.message : String(e);
     }
   }
@@ -651,19 +652,19 @@
             await commands.updateBranchPr(branch.id, prNumber);
             branch.prNumber = prNumber;
           }
-          prState = 'created';
+          prStateOverride = 'created';
         } else {
           // Session completed but we couldn't find a PR URL
-          prState = 'error';
+          prStateOverride = 'error';
           prError = 'PR session completed but no PR URL was found in the output.';
         }
       } catch (e) {
-        prState = 'error';
+        prStateOverride = 'error';
         prError = e instanceof Error ? e.message : String(e);
       }
     } else {
       // Session errored or was cancelled
-      prState = 'error';
+      prStateOverride = 'error';
       prError = `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
     }
     prSessionId = null;
@@ -692,7 +693,7 @@
 
   function handlePrErrorClose() {
     showPrErrorDialog = false;
-    prState = 'idle';
+    prStateOverride = null;
     prError = null;
   }
 </script>

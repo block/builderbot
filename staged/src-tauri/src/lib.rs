@@ -16,6 +16,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use store::Store;
+use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
 use tauri::Manager;
 
 // =============================================================================
@@ -1697,6 +1698,107 @@ pub fn run() {
         )
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
+            // Build a custom macOS application menu so that the app submenu,
+            // "About" item, and "Quit" item use the capitalised product name
+            // "Staged" instead of the lowercase Cargo package name "staged".
+            #[cfg(target_os = "macos")]
+            {
+                let handle = app.handle();
+                let pkg_info = handle.package_info();
+                let config = handle.config();
+                let about_metadata = AboutMetadata {
+                    name: Some("Staged".into()),
+                    version: Some(pkg_info.version.to_string()),
+                    copyright: config.bundle.copyright.clone(),
+                    authors: config.bundle.publisher.clone().map(|p| vec![p]),
+                    ..Default::default()
+                };
+
+                let app_menu = Submenu::with_items(
+                    handle,
+                    "Staged",
+                    true,
+                    &[
+                        &PredefinedMenuItem::about(
+                            handle,
+                            Some("About Staged"),
+                            Some(about_metadata),
+                        )?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::services(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::hide(handle, None)?,
+                        &PredefinedMenuItem::hide_others(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::quit(handle, Some("Quit Staged"))?,
+                    ],
+                )?;
+
+                let file_menu = Submenu::with_items(
+                    handle,
+                    "File",
+                    true,
+                    &[&PredefinedMenuItem::close_window(handle, None)?],
+                )?;
+
+                let edit_menu = Submenu::with_items(
+                    handle,
+                    "Edit",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(handle, None)?,
+                        &PredefinedMenuItem::redo(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::cut(handle, None)?,
+                        &PredefinedMenuItem::copy(handle, None)?,
+                        &PredefinedMenuItem::paste(handle, None)?,
+                        &PredefinedMenuItem::select_all(handle, None)?,
+                    ],
+                )?;
+
+                let view_menu = Submenu::with_items(
+                    handle,
+                    "View",
+                    true,
+                    &[&PredefinedMenuItem::fullscreen(handle, None)?],
+                )?;
+
+                let window_menu = Submenu::with_id_and_items(
+                    handle,
+                    tauri::menu::WINDOW_SUBMENU_ID,
+                    "Window",
+                    true,
+                    &[
+                        &PredefinedMenuItem::minimize(handle, None)?,
+                        &PredefinedMenuItem::maximize(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::close_window(handle, None)?,
+                    ],
+                )?;
+
+                let help_menu = Submenu::with_id_and_items(
+                    handle,
+                    tauri::menu::HELP_SUBMENU_ID,
+                    "Help",
+                    true,
+                    &[],
+                )?;
+
+                let menu = Menu::with_items(
+                    handle,
+                    &[
+                        &app_menu,
+                        &file_menu,
+                        &edit_menu,
+                        &view_menu,
+                        &window_menu,
+                        &help_menu,
+                    ],
+                )?;
+
+                app.set_menu(menu)?;
+            }
+
             let app_data_dir = app
                 .path()
                 .app_data_dir()

@@ -366,13 +366,8 @@ pub fn start_branch_session(
         }
     };
 
-    // For remote branches, prefer the user's UI selection, fall back to the
-    // agent stored on the branch.
-    let effective_provider = if is_remote {
-        provider.or_else(|| branch.agent.clone())
-    } else {
-        provider
-    };
+    // For remote branches, use the user's UI selection.
+    let effective_provider = provider;
 
     session_runner::start_session(
         SessionConfig {

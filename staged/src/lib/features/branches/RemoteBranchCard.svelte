@@ -18,7 +18,6 @@
     AlertCircle,
     CircleCheck,
     CirclePause,
-    Bot,
     Copy,
     GitCommitHorizontal,
     StickyNote,
@@ -297,11 +296,6 @@
         return 'Unknown';
     }
   }
-
-  function agentLabel(agent: string | null): string {
-    if (!agent) return 'Agent';
-    return agent.charAt(0).toUpperCase() + agent.slice(1);
-  }
 </script>
 
 <div class="branch-card remote" class:deleting>
@@ -340,16 +334,12 @@
       </div>
     </div>
 
-    <!-- Subheader: agent + workspace info -->
-    <div class="card-subheader">
-      <div class="agent-badge">
-        <Bot size={12} />
-        <span>{agentLabel(branch.agent)}</span>
-      </div>
-      {#if branch.workspaceName}
+    <!-- Subheader: workspace info -->
+    {#if branch.workspaceName}
+      <div class="card-subheader">
         <span class="workspace-name">{branch.workspaceName}</span>
-      {/if}
-    </div>
+      </div>
+    {/if}
 
     <!-- Content area — varies by status -->
     <div class="card-content">
@@ -567,19 +557,6 @@
     gap: 10px;
     padding: 8px 16px 12px;
     border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .agent-badge {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--size-xs);
-    font-weight: 500;
-    color: var(--text-muted);
-  }
-
-  .agent-badge :global(svg) {
-    color: var(--text-faint);
   }
 
   .workspace-name {

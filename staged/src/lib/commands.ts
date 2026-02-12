@@ -89,15 +89,13 @@ export function createRemoteBranch(
   projectId: string,
   branchName: string,
   workspaceName: string,
-  baseBranch?: string,
-  agent?: string
+  baseBranch?: string
 ): Promise<Branch> {
   return invoke('create_remote_branch', {
     projectId,
     branchName,
     baseBranch,
     workspaceName,
-    agent,
   });
 }
 

@@ -52,8 +52,7 @@ Action type guidelines:
 - "run": Development servers and other commands (like "npm run dev", "npm start", "just run", "storybook")
 
 Special instructions for lefthook:
-- If lefthook.yml is present in the project, ALWAYS include "lefthook install" as a prerun action
-- This ensures git hooks are properly installed in each new worktree
+{lefthook_instructions}
 
 Special instructions for subdirectory build files:
 - If justfile/Justfile/Makefile/makefile files are found in subdirectories, detect actions from them
@@ -168,10 +167,23 @@ impl ActionDetector {
         let file_list = collect_file_list(working_dir)?;
         let file_contents = collect_relevant_files(working_dir)?;
 
+        // Check if the user has git hook overrides (core.hooksPath).
+        // If so, lefthook install is unnecessary since hooks are managed externally.
+        let lefthook_instructions = if has_git_hooks_path_override(working_dir) {
+            "- SKIP lefthook detection entirely. The user has a custom git core.hooksPath configured, \
+             so lefthook install is not needed and should NOT be suggested as an action."
+                .to_string()
+        } else {
+            "- If lefthook.yml is present in the project, ALWAYS include \"lefthook install\" as a prerun action\n\
+             - This ensures git hooks are properly installed in each new worktree"
+                .to_string()
+        };
+
         // Build the prompt
         let prompt = DETECTION_PROMPT_TEMPLATE
             .replace("{file_list}", &file_list)
-            .replace("{file_contents}", &file_contents);
+            .replace("{file_contents}", &file_contents)
+            .replace("{lefthook_instructions}", &lefthook_instructions);
 
         // Call AI to analyze and suggest actions
         let response = self
@@ -183,6 +195,18 @@ impl ActionDetector {
         // Parse the JSON response
         parse_ai_response(&response)
     }
+}
+
+/// Check if the repository has a custom git hooks path configured (core.hooksPath).
+/// When this is set, the user manages git hooks externally and lefthook install
+/// should be skipped.
+fn has_git_hooks_path_override(working_dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .args(["config", "core.hooksPath"])
+        .current_dir(working_dir)
+        .output()
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 /// Collect a list of files in the directory (recursively up to 2 levels)
@@ -232,7 +256,13 @@ fn collect_file_list_recursive(
                 } else if file_type.is_dir() {
                     files.push(format!("{}/", full_path));
                     // Recurse into subdirectory
-                    collect_file_list_recursive(&entry.path(), &full_path, files, depth + 1, max_depth)?;
+                    collect_file_list_recursive(
+                        &entry.path(),
+                        &full_path,
+                        files,
+                        depth + 1,
+                        max_depth,
+                    )?;
                 }
             }
         }
@@ -286,7 +316,6 @@ fn collect_relevant_files(dir: &Path) -> Result<String> {
         Ok(contents.join("\n"))
     }
 }
-
 
 /// Parse the AI response and extract suggested actions
 fn parse_ai_response(response: &str) -> Result<Vec<SuggestedAction>> {

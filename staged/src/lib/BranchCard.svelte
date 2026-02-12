@@ -777,7 +777,7 @@
           disabled={showNewSession}
           title="New note"
         >
-          <span class="btn-icon note-icon"><FileText size={13} /></span>
+          <FileText size={13} />
           <span>New note</span>
         </button>
         <button
@@ -786,7 +786,7 @@
           disabled={showNewSession}
           title="New commit"
         >
-          <span class="btn-icon commit-icon"><GitCommitHorizontal size={13} /></span>
+          <GitCommitHorizontal size={13} />
           <span>New commit</span>
         </button>
       </div>
@@ -1235,26 +1235,12 @@
     flex-shrink: 0;
   }
 
-  /* Icon wrapper with tinted background on hover */
-  .btn-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
-    border-radius: 4px;
-    transition:
-      background-color 0.15s,
-      color 0.15s;
-  }
-
-  .note-btn:hover .btn-icon.note-icon {
-    background-color: var(--note-bg);
+  /* Icon - tinted background appears on button hover */
+  .note-btn:hover :global(svg) {
     color: var(--note-color);
   }
 
-  .commit-btn:hover .btn-icon.commit-icon {
-    background-color: var(--commit-bg);
+  .commit-btn:hover :global(svg) {
     color: var(--commit-color);
   }
 

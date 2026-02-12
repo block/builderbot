@@ -76,6 +76,10 @@
   let prUrl = $state<string | null>(null);
   let showPrErrorDialog = $state(false);
 
+  // Unpushed-commits state (only relevant when PR already exists)
+  let hasUnpushed = $state(false);
+  let pushing = $state(false);
+
   // Dropdown state
   let showMoreMenu = $state(false);
   let showActionsSubmenu = $state(false);
@@ -88,6 +92,9 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showBranchDiff = $state(false);
+
+  // Whether the branch has any commits (used to gate PR button visibility)
+  let hasCommits = $derived(timeline != null && timeline.commits.length > 0);
 
   // Actions state
   let actions = $state<ProjectAction[]>([]);
@@ -249,6 +256,14 @@
       unlistenStatus?.();
       unlistenActionStatus?.();
     };
+  });
+
+  // Re-check unpushed commits whenever the timeline refreshes and a PR exists
+  $effect(() => {
+    // Re-run when timeline changes (dependency) and PR exists
+    if (timeline && branch.prNumber && branch.branchType === 'local') {
+      commands.hasUnpushedCommits(branch.id).then((v) => (hasUnpushed = v));
+    }
   });
 
   onMount(() => {
@@ -669,8 +684,23 @@
     prSessionId = null;
   }
 
+  async function handlePush() {
+    pushing = true;
+    try {
+      await commands.pushBranch(branch.id);
+      hasUnpushed = false;
+    } catch (e) {
+      console.error('Push failed:', e);
+      // Could show error UI here
+    } finally {
+      pushing = false;
+    }
+  }
+
   function handlePrButtonClick() {
-    if (prState === 'created') {
+    if (prState === 'created' && hasUnpushed) {
+      handlePush();
+    } else if (prState === 'created') {
       // View PR - open in browser
       const url = prUrl || (branch.prNumber ? getPrUrlFromNumber(branch.prNumber) : null);
       if (url) {
@@ -681,8 +711,10 @@
       showPrErrorDialog = true;
     } else if (prState === 'idle') {
       handleCreatePr();
+    } else if (prState === 'creating' && prSessionId) {
+      // While creating, open the session chat so user can watch progress
+      openSessionId = prSessionId;
     }
-    // 'creating' state — button shows spinner, no action on click
   }
 
   function handlePrErrorRetry() {
@@ -912,42 +944,57 @@
 
     <!-- Footer with PR button and note/commit buttons -->
     <div class="card-footer">
-      <button
-        class="pr-btn"
-        class:creating={prState === 'creating'}
-        class:error={prState === 'error'}
-        class:created={prState === 'created'}
-        onclick={handlePrButtonClick}
-        disabled={prState === 'creating'}
-        title={prState === 'created'
-          ? 'View PR'
-          : prState === 'error'
-            ? 'PR creation failed — click for details'
-            : prState === 'creating'
-              ? 'Creating PR…'
-              : 'Create PR'}
-      >
-        {#if prState === 'creating'}
-          <Spinner size={13} />
-        {:else if prState === 'error'}
-          <AlertCircle size={13} />
-        {:else if prState === 'created'}
-          <GitPullRequestArrow size={13} />
-        {:else}
-          <GitPullRequestCreateArrow size={13} />
-        {/if}
-        <span>
-          {#if prState === 'created'}
-            View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+      {#if hasCommits || prState !== 'idle'}
+        <button
+          class="pr-btn"
+          class:creating={prState === 'creating'}
+          class:error={prState === 'error'}
+          class:created={prState === 'created'}
+          class:pushing
+          onclick={handlePrButtonClick}
+          disabled={pushing}
+          title={pushing
+            ? 'Pushing…'
+            : prState === 'created' && hasUnpushed
+              ? 'Push new commits'
+              : prState === 'created'
+                ? 'View PR'
+                : prState === 'error'
+                  ? 'PR creation failed — click for details'
+                  : prState === 'creating'
+                    ? 'Creating PR… (click to view)'
+                    : 'Create PR'}
+        >
+          {#if pushing}
+            <Spinner size={13} />
           {:else if prState === 'creating'}
-            Creating PR…
+            <Spinner size={13} />
           {:else if prState === 'error'}
-            PR failed
+            <AlertCircle size={13} />
+          {:else if prState === 'created' && hasUnpushed}
+            <GitPullRequestCreateArrow size={13} />
+          {:else if prState === 'created'}
+            <GitPullRequestArrow size={13} />
           {:else}
-            Create PR
+            <GitPullRequestCreateArrow size={13} />
           {/if}
-        </span>
-      </button>
+          <span>
+            {#if pushing}
+              Pushing…
+            {:else if prState === 'created' && hasUnpushed}
+              Push{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+            {:else if prState === 'created'}
+              View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+            {:else if prState === 'creating'}
+              Creating PR…
+            {:else if prState === 'error'}
+              PR failed
+            {:else}
+              Create PR
+            {/if}
+          </span>
+        </button>
+      {/if}
       <div class="new-btn-group">
         <button
           class="new-item-btn note-btn"
@@ -1436,6 +1483,12 @@
     color: var(--text-primary);
     border-color: var(--border-muted);
     background: var(--bg-hover);
+  }
+
+  .pr-btn.pushing {
+    color: var(--text-muted);
+    border-color: var(--border-muted);
+    cursor: default;
   }
 
   .pr-btn :global(svg) {

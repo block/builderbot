@@ -427,3 +427,13 @@ export function createPr(branchId: string, provider?: string): Promise<string> {
 export function updateBranchPr(branchId: string, prNumber: number | null): Promise<void> {
   return invoke('update_branch_pr', { branchId, prNumber });
 }
+
+/** Check whether a branch has local commits not yet pushed to the remote. */
+export function hasUnpushedCommits(branchId: string): Promise<boolean> {
+  return invoke('has_unpushed_commits', { branchId });
+}
+
+/** Push a branch to its remote (git push -u origin <branch>). */
+export function pushBranch(branchId: string, force?: boolean): Promise<void> {
+  return invoke('push_branch_cmd', { branchId, force: force ?? false });
+}

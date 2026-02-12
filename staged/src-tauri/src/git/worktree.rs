@@ -499,6 +499,23 @@ pub fn switch_branch(worktree: &Path, branch_name: &str) -> Result<(), GitError>
     Ok(())
 }
 
+/// Check if the local branch has commits not yet pushed to the remote.
+///
+/// Compares the local HEAD with `origin/<branch>`. Returns `true` if there
+/// are commits in the local branch that are not in the remote tracking branch.
+/// Returns `false` if the remote tracking branch doesn't exist (e.g., never pushed).
+pub fn has_unpushed_commits(worktree: &Path, branch: &str) -> Result<bool, GitError> {
+    let remote_ref = format!("origin/{branch}");
+    // Check that the remote ref exists first
+    if cli::run(worktree, &["rev-parse", "--verify", &remote_ref]).is_err() {
+        // Remote tracking branch doesn't exist — treat as "all commits are unpushed"
+        // but only if there are local commits at all
+        return Ok(false);
+    }
+    let output = cli::run(worktree, &["rev-list", &format!("{remote_ref}..HEAD")])?;
+    Ok(!output.trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

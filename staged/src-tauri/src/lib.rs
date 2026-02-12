@@ -1700,6 +1700,76 @@ fn update_branch_pr(
         .map_err(|e| e.to_string())
 }
 
+/// Check if a branch has commits that haven't been pushed to the remote.
+#[tauri::command(rename_all = "camelCase")]
+fn has_unpushed_commits(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<bool, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let workdir = store
+        .get_workdir_for_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+    git::has_unpushed_commits(Path::new(&workdir.path), &branch.branch_name)
+        .map_err(|e| e.to_string())
+}
+
+/// Push a branch to its remote.
+///
+/// For local branches, runs `git push -u origin <branch>`.
+/// For remote branches, executes the push inside the Blox workspace.
+#[tauri::command(rename_all = "camelCase")]
+fn push_branch_cmd(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    force: Option<bool>,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    match branch.branch_type {
+        store::BranchType::Local => {
+            let workdir = store
+                .get_workdir_for_branch(&branch_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+            git::push_branch(
+                Path::new(&workdir.path),
+                &branch.branch_name,
+                force.unwrap_or(false),
+            )
+            .map_err(|e| e.to_string())
+        }
+        store::BranchType::Remote => {
+            let ws_name = branch
+                .workspace_name
+                .as_deref()
+                .ok_or("Branch has no workspace name")?;
+
+            let mut cmd = vec!["git", "push", "-u", "origin", &branch.branch_name];
+            if force.unwrap_or(false) {
+                cmd.push("--force-with-lease");
+            }
+
+            blox::ws_exec(ws_name, &cmd).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+    }
+}
+
 // =============================================================================
 // Utilities
 // =============================================================================
@@ -2098,6 +2168,8 @@ pub fn run() {
             list_issues,
             create_pr,
             update_branch_pr,
+            has_unpushed_commits,
+            push_branch_cmd,
             open_url,
             is_sq_available,
             get_available_openers,

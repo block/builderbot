@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
 use crate::agent::{self, AcpProviderInfo};
+use crate::blox;
 use crate::git;
 use crate::session_runner::{self, SessionConfig};
 use crate::store::{self, Store};
@@ -298,11 +299,16 @@ pub fn start_branch_session(
     let is_remote = branch.workspace_name.is_some();
 
     // Resolve working directory and branch context.
-    // Remote branches have no local worktree — use the project's repo path
-    // as a valid cwd for the blox subprocess, and skip branch context.
+    // Remote branches use ws_exec for git operations; local branches use the worktree directly.
     let (working_dir, branch_context) = if is_remote {
         let repo_path = PathBuf::from(&project.repo_path);
-        (repo_path, String::new())
+        let ctx = build_remote_branch_context(
+            branch.workspace_name.as_deref().unwrap(),
+            &branch.base_branch,
+            &store,
+            &branch_id,
+        );
+        (repo_path, ctx)
     } else {
         let workdir = store
             .get_workdir_for_branch(&branch_id)
@@ -338,9 +344,18 @@ pub fn start_branch_session(
         BranchSessionType::Commit => {
             let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
             store.create_commit(&commit).map_err(|e| e.to_string())?;
-            // Remote branches have no local HEAD to compare against
+            // For remote branches, get HEAD via ws_exec; for local, use git directly.
             let head_sha = if is_remote {
-                None
+                match blox::ws_exec(
+                    branch.workspace_name.as_deref().unwrap(),
+                    &["git", "rev-parse", "HEAD"],
+                ) {
+                    Ok(sha) => Some(sha.trim().to_string()),
+                    Err(e) => {
+                        log::warn!("Failed to get remote HEAD SHA via ws_exec: {e}");
+                        None
+                    }
+                }
             } else {
                 Some(
                     git::get_head_sha(&working_dir)
@@ -384,7 +399,7 @@ pub fn start_branch_session(
 // Prompt construction helpers
 // =============================================================================
 
-/// Build the branch history context block.
+/// Build the branch history context block for a local branch.
 fn build_branch_context(
     worktree: &Path,
     base_branch: &str,
@@ -393,15 +408,9 @@ fn build_branch_context(
 ) -> String {
     let mut parts = Vec::new();
 
-    parts.push(
-        "This branch represents an ongoing conversation across multiple sessions. \
-         Be judicious with your context window, but you are responsible for understanding \
-         previous changes or note content from the branch history when they relate to the \
-         next step."
-            .to_string(),
-    );
+    parts.push(context_preamble());
 
-    // Full commit log
+    // Full commit log from local worktree
     match git::get_full_commit_log(worktree, base_branch) {
         Ok(log) if !log.trim().is_empty() => {
             parts.push(format!("## Commit History (oldest first)\n\n{log}"));
@@ -415,7 +424,67 @@ fn build_branch_context(
         }
     }
 
-    // Notes — title + path only (content can be read from file if needed)
+    // Notes from DB
+    append_notes_context(&mut parts, store, branch_id);
+
+    parts.join("\n\n")
+}
+
+/// Build the branch history context block for a remote branch.
+///
+/// Uses `blox ws_exec` to run git commands inside the remote workspace,
+/// and reads notes from the DB (which works regardless of worktree location).
+fn build_remote_branch_context(
+    workspace_name: &str,
+    base_branch: &str,
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> String {
+    let mut parts = Vec::new();
+
+    parts.push(context_preamble());
+
+    // Full commit log via ws_exec
+    let range = format!("{base_branch}..HEAD");
+    match blox::ws_exec(
+        workspace_name,
+        &[
+            "git",
+            "log",
+            "--reverse",
+            "--format=commit %H%nAuthor: %an%nDate: %ci%n%n%B",
+            &range,
+        ],
+    ) {
+        Ok(log) if !log.trim().is_empty() => {
+            parts.push(format!("## Commit History (oldest first)\n\n{log}"));
+        }
+        Ok(_) => {
+            parts.push("## Commit History\n\nNo commits on this branch yet.".to_string());
+        }
+        Err(e) => {
+            log::warn!("Failed to get remote commit log via ws_exec: {e}");
+            parts.push("## Commit History\n\nNo commits on this branch yet.".to_string());
+        }
+    }
+
+    // Notes from DB
+    append_notes_context(&mut parts, store, branch_id);
+
+    parts.join("\n\n")
+}
+
+/// Shared preamble for branch context blocks.
+fn context_preamble() -> String {
+    "This branch represents an ongoing conversation across multiple sessions. \
+     Be judicious with your context window, but you are responsible for understanding \
+     previous changes or note content from the branch history when they relate to the \
+     next step."
+        .to_string()
+}
+
+/// Append notes context from the DB to a parts vector.
+fn append_notes_context(parts: &mut Vec<String>, store: &Arc<Store>, branch_id: &str) {
     match store.list_notes_for_branch(branch_id) {
         Ok(notes) if !notes.is_empty() => {
             let mut note_section = String::from("## Notes\n");
@@ -442,8 +511,6 @@ fn build_branch_context(
             log::warn!("Failed to list notes for branch context: {e}");
         }
     }
-
-    parts.join("\n\n")
 }
 
 /// Assemble the full prompt from action tag + branch context + user prompt.

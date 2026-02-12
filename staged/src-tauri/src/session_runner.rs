@@ -232,18 +232,12 @@ pub fn start_session(
 
         // Run post-completion hooks before transitioning status.
         // These detect artifacts produced by the session (commits, notes).
-        // For remote workspaces, skip commit detection (no local git) but
-        // still run note extraction (reads from session messages in the DB).
         if new_status == "completed" {
-            let effective_pre_head = if config.workspace_name.is_some() {
-                None // no local HEAD to compare against
-            } else {
-                config.pre_head_sha.as_deref()
-            };
             run_post_completion_hooks(
                 &session_id_for_status,
                 &config.working_dir,
-                effective_pre_head,
+                config.pre_head_sha.as_deref(),
+                config.workspace_name.as_deref(),
                 &store_for_status,
             );
         }
@@ -269,18 +263,29 @@ pub fn start_session(
 ///
 /// - **Commits**: If a pending commit record is linked to this session and
 ///   HEAD has moved since the session started, record the new SHA.
+///   For remote workspaces, HEAD is checked via `blox ws_exec`.
 /// - **Notes**: If an empty note is linked to this session, parse the
 ///   assistant's last message for content after the first `---`.
 fn run_post_completion_hooks(
     session_id: &str,
     working_dir: &std::path::Path,
     pre_head_sha: Option<&str>,
+    workspace_name: Option<&str>,
     store: &Arc<Store>,
 ) {
     // --- Commit detection ---
     if let Some(pre_sha) = pre_head_sha {
         if let Ok(Some(pending_commit)) = store.get_pending_commit_by_session(session_id) {
-            match crate::git::get_head_sha(working_dir) {
+            // Get current HEAD — either from local worktree or remote workspace.
+            let current_head_result = if let Some(ws_name) = workspace_name {
+                crate::blox::ws_exec(ws_name, &["git", "rev-parse", "HEAD"])
+                    .map(|s| s.trim().to_string())
+                    .map_err(|e| format!("{e}"))
+            } else {
+                crate::git::get_head_sha(working_dir).map_err(|e| format!("{e}"))
+            };
+
+            match current_head_result {
                 Ok(current_head) if current_head != pre_sha => {
                     log::info!(
                         "Session {session_id}: new commit detected ({} → {})",
@@ -292,9 +297,6 @@ fn run_post_completion_hooks(
                     }
                 }
                 Ok(_) => {
-                    // Leave the pending commit record in the DB so it appears
-                    // as a failed-commit in the timeline (warning icon). The
-                    // user can choose to retry via the session or delete it.
                     log::info!("Session {session_id}: no new commit (HEAD unchanged), leaving pending commit as failed");
                 }
                 Err(e) => {

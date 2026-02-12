@@ -1235,7 +1235,7 @@
     flex-shrink: 0;
   }
 
-  /* Icon wrapper with tinted background */
+  /* Icon wrapper with tinted background on hover */
   .btn-icon {
     display: flex;
     align-items: center;
@@ -1243,14 +1243,17 @@
     width: 20px;
     height: 20px;
     border-radius: 4px;
+    transition:
+      background-color 0.15s,
+      color 0.15s;
   }
 
-  .btn-icon.note-icon {
+  .note-btn:hover .btn-icon.note-icon {
     background-color: var(--note-bg);
     color: var(--note-color);
   }
 
-  .btn-icon.commit-icon {
+  .commit-btn:hover .btn-icon.commit-icon {
     background-color: var(--commit-bg);
     color: var(--commit-color);
   }

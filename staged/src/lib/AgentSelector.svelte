@@ -14,7 +14,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { ChevronDown, Check, Bot } from 'lucide-svelte';
   import { agentState, REMOTE_AGENTS } from './stores/agent.svelte';
-  import { preferences, setAiAgent } from './stores/preferences.svelte';
+  import { setAiAgent, getPreferredAgent } from './stores/preferences.svelte';
 
   interface Props {
     disabled?: boolean;
@@ -27,9 +27,9 @@
 
   let agents = $derived(remote ? REMOTE_AGENTS : agentState.providers);
 
-  let currentLabel = $derived(
-    agents.find((p) => p.id === preferences.aiAgent)?.label ?? preferences.aiAgent ?? 'Agent'
-  );
+  let preferredId = $derived(getPreferredAgent(agents));
+
+  let currentLabel = $derived(agents.find((p) => p.id === preferredId)?.label ?? 'Agent');
 
   onMount(() => {
     document.addEventListener('click', handleClickOutside);
@@ -79,11 +79,11 @@
           <button
             type="button"
             class="selector-option"
-            class:selected={preferences.aiAgent === provider.id}
+            class:selected={preferredId === provider.id}
             onclick={() => select(provider.id)}
           >
             <span class="option-label">{provider.label}</span>
-            {#if preferences.aiAgent === provider.id}
+            {#if preferredId === provider.id}
               <Check size={14} />
             {/if}
           </button>

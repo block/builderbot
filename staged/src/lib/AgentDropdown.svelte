@@ -9,7 +9,7 @@
   import { Check, ExternalLink, RefreshCw } from 'lucide-svelte';
   import Spinner from './Spinner.svelte';
   import { agentState, refreshProviders, KNOWN_AGENTS } from './stores/agent.svelte';
-  import { preferences, setAiAgent } from './stores/preferences.svelte';
+  import { setAiAgent, getPreferredAgent } from './stores/preferences.svelte';
   import { openUrl } from './commands';
 
   interface Props {
@@ -20,6 +20,8 @@
 
   let dropdownRef = $state<HTMLDivElement | null>(null);
   let refreshing = $state(false);
+
+  let preferredId = $derived(getPreferredAgent(agentState.providers));
 
   function isInstalled(id: string): boolean {
     return agentState.providers.some((p) => p.id === id);
@@ -70,14 +72,14 @@
       {#if installed}
         <button
           class="agent-item"
-          class:active={preferences.aiAgent === agent.id}
+          class:active={preferredId === agent.id}
           onclick={() => select(agent.id)}
         >
           <div class="agent-info">
             <span class="agent-name">{agent.label}</span>
             <span class="agent-status installed">Installed</span>
           </div>
-          {#if preferences.aiAgent === agent.id}
+          {#if preferredId === agent.id}
             <Check size={14} />
           {/if}
         </button>

@@ -122,7 +122,7 @@ impl FromStr for WorkspaceStatus {
 ///
 /// Branches can be **local** (backed by a git worktree on this machine) or
 /// **remote** (backed by a Blox workspace). Remote branches store additional
-/// metadata: the workspace name, its lifecycle status, and the agent type.
+/// metadata: the workspace name and its lifecycle status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Branch {
@@ -137,8 +137,6 @@ pub struct Branch {
     pub workspace_name: Option<String>,
     /// Current lifecycle status of the workspace (remote branches only).
     pub workspace_status: Option<WorkspaceStatus>,
-    /// The agent running on the workspace, e.g. "goose" or "claude" (remote only).
-    pub agent: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -156,7 +154,6 @@ impl Branch {
             branch_type: BranchType::Local,
             workspace_name: None,
             workspace_status: None,
-            agent: None,
             created_at: now,
             updated_at: now,
         }
@@ -168,7 +165,6 @@ impl Branch {
         branch_name: &str,
         base_branch: &str,
         workspace_name: &str,
-        agent: &str,
     ) -> Self {
         let now = now_timestamp();
         Self {
@@ -180,7 +176,6 @@ impl Branch {
             branch_type: BranchType::Remote,
             workspace_name: Some(workspace_name.to_string()),
             workspace_status: Some(WorkspaceStatus::Starting),
-            agent: Some(agent.to_string()),
             created_at: now,
             updated_at: now,
         }

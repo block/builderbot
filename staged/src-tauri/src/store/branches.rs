@@ -10,8 +10,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO branches (id, project_id, branch_name, base_branch, pr_number,
-                branch_type, workspace_name, workspace_status, agent, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                branch_type, workspace_name, workspace_status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 branch.id,
                 branch.project_id,
@@ -21,7 +21,6 @@ impl Store {
                 branch.branch_type.as_str(),
                 branch.workspace_name,
                 branch.workspace_status.as_ref().map(|s| s.as_str()),
-                branch.agent,
                 branch.created_at,
                 branch.updated_at,
             ],
@@ -34,7 +33,7 @@ impl Store {
         Self::row_to_branch_query(
             &conn,
             "SELECT id, project_id, branch_name, base_branch, pr_number,
-                    branch_type, workspace_name, workspace_status, agent,
+                    branch_type, workspace_name, workspace_status,
                     created_at, updated_at
              FROM branches WHERE id = ?1",
             params![id],
@@ -45,7 +44,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, project_id, branch_name, base_branch, pr_number,
-                    branch_type, workspace_name, workspace_status, agent,
+                    branch_type, workspace_name, workspace_status,
                     created_at, updated_at
              FROM branches WHERE project_id = ?1 ORDER BY created_at ASC",
         )?;
@@ -109,9 +108,8 @@ impl Store {
             branch_type: branch_type_str.parse().unwrap_or(BranchType::Local),
             workspace_name: row.get(6)?,
             workspace_status: workspace_status_str.and_then(|s| s.parse().ok()),
-            agent: row.get(8)?,
-            created_at: row.get(9)?,
-            updated_at: row.get(10)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
         })
     }
 

@@ -24,7 +24,6 @@ export interface Branch {
   branchType: BranchType;
   workspaceName: string | null;
   workspaceStatus: WorkspaceStatus | null;
-  agent: string | null;
   worktreePath: string | null;
   createdAt: number;
   updatedAt: number;

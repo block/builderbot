@@ -64,7 +64,6 @@ After activation, `cargo`, `node`, `npm`, and `just` are all available from the 
 ### Quick Start
 
 ```bash
-just install   # Install npm + cargo dependencies
 just dev       # Run in development mode (hot-reload)
 ```
 
@@ -84,7 +83,6 @@ just check-all  # Format, lint, typecheck — run before pushing
 just ci         # Verify formatting, lint, typecheck — for CI/hooks
 
 # Maintenance
-just install    # Install all dependencies
 just clean      # Remove build artifacts
 ```
 

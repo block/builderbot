@@ -1,5 +1,5 @@
 # Staged - Git Diff Viewer
-# Run `just install` once after cloning, then `just dev` to start.
+# Run `just dev` to start development.
 
 # ============================================================================
 # Development
@@ -10,8 +10,14 @@ dev repo="":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Pick a free port so multiple worktrees can run simultaneously
-    VITE_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()')
+    # Install JS deps if needed
+    [[ -d node_modules ]] || npm install
+
+    # Derive a stable port from the working directory so the same worktree
+    # always gets the same port. This avoids changing TAURI_CONFIG between
+    # runs, which would invalidate Cargo's build cache and trigger a full
+    # Rust rebuild every time.
+    VITE_PORT=$(python3 -c "import hashlib,os; h=int(hashlib.sha256(os.getcwd().encode()).hexdigest(),16); print(10000 + h % 55000)")
     export VITE_PORT
     TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\"}}"
 
@@ -71,13 +77,8 @@ check-all: fmt lint typecheck
 ci: fmt-check lint typecheck
 
 # ============================================================================
-# Setup & Maintenance
+# Maintenance
 # ============================================================================
-
-# First-time setup: install all dependencies
-install:
-    npm install
-    cd src-tauri && cargo fetch
 
 # Delete all build artifacts and dependencies
 clean:

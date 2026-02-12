@@ -4,7 +4,7 @@
 //! workspaces. Each function shells out to the `sq` CLI and parses
 //! the result.
 
-use acp_client::types::find_command;
+use acp_client::find_command;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::process::Command;
 use thiserror::Error;

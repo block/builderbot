@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, Implementation,
@@ -30,9 +30,6 @@ use crate::types::{blox_acp_command, find_command};
 // =============================================================================
 // Public traits and types
 // =============================================================================
-
-/// Minimum interval between DB flushes for streaming text.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Protocol-agnostic message writer — streams agent output.
 ///

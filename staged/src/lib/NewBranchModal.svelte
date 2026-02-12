@@ -154,11 +154,16 @@
           project.id,
           branchName.trim(),
           wsName,
-          selectedBaseBranch ?? undefined,
-          undefined,
-          project.repoPath
+          selectedBaseBranch ?? undefined
         );
+
+        // Dismiss immediately — the card will show "Provisioning…" state
         onCreated(branch);
+
+        // Kick off workspace provisioning in the background
+        commands.startWorkspace(branch.id).catch((e) => {
+          console.error('[NewBranchModal] Failed to start workspace:', e);
+        });
       }
     } catch (e) {
       if (typeof e === 'string') {

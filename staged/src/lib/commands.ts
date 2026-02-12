@@ -69,14 +69,13 @@ export function createBranch(
   return invoke('create_branch', { projectId, branchName, baseBranch });
 }
 
-/** Create a remote branch backed by a Blox workspace. */
+/** Create a remote branch record (does not start the workspace). */
 export function createRemoteBranch(
   projectId: string,
   branchName: string,
   workspaceName: string,
   baseBranch?: string,
-  agent?: string,
-  source?: string
+  agent?: string
 ): Promise<Branch> {
   return invoke('create_remote_branch', {
     projectId,
@@ -84,8 +83,12 @@ export function createRemoteBranch(
     baseBranch,
     workspaceName,
     agent,
-    source,
   });
+}
+
+/** Start the Blox workspace for a remote branch. */
+export function startWorkspace(branchId: string): Promise<void> {
+  return invoke('start_workspace', { branchId });
 }
 
 export function deleteBranch(branchId: string): Promise<void> {

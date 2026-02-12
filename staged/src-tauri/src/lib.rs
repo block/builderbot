@@ -1726,46 +1726,108 @@ fn has_unpushed_commits(
 ///
 /// For local branches, runs `git push -u origin <branch>`.
 /// For remote branches, executes the push inside the Blox workspace.
+///
+/// If a normal push fails with a non-fast-forward rejection (e.g. after a
+/// rebase), automatically retries with `--force-with-lease`.
 #[tauri::command(rename_all = "camelCase")]
-fn push_branch_cmd(
+async fn push_branch_cmd(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
     force: Option<bool>,
 ) -> Result<(), String> {
-    let store = get_store(&store)?;
+    let (branch_type, branch_name, workdir_path, workspace_name) = {
+        let store = get_store(&store)?;
 
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-    match branch.branch_type {
-        store::BranchType::Local => {
-            let workdir = store
-                .get_workdir_for_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
-
-            git::push_branch(
-                Path::new(&workdir.path),
-                &branch.branch_name,
-                force.unwrap_or(false),
+        let workdir_path = if branch.branch_type == store::BranchType::Local {
+            Some(
+                store
+                    .get_workdir_for_branch(&branch_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?
+                    .path,
             )
-            .map_err(|e| e.to_string())
+        } else {
+            None
+        };
+
+        (
+            branch.branch_type,
+            branch.branch_name,
+            workdir_path,
+            branch.workspace_name,
+        )
+    };
+
+    let use_force = force.unwrap_or(false);
+
+    match branch_type {
+        store::BranchType::Local => {
+            let wt_path = workdir_path.unwrap();
+            let path = PathBuf::from(&wt_path);
+
+            // Try normal push first (unless force was explicitly requested)
+            if use_force {
+                return git::push_branch(&path, &branch_name, true).map_err(|e| e.to_string());
+            }
+
+            match git::push_branch(&path, &branch_name, false) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("non-fast-forward") || msg.contains("failed to push some refs")
+                    {
+                        log::info!(
+                            "Normal push rejected for '{}', retrying with --force-with-lease",
+                            branch_name
+                        );
+                        git::push_branch(&path, &branch_name, true).map_err(|e| e.to_string())
+                    } else {
+                        Err(msg)
+                    }
+                }
+            }
         }
         store::BranchType::Remote => {
-            let ws_name = branch
-                .workspace_name
+            let ws_name = workspace_name
                 .as_deref()
                 .ok_or("Branch has no workspace name")?;
 
-            let mut cmd = vec!["git", "push", "-u", "origin", &branch.branch_name];
-            if force.unwrap_or(false) {
+            let mut cmd = vec!["git", "push", "-u", "origin", &branch_name];
+            if use_force {
                 cmd.push("--force-with-lease");
             }
 
-            blox::ws_exec(ws_name, &cmd).map_err(|e| e.to_string())?;
-            Ok(())
+            match blox::ws_exec(ws_name, &cmd) {
+                Ok(_) => Ok(()),
+                Err(e) if !use_force => {
+                    let msg = e.to_string();
+                    if msg.contains("non-fast-forward") || msg.contains("failed to push some refs")
+                    {
+                        log::info!(
+                            "Normal push rejected for remote '{}', retrying with --force-with-lease",
+                            branch_name
+                        );
+                        let retry_cmd = vec![
+                            "git",
+                            "push",
+                            "-u",
+                            "origin",
+                            &branch_name,
+                            "--force-with-lease",
+                        ];
+                        blox::ws_exec(ws_name, &retry_cmd).map_err(|e| e.to_string())?;
+                        Ok(())
+                    } else {
+                        Err(msg)
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            }
         }
     }
 }

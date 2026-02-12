@@ -59,14 +59,12 @@
     }
   }
 
-  /** Select a suggestion, filling the subpath and loading next level. */
+  /** Select a suggestion, filling the subpath and closing the dropdown. */
   function selectSuggestion(entry: DirEntry) {
     const { parentDir } = getSubpathContext(subpath);
-    subpath = parentDir ? `${parentDir}/${entry.name}/` : `${entry.name}/`;
+    subpath = parentDir ? `${parentDir}/${entry.name}` : entry.name;
     showDropdown = false;
     suggestions = [];
-    // Load next level after selection
-    loadSuggestions();
     subpathInputEl?.focus();
   }
 

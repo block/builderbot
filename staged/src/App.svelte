@@ -13,6 +13,7 @@
   import AgentSetupModal from './lib/AgentSetupModal.svelte';
   import { preferences, initPreferences } from './lib/stores/preferences.svelte';
   import { agentState, refreshProviders } from './lib/stores/agent.svelte';
+  import { refreshSqAvailability } from './lib/stores/sq.svelte';
 
   let showSessionLab = $state(false);
   let showAgentSetup = $state(false);
@@ -58,6 +59,9 @@
     // Discover available agents. We await so we know whether to show
     // the setup modal before revealing the window.
     await refreshProviders();
+
+    // Check for `sq` CLI in the background (non-blocking).
+    refreshSqAvailability();
 
     // Show the setup modal only when no agents are installed at all.
     if (agentState.providers.length === 0) {

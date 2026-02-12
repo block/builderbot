@@ -11,6 +11,7 @@
   import Spinner from './Spinner.svelte';
   import type { Branch, BranchRef, Project, BranchType } from './types';
   import * as commands from './commands';
+  import { sqState } from './stores/sq.svelte';
 
   interface Props {
     project: Project;
@@ -22,9 +23,6 @@
 
   // Branch type toggle
   let branchType = $state<BranchType>('local');
-
-  // Whether the `sq` CLI is available (controls remote toggle visibility)
-  let sqAvailable = $state(false);
 
   // State
   let branchTitle = $state('');
@@ -84,13 +82,6 @@
   }
 
   onMount(async () => {
-    // Check if `sq` CLI is available (controls remote branch toggle)
-    try {
-      sqAvailable = await commands.isSqAvailable();
-    } catch {
-      sqAvailable = false;
-    }
-
     // Detect default branch
     try {
       detectedDefaultBranch = await commands.detectDefaultBranch(project.repoPath);
@@ -244,7 +235,7 @@
 
     <div class="modal-body">
       <!-- Branch type toggle (only shown when sq CLI is available) -->
-      {#if sqAvailable}
+      {#if sqState.available}
         <div class="type-toggle">
           <button
             class="toggle-option"

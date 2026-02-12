@@ -303,6 +303,7 @@
   /* Commit/Note color accents for active mode */
   .mode-option.active.commit-mode {
     color: var(--commit-color);
+    background: var(--commit-bg-emphasis);
   }
 
   .mode-option.active.commit-mode :global(svg) {
@@ -311,6 +312,7 @@
 
   .mode-option.active.note-mode {
     color: var(--note-color);
+    background: var(--note-bg-emphasis);
   }
 
   .mode-option.active.note-mode :global(svg) {

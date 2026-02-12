@@ -45,9 +45,7 @@ jobs:
             patchelf
 
       # Install dependencies
-      # TODO: Re-enable npm install once lockfile is compatible with CI
-      # - name: Install dependencies
-      #   run: just install
+      # TODO: Add npm install once lockfile is compatible with CI
       - name: Install dependencies (Rust only)
         working-directory: staged/src-tauri
         run: cargo fetch

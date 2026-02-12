@@ -26,7 +26,7 @@ test:
     cargo test
 
 # Install the summarize binary to ~/.cargo/bin
-install:
+install-summarize:
     cargo install --path crates/summarize
 
 # ============================================================================

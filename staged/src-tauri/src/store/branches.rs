@@ -76,6 +76,20 @@ impl Store {
         Ok(())
     }
 
+    /// Update the PR number for a branch.
+    pub fn update_branch_pr_number(
+        &self,
+        id: &str,
+        pr_number: Option<u64>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE branches SET pr_number = ?1, updated_at = ?2 WHERE id = ?3",
+            params![pr_number.map(|n| n as i64), now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_branch(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM branches WHERE id = ?1", params![id])?;

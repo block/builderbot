@@ -386,3 +386,18 @@ export function listGitBranches(repoPath: string): Promise<BranchRef[]> {
 export function detectDefaultBranch(repoPath: string): Promise<string> {
   return invoke('detect_default_branch_cmd', { repoPath });
 }
+
+// =============================================================================
+// PR creation
+// =============================================================================
+
+/** Kick off an agent session to push the branch and create a PR via `gh`.
+ *  Returns the session ID so the frontend can track progress. */
+export function createPr(branchId: string, provider?: string): Promise<string> {
+  return invoke('create_pr', { branchId, provider: provider ?? null });
+}
+
+/** Update the PR number stored for a branch. */
+export function updateBranchPr(branchId: string, prNumber: number | null): Promise<void> {
+  return invoke('update_branch_pr', { branchId, prNumber });
+}

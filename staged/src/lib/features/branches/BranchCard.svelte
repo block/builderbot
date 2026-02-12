@@ -79,6 +79,9 @@
   // Unpushed-commits state (only relevant when PR already exists)
   let hasUnpushed = $state(false);
   let pushing = $state(false);
+  let pushError = $state<string | null>(null);
+  let showPushErrorDialog = $state(false);
+  let forcePushing = $state(false);
 
   // Dropdown state
   let showMoreMenu = $state(false);
@@ -684,20 +687,46 @@
     prSessionId = null;
   }
 
-  async function handlePush() {
+  async function handlePush(force = false) {
     pushing = true;
+    pushError = null;
     try {
-      await commands.pushBranch(branch.id);
+      await commands.pushBranch(branch.id, force);
       hasUnpushed = false;
     } catch (e) {
       console.error('Push failed:', e);
-      // Could show error UI here
+      pushError = e instanceof Error ? e.message : String(e);
     } finally {
       pushing = false;
     }
   }
 
+  async function handleForcePush() {
+    forcePushing = true;
+    try {
+      await commands.pushBranch(branch.id, true);
+      hasUnpushed = false;
+      pushError = null;
+      showPushErrorDialog = false;
+    } catch (e) {
+      console.error('Force push failed:', e);
+      pushError = e instanceof Error ? e.message : String(e);
+    } finally {
+      forcePushing = false;
+    }
+  }
+
+  function handlePushErrorClose() {
+    showPushErrorDialog = false;
+    pushError = null;
+  }
+
   function handlePrButtonClick() {
+    if (pushError) {
+      // Push failed — show error dialog
+      showPushErrorDialog = true;
+      return;
+    }
     if (prState === 'created' && hasUnpushed) {
       handlePush();
     } else if (prState === 'created') {
@@ -948,25 +977,29 @@
         <button
           class="pr-btn"
           class:creating={prState === 'creating'}
-          class:error={prState === 'error'}
-          class:created={prState === 'created'}
+          class:error={prState === 'error' || !!pushError}
+          class:created={prState === 'created' && !pushError}
           class:pushing
           onclick={handlePrButtonClick}
           disabled={pushing}
           title={pushing
             ? 'Pushing…'
-            : prState === 'created' && hasUnpushed
-              ? 'Push new commits'
-              : prState === 'created'
-                ? 'View PR'
-                : prState === 'error'
-                  ? 'PR creation failed — click for details'
-                  : prState === 'creating'
-                    ? 'Creating PR… (click to view)'
-                    : 'Create PR'}
+            : pushError
+              ? 'Push failed — click for details'
+              : prState === 'created' && hasUnpushed
+                ? 'Push new commits'
+                : prState === 'created'
+                  ? 'View PR'
+                  : prState === 'error'
+                    ? 'PR creation failed — click for details'
+                    : prState === 'creating'
+                      ? 'Creating PR… (click to view)'
+                      : 'Create PR'}
         >
           {#if pushing}
             <Spinner size={13} />
+          {:else if pushError}
+            <AlertCircle size={13} />
           {:else if prState === 'creating'}
             <Spinner size={13} />
           {:else if prState === 'error'}
@@ -981,6 +1014,8 @@
           <span>
             {#if pushing}
               Pushing…
+            {:else if pushError}
+              Push failed
             {:else if prState === 'created' && hasUnpushed}
               Push{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
             {:else if prState === 'created'}
@@ -1092,6 +1127,45 @@
     onConfirm={handlePrErrorRetry}
     onCancel={handlePrErrorClose}
   />
+{/if}
+
+{#if showPushErrorDialog}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class="modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    onclick={(e) => {
+      if (e.target === e.currentTarget && !forcePushing) handlePushErrorClose();
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape' && !forcePushing) handlePushErrorClose();
+    }}
+  >
+    <div class="push-error-modal">
+      <div class="push-error-content">
+        <div class="push-error-icon-wrapper">
+          <AlertCircle size={24} />
+        </div>
+        <div class="push-error-text">
+          <h2>Push Failed</h2>
+          <p>{pushError ?? 'An unknown error occurred while pushing.'}</p>
+        </div>
+      </div>
+      <div class="push-error-actions">
+        <button class="btn btn-secondary" onclick={handlePushErrorClose} disabled={forcePushing}>
+          Close
+        </button>
+        <button class="btn btn-danger" onclick={handleForcePush} disabled={forcePushing}>
+          {#if forcePushing}
+            <Spinner size={13} />
+          {/if}
+          Force Push
+        </button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -1549,5 +1623,110 @@
   :global(.spinner) {
     animation: spin 1s linear infinite;
     flex-shrink: 0;
+  }
+
+  /* Push error dialog */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--shadow-overlay);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .push-error-modal {
+    background: var(--bg-chrome);
+    border-radius: 12px;
+    box-shadow: var(--shadow-elevated);
+    width: 400px;
+    max-width: 90vw;
+    overflow: hidden;
+  }
+
+  .push-error-content {
+    display: flex;
+    gap: 16px;
+    padding: 24px;
+  }
+
+  .push-error-icon-wrapper {
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--ui-danger-bg);
+    border-radius: 10px;
+    color: var(--ui-danger);
+  }
+
+  .push-error-text {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .push-error-text h2 {
+    margin: 0 0 8px 0;
+    font-size: var(--size-base);
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .push-error-text p {
+    margin: 0;
+    font-size: var(--size-sm);
+    color: var(--text-muted);
+    line-height: 1.5;
+    word-break: break-word;
+  }
+
+  .push-error-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 16px 24px;
+    border-top: 1px solid var(--border-subtle);
+    background: var(--bg-primary);
+  }
+
+  .btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border: none;
+    border-radius: 6px;
+    font-size: var(--size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      opacity 0.1s;
+  }
+
+  .btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .btn-secondary {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    background: var(--border-subtle);
+  }
+
+  .btn-danger {
+    background: var(--ui-danger);
+    color: white;
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    filter: brightness(1.1);
   }
 </style>

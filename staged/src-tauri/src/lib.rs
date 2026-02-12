@@ -1726,11 +1726,15 @@ fn has_unpushed_commits(
 ///
 /// For local branches, runs `git push -u origin <branch>`.
 /// For remote branches, executes the push inside the Blox workspace.
+/// When `force` is true, uses `--force-with-lease` for safer force pushing.
 #[tauri::command(rename_all = "camelCase")]
 async fn push_branch_cmd(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
+    force: Option<bool>,
 ) -> Result<(), String> {
+    let force = force.unwrap_or(false);
+
     let (branch_type, branch_name, workdir_path, workspace_name) = {
         let store = get_store(&store)?;
 
@@ -1763,14 +1767,17 @@ async fn push_branch_cmd(
         store::BranchType::Local => {
             let wt_path = workdir_path.unwrap();
             let path = PathBuf::from(&wt_path);
-            git::push_branch(&path, &branch_name, false).map_err(|e| e.to_string())
+            git::push_branch(&path, &branch_name, force).map_err(|e| e.to_string())
         }
         store::BranchType::Remote => {
             let ws_name = workspace_name
                 .as_deref()
                 .ok_or("Branch has no workspace name")?;
 
-            let cmd = vec!["git", "push", "-u", "origin", &branch_name];
+            let mut cmd = vec!["git", "push", "-u", "origin", &branch_name];
+            if force {
+                cmd.push("--force-with-lease");
+            }
             blox::ws_exec(ws_name, &cmd).map_err(|e| e.to_string())?;
             Ok(())
         }

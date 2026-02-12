@@ -433,7 +433,8 @@ export function hasUnpushedCommits(branchId: string): Promise<boolean> {
   return invoke('has_unpushed_commits', { branchId });
 }
 
-/** Push a branch to its remote (git push -u origin <branch>). */
-export function pushBranch(branchId: string): Promise<void> {
-  return invoke('push_branch_cmd', { branchId });
+/** Push a branch to its remote (git push -u origin <branch>).
+ *  When force is true, uses --force-with-lease for safer force pushing. */
+export function pushBranch(branchId: string, force?: boolean): Promise<void> {
+  return invoke('push_branch_cmd', { branchId, force: force ?? null });
 }

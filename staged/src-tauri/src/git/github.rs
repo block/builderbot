@@ -27,6 +27,7 @@ pub struct GitHubAuthStatus {
 
 /// A pull request from GitHub (for display in picker)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PullRequest {
     pub number: u64,
     pub title: String,
@@ -41,6 +42,7 @@ pub struct PullRequest {
 
 /// A GitHub issue (for display in picker)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Issue {
     pub number: u64,
     pub title: String,

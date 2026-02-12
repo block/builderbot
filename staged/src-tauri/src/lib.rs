@@ -1592,6 +1592,20 @@ fn detect_default_branch_cmd(repo_path: String) -> Result<String, String> {
     git::detect_default_branch(path).map_err(|e| e.to_string())
 }
 
+/// List open pull requests for a repository.
+#[tauri::command(rename_all = "camelCase")]
+fn list_pull_requests(repo_path: String) -> Result<Vec<git::github::PullRequest>, String> {
+    let path = Path::new(&repo_path);
+    git::github::list_pull_requests(path).map_err(|e| e.to_string())
+}
+
+/// List open issues for a repository.
+#[tauri::command(rename_all = "camelCase")]
+fn list_issues(repo_path: String) -> Result<Vec<git::github::Issue>, String> {
+    let path = Path::new(&repo_path);
+    git::github::list_issues(path).map_err(|e| e.to_string())
+}
+
 // =============================================================================
 // PR creation
 // =============================================================================
@@ -2090,6 +2104,8 @@ pub fn run() {
             delete_pending_commit,
             list_git_branches,
             detect_default_branch_cmd,
+            list_pull_requests,
+            list_issues,
             create_pr,
             update_branch_pr,
             open_url,

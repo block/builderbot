@@ -21,6 +21,8 @@ import type {
   Review,
   Comment,
   WorkspaceInfo,
+  PullRequest,
+  Issue,
 } from './types';
 
 // =============================================================================
@@ -403,6 +405,14 @@ export function listGitBranches(repoPath: string): Promise<BranchRef[]> {
 
 export function detectDefaultBranch(repoPath: string): Promise<string> {
   return invoke('detect_default_branch_cmd', { repoPath });
+}
+
+export function listPullRequests(repoPath: string): Promise<PullRequest[]> {
+  return invoke('list_pull_requests', { repoPath });
+}
+
+export function listIssues(repoPath: string): Promise<Issue[]> {
+  return invoke('list_issues', { repoPath });
 }
 
 // =============================================================================

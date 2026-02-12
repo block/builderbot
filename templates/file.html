@@ -875,12 +875,26 @@
         var form = document.getElementById('reply-form-' + threadId);
         if (!form) return;
         var isVisible = form.style.display !== 'none';
-        document.querySelectorAll('.reply-form').forEach(function(f) { f.style.display = 'none'; });
-        if (!isVisible) { ensureAgent(); form.style.display = ''; form.querySelector('textarea').focus(); }
+        // Close any other open reply forms and restore their action buttons
+        document.querySelectorAll('.reply-form').forEach(function(f) {
+            f.style.display = 'none';
+            var actions = f.previousElementSibling;
+            if (actions && actions.classList.contains('thread-actions')) actions.style.display = '';
+        });
+        if (!isVisible) {
+            ensureAgent();
+            form.style.display = '';
+            var actions = form.previousElementSibling;
+            if (actions && actions.classList.contains('thread-actions')) actions.style.display = 'none';
+            form.querySelector('textarea').focus();
+        }
     }
     function hideReplyForm(threadId) {
         var form = document.getElementById('reply-form-' + threadId);
-        if (form) form.style.display = 'none';
+        if (!form) return;
+        form.style.display = 'none';
+        var actions = form.previousElementSibling;
+        if (actions && actions.classList.contains('thread-actions')) actions.style.display = '';
     }
     function handleReplyKeydown(event, threadId) {
         if (event.key === 'Escape') hideReplyForm(threadId);
@@ -1347,6 +1361,8 @@
             var form = document.getElementById('reply-form-' + state.reply.threadId);
             if (form) {
                 form.style.display = '';
+                var actions = form.previousElementSibling;
+                if (actions && actions.classList.contains('thread-actions')) actions.style.display = 'none';
                 var textarea = form.querySelector('textarea');
                 if (textarea) { textarea.value = state.reply.body; textarea.focus(); }
                 var author = form.querySelector('.author-field');

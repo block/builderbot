@@ -256,6 +256,7 @@ type NavData struct {
 	InProject     bool        // true when viewing a project or file page (triggers focused sidebar)
 	SearchQuery   string      // pre-fill search box if on search page
 	ReviewCount   int         // total files with open comment threads across all projects
+	ActivePage    string      // "recent", "in-review", etc. for sidebar link highlighting
 }
 
 type NavWorkspace struct {

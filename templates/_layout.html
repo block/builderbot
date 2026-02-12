@@ -109,6 +109,7 @@
             text-decoration: none;
         }
         .sidebar-link:hover { color: #0066cc; text-decoration: none; background: #f0f0f0; }
+        .sidebar-link.active { background: #e8f0fe; color: #0066cc; font-weight: 500; }
         .sidebar-link.no-reviews { color: #bbb; pointer-events: none; cursor: default; }
         .sidebar-add {
             color: #aaa;
@@ -517,8 +518,8 @@
             {{end}}
 
             <div class="sidebar-divider"></div>
-            <a class="sidebar-link{{if not (gt .Nav.ReviewCount 0)}} no-reviews{{end}}" id="sidebar-review-link"{{if gt .Nav.ReviewCount 0}} href="/in-review"{{end}}>In Review</a>
-            <a class="sidebar-link" href="/recent">Recent</a>
+            <a class="sidebar-link{{if eq .Nav.ActivePage "in-review"}} active{{end}}{{if not (gt .Nav.ReviewCount 0)}} no-reviews{{end}}" id="sidebar-review-link"{{if gt .Nav.ReviewCount 0}} href="/in-review"{{end}}>In Review</a>
+            <a class="sidebar-link{{if eq .Nav.ActivePage "recent"}} active{{end}}" href="/recent">Recent</a>
             <div class="sidebar-add" onclick="showAddDialog(event)">+ Add workspace or project</div>
             {{end}}
 

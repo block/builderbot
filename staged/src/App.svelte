@@ -8,12 +8,12 @@
   import { onMount, onDestroy } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import TopBar from './lib/TopBar.svelte';
-  import ProjectHome from './lib/ProjectHome.svelte';
-  import SessionLauncher from './lib/SessionLauncher.svelte';
-  import AgentSetupModal from './lib/AgentSetupModal.svelte';
-  import { preferences, initPreferences } from './lib/stores/preferences.svelte';
-  import { agentState, refreshProviders } from './lib/stores/agent.svelte';
-  import { refreshSqAvailability } from './lib/stores/sq.svelte';
+  import ProjectHome from './lib/features/projects/ProjectHome.svelte';
+  import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
+  import AgentSetupModal from './lib/features/agents/AgentSetupModal.svelte';
+  import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
+  import { agentState, refreshProviders } from './lib/features/agents/agent.svelte';
+  import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
 
   let showSessionLab = $state(false);
   let showAgentSetup = $state(false);

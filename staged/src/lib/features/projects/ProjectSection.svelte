@@ -1,0 +1,213 @@
+<!--
+  ProjectSection.svelte - A project header + list of branch cards
+
+  Shows the project name, a delete button, and all branches for this project.
+  Includes a "New Branch" dashed button at the bottom.
+-->
+<script lang="ts">
+  import { Folder, Trash2, Plus, Settings, Loader2 } from 'lucide-svelte';
+  import type { Project, Branch } from '../../types';
+  import { projectDisplayName } from '../../shared/utils';
+  import BranchCard from '../branches/BranchCard.svelte';
+  import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
+  import DropdownMenu, { type MenuItem } from '../../shared/DropdownMenu.svelte';
+  import ProjectSettingsModal from './ProjectSettingsModal.svelte';
+
+  interface Props {
+    project: Project;
+    branches: Branch[];
+    deletingBranches?: Set<string>;
+    detecting?: boolean;
+    onDeleteProject?: () => void;
+    onDeleteBranch?: (branchId: string) => void;
+    onNewBranch?: () => void;
+  }
+
+  let {
+    project,
+    branches,
+    deletingBranches = new Set(),
+    detecting = false,
+    onDeleteProject,
+    onDeleteBranch,
+    onNewBranch,
+  }: Props = $props();
+
+  let showProjectSettings = $state(false);
+
+  const projectMenuItems: MenuItem[] = [
+    {
+      label: 'Actions',
+      icon: Settings,
+      action: () => {
+        showProjectSettings = true;
+      },
+    },
+    { label: 'Remove Project', icon: Trash2, danger: true, action: () => onDeleteProject?.() },
+  ];
+</script>
+
+<div class="project-section">
+  <div class="project-header">
+    <div class="project-info">
+      <div class="project-icon-slot">
+        <span class="folder-icon"><Folder size={14} /></span>
+        <span class="menu-icon"><DropdownMenu items={projectMenuItems} align="left" /></span>
+      </div>
+      <span class="project-name">{projectDisplayName(project)}</span>
+      {#if detecting}
+        <div class="detecting-status">
+          <Loader2 size={12} class="spinner" />
+          <span>Detecting actions...</span>
+        </div>
+      {/if}
+    </div>
+  </div>
+  <div class="branches-list">
+    {#each branches as branch (branch.id)}
+      {#if branch.branchType === 'remote'}
+        <RemoteBranchCard
+          {branch}
+          deleting={deletingBranches.has(branch.id)}
+          onDelete={() => onDeleteBranch?.(branch.id)}
+        />
+      {:else}
+        <BranchCard
+          {branch}
+          deleting={deletingBranches.has(branch.id)}
+          onDelete={() => onDeleteBranch?.(branch.id)}
+        />
+      {/if}
+    {/each}
+    <!-- New branch button -->
+    <button class="new-branch-button" onclick={() => onNewBranch?.()}>
+      <Plus size={16} />
+      New Branch
+    </button>
+  </div>
+</div>
+
+{#if showProjectSettings}
+  <ProjectSettingsModal
+    {project}
+    {detecting}
+    onClose={() => {
+      showProjectSettings = false;
+    }}
+  />
+{/if}
+
+<style>
+  .project-section {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .project-header {
+    display: flex;
+    align-items: center;
+    padding: 0 4px;
+  }
+
+  .project-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .project-icon-slot {
+    position: relative;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .folder-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    transition: opacity 0.15s ease;
+  }
+
+  .menu-icon {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+
+  .project-header:hover .folder-icon {
+    opacity: 0;
+  }
+
+  .project-header:hover .menu-icon {
+    opacity: 1;
+  }
+
+  .project-name {
+    font-size: var(--size-lg);
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+  }
+
+  .detecting-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 12px;
+    padding: 4px 10px;
+    background-color: var(--bg-hover);
+    border-radius: 4px;
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+  }
+
+  .detecting-status :global(.spinner) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .branches-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .new-branch-button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 20px;
+    background-color: transparent;
+    border: 1px dashed var(--border-muted);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .new-branch-button:hover {
+    border-color: var(--ui-accent);
+    color: var(--ui-accent);
+    background-color: var(--bg-hover);
+  }
+</style>

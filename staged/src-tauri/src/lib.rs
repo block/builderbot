@@ -796,10 +796,19 @@ async fn poll_workspace_status(
 
     let info = blox::ws_info(ws_name).map_err(|e| e.to_string())?;
 
-    // Map the CLI-reported status to our enum
+    // Map the CLI-reported status to our enum.
+    // During initial startup, Blox may briefly report "stopped" before the
+    // workspace transitions to "running". If the DB still says Starting,
+    // treat a Blox "stopped" as still Starting so we keep polling.
     let new_status = match info.status.as_deref() {
         Some("running") | Some("Running") => store::WorkspaceStatus::Running,
-        Some("stopped") | Some("Stopped") => store::WorkspaceStatus::Stopped,
+        Some("stopped") | Some("Stopped") => {
+            if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
+                store::WorkspaceStatus::Starting
+            } else {
+                store::WorkspaceStatus::Stopped
+            }
+        }
         Some("starting") | Some("Starting") | Some("provisioning") | Some("Provisioning") => {
             store::WorkspaceStatus::Starting
         }

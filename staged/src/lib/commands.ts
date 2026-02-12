@@ -61,12 +61,21 @@ export function listBranchesForProject(projectId: string): Promise<Branch[]> {
   return invoke('list_branches_for_project', { projectId });
 }
 
+/** Create a local branch record (DB only — no git worktree yet).
+ *  Returns immediately with worktreePath = null.
+ *  Call `setupWorktree` separately to create the git worktree. */
 export function createBranch(
   projectId: string,
   branchName: string,
   baseBranch?: string
 ): Promise<Branch> {
   return invoke('create_branch', { projectId, branchName, baseBranch });
+}
+
+/** Create the git worktree for a local branch and record its workdir.
+ *  Returns the updated branch with worktreePath populated. */
+export function setupWorktree(branchId: string): Promise<Branch> {
+  return invoke('setup_worktree', { branchId });
 }
 
 /** Create a remote branch record (does not start the workspace). */

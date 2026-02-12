@@ -615,7 +615,11 @@ fn list_branches_for_project(
     Ok(result)
 }
 
-#[tauri::command]
+/// Create a local branch record (DB only — no git worktree yet).
+///
+/// Returns immediately with `worktree_path = None`. Call `setup_worktree`
+/// separately to create the git worktree in the background.
+#[tauri::command(rename_all = "camelCase")]
 fn create_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
@@ -638,8 +642,39 @@ fn create_branch(
         None => git::detect_default_branch(repo_path).map_err(|e| e.to_string())?,
     };
 
+    // Create branch record only — no git worktree yet
+    let branch = store::Branch::new(&project_id, &branch_name, &effective_base);
+    store.create_branch(&branch).map_err(|e| e.to_string())?;
+
+    Ok(to_branch_with_workdir(branch, None))
+}
+
+/// Create the git worktree for a local branch and record its workdir.
+///
+/// Separated from `create_branch` so the frontend can dismiss the modal
+/// immediately and show a "Creating worktree…" spinner on the branch card
+/// while this runs in the background.
+#[tauri::command(rename_all = "camelCase")]
+async fn setup_worktree(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<BranchWithWorkdir, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let repo_path = Path::new(&project.repo_path);
+
     // Create git branch + worktree
-    let worktree_path = git::create_worktree(repo_path, &branch_name, &effective_base)
+    let worktree_path = git::create_worktree(repo_path, &branch.branch_name, &branch.base_branch)
         .map_err(|e| e.to_string())?;
 
     let worktree_str = worktree_path
@@ -647,12 +682,8 @@ fn create_branch(
         .ok_or("Invalid worktree path")?
         .to_string();
 
-    // Create branch record
-    let branch = store::Branch::new(&project_id, &branch_name, &effective_base);
-    store.create_branch(&branch).map_err(|e| e.to_string())?;
-
     // Create workdir record assigned to this branch
-    let workdir = store::Workdir::new(&project_id, &worktree_str).with_branch(&branch.id);
+    let workdir = store::Workdir::new(&branch.project_id, &worktree_str).with_branch(&branch.id);
     store.create_workdir(&workdir).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
@@ -1884,6 +1915,7 @@ pub fn run() {
             delete_project,
             list_branches_for_project,
             create_branch,
+            setup_worktree,
             create_remote_branch,
             start_workspace,
             delete_branch,

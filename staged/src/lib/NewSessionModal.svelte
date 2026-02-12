@@ -338,7 +338,7 @@
   }
 
   .branch-info :global(svg) {
-    color: var(--status-renamed);
+    color: var(--branch-color);
     flex-shrink: 0;
   }
 

@@ -1089,7 +1089,7 @@
   }
 
   :global(.branch-icon) {
-    color: var(--status-renamed);
+    color: var(--branch-color);
     flex-shrink: 0;
   }
 

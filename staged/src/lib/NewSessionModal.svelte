@@ -131,10 +131,10 @@
     <header class="modal-header">
       <div class="header-title">
         {#if isCommit}
-          <GitCommitHorizontal size={14} />
+          <span class="header-icon commit-icon"><GitCommitHorizontal size={14} /></span>
           <span>New commit</span>
         {:else}
-          <StickyNote size={14} />
+          <span class="header-icon note-icon"><StickyNote size={14} /></span>
           <span>New note</span>
         {/if}
       </div>
@@ -228,8 +228,27 @@
     color: var(--text-primary);
   }
 
-  .header-title :global(svg) {
-    color: var(--text-muted);
+  .header-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .header-icon.note-icon {
+    background-color: var(--note-bg);
+    color: var(--note-color);
+  }
+
+  .header-icon.commit-icon {
+    background-color: var(--commit-bg);
+    color: var(--commit-color);
+  }
+
+  .header-icon :global(svg) {
     flex-shrink: 0;
   }
 

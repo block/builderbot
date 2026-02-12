@@ -1151,7 +1151,38 @@ fn get_branch_timeline(
 
     // Get commits from git (the source of truth for commit data)
     let mut commits = Vec::new();
-    if let Some(ref wd) = workdir {
+    if let Some(ref ws_name) = branch.workspace_name {
+        // Remote branch: fetch commits via ws_exec
+        let range = format!("{}..HEAD", &branch.base_branch);
+        let format_arg = "--format=%H|%h|%s|%an|%ct";
+        if let Ok(output) = blox::ws_exec(ws_name, &["git", "log", format_arg, &range]) {
+            for line in output.lines() {
+                if line.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = line.splitn(5, '|').collect();
+                if parts.len() >= 5 {
+                    let sha = parts[0].to_string();
+                    let our_commit = store.get_commit_by_sha(&branch_id, &sha).unwrap_or(None);
+                    let (session_id, session_status) = store.resolve_session_status(
+                        our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
+                    );
+
+                    commits.push(CommitTimelineItem {
+                        id: our_commit.as_ref().map(|c| c.id.clone()),
+                        sha,
+                        short_sha: parts[1].to_string(),
+                        subject: parts[2].to_string(),
+                        author: parts[3].to_string(),
+                        timestamp: parts[4].parse().unwrap_or(0),
+                        session_id,
+                        session_status,
+                    });
+                }
+            }
+        }
+    } else if let Some(ref wd) = workdir {
+        // Local branch: fetch commits from the local worktree
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
             let git_commits =

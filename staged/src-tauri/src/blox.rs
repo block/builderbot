@@ -141,6 +141,18 @@ pub fn ws_list() -> Result<Vec<WorkspaceListEntry>, BloxError> {
     serde_json::from_str(&stdout).map_err(|e| BloxError::ParseError(format!("{e}\nRaw: {stdout}")))
 }
 
+/// Execute a command inside a Blox workspace.
+///
+/// Runs: `sq blox ws exec <name> -- <args…>`
+///
+/// Returns the command's stdout on success. Useful for running git commands
+/// against a remote workspace (e.g. `ws_exec(name, &["git", "rev-parse", "HEAD"])`).
+pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
+    let mut full_args = vec!["ws", "exec", name, "--"];
+    full_args.extend_from_slice(args);
+    run(&full_args)
+}
+
 // Phase 3: Pause/resume lifecycle — workspaces auto-suspend after idle;
 // use `sq blox ws resume <name>` to bring them back. There is no explicit
 // `sq blox ws stop` command. Deletion is a single `sq blox ws delete` call.

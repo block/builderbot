@@ -557,11 +557,30 @@
 
 <svelte:window onclick={handleClickOutside} />
 
-<div class="branch-card" class:deleting>
+<div
+  class="branch-card"
+  class:deleting
+  class:creating-worktree={branch.branchType === 'local' && !branch.worktreePath && !deleting}
+>
   {#if deleting}
     <div class="deleting-overlay">
       <Spinner size={16} />
       <span>Deleting…</span>
+    </div>
+  {:else if branch.branchType === 'local' && !branch.worktreePath}
+    <div class="card-header">
+      <div class="branch-info">
+        <GitBranch size={16} class="branch-icon" />
+        <span class="branch-name">{branch.branchName}</span>
+        <span class="branch-separator">›</span>
+        <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
+      </div>
+    </div>
+    <div class="card-content">
+      <div class="loading">
+        <Spinner size={14} />
+        <span>Creating worktree…</span>
+      </div>
     </div>
   {:else}
     <div class="card-header">

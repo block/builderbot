@@ -53,11 +53,12 @@ type Anchor struct {
 
 // Comment is a single message within a thread.
 type Comment struct {
-	ID        string    `json:"id"`
-	Author    string    `json:"author"`
-	Role      string    `json:"role"` // "human" | "agent"
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID               string    `json:"id"`
+	Author           string    `json:"author"`
+	Role             string    `json:"role"` // "human" | "agent"
+	Body             string    `json:"body"`
+	CreatedAt        time.Time `json:"createdAt"`
+	SuggestedReplies []string  `json:"suggestedReplies,omitempty"`
 }
 
 // ThreadWithFile pairs a thread with the file path it belongs to.

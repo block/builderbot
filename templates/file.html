@@ -359,6 +359,28 @@
         40% { opacity: 1; }
     }
 
+    /* Suggested reply pills */
+    .suggested-replies {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 6px 12px 8px;
+    }
+    .suggested-reply-pill {
+        font-size: 0.8em;
+        padding: 4px 12px;
+        border-radius: 16px;
+        border: 1px solid #0066cc;
+        background: #f0f7ff;
+        color: #0066cc;
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s;
+    }
+    .suggested-reply-pill:hover {
+        background: #0066cc;
+        color: #fff;
+    }
+
     /* Floating comment button */
     .comment-btn-float {
         position: absolute;
@@ -817,7 +839,7 @@
 
         if (line === -1) html += '<div class="orphaned-warning">Anchor text not found in document</div>';
 
-        thread.comments.forEach(function(c) {
+        thread.comments.forEach(function(c, i) {
             html += '<div class="thread-comment">';
             html += '<div class="comment-header">';
             html += '<span class="comment-author">' + escapeHtml(c.author) + '</span>';
@@ -826,6 +848,17 @@
             html += '</div>';
             html += '<div class="comment-body">' + renderCommentMarkdown(c.body) + '</div>';
             html += '</div>';
+            if (c.suggestedReplies && c.suggestedReplies.length > 0 &&
+                i === thread.comments.length - 1 &&
+                c.role === 'agent' && thread.status === 'open') {
+                html += '<div class="suggested-replies">';
+                c.suggestedReplies.forEach(function(suggestion) {
+                    html += '<button class="suggested-reply-pill" onclick="event.stopPropagation(); submitSuggestedReply(\'' +
+                        tid + '\', this)">' +
+                        escapeHtml(suggestion) + '</button>';
+                });
+                html += '</div>';
+            }
         });
 
         if (thread.agentTyping) {
@@ -920,6 +953,30 @@
         .then(function(r) { if (!r.ok) throw new Error('Failed'); return r.json(); })
         .then(function() { hideReplyForm(threadId); refreshComments(); })
         .catch(function(err) { console.error('Failed to reply:', err); submitBtn.disabled = false; });
+    }
+
+    function submitSuggestedReply(threadId, btn) {
+        var author = getSavedAuthor();
+        if (!author) {
+            toggleReplyForm(threadId);
+            return;
+        }
+        var text = btn.textContent;
+        btn.disabled = true;
+        fetch('/api/threads/' + encodeURIComponent(threadId) + '/comments', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                project: qualifiedName,
+                path: filePath,
+                author: author,
+                role: 'human',
+                body: text
+            })
+        })
+        .then(function(r) { if (!r.ok) throw new Error('Failed'); return r.json(); })
+        .then(function() { refreshComments(); })
+        .catch(function(err) { console.error('Failed to submit suggested reply:', err); btn.disabled = false; });
     }
 
     // --- Resolve / Reopen ---

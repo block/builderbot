@@ -29,18 +29,20 @@ type readThreadInput struct {
 }
 
 type replyInput struct {
-	Project  string `json:"project" jsonschema:"Project name"`
-	Path     string `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
-	ThreadID string `json:"threadId" jsonschema:"Thread ID to reply to"`
-	Body     string `json:"body" jsonschema:"Reply message body"`
+	Project          string   `json:"project" jsonschema:"Project name"`
+	Path             string   `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
+	ThreadID         string   `json:"threadId" jsonschema:"Thread ID to reply to"`
+	Body             string   `json:"body" jsonschema:"Reply message body"`
+	SuggestedReplies []string `json:"suggestedReplies,omitempty" jsonschema:"Up to 3 short reply suggestions shown as clickable pills to the human"`
 }
 
 type createThreadInput struct {
-	Project      string `json:"project" jsonschema:"Project name"`
-	Path         string `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
-	SelectedText string `json:"selectedText" jsonschema:"The text in the file to anchor the comment to"`
-	Body         string `json:"body" jsonschema:"Comment body"`
-	HeadingPath  string `json:"headingPath,omitempty" jsonschema:"Heading path for context"`
+	Project          string   `json:"project" jsonschema:"Project name"`
+	Path             string   `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
+	SelectedText     string   `json:"selectedText" jsonschema:"The text in the file to anchor the comment to"`
+	Body             string   `json:"body" jsonschema:"Comment body"`
+	HeadingPath      string   `json:"headingPath,omitempty" jsonschema:"Heading path for context"`
+	SuggestedReplies []string `json:"suggestedReplies,omitempty" jsonschema:"Up to 3 short reply suggestions shown as clickable pills to the human"`
 }
 
 type filesInReviewInput struct {
@@ -152,7 +154,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// birdseye_reply
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "birdseye_reply",
-		Description: "Reply to an existing comment thread. The reply is attributed to the agent.",
+		Description: "Reply to an existing comment thread. The reply is attributed to the agent. Include suggestedReplies when asking for confirmation or presenting options.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input replyInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" || input.Path == "" || input.ThreadID == "" || input.Body == "" {
 			return nil, nil, fmt.Errorf("project, path, threadId, and body are all required")
@@ -161,9 +163,10 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		store.ClearTyping(input.Project, input.Path, input.ThreadID)
 
 		comment := comments.Comment{
-			Author: "claude",
-			Role:   "agent",
-			Body:   input.Body,
+			Author:           "claude",
+			Role:             "agent",
+			Body:             input.Body,
+			SuggestedReplies: input.SuggestedReplies,
 		}
 		thread, err := store.AddComment(input.Project, input.Path, input.ThreadID, comment)
 		if err != nil {
@@ -229,9 +232,10 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		}
 
 		comment := comments.Comment{
-			Author: "claude",
-			Role:   "agent",
-			Body:   input.Body,
+			Author:           "claude",
+			Role:             "agent",
+			Body:             input.Body,
+			SuggestedReplies: input.SuggestedReplies,
 		}
 
 		thread, err := store.CreateThread(input.Project, input.Path, anchor, comment)

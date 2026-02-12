@@ -16,7 +16,6 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use store::Store;
-use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
 use tauri::Manager;
 
 // =============================================================================
@@ -1703,6 +1702,8 @@ pub fn run() {
             // "Staged" instead of the lowercase Cargo package name "staged".
             #[cfg(target_os = "macos")]
             {
+                use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+
                 let handle = app.handle();
                 let pkg_info = handle.package_info();
                 let config = handle.config();

@@ -258,3 +258,31 @@ func (s *Store) IsTyping(project, path, threadID string) bool {
 	}
 	return time.Since(t) < 60*time.Second
 }
+
+// HasTypingEntry returns true if a typing entry exists for the given thread,
+// regardless of when it was set. Use this when the agent process is known to
+// be running—explicit cleanup (ClearTyping on reply, ClearProjectTyping on
+// exit) handles staleness.
+func (s *Store) HasTypingEntry(project, path, threadID string) bool {
+	key := project + ":" + path + ":" + threadID
+	s.typingMu.RLock()
+	defer s.typingMu.RUnlock()
+	_, ok := s.typing[key]
+	return ok
+}
+
+// TypingCountNoExpiry returns the number of threads with typing indicators
+// for the given project and file path, without checking the 60-second expiry.
+// Use this when the agent process is known to be running.
+func (s *Store) TypingCountNoExpiry(project, path string) int {
+	prefix := project + ":" + path + ":"
+	s.typingMu.RLock()
+	defer s.typingMu.RUnlock()
+	count := 0
+	for key := range s.typing {
+		if strings.HasPrefix(key, prefix) {
+			count++
+		}
+	}
+	return count
+}

@@ -96,11 +96,16 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 	agentActive := s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running
 	result := make([]APIFileInReview, len(files))
 	for i, f := range files {
+		typingThreads := s.comments.TypingCount(projectName, f.FilePath)
+		if agentActive && typingThreads == 0 {
+			// Agent is running—typing entries survive beyond 60s timeout
+			typingThreads = s.comments.TypingCountNoExpiry(projectName, f.FilePath)
+		}
 		result[i] = APIFileInReview{
 			FilePath:      f.FilePath,
 			OpenThreads:   f.OpenThreads,
 			AgentActive:   agentActive,
-			TypingThreads: s.comments.TypingCount(projectName, f.FilePath),
+			TypingThreads: typingThreads,
 		}
 	}
 
@@ -164,10 +169,14 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		threads = filtered
 	}
 
+	agentRunning := s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running
 	var result []threadResponse
 	for _, t := range threads {
 		tr := threadResponse{Thread: t}
 		if s.comments.IsTyping(projectName, filePath, t.ID) {
+			tr.AgentTyping = true
+		} else if agentRunning && s.comments.HasTypingEntry(projectName, filePath, t.ID) {
+			// Agent is running—don't let the 60s timeout hide the indicator
 			tr.AgentTyping = true
 		}
 		result = append(result, tr)

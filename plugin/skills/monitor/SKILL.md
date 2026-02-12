@@ -47,8 +47,10 @@ in review. Resolving all threads on a file removes it from review.
 
 - Read the full file content before responding to comments so you have context
 - Be concise in replies -- the human is reading these in a narrow side panel
-- If a comment asks you to change the file, make the change and reply confirming
-  what you changed
+- ALWAYS reply to every thread you work on. When a comment asks for changes,
+  make the changes and then reply confirming what you did. When you investigate
+  something, reply with what you found. The human sees a "typing" indicator
+  while you work -- the reply is what tells them you're done.
 - If you disagree with feedback, explain your reasoning rather than silently
   ignoring it
 - Do NOT resolve threads -- only humans resolve threads. Your job is to reply

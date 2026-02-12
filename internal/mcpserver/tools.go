@@ -129,6 +129,8 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project, path, and threadId are all required")
 		}
 
+		store.RecordHeartbeat(input.Project, input.Path)
+
 		fc, err := store.Load(input.Project, input.Path)
 		if err != nil {
 			return nil, nil, err

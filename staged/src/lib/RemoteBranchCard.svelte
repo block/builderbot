@@ -51,6 +51,8 @@
   let polledStatus = $state<WorkspaceStatus | null>(null);
   let status = $derived<WorkspaceStatus | null>(polledStatus ?? branch.workspaceStatus);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let pollStartedAt: number | null = null;
+  const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
   // Error state
   let error = $state<string | null>(null);
@@ -130,7 +132,18 @@
 
   function startPolling() {
     stopPolling();
+    pollStartedAt = Date.now();
     pollTimer = setInterval(async () => {
+      // Safety valve: stop polling after timeout to avoid infinite loops
+      // when a workspace never materializes.
+      if (pollStartedAt && Date.now() - pollStartedAt > POLL_TIMEOUT_MS) {
+        console.error('Workspace polling timed out after 5 minutes');
+        polledStatus = 'error';
+        error = 'Workspace provisioning timed out';
+        stopPolling();
+        return;
+      }
+
       try {
         const newStatus = (await commands.pollWorkspaceStatus(branch.id)) as WorkspaceStatus;
         polledStatus = newStatus;
@@ -141,10 +154,18 @@
           stopPolling();
         }
       } catch (e) {
-        console.error('Failed to poll workspace status:', e);
-        polledStatus = 'error';
-        error = e instanceof Error ? e.message : String(e);
-        stopPolling();
+        // During initial creation, `blox ws start` may still be running
+        // when the first poll fires. The backend tolerates this when the
+        // DB status is Starting, but as a safety net we also keep polling
+        // on the frontend side if our local status is still 'starting'.
+        if (status === 'starting') {
+          console.debug('Poll failed while starting (workspace may not exist yet), retrying…', e);
+        } else {
+          console.error('Failed to poll workspace status:', e);
+          polledStatus = 'error';
+          error = e instanceof Error ? e.message : String(e);
+          stopPolling();
+        }
       }
     }, 3000);
   }

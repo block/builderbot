@@ -779,9 +779,16 @@ async fn start_workspace(
     match blox::ws_start(ws_name, resolved_source.as_deref()) {
         Ok(_) => Ok(()),
         Err(e) => {
-            let _ =
-                store.update_branch_workspace_status(&branch.id, &store::WorkspaceStatus::Error);
-            Err(format!("Failed to start workspace: {e}"))
+            // Don't set Error status here — `blox ws start` can fail (e.g.
+            // timeout, transient network issue) even though the workspace was
+            // created and is still booting. Let the frontend's status polling
+            // determine the real state; it will keep polling while the DB says
+            // Starting and will eventually converge on the correct status.
+            log::warn!(
+                "blox ws start failed for '{}', leaving status as Starting for polling to resolve: {e}",
+                ws_name
+            );
+            Ok(())
         }
     }
 }
@@ -829,7 +836,24 @@ async fn poll_workspace_status(
         .as_deref()
         .ok_or("Branch is not a remote workspace branch")?;
 
-    let info = blox::ws_info(ws_name).map_err(|e| e.to_string())?;
+    let info = match blox::ws_info(ws_name) {
+        Ok(info) => info,
+        Err(e) => {
+            // During initial creation, `blox ws start` may still be running
+            // when the frontend's first poll fires `blox ws info`. The
+            // workspace doesn't exist yet, so the CLI returns "not found".
+            // If the DB still says Starting, swallow the error and tell the
+            // frontend to keep polling.
+            if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
+                log::debug!(
+                    "blox ws info failed for '{}' while still Starting, treating as Starting: {e}",
+                    ws_name
+                );
+                return Ok(store::WorkspaceStatus::Starting.as_str().to_string());
+            }
+            return Err(e.to_string());
+        }
+    };
 
     // Map the CLI-reported status to our enum.
     // During initial startup, Blox may briefly report "stopped" before the

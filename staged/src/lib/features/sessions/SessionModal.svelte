@@ -47,6 +47,7 @@
     getSession,
     getSessionMessages,
     getSessionMessagesSince,
+    openUrl,
     resumeSession,
   } from '../../commands';
 
@@ -404,6 +405,17 @@
     }
   }
 
+  /** Intercept link clicks so they open in the system browser, not the webview. */
+  function handleContentClick(e: MouseEvent) {
+    const anchor = (e.target as HTMLElement).closest('a');
+    if (!anchor) return;
+    const href = anchor.getAttribute('href');
+    if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+      e.preventDefault();
+      openUrl(href);
+    }
+  }
+
   /** Parse tool call content — returns { name, args } or null */
   function parseToolCall(content: string): { name: string; args: Record<string, unknown> } | null {
     try {
@@ -530,7 +542,13 @@
     </header>
 
     <!-- Messages area -->
-    <div class="modal-content" bind:this={messagesEl} onscroll={handleScroll}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div
+      class="modal-content"
+      bind:this={messagesEl}
+      onscroll={handleScroll}
+      onclick={handleContentClick}
+    >
       {#if loading}
         <div class="center-state">
           <Spinner size={24} />

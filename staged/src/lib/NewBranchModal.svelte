@@ -186,53 +186,61 @@
     baseSelectedIndex = 0;
   }
 
-  async function openGithubPicker() {
+  function loadPrs() {
+    if (prsLoaded || prsLoading) return;
+    prsLoading = true;
+    githubError = null;
+    commands
+      .listPullRequests(project.repoPath)
+      .then((result) => {
+        pullRequests = result;
+        prsLoaded = true;
+      })
+      .catch((e) => {
+        githubError = typeof e === 'string' ? e : String(e);
+      })
+      .finally(() => {
+        prsLoading = false;
+      });
+  }
+
+  function loadIssues() {
+    if (issuesLoaded || issuesLoading) return;
+    issuesLoading = true;
+    githubError = null;
+    commands
+      .listIssues(project.repoPath)
+      .then((result) => {
+        issues = result;
+        issuesLoaded = true;
+      })
+      .catch((e) => {
+        githubError = typeof e === 'string' ? e : String(e);
+      })
+      .finally(() => {
+        issuesLoading = false;
+      });
+  }
+
+  function openGithubPicker() {
     showGithubPicker = true;
     githubTab = 'pr';
     githubSearchQuery = '';
     githubSelectedIndex = 0;
     githubError = null;
-
-    // Load PRs if not already loaded
-    if (!prsLoaded) {
-      prsLoading = true;
-      try {
-        pullRequests = await commands.listPullRequests(project.repoPath);
-        prsLoaded = true;
-      } catch (e) {
-        githubError = typeof e === 'string' ? e : String(e);
-      } finally {
-        prsLoading = false;
-      }
-    }
+    loadPrs();
   }
 
-  async function switchGithubTab(tab: 'pr' | 'issue') {
+  function switchGithubTab(tab: 'pr' | 'issue') {
     githubTab = tab;
     githubSelectedIndex = 0;
     githubSearchQuery = '';
     githubError = null;
 
-    if (tab === 'issue' && !issuesLoaded) {
-      issuesLoading = true;
-      try {
-        issues = await commands.listIssues(project.repoPath);
-        issuesLoaded = true;
-      } catch (e) {
-        githubError = typeof e === 'string' ? e : String(e);
-      } finally {
-        issuesLoading = false;
-      }
-    } else if (tab === 'pr' && !prsLoaded) {
-      prsLoading = true;
-      try {
-        pullRequests = await commands.listPullRequests(project.repoPath);
-        prsLoaded = true;
-      } catch (e) {
-        githubError = typeof e === 'string' ? e : String(e);
-      } finally {
-        prsLoading = false;
-      }
+    if (tab === 'issue') {
+      loadIssues();
+    } else {
+      loadPrs();
     }
   }
 
@@ -921,7 +929,6 @@
   .github-import-button {
     display: flex;
     align-items: center;
-    justify-content: center;
     gap: 6px;
     padding: 8px 12px;
     background: transparent;
@@ -931,7 +938,7 @@
     font-size: var(--size-sm);
     cursor: pointer;
     transition: all 0.15s;
-    width: 100%;
+    align-self: flex-start;
   }
 
   .github-import-button:hover {

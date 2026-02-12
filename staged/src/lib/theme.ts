@@ -94,6 +94,14 @@ export interface Theme {
     elevated: string; // Floating element shadows
     glow: string; // Selection glow effect
   };
+
+  // Timeline commit/note theming
+  timeline: {
+    commitBg: string; // Subtle background for commit items
+    commitBgEmphasis: string; // Emphasized background (hover) for commit items
+    noteBg: string; // Subtle background for note items
+    noteBgEmphasis: string; // Emphasized background (hover) for note items
+  };
 }
 
 // =============================================================================
@@ -420,6 +428,15 @@ export function createAdaptiveTheme(
       // Selection glow - subtle glow using foreground color
       glow: `0 0 0 1px ${overlay(syntaxFg, isDark ? 0.1 : 0.08)}`,
     },
+
+    timeline: {
+      // Commit uses modified/orange color - subtle and emphasized backgrounds
+      commitBg: overlay(accentOrange, isDark ? 0.08 : 0.1),
+      commitBgEmphasis: overlay(accentOrange, isDark ? 0.15 : 0.18),
+      // Note uses added/green color - subtle and emphasized backgrounds
+      noteBg: overlay(accentGreen, isDark ? 0.08 : 0.1),
+      noteBgEmphasis: overlay(accentGreen, isDark ? 0.15 : 0.18),
+    },
   };
 }
 
@@ -478,5 +495,10 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--shadow-overlay': t.shadow.overlay,
     '--shadow-elevated': t.shadow.elevated,
     '--shadow-glow': t.shadow.glow,
+
+    '--commit-bg': t.timeline.commitBg,
+    '--commit-bg-emphasis': t.timeline.commitBgEmphasis,
+    '--note-bg': t.timeline.noteBg,
+    '--note-bg-emphasis': t.timeline.noteBgEmphasis,
   };
 }

@@ -1,9 +1,10 @@
 //! Blox CLI integration.
 //!
-//! Thin wrappers around `blox ws` subcommands for managing remote
-//! workspaces. Each function shells out to the `blox` CLI and parses
+//! Thin wrappers around `sq blox ws` subcommands for managing remote
+//! workspaces. Each function shells out to the `sq` CLI and parses
 //! the result.
 
+use acp_client::types::find_command;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::process::Command;
 use thiserror::Error;
@@ -11,13 +12,13 @@ use thiserror::Error;
 /// Structured errors from Blox CLI operations, mirroring `GitError`.
 #[derive(Error, Debug)]
 pub enum BloxError {
-    #[error("blox CLI not found — is blox installed?")]
+    #[error("sq CLI not found — is sq installed and on your PATH?")]
     NotFound,
 
-    #[error("blox command failed: {0}")]
+    #[error("sq blox command failed: {0}")]
     CommandFailed(String),
 
-    #[error("failed to parse blox output: {0}")]
+    #[error("failed to parse sq blox output: {0}")]
     ParseError(String),
 }
 
@@ -71,15 +72,22 @@ where
     }
 }
 
-/// Run a blox command and return stdout as a string.
+/// Locate the `sq` binary, returning its path or `BloxError::NotFound`.
+fn sq_binary() -> Result<std::path::PathBuf, BloxError> {
+    find_command("sq").ok_or(BloxError::NotFound)
+}
+
+/// Run `sq blox <args…>` and return stdout as a string.
 fn run(args: &[&str]) -> Result<String, BloxError> {
-    let output = Command::new("blox").args(args).output().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            BloxError::NotFound
-        } else {
-            BloxError::CommandFailed(e.to_string())
-        }
-    })?;
+    let sq = sq_binary()?;
+
+    let mut full_args = vec!["blox"];
+    full_args.extend_from_slice(args);
+
+    let output = Command::new(&sq)
+        .args(&full_args)
+        .output()
+        .map_err(|e| BloxError::CommandFailed(e.to_string()))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -87,12 +95,17 @@ fn run(args: &[&str]) -> Result<String, BloxError> {
     }
 
     String::from_utf8(output.stdout)
-        .map_err(|e| BloxError::ParseError(format!("invalid UTF-8 in blox output: {e}")))
+        .map_err(|e| BloxError::ParseError(format!("invalid UTF-8 in sq blox output: {e}")))
+}
+
+/// Check whether the `sq` CLI is available on this system.
+pub fn is_sq_available() -> bool {
+    find_command("sq").is_some()
 }
 
 /// Start a new Blox workspace.
 ///
-/// Runs: `blox ws start <name> [<source>]`
+/// Runs: `sq blox ws start <name> [<source>]`
 ///
 /// Returns the workspace name on success.
 pub fn ws_start(name: &str, source: Option<&str>) -> Result<String, BloxError> {
@@ -106,7 +119,7 @@ pub fn ws_start(name: &str, source: Option<&str>) -> Result<String, BloxError> {
 
 /// Delete a Blox workspace.
 ///
-/// Runs: `blox ws delete <name>`
+/// Runs: `sq blox ws delete <name>`
 pub fn ws_delete(name: &str) -> Result<(), BloxError> {
     run(&["ws", "delete", name])?;
     Ok(())
@@ -114,7 +127,7 @@ pub fn ws_delete(name: &str) -> Result<(), BloxError> {
 
 /// Get info about a Blox workspace.
 ///
-/// Runs: `blox ws info <name> --json`
+/// Runs: `sq blox ws info <name> --json`
 pub fn ws_info(name: &str) -> Result<WorkspaceInfo, BloxError> {
     let stdout = run(&["ws", "info", name, "--json"])?;
     serde_json::from_str(&stdout).map_err(|e| BloxError::ParseError(format!("{e}\nRaw: {stdout}")))
@@ -122,12 +135,12 @@ pub fn ws_info(name: &str) -> Result<WorkspaceInfo, BloxError> {
 
 /// List all Blox workspaces.
 ///
-/// Runs: `blox ws list --json`
+/// Runs: `sq blox ws list --json`
 pub fn ws_list() -> Result<Vec<WorkspaceListEntry>, BloxError> {
     let stdout = run(&["ws", "list", "--json"])?;
     serde_json::from_str(&stdout).map_err(|e| BloxError::ParseError(format!("{e}\nRaw: {stdout}")))
 }
 
 // Phase 3: Pause/resume lifecycle — workspaces auto-suspend after idle;
-// use `blox ws resume <name>` to bring them back. There is no explicit
-// `blox ws stop` command. Deletion is a single `blox ws delete` call.
+// use `sq blox ws resume <name>` to bring them back. There is no explicit
+// `sq blox ws stop` command. Deletion is a single `sq blox ws delete` call.

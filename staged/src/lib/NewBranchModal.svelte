@@ -23,6 +23,9 @@
   // Branch type toggle
   let branchType = $state<BranchType>('local');
 
+  // Whether the `sq` CLI is available (controls remote toggle visibility)
+  let sqAvailable = $state(false);
+
   // State
   let branchTitle = $state('');
   let creating = $state(false);
@@ -81,6 +84,13 @@
   }
 
   onMount(async () => {
+    // Check if `sq` CLI is available (controls remote branch toggle)
+    try {
+      sqAvailable = await commands.isSqAvailable();
+    } catch {
+      sqAvailable = false;
+    }
+
     // Detect default branch
     try {
       detectedDefaultBranch = await commands.detectDefaultBranch(project.repoPath);
@@ -233,31 +243,33 @@
     </div>
 
     <div class="modal-body">
-      <!-- Branch type toggle -->
-      <div class="type-toggle">
-        <button
-          class="toggle-option"
-          class:active={branchType === 'local'}
-          onclick={() => {
-            branchType = 'local';
-            selectedBaseBranch = null;
-          }}
-        >
-          <Monitor size={14} />
-          Local
-        </button>
-        <button
-          class="toggle-option"
-          class:active={branchType === 'remote'}
-          onclick={() => {
-            branchType = 'remote';
-            selectedBaseBranch = null;
-          }}
-        >
-          <Cloud size={14} />
-          Remote
-        </button>
-      </div>
+      <!-- Branch type toggle (only shown when sq CLI is available) -->
+      {#if sqAvailable}
+        <div class="type-toggle">
+          <button
+            class="toggle-option"
+            class:active={branchType === 'local'}
+            onclick={() => {
+              branchType = 'local';
+              selectedBaseBranch = null;
+            }}
+          >
+            <Monitor size={14} />
+            Local
+          </button>
+          <button
+            class="toggle-option"
+            class:active={branchType === 'remote'}
+            onclick={() => {
+              branchType = 'remote';
+              selectedBaseBranch = null;
+            }}
+          >
+            <Cloud size={14} />
+            Remote
+          </button>
+        </div>
+      {/if}
 
       <div class="selected-info">
         <div class="info-row">

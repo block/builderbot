@@ -1547,6 +1547,15 @@ fn open_url(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("Failed to open URL: {e}"))
 }
 
+/// Check whether the `sq` CLI is available on this system.
+///
+/// The frontend uses this to decide whether to show the Remote branch option
+/// in the new-branch modal.
+#[tauri::command]
+fn is_sq_available() -> bool {
+    blox::is_sq_available()
+}
+
 // =============================================================================
 // Open In commands
 // =============================================================================
@@ -1923,6 +1932,7 @@ pub fn run() {
             list_git_branches,
             detect_default_branch_cmd,
             open_url,
+            is_sq_available,
             get_available_openers,
             open_in_app,
             session_commands::discover_acp_providers,

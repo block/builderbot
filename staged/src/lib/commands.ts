@@ -392,6 +392,11 @@ export function removeReferenceFile(reviewId: string, path: string): Promise<voi
 // Git helpers
 // =============================================================================
 
+/** Check whether the `sq` CLI is available on this system. */
+export function isSqAvailable(): Promise<boolean> {
+  return invoke('is_sq_available');
+}
+
 export function listGitBranches(repoPath: string): Promise<BranchRef[]> {
   return invoke('list_git_branches', { repoPath });
 }

@@ -210,11 +210,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/file/", s.handleFile)
 	s.mux.HandleFunc("/search", s.handleSearch)
 	s.mux.HandleFunc("/recent", s.handleRecent)
+	s.mux.HandleFunc("/in-review", s.handleInReview)
 	s.mux.HandleFunc("/events", s.handleEvents)
 	// API endpoints for dynamic updates
 	s.mux.HandleFunc("/api/projects", s.handleAPIProjects)
 	s.mux.HandleFunc("/api/project/", s.handleAPIProjectFiles)
 	s.mux.HandleFunc("/api/recent", s.handleAPIRecent)
+	s.mux.HandleFunc("/api/in-review", s.handleAPIInReview)
 	s.mux.HandleFunc("/api/copy-file", s.handleCopyFile)
 	s.mux.HandleFunc("/api/project-info", s.handleProjectInfo)
 	s.mux.HandleFunc("/api/delete-project", s.handleDeleteProject)
@@ -253,6 +255,7 @@ type NavData struct {
 	ActiveWSName  string      // display name of the active workspace (for URL construction)
 	InProject     bool        // true when viewing a project or file page (triggers focused sidebar)
 	SearchQuery   string      // pre-fill search box if on search page
+	ReviewCount   int         // total files with open comment threads across all projects
 }
 
 type NavWorkspace struct {
@@ -327,6 +330,13 @@ func (s *Server) buildNav(activeQN string) NavData {
 			Path:     ws.Path,
 			HasAgent: wsHasAgent[ws.Path],
 		})
+	}
+
+	// Count files in review across all projects
+	for _, p := range projects {
+		if reviews, err := s.comments.ListFilesInReview(p.QualifiedName()); err == nil {
+			nav.ReviewCount += len(reviews)
+		}
 	}
 
 	return nav

@@ -4,12 +4,26 @@
   Two modes toggled by a segmented control:
   - Local: branch name + base branch picker → creates git worktree
   - Remote: branch name → starts a Blox workspace
+
+  Optionally import from a GitHub PR or issue to auto-populate the branch name
+  and (for PRs) set the base branch.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { X, GitBranch, Search, ChevronsUpDown, Check, Monitor, Cloud } from 'lucide-svelte';
+  import {
+    X,
+    GitBranch,
+    Search,
+    ChevronsUpDown,
+    Check,
+    Monitor,
+    Cloud,
+    Github,
+    GitPullRequest,
+    CircleDot,
+  } from 'lucide-svelte';
   import Spinner from './Spinner.svelte';
-  import type { Branch, BranchRef, Project, BranchType } from './types';
+  import type { Branch, BranchRef, Project, BranchType, PullRequest, Issue } from './types';
   import * as commands from './commands';
   import { sqState } from './stores/sq.svelte';
 
@@ -42,6 +56,20 @@
   let branchInputEl: HTMLInputElement | null = $state(null);
   let baseSearchEl: HTMLInputElement | null = $state(null);
 
+  // GitHub picker state
+  let showGithubPicker = $state(false);
+  let githubTab = $state<'pr' | 'issue'>('pr');
+  let pullRequests = $state<PullRequest[]>([]);
+  let issues = $state<Issue[]>([]);
+  let githubSearchQuery = $state('');
+  let githubLoading = $state(false);
+  let githubError = $state<string | null>(null);
+  let githubSelectedIndex = $state(0);
+  let prsLoaded = $state(false);
+  let issuesLoaded = $state(false);
+
+  let githubSearchEl: HTMLInputElement | null = $state(null);
+
   let effectiveBaseBranch = $derived(selectedBaseBranch ?? detectedDefaultBranch ?? 'main');
 
   // For remote branches, only show remote-tracking refs (branches that exist on the remote).
@@ -58,6 +86,31 @@
     const q = baseSearchQuery.toLowerCase();
     return availableBranches.filter((b) => b.toLowerCase().includes(q));
   });
+
+  // Filtered GitHub items (client-side)
+  let filteredPullRequests = $derived.by(() => {
+    if (!githubSearchQuery) return pullRequests;
+    const q = githubSearchQuery.toLowerCase();
+    return pullRequests.filter(
+      (pr) =>
+        pr.title.toLowerCase().includes(q) ||
+        `#${pr.number}`.includes(q) ||
+        pr.author.toLowerCase().includes(q)
+    );
+  });
+
+  let filteredIssues = $derived.by(() => {
+    if (!githubSearchQuery) return issues;
+    const q = githubSearchQuery.toLowerCase();
+    return issues.filter(
+      (issue) =>
+        issue.title.toLowerCase().includes(q) ||
+        `#${issue.number}`.includes(q) ||
+        issue.author.toLowerCase().includes(q)
+    );
+  });
+
+  let currentGithubList = $derived(githubTab === 'pr' ? filteredPullRequests : filteredIssues);
 
   /**
    * Sanitize a branch title into a valid git branch name.
@@ -99,7 +152,7 @@
 
   // Focus branch input
   $effect(() => {
-    if (branchInputEl && !showBasePicker) {
+    if (branchInputEl && !showBasePicker && !showGithubPicker) {
       branchInputEl.focus();
     }
   });
@@ -108,6 +161,13 @@
   $effect(() => {
     if (showBasePicker && baseSearchEl) {
       baseSearchEl.focus();
+    }
+  });
+
+  // Focus github search when picker opens
+  $effect(() => {
+    if (showGithubPicker && githubSearchEl) {
+      githubSearchEl.focus();
     }
   });
 
@@ -122,6 +182,78 @@
     showBasePicker = false;
     baseSearchQuery = '';
     baseSelectedIndex = 0;
+  }
+
+  async function openGithubPicker() {
+    showGithubPicker = true;
+    githubSearchQuery = '';
+    githubSelectedIndex = 0;
+    githubError = null;
+
+    // Load PRs if not already loaded
+    if (!prsLoaded) {
+      githubLoading = true;
+      try {
+        pullRequests = await commands.listPullRequests(project.repoPath);
+        prsLoaded = true;
+      } catch (e) {
+        githubError = typeof e === 'string' ? e : String(e);
+      } finally {
+        githubLoading = false;
+      }
+    }
+  }
+
+  async function switchGithubTab(tab: 'pr' | 'issue') {
+    githubTab = tab;
+    githubSelectedIndex = 0;
+    githubError = null;
+
+    if (tab === 'issue' && !issuesLoaded) {
+      githubLoading = true;
+      try {
+        issues = await commands.listIssues(project.repoPath);
+        issuesLoaded = true;
+      } catch (e) {
+        githubError = typeof e === 'string' ? e : String(e);
+      } finally {
+        githubLoading = false;
+      }
+    }
+  }
+
+  function selectPullRequest(pr: PullRequest) {
+    branchTitle = `pr-${pr.number}-${pr.title}`;
+    // Auto-set base branch to the PR's target
+    selectedBaseBranch = pr.baseRef;
+    showGithubPicker = false;
+  }
+
+  function selectIssue(issue: Issue) {
+    branchTitle = `issue-${issue.number}-${issue.title}`;
+    showGithubPicker = false;
+  }
+
+  function selectGithubItem(index: number) {
+    if (githubTab === 'pr') {
+      const pr = filteredPullRequests[index];
+      if (pr) selectPullRequest(pr);
+    } else {
+      const issue = filteredIssues[index];
+      if (issue) selectIssue(issue);
+    }
+  }
+
+  function formatTimeAgo(dateStr: string): string {
+    const date = new Date(dateStr);
+    const now = Date.now();
+    const diffMs = now - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    if (diffMins < 60) return `${diffMins}m ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    const diffDays = Math.floor(diffHours / 24);
+    return `${diffDays}d ago`;
   }
 
   async function handleCreate() {
@@ -171,7 +303,10 @@
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      if (showBasePicker) {
+      if (showGithubPicker) {
+        showGithubPicker = false;
+        githubSearchQuery = '';
+      } else if (showBasePicker) {
         showBasePicker = false;
         baseSearchQuery = '';
       } else {
@@ -180,7 +315,18 @@
       return;
     }
 
-    if (showBasePicker) {
+    if (showGithubPicker) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        githubSelectedIndex = Math.min(githubSelectedIndex + 1, currentGithubList.length - 1);
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        githubSelectedIndex = Math.max(githubSelectedIndex - 1, 0);
+      } else if (e.key === 'Enter' && currentGithubList.length > 0) {
+        e.preventDefault();
+        selectGithubItem(githubSelectedIndex);
+      }
+    } else if (showBasePicker) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         baseSelectedIndex = Math.min(baseSelectedIndex + 1, filteredBranches.length - 1);
@@ -307,6 +453,90 @@
             {/if}
           </div>
         </div>
+      {:else if showGithubPicker}
+        <!-- GitHub PR/Issue picker -->
+        <div class="github-picker">
+          <div class="github-tabs">
+            <button
+              class="github-tab"
+              class:active={githubTab === 'pr'}
+              onclick={() => switchGithubTab('pr')}
+            >
+              <GitPullRequest size={13} />
+              PRs
+            </button>
+            <button
+              class="github-tab"
+              class:active={githubTab === 'issue'}
+              onclick={() => switchGithubTab('issue')}
+            >
+              <CircleDot size={13} />
+              Issues
+            </button>
+          </div>
+          <div class="github-search-container">
+            <Search size={14} class="search-icon" />
+            <input
+              bind:this={githubSearchEl}
+              bind:value={githubSearchQuery}
+              oninput={() => (githubSelectedIndex = 0)}
+              type="text"
+              placeholder="Filter..."
+              class="github-search-input"
+            />
+          </div>
+          <div class="github-list">
+            {#if githubLoading}
+              <div class="github-loading">
+                <Spinner size={16} />
+                <span>Loading...</span>
+              </div>
+            {:else if githubError}
+              <div class="github-error">{githubError}</div>
+            {:else if githubTab === 'pr'}
+              {#each filteredPullRequests as pr, index (pr.number)}
+                <button
+                  class="github-item"
+                  class:selected={index === githubSelectedIndex}
+                  onclick={() => selectPullRequest(pr)}
+                >
+                  <div class="github-item-main">
+                    <span class="github-item-number">#{pr.number}</span>
+                    <span class="github-item-title">{pr.title}</span>
+                    {#if pr.draft}
+                      <span class="github-draft-badge">Draft</span>
+                    {/if}
+                  </div>
+                  <div class="github-item-meta">
+                    @{pr.author} &middot; {formatTimeAgo(pr.updatedAt)}
+                  </div>
+                </button>
+              {/each}
+              {#if filteredPullRequests.length === 0}
+                <div class="github-empty">No pull requests found</div>
+              {/if}
+            {:else}
+              {#each filteredIssues as issue, index (issue.number)}
+                <button
+                  class="github-item"
+                  class:selected={index === githubSelectedIndex}
+                  onclick={() => selectIssue(issue)}
+                >
+                  <div class="github-item-main">
+                    <span class="github-item-number">#{issue.number}</span>
+                    <span class="github-item-title">{issue.title}</span>
+                  </div>
+                  <div class="github-item-meta">
+                    @{issue.author} &middot; {formatTimeAgo(issue.updatedAt)}
+                  </div>
+                </button>
+              {/each}
+              {#if filteredIssues.length === 0}
+                <div class="github-empty">No issues found</div>
+              {/if}
+            {/if}
+          </div>
+        </div>
       {:else}
         <div class="input-group">
           <label for="branch-title">Branch name</label>
@@ -335,6 +565,11 @@
             </div>
           {/if}
         </div>
+
+        <button class="github-import-button" onclick={openGithubPicker}>
+          <Github size={14} />
+          Import from GitHub...
+        </button>
 
         {#if error}
           <div class="error-message">{error}</div>
@@ -666,6 +901,183 @@
 
   .workspace-preview span {
     font-family: 'SF Mono', 'Menlo', monospace;
+  }
+
+  /* GitHub import button */
+  .github-import-button {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+    cursor: pointer;
+    transition: color 0.15s;
+    align-self: flex-start;
+  }
+
+  .github-import-button:hover {
+    color: var(--text-primary);
+  }
+
+  .github-import-button :global(svg) {
+    flex-shrink: 0;
+  }
+
+  /* GitHub picker */
+  .github-picker {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .github-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .github-tab {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 8px 12px;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-size: var(--size-sm);
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-bottom: -1px;
+  }
+
+  .github-tab:hover {
+    color: var(--text-primary);
+  }
+
+  .github-tab.active {
+    color: var(--text-primary);
+    border-bottom-color: var(--ui-accent);
+  }
+
+  .github-tab :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .github-search-container {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .github-search-input {
+    flex: 1;
+    padding: 4px 0;
+    background: transparent;
+    border: none;
+    outline: none;
+    font-size: var(--size-sm);
+    color: var(--text-primary);
+  }
+
+  .github-search-input::placeholder {
+    color: var(--text-faint);
+  }
+
+  .github-list {
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 4px;
+  }
+
+  .github-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px 16px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+  }
+
+  .github-error {
+    padding: 16px;
+    text-align: center;
+    color: var(--ui-danger);
+    font-size: var(--size-sm);
+  }
+
+  .github-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    padding: 8px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.1s;
+  }
+
+  .github-item:hover,
+  .github-item.selected {
+    background-color: var(--bg-hover);
+  }
+
+  .github-item-main {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--size-sm);
+    color: var(--text-primary);
+  }
+
+  .github-item-number {
+    color: var(--text-muted);
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: var(--size-xs);
+    flex-shrink: 0;
+  }
+
+  .github-item-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .github-draft-badge {
+    flex-shrink: 0;
+    padding: 1px 6px;
+    background-color: var(--bg-hover);
+    border: 1px solid var(--border-muted);
+    border-radius: 10px;
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+  }
+
+  .github-item-meta {
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+    padding-left: 0;
+  }
+
+  .github-empty {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
   }
 
   .error-message {

@@ -77,6 +77,28 @@ export interface BranchRef {
 }
 
 // =============================================================================
+// GitHub types (for PR/Issue picker)
+// =============================================================================
+
+export interface PullRequest {
+  number: number;
+  title: string;
+  author: string;
+  baseRef: string;
+  headRef: string;
+  draft: boolean;
+  updatedAt: string;
+}
+
+export interface Issue {
+  number: number;
+  title: string;
+  author: string;
+  updatedAt: string;
+  labels: string[];
+}
+
+// =============================================================================
 // Sessions
 // =============================================================================
 

@@ -17,7 +17,7 @@
     GitCommitHorizontal,
     Trash2,
     FileDiff,
-    StickyNote,
+    FileText,
     Copy,
     Play,
     Hammer,
@@ -772,16 +772,16 @@
     <div class="card-footer">
       <div class="new-btn-group">
         <button
-          class="new-item-btn"
+          class="new-item-btn note-btn"
           onclick={() => openNewSession('note')}
           disabled={showNewSession}
           title="New note"
         >
-          <StickyNote size={13} />
+          <FileText size={13} />
           <span>New note</span>
         </button>
         <button
-          class="new-item-btn"
+          class="new-item-btn commit-btn"
           onclick={() => openNewSession('commit')}
           disabled={showNewSession}
           title="New commit"
@@ -1043,7 +1043,7 @@
   }
 
   :global(.branch-icon) {
-    color: var(--status-renamed);
+    color: var(--branch-color);
     flex-shrink: 0;
   }
 
@@ -1233,6 +1233,16 @@
 
   .new-item-btn :global(svg) {
     flex-shrink: 0;
+    transition: color 0.15s;
+  }
+
+  /* Icon color on button hover */
+  .note-btn:hover :global(svg) {
+    color: var(--note-color);
+  }
+
+  .commit-btn:hover :global(svg) {
+    color: var(--commit-color);
   }
 
   :global(.spinner) {

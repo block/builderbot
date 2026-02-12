@@ -21,7 +21,7 @@
     Bot,
     Copy,
     GitCommitHorizontal,
-    StickyNote,
+    FileText,
     Plus,
   } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -449,12 +449,12 @@
           </button>
           {#if showPicker}
             <div class="picker-dropdown">
-              <button class="picker-item" onclick={() => openNewSession('commit')}>
+              <button class="picker-item commit-item" onclick={() => openNewSession('commit')}>
                 <GitCommitHorizontal size={14} />
                 <span>Commit</span>
               </button>
-              <button class="picker-item" onclick={() => openNewSession('note')}>
-                <StickyNote size={14} />
+              <button class="picker-item note-item" onclick={() => openNewSession('note')}>
+                <FileText size={14} />
                 <span>Note</span>
               </button>
             </div>
@@ -767,6 +767,23 @@
   .picker-item :global(svg) {
     color: var(--text-muted);
     flex-shrink: 0;
+  }
+
+  /* Commit/Note color accents for picker items */
+  .picker-item.commit-item :global(svg) {
+    color: var(--commit-color);
+  }
+
+  .picker-item.commit-item:hover {
+    background: var(--commit-bg);
+  }
+
+  .picker-item.note-item :global(svg) {
+    color: var(--note-color);
+  }
+
+  .picker-item.note-item:hover {
+    background: var(--note-bg);
   }
 
   :global(.spinner) {

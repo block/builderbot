@@ -94,6 +94,17 @@ export interface Theme {
     elevated: string; // Floating element shadows
     glow: string; // Selection glow effect
   };
+
+  // Timeline commit/note theming
+  timeline: {
+    commitColor: string; // Icon/text color for commit items (inherits from status.added)
+    commitBg: string; // Subtle background for commit items
+    commitBgEmphasis: string; // Emphasized background (hover) for commit items
+    noteColor: string; // Icon/text color for note items (inherits from status.modified)
+    noteBg: string; // Subtle background for note items
+    noteBgEmphasis: string; // Emphasized background (hover) for note items
+    branchColor: string; // Icon/text color for branch items (inherits from status.renamed)
+  };
 }
 
 // =============================================================================
@@ -420,6 +431,19 @@ export function createAdaptiveTheme(
       // Selection glow - subtle glow using foreground color
       glow: `0 0 0 1px ${overlay(syntaxFg, isDark ? 0.1 : 0.08)}`,
     },
+
+    timeline: {
+      // Commit uses added/green color - commits are "added" items
+      commitColor: accentGreen,
+      commitBg: overlay(accentGreen, isDark ? 0.08 : 0.1),
+      commitBgEmphasis: overlay(accentGreen, isDark ? 0.15 : 0.18),
+      // Note uses modified/orange color - notes are "modified" items
+      noteColor: accentOrange,
+      noteBg: overlay(accentOrange, isDark ? 0.08 : 0.1),
+      noteBgEmphasis: overlay(accentOrange, isDark ? 0.15 : 0.18),
+      // Branch uses renamed/blue color
+      branchColor: accentBlue,
+    },
   };
 }
 
@@ -478,5 +502,13 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--shadow-overlay': t.shadow.overlay,
     '--shadow-elevated': t.shadow.elevated,
     '--shadow-glow': t.shadow.glow,
+
+    '--commit-color': t.timeline.commitColor,
+    '--commit-bg': t.timeline.commitBg,
+    '--commit-bg-emphasis': t.timeline.commitBgEmphasis,
+    '--note-color': t.timeline.noteColor,
+    '--note-bg': t.timeline.noteBg,
+    '--note-bg-emphasis': t.timeline.noteBgEmphasis,
+    '--branch-color': t.timeline.branchColor,
   };
 }

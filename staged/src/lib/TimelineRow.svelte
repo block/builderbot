@@ -213,11 +213,15 @@
   }
 
   .timeline-icon.commit-icon {
-    color: var(--status-added);
+    color: var(--commit-color);
+    background-color: var(--commit-bg);
+    border-color: transparent;
   }
 
   .timeline-icon.note-icon {
-    color: var(--text-accent);
+    color: var(--note-color);
+    background-color: var(--note-bg);
+    border-color: transparent;
   }
 
   .timeline-icon.review-icon {
@@ -225,11 +229,12 @@
   }
 
   .timeline-row.pending .timeline-icon {
-    border-color: var(--border-muted);
+    background-color: var(--bg-elevated);
+    border-color: transparent;
   }
 
   .timeline-row.pending .timeline-icon :global(.spinner) {
-    color: var(--text-muted);
+    color: var(--text-primary);
   }
 
   .timeline-icon.failed-icon {

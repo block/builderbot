@@ -1,11 +1,9 @@
 {{define "title"}}In Review - Birdseye{{end}}
 
 {{define "pagestyle"}}
-    h1 { color: #333; font-weight: 600; }
-    .subtitle { color: #888; margin-bottom: 20px; }
     .empty { color: #888; font-style: italic; }
 
-    /* Reuse project-page source section styles */
+    /* Source sections */
     .source-section {
         margin-bottom: 16px;
         border: 1px solid #e8e8e8;
@@ -76,47 +74,21 @@
         40% { opacity: 1; }
     }
 
-    /* File rows */
+    /* File rows within source sections - match project page */
     .files { list-style: none; padding: 0; margin: 0; }
-    .file {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 16px;
+    .source-section .file {
+        margin-bottom: 0;
+        border: none;
+        border-radius: 0;
         border-top: 1px solid #f0f0f0;
-        transition: background 0.1s;
+        background: transparent;
     }
-    .file:hover { background: #eff0f1; }
-    .file-left {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        min-width: 0;
+    .source-section .file:hover {
+        border-color: #f0f0f0;
+        background: #eff0f1;
     }
-    .file-right {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-left: 16px;
-    }
-    .file-name { min-width: 0; }
-    .file-name a {
-        color: #333;
-        text-decoration: none;
-        font-weight: 500;
-        font-size: 0.9em;
-    }
-    .file-name a:hover { color: #0066cc; }
-    .file-type {
-        font-size: 0.7em;
-        font-weight: 500;
-        text-transform: uppercase;
-        padding: 2px 6px;
-        border-radius: 3px;
-        flex-shrink: 0;
-    }
-    .file-type.research { background: #ddf4ff; color: #0969da; }
-    .file-type.plan { background: #dafbe1; color: #1a7f37; }
+    .source-section .file:last-child { border-radius: 0 0 6px 6px; }
+
     .review-badge {
         font-size: 0.7em;
         font-weight: 500;
@@ -127,17 +99,65 @@
         color: #0969da;
         flex-shrink: 0;
     }
+    .file-age {
+        color: #888;
+        font-size: 0.85em;
+        white-space: nowrap;
+    }
     .thread-count {
         font-size: 0.75em;
         color: #656d76;
         white-space: nowrap;
     }
+
+    /* File three-dot menu */
+    .file-dots {
+        background: none;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-size: 0.85em;
+        color: #999;
+        cursor: pointer;
+        line-height: 1;
+    }
+    .file-dots:hover { color: #333; border-color: #ccc; }
+    .file-menu-wrap { position: relative; }
+    .file-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        z-index: 100;
+        min-width: 200px;
+        padding: 4px 0;
+    }
+    .file-menu-wrap.menu-open .file-menu { display: block; }
+    .file-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 12px;
+        border: none;
+        background: none;
+        font-size: 0.85em;
+        color: #333;
+        cursor: pointer;
+    }
+    .file-menu button:hover { background: #f5f5f5; }
+    .file-menu .menu-divider {
+        border-top: 1px solid #eee;
+        margin: 4px 0;
+    }
+    .file-menu .menu-danger { color: #cf222e; }
+    .file-menu .menu-danger:hover { background: #fff5f5; }
 {{end}}
 
 {{define "content"}}
-    <h1>In Review</h1>
-    <p class="subtitle">Files with open comment threads across all projects</p>
-
     <div id="groups-container">
     {{if .Page.Groups}}
         {{range $group := .Page.Groups}}
@@ -156,7 +176,7 @@
             </div>
             <ul class="files">
                 {{range $group.Files}}
-                <li class="file">
+                <li class="file" data-project="{{.Project}}" data-project-path="{{.ProjectPath}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
                     <div class="file-left">
                         {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
                         <span class="review-badge">in review</span>
@@ -170,6 +190,11 @@
                     </div>
                     <div class="file-right">
                         <span class="thread-count">{{.OpenThreads}} thread{{if ne .OpenThreads 1}}s{{end}}</span>
+                        <span class="file-age">{{.Age}}</span>
+                        <div class="file-menu-wrap">
+                            <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
+                            <div class="file-menu"></div>
+                        </div>
                     </div>
                 </li>
                 {{end}}
@@ -183,6 +208,25 @@
 {{end}}
 
 {{define "pagescript"}}
+    // File menu support
+    function toggleFileMenu(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var wrap = event.target.closest('.file-menu-wrap');
+        document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) {
+            if (w !== wrap) w.classList.remove('menu-open');
+        });
+        wrap.classList.toggle('menu-open');
+    }
+
+    document.addEventListener('click', function() {
+        document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
+    });
+
+    initFileMenus();
+    loadPublishStates();
+
+    // SSE for live updates
     onSSE(function(data) {
         if (data.type === 'comments' || data.type === 'agents') debouncedRefresh('in-review', refreshInReview);
     });
@@ -195,6 +239,29 @@
         if (count <= 0) return '';
         return '<span class="file-typing"><span class="agent-dot"></span>' +
             '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></span>';
+    }
+
+    function renderReviewFileRow(f) {
+        var plural = f.openThreads !== 1 ? 's' : '';
+        var html = '<li class="file" data-project="' + escapeHtml(f.project) + '" data-project-path="' + escapeHtml(f.projectPath || '') + '" data-path="' + escapeHtml(f.path) + '" data-source="' + escapeHtml(f.source || '') + '" data-source-type="' + escapeHtml(f.sourceType || '') + '">';
+        html += '<div class="file-left">';
+        if (f.fileType && f.fileType !== 'other') {
+            html += '<span class="file-type ' + escapeHtml(f.fileType) + '">' + escapeHtml(f.fileType) + '</span>';
+        }
+        html += '<span class="review-badge">in review</span>';
+        html += '<span class="file-name"><a href="/file/' + escapeHtml(f.project) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>';
+        html += typingHTML(f.typingThreads);
+        html += '</div>';
+        html += '<div class="file-right">';
+        html += '<span class="thread-count">' + f.openThreads + ' thread' + plural + '</span>';
+        html += '<span class="file-age">' + escapeHtml(f.age || '') + '</span>';
+        html += '<div class="file-menu-wrap">';
+        html += '<button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>';
+        html += '<div class="file-menu"></div>';
+        html += '</div>';
+        html += '</div>';
+        html += '</li>';
+        return html;
     }
 
     async function refreshInReview() {
@@ -230,25 +297,14 @@
                 html += '</div>';
                 html += '<ul class="files">';
                 (g.files || []).forEach(function(f) {
-                    var plural = f.openThreads !== 1 ? 's' : '';
-                    html += '<li class="file">';
-                    html += '<div class="file-left">';
-                    if (f.fileType && f.fileType !== 'other') {
-                        html += '<span class="file-type ' + escapeHtml(f.fileType) + '">' + escapeHtml(f.fileType) + '</span>';
-                    }
-                    html += '<span class="review-badge">in review</span>';
-                    html += '<span class="file-name"><a href="/file/' + escapeHtml(f.project) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>';
-                    html += typingHTML(f.typingThreads);
-                    html += '</div>';
-                    html += '<div class="file-right">';
-                    html += '<span class="thread-count">' + f.openThreads + ' thread' + plural + '</span>';
-                    html += '</div>';
-                    html += '</li>';
+                    html += renderReviewFileRow(f);
                 });
                 html += '</ul></div>';
             });
 
             container.innerHTML = html;
+            initFileMenus();
+            loadPublishStates();
             updateSidebarReviewLink(true);
         } catch (err) {
             console.error('Failed to refresh in-review:', err);
@@ -259,11 +315,11 @@
         var link = document.getElementById('sidebar-review-link');
         if (!link) return;
         if (hasReviews) {
-            link.classList.add('has-reviews');
             link.classList.remove('no-reviews');
+            link.href = '/in-review';
         } else {
-            link.classList.remove('has-reviews');
             link.classList.add('no-reviews');
+            link.removeAttribute('href');
         }
     }
 {{end}}

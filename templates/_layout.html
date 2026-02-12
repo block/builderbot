@@ -109,10 +109,7 @@
             text-decoration: none;
         }
         .sidebar-link:hover { color: #0066cc; text-decoration: none; background: #f0f0f0; }
-        .sidebar-link.has-reviews { background: #dafbe1; color: #1a7f37; }
-        .sidebar-link.has-reviews:hover { background: #aceebb; color: #1a7f37; }
-        .sidebar-link.no-reviews { color: #bbb; }
-        .sidebar-link.no-reviews:hover { color: #888; }
+        .sidebar-link.no-reviews { color: #bbb; pointer-events: none; cursor: default; }
         .sidebar-add {
             color: #aaa;
             font-size: 0.85em;
@@ -520,7 +517,7 @@
             {{end}}
 
             <div class="sidebar-divider"></div>
-            <a class="sidebar-link{{if gt .Nav.ReviewCount 0}} has-reviews{{else}} no-reviews{{end}}" id="sidebar-review-link" href="/in-review">In Review</a>
+            <a class="sidebar-link{{if not (gt .Nav.ReviewCount 0)}} no-reviews{{end}}" id="sidebar-review-link"{{if gt .Nav.ReviewCount 0}} href="/in-review"{{end}}>In Review</a>
             <a class="sidebar-link" href="/recent">Recent</a>
             <div class="sidebar-add" onclick="showAddDialog(event)">+ Add workspace or project</div>
             {{end}}
@@ -832,11 +829,11 @@
                     if (!link) return;
                     var hasReviews = groups && groups.length > 0;
                     if (hasReviews) {
-                        link.classList.add('has-reviews');
                         link.classList.remove('no-reviews');
+                        link.href = '/in-review';
                     } else {
-                        link.classList.remove('has-reviews');
                         link.classList.add('no-reviews');
+                        link.removeAttribute('href');
                     }
                 })
                 .catch(function() {});

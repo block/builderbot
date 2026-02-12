@@ -319,8 +319,6 @@
     .source-section.in-review-section:hover { border-color: #0969da; }
     .source-section.in-review-section .source-header { cursor: default; }
     .source-section.in-review-section .source-header:hover { background: transparent; }
-    .source-section.in-review-section .file { cursor: pointer; }
-    .source-section.in-review-section .file:hover { background: #eff0f1; }
     .in-review-thread-count {
         font-size: 0.75em;
         color: #656d76;
@@ -1054,12 +1052,21 @@
             return;
         }
 
-        // Look up display names from the actual file rows in their source sections
-        var fileNames = {};
+        // Look up file info from the actual file rows in their source sections
+        var fileInfo = {};
         document.querySelectorAll('.file[data-path]').forEach(function(file) {
             if (file.closest('.in-review-section')) return;
             var nameEl = file.querySelector('.file-name a');
-            if (nameEl) fileNames[file.dataset.path] = nameEl.textContent;
+            var ageEl = file.querySelector('.file-age');
+            var typeEl = file.querySelector('.file-type');
+            fileInfo[file.dataset.path] = {
+                name: nameEl ? nameEl.textContent : file.dataset.path.split('/').pop(),
+                path: file.dataset.path,
+                age: ageEl ? ageEl.textContent : '',
+                source: file.dataset.source || '',
+                sourceType: file.dataset.sourceType || '',
+                fileType: typeEl ? typeEl.textContent : ''
+            };
         });
 
         var hasAgent = reviewPaths.some(function(p) { return reviewData[p].agentActive; });
@@ -1079,11 +1086,15 @@
 
         reviewPaths.forEach(function(path) {
             var r = reviewData[path];
-            var name = fileNames[path] || path.split('/').pop();
-            html += '<li class="file" data-path="' + escapeHtml(path) + '" onclick="window.location.href=\'/file/' + encodeURI(qualifiedName) + '/' + encodeURI(path) + '\'">';
+            var fi = fileInfo[path] || { name: path.split('/').pop(), path: path, age: '', source: '', sourceType: '', fileType: '' };
+            html += '<li class="file" data-project="' + escapeHtml(qualifiedName) + '" data-project-path="' + escapeHtml(projectPath) + '" data-path="' + escapeHtml(path) + '" data-source="' + escapeHtml(fi.source) + '" data-source-type="' + escapeHtml(fi.sourceType) + '">';
             html += '<div class="file-left">';
+            html += '<input type="checkbox" class="file-checkbox" />';
+            if (fi.fileType && fi.fileType !== 'other') {
+                html += '<span class="file-type ' + escapeHtml(fi.fileType) + '">' + escapeHtml(fi.fileType) + '</span>';
+            }
             html += '<span class="review-badge' + (r.agentActive ? ' agent-active' : '') + '">in review</span>';
-            html += '<span class="file-name"><a href="/file/' + encodeURI(qualifiedName) + '/' + encodeURI(path) + '">' + escapeHtml(name) + '</a></span>';
+            html += '<span class="file-name"><a href="/file/' + encodeURI(qualifiedName) + '/' + encodeURI(path) + '">' + escapeHtml(fi.name) + '</a></span>';
             if (r.typingThreads > 0) {
                 html += '<span class="file-typing">' +
                     '<span class="agent-dot"></span>' +
@@ -1093,6 +1104,11 @@
             html += '</div>';
             html += '<div class="file-right">';
             html += '<span class="in-review-thread-count">' + r.openThreads + ' thread' + (r.openThreads !== 1 ? 's' : '') + '</span>';
+            html += '<span class="file-age">' + escapeHtml(fi.age) + '</span>';
+            html += '<div class="file-menu-wrap">';
+            html += '<button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>';
+            html += '<div class="file-menu"></div>';
+            html += '</div>';
             html += '</div>';
             html += '</li>';
         });
@@ -1104,6 +1120,12 @@
         } else {
             container.insertAdjacentHTML('afterbegin', html);
         }
+
+        // Initialize menus for the new file rows
+        container.querySelectorAll('.in-review-section .file-menu').forEach(function(menu) {
+            var el = menu.closest('[data-project]');
+            if (el) menu.innerHTML = buildFileMenuHTML(el);
+        });
     }
 
     refreshReviewBadges();

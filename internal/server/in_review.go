@@ -13,10 +13,14 @@ type ReviewFileEntry struct {
 	Name          string `json:"name"`
 	Path          string `json:"path"`
 	Project       string `json:"project"`
+	ProjectPath   string `json:"projectPath"`
 	OpenThreads   int    `json:"openThreads"`
 	AgentActive   bool   `json:"agentActive"`
 	TypingThreads int    `json:"typingThreads,omitempty"`
 	FileType      string `json:"fileType,omitempty"`
+	Age           string `json:"age,omitempty"`
+	Source        string `json:"source,omitempty"`
+	SourceType    string `json:"sourceType,omitempty"`
 }
 
 // ReviewGroup groups files in review by project and source, with breadcrumb info.
@@ -88,9 +92,13 @@ func (s *Server) listAllReviewGroups() []ReviewGroup {
 			// Look up source from cache
 			sourceName := ""
 			fileType := ""
+			age := ""
+			sourceType := ""
 			if fi := s.cache.FindFile(qn, f.FilePath); fi != nil {
 				sourceName = fi.Source
 				fileType = fi.FileType
+				age = formatAge(fi.ModTime)
+				sourceType = fi.SourceType
 			}
 			if sourceName == "" {
 				sourceName = "files"
@@ -134,10 +142,14 @@ func (s *Server) listAllReviewGroups() []ReviewGroup {
 				Name:          name,
 				Path:          f.FilePath,
 				Project:       qn,
+				ProjectPath:   p.Path,
 				OpenThreads:   f.OpenThreads,
 				AgentActive:   agentActive,
 				TypingThreads: typingThreads,
 				FileType:      fileType,
+				Age:           age,
+				Source:        sourceName,
+				SourceType:    sourceType,
 			})
 			g.TypingThreads += typingThreads
 		}

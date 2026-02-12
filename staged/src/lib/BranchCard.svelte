@@ -1429,11 +1429,13 @@
   }
 
   .pr-btn.created {
-    color: var(--ui-success);
-    border-color: var(--ui-success);
+    color: var(--text-faint);
+    border-color: var(--border-subtle);
   }
 
   .pr-btn.created:hover {
+    color: var(--text-primary);
+    border-color: var(--border-muted);
     background: var(--bg-hover);
   }
 

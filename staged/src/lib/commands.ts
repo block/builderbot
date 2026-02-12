@@ -45,8 +45,12 @@ export function listProjects(): Promise<Project[]> {
   return invoke('list_projects');
 }
 
-export function createProject(repoPath: string, subpath?: string): Promise<Project> {
-  return invoke('create_project', { repoPath, subpath });
+export function createProject(
+  repoPath: string,
+  subpath?: string,
+  importWorktrees?: boolean
+): Promise<Project> {
+  return invoke('create_project', { repoPath, subpath, importWorktrees });
 }
 
 export function deleteProject(id: string): Promise<void> {

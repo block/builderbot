@@ -25,6 +25,7 @@ func buildPrompt(projectName string) string {
 
 - Read the full file content before responding to comments so you have context.
 - Be concise in replies — the human reads these in a narrow side panel.
+- ALWAYS reply to every thread you work on. When a comment asks for changes, make the changes and then reply confirming what you did. When you investigate something, reply with what you found. The human sees a "typing" indicator while you work — the reply is what tells them you're done.
 - If you disagree with feedback, explain your reasoning rather than silently ignoring it.
 - Only respond to threads where the last comment has role "human". Skip threads where the last comment is from an agent (you've already responded).
 - Do NOT resolve threads — only humans resolve threads. Your job is to reply and make changes, not to decide when a conversation is done.

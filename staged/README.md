@@ -64,12 +64,14 @@ After activation, `cargo`, `node`, `npm`, and `just` are all available from the 
 ### Quick Start
 
 ```bash
+just install   # Install all dependencies (first time)
 just dev       # Run in development mode (hot-reload)
 ```
 
 ### Commands
 
 ```bash
+just install    # First-time setup: install all dependencies
 just dev        # Run app in dev mode with hot-reload
 just build      # Build for production
 

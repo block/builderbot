@@ -9,6 +9,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import type { Project, Branch, StoreIncompatibility } from './types';
   import * as commands from './commands';
+  import { runPrerunActions } from './services/actions';
   import { projectDisplayName } from './utils';
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
@@ -163,6 +164,34 @@
     branchesByProject = new Map(branchesByProject).set(branch.projectId, [...existing, branch]);
     showNewBranchModal = false;
     newBranchProject = null;
+
+    // For local branches without a worktree, set up the git worktree in the
+    // background. The card will show "Creating worktree…" while this runs.
+    if (branch.branchType === 'local' && !branch.worktreePath) {
+      const branchId = branch.id;
+      const projectId = branch.projectId;
+
+      commands
+        .setupWorktree(branchId)
+        .then((updated) => {
+          // Replace the branch record so the card picks up worktreePath
+          const branches = branchesByProject.get(projectId) || [];
+          branchesByProject = new Map(branchesByProject).set(
+            projectId,
+            branches.map((b) => (b.id === updated.id ? updated : b))
+          );
+
+          // Now that the worktree exists, run prerun actions
+          setTimeout(() => {
+            runPrerunActions(branchId, projectId).catch((e) => {
+              console.error('[ProjectHome] Failed to run prerun actions:', e);
+            });
+          }, 150);
+        })
+        .catch((e) => {
+          console.error('[ProjectHome] Failed to setup worktree:', e);
+        });
+    }
   }
 
   function handleDeleteBranchRequest(branchId: string, project: Project) {

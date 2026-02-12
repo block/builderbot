@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["rt", "macros"] }
 ### Basic Example
 
 ```rust
-use acp_client::{find_acp_agent, run_acp_prompt_raw};
+use acp_client::{find_acp_agent, run_acp_prompt};
 use std::path::Path;
 
 #[tokio::main]
@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No ACP agent found. Install goose or claude-code-acp."))?;
 
     // Send a prompt and get a response
-    let response = run_acp_prompt_raw(
+    let response = run_acp_prompt(
         &agent,
         Path::new("."),
         "What files are in this directory?"
@@ -81,7 +81,7 @@ if let Some(agent) = find_acp_agent_by_id("goose") {
 
 ### Prompt Functions
 
-- `run_acp_prompt_raw(agent, working_dir, prompt) -> anyhow::Result<String>` - Send a one-shot prompt
+- `run_acp_prompt(agent, working_dir, prompt) -> anyhow::Result<String>` - Send a one-shot prompt
 
 ### Types
 
@@ -119,7 +119,7 @@ if let Some(agent) = find_acp_agent_by_id("goose") {
 ### With builderbot-actions
 
 ```rust
-use acp_client::{find_acp_agent, run_acp_prompt_raw};
+use acp_client::{find_acp_agent, run_acp_prompt};
 use builderbot_actions::AiProvider;
 use async_trait::async_trait;
 
@@ -133,7 +133,7 @@ impl AiProvider for AcpAiProvider {
         let agent = find_acp_agent()
             .ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
 
-        run_acp_prompt_raw(&agent, &self.working_dir, &prompt).await
+        run_acp_prompt(&agent, &self.working_dir, &prompt).await
     }
 }
 ```
@@ -141,14 +141,14 @@ impl AiProvider for AcpAiProvider {
 ### With Tauri
 
 ```rust
-use acp_client::{find_acp_agent, run_acp_prompt_raw};
+use acp_client::{find_acp_agent, run_acp_prompt};
 
 #[tauri::command]
 async fn ask_ai(question: String) -> Result<String, String> {
     let agent = find_acp_agent()
         .ok_or("No ACP agent installed")?;
 
-    run_acp_prompt_raw(&agent, Path::new("."), &question)
+    run_acp_prompt(&agent, Path::new("."), &question)
         .await
         .map_err(|e| e.to_string())
 }

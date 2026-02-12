@@ -61,6 +61,9 @@ export function listBranchesForProject(projectId: string): Promise<Branch[]> {
   return invoke('list_branches_for_project', { projectId });
 }
 
+/** Create a local branch record (DB only — no git worktree yet).
+ *  Returns immediately with worktreePath = null.
+ *  Call `setupWorktree` separately to create the git worktree. */
 export function createBranch(
   projectId: string,
   branchName: string,
@@ -69,14 +72,19 @@ export function createBranch(
   return invoke('create_branch', { projectId, branchName, baseBranch });
 }
 
-/** Create a remote branch backed by a Blox workspace. */
+/** Create the git worktree for a local branch and record its workdir.
+ *  Returns the updated branch with worktreePath populated. */
+export function setupWorktree(branchId: string): Promise<Branch> {
+  return invoke('setup_worktree', { branchId });
+}
+
+/** Create a remote branch record (does not start the workspace). */
 export function createRemoteBranch(
   projectId: string,
   branchName: string,
   workspaceName: string,
   baseBranch?: string,
-  agent?: string,
-  source?: string
+  agent?: string
 ): Promise<Branch> {
   return invoke('create_remote_branch', {
     projectId,
@@ -84,8 +92,12 @@ export function createRemoteBranch(
     baseBranch,
     workspaceName,
     agent,
-    source,
   });
+}
+
+/** Start the Blox workspace for a remote branch. */
+export function startWorkspace(branchId: string): Promise<void> {
+  return invoke('start_workspace', { branchId });
 }
 
 export function deleteBranch(branchId: string): Promise<void> {

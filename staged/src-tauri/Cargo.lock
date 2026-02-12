@@ -9,11 +9,11 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "async-trait",
+ "log",
  "serde",
  "serde_json",
  "tokio",
  "tokio-util",
- "which",
 ]
 
 [[package]]

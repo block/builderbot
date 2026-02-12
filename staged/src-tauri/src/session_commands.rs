@@ -351,9 +351,10 @@ pub fn start_branch_session(
         }
     };
 
-    // For remote branches, pass the workspace name and agent ID as the provider
+    // For remote branches, prefer the user's UI selection, fall back to the
+    // agent stored on the branch.
     let effective_provider = if is_remote {
-        branch.agent.clone()
+        provider.or_else(|| branch.agent.clone())
     } else {
         provider
     };

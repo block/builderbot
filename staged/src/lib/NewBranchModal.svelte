@@ -11,7 +11,6 @@
   import Spinner from './Spinner.svelte';
   import type { Branch, BranchRef, Project, BranchType } from './types';
   import * as commands from './commands';
-  import { runPrerunActions } from './services/actions';
 
   interface Props {
     project: Project;
@@ -133,32 +132,28 @@
     try {
       if (branchType === 'local') {
         const baseBranch = selectedBaseBranch ?? undefined;
+        // Fast: creates DB record only (no git worktree yet)
         const branch = await commands.createBranch(project.id, branchName.trim(), baseBranch);
 
-        // Capture values before modal closes
-        const branchId = branch.id;
-        const projectId = project.id;
-
+        // Dismiss immediately — the card will show "Creating worktree…" state.
+        // ProjectHome handles worktree setup + prerun actions in the background.
         onCreated(branch);
-
-        // Wait for BranchCard to be created and listeners to be set up
-        // The BranchCard sets up listeners at module level, but the component needs to be created first
-        setTimeout(() => {
-          runPrerunActions(branchId, projectId).catch((e) => {
-            console.error('[NewBranchModal] Failed to run prerun actions:', e);
-          });
-        }, 150);
       } else {
         const wsName = workspaceName(branchName.trim());
         const branch = await commands.createRemoteBranch(
           project.id,
           branchName.trim(),
           wsName,
-          selectedBaseBranch ?? undefined,
-          undefined,
-          project.repoPath
+          selectedBaseBranch ?? undefined
         );
+
+        // Dismiss immediately — the card will show "Provisioning…" state
         onCreated(branch);
+
+        // Kick off workspace provisioning in the background
+        commands.startWorkspace(branch.id).catch((e) => {
+          console.error('[NewBranchModal] Failed to start workspace:', e);
+        });
       }
     } catch (e) {
       if (typeof e === 'string') {

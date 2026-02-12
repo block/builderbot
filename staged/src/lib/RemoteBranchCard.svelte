@@ -474,6 +474,7 @@
     {branch}
     mode={newSessionMode}
     initialPrompt={draftPrompt}
+    remote
     onClose={handleNewSessionClose}
     onStarted={handleNewSessionStarted}
   />

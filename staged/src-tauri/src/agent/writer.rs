@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::store::{MessageRole, Store};
@@ -154,5 +155,29 @@ impl MessageWriter {
         if elapsed >= FLUSH_INTERVAL {
             self.flush_text().await;
         }
+    }
+}
+
+// Implement the acp_client MessageWriter trait for our MessageWriter
+#[async_trait]
+impl acp_client::MessageWriter for MessageWriter {
+    async fn append_text(&self, text: &str) {
+        self.append_text(text).await
+    }
+
+    async fn finalize(&self) {
+        self.finalize().await
+    }
+
+    async fn record_tool_call(&self, tool_call_id: &str, title: &str) {
+        self.record_tool_call(tool_call_id, title).await
+    }
+
+    async fn update_tool_call_title(&self, tool_call_id: &str, title: &str) {
+        self.update_tool_call_title(tool_call_id, title).await
+    }
+
+    async fn record_tool_result(&self, content: &str) {
+        self.record_tool_result(content).await
     }
 }

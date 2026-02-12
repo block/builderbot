@@ -50,7 +50,18 @@ export const KNOWN_AGENTS: KnownAgent[] = [
     description: 'AI coding agent by Mario Zechner',
     installUrl: null,
   },
+  {
+    id: 'amp',
+    label: 'Amp',
+    description: 'AI coding agent by Sourcegraph',
+    installUrl: 'https://www.npmjs.com/package/amp-acp',
+  },
 ];
+
+/** Agents always available on remote Blox workstations, regardless of local installs. */
+export const REMOTE_AGENTS: KnownAgent[] = KNOWN_AGENTS.filter((a) =>
+  ['goose', 'claude', 'amp'].includes(a.id)
+);
 
 // =============================================================================
 // Reactive discovery cache

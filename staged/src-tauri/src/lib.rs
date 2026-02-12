@@ -62,7 +62,6 @@ pub struct BranchWithWorkdir {
     pub workspace_status: Option<store::WorkspaceStatus>,
     pub agent: Option<String>,
     pub worktree_path: Option<String>,
-    pub is_main_worktree: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -430,7 +429,20 @@ fn import_existing_worktrees(
 
     let mut imported_count = 0;
 
+    let canonical_repo = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+
     for (worktree_path, branch_name) in worktrees {
+        // Skip the main worktree (the repo checkout itself)
+        let canonical_wt = worktree_path
+            .canonicalize()
+            .unwrap_or_else(|_| worktree_path.clone());
+        if canonical_wt == canonical_repo {
+            log::debug!("Skipping main worktree at {}", worktree_path.display());
+            continue;
+        }
+
         let branch_name = match branch_name {
             Some(name) => name,
             None => {
@@ -570,7 +582,6 @@ fn to_branch_with_workdir(
         workspace_status: branch.workspace_status,
         agent: branch.agent,
         worktree_path: workdir_path,
-        is_main_worktree: false,
         created_at: branch.created_at,
         updated_at: branch.updated_at,
     }
@@ -582,14 +593,10 @@ fn list_branches_for_project(
     project_id: String,
 ) -> Result<Vec<BranchWithWorkdir>, String> {
     let store = get_store(&store)?;
-    let project = store
+    let _project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
-
-    let canonical_repo = Path::new(&project.repo_path)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(&project.repo_path));
 
     let branches = store
         .list_branches_for_project(&project_id)
@@ -601,21 +608,17 @@ fn list_branches_for_project(
             .get_workdir_for_branch(&branch.id)
             .map_err(|e| e.to_string())?;
 
-        let is_main = workdir.as_ref().is_some_and(|w| {
-            Path::new(&w.path)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(&w.path))
-                == canonical_repo
-        });
-
-        let mut bw = to_branch_with_workdir(branch, workdir.map(|w| w.path));
-        bw.is_main_worktree = is_main;
+        let bw = to_branch_with_workdir(branch, workdir.map(|w| w.path));
         result.push(bw);
     }
     Ok(result)
 }
 
-#[tauri::command]
+/// Create a local branch record (DB only — no git worktree yet).
+///
+/// Returns immediately with `worktree_path = None`. Call `setup_worktree`
+/// separately to create the git worktree in the background.
+#[tauri::command(rename_all = "camelCase")]
 fn create_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
@@ -638,8 +641,39 @@ fn create_branch(
         None => git::detect_default_branch(repo_path).map_err(|e| e.to_string())?,
     };
 
+    // Create branch record only — no git worktree yet
+    let branch = store::Branch::new(&project_id, &branch_name, &effective_base);
+    store.create_branch(&branch).map_err(|e| e.to_string())?;
+
+    Ok(to_branch_with_workdir(branch, None))
+}
+
+/// Create the git worktree for a local branch and record its workdir.
+///
+/// Separated from `create_branch` so the frontend can dismiss the modal
+/// immediately and show a "Creating worktree…" spinner on the branch card
+/// while this runs in the background.
+#[tauri::command(rename_all = "camelCase")]
+async fn setup_worktree(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<BranchWithWorkdir, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let repo_path = Path::new(&project.repo_path);
+
     // Create git branch + worktree
-    let worktree_path = git::create_worktree(repo_path, &branch_name, &effective_base)
+    let worktree_path = git::create_worktree(repo_path, &branch.branch_name, &branch.base_branch)
         .map_err(|e| e.to_string())?;
 
     let worktree_str = worktree_path
@@ -647,22 +681,17 @@ fn create_branch(
         .ok_or("Invalid worktree path")?
         .to_string();
 
-    // Create branch record
-    let branch = store::Branch::new(&project_id, &branch_name, &effective_base);
-    store.create_branch(&branch).map_err(|e| e.to_string())?;
-
     // Create workdir record assigned to this branch
-    let workdir = store::Workdir::new(&project_id, &worktree_str).with_branch(&branch.id);
+    let workdir = store::Workdir::new(&branch.project_id, &worktree_str).with_branch(&branch.id);
     store.create_workdir(&workdir).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
 }
 
-/// Create a remote branch backed by a Blox workspace.
+/// Create a remote branch record.
 ///
-/// This creates the branch record with type=remote, starts a Blox workspace
-/// via `blox ws start`, and stores the workspace metadata on the branch.
-/// No local worktree or workdir is created.
+/// Creates the branch DB record with type=remote and status=Starting.
+/// No workspace is started here — call `start_workspace` separately.
 #[tauri::command(rename_all = "camelCase")]
 async fn create_remote_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -671,11 +700,10 @@ async fn create_remote_branch(
     base_branch: Option<String>,
     workspace_name: String,
     agent: Option<String>,
-    source: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
 
-    // Get the project to find its repo path
+    // Get the project to find its repo path (needed for default branch detection)
     let project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
@@ -701,32 +729,53 @@ async fn create_remote_branch(
     );
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
-    // Resolve the source to an HTTPS git URL. The frontend passes the
-    // local repo path, but blox needs a fetchable HTTPS URL.
-    // Append ?ref=<branch> so the workspace checks out the correct base.
-    // Strip the "origin/" prefix since blox expects a plain branch name.
-    let ref_name = effective_base
-        .strip_prefix("origin/")
-        .unwrap_or(&effective_base);
-    let resolved_source = match source {
-        Some(_) => git::get_remote_url(repo_path, "origin")
-            .ok()
-            .filter(|u| !u.is_empty())
-            .map(|u| format!("{}?ref={}", ssh_url_to_https(&u), ref_name)),
-        None => None,
-    };
+    Ok(to_branch_with_workdir(branch, None))
+}
 
-    // Kick off the Blox workspace. `ws_start` tells the platform to begin
-    // provisioning but the workspace won't be fully ready yet — status
-    // stays as `Starting`. The frontend should poll `get_workspace_info`
-    // and update the status to `Running` once the platform reports ready.
-    match blox::ws_start(&workspace_name, resolved_source.as_deref()) {
-        Ok(_) => Ok(to_branch_with_workdir(branch, None)),
+/// Start the Blox workspace for a remote branch.
+///
+/// Separated from `create_remote_branch` so the frontend can dismiss the
+/// dialog immediately and show the card in its "Provisioning…" state while
+/// this runs in the background.
+#[tauri::command(rename_all = "camelCase")]
+async fn start_workspace(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let repo_path = Path::new(&project.repo_path);
+
+    let ws_name = branch
+        .workspace_name
+        .as_deref()
+        .ok_or("Branch has no workspace name")?;
+
+    // Resolve the source to an HTTPS git URL with ?ref=<base_branch>.
+    let ref_name = branch
+        .base_branch
+        .strip_prefix("origin/")
+        .unwrap_or(&branch.base_branch);
+    let resolved_source = git::get_remote_url(repo_path, "origin")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .map(|u| format!("{}?ref={}", ssh_url_to_https(&u), ref_name));
+
+    match blox::ws_start(ws_name, resolved_source.as_deref()) {
+        Ok(_) => Ok(()),
         Err(e) => {
-            // Update status to Error but keep the branch record
             let _ =
                 store.update_branch_workspace_status(&branch.id, &store::WorkspaceStatus::Error);
-
             Err(format!("Failed to start workspace: {e}"))
         }
     }
@@ -777,10 +826,19 @@ async fn poll_workspace_status(
 
     let info = blox::ws_info(ws_name).map_err(|e| e.to_string())?;
 
-    // Map the CLI-reported status to our enum
+    // Map the CLI-reported status to our enum.
+    // During initial startup, Blox may briefly report "stopped" before the
+    // workspace transitions to "running". If the DB still says Starting,
+    // treat a Blox "stopped" as still Starting so we keep polling.
     let new_status = match info.status.as_deref() {
         Some("running") | Some("Running") => store::WorkspaceStatus::Running,
-        Some("stopped") | Some("Stopped") => store::WorkspaceStatus::Stopped,
+        Some("stopped") | Some("Stopped") => {
+            if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
+                store::WorkspaceStatus::Starting
+            } else {
+                store::WorkspaceStatus::Stopped
+            }
+        }
         Some("starting") | Some("Starting") | Some("provisioning") | Some("Provisioning") => {
             store::WorkspaceStatus::Starting
         }
@@ -823,19 +881,6 @@ async fn delete_branch(
             let workdir = store
                 .get_workdir_for_branch(&branch_id)
                 .map_err(|e| e.to_string())?;
-
-            // Prevent deletion of the main worktree (the repo checkout itself)
-            if let Some(ref wd) = workdir {
-                let canonical_repo = Path::new(&project.repo_path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| PathBuf::from(&project.repo_path));
-                let canonical_wd = Path::new(&wd.path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| PathBuf::from(&wd.path));
-                if canonical_wd == canonical_repo {
-                    return Err("Cannot delete the main worktree".to_string());
-                }
-            }
 
             if let Some(ref wd) = workdir {
                 let repo_path = Path::new(&project.repo_path);
@@ -1669,6 +1714,109 @@ pub fn run() {
         )
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
+            // Build a custom macOS application menu so that the app submenu,
+            // "About" item, and "Quit" item use the capitalised product name
+            // "Staged" instead of the lowercase Cargo package name "staged".
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+
+                let handle = app.handle();
+                let pkg_info = handle.package_info();
+                let config = handle.config();
+                let about_metadata = AboutMetadata {
+                    name: Some("Staged".into()),
+                    version: Some(pkg_info.version.to_string()),
+                    copyright: config.bundle.copyright.clone(),
+                    authors: config.bundle.publisher.clone().map(|p| vec![p]),
+                    ..Default::default()
+                };
+
+                let app_menu = Submenu::with_items(
+                    handle,
+                    "Staged",
+                    true,
+                    &[
+                        &PredefinedMenuItem::about(
+                            handle,
+                            Some("About Staged"),
+                            Some(about_metadata),
+                        )?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::services(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::hide(handle, None)?,
+                        &PredefinedMenuItem::hide_others(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::quit(handle, Some("Quit Staged"))?,
+                    ],
+                )?;
+
+                let file_menu = Submenu::with_items(
+                    handle,
+                    "File",
+                    true,
+                    &[&PredefinedMenuItem::close_window(handle, None)?],
+                )?;
+
+                let edit_menu = Submenu::with_items(
+                    handle,
+                    "Edit",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(handle, None)?,
+                        &PredefinedMenuItem::redo(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::cut(handle, None)?,
+                        &PredefinedMenuItem::copy(handle, None)?,
+                        &PredefinedMenuItem::paste(handle, None)?,
+                        &PredefinedMenuItem::select_all(handle, None)?,
+                    ],
+                )?;
+
+                let view_menu = Submenu::with_items(
+                    handle,
+                    "View",
+                    true,
+                    &[&PredefinedMenuItem::fullscreen(handle, None)?],
+                )?;
+
+                let window_menu = Submenu::with_id_and_items(
+                    handle,
+                    tauri::menu::WINDOW_SUBMENU_ID,
+                    "Window",
+                    true,
+                    &[
+                        &PredefinedMenuItem::minimize(handle, None)?,
+                        &PredefinedMenuItem::maximize(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::close_window(handle, None)?,
+                    ],
+                )?;
+
+                let help_menu = Submenu::with_id_and_items(
+                    handle,
+                    tauri::menu::HELP_SUBMENU_ID,
+                    "Help",
+                    true,
+                    &[],
+                )?;
+
+                let menu = Menu::with_items(
+                    handle,
+                    &[
+                        &app_menu,
+                        &file_menu,
+                        &edit_menu,
+                        &view_menu,
+                        &window_menu,
+                        &help_menu,
+                    ],
+                )?;
+
+                app.set_menu(menu)?;
+            }
+
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -1753,7 +1901,9 @@ pub fn run() {
             delete_project,
             list_branches_for_project,
             create_branch,
+            setup_worktree,
             create_remote_branch,
+            start_workspace,
             delete_branch,
             get_workspace_info,
             poll_workspace_status,

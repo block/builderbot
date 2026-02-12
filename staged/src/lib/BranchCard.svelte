@@ -1233,9 +1233,10 @@
 
   .new-item-btn :global(svg) {
     flex-shrink: 0;
+    transition: color 0.15s;
   }
 
-  /* Icon - tinted background appears on button hover */
+  /* Icon color on button hover */
   .note-btn:hover :global(svg) {
     color: var(--note-color);
   }

@@ -228,13 +228,22 @@
     color: var(--status-modified);
   }
 
-  .timeline-row.pending .timeline-icon {
-    background-color: var(--bg-elevated);
+  .timeline-row.pending .timeline-icon.commit-icon {
+    background-color: var(--commit-bg);
     border-color: transparent;
   }
 
-  .timeline-row.pending .timeline-icon :global(.spinner) {
-    color: var(--text-primary);
+  .timeline-row.pending .timeline-icon.commit-icon :global(.spinner) {
+    color: var(--commit-color);
+  }
+
+  .timeline-row.pending .timeline-icon.note-icon {
+    background-color: var(--note-bg);
+    border-color: transparent;
+  }
+
+  .timeline-row.pending .timeline-icon.note-icon :global(.spinner) {
+    color: var(--note-color);
   }
 
   .timeline-icon.failed-icon {

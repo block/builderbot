@@ -1574,6 +1574,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    margin-left: auto;
   }
 
   .new-item-btn {

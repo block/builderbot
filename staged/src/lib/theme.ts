@@ -430,12 +430,12 @@ export function createAdaptiveTheme(
     },
 
     timeline: {
-      // Commit uses modified/orange color - subtle and emphasized backgrounds
-      commitBg: overlay(accentOrange, isDark ? 0.08 : 0.1),
-      commitBgEmphasis: overlay(accentOrange, isDark ? 0.15 : 0.18),
-      // Note uses added/green color - subtle and emphasized backgrounds
-      noteBg: overlay(accentGreen, isDark ? 0.08 : 0.1),
-      noteBgEmphasis: overlay(accentGreen, isDark ? 0.15 : 0.18),
+      // Commit uses added/green color - commits are "added" items
+      commitBg: overlay(accentGreen, isDark ? 0.08 : 0.1),
+      commitBgEmphasis: overlay(accentGreen, isDark ? 0.15 : 0.18),
+      // Note uses modified/orange color - notes are "modified" items
+      noteBg: overlay(accentOrange, isDark ? 0.08 : 0.1),
+      noteBgEmphasis: overlay(accentOrange, isDark ? 0.15 : 0.18),
     },
   };
 }

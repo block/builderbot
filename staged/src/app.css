@@ -36,13 +36,14 @@
   --status-untracked: #91889b;
 
   /* ── Commit/Note Timeline Theming ── */
-  --commit-color: var(--status-modified);
-  --commit-bg: rgba(210, 153, 34, 0.08);
-  --commit-bg-emphasis: rgba(210, 153, 34, 0.15);
+  /* Commits = added (green), Notes = modified (orange) */
+  --commit-color: var(--status-added);
+  --commit-bg: rgba(63, 185, 80, 0.08);
+  --commit-bg-emphasis: rgba(63, 185, 80, 0.15);
 
-  --note-color: var(--status-added);
-  --note-bg: rgba(63, 185, 80, 0.08);
-  --note-bg-emphasis: rgba(63, 185, 80, 0.15);
+  --note-color: var(--status-modified);
+  --note-bg: rgba(210, 153, 34, 0.08);
+  --note-bg-emphasis: rgba(210, 153, 34, 0.15);
 
   --diff-added-bg: rgba(63, 185, 80, 0.08);
   --diff-removed-bg: rgba(248, 81, 73, 0.08);

@@ -55,7 +55,8 @@
     copyPathToClipboard,
     type OpenerApp,
   } from './services/branch';
-  import { preferences } from './stores/preferences.svelte';
+  import { getPreferredAgent } from './stores/preferences.svelte';
+  import { agentState, REMOTE_AGENTS } from './stores/agent.svelte';
 
   interface Props {
     branch: Branch;
@@ -622,9 +623,10 @@
     prUrl = null;
 
     try {
-      // Use the most recent agent's provider if available
-      const provider =
-        preferences.recentAgents.length > 0 ? preferences.recentAgents[0] : undefined;
+      // Pick the best available agent for this branch's location (local vs remote)
+      const remote = branch.branchType === 'remote';
+      const agents = remote ? REMOTE_AGENTS : agentState.providers;
+      const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.createPr(branch.id, provider);
       prSessionId = sessionId;
       // The session-status-changed listener will handle completion

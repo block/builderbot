@@ -2,7 +2,7 @@
   BranchCard.svelte - Card display for a tracked branch
 
   Shows branch name, base branch, and a unified timeline of commits/notes/reviews.
-  Footer has a single "New" button: click for commit, long-press to pick note/commit.
+  Footer has two buttons: "New note" and "New commit" for creating items.
   Opens a modal for prompt entry; draft text is preserved across open/close.
 
   Timeline items are clickable:
@@ -18,7 +18,6 @@
     Trash2,
     FileDiff,
     StickyNote,
-    Plus,
     Copy,
     Play,
     Hammer,
@@ -102,12 +101,6 @@
   let showNewSession = $state(false);
   let newSessionMode = $state<BranchSessionType>('commit');
   let draftPrompt = $state('');
-
-  // Long-press picker state
-  let longPressTimer: ReturnType<typeof setTimeout> | null = null;
-  let showPicker = $state(false);
-  let pickerRef = $state<HTMLDivElement | null>(null);
-  let didLongPress = false;
 
   // Session modal (opened after starting a branch session, or from timeline)
   let openSessionId = $state<string | null>(null);
@@ -470,7 +463,6 @@
   function openNewSession(mode: BranchSessionType) {
     newSessionMode = mode;
     showNewSession = true;
-    showPicker = false;
   }
 
   function handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType }) {
@@ -483,48 +475,6 @@
     showNewSession = false;
     draftPrompt = '';
     loadTimeline();
-  }
-
-  // =========================================================================
-  // Long-press button logic
-  // =========================================================================
-
-  function handlePointerDown() {
-    didLongPress = false;
-    longPressTimer = setTimeout(() => {
-      didLongPress = true;
-      showPicker = true;
-    }, 400);
-  }
-
-  function handlePointerUp() {
-    if (longPressTimer) {
-      clearTimeout(longPressTimer);
-      longPressTimer = null;
-    }
-    if (!didLongPress && !showPicker) {
-      openNewSession('commit');
-    }
-  }
-
-  function handlePointerLeave() {
-    if (longPressTimer) {
-      clearTimeout(longPressTimer);
-      longPressTimer = null;
-    }
-  }
-
-  function handlePickerClickOutside(e: MouseEvent) {
-    if (showPicker && pickerRef && !pickerRef.contains(e.target as Node)) {
-      showPicker = false;
-    }
-  }
-
-  function handlePickerKeydown(e: KeyboardEvent) {
-    if (showPicker && e.key === 'Escape') {
-      showPicker = false;
-      e.stopPropagation();
-    }
   }
 
   // =========================================================================
@@ -605,13 +555,7 @@
   }
 </script>
 
-<svelte:window
-  onclick={(e) => {
-    handlePickerClickOutside(e);
-    handleClickOutside(e);
-  }}
-  onkeydown={handlePickerKeydown}
-/>
+<svelte:window onclick={handleClickOutside} />
 
 <div class="branch-card" class:deleting>
   {#if deleting}
@@ -810,31 +754,27 @@
       {/if}
     </div>
 
-    <!-- Footer with single action button -->
+    <!-- Footer with separate note and commit buttons -->
     <div class="card-footer">
-      <div class="new-btn-container" bind:this={pickerRef}>
+      <div class="new-btn-group">
         <button
-          class="new-btn"
-          onpointerdown={handlePointerDown}
-          onpointerup={handlePointerUp}
-          onpointerleave={handlePointerLeave}
+          class="new-item-btn"
+          onclick={() => openNewSession('note')}
           disabled={showNewSession}
-          title="New commit (hold for options)"
+          title="New note"
         >
-          <Plus size={14} />
+          <StickyNote size={13} />
+          <span>New note</span>
         </button>
-        {#if showPicker}
-          <div class="picker-dropdown">
-            <button class="picker-item" onclick={() => openNewSession('commit')}>
-              <GitCommitHorizontal size={14} />
-              <span>Commit</span>
-            </button>
-            <button class="picker-item" onclick={() => openNewSession('note')}>
-              <StickyNote size={14} />
-              <span>Note</span>
-            </button>
-          </div>
-        {/if}
+        <button
+          class="new-item-btn"
+          onclick={() => openNewSession('commit')}
+          disabled={showNewSession}
+          title="New commit"
+        >
+          <GitCommitHorizontal size={13} />
+          <span>New commit</span>
+        </button>
       </div>
     </div>
   {/if}
@@ -1249,82 +1189,44 @@
     padding: 6px 12px;
   }
 
-  /* Single "New" button with long-press picker */
-  .new-btn-container {
-    position: relative;
-  }
-
-  .new-btn {
+  /* Footer with separate note/commit buttons */
+  .new-btn-group {
     display: flex;
     align-items: center;
-    justify-content: center;
-    width: 26px;
-    height: 26px;
-    padding: 0;
+    gap: 6px;
+  }
+
+  .new-item-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
     background: none;
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
     color: var(--text-faint);
+    font-size: var(--size-xs);
+    font-weight: 500;
     cursor: pointer;
     transition:
       color 0.15s,
       border-color 0.15s,
       background-color 0.15s;
-    user-select: none;
-    -webkit-user-select: none;
-    touch-action: none;
+    white-space: nowrap;
   }
 
-  .new-btn:hover:not(:disabled) {
+  .new-item-btn:hover:not(:disabled) {
     color: var(--text-primary);
     border-color: var(--border-muted);
     background: var(--bg-hover);
   }
 
-  .new-btn:disabled {
+  .new-item-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
   }
 
-  /* Long-press picker dropdown */
-  .picker-dropdown {
-    position: absolute;
-    bottom: calc(100% + 4px);
-    right: 0;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    box-shadow:
-      0 4px 12px rgba(0, 0, 0, 0.12),
-      0 1px 4px rgba(0, 0, 0, 0.08);
-    overflow: hidden;
-    z-index: 100;
-    min-width: 120px;
-    padding: 4px 0;
-  }
-
-  .picker-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 7px 12px;
-    background: transparent;
-    border: none;
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    cursor: pointer;
-    transition: background-color 0.1s;
-    text-align: left;
-    white-space: nowrap;
-  }
-
-  .picker-item:hover {
-    background: var(--bg-hover);
-  }
-
-  .picker-item :global(svg) {
-    color: var(--text-muted);
+  .new-item-btn :global(svg) {
     flex-shrink: 0;
   }
 

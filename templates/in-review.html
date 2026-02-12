@@ -3,58 +3,52 @@
 {{define "pagestyle"}}
     h1 { color: #333; font-weight: 600; }
     .subtitle { color: #888; margin-bottom: 20px; }
-    .file {
-        padding: 12px 16px;
-        background: #fff;
-        margin-bottom: 8px;
-        border-radius: 6px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
+    .empty { color: #888; font-style: italic; }
+
+    /* Reuse project-page source section styles */
+    .source-section {
+        margin-bottom: 16px;
         border: 1px solid #e8e8e8;
+        border-radius: 6px;
+        background: #fff;
         transition: border-color 0.15s;
     }
-    .file:hover { border-color: #ccc; }
-    .file-info { min-width: 0; }
-    .file-name {
+    .source-section:hover { border-color: #ccc; }
+    .source-header {
         display: flex;
         align-items: center;
-        gap: 6px;
-        font-weight: 500;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        gap: 8px;
+        padding: 10px 16px;
+        flex-wrap: wrap;
     }
-    .file-project { color: #888; font-size: 0.85em; }
-    .file-meta {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        white-space: nowrap;
-        margin-left: 16px;
-    }
-    .thread-count {
-        font-size: 0.75em;
-        color: #656d76;
-    }
-    .review-badge {
-        font-size: 0.7em;
-        font-weight: 500;
-        text-transform: uppercase;
-        padding: 2px 6px;
+    .source-header .source-badge {
+        font-size: 0.65em;
+        font-weight: 600;
+        padding: 1px 5px;
         border-radius: 3px;
-        background: #ddf4ff;
-        color: #0969da;
+        letter-spacing: 0.3px;
         flex-shrink: 0;
     }
-    .review-badge.agent-active {
-        animation: review-badge-pulse 2s infinite;
+
+    /* Breadcrumb links in the header */
+    .source-breadcrumb {
+        font-size: 0.8em;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex-wrap: wrap;
     }
-    @keyframes review-badge-pulse {
-        0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.4); }
-        70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
+    .source-breadcrumb a {
+        color: #666;
+        text-decoration: none;
     }
+    .source-breadcrumb a:hover { color: #0066cc; text-decoration: underline; }
+    .source-breadcrumb .breadcrumb-sep { color: #ccc; }
+    .source-breadcrumb .breadcrumb-source { text-transform: uppercase; }
+
+    /* Typing indicator */
     .file-typing {
         display: inline-flex;
         align-items: center;
@@ -81,30 +75,107 @@
         0%, 80%, 100% { opacity: 0.3; }
         40% { opacity: 1; }
     }
-    .empty { color: #888; font-style: italic; }
+
+    /* File rows */
+    .files { list-style: none; padding: 0; margin: 0; }
+    .file {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 16px;
+        border-top: 1px solid #f0f0f0;
+        transition: background 0.1s;
+    }
+    .file:hover { background: #eff0f1; }
+    .file-left {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+    }
+    .file-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-left: 16px;
+    }
+    .file-name { min-width: 0; }
+    .file-name a {
+        color: #333;
+        text-decoration: none;
+        font-weight: 500;
+        font-size: 0.9em;
+    }
+    .file-name a:hover { color: #0066cc; }
+    .file-type {
+        font-size: 0.7em;
+        font-weight: 500;
+        text-transform: uppercase;
+        padding: 2px 6px;
+        border-radius: 3px;
+        flex-shrink: 0;
+    }
+    .file-type.research { background: #ddf4ff; color: #0969da; }
+    .file-type.plan { background: #dafbe1; color: #1a7f37; }
+    .review-badge {
+        font-size: 0.7em;
+        font-weight: 500;
+        text-transform: uppercase;
+        padding: 2px 6px;
+        border-radius: 3px;
+        background: #ddf4ff;
+        color: #0969da;
+        flex-shrink: 0;
+    }
+    .thread-count {
+        font-size: 0.75em;
+        color: #656d76;
+        white-space: nowrap;
+    }
 {{end}}
 
 {{define "content"}}
     <h1>In Review</h1>
     <p class="subtitle">Files with open comment threads across all projects</p>
 
-    <div id="files-container">
-    {{if .Page.Files}}
-    {{range .Page.Files}}
-    <div class="file">
-        <div class="file-info">
-            <div class="file-name">
-                <span class="review-badge{{if .AgentActive}} agent-active{{end}}">in review</span>
-                <a href="/file/{{.Project}}/{{.FilePath}}">{{.FileName}}</a>
-                {{if gt .TypingThreads 0}}<span class="file-typing"><span class="agent-dot"></span><span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></span>{{end}}
+    <div id="groups-container">
+    {{if .Page.Groups}}
+        {{range $group := .Page.Groups}}
+        <div class="source-section">
+            <div class="source-header">
+                {{if $group.BadgeText}}<span class="source-badge" style="color:{{$group.BadgeColor}};background:{{$group.BadgeBg}}">{{$group.BadgeText}}</span>{{end}}
+                <span class="source-breadcrumb">
+                    {{if $group.Workspace}}<a href="{{$group.WorkspaceURL}}">{{$group.Workspace}}</a><span class="breadcrumb-sep">/</span>{{end}}<a href="/project/{{$group.ProjectQN}}">{{$group.ProjectName}}</a><span class="breadcrumb-sep">/</span><a href="/project/{{$group.ProjectQN}}#source-{{$group.SourceName}}" class="breadcrumb-source">{{$group.SourceName}}</a>
+                </span>
+                {{if gt $group.TypingThreads 0}}
+                <span class="file-typing" style="margin-left:auto">
+                    <span class="agent-dot"></span>
+                    <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>
+                </span>
+                {{end}}
             </div>
-            <div class="file-project">{{.Project}}/{{.FilePath}}</div>
+            <ul class="files">
+                {{range $group.Files}}
+                <li class="file">
+                    <div class="file-left">
+                        {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
+                        <span class="review-badge">in review</span>
+                        <span class="file-name"><a href="/file/{{.Project}}/{{.Path}}">{{.Name}}</a></span>
+                        {{if gt .TypingThreads 0}}
+                        <span class="file-typing">
+                            <span class="agent-dot"></span>
+                            <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>
+                        </span>
+                        {{end}}
+                    </div>
+                    <div class="file-right">
+                        <span class="thread-count">{{.OpenThreads}} thread{{if ne .OpenThreads 1}}s{{end}}</span>
+                    </div>
+                </li>
+                {{end}}
+            </ul>
         </div>
-        <div class="file-meta">
-            <span class="thread-count">{{.OpenThreads}} thread{{if ne .OpenThreads 1}}s{{end}}</span>
-        </div>
-    </div>
-    {{end}}
+        {{end}}
     {{else}}
     <p class="empty">No files are currently in review.</p>
     {{end}}
@@ -120,59 +191,79 @@
         if (!document.hidden) debouncedRefresh('in-review', refreshInReview);
     });
 
+    function typingHTML(count) {
+        if (count <= 0) return '';
+        return '<span class="file-typing"><span class="agent-dot"></span>' +
+            '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></span>';
+    }
+
     async function refreshInReview() {
         try {
             var response = await fetch('/api/in-review');
-            var files = await response.json();
-            var container = document.getElementById('files-container');
+            var groups = await response.json();
+            var container = document.getElementById('groups-container');
 
-            if (!files || files.length === 0) {
+            if (!groups || groups.length === 0) {
                 container.innerHTML = '<p class="empty">No files are currently in review.</p>';
-                updateSidebarDot(false);
+                updateSidebarReviewLink(false);
                 return;
             }
 
-            container.innerHTML = files.map(function(f) {
-                var agentClass = f.agentActive ? ' agent-active' : '';
-                var typingHTML = f.typingThreads > 0
-                    ? '<span class="file-typing"><span class="agent-dot"></span><span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></span>'
-                    : '';
-                var plural = f.openThreads !== 1 ? 's' : '';
-                return '<div class="file">' +
-                    '<div class="file-info">' +
-                        '<div class="file-name">' +
-                            '<span class="review-badge' + agentClass + '">in review</span>' +
-                            '<a href="/file/' + escapeHtml(f.project) + '/' + encodeURI(f.filePath) + '">' + escapeHtml(f.fileName) + '</a>' +
-                            typingHTML +
-                        '</div>' +
-                        '<div class="file-project">' + escapeHtml(f.project) + '/' + escapeHtml(f.filePath) + '</div>' +
-                    '</div>' +
-                    '<div class="file-meta">' +
-                        '<span class="thread-count">' + f.openThreads + ' thread' + plural + '</span>' +
-                    '</div>' +
-                '</div>';
-            }).join('');
+            var html = '';
+            groups.forEach(function(g) {
+                html += '<div class="source-section">';
+                html += '<div class="source-header">';
+                if (g.badgeText) {
+                    html += '<span class="source-badge" style="color:' + escapeHtml(g.badgeColor) + ';background:' + escapeHtml(g.badgeBg) + '">' + escapeHtml(g.badgeText) + '</span>';
+                }
+                html += '<span class="source-breadcrumb">';
+                if (g.workspace) {
+                    html += '<a href="' + escapeHtml(g.workspaceURL) + '">' + escapeHtml(g.workspace) + '</a><span class="breadcrumb-sep">/</span>';
+                }
+                html += '<a href="/project/' + escapeHtml(g.projectQN) + '">' + escapeHtml(g.projectName) + '</a>';
+                html += '<span class="breadcrumb-sep">/</span>';
+                html += '<a href="/project/' + escapeHtml(g.projectQN) + '#source-' + escapeHtml(g.sourceName) + '" class="breadcrumb-source">' + escapeHtml(g.sourceName) + '</a>';
+                html += '</span>';
+                if (g.typingThreads > 0) {
+                    html += '<span style="margin-left:auto">' + typingHTML(g.typingThreads) + '</span>';
+                }
+                html += '</div>';
+                html += '<ul class="files">';
+                (g.files || []).forEach(function(f) {
+                    var plural = f.openThreads !== 1 ? 's' : '';
+                    html += '<li class="file">';
+                    html += '<div class="file-left">';
+                    if (f.fileType && f.fileType !== 'other') {
+                        html += '<span class="file-type ' + escapeHtml(f.fileType) + '">' + escapeHtml(f.fileType) + '</span>';
+                    }
+                    html += '<span class="review-badge">in review</span>';
+                    html += '<span class="file-name"><a href="/file/' + escapeHtml(f.project) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>';
+                    html += typingHTML(f.typingThreads);
+                    html += '</div>';
+                    html += '<div class="file-right">';
+                    html += '<span class="thread-count">' + f.openThreads + ' thread' + plural + '</span>';
+                    html += '</div>';
+                    html += '</li>';
+                });
+                html += '</ul></div>';
+            });
 
-            updateSidebarDot(true);
+            container.innerHTML = html;
+            updateSidebarReviewLink(true);
         } catch (err) {
             console.error('Failed to refresh in-review:', err);
         }
     }
 
-    function updateSidebarDot(hasReviews) {
+    function updateSidebarReviewLink(hasReviews) {
         var link = document.getElementById('sidebar-review-link');
-        if (hasReviews && !link) {
-            var recentLink = document.querySelector('.sidebar-link[href="/recent"]');
-            if (recentLink) {
-                var a = document.createElement('a');
-                a.className = 'sidebar-link';
-                a.id = 'sidebar-review-link';
-                a.href = '/in-review';
-                a.innerHTML = '<span class="sidebar-review-dot"></span> In Review';
-                recentLink.parentNode.insertBefore(a, recentLink);
-            }
-        } else if (!hasReviews && link) {
-            link.remove();
+        if (!link) return;
+        if (hasReviews) {
+            link.classList.add('has-reviews');
+            link.classList.remove('no-reviews');
+        } else {
+            link.classList.remove('has-reviews');
+            link.classList.add('no-reviews');
         }
     }
 {{end}}

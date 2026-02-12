@@ -109,15 +109,10 @@
             text-decoration: none;
         }
         .sidebar-link:hover { color: #0066cc; text-decoration: none; background: #f0f0f0; }
-        .sidebar-link { display: flex; align-items: center; gap: 6px; }
-        .sidebar-review-dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: #2da44e;
-            flex-shrink: 0;
-            animation: sidebar-pulse 2s infinite;
-        }
+        .sidebar-link.has-reviews { background: #dafbe1; color: #1a7f37; }
+        .sidebar-link.has-reviews:hover { background: #aceebb; color: #1a7f37; }
+        .sidebar-link.no-reviews { color: #bbb; }
+        .sidebar-link.no-reviews:hover { color: #888; }
         .sidebar-add {
             color: #aaa;
             font-size: 0.85em;
@@ -525,7 +520,7 @@
             {{end}}
 
             <div class="sidebar-divider"></div>
-            {{if gt .Nav.ReviewCount 0}}<a class="sidebar-link" id="sidebar-review-link" href="/in-review"><span class="sidebar-review-dot"></span> In Review</a>{{end}}
+            <a class="sidebar-link{{if gt .Nav.ReviewCount 0}} has-reviews{{else}} no-reviews{{end}}" id="sidebar-review-link" href="/in-review">In Review</a>
             <a class="sidebar-link" href="/recent">Recent</a>
             <div class="sidebar-add" onclick="showAddDialog(event)">+ Add workspace or project</div>
             {{end}}
@@ -832,21 +827,16 @@
         function refreshSidebarReview() {
             fetch('/api/in-review')
                 .then(function(r) { return r.json(); })
-                .then(function(files) {
+                .then(function(groups) {
                     var link = document.getElementById('sidebar-review-link');
-                    var hasReviews = files && files.length > 0;
-                    if (hasReviews && !link) {
-                        var recentLink = document.querySelector('.sidebar-link[href="/recent"]');
-                        if (recentLink) {
-                            var a = document.createElement('a');
-                            a.className = 'sidebar-link';
-                            a.id = 'sidebar-review-link';
-                            a.href = '/in-review';
-                            a.innerHTML = '<span class="sidebar-review-dot"></span> In Review';
-                            recentLink.parentNode.insertBefore(a, recentLink);
-                        }
-                    } else if (!hasReviews && link) {
-                        link.remove();
+                    if (!link) return;
+                    var hasReviews = groups && groups.length > 0;
+                    if (hasReviews) {
+                        link.classList.add('has-reviews');
+                        link.classList.remove('no-reviews');
+                    } else {
+                        link.classList.remove('has-reviews');
+                        link.classList.add('no-reviews');
                     }
                 })
                 .catch(function() {});

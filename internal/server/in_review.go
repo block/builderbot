@@ -3,39 +3,66 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
+
+	"github.com/loganj/birdseye/internal/discovery"
 )
 
-// ReviewFile represents a file with open comment threads, for the global In Review page.
-type ReviewFile struct {
+// ReviewFileEntry is a single file within a review group.
+type ReviewFileEntry struct {
+	Name          string `json:"name"`
+	Path          string `json:"path"`
 	Project       string `json:"project"`
-	FilePath      string `json:"filePath"`
-	FileName      string `json:"fileName"`
 	OpenThreads   int    `json:"openThreads"`
 	AgentActive   bool   `json:"agentActive"`
 	TypingThreads int    `json:"typingThreads,omitempty"`
+	FileType      string `json:"fileType,omitempty"`
+}
+
+// ReviewGroup groups files in review by project and source, with breadcrumb info.
+type ReviewGroup struct {
+	Workspace     string            `json:"workspace,omitempty"`
+	WorkspaceURL  string            `json:"workspaceURL,omitempty"`
+	ProjectName   string            `json:"projectName"`
+	ProjectQN     string            `json:"projectQN"`
+	SourceName    string            `json:"sourceName"`
+	SourceAnchor  string            `json:"sourceAnchor"`
+	BadgeText     string            `json:"badgeText,omitempty"`
+	BadgeColor    string            `json:"badgeColor,omitempty"`
+	BadgeBg       string            `json:"badgeBg,omitempty"`
+	AgentActive   bool              `json:"agentActive"`
+	TypingThreads int               `json:"typingThreads,omitempty"`
+	Files         []ReviewFileEntry `json:"files"`
 }
 
 func (s *Server) handleInReview(w http.ResponseWriter, r *http.Request) {
-	files := s.listAllReviews()
+	groups := s.listAllReviewGroups()
 
 	nav := s.buildNav("")
 	pageData := struct {
-		Files []ReviewFile
+		Groups []ReviewGroup
 	}{
-		Files: files,
+		Groups: groups,
 	}
 	s.renderPage(w, "in-review.html", nav, pageData)
 }
 
 func (s *Server) handleAPIInReview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(s.listAllReviews())
+	json.NewEncoder(w).Encode(s.listAllReviewGroups())
 }
 
-// listAllReviews returns all files with open threads across every project.
-func (s *Server) listAllReviews() []ReviewFile {
+// listAllReviewGroups returns files in review grouped by project+source.
+func (s *Server) listAllReviewGroups() []ReviewGroup {
 	projects := s.cache.Projects()
-	var result []ReviewFile
+
+	// Build source type lookup per project+source
+	type groupKey struct {
+		project string
+		source  string
+	}
+	groupMap := make(map[groupKey]*ReviewGroup)
+	var groupOrder []groupKey
 
 	for _, p := range projects {
 		qn := p.QualifiedName()
@@ -46,31 +73,79 @@ func (s *Server) listAllReviews() []ReviewFile {
 
 		agentActive := s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running
 
+		// Build source name -> SourceTypeName lookup
+		sourceTypeMap := make(map[string]string)
+		for _, src := range p.Sources {
+			sourceTypeMap[src.Name] = src.SourceTypeName
+		}
+
 		for _, f := range reviews {
 			typingThreads := s.comments.TypingCount(qn, f.FilePath)
 			if agentActive && typingThreads == 0 {
 				typingThreads = s.comments.TypingCountNoExpiry(qn, f.FilePath)
 			}
 
-			// Extract filename from path
-			name := f.FilePath
-			for i := len(name) - 1; i >= 0; i-- {
-				if name[i] == '/' {
-					name = name[i+1:]
-					break
-				}
+			// Look up source from cache
+			sourceName := ""
+			fileType := ""
+			if fi := s.cache.FindFile(qn, f.FilePath); fi != nil {
+				sourceName = fi.Source
+				fileType = fi.FileType
+			}
+			if sourceName == "" {
+				sourceName = "files"
 			}
 
-			result = append(result, ReviewFile{
+			key := groupKey{project: qn, source: sourceName}
+			g, ok := groupMap[key]
+			if !ok {
+				// Look up badge info
+				var badgeText, badgeColor, badgeBg string
+				if stName, ok := sourceTypeMap[sourceName]; ok {
+					if st := discovery.GetSourceType(stName); st != nil {
+						badgeText = st.DisplayName
+						badgeColor = st.BadgeColor
+						badgeBg = st.BadgeBg
+					}
+				}
+
+				g = &ReviewGroup{
+					Workspace:    p.WorkspaceName,
+					ProjectName:  p.Name,
+					ProjectQN:    qn,
+					SourceName:   sourceName,
+					SourceAnchor: "source-" + sourceName,
+					BadgeText:    badgeText,
+					BadgeColor:   badgeColor,
+					BadgeBg:      badgeBg,
+					AgentActive:  agentActive,
+				}
+				if p.WorkspaceName != "" {
+					g.WorkspaceURL = "/workspace/" + p.WorkspaceName
+				}
+
+				groupMap[key] = g
+				groupOrder = append(groupOrder, key)
+			}
+
+			name := filepath.Base(f.FilePath)
+
+			g.Files = append(g.Files, ReviewFileEntry{
+				Name:          name,
+				Path:          f.FilePath,
 				Project:       qn,
-				FilePath:      f.FilePath,
-				FileName:      name,
 				OpenThreads:   f.OpenThreads,
 				AgentActive:   agentActive,
 				TypingThreads: typingThreads,
+				FileType:      fileType,
 			})
+			g.TypingThreads += typingThreads
 		}
 	}
 
+	result := make([]ReviewGroup, 0, len(groupOrder))
+	for _, key := range groupOrder {
+		result = append(result, *groupMap[key])
+	}
 	return result
 }

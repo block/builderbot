@@ -17,7 +17,7 @@
     GitCommitHorizontal,
     Trash2,
     FileDiff,
-    StickyNote,
+    FileText,
     Copy,
     Play,
     Hammer,
@@ -777,7 +777,7 @@
           disabled={showNewSession}
           title="New note"
         >
-          <span class="btn-icon note-icon"><StickyNote size={13} /></span>
+          <span class="btn-icon note-icon"><FileText size={13} /></span>
           <span>New note</span>
         </button>
         <button

@@ -14,7 +14,7 @@
     onStarted     — called with { sessionId, artifactId } on successful start
 -->
 <script lang="ts">
-  import { X, GitCommitHorizontal, StickyNote, GitBranch, Send } from 'lucide-svelte';
+  import { X, GitCommitHorizontal, FileText, GitBranch, Send } from 'lucide-svelte';
   import Spinner from './Spinner.svelte';
   import type { Branch, BranchSessionType } from './types';
   import * as commands from './commands';
@@ -134,7 +134,7 @@
           <span class="header-icon commit-icon"><GitCommitHorizontal size={14} /></span>
           <span>New commit</span>
         {:else}
-          <span class="header-icon note-icon"><StickyNote size={14} /></span>
+          <span class="header-icon note-icon"><FileText size={14} /></span>
           <span>New note</span>
         {/if}
       </div>

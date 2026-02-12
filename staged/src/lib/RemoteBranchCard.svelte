@@ -21,7 +21,7 @@
     Bot,
     Copy,
     GitCommitHorizontal,
-    StickyNote,
+    FileText,
     Plus,
   } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -454,7 +454,7 @@
                 <span>Commit</span>
               </button>
               <button class="picker-item note-item" onclick={() => openNewSession('note')}>
-                <StickyNote size={14} />
+                <FileText size={14} />
                 <span>Note</span>
               </button>
             </div>

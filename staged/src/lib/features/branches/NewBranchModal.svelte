@@ -41,6 +41,7 @@
   // State
   let branchTitle = $state('');
   let creating = $state(false);
+  let loading = $state(true);
   let error = $state<string | null>(null);
 
   // Default branch (detected on mount)
@@ -137,19 +138,17 @@
   }
 
   onMount(async () => {
-    // Detect default branch
-    try {
-      detectedDefaultBranch = await commands.detectDefaultBranch(project.repoPath);
-    } catch {
-      detectedDefaultBranch = 'main';
-    }
+    // Fetch default branch and branch list in parallel
+    const [defaultBranchResult, branchRefsResult] = await Promise.allSettled([
+      commands.detectDefaultBranch(project.repoPath),
+      commands.listGitBranches(project.repoPath),
+    ]);
 
-    // Load available branches
-    try {
-      allBranchRefs = await commands.listGitBranches(project.repoPath);
-    } catch {
-      allBranchRefs = [];
-    }
+    detectedDefaultBranch =
+      defaultBranchResult.status === 'fulfilled' ? defaultBranchResult.value : 'main';
+    allBranchRefs = branchRefsResult.status === 'fulfilled' ? branchRefsResult.value : [];
+
+    loading = false;
   });
 
   // Focus branch input
@@ -402,212 +401,219 @@
     </div>
 
     <div class="modal-body">
-      <!-- Branch type toggle (only shown when sq CLI is available) -->
-      {#if sqState.available}
-        <div class="type-toggle">
-          <button
-            class="toggle-option"
-            class:active={branchType === 'local'}
-            onclick={() => {
-              branchType = 'local';
-              selectedBaseBranch = null;
-            }}
-          >
-            <Monitor size={14} />
-            Local
-          </button>
-          <button
-            class="toggle-option"
-            class:active={branchType === 'remote'}
-            onclick={() => {
-              branchType = 'remote';
-              selectedBaseBranch = null;
-            }}
-          >
-            <Cloud size={14} />
-            Remote
-          </button>
-        </div>
-      {/if}
-
-      <div class="selected-info">
-        <div class="info-row">
-          <GitBranch size={14} />
-          <span class="info-label">Repository:</span>
-          <span class="info-value">{repoName(project.repoPath)}</span>
-        </div>
-        <button class="info-row base-row" onclick={toggleBasePicker}>
-          <GitBranch size={14} class="base-icon" />
-          <span class="info-label">Base:</span>
-          <span class="info-value">{formatBranchName(effectiveBaseBranch)}</span>
-          <ChevronsUpDown size={12} class="base-chevron" />
-        </button>
-      </div>
-
-      {#if showBasePicker}
-        <!-- Base branch picker -->
-        <div class="base-picker">
-          <div class="base-search-container">
-            <Search size={14} class="search-icon" />
-            <input
-              bind:this={baseSearchEl}
-              bind:value={baseSearchQuery}
-              type="text"
-              placeholder="Search branches..."
-              class="base-search-input"
-            />
-          </div>
-          <div class="base-list">
-            {#each filteredBranches as branch, index (branch)}
-              <button
-                class="base-item"
-                class:selected={index === baseSelectedIndex}
-                onclick={() => selectBaseBranch(branch)}
-              >
-                <span class="base-item-name">{branch}</span>
-                {#if branch === effectiveBaseBranch}
-                  <Check size={14} class="check-icon" />
-                {/if}
-              </button>
-            {/each}
-            {#if filteredBranches.length === 0}
-              <div class="base-empty">No branches found</div>
-            {/if}
-          </div>
-        </div>
-      {:else if showGithubPicker}
-        <!-- GitHub PR/Issue picker -->
-        <div class="github-picker">
-          <div class="github-tabs">
-            <button
-              class="github-tab"
-              class:active={githubTab === 'pr'}
-              onclick={() => switchGithubTab('pr')}
-            >
-              <GitPullRequest size={13} />
-              PRs
-            </button>
-            <button
-              class="github-tab"
-              class:active={githubTab === 'issue'}
-              onclick={() => switchGithubTab('issue')}
-            >
-              <CircleDot size={13} />
-              Issues
-            </button>
-          </div>
-          <div class="github-search-container">
-            <Search size={14} class="search-icon" />
-            <input
-              bind:this={githubSearchEl}
-              bind:value={githubSearchQuery}
-              oninput={() => (githubSelectedIndex = 0)}
-              type="text"
-              placeholder="Filter..."
-              class="github-search-input"
-            />
-          </div>
-          <div class="github-list">
-            {#if githubLoading}
-              <div class="github-loading">
-                <Spinner size={16} />
-                <span>Loading...</span>
-              </div>
-            {:else if githubError}
-              <div class="github-error">{githubError}</div>
-            {:else if githubTab === 'pr'}
-              {#each filteredPullRequests as pr, index (pr.number)}
-                <button
-                  class="github-item"
-                  class:selected={index === githubSelectedIndex}
-                  onclick={() => selectPullRequest(pr)}
-                >
-                  <div class="github-item-main">
-                    <span class="github-item-number">#{pr.number}</span>
-                    <span class="github-item-title">{pr.title}</span>
-                    {#if pr.draft}
-                      <span class="github-draft-badge">Draft</span>
-                    {/if}
-                  </div>
-                  <div class="github-item-meta">
-                    @{pr.author} &middot; {formatTimeAgo(pr.updatedAt)}
-                  </div>
-                </button>
-              {/each}
-              {#if filteredPullRequests.length === 0}
-                <div class="github-empty">No pull requests found</div>
-              {/if}
-            {:else}
-              {#each filteredIssues as issue, index (issue.number)}
-                <button
-                  class="github-item"
-                  class:selected={index === githubSelectedIndex}
-                  onclick={() => selectIssue(issue)}
-                >
-                  <div class="github-item-main">
-                    <span class="github-item-number">#{issue.number}</span>
-                    <span class="github-item-title">{issue.title}</span>
-                  </div>
-                  <div class="github-item-meta">
-                    @{issue.author} &middot; {formatTimeAgo(issue.updatedAt)}
-                  </div>
-                </button>
-              {/each}
-              {#if filteredIssues.length === 0}
-                <div class="github-empty">No issues found</div>
-              {/if}
-            {/if}
-          </div>
+      {#if loading}
+        <div class="loading-state">
+          <Spinner size={20} />
+          <span>Loading branches…</span>
         </div>
       {:else}
-        <div class="input-group">
-          <label for="branch-title">Branch name</label>
-          <input
-            bind:this={branchInputEl}
-            bind:value={branchTitle}
-            id="branch-title"
-            type="text"
-            placeholder={branchType === 'local' ? 'Fix login issue' : 'Add user auth'}
-            class="branch-input"
-            autocomplete="off"
-            autocorrect="off"
-            autocapitalize="off"
-            spellcheck="false"
-          />
-          {#if branchTitle && branchName !== branchTitle.toLowerCase()}
-            <div class="branch-preview">
-              <GitBranch size={12} />
-              <span>{branchName || '...'}</span>
-            </div>
-          {/if}
-          {#if branchType === 'remote' && branchName}
-            <div class="workspace-preview">
-              <Cloud size={12} />
-              <span>Workspace: {workspaceName(branchName)}</span>
-            </div>
-          {/if}
-        </div>
-
-        <button class="github-import-button" onclick={openGithubPicker}>
-          <Github size={14} />
-          Import from GitHub...
-        </button>
-
-        {#if error}
-          <div class="error-message">{error}</div>
+        <!-- Branch type toggle (only shown when sq CLI is available) -->
+        {#if sqState.available}
+          <div class="type-toggle">
+            <button
+              class="toggle-option"
+              class:active={branchType === 'local'}
+              onclick={() => {
+                branchType = 'local';
+                selectedBaseBranch = null;
+              }}
+            >
+              <Monitor size={14} />
+              Local
+            </button>
+            <button
+              class="toggle-option"
+              class:active={branchType === 'remote'}
+              onclick={() => {
+                branchType = 'remote';
+                selectedBaseBranch = null;
+              }}
+            >
+              <Cloud size={14} />
+              Remote
+            </button>
+          </div>
         {/if}
 
-        <div class="actions">
-          <button class="cancel-button" onclick={onClose}>Cancel</button>
-          <button class="create-button" onclick={handleCreate} disabled={!branchName || creating}>
-            {#if creating}
-              <Spinner size={14} />
-              Creating...
-            {:else}
-              Create Branch
-            {/if}
+        <div class="selected-info">
+          <div class="info-row">
+            <GitBranch size={14} />
+            <span class="info-label">Repository:</span>
+            <span class="info-value">{repoName(project.repoPath)}</span>
+          </div>
+          <button class="info-row base-row" onclick={toggleBasePicker}>
+            <GitBranch size={14} class="base-icon" />
+            <span class="info-label">Base:</span>
+            <span class="info-value">{formatBranchName(effectiveBaseBranch)}</span>
+            <ChevronsUpDown size={12} class="base-chevron" />
           </button>
         </div>
+
+        {#if showBasePicker}
+          <!-- Base branch picker -->
+          <div class="base-picker">
+            <div class="base-search-container">
+              <Search size={14} class="search-icon" />
+              <input
+                bind:this={baseSearchEl}
+                bind:value={baseSearchQuery}
+                type="text"
+                placeholder="Search branches..."
+                class="base-search-input"
+              />
+            </div>
+            <div class="base-list">
+              {#each filteredBranches as branch, index (branch)}
+                <button
+                  class="base-item"
+                  class:selected={index === baseSelectedIndex}
+                  onclick={() => selectBaseBranch(branch)}
+                >
+                  <span class="base-item-name">{branch}</span>
+                  {#if branch === effectiveBaseBranch}
+                    <Check size={14} class="check-icon" />
+                  {/if}
+                </button>
+              {/each}
+              {#if filteredBranches.length === 0}
+                <div class="base-empty">No branches found</div>
+              {/if}
+            </div>
+          </div>
+        {:else if showGithubPicker}
+          <!-- GitHub PR/Issue picker -->
+          <div class="github-picker">
+            <div class="github-tabs">
+              <button
+                class="github-tab"
+                class:active={githubTab === 'pr'}
+                onclick={() => switchGithubTab('pr')}
+              >
+                <GitPullRequest size={13} />
+                PRs
+              </button>
+              <button
+                class="github-tab"
+                class:active={githubTab === 'issue'}
+                onclick={() => switchGithubTab('issue')}
+              >
+                <CircleDot size={13} />
+                Issues
+              </button>
+            </div>
+            <div class="github-search-container">
+              <Search size={14} class="search-icon" />
+              <input
+                bind:this={githubSearchEl}
+                bind:value={githubSearchQuery}
+                oninput={() => (githubSelectedIndex = 0)}
+                type="text"
+                placeholder="Filter..."
+                class="github-search-input"
+              />
+            </div>
+            <div class="github-list">
+              {#if githubLoading}
+                <div class="github-loading">
+                  <Spinner size={16} />
+                  <span>Loading...</span>
+                </div>
+              {:else if githubError}
+                <div class="github-error">{githubError}</div>
+              {:else if githubTab === 'pr'}
+                {#each filteredPullRequests as pr, index (pr.number)}
+                  <button
+                    class="github-item"
+                    class:selected={index === githubSelectedIndex}
+                    onclick={() => selectPullRequest(pr)}
+                  >
+                    <div class="github-item-main">
+                      <span class="github-item-number">#{pr.number}</span>
+                      <span class="github-item-title">{pr.title}</span>
+                      {#if pr.draft}
+                        <span class="github-draft-badge">Draft</span>
+                      {/if}
+                    </div>
+                    <div class="github-item-meta">
+                      @{pr.author} &middot; {formatTimeAgo(pr.updatedAt)}
+                    </div>
+                  </button>
+                {/each}
+                {#if filteredPullRequests.length === 0}
+                  <div class="github-empty">No pull requests found</div>
+                {/if}
+              {:else}
+                {#each filteredIssues as issue, index (issue.number)}
+                  <button
+                    class="github-item"
+                    class:selected={index === githubSelectedIndex}
+                    onclick={() => selectIssue(issue)}
+                  >
+                    <div class="github-item-main">
+                      <span class="github-item-number">#{issue.number}</span>
+                      <span class="github-item-title">{issue.title}</span>
+                    </div>
+                    <div class="github-item-meta">
+                      @{issue.author} &middot; {formatTimeAgo(issue.updatedAt)}
+                    </div>
+                  </button>
+                {/each}
+                {#if filteredIssues.length === 0}
+                  <div class="github-empty">No issues found</div>
+                {/if}
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <div class="input-group">
+            <label for="branch-title">Branch name</label>
+            <input
+              bind:this={branchInputEl}
+              bind:value={branchTitle}
+              id="branch-title"
+              type="text"
+              placeholder={branchType === 'local' ? 'Fix login issue' : 'Add user auth'}
+              class="branch-input"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+            />
+            {#if branchTitle && branchName !== branchTitle.toLowerCase()}
+              <div class="branch-preview">
+                <GitBranch size={12} />
+                <span>{branchName || '...'}</span>
+              </div>
+            {/if}
+            {#if branchType === 'remote' && branchName}
+              <div class="workspace-preview">
+                <Cloud size={12} />
+                <span>Workspace: {workspaceName(branchName)}</span>
+              </div>
+            {/if}
+          </div>
+
+          <button class="github-import-button" onclick={openGithubPicker}>
+            <Github size={14} />
+            Import from GitHub...
+          </button>
+
+          {#if error}
+            <div class="error-message">{error}</div>
+          {/if}
+
+          <div class="actions">
+            <button class="cancel-button" onclick={onClose}>Cancel</button>
+            <button class="create-button" onclick={handleCreate} disabled={!branchName || creating}>
+              {#if creating}
+                <Spinner size={14} />
+                Creating...
+              {:else}
+                Create Branch
+              {/if}
+            </button>
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
@@ -676,6 +682,17 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
+  }
+
+  /* Loading state */
+  .loading-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 32px 16px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
   }
 
   /* Branch type toggle */

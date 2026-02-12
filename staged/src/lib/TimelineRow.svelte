@@ -216,10 +216,14 @@
 
   .timeline-icon.commit-icon {
     color: var(--commit-color);
+    background-color: var(--commit-bg);
+    border-color: transparent;
   }
 
   .timeline-icon.note-icon {
     color: var(--note-color);
+    background-color: var(--note-bg);
+    border-color: transparent;
   }
 
   .timeline-icon.review-icon {

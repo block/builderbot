@@ -245,7 +245,7 @@
   }
 
   .timeline-row.pending .timeline-icon :global(.spinner) {
-    color: var(--text-muted);
+    color: var(--text-primary);
   }
 
   .timeline-icon.failed-icon {

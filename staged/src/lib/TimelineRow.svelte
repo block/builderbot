@@ -83,8 +83,6 @@
   class:pending={isPending}
   class:failed={isFailed}
   class:clickable={isClickable}
-  class:commit-row={type === 'commit' || type === 'pending-commit' || type === 'failed-commit'}
-  class:note-row={type === 'note' || type === 'generating-note' || type === 'failed-note'}
   onclick={handleRowClick}
 >
   <div class="timeline-marker">
@@ -228,15 +226,6 @@
 
   .timeline-icon.review-icon {
     color: var(--status-modified);
-  }
-
-  /* Row background tints for commit/note distinction */
-  .timeline-row.commit-row:hover {
-    background-color: var(--commit-bg);
-  }
-
-  .timeline-row.note-row:hover {
-    background-color: var(--note-bg);
   }
 
   .timeline-row.pending .timeline-icon {

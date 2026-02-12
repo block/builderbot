@@ -156,7 +156,7 @@ const COMMON_PATHS: &[&str] = &[
 /// Searches in order:
 /// 1. Login shell `which` (picks up user's PATH from `.zshrc` / `.bashrc`)
 /// 2. Common install locations
-pub(crate) fn find_command(cmd: &str) -> Option<PathBuf> {
+pub fn find_command(cmd: &str) -> Option<PathBuf> {
     // Strategy 1: Login shell `which`
     if let Some(path) = find_via_login_shell(cmd) {
         if path.exists() {

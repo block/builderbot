@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, Implementation,
@@ -30,9 +30,6 @@ use crate::types::{blox_acp_command, find_command};
 // =============================================================================
 // Public traits and types
 // =============================================================================
-
-/// Minimum interval between DB flushes for streaming text.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Protocol-agnostic message writer — streams agent output.
 ///
@@ -129,13 +126,17 @@ impl AcpDriver {
             })
     }
 
-    /// Create a driver that proxies through `blox acp <workspace>`.
+    /// Create a driver that proxies through `sq blox acp <workspace>`.
     pub fn for_workspace(workspace_name: &str, agent_id: Option<&str>) -> Result<Self, String> {
-        let binary_path = find_command("blox").ok_or_else(|| {
-            "Could not find `blox` binary. Install it and ensure it's on your PATH.".to_string()
+        let binary_path = find_command("sq").ok_or_else(|| {
+            "Could not find `sq` binary. Install it and ensure it's on your PATH.".to_string()
         })?;
 
-        let mut args = vec!["acp".to_string(), workspace_name.to_string()];
+        let mut args = vec![
+            "blox".to_string(),
+            "acp".to_string(),
+            workspace_name.to_string(),
+        ];
 
         if let Some(id) = agent_id {
             if let Some(cmd) = blox_acp_command(id) {

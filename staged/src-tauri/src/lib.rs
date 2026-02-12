@@ -60,7 +60,6 @@ pub struct BranchWithWorkdir {
     pub branch_type: store::BranchType,
     pub workspace_name: Option<String>,
     pub workspace_status: Option<store::WorkspaceStatus>,
-    pub agent: Option<String>,
     pub worktree_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -585,7 +584,6 @@ fn to_branch_with_workdir(
         branch_type: branch.branch_type,
         workspace_name: branch.workspace_name,
         workspace_status: branch.workspace_status,
-        agent: branch.agent,
         worktree_path: workdir_path,
         created_at: branch.created_at,
         updated_at: branch.updated_at,
@@ -704,7 +702,6 @@ async fn create_remote_branch(
     branch_name: String,
     base_branch: Option<String>,
     workspace_name: String,
-    agent: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
 
@@ -722,16 +719,9 @@ async fn create_remote_branch(
         None => git::detect_default_branch(repo_path).map_err(|e| e.to_string())?,
     };
 
-    let effective_agent = agent.unwrap_or_else(|| "goose".to_string());
-
     // Create the branch record (starts in Starting status)
-    let branch = store::Branch::new_remote(
-        &project_id,
-        &branch_name,
-        &effective_base,
-        &workspace_name,
-        &effective_agent,
-    );
+    let branch =
+        store::Branch::new_remote(&project_id, &branch_name, &effective_base, &workspace_name);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, None))

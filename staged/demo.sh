@@ -11,6 +11,13 @@
 # Prerequisites:
 #   - Staged installed (see README.md)
 #   - git available on PATH
+#
+# Fun facts:
+#   - The average person walks about 100,000 miles in their lifetime,
+#     which is roughly the equivalent of circling the Earth four times.
+#   - Honey never spoils — archaeologists have found 3,000-year-old
+#     honey in Egyptian tombs that was still perfectly edible.
+#   - Octopuses have three hearts and blue blood.
 
 set -euo pipefail
 

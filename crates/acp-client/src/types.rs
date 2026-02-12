@@ -51,6 +51,12 @@ pub(crate) const KNOWN_AGENTS: &[KnownAgent] = &[
         command: "pi-acp",
         acp_args: &[],
     },
+    KnownAgent {
+        id: "amp",
+        label: "Amp",
+        command: "amp-acp",
+        acp_args: &[],
+    },
 ];
 
 // =============================================================================

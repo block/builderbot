@@ -13,21 +13,22 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { ChevronDown, Check, Bot } from 'lucide-svelte';
-  import { agentState } from './stores/agent.svelte';
+  import { agentState, REMOTE_AGENTS } from './stores/agent.svelte';
   import { preferences, setAiAgent } from './stores/preferences.svelte';
 
   interface Props {
     disabled?: boolean;
+    remote?: boolean;
   }
 
-  let { disabled = false }: Props = $props();
+  let { disabled = false, remote = false }: Props = $props();
 
   let showDropdown = $state(false);
 
+  let agents = $derived(remote ? REMOTE_AGENTS : agentState.providers);
+
   let currentLabel = $derived(
-    agentState.providers.find((p) => p.id === preferences.aiAgent)?.label ??
-      preferences.aiAgent ??
-      'Agent'
+    agents.find((p) => p.id === preferences.aiAgent)?.label ?? preferences.aiAgent ?? 'Agent'
   );
 
   onMount(() => {
@@ -51,30 +52,30 @@
   }
 
   function toggle() {
-    if (!disabled && agentState.providers.length > 1) {
+    if (!disabled && agents.length > 1) {
       showDropdown = !showDropdown;
     }
   }
 </script>
 
-{#if agentState.loaded && agentState.providers.length > 0}
+{#if (remote || agentState.loaded) && agents.length > 0}
   <div class="agent-selector">
     <button
       type="button"
       class="selector-btn"
       onclick={toggle}
       {disabled}
-      title={agentState.providers.length > 1 ? 'Select AI agent' : currentLabel}
+      title={agents.length > 1 ? 'Select AI agent' : currentLabel}
     >
       <Bot size={12} />
       <span class="selector-label">{currentLabel}</span>
-      {#if agentState.providers.length > 1}
+      {#if agents.length > 1}
         <ChevronDown size={12} />
       {/if}
     </button>
     {#if showDropdown}
       <div class="selector-dropdown">
-        {#each agentState.providers as provider (provider.id)}
+        {#each agents as provider (provider.id)}
           <button
             type="button"
             class="selector-option"

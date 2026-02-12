@@ -319,12 +319,6 @@
     .source-section.in-review-section:hover { border-color: #0969da; }
     .source-section.in-review-section .source-header { cursor: default; }
     .source-section.in-review-section .source-header:hover { background: transparent; }
-    .in-review-thread-count {
-        font-size: 0.75em;
-        color: #656d76;
-        white-space: nowrap;
-    }
-
     /* Sidebar source type tags */
     .sidebar-card-nav a { display: flex; align-items: center; gap: 6px; }
     .sidebar-source-tag {
@@ -1000,9 +994,11 @@
     }
 
     function applyReviewBadges() {
-        // Apply badges to individual file rows in their source sections
+        // Render in-review section first (replaces DOM), then decorate all files
+        renderInReviewSection();
+
+        // Apply badges to all file rows (including in-review section)
         document.querySelectorAll('.file[data-path]').forEach(function(file) {
-            if (file.closest('.in-review-section')) return;
             var path = file.dataset.path;
             var existing = file.querySelector('.review-badge');
             if (existing) existing.remove();
@@ -1037,7 +1033,6 @@
             }
         });
 
-        renderInReviewSection();
         updateSidebarReviewLink();
     }
 
@@ -1085,32 +1080,8 @@
         html += '<ul class="files">';
 
         reviewPaths.forEach(function(path) {
-            var r = reviewData[path];
             var fi = fileInfo[path] || { name: path.split('/').pop(), path: path, age: '', source: '', sourceType: '', fileType: '' };
-            html += '<li class="file" data-project="' + escapeHtml(qualifiedName) + '" data-project-path="' + escapeHtml(projectPath) + '" data-path="' + escapeHtml(path) + '" data-source="' + escapeHtml(fi.source) + '" data-source-type="' + escapeHtml(fi.sourceType) + '">';
-            html += '<div class="file-left">';
-            html += '<input type="checkbox" class="file-checkbox" />';
-            if (fi.fileType && fi.fileType !== 'other') {
-                html += '<span class="file-type ' + escapeHtml(fi.fileType) + '">' + escapeHtml(fi.fileType) + '</span>';
-            }
-            html += '<span class="review-badge' + (r.agentActive ? ' agent-active' : '') + '">in review</span>';
-            html += '<span class="file-name"><a href="/file/' + encodeURI(qualifiedName) + '/' + encodeURI(path) + '">' + escapeHtml(fi.name) + '</a></span>';
-            if (r.typingThreads > 0) {
-                html += '<span class="file-typing">' +
-                    '<span class="agent-dot"></span>' +
-                    '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>' +
-                    '</span>';
-            }
-            html += '</div>';
-            html += '<div class="file-right">';
-            html += '<span class="in-review-thread-count">' + r.openThreads + ' thread' + (r.openThreads !== 1 ? 's' : '') + '</span>';
-            html += '<span class="file-age">' + escapeHtml(fi.age) + '</span>';
-            html += '<div class="file-menu-wrap">';
-            html += '<button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>';
-            html += '<div class="file-menu"></div>';
-            html += '</div>';
-            html += '</div>';
-            html += '</li>';
+            html += renderFileRow(fi);
         });
 
         html += '</ul></div>';

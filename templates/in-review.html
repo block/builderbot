@@ -89,24 +89,9 @@
     }
     .source-section .file:last-child { border-radius: 0 0 6px 6px; }
 
-    .review-badge {
-        font-size: 0.7em;
-        font-weight: 500;
-        text-transform: uppercase;
-        padding: 2px 6px;
-        border-radius: 3px;
-        background: #ddf4ff;
-        color: #0969da;
-        flex-shrink: 0;
-    }
     .file-age {
         color: #888;
         font-size: 0.85em;
-        white-space: nowrap;
-    }
-    .thread-count {
-        font-size: 0.75em;
-        color: #656d76;
         white-space: nowrap;
     }
 
@@ -179,17 +164,9 @@
                 <li class="file" data-project="{{.Project}}" data-project-path="{{.ProjectPath}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
                     <div class="file-left">
                         {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                        <span class="review-badge">in review</span>
                         <span class="file-name"><a href="/file/{{.Project}}/{{.Path}}">{{.Name}}</a></span>
-                        {{if gt .TypingThreads 0}}
-                        <span class="file-typing">
-                            <span class="agent-dot"></span>
-                            <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>
-                        </span>
-                        {{end}}
                     </div>
                     <div class="file-right">
-                        <span class="thread-count">{{.OpenThreads}} thread{{if ne .OpenThreads 1}}s{{end}}</span>
                         <span class="file-age">{{.Age}}</span>
                         <div class="file-menu-wrap">
                             <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
@@ -241,19 +218,15 @@
             '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></span>';
     }
 
-    function renderReviewFileRow(f) {
-        var plural = f.openThreads !== 1 ? 's' : '';
+    function renderFileRow(f) {
         var html = '<li class="file" data-project="' + escapeHtml(f.project) + '" data-project-path="' + escapeHtml(f.projectPath || '') + '" data-path="' + escapeHtml(f.path) + '" data-source="' + escapeHtml(f.source || '') + '" data-source-type="' + escapeHtml(f.sourceType || '') + '">';
         html += '<div class="file-left">';
         if (f.fileType && f.fileType !== 'other') {
             html += '<span class="file-type ' + escapeHtml(f.fileType) + '">' + escapeHtml(f.fileType) + '</span>';
         }
-        html += '<span class="review-badge">in review</span>';
         html += '<span class="file-name"><a href="/file/' + escapeHtml(f.project) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>';
-        html += typingHTML(f.typingThreads);
         html += '</div>';
         html += '<div class="file-right">';
-        html += '<span class="thread-count">' + f.openThreads + ' thread' + plural + '</span>';
         html += '<span class="file-age">' + escapeHtml(f.age || '') + '</span>';
         html += '<div class="file-menu-wrap">';
         html += '<button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>';
@@ -297,7 +270,7 @@
                 html += '</div>';
                 html += '<ul class="files">';
                 (g.files || []).forEach(function(f) {
-                    html += renderReviewFileRow(f);
+                    html += renderFileRow(f);
                 });
                 html += '</ul></div>';
             });

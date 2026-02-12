@@ -62,7 +62,6 @@ pub struct BranchWithWorkdir {
     pub workspace_status: Option<store::WorkspaceStatus>,
     pub agent: Option<String>,
     pub worktree_path: Option<String>,
-    pub is_main_worktree: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -430,7 +429,20 @@ fn import_existing_worktrees(
 
     let mut imported_count = 0;
 
+    let canonical_repo = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+
     for (worktree_path, branch_name) in worktrees {
+        // Skip the main worktree (the repo checkout itself)
+        let canonical_wt = worktree_path
+            .canonicalize()
+            .unwrap_or_else(|_| worktree_path.clone());
+        if canonical_wt == canonical_repo {
+            log::debug!("Skipping main worktree at {}", worktree_path.display());
+            continue;
+        }
+
         let branch_name = match branch_name {
             Some(name) => name,
             None => {
@@ -570,7 +582,6 @@ fn to_branch_with_workdir(
         workspace_status: branch.workspace_status,
         agent: branch.agent,
         worktree_path: workdir_path,
-        is_main_worktree: false,
         created_at: branch.created_at,
         updated_at: branch.updated_at,
     }
@@ -582,14 +593,10 @@ fn list_branches_for_project(
     project_id: String,
 ) -> Result<Vec<BranchWithWorkdir>, String> {
     let store = get_store(&store)?;
-    let project = store
+    let _project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
-
-    let canonical_repo = Path::new(&project.repo_path)
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(&project.repo_path));
 
     let branches = store
         .list_branches_for_project(&project_id)
@@ -601,15 +608,7 @@ fn list_branches_for_project(
             .get_workdir_for_branch(&branch.id)
             .map_err(|e| e.to_string())?;
 
-        let is_main = workdir.as_ref().is_some_and(|w| {
-            Path::new(&w.path)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(&w.path))
-                == canonical_repo
-        });
-
-        let mut bw = to_branch_with_workdir(branch, workdir.map(|w| w.path));
-        bw.is_main_worktree = is_main;
+        let bw = to_branch_with_workdir(branch, workdir.map(|w| w.path));
         result.push(bw);
     }
     Ok(result)
@@ -851,19 +850,6 @@ async fn delete_branch(
             let workdir = store
                 .get_workdir_for_branch(&branch_id)
                 .map_err(|e| e.to_string())?;
-
-            // Prevent deletion of the main worktree (the repo checkout itself)
-            if let Some(ref wd) = workdir {
-                let canonical_repo = Path::new(&project.repo_path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| PathBuf::from(&project.repo_path));
-                let canonical_wd = Path::new(&wd.path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| PathBuf::from(&wd.path));
-                if canonical_wd == canonical_repo {
-                    return Err("Cannot delete the main worktree".to_string());
-                }
-            }
 
             if let Some(ref wd) = workdir {
                 let repo_path = Path::new(&project.repo_path);

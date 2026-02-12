@@ -568,9 +568,6 @@
       <div class="branch-info">
         <GitBranch size={16} class="branch-icon" />
         <span class="branch-name">{branch.branchName}</span>
-        {#if branch.isMainWorktree}
-          <span class="main-badge">main worktree</span>
-        {/if}
         <span class="branch-separator">›</span>
         <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
       </div>
@@ -718,13 +715,11 @@
               {/if}
 
               <!-- Delete last -->
-              {#if !branch.isMainWorktree}
-                <div class="menu-separator"></div>
-                <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
-                  <Trash2 size={14} />
-                  Delete
-                </button>
-              {/if}
+              <div class="menu-separator"></div>
+              <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
+                <Trash2 size={14} />
+                Delete
+              </button>
             </div>
           {/if}
         </div>
@@ -1038,15 +1033,6 @@
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;
-  }
-
-  .main-badge {
-    font-size: var(--size-xs);
-    font-weight: 500;
-    color: var(--text-faint);
-    background-color: var(--bg-hover);
-    padding: 1px 6px;
-    border-radius: 4px;
   }
 
   .branch-separator {

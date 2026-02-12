@@ -18,7 +18,8 @@
   import type { Branch, BranchSessionType } from './types';
   import * as commands from './commands';
   import AgentSelector from './AgentSelector.svelte';
-  import { preferences } from './stores/preferences.svelte';
+  import { agentState, REMOTE_AGENTS } from './stores/agent.svelte';
+  import { getPreferredAgent } from './stores/preferences.svelte';
 
   interface Props {
     branch: Branch;
@@ -73,11 +74,12 @@
     error = null;
 
     try {
+      const agents = remote ? REMOTE_AGENTS : agentState.providers;
       const result = await commands.startBranchSession(
         branch.id,
         prompt.trim(),
         currentMode,
-        preferences.aiAgent ?? undefined
+        getPreferredAgent(agents) ?? undefined
       );
       onStarted({ sessionId: result.sessionId, artifactId: result.artifactId });
     } catch (e) {

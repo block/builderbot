@@ -33,7 +33,9 @@ const SIZE_DEFAULT = 13;
 
 const SIZE_STORE_KEY = 'size-base';
 const SYNTAX_THEME_STORE_KEY = 'syntax-theme';
-const AI_AGENT_STORE_KEY = 'ai-agent';
+const RECENT_AGENTS_STORE_KEY = 'recent-agents';
+/** Maximum number of recent agents to remember. */
+const RECENT_AGENTS_MAX = 10;
 
 const DEFAULT_SYNTAX_THEME: SyntaxThemeName = 'laserwave';
 
@@ -58,8 +60,11 @@ export const preferences = $state({
   sizeBase: SIZE_DEFAULT,
   /** Current syntax theme name */
   syntaxTheme: DEFAULT_SYNTAX_THEME as string,
-  /** Selected AI agent provider ID (e.g. "goose", "claude"). Null = not yet chosen. */
-  aiAgent: null as string | null,
+  /**
+   * Ordered list of recently used AI agent IDs, most-recent first.
+   * Used to pick the best available agent for a given context (local vs remote).
+   */
+  recentAgents: [] as string[],
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -114,10 +119,17 @@ export async function initPreferences(): Promise<void> {
   await setSyntaxTheme(preferences.syntaxTheme as SyntaxThemeName);
   applyAdaptiveTheme();
 
-  // Load AI agent preference
-  const savedAgent = await getStoreValue<string>(AI_AGENT_STORE_KEY);
-  if (savedAgent) {
-    preferences.aiAgent = savedAgent;
+  // Load recent agents list (with migration from legacy single-agent key)
+  const savedRecent = await getStoreValue<string[]>(RECENT_AGENTS_STORE_KEY);
+  if (savedRecent && Array.isArray(savedRecent) && savedRecent.length > 0) {
+    preferences.recentAgents = savedRecent;
+  } else {
+    // Migrate from legacy single-agent preference
+    const legacyAgent = await getStoreValue<string>('ai-agent');
+    if (legacyAgent) {
+      preferences.recentAgents = [legacyAgent];
+      await setStoreValue(RECENT_AGENTS_STORE_KEY, [legacyAgent]);
+    }
   }
 
   preferences.loaded = true;
@@ -184,9 +196,29 @@ export function resetSize(): void {
 // =============================================================================
 
 /**
- * Set the preferred AI agent provider.
+ * Record an agent as the most recently used.
+ *
+ * Moves `agentId` to the front of `recentAgents`, removing any prior
+ * occurrence so the list stays deduplicated. The list is capped at
+ * RECENT_AGENTS_MAX entries and persisted to disk.
  */
 export function setAiAgent(agentId: string): void {
-  preferences.aiAgent = agentId;
-  setStoreValue(AI_AGENT_STORE_KEY, agentId);
+  const filtered = preferences.recentAgents.filter((id) => id !== agentId);
+  preferences.recentAgents = [agentId, ...filtered].slice(0, RECENT_AGENTS_MAX);
+  setStoreValue(RECENT_AGENTS_STORE_KEY, preferences.recentAgents);
+}
+
+/**
+ * Return the most recently used agent that is present in `available`.
+ *
+ * Walks `recentAgents` in order and returns the first match, so local
+ * and remote contexts each get the best agent for their environment.
+ * Returns `null` if no recent agent is available.
+ */
+export function getPreferredAgent(available: { id: string }[]): string | null {
+  const ids = new Set(available.map((a) => a.id));
+  for (const agentId of preferences.recentAgents) {
+    if (ids.has(agentId)) return agentId;
+  }
+  return null;
 }

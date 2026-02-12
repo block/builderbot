@@ -63,7 +63,7 @@ impl Store {
     pub fn list_projects(&self) -> Result<Vec<Project>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, repo_path, subpath, created_at, updated_at FROM projects ORDER BY created_at DESC",
+            "SELECT id, repo_path, subpath, created_at, updated_at FROM projects ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Project {

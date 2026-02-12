@@ -15,6 +15,8 @@
   import {
     GitBranch,
     GitCommitHorizontal,
+    GitPullRequestCreateArrow,
+    GitPullRequestArrow,
     Trash2,
     FileDiff,
     FileText,
@@ -53,6 +55,8 @@
     copyPathToClipboard,
     type OpenerApp,
   } from './services/branch';
+  import { getPreferredAgent } from './stores/preferences.svelte';
+  import { agentState, REMOTE_AGENTS } from './stores/agent.svelte';
 
   interface Props {
     branch: Branch;
@@ -61,6 +65,17 @@
   }
 
   let { branch, deleting = false, onDelete }: Props = $props();
+
+  // =========================================================================
+  // PR button state
+  // =========================================================================
+  type PrState = 'idle' | 'creating' | 'error' | 'created';
+  let prStateOverride = $state<PrState | null>(null);
+  let prState = $derived<PrState>(prStateOverride ?? (branch.prNumber ? 'created' : 'idle'));
+  let prSessionId = $state<string | null>(null);
+  let prError = $state<string | null>(null);
+  let prUrl = $state<string | null>(null);
+  let showPrErrorDialog = $state(false);
 
   // Dropdown state
   let showMoreMenu = $state(false);
@@ -137,9 +152,13 @@
       sessionId: string;
       status: string;
     }>('session-status-changed', (event) => {
-      const { status } = event.payload;
+      const { sessionId: eventSessionId, status } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         loadTimeline();
+        // Handle PR session completion
+        if (eventSessionId === prSessionId) {
+          handlePrSessionComplete(status);
+        }
       }
     }).then((unlisten) => {
       unlistenStatus = unlisten;
@@ -553,6 +572,130 @@
       console.error('Failed to delete pending commit:', e);
     }
   }
+
+  // =========================================================================
+  // PR creation
+  // =========================================================================
+
+  /**
+   * Extract a PR URL from session messages.
+   * Looks for a line matching `PR_URL: <url>` in any assistant message.
+   * Also tries to find GitHub PR URLs directly in the text.
+   */
+  function extractPrUrl(messages: { content: string; role: string }[]): string | null {
+    for (const msg of messages) {
+      if (msg.role !== 'assistant') continue;
+      // Look for explicit PR_URL marker
+      const markerMatch = msg.content.match(/PR_URL:\s*(https?:\/\/\S+)/);
+      if (markerMatch) return markerMatch[1];
+      // Fallback: look for GitHub PR URL pattern
+      const ghMatch = msg.content.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
+      if (ghMatch) return ghMatch[0];
+    }
+    return null;
+  }
+
+  /**
+   * Extract the PR number from a GitHub PR URL.
+   */
+  function extractPrNumber(url: string): number | null {
+    const match = url.match(/\/pull\/(\d+)/);
+    return match ? parseInt(match[1], 10) : null;
+  }
+
+  /**
+   * Build the PR URL from the branch's PR number.
+   * We store only the number, so we need the repo URL to reconstruct.
+   * Falls back to null if we can't determine the repo URL.
+   */
+  function getPrUrlFromNumber(prNumber: number): string | null {
+    // If we captured the URL during creation, use it
+    if (prUrl) return prUrl;
+    // Otherwise we can't reconstruct without the repo URL — return null
+    // The user will need to view from the repo directly
+    return null;
+  }
+
+  async function handleCreatePr() {
+    if (prState === 'creating') return;
+
+    prStateOverride = 'creating';
+    prError = null;
+    prUrl = null;
+
+    try {
+      // Pick the best available agent for this branch's location (local vs remote)
+      const remote = branch.branchType === 'remote';
+      const agents = remote ? REMOTE_AGENTS : agentState.providers;
+      const provider = getPreferredAgent(agents) ?? undefined;
+      const sessionId = await commands.createPr(branch.id, provider);
+      prSessionId = sessionId;
+      // The session-status-changed listener will handle completion
+    } catch (e) {
+      prStateOverride = 'error';
+      prError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function handlePrSessionComplete(status: string) {
+    if (status === 'completed' && prSessionId) {
+      try {
+        // Fetch session messages to find the PR URL
+        const messages = await commands.getSessionMessages(prSessionId);
+        const foundUrl = extractPrUrl(messages);
+
+        if (foundUrl) {
+          prUrl = foundUrl;
+          const prNumber = extractPrNumber(foundUrl);
+          if (prNumber) {
+            // Save PR number to storage
+            await commands.updateBranchPr(branch.id, prNumber);
+            branch.prNumber = prNumber;
+          }
+          prStateOverride = 'created';
+        } else {
+          // Session completed but we couldn't find a PR URL
+          prStateOverride = 'error';
+          prError = 'PR session completed but no PR URL was found in the output.';
+        }
+      } catch (e) {
+        prStateOverride = 'error';
+        prError = e instanceof Error ? e.message : String(e);
+      }
+    } else {
+      // Session errored or was cancelled
+      prStateOverride = 'error';
+      prError = `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
+    }
+    prSessionId = null;
+  }
+
+  function handlePrButtonClick() {
+    if (prState === 'created') {
+      // View PR - open in browser
+      const url = prUrl || (branch.prNumber ? getPrUrlFromNumber(branch.prNumber) : null);
+      if (url) {
+        commands.openUrl(url);
+      }
+    } else if (prState === 'error') {
+      // Show error dialog
+      showPrErrorDialog = true;
+    } else if (prState === 'idle') {
+      handleCreatePr();
+    }
+    // 'creating' state — button shows spinner, no action on click
+  }
+
+  function handlePrErrorRetry() {
+    showPrErrorDialog = false;
+    handleCreatePr();
+  }
+
+  function handlePrErrorClose() {
+    showPrErrorDialog = false;
+    prStateOverride = null;
+    prError = null;
+  }
 </script>
 
 <svelte:window onclick={handleClickOutside} />
@@ -768,8 +911,44 @@
       {/if}
     </div>
 
-    <!-- Footer with separate note and commit buttons -->
+    <!-- Footer with PR button and note/commit buttons -->
     <div class="card-footer">
+      <button
+        class="pr-btn"
+        class:creating={prState === 'creating'}
+        class:error={prState === 'error'}
+        class:created={prState === 'created'}
+        onclick={handlePrButtonClick}
+        disabled={prState === 'creating'}
+        title={prState === 'created'
+          ? 'View PR'
+          : prState === 'error'
+            ? 'PR creation failed — click for details'
+            : prState === 'creating'
+              ? 'Creating PR…'
+              : 'Create PR'}
+      >
+        {#if prState === 'creating'}
+          <Spinner size={13} />
+        {:else if prState === 'error'}
+          <AlertCircle size={13} />
+        {:else if prState === 'created'}
+          <GitPullRequestArrow size={13} />
+        {:else}
+          <GitPullRequestCreateArrow size={13} />
+        {/if}
+        <span>
+          {#if prState === 'created'}
+            View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+          {:else if prState === 'creating'}
+            Creating PR…
+          {:else if prState === 'error'}
+            PR failed
+          {:else}
+            Create PR
+          {/if}
+        </span>
+      </button>
       <div class="new-btn-group">
         <button
           class="new-item-btn note-btn"
@@ -856,6 +1035,16 @@
     executionId={actionOutputModal.executionId}
     actionName={actionOutputModal.actionName}
     onClose={() => (actionOutputModal = null)}
+  />
+{/if}
+
+{#if showPrErrorDialog}
+  <ConfirmDialog
+    title="PR Creation Failed"
+    message={prError ?? 'An unknown error occurred while creating the PR.'}
+    confirmLabel="Retry"
+    onConfirm={handlePrErrorRetry}
+    onCancel={handlePrErrorClose}
   />
 {/if}
 
@@ -1190,8 +1379,66 @@
   /* Footer */
   .card-footer {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
     padding: 6px 12px;
+  }
+
+  /* PR button */
+  .pr-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    background: none;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    color: var(--text-faint);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
+    white-space: nowrap;
+  }
+
+  .pr-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: var(--border-muted);
+    background: var(--bg-hover);
+  }
+
+  .pr-btn:disabled {
+    cursor: default;
+  }
+
+  .pr-btn.creating {
+    color: var(--text-muted);
+    border-color: var(--border-muted);
+  }
+
+  .pr-btn.error {
+    color: var(--ui-danger);
+    border-color: var(--ui-danger);
+  }
+
+  .pr-btn.error:hover {
+    background: var(--ui-danger-bg);
+  }
+
+  .pr-btn.created {
+    color: var(--ui-success);
+    border-color: var(--ui-success);
+  }
+
+  .pr-btn.created:hover {
+    background: var(--bg-hover);
+  }
+
+  .pr-btn :global(svg) {
+    flex-shrink: 0;
   }
 
   /* Footer with separate note/commit buttons */

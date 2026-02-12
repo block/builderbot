@@ -1538,6 +1538,110 @@ fn detect_default_branch_cmd(repo_path: String) -> Result<String, String> {
 }
 
 // =============================================================================
+// PR creation
+// =============================================================================
+
+/// Create a pull request for a branch by kicking off an agent session.
+///
+/// The agent pushes the branch to the remote and creates a PR using `gh`.
+/// Returns the session ID so the frontend can track progress. The PR title
+/// uses conventional commit styling and the agent figures out changes by
+/// comparing the branch's HEAD with when it branched off the parent branch.
+#[tauri::command(rename_all = "camelCase")]
+fn create_pr(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let workdir = store
+        .get_workdir_for_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+    let mut working_dir = PathBuf::from(&workdir.path);
+    if let Some(ref subpath) = project.subpath {
+        working_dir = working_dir.join(subpath);
+    }
+
+    // Build the PR creation prompt
+    let base_branch = branch
+        .base_branch
+        .strip_prefix("origin/")
+        .unwrap_or(&branch.base_branch);
+
+    let prompt = format!(
+        r#"<action>
+Create a pull request for the current branch.
+
+Steps:
+1. First, look at the diff between the current branch and the base branch `{base_branch}` to understand all changes. Use `git log --oneline {base_branch}..HEAD` and `git diff {base_branch}...HEAD --stat` to see what changed.
+2. Push the current branch to the remote: `git push -u origin {branch_name}`
+3. Create a PR using the GitHub CLI: `gh pr create --base {base_branch} --fill-first`
+   - The title MUST use conventional commit style (e.g., "feat: add user authentication", "fix: resolve null pointer in parser", "refactor: extract validation logic")
+   - Choose the most appropriate conventional commit type (feat, fix, refactor, docs, style, test, chore, perf, ci, build) based on the actual changes
+   - The body should be a concise summary of the changes
+
+IMPORTANT: After creating the PR, you MUST output the PR URL on its own line in this exact format:
+PR_URL: https://github.com/...
+
+This is critical - the application parses this to link the PR.
+</action>"#,
+        base_branch = base_branch,
+        branch_name = branch.branch_name,
+    );
+
+    // Create the session
+    let mut session = store::Session::new_running(&prompt, &working_dir);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
+    }
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    session_runner::start_session(
+        session_runner::SessionConfig {
+            session_id: session.id.clone(),
+            prompt,
+            working_dir,
+            agent_session_id: None,
+            pre_head_sha: None,
+            provider,
+            workspace_name: None,
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(session.id)
+}
+
+/// Update the PR number for a branch.
+#[tauri::command(rename_all = "camelCase")]
+fn update_branch_pr(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    pr_number: Option<u64>,
+) -> Result<(), String> {
+    get_store(&store)?
+        .update_branch_pr_number(&branch_id, pr_number)
+        .map_err(|e| e.to_string())
+}
+
+// =============================================================================
 // Utilities
 // =============================================================================
 
@@ -1931,6 +2035,8 @@ pub fn run() {
             delete_pending_commit,
             list_git_branches,
             detect_default_branch_cmd,
+            create_pr,
+            update_branch_pr,
             open_url,
             is_sq_available,
             get_available_openers,

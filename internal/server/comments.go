@@ -193,12 +193,13 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 // handleCreateThread handles POST /api/threads.
 func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Project string          `json:"project"`
-		Path    string          `json:"path"`
-		Anchor  comments.Anchor `json:"anchor"`
-		Author  string          `json:"author"`
-		Role    string          `json:"role"`
-		Body    string          `json:"body"`
+		Project          string          `json:"project"`
+		Path             string          `json:"path"`
+		Anchor           comments.Anchor `json:"anchor"`
+		Author           string          `json:"author"`
+		Role             string          `json:"role"`
+		Body             string          `json:"body"`
+		SuggestedReplies []string        `json:"suggestedReplies,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -211,9 +212,10 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 	}
 
 	comment := comments.Comment{
-		Author: req.Author,
-		Role:   req.Role,
-		Body:   req.Body,
+		Author:           req.Author,
+		Role:             req.Role,
+		Body:             req.Body,
+		SuggestedReplies: req.SuggestedReplies,
 	}
 
 	thread, err := s.comments.CreateThread(req.Project, req.Path, req.Anchor, comment)
@@ -232,11 +234,12 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 // handleAddComment handles POST /api/threads/{id}/comments.
 func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request, threadID string) {
 	var req struct {
-		Project string `json:"project"`
-		Path    string `json:"path"`
-		Author  string `json:"author"`
-		Role    string `json:"role"`
-		Body    string `json:"body"`
+		Project          string   `json:"project"`
+		Path             string   `json:"path"`
+		Author           string   `json:"author"`
+		Role             string   `json:"role"`
+		Body             string   `json:"body"`
+		SuggestedReplies []string `json:"suggestedReplies,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -249,9 +252,10 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request, thread
 	}
 
 	comment := comments.Comment{
-		Author: req.Author,
-		Role:   req.Role,
-		Body:   req.Body,
+		Author:           req.Author,
+		Role:             req.Role,
+		Body:             req.Body,
+		SuggestedReplies: req.SuggestedReplies,
 	}
 
 	thread, err := s.comments.AddComment(req.Project, req.Path, threadID, comment)

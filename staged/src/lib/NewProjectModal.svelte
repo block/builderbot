@@ -311,7 +311,6 @@
     box-shadow: var(--shadow-elevated);
     display: flex;
     flex-direction: column;
-    overflow: hidden;
   }
 
   .modal-header {
@@ -320,6 +319,7 @@
     gap: 8px;
     padding: 16px;
     border-bottom: 1px solid var(--border-subtle);
+    border-radius: 12px 12px 0 0;
   }
 
   .modal-header h2 {

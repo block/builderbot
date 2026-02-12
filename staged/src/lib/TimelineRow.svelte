@@ -241,7 +241,7 @@
 
   .timeline-row.pending .timeline-icon {
     background-color: var(--bg-elevated);
-    border-color: var(--border-muted);
+    border-color: transparent;
   }
 
   .timeline-row.pending .timeline-icon :global(.spinner) {

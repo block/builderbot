@@ -23,6 +23,7 @@
 
   let selectedRepo = $state<string | null>(null);
   let subpath = $state('');
+  let importWorktrees = $state(false);
   let saving = $state(false);
   let error = $state<string | null>(null);
 
@@ -121,7 +122,11 @@
 
     try {
       const normalizedSubpath = subpath.trim().replace(/^\/+|\/+$/g, '') || undefined;
-      const project = await commands.createProject(selectedRepo, normalizedSubpath);
+      const project = await commands.createProject(
+        selectedRepo,
+        normalizedSubpath,
+        importWorktrees
+      );
 
       // Auto-trigger action detection in background
       detectAndSaveActions(project.id).catch(() => {}); // Silent failure
@@ -273,6 +278,14 @@
             For monorepos: subdirectory to use as working directory for AI sessions
           </span>
         </div>
+
+        <label class="checkbox-group">
+          <input type="checkbox" bind:checked={importWorktrees} disabled={saving} />
+          <span class="checkbox-label">Import existing worktrees</span>
+          <span class="checkbox-help">
+            Detect and import git worktrees that already exist for this repo
+          </span>
+        </label>
 
         {#if error}
           <div class="error-message">{error}</div>
@@ -505,6 +518,40 @@
   .help-text {
     font-size: var(--size-xs);
     color: var(--text-muted);
+  }
+
+  .checkbox-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+  }
+
+  .checkbox-group input[type='checkbox'] {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: var(--ui-accent);
+    cursor: pointer;
+  }
+
+  .checkbox-group input[type='checkbox']:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .checkbox-label {
+    font-size: var(--size-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .checkbox-help {
+    width: 100%;
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+    padding-left: 24px;
   }
 
   .error-message {

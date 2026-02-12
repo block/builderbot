@@ -497,8 +497,10 @@ fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     repo_path: String,
     subpath: Option<String>,
+    import_worktrees: Option<bool>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
+    let should_import = import_worktrees.unwrap_or(false);
 
     // Validate that the path is a git repo
     let path = Path::new(&repo_path);
@@ -506,23 +508,24 @@ fn create_project(
         return Err(format!("Not a git repository: {repo_path}"));
     }
 
-    // Check for duplicate — still import worktrees even for existing projects,
-    // since they may have been added before this feature existed.
+    // Check for duplicate — import worktrees for existing projects only if requested.
     if let Some(existing) = store
         .get_project_by_repo(&repo_path)
         .map_err(|e| e.to_string())?
     {
-        match import_existing_worktrees(&store, &existing) {
-            Ok(count) if count > 0 => {
-                log::info!(
-                    "Imported {count} worktree(s) for existing project '{}'",
-                    existing.repo_path
-                );
+        if should_import {
+            match import_existing_worktrees(&store, &existing) {
+                Ok(count) if count > 0 => {
+                    log::info!(
+                        "Imported {count} worktree(s) for existing project '{}'",
+                        existing.repo_path
+                    );
+                }
+                Err(e) => {
+                    log::warn!("Failed to import worktrees for existing project: {e}");
+                }
+                _ => {}
             }
-            Err(e) => {
-                log::warn!("Failed to import worktrees for existing project: {e}");
-            }
-            _ => {}
         }
         return Ok(existing);
     }
@@ -533,19 +536,21 @@ fn create_project(
     }
     store.create_project(&project).map_err(|e| e.to_string())?;
 
-    // Import any existing worktrees for this project
-    match import_existing_worktrees(&store, &project) {
-        Ok(count) => {
-            if count > 0 {
-                log::info!(
-                    "Imported {count} existing worktree(s) for project '{}'",
-                    project.repo_path
-                );
+    // Import existing worktrees only if requested
+    if should_import {
+        match import_existing_worktrees(&store, &project) {
+            Ok(count) => {
+                if count > 0 {
+                    log::info!(
+                        "Imported {count} existing worktree(s) for project '{}'",
+                        project.repo_path
+                    );
+                }
             }
-        }
-        Err(e) => {
-            // Log the error but don't fail project creation
-            log::warn!("Failed to import existing worktrees: {e}");
+            Err(e) => {
+                // Log the error but don't fail project creation
+                log::warn!("Failed to import existing worktrees: {e}");
+            }
         }
     }
 

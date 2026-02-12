@@ -149,6 +149,18 @@
     allBranchRefs = branchRefsResult.status === 'fulfilled' ? branchRefsResult.value : [];
 
     loading = false;
+
+    // Fire-and-forget: prune stale remote-tracking refs in the background.
+    // Once done, silently refresh the branch list so any stale refs disappear.
+    commands
+      .pruneRemoteRefs(project.repoPath)
+      .then(() => commands.listGitBranches(project.repoPath))
+      .then((refs) => {
+        allBranchRefs = refs;
+      })
+      .catch(() => {
+        // Best-effort — ignore errors (e.g. no network, no remote configured)
+      });
   });
 
   // Focus branch input

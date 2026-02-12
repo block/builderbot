@@ -65,15 +65,22 @@ pub struct BranchRef {
     pub remote: Option<String>,
 }
 
+/// Prune stale remote-tracking refs (branches deleted on the remote).
+///
+/// This is a network operation that can be slow, so callers should run it
+/// in the background rather than blocking the UI.
+pub fn prune_remote(repo: &Path) -> Result<(), GitError> {
+    cli::run(repo, &["remote", "prune", "origin"])?;
+    Ok(())
+}
+
 /// List branches (local and remote) for base branch selection.
 /// Returns branches sorted with local first, then remote.
 /// Filters out HEAD references.
-/// Prunes stale remote-tracking refs first so deleted remote branches don't appear.
+///
+/// Note: this no longer prunes stale remote-tracking refs automatically.
+/// Call `prune_remote` separately (in the background) to clean up stale refs.
 pub fn list_branches(repo: &Path) -> Result<Vec<BranchRef>, GitError> {
-    // Prune stale remote-tracking refs (branches deleted on the remote).
-    // Best-effort: ignore errors (e.g. no network, no remote configured).
-    let _ = cli::run(repo, &["remote", "prune", "origin"]);
-
     let output = cli::run(
         repo,
         &[

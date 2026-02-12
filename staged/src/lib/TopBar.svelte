@@ -7,8 +7,8 @@
 <script lang="ts">
   import { Palette, Plus, Bot } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import ThemeSelectorModal from './ThemeSelectorModal.svelte';
-  import AgentDropdown from './AgentDropdown.svelte';
+  import ThemeSelectorModal from './features/settings/ThemeSelectorModal.svelte';
+  import AgentDropdown from './features/agents/AgentDropdown.svelte';
 
   let showThemeModal = $state(false);
   let showAgentDropdown = $state(false);

@@ -1,0 +1,300 @@
+{{define "title"}}In Review - Birdseye{{end}}
+
+{{define "pagestyle"}}
+    .empty { color: #888; font-style: italic; }
+
+    /* Source sections */
+    .source-section {
+        margin-bottom: 16px;
+        border: 1px solid #e8e8e8;
+        border-radius: 6px;
+        background: #fff;
+        transition: border-color 0.15s;
+    }
+    .source-section:hover { border-color: #ccc; }
+    .source-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 16px;
+        flex-wrap: wrap;
+    }
+    .source-header .source-badge {
+        font-size: 0.65em;
+        font-weight: 600;
+        padding: 1px 5px;
+        border-radius: 3px;
+        letter-spacing: 0.3px;
+        flex-shrink: 0;
+    }
+
+    /* Breadcrumb links in the header */
+    .source-breadcrumb {
+        font-size: 0.8em;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex-wrap: wrap;
+    }
+    .source-breadcrumb a {
+        color: #666;
+        text-decoration: none;
+    }
+    .source-breadcrumb a:hover { color: #0066cc; text-decoration: underline; }
+    .source-breadcrumb .breadcrumb-sep { color: #ccc; }
+    .source-breadcrumb .breadcrumb-source { text-transform: uppercase; }
+
+    /* Typing indicator */
+    .file-typing {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: #2da44e;
+        font-size: 0.75em;
+        font-weight: 500;
+        flex-shrink: 0;
+    }
+    .file-typing .agent-dot {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        background: #2da44e;
+        border-radius: 50%;
+        flex-shrink: 0;
+    }
+    .file-typing .typing-dots span {
+        animation: typing-blink 1.4s infinite both;
+    }
+    .file-typing .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .file-typing .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes typing-blink {
+        0%, 80%, 100% { opacity: 0.3; }
+        40% { opacity: 1; }
+    }
+
+    /* File rows within source sections - match project page */
+    .files { list-style: none; padding: 0; margin: 0; }
+    .source-section .file {
+        margin-bottom: 0;
+        border: none;
+        border-radius: 0;
+        border-top: 1px solid #f0f0f0;
+        background: transparent;
+    }
+    .source-section .file:hover {
+        border-color: #f0f0f0;
+        background: #eff0f1;
+    }
+    .source-section .file:last-child { border-radius: 0 0 6px 6px; }
+
+    .file-age {
+        color: #888;
+        font-size: 0.85em;
+        white-space: nowrap;
+    }
+
+    /* File three-dot menu */
+    .file-dots {
+        background: none;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-size: 0.85em;
+        color: #999;
+        cursor: pointer;
+        line-height: 1;
+    }
+    .file-dots:hover { color: #333; border-color: #ccc; }
+    .file-menu-wrap { position: relative; }
+    .file-menu {
+        display: none;
+        position: absolute;
+        right: 0;
+        top: calc(100% + 4px);
+        background: #fff;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        z-index: 100;
+        min-width: 200px;
+        padding: 4px 0;
+    }
+    .file-menu-wrap.menu-open .file-menu { display: block; }
+    .file-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 12px;
+        border: none;
+        background: none;
+        font-size: 0.85em;
+        color: #333;
+        cursor: pointer;
+    }
+    .file-menu button:hover { background: #f5f5f5; }
+    .file-menu .menu-divider {
+        border-top: 1px solid #eee;
+        margin: 4px 0;
+    }
+    .file-menu .menu-danger { color: #cf222e; }
+    .file-menu .menu-danger:hover { background: #fff5f5; }
+{{end}}
+
+{{define "content"}}
+    <div id="groups-container">
+    {{if .Page.Groups}}
+        {{range $group := .Page.Groups}}
+        <div class="source-section">
+            <div class="source-header">
+                {{if $group.BadgeText}}<span class="source-badge" style="color:{{$group.BadgeColor}};background:{{$group.BadgeBg}}">{{$group.BadgeText}}</span>{{end}}
+                <span class="source-breadcrumb">
+                    {{if $group.Workspace}}<a href="{{$group.WorkspaceURL}}">{{$group.Workspace}}</a><span class="breadcrumb-sep">/</span>{{end}}<a href="/project/{{$group.ProjectQN}}">{{$group.ProjectName}}</a><span class="breadcrumb-sep">/</span><a href="/project/{{$group.ProjectQN}}#source-{{$group.SourceName}}" class="breadcrumb-source">{{$group.SourceName}}</a>
+                </span>
+                {{if gt $group.TypingThreads 0}}
+                <span class="file-typing" style="margin-left:auto">
+                    <span class="agent-dot"></span>
+                    <span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>
+                </span>
+                {{end}}
+            </div>
+            <ul class="files">
+                {{range $group.Files}}
+                <li class="file" data-project="{{.Project}}" data-project-path="{{.ProjectPath}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
+                    <div class="file-left">
+                        {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
+                        <span class="file-name"><a href="/file/{{.Project}}/{{.Path}}">{{.Name}}</a></span>
+                    </div>
+                    <div class="file-right">
+                        <span class="file-age">{{.Age}}</span>
+                        <div class="file-menu-wrap">
+                            <button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>
+                            <div class="file-menu"></div>
+                        </div>
+                    </div>
+                </li>
+                {{end}}
+            </ul>
+        </div>
+        {{end}}
+    {{else}}
+    <p class="empty">No files are currently in review.</p>
+    {{end}}
+    </div>
+{{end}}
+
+{{define "pagescript"}}
+    // File menu support
+    function toggleFileMenu(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var wrap = event.target.closest('.file-menu-wrap');
+        document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) {
+            if (w !== wrap) w.classList.remove('menu-open');
+        });
+        wrap.classList.toggle('menu-open');
+    }
+
+    document.addEventListener('click', function() {
+        document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
+    });
+
+    initFileMenus();
+    loadPublishStates();
+
+    // SSE for live updates
+    onSSE(function(data) {
+        if (data.type === 'comments' || data.type === 'agents') debouncedRefresh('in-review', refreshInReview);
+    });
+
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) debouncedRefresh('in-review', refreshInReview);
+    });
+
+    function typingHTML(count) {
+        if (count <= 0) return '';
+        return '<span class="file-typing"><span class="agent-dot"></span>' +
+            '<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span></span>';
+    }
+
+    function renderFileRow(f) {
+        var html = '<li class="file" data-project="' + escapeHtml(f.project) + '" data-project-path="' + escapeHtml(f.projectPath || '') + '" data-path="' + escapeHtml(f.path) + '" data-source="' + escapeHtml(f.source || '') + '" data-source-type="' + escapeHtml(f.sourceType || '') + '">';
+        html += '<div class="file-left">';
+        if (f.fileType && f.fileType !== 'other') {
+            html += '<span class="file-type ' + escapeHtml(f.fileType) + '">' + escapeHtml(f.fileType) + '</span>';
+        }
+        html += '<span class="file-name"><a href="/file/' + escapeHtml(f.project) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>';
+        html += '</div>';
+        html += '<div class="file-right">';
+        html += '<span class="file-age">' + escapeHtml(f.age || '') + '</span>';
+        html += '<div class="file-menu-wrap">';
+        html += '<button class="file-dots" onclick="toggleFileMenu(event)">&#8942;</button>';
+        html += '<div class="file-menu"></div>';
+        html += '</div>';
+        html += '</div>';
+        html += '</li>';
+        return html;
+    }
+
+    async function refreshInReview() {
+        try {
+            var response = await fetch('/api/in-review');
+            var groups = await response.json();
+            var container = document.getElementById('groups-container');
+
+            if (!groups || groups.length === 0) {
+                container.innerHTML = '<p class="empty">No files are currently in review.</p>';
+                updateSidebarReviewLink(false);
+                return;
+            }
+
+            var html = '';
+            groups.forEach(function(g) {
+                html += '<div class="source-section">';
+                html += '<div class="source-header">';
+                if (g.badgeText) {
+                    html += '<span class="source-badge" style="color:' + escapeHtml(g.badgeColor) + ';background:' + escapeHtml(g.badgeBg) + '">' + escapeHtml(g.badgeText) + '</span>';
+                }
+                html += '<span class="source-breadcrumb">';
+                if (g.workspace) {
+                    html += '<a href="' + escapeHtml(g.workspaceURL) + '">' + escapeHtml(g.workspace) + '</a><span class="breadcrumb-sep">/</span>';
+                }
+                html += '<a href="/project/' + escapeHtml(g.projectQN) + '">' + escapeHtml(g.projectName) + '</a>';
+                html += '<span class="breadcrumb-sep">/</span>';
+                html += '<a href="/project/' + escapeHtml(g.projectQN) + '#source-' + escapeHtml(g.sourceName) + '" class="breadcrumb-source">' + escapeHtml(g.sourceName) + '</a>';
+                html += '</span>';
+                if (g.typingThreads > 0) {
+                    html += '<span style="margin-left:auto">' + typingHTML(g.typingThreads) + '</span>';
+                }
+                html += '</div>';
+                html += '<ul class="files">';
+                (g.files || []).forEach(function(f) {
+                    html += renderFileRow(f);
+                });
+                html += '</ul></div>';
+            });
+
+            container.innerHTML = html;
+            initFileMenus();
+            loadPublishStates();
+            updateSidebarReviewLink(true);
+        } catch (err) {
+            console.error('Failed to refresh in-review:', err);
+        }
+    }
+
+    function updateSidebarReviewLink(hasReviews) {
+        var link = document.getElementById('sidebar-review-link');
+        if (!link) return;
+        if (hasReviews) {
+            link.classList.remove('no-reviews');
+            link.href = '/in-review';
+        } else {
+            link.classList.add('no-reviews');
+            link.removeAttribute('href');
+        }
+    }
+{{end}}
+
+{{template "layout" .}}

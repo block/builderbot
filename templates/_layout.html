@@ -109,6 +109,8 @@
             text-decoration: none;
         }
         .sidebar-link:hover { color: #0066cc; text-decoration: none; background: #f0f0f0; }
+        .sidebar-link.active { background: #e8f0fe; color: #0066cc; font-weight: 500; }
+        .sidebar-link.no-reviews { color: #bbb; pointer-events: none; cursor: default; }
         .sidebar-add {
             color: #aaa;
             font-size: 0.85em;
@@ -516,7 +518,8 @@
             {{end}}
 
             <div class="sidebar-divider"></div>
-            <a class="sidebar-link" href="/recent">Recent</a>
+            <a class="sidebar-link{{if eq .Nav.ActivePage "in-review"}} active{{end}}{{if not (gt .Nav.ReviewCount 0)}} no-reviews{{end}}" id="sidebar-review-link"{{if gt .Nav.ReviewCount 0}} href="/in-review"{{end}}>In Review</a>
+            <a class="sidebar-link{{if eq .Nav.ActivePage "recent"}} active{{end}}" href="/recent">Recent</a>
             <div class="sidebar-add" onclick="showAddDialog(event)">+ Add workspace or project</div>
             {{end}}
 
@@ -809,12 +812,33 @@
             updateSelectionBar();
         }
 
-        // --- Sidebar SSE refresh (agent dots) ---
+        // --- Sidebar SSE refresh (agent dots, review link) ---
         onSSE(function(data) {
             if (data.type === 'projects' || data.type === 'agents') {
                 debouncedRefresh('sidebar', refreshSidebar);
             }
+            if (data.type === 'comments') {
+                debouncedRefresh('sidebar-review', refreshSidebarReview);
+            }
         });
+
+        function refreshSidebarReview() {
+            fetch('/api/in-review')
+                .then(function(r) { return r.json(); })
+                .then(function(groups) {
+                    var link = document.getElementById('sidebar-review-link');
+                    if (!link) return;
+                    var hasReviews = groups && groups.length > 0;
+                    if (hasReviews) {
+                        link.classList.remove('no-reviews');
+                        link.href = '/in-review';
+                    } else {
+                        link.classList.add('no-reviews');
+                        link.removeAttribute('href');
+                    }
+                })
+                .catch(function() {});
+        }
 
         function refreshSidebar() {
             fetch('/api/projects')

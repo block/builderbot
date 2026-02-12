@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use tokio::sync::oneshot;
 
 use crate::git::auto_commit_if_changes;
 use crate::models::{ActionStatus, ExecutionEvent, OutputChunk};
@@ -56,24 +57,17 @@ impl ActionExecutor {
         }
     }
 
-    /// Execute a shell command in the specified working directory
-    ///
-    /// # Arguments
-    /// * `command` - The shell command to execute
-    /// * `working_dir` - Directory to execute the command in
-    /// * `metadata` - Action metadata (id, name, auto_commit flag)
-    /// * `listener` - Event listener for execution events
-    ///
-    /// # Returns
-    /// A unique execution ID that can be used to stop the action or retrieve output
-    pub async fn execute(
+    /// Internal implementation that spawns the command and returns both the
+    /// execution ID and a oneshot receiver that fires when the action completes.
+    async fn execute_inner(
         &self,
         command: String,
         working_dir: String,
         metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
-    ) -> Result<String> {
+    ) -> Result<(String, oneshot::Receiver<()>)> {
         let execution_id = uuid::Uuid::new_v4().to_string();
+        let (completion_tx, completion_rx) = oneshot::channel();
 
         // Determine which shell to use
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
@@ -306,7 +300,48 @@ impl ActionExecutor {
                         }
                     }
                 });
+
+            // Signal completion (ignore error if receiver was dropped)
+            let _ = completion_tx.send(());
         });
+
+        Ok((execution_id, completion_rx))
+    }
+
+    /// Execute a shell command in the specified working directory
+    ///
+    /// Returns a unique execution ID. The action runs in the background.
+    /// Use `execute_and_wait` if you need to wait for completion.
+    pub async fn execute(
+        &self,
+        command: String,
+        working_dir: String,
+        metadata: ActionMetadata,
+        listener: Arc<dyn ExecutionListener>,
+    ) -> Result<String> {
+        let (execution_id, _completion_rx) =
+            self.execute_inner(command, working_dir, metadata, listener)
+                .await?;
+        Ok(execution_id)
+    }
+
+    /// Execute a shell command and wait for it to complete
+    ///
+    /// Returns the execution ID after the action has finished.
+    /// This is useful for running actions sequentially.
+    pub async fn execute_and_wait(
+        &self,
+        command: String,
+        working_dir: String,
+        metadata: ActionMetadata,
+        listener: Arc<dyn ExecutionListener>,
+    ) -> Result<String> {
+        let (execution_id, completion_rx) =
+            self.execute_inner(command, working_dir, metadata, listener)
+                .await?;
+
+        // Wait for the background thread to signal completion
+        let _ = completion_rx.await;
 
         Ok(execution_id)
     }

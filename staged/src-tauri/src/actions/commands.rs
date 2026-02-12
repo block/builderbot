@@ -175,7 +175,8 @@ pub async fn run_prerun_actions(
         .map_err(|e| format!("Failed to get workdir: {e}"))?
         .ok_or_else(|| "No worktree found for branch".to_string())?;
 
-    // Execute each prerun action
+    // Execute each prerun action sequentially, waiting for each to complete
+    // before starting the next one
     let mut execution_ids = Vec::new();
     for action in prerun_actions {
         let listener = Arc::new(TauriExecutionListener::new(
@@ -192,7 +193,7 @@ pub async fn run_prerun_actions(
         };
 
         let execution_id = executor
-            .execute(action.command, workdir.path.clone(), metadata, listener)
+            .execute_and_wait(action.command, workdir.path.clone(), metadata, listener)
             .await
             .map_err(|e| format!("Failed to execute prerun action: {e}"))?;
 

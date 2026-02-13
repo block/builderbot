@@ -1810,6 +1810,23 @@ fn is_sq_available() -> bool {
     blox::is_sq_available()
 }
 
+/// Read a text file from an absolute path.
+///
+/// Used by the frontend to read file contents from paths provided by
+/// Tauri's native drag-and-drop events (which give file paths, not
+/// File objects like browser drag events).
+#[tauri::command(rename_all = "camelCase")]
+fn read_text_file(file_path: String) -> Result<String, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err(format!("File does not exist: {file_path}"));
+    }
+    if !path.is_file() {
+        return Err(format!("Not a file: {file_path}"));
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))
+}
+
 // =============================================================================
 // Open In commands
 // =============================================================================
@@ -2230,6 +2247,7 @@ pub fn run() {
             push_branch,
             open_url,
             is_sq_available,
+            read_text_file,
             get_available_openers,
             open_in_app,
             session_commands::discover_acp_providers,

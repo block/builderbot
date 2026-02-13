@@ -857,53 +857,56 @@
   }
 
   // =========================================================================
-  // Drag-and-drop text files → notes
+  // Drag-and-drop text files → notes (via Tauri native drag-drop events)
   // =========================================================================
 
+  // Tauri v2 intercepts file drops at the OS level, so standard browser
+  // drag/drop events never fire for files dragged from Finder/Explorer.
+  // Instead we use getCurrentWebview().onDragDropEvent() which provides
+  // file paths and a physical position we can use to hit-test our card.
+
   let dragOver = $state(false);
-  let dragCounter = $state(0);
+  let cardElement: HTMLDivElement | undefined = $state();
+  let unlistenDragDrop: UnlistenFn | null = null;
 
-  function handleDragEnter(e: DragEvent) {
-    e.preventDefault();
-    dragCounter++;
-    if (e.dataTransfer?.types.includes('Files')) {
-      dragOver = true;
-    }
+  /** Text-file extensions we accept for note creation. */
+  const TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.text', '.rst', '.org', '.adoc'];
+
+  function isTextFile(filePath: string): boolean {
+    const lower = filePath.toLowerCase();
+    return TEXT_EXTENSIONS.some((ext) => lower.endsWith(ext));
   }
 
-  function handleDragOver(e: DragEvent) {
-    e.preventDefault();
-    if (e.dataTransfer) {
-      e.dataTransfer.dropEffect = 'copy';
-    }
+  function fileNameFromPath(filePath: string): string {
+    const parts = filePath.split('/');
+    const name = parts[parts.length - 1] || filePath;
+    return name.replace(/\.[^.]+$/, '');
   }
 
-  function handleDragLeave(e: DragEvent) {
-    e.preventDefault();
-    dragCounter--;
-    if (dragCounter <= 0) {
-      dragCounter = 0;
-      dragOver = false;
-    }
-  }
-
-  async function handleDrop(e: DragEvent) {
-    e.preventDefault();
-    dragOver = false;
-    dragCounter = 0;
-
-    const files = e.dataTransfer?.files;
-    if (!files || files.length === 0) return;
-
-    const textFiles = Array.from(files).filter(
-      (f) => f.type.startsWith('text/') || f.name.endsWith('.md') || f.name.endsWith('.txt')
+  /** Check if a physical position is within this card's bounding rect. */
+  function isPositionOverCard(x: number, y: number): boolean {
+    if (!cardElement) return false;
+    const rect = cardElement.getBoundingClientRect();
+    // Tauri gives physical pixels; convert using devicePixelRatio
+    const dpr = window.devicePixelRatio || 1;
+    const logicalX = x / dpr;
+    const logicalY = y / dpr;
+    return (
+      logicalX >= rect.left &&
+      logicalX <= rect.right &&
+      logicalY >= rect.top &&
+      logicalY <= rect.bottom
     );
-    if (textFiles.length === 0) return;
+  }
 
-    for (const file of textFiles) {
+  async function handleFileDrop(paths: string[]) {
+    const textPaths = paths.filter(isTextFile);
+    if (textPaths.length === 0) return;
+
+    for (const filePath of textPaths) {
       try {
-        const content = await file.text();
-        const title = file.name.replace(/\.[^.]+$/, '');
+        const content = await commands.readTextFile(filePath);
+        const title = fileNameFromPath(filePath);
         await commands.createNote(branch.id, title, content);
       } catch (e) {
         console.error('Failed to create note from dropped file:', e);
@@ -912,12 +915,45 @@
 
     loadTimeline();
   }
+
+  // Register the Tauri drag-drop listener once on mount
+  $effect(() => {
+    // Import dynamically to avoid issues if running outside Tauri
+    import('@tauri-apps/api/webview').then(({ getCurrentWebview }) => {
+      getCurrentWebview()
+        .onDragDropEvent((event) => {
+          if (event.payload.type === 'enter' || event.payload.type === 'over') {
+            const { x, y } = event.payload.position;
+            const over = isPositionOverCard(x, y);
+            if (dragOver !== over) {
+              dragOver = over;
+            }
+          } else if (event.payload.type === 'drop') {
+            const { x, y } = event.payload.position;
+            if (isPositionOverCard(x, y)) {
+              handleFileDrop(event.payload.paths);
+            }
+            dragOver = false;
+          } else if (event.payload.type === 'leave') {
+            dragOver = false;
+          }
+        })
+        .then((unlisten) => {
+          unlistenDragDrop = unlisten;
+        });
+    });
+
+    return () => {
+      unlistenDragDrop?.();
+    };
+  });
 </script>
 
 <svelte:window onclick={handleClickOutside} />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+  bind:this={cardElement}
   class="branch-card"
   class:deleting
   class:creating-worktree={branch.branchType === 'local' &&
@@ -925,10 +961,6 @@
     !worktreeError &&
     !deleting}
   class:drag-over={dragOver}
-  ondragenter={handleDragEnter}
-  ondragover={handleDragOver}
-  ondragleave={handleDragLeave}
-  ondrop={handleDrop}
 >
   {#if deleting}
     <div class="deleting-overlay">

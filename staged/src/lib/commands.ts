@@ -207,6 +207,11 @@ export function openUrl(url: string): Promise<void> {
   return invoke('open_url', { url });
 }
 
+/** Read a text file from an absolute path (used for Tauri native drag-and-drop). */
+export function readTextFile(filePath: string): Promise<string> {
+  return invoke('read_text_file', { filePath });
+}
+
 /** Intercept link clicks so they open in the system browser, not the webview. */
 export function handleExternalLinkClick(e: MouseEvent): void {
   const anchor = (e.target as HTMLElement).closest('a');

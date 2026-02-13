@@ -11,7 +11,6 @@
 <script lang="ts">
   import {
     Folder,
-    Home,
     GitCommitHorizontal,
     StickyNote,
     FolderTree,
@@ -25,7 +24,7 @@
   import type { Branch, CommitTimelineItem, NoteTimelineItem } from './types';
   import { projectStore } from './features/projects/projectStore.svelte';
   import { projectDisplayName } from './shared/utils';
-  import { navigation, selectProject, goHome } from './navigation.svelte';
+  import { navigation, goHome } from './navigation.svelte';
   import * as commands from './commands';
   import {
     preferences,
@@ -294,21 +293,6 @@
     return [...groups.values()].sort((a, b) => b.maxTs - a.maxTs);
   });
 
-  // ── Project last-activity helpers ──
-
-  function getProjectLastActivity(projectId: string): string {
-    const items = timelineItems.filter((i) => i.projectId === projectId);
-    if (items.length > 0) {
-      return formatRelativeTime(items[0].timestamp);
-    }
-    const branches = projectStore.branchesByProject.get(projectId) || [];
-    if (branches.length > 0) {
-      const latest = Math.max(...branches.map((b) => b.updatedAt));
-      return formatRelativeTime(Math.floor(latest / 1000));
-    }
-    return '';
-  }
-
   // ── Helpers ──
 
   function formatRelativeTime(timestamp: number): string {
@@ -361,31 +345,18 @@
 </script>
 
 <aside class="sidebar" class:resizing style:width="{preferences.sidebarWidth}px">
-  <!-- ── Projects navigation ── -->
-  <div class="sidebar-header">
-    <button class="sidebar-title-btn" onclick={goHome} title="All projects">
-      <span class="sidebar-title">Projects</span>
+  <!-- ── Top nav ── -->
+  <nav class="sidebar-nav">
+    <button
+      class="nav-item"
+      class:active={!navigation.selectedProjectId}
+      onclick={goHome}
+      title="All projects"
+    >
+      <Folder size={14} />
+      <span>Projects</span>
     </button>
-  </div>
-
-  {#if projectStore.projects.length > 0}
-    <div class="projects-nav">
-      {#each projectStore.projects as p (p.id)}
-        <button
-          class="project-nav-item"
-          class:active={navigation.selectedProjectId === p.id}
-          onclick={() => selectProject(p.id)}
-          title={projectDisplayName(p)}
-        >
-          <span class="project-nav-icon"><Folder size={12} /></span>
-          <span class="project-nav-name">{projectDisplayName(p)}</span>
-          {#if getProjectLastActivity(p.id)}
-            <span class="project-nav-time">{getProjectLastActivity(p.id)}</span>
-          {/if}
-        </button>
-      {/each}
-    </div>
-  {/if}
+  </nav>
 
   <!-- ── Activity feed ── -->
   <div class="activity-header">
@@ -556,25 +527,41 @@
     background-color: var(--ui-accent);
   }
 
-  .sidebar-header {
+  /* ── Top nav ── */
+
+  .sidebar-nav {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 12px 6px;
+    flex-direction: column;
+    padding: 8px 6px 4px;
     flex-shrink: 0;
   }
 
-  .sidebar-title-btn {
+  .nav-item {
     display: flex;
     align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 6px;
     background: transparent;
     border: none;
-    padding: 0;
+    border-radius: 5px;
+    color: var(--text-muted);
+    font-size: var(--size-base);
+    font-weight: 500;
+    text-align: left;
     cursor: pointer;
+    transition:
+      background-color 0.1s,
+      color 0.1s;
   }
 
-  .sidebar-title-btn:hover .sidebar-title {
-    color: var(--text-muted);
+  .nav-item:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .nav-item.active {
+    color: var(--text-primary);
   }
 
   .sidebar-title {
@@ -583,69 +570,6 @@
     color: var(--text-faint);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-  }
-
-  /* ── Projects navigation ── */
-
-  .projects-nav {
-    display: flex;
-    flex-direction: column;
-    padding: 0 6px 6px;
-    flex-shrink: 0;
-  }
-
-  .project-nav-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 5px 6px;
-    background: transparent;
-    border: none;
-    border-radius: 5px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    text-align: left;
-    cursor: pointer;
-    transition:
-      background-color 0.1s,
-      color 0.1s;
-  }
-
-  .project-nav-item:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .project-nav-item.active {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .project-nav-icon {
-    display: flex;
-    align-items: center;
-    flex-shrink: 0;
-    color: var(--text-faint);
-  }
-
-  .project-nav-item.active .project-nav-icon {
-    color: var(--ui-accent);
-  }
-
-  .project-nav-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-    flex: 1;
-  }
-
-  .project-nav-time {
-    flex-shrink: 0;
-    font-size: 10px;
-    color: var(--text-faint);
-    opacity: 0.7;
   }
 
   /* ── Activity header ── */
@@ -710,7 +634,7 @@
 
   .sidebar-empty {
     padding: 16px 8px;
-    font-size: var(--size-xs);
+    font-size: var(--size-base);
     color: var(--text-faint);
     text-align: center;
   }
@@ -737,7 +661,7 @@
     border: none;
     border-radius: 5px;
     color: var(--text-muted);
-    font-size: var(--size-xs);
+    font-size: var(--size-base);
     text-align: left;
     cursor: pointer;
     transition:
@@ -779,7 +703,7 @@
   }
 
   .project-group-name {
-    font-size: var(--size-xs);
+    font-size: var(--size-base);
     font-weight: 600;
     color: var(--text-muted);
     letter-spacing: -0.01em;
@@ -796,7 +720,7 @@
     border: none;
     border-radius: 5px;
     color: var(--text-muted);
-    font-size: var(--size-xs);
+    font-size: var(--size-base);
     text-align: left;
     cursor: pointer;
     transition:
@@ -846,7 +770,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 10px;
+    font-size: var(--size-sm);
     color: var(--text-faint);
     line-height: 1.2;
   }

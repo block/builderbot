@@ -863,11 +863,14 @@
   // Tauri v2 intercepts file drops at the OS level, so standard browser
   // drag/drop events never fire for files dragged from Finder/Explorer.
   // Instead we use getCurrentWebview().onDragDropEvent() which provides
-  // file paths and a physical position we can use to hit-test our card.
+  // file paths and a position we can use to hit-test our card.
 
   let dragOver = $state(false);
   let cardElement: HTMLDivElement | undefined = $state();
   let unlistenDragDrop: UnlistenFn | null = null;
+
+  /** Pending note placeholders shown in the timeline while files are being added. */
+  let pendingDropNotes = $state<{ key: string; title: string }[]>([]);
 
   /** Text-file extensions we accept for note creation. */
   const TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.text', '.rst', '.org', '.adoc'];
@@ -883,37 +886,42 @@
     return name.replace(/\.[^.]+$/, '');
   }
 
-  /** Check if a physical position is within this card's bounding rect. */
+  /** Check if a logical position is within this card's bounding rect. */
   function isPositionOverCard(x: number, y: number): boolean {
     if (!cardElement) return false;
     const rect = cardElement.getBoundingClientRect();
-    // Tauri gives physical pixels; convert using devicePixelRatio
-    const dpr = window.devicePixelRatio || 1;
-    const logicalX = x / dpr;
-    const logicalY = y / dpr;
-    return (
-      logicalX >= rect.left &&
-      logicalX <= rect.right &&
-      logicalY >= rect.top &&
-      logicalY <= rect.bottom
-    );
+    // Tauri on macOS gives logical coordinates that match getBoundingClientRect.
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
   }
 
-  async function handleFileDrop(paths: string[]) {
+  function handleFileDrop(paths: string[]) {
     const textPaths = paths.filter(isTextFile);
     if (textPaths.length === 0) return;
 
-    for (const filePath of textPaths) {
-      try {
-        const content = await commands.readTextFile(filePath);
-        const title = fileNameFromPath(filePath);
-        await commands.createNote(branch.id, title, content);
-      } catch (e) {
-        console.error('Failed to create note from dropped file:', e);
-      }
-    }
+    // Show placeholder items immediately
+    const placeholders = textPaths.map((filePath) => ({
+      key: `drop-${Date.now()}-${filePath}`,
+      title: fileNameFromPath(filePath),
+    }));
+    pendingDropNotes = [...pendingDropNotes, ...placeholders];
 
-    loadTimeline();
+    // Process each file asynchronously without blocking the UI
+    Promise.all(
+      textPaths.map(async (filePath, i) => {
+        try {
+          const content = await commands.readTextFile(filePath);
+          const title = fileNameFromPath(filePath);
+          await commands.createNote(branch.id, title, content);
+        } catch (e) {
+          console.error('Failed to create note from dropped file:', e);
+        } finally {
+          // Remove this placeholder
+          pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
+        }
+      })
+    ).then(() => {
+      loadTimeline();
+    });
   }
 
   // Register the Tauri drag-drop listener once on mount
@@ -1175,6 +1183,7 @@
       {:else if timeline}
         <BranchTimeline
           {timeline}
+          {pendingDropNotes}
           onSessionClick={handleTimelineSessionClick}
           onCommitClick={handleCommitClick}
           onNoteClick={handleNoteClick}

@@ -1,8 +1,12 @@
 //! AI-powered action detection
 //!
-//! This module uses an AI model to analyze project structure and suggest
+//! This module uses an AI agent to analyze project structure and suggest
 //! relevant actions (linting, testing, formatting, etc.) based on common
 //! patterns in build files (justfile, Makefile, package.json, etc.).
+//!
+//! The agent is responsible for exploring the project files itself – either
+//! on the local filesystem (when a clone exists) or via the `gh` CLI (when
+//! no local clone is available).
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -17,6 +21,10 @@ pub trait AiProvider: Send + Sync {
     async fn prompt(&self, prompt: String) -> Result<String>;
 }
 
+// ---------------------------------------------------------------------------
+// Suggested action
+// ---------------------------------------------------------------------------
+
 /// A suggested action that was detected
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,12 +36,51 @@ pub struct SuggestedAction {
     pub source: String, // e.g., "justfile", "Makefile", "package.json"
 }
 
-/// System prompt for AI action detection
-const DETECTION_PROMPT_TEMPLATE: &str = r#"You are analyzing a project directory to detect available actions (build, test, lint, format commands).
+// ---------------------------------------------------------------------------
+// File exploration mode
+// ---------------------------------------------------------------------------
 
-Analyze the project structure and suggest actions based on the files present.
+/// How the agent should explore the project files.
+pub enum FileExplorationMode {
+    /// The agent has a local checkout and can use normal shell commands
+    /// (`ls`, `cat`, `find`, etc.) to explore files.
+    Local {
+        /// The working directory path (needed to check git config).
+        working_dir: std::path::PathBuf,
+    },
+    /// No local clone exists. The agent should use `gh api` to explore
+    /// the repository on GitHub.
+    GitHub {
+        /// Full repo identifier, e.g. `"squareup/builderbot"`.
+        repo: String,
+        /// Optional subdirectory to scope detection to.
+        subpath: Option<String>,
+    },
+}
 
-IMPORTANT: Return your response as valid JSON ONLY. Do not include any explanatory text before or after the JSON.
+// ---------------------------------------------------------------------------
+// Prompt templates
+// ---------------------------------------------------------------------------
+
+/// Core instructions shared by both local and GitHub modes.
+const DETECTION_PROMPT_CORE: &str = r#"You are analyzing a project to detect available development actions (build, test, lint, format commands).
+
+Your task:
+1. Explore the project structure to find build/config files
+2. Read relevant files to understand available commands
+3. Return a JSON array of suggested actions
+
+IMPORTANT FILES TO LOOK FOR:
+- justfile / Justfile (just command runner)
+- Makefile / makefile
+- package.json (npm/yarn/pnpm scripts)
+- Cargo.toml (Rust)
+- pyproject.toml / setup.py (Python)
+- tsconfig.json, eslint.config.js, .eslintrc.json, .prettierrc
+- lefthook.yml (git hooks)
+- Also check subdirectories (1-2 levels deep) for additional justfile/Makefile files
+
+IMPORTANT: Return your final response as valid JSON ONLY. Do not include any explanatory text before or after the JSON.
 
 The response must be a JSON array of action objects. Each action object must have these fields:
 - name: string (concise action name, e.g., "Test", "Lint", "Format")
@@ -59,7 +106,6 @@ Special instructions for subdirectory build files:
 - For commands from subdirectory build files, prefix the command with "cd <subpath> && "
 - Example: if "staged/justfile" contains a "dev" target, the command should be "cd staged && just dev"
 - Include the subdirectory path in the source field (e.g., "source": "staged/justfile")
-- This allows running commands in the correct directory context
 
 Action ordering (list most important first):
 - Primary dev commands should come first (like "dev", "start")
@@ -76,12 +122,6 @@ IMPORTANT: Only suggest actions suitable for development environments. Skip:
 - CI/CD specific commands
 - Docker/container deployment commands
 - Cloud infrastructure commands
-
-Project directory contents:
-{file_list}
-
-Relevant file contents:
-{file_contents}
 
 Return ONLY a JSON array with detected actions. Example (ordered by importance):
 [
@@ -150,6 +190,27 @@ Return ONLY a JSON array with detected actions. Example (ordered by importance):
   }
 ]"#;
 
+/// Extra instructions for local file exploration.
+const LOCAL_EXPLORATION_INSTRUCTIONS: &str = r#"
+HOW TO EXPLORE THE PROJECT:
+- Use shell commands like `ls`, `cat`, `find`, etc. to explore the project files
+- You are already in the project root directory
+- Start by listing the top-level files, then read relevant build/config files
+- Check subdirectories (1-2 levels) for additional build files"#;
+
+/// Extra instructions for GitHub API file exploration.
+const GITHUB_EXPLORATION_INSTRUCTIONS: &str = r#"
+HOW TO EXPLORE THE PROJECT:
+- There is NO local clone of this repository. You must use the `gh` CLI to explore files.
+- To list the file tree: `gh api 'repos/{repo}/git/trees/HEAD?recursive=1' --jq '.tree[] | select(.type==\"blob\") | .path'`
+- To read a file: `gh api 'repos/{repo}/contents/{path}' --jq '.content' | base64 --decode`
+- Start by listing the file tree to find build/config files, then read the relevant ones
+- {subpath_instructions}"#;
+
+// ---------------------------------------------------------------------------
+// ActionDetector
+// ---------------------------------------------------------------------------
+
 /// Action detector that uses an AI provider to detect actions from project files
 pub struct ActionDetector {
     provider: Box<dyn AiProvider>,
@@ -161,29 +222,66 @@ impl ActionDetector {
         Self { provider }
     }
 
-    /// Detect actions from a project repository using AI
+    /// Detect actions from a local project directory using AI.
+    ///
+    /// This is a convenience wrapper that uses [`FileExplorationMode::Local`].
     pub async fn detect_actions(&self, working_dir: &Path) -> Result<Vec<SuggestedAction>> {
-        // Collect information about the project
-        let file_list = collect_file_list(working_dir)?;
-        let file_contents = collect_relevant_files(working_dir)?;
+        self.detect_actions_with_mode(FileExplorationMode::Local {
+            working_dir: working_dir.to_path_buf(),
+        })
+        .await
+    }
+
+    /// Detect actions using the specified [`FileExplorationMode`].
+    pub async fn detect_actions_with_mode(
+        &self,
+        mode: FileExplorationMode,
+    ) -> Result<Vec<SuggestedAction>> {
+        let exploration_instructions = match &mode {
+            FileExplorationMode::Local { .. } => LOCAL_EXPLORATION_INSTRUCTIONS.to_string(),
+            FileExplorationMode::GitHub { repo, subpath } => {
+                let subpath_instructions = match subpath {
+                    Some(sub) if !sub.is_empty() => {
+                        format!(
+                            "Focus on files under the `{sub}/` subdirectory, but also check the repo root for top-level config files."
+                        )
+                    }
+                    _ => "Explore from the repository root.".to_string(),
+                };
+                GITHUB_EXPLORATION_INSTRUCTIONS
+                    .replace("{repo}", repo)
+                    .replace("{subpath_instructions}", &subpath_instructions)
+            }
+        };
 
         // Check if the user has git hook overrides (core.hooksPath).
         // If so, lefthook install is unnecessary since hooks are managed externally.
-        let lefthook_instructions = if has_git_hooks_path_override(working_dir) {
-            "- SKIP lefthook detection entirely. The user has a custom git core.hooksPath configured, \
-             so lefthook install is not needed and should NOT be suggested as an action."
-                .to_string()
-        } else {
-            "- If lefthook.yml is present in the project, ALWAYS include \"lefthook install\" as a prerun action\n\
-             - This ensures git hooks are properly installed in each new worktree"
-                .to_string()
+        let lefthook_instructions = match &mode {
+            FileExplorationMode::Local { working_dir } => {
+                if has_git_hooks_path_override(working_dir) {
+                    "- SKIP lefthook detection entirely. The user has a custom git core.hooksPath configured, \
+                     so lefthook install is not needed and should NOT be suggested as an action."
+                        .to_string()
+                } else {
+                    "- If lefthook.yml is present in the project, ALWAYS include \"lefthook install\" as a prerun action\n\
+                     - This ensures git hooks are properly installed in each new worktree"
+                        .to_string()
+                }
+            }
+            FileExplorationMode::GitHub { .. } => {
+                // We can't check git config without a local clone, so we always include
+                // lefthook detection and let the agent decide based on whether lefthook.yml exists.
+                "- If lefthook.yml is present in the project, ALWAYS include \"lefthook install\" as a prerun action\n\
+                 - This ensures git hooks are properly installed in each new worktree"
+                    .to_string()
+            }
         };
 
-        // Build the prompt
-        let prompt = DETECTION_PROMPT_TEMPLATE
-            .replace("{file_list}", &file_list)
-            .replace("{file_contents}", &file_contents)
-            .replace("{lefthook_instructions}", &lefthook_instructions);
+        let prompt = format!(
+            "{DETECTION_PROMPT_CORE}\n{exploration_instructions}",
+            DETECTION_PROMPT_CORE =
+                DETECTION_PROMPT_CORE.replace("{lefthook_instructions}", &lefthook_instructions),
+        );
 
         // Call AI to analyze and suggest actions
         let response = self
@@ -197,6 +295,10 @@ impl ActionDetector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 /// Check if the repository has a custom git hooks path configured (core.hooksPath).
 /// When this is set, the user manages git hooks externally and lefthook install
 /// should be skipped.
@@ -209,118 +311,8 @@ fn has_git_hooks_path_override(working_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Collect a list of files in the directory (recursively up to 2 levels)
-fn collect_file_list(dir: &Path) -> Result<String> {
-    let mut files = Vec::new();
-    collect_file_list_recursive(dir, "", &mut files, 0, 2)?;
-    files.sort();
-    Ok(files.join("\n"))
-}
-
-/// Recursively collect file listings with indentation
-fn collect_file_list_recursive(
-    dir: &Path,
-    prefix: &str,
-    files: &mut Vec<String>,
-    depth: usize,
-    max_depth: usize,
-) -> Result<()> {
-    if depth >= max_depth {
-        return Ok(());
-    }
-
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            if let Ok(file_type) = entry.file_type() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-
-                // Skip hidden files and common directories
-                if name_str.starts_with('.')
-                    || name_str == "node_modules"
-                    || name_str == "target"
-                    || name_str == "dist"
-                    || name_str == "build"
-                {
-                    continue;
-                }
-
-                let full_path = if prefix.is_empty() {
-                    name_str.to_string()
-                } else {
-                    format!("{}/{}", prefix, name_str)
-                };
-
-                if file_type.is_file() {
-                    files.push(full_path);
-                } else if file_type.is_dir() {
-                    files.push(format!("{}/", full_path));
-                    // Recurse into subdirectory
-                    collect_file_list_recursive(
-                        &entry.path(),
-                        &full_path,
-                        files,
-                        depth + 1,
-                        max_depth,
-                    )?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Collect contents of relevant build/config files from root directory only
-fn collect_relevant_files(dir: &Path) -> Result<String> {
-    let relevant_files = [
-        "package.json",
-        "justfile",
-        "Justfile",
-        "Makefile",
-        "makefile",
-        "Cargo.toml",
-        "pyproject.toml",
-        "setup.py",
-        "tsconfig.json",
-        ".eslintrc.json",
-        ".eslintrc.js",
-        "eslint.config.js",
-        ".prettierrc",
-        ".prettierrc.json",
-        "lefthook.yml",
-    ];
-
-    let mut contents = Vec::new();
-
-    // Collect files from root directory only
-    // The AI agent will be instructed to search subdirectories if needed
-    for file_name in &relevant_files {
-        let file_path = dir.join(file_name);
-        if file_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                // Limit file size to avoid token overflow
-                let truncated = if content.len() > 4000 {
-                    format!("{}... (truncated)", &content[..4000])
-                } else {
-                    content
-                };
-                contents.push(format!("=== {} ===\n{}\n", file_name, truncated));
-            }
-        }
-    }
-
-    if contents.is_empty() {
-        Ok("No relevant build files found.".to_string())
-    } else {
-        Ok(contents.join("\n"))
-    }
-}
-
 /// Parse the AI response and extract suggested actions
 fn parse_ai_response(response: &str) -> Result<Vec<SuggestedAction>> {
-    // Try to extract JSON from the response
-    // AI might include explanatory text, so we need to find the JSON array
     let json_str = extract_json_array(response)?;
 
     let actions: Vec<SuggestedAction> = serde_json::from_str(&json_str).map_err(|e| {
@@ -346,7 +338,6 @@ fn extract_json_array(text: &str) -> Result<String> {
         if let Some(end) = text.rfind(']') {
             if end > start {
                 let json_str = &text[start..=end];
-                // Validate it's valid JSON
                 if serde_json::from_str::<serde_json::Value>(json_str).is_ok() {
                     return Ok(json_str.to_string());
                 }

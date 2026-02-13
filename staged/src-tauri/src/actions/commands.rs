@@ -1,7 +1,9 @@
 //! Tauri commands for action execution and detection
 
 use anyhow::Result;
-use builderbot_actions::{ActionDetector, ActionExecutor, ActionMetadata, SuggestedAction};
+use builderbot_actions::{
+    ActionDetector, ActionExecutor, ActionMetadata, FileExplorationMode, SuggestedAction,
+};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 
@@ -20,7 +22,11 @@ fn get_store(store: &State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>,
         .cloned()
 }
 
-/// Detect available actions from a project's build files using AI
+/// Detect available actions from a project's build files using AI.
+///
+/// If a local clone already exists on disk we read files from the filesystem.
+/// Otherwise we use the GitHub API (via `gh`) to inspect the repository
+/// remotely, avoiding an expensive clone just for action detection.
 #[tauri::command]
 pub async fn detect_project_actions(
     project_id: String,
@@ -34,26 +40,50 @@ pub async fn detect_project_actions(
         .map_err(|e| format!("Failed to get project: {e}"))?
         .ok_or_else(|| "Project not found".to_string())?;
 
-    // Ensure the clone exists before trying to detect actions
-    let clone_path = crate::git::ensure_local_clone(&project.github_repo)
-        .map_err(|e| format!("Failed to ensure local clone: {e}"))?;
+    // Check whether a local clone already exists on disk.
+    let local_clone = project.clone_path().filter(|p| p.exists());
 
-    let working_dir = if let Some(subpath) = &project.subpath {
-        clone_path.join(subpath)
-    } else {
-        clone_path
+    // Pick the right AI provider working directory. When we have a local
+    // clone we point the provider at it; otherwise we use a temp dir (the
+    // provider only needs a cwd for spawning processes, not for file access).
+    let provider_dir = match &local_clone {
+        Some(clone_path) => {
+            if let Some(subpath) = &project.subpath {
+                clone_path.join(subpath)
+            } else {
+                clone_path.clone()
+            }
+        }
+        None => std::env::temp_dir(),
     };
 
-    // Create AI provider with the working directory
-    let provider = AcpAiProvider::new(working_dir.clone())
+    let provider = AcpAiProvider::new(provider_dir.clone())
         .map_err(|e| format!("Failed to create AI provider: {e}"))?;
 
-    // Create detector
     let detector = ActionDetector::new(Box::new(provider));
 
-    // Detect actions
+    let mode = match local_clone {
+        Some(_) => {
+            // Local clone exists – the agent can explore files directly via
+            // shell commands since the provider's working dir is set to the
+            // clone path. Pass the working directory so we can check for git
+            // hooks path overrides.
+            FileExplorationMode::Local {
+                working_dir: provider_dir,
+            }
+        }
+        None => {
+            // No local clone – instruct the agent to use `gh api` to explore
+            // the repository on GitHub.
+            FileExplorationMode::GitHub {
+                repo: project.github_repo.clone(),
+                subpath: project.subpath.clone(),
+            }
+        }
+    };
+
     detector
-        .detect_actions(&working_dir)
+        .detect_actions_with_mode(mode)
         .await
         .map_err(|e| format!("Action detection failed: {e}"))
 }

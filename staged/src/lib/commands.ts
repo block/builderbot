@@ -436,6 +436,10 @@ export function hasUnpushedCommits(branchId: string): Promise<boolean> {
 /** Push a branch to its remote via an agent session.
  *  The agent runs git push and can fix pre-push hook failures.
  *  Returns the session ID so the frontend can track progress. */
-export function pushBranch(branchId: string, provider?: string): Promise<string> {
-  return invoke('push_branch', { branchId, provider: provider ?? null });
+export function pushBranch(branchId: string, provider?: string, force?: boolean): Promise<string> {
+  return invoke('push_branch', {
+    branchId,
+    provider: provider ?? null,
+    force: force ?? null,
+  });
 }

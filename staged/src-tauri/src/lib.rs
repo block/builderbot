@@ -1736,6 +1736,7 @@ fn push_branch(
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
+    force: Option<bool>,
 ) -> Result<String, String> {
     let store = get_store(&store)?;
 
@@ -1767,18 +1768,42 @@ fn push_branch(
         (working_dir, None)
     };
 
-    let prompt = format!(
-        r#"<action>
+    let force = force.unwrap_or(false);
+
+    let prompt = if force {
+        format!(
+            r#"<action>
+Push the current branch to the remote using force-with-lease.
+
+Run: `git push -u origin {branch_name} --force-with-lease`
+
+If the push fails due to pre-push hook errors, read the error output, fix the underlying issue, and retry the push.
+
+The push must succeed before you finish.
+</action>"#,
+            branch_name = branch.branch_name,
+        )
+    } else {
+        format!(
+            r#"<action>
 Push the current branch to the remote.
 
 Run: `git push -u origin {branch_name}`
 
-If the push fails (e.g. due to pre-push hook errors, non-fast-forward rejection, or any other issue), diagnose the problem and fix it. For hook failures, read the error output, fix the underlying issue, and retry the push. For non-fast-forward rejections, you may use `git push -u origin {branch_name} --force-with-lease` if appropriate.
+IMPORTANT: You MUST NOT use --force, --force-with-lease, or any force-push variant. Only a normal push is allowed.
 
-The push must succeed before you finish.
+If the push fails due to pre-push hook errors, read the error output, fix the underlying issue, and retry the push.
+
+If the push is rejected because the remote has commits that would be lost (non-fast-forward rejection), do NOT attempt to fix it. Instead, output the following marker on its own line and stop:
+PUSH_REJECTED: NON_FAST_FORWARD
+
+For any other failure, diagnose the problem and fix it, then retry the push.
+
+The push must succeed before you finish (unless you output the non-fast-forward marker above).
 </action>"#,
-        branch_name = branch.branch_name,
-    );
+            branch_name = branch.branch_name,
+        )
+    };
 
     // Create the session
     let mut session = store::Session::new_running(&prompt, &working_dir);

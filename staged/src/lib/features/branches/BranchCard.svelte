@@ -86,6 +86,7 @@
   let pushSessionId = $state<string | null>(null);
   let pushError = $state<string | null>(null);
   let showPushErrorDialog = $state(false);
+  let showForcePushDialog = $state(false);
 
   // Dropdown state
   let showMoreMenu = $state(false);
@@ -750,7 +751,16 @@
   // Push (session-based, mirrors PR creation pattern)
   // =========================================================================
 
-  async function handlePush() {
+  /**
+   * Check whether push session messages contain the non-fast-forward marker.
+   * The agent outputs `PUSH_REJECTED: NON_FAST_FORWARD` when the remote would
+   * lose commits on a normal push.
+   */
+  function isPushRejectedNonFastForward(messages: { content: string; role: string }[]): boolean {
+    return messages.some((msg) => msg.content.includes('PUSH_REJECTED: NON_FAST_FORWARD'));
+  }
+
+  async function handlePush(force = false) {
     if (pushState === 'pushing') return;
 
     pushStateOverride = 'pushing';
@@ -760,7 +770,7 @@
       const remote = branch.branchType === 'remote';
       const agents = remote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
-      const sessionId = await commands.pushBranch(branch.id, provider);
+      const sessionId = await commands.pushBranch(branch.id, provider, force);
       pushSessionId = sessionId;
       // The session-status-changed listener will handle completion
     } catch (e) {
@@ -770,7 +780,23 @@
   }
 
   async function handlePushSessionComplete(status: string) {
-    if (status === 'completed') {
+    if (status === 'completed' && pushSessionId) {
+      // Check session messages for the non-fast-forward rejection marker
+      try {
+        const messages = await commands.getSessionMessages(pushSessionId);
+        if (isPushRejectedNonFastForward(messages)) {
+          // The agent stopped because the remote would lose commits —
+          // prompt the user to decide whether to force push.
+          pushStateOverride = 'error';
+          pushError = null;
+          showForcePushDialog = true;
+          pushSessionId = null;
+          return;
+        }
+      } catch {
+        // If we can't read messages, treat as success (push likely worked)
+      }
+
       pushStateOverride = 'done';
       hasUnpushed = false;
       // Reset to idle after a brief moment so the button returns to "View PR"
@@ -782,6 +808,17 @@
       pushError = `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
     }
     pushSessionId = null;
+  }
+
+  function handleForcePushConfirm() {
+    showForcePushDialog = false;
+    handlePush(true);
+  }
+
+  function handleForcePushCancel() {
+    showForcePushDialog = false;
+    pushStateOverride = null;
+    pushError = null;
   }
 
   function handlePushErrorRetry() {
@@ -796,7 +833,7 @@
   }
 
   function handlePrButtonClick() {
-    if (pushState === 'error') {
+    if (pushState === 'error' && !showForcePushDialog) {
       // Push failed — show error dialog
       showPushErrorDialog = true;
       return;
@@ -1056,11 +1093,13 @@
         <button
           class="pr-btn"
           class:creating={prState === 'creating'}
-          class:error={(prState === 'error' || pushState === 'error') && !showPushErrorDialog}
+          class:error={(prState === 'error' || pushState === 'error') &&
+            !showPushErrorDialog &&
+            !showForcePushDialog}
           class:created={prState === 'created' && pushState !== 'error'}
           class:pushing={pushState === 'pushing'}
           onclick={handlePrButtonClick}
-          disabled={showPushErrorDialog}
+          disabled={showPushErrorDialog || showForcePushDialog}
           title={pushState === 'pushing'
             ? 'Pushing… (click to view)'
             : pushState === 'error'
@@ -1238,6 +1277,17 @@
     confirmLabel="Retry"
     onConfirm={handlePushErrorRetry}
     onCancel={handlePushErrorClose}
+  />
+{/if}
+
+{#if showForcePushDialog}
+  <ConfirmDialog
+    title="Push Rejected"
+    message="The remote branch has commits that would be lost. Do you want to force push? This will overwrite the remote branch with your local version."
+    confirmLabel="Force Push"
+    danger
+    onConfirm={handleForcePushConfirm}
+    onCancel={handleForcePushCancel}
   />
 {/if}
 

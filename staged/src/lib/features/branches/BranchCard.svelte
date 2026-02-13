@@ -78,10 +78,14 @@
 
   // Unpushed-commits state (only relevant when PR already exists)
   let hasUnpushed = $state(false);
-  let pushing = $state(false);
+
+  // Push session state (mirrors PR session pattern)
+  type PushState = 'idle' | 'pushing' | 'error' | 'done';
+  let pushStateOverride = $state<PushState | null>(null);
+  let pushState = $derived<PushState>(pushStateOverride ?? 'idle');
+  let pushSessionId = $state<string | null>(null);
   let pushError = $state<string | null>(null);
   let showPushErrorDialog = $state(false);
-  let forcePushing = $state(false);
 
   // Dropdown state
   let showMoreMenu = $state(false);
@@ -167,6 +171,10 @@
         // Handle PR session completion
         if (eventSessionId === prSessionId) {
           handlePrSessionComplete(status);
+        }
+        // Handle push session completion
+        if (eventSessionId === pushSessionId) {
+          handlePushSessionComplete(status);
         }
       }
     }).then((unlisten) => {
@@ -278,6 +286,27 @@
         prStateOverride = 'error';
         prError = 'Lost track of PR creation session.';
         prSessionId = null;
+      }
+    }, 5_000);
+
+    return () => clearInterval(interval);
+  });
+
+  // Fallback polling for push session (same pattern as PR)
+  $effect(() => {
+    if (pushState !== 'pushing' || !pushSessionId) return;
+
+    const sid = pushSessionId;
+    const interval = setInterval(async () => {
+      try {
+        const session = await commands.getSession(sid);
+        if (session && session.status !== 'running') {
+          handlePushSessionComplete(session.status);
+        }
+      } catch {
+        pushStateOverride = 'error';
+        pushError = 'Lost track of push session.';
+        pushSessionId = null;
       }
     }, 5_000);
 
@@ -717,47 +746,67 @@
     prSessionId = null;
   }
 
-  async function handlePush(force = false) {
-    pushing = true;
+  // =========================================================================
+  // Push (session-based, mirrors PR creation pattern)
+  // =========================================================================
+
+  async function handlePush() {
+    if (pushState === 'pushing') return;
+
+    pushStateOverride = 'pushing';
     pushError = null;
+
     try {
-      await commands.pushBranch(branch.id, force);
-      hasUnpushed = false;
+      const remote = branch.branchType === 'remote';
+      const agents = remote ? REMOTE_AGENTS : agentState.providers;
+      const provider = getPreferredAgent(agents) ?? undefined;
+      const sessionId = await commands.pushBranch(branch.id, provider);
+      pushSessionId = sessionId;
+      // The session-status-changed listener will handle completion
     } catch (e) {
-      console.error('Push failed:', e);
+      pushStateOverride = 'error';
       pushError = e instanceof Error ? e.message : String(e);
-    } finally {
-      pushing = false;
     }
   }
 
-  async function handleForcePush() {
-    forcePushing = true;
-    try {
-      await commands.pushBranch(branch.id, true);
+  async function handlePushSessionComplete(status: string) {
+    if (status === 'completed') {
+      pushStateOverride = 'done';
       hasUnpushed = false;
-      pushError = null;
-      showPushErrorDialog = false;
-    } catch (e) {
-      console.error('Force push failed:', e);
-      pushError = e instanceof Error ? e.message : String(e);
-    } finally {
-      forcePushing = false;
+      // Reset to idle after a brief moment so the button returns to "View PR"
+      setTimeout(() => {
+        pushStateOverride = null;
+      }, 1_500);
+    } else {
+      pushStateOverride = 'error';
+      pushError = `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
     }
+    pushSessionId = null;
+  }
+
+  function handlePushErrorRetry() {
+    showPushErrorDialog = false;
+    handlePush();
   }
 
   function handlePushErrorClose() {
     showPushErrorDialog = false;
+    pushStateOverride = null;
     pushError = null;
   }
 
   function handlePrButtonClick() {
-    if (pushError) {
+    if (pushState === 'error') {
       // Push failed — show error dialog
       showPushErrorDialog = true;
       return;
     }
-    if (prState === 'created' && hasUnpushed) {
+    if (pushState === 'pushing' && pushSessionId) {
+      // While pushing, open the session chat so user can watch progress
+      openSessionId = pushSessionId;
+      return;
+    }
+    if (prState === 'created' && hasUnpushed && pushState === 'idle') {
       handlePush();
     } else if (prState === 'created') {
       // View PR - open in browser
@@ -1007,14 +1056,14 @@
         <button
           class="pr-btn"
           class:creating={prState === 'creating'}
-          class:error={(prState === 'error' || !!pushError) && !showPushErrorDialog}
-          class:created={prState === 'created' && !pushError}
-          class:pushing
+          class:error={(prState === 'error' || pushState === 'error') && !showPushErrorDialog}
+          class:created={prState === 'created' && pushState !== 'error'}
+          class:pushing={pushState === 'pushing'}
           onclick={handlePrButtonClick}
-          disabled={pushing || showPushErrorDialog}
-          title={pushing
-            ? 'Pushing…'
-            : pushError
+          disabled={showPushErrorDialog}
+          title={pushState === 'pushing'
+            ? 'Pushing… (click to view)'
+            : pushState === 'error'
               ? 'Push failed — click for details'
               : prState === 'created' && hasUnpushed
                 ? 'Push new commits'
@@ -1026,9 +1075,9 @@
                       ? 'Creating PR… (click to view)'
                       : 'Create PR'}
         >
-          {#if pushing}
+          {#if pushState === 'pushing'}
             <Spinner size={13} />
-          {:else if pushError}
+          {:else if pushState === 'error'}
             <AlertCircle size={13} />
           {:else if prState === 'creating'}
             <Spinner size={13} />
@@ -1042,9 +1091,9 @@
             <GitPullRequestCreateArrow size={13} />
           {/if}
           <span>
-            {#if pushing}
+            {#if pushState === 'pushing'}
               Pushing…
-            {:else if pushError}
+            {:else if pushState === 'error'}
               Push failed
             {:else if prState === 'created' && hasUnpushed}
               Push{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
@@ -1138,6 +1187,17 @@
           // Ignore — the polling fallback will catch it
         }
       }
+      // If the closed modal was the push session, check if it finished while open
+      if (pushState === 'pushing' && closedSessionId === pushSessionId && closedSessionId) {
+        try {
+          const session = await commands.getSession(closedSessionId);
+          if (session && session.status !== 'running') {
+            handlePushSessionComplete(session.status);
+          }
+        } catch {
+          // Ignore — the polling fallback will catch it
+        }
+      }
     }}
   />
 {/if}
@@ -1172,42 +1232,13 @@
 {/if}
 
 {#if showPushErrorDialog}
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <div
-    class="modal-backdrop"
-    role="dialog"
-    aria-modal="true"
-    tabindex="-1"
-    onclick={(e) => {
-      if (e.target === e.currentTarget && !forcePushing) handlePushErrorClose();
-    }}
-    onkeydown={(e) => {
-      if (e.key === 'Escape' && !forcePushing) handlePushErrorClose();
-    }}
-  >
-    <div class="push-error-modal">
-      <div class="push-error-content">
-        <div class="push-error-icon-wrapper">
-          <AlertCircle size={24} />
-        </div>
-        <div class="push-error-text">
-          <h2>Push Failed</h2>
-          <p>{pushError ?? 'An unknown error occurred while pushing.'}</p>
-        </div>
-      </div>
-      <div class="push-error-actions">
-        <button class="btn btn-secondary" onclick={handlePushErrorClose} disabled={forcePushing}>
-          Close
-        </button>
-        <button class="btn btn-danger" onclick={handleForcePush} disabled={forcePushing}>
-          {#if forcePushing}
-            <Spinner size={13} />
-          {/if}
-          Force Push
-        </button>
-      </div>
-    </div>
-  </div>
+  <ConfirmDialog
+    title="Push Failed"
+    message={pushError ?? 'An unknown error occurred while pushing.'}
+    confirmLabel="Retry"
+    onConfirm={handlePushErrorRetry}
+    onCancel={handlePushErrorClose}
+  />
 {/if}
 
 <style>
@@ -1666,110 +1697,5 @@
   :global(.spinner) {
     animation: spin 1s linear infinite;
     flex-shrink: 0;
-  }
-
-  /* Push error dialog */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: var(--shadow-overlay);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .push-error-modal {
-    background: var(--bg-chrome);
-    border-radius: 12px;
-    box-shadow: var(--shadow-elevated);
-    width: 400px;
-    max-width: 90vw;
-    overflow: hidden;
-  }
-
-  .push-error-content {
-    display: flex;
-    gap: 16px;
-    padding: 24px;
-  }
-
-  .push-error-icon-wrapper {
-    flex-shrink: 0;
-    width: 40px;
-    height: 40px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--ui-danger-bg);
-    border-radius: 10px;
-    color: var(--ui-danger);
-  }
-
-  .push-error-text {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .push-error-text h2 {
-    margin: 0 0 8px 0;
-    font-size: var(--size-base);
-    font-weight: 600;
-    color: var(--text-primary);
-  }
-
-  .push-error-text p {
-    margin: 0;
-    font-size: var(--size-sm);
-    color: var(--text-muted);
-    line-height: 1.5;
-    word-break: break-word;
-  }
-
-  .push-error-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 16px 24px;
-    border-top: 1px solid var(--border-subtle);
-    background: var(--bg-primary);
-  }
-
-  .btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 16px;
-    border: none;
-    border-radius: 6px;
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      background-color 0.1s,
-      opacity 0.1s;
-  }
-
-  .btn:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-
-  .btn-secondary {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .btn-secondary:hover:not(:disabled) {
-    background: var(--border-subtle);
-  }
-
-  .btn-danger {
-    background: var(--ui-danger);
-    color: white;
-  }
-
-  .btn-danger:hover:not(:disabled) {
-    filter: brightness(1.1);
   }
 </style>

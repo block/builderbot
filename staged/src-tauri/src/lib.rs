@@ -1722,66 +1722,87 @@ fn has_unpushed_commits(
         .map_err(|e| e.to_string())
 }
 
-/// Push a branch to its remote.
+/// Push a branch to its remote by kicking off an agent session.
 ///
-/// For local branches, runs `git push -u origin <branch>`.
-/// For remote branches, executes the push inside the Blox workspace.
-/// When `force` is true, uses `--force-with-lease` for safer force pushing.
+/// The agent runs `git push` and can diagnose and fix pre-push hook
+/// failures or other push errors. Returns the session ID so the
+/// frontend can track progress (same pattern as `create_pr`).
+///
+/// For remote branches the session runs inside the Blox workspace.
 #[tauri::command(rename_all = "camelCase")]
-async fn push_branch_cmd(
+fn push_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
     branch_id: String,
-    force: Option<bool>,
-) -> Result<(), String> {
-    let force = force.unwrap_or(false);
+    provider: Option<String>,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
 
-    let (branch_type, branch_name, workdir_path, workspace_name) = {
-        let store = get_store(&store)?;
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-        let branch = store
-            .get_branch(&branch_id)
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let is_remote = branch.branch_type == store::BranchType::Remote;
+
+    let (working_dir, workspace_name) = if is_remote {
+        let repo_path = PathBuf::from(&project.repo_path);
+        (repo_path, branch.workspace_name.clone())
+    } else {
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
-        let workdir_path = if branch.branch_type == store::BranchType::Local {
-            Some(
-                store
-                    .get_workdir_for_branch(&branch_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?
-                    .path,
-            )
-        } else {
-            None
-        };
-
-        (
-            branch.branch_type,
-            branch.branch_name,
-            workdir_path,
-            branch.workspace_name,
-        )
+        let mut working_dir = PathBuf::from(&workdir.path);
+        if let Some(ref subpath) = project.subpath {
+            working_dir = working_dir.join(subpath);
+        }
+        (working_dir, None)
     };
 
-    match branch_type {
-        store::BranchType::Local => {
-            let wt_path = workdir_path.unwrap();
-            let path = PathBuf::from(&wt_path);
-            git::push_branch(&path, &branch_name, force).map_err(|e| e.to_string())
-        }
-        store::BranchType::Remote => {
-            let ws_name = workspace_name
-                .as_deref()
-                .ok_or("Branch has no workspace name")?;
+    let prompt = format!(
+        r#"<action>
+Push the current branch to the remote.
 
-            let mut cmd = vec!["git", "push", "-u", "origin", &branch_name];
-            if force {
-                cmd.push("--force-with-lease");
-            }
-            blox::ws_exec(ws_name, &cmd).map_err(|e| e.to_string())?;
-            Ok(())
-        }
+Run: `git push -u origin {branch_name}`
+
+If the push fails (e.g. due to pre-push hook errors, non-fast-forward rejection, or any other issue), diagnose the problem and fix it. For hook failures, read the error output, fix the underlying issue, and retry the push. For non-fast-forward rejections, you may use `git push -u origin {branch_name} --force-with-lease` if appropriate.
+
+The push must succeed before you finish.
+</action>"#,
+        branch_name = branch.branch_name,
+    );
+
+    // Create the session
+    let mut session = store::Session::new_running(&prompt, &working_dir);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
     }
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    session_runner::start_session(
+        session_runner::SessionConfig {
+            session_id: session.id.clone(),
+            prompt,
+            working_dir,
+            agent_session_id: None,
+            pre_head_sha: None,
+            provider,
+            workspace_name,
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(session.id)
 }
 
 // =============================================================================
@@ -2183,7 +2204,7 @@ pub fn run() {
             create_pr,
             update_branch_pr,
             has_unpushed_commits,
-            push_branch_cmd,
+            push_branch,
             open_url,
             is_sq_available,
             get_available_openers,

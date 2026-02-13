@@ -360,7 +360,7 @@
 
   <!-- ── Activity feed ── -->
   <div class="activity-header">
-    <span class="sidebar-title">Activity</span>
+    <span class="sidebar-title">Recents</span>
     <button
       class="group-toggle"
       class:active={preferences.sidebarGroupByProject}

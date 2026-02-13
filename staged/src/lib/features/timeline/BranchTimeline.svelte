@@ -1,11 +1,12 @@
 <!--
   BranchTimeline.svelte - Renders the unified timeline for a branch
 
-  Receives timeline data, merges commits/notes/reviews by timestamp,
-  and renders as a list of TimelineRow items.
+  Commits, notes, and reviews are merged by timestamp into a single linear list.
   Pending items (running sessions, generating notes) appear at the bottom.
 -->
 <script lang="ts">
+  import type { Snippet } from 'svelte';
+  import { FileText, GitCommitHorizontal } from 'lucide-svelte';
   import type { BranchTimeline as BranchTimelineData } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType } from './TimelineRow.svelte';
@@ -20,6 +21,10 @@
     onDeleteCommit?: (sha: string, sessionId?: string) => void;
     onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
     onDeleteNote?: (noteId: string, sessionId?: string) => void;
+    onNewNote?: () => void;
+    onNewCommit?: () => void;
+    newSessionDisabled?: boolean;
+    footerActions?: Snippet;
   }
 
   let {
@@ -31,6 +36,10 @@
     onDeleteCommit,
     onDeletePendingCommit,
     onDeleteNote,
+    onNewNote,
+    onNewCommit,
+    newSessionDisabled = false,
+    footerActions,
   }: Props = $props();
 
   // Unified timeline item for display
@@ -42,7 +51,6 @@
     secondaryMeta?: string;
     timestamp: number;
     sessionId?: string;
-    // Extra data for click handlers
     commitSha?: string;
     commitId?: string;
     noteId?: string;
@@ -64,7 +72,6 @@
     for (const commit of timeline.commits) {
       const isPending = !commit.sha;
       const isRunning = commit.sessionStatus === 'running';
-      // Session finished but never produced a commit
       const isFailed = isPending && !isRunning && !!commit.sessionId;
 
       let type: TimelineItemType;
@@ -96,7 +103,6 @@
 
     for (const note of timeline.notes) {
       const isRunning = note.sessionStatus === 'running';
-      // Session finished but note has no real content
       const isFailed = !isRunning && !!note.sessionId && !note.content?.trim();
 
       let type: TimelineItemType;
@@ -139,7 +145,7 @@
       });
     }
 
-    // Sort by timestamp ascending (oldest first), pending/failed items at bottom
+    // Sort by timestamp ascending; pending/failed items at bottom
     all.sort((a, b) => {
       const aIsTransient =
         a.type === 'pending-commit' ||
@@ -156,12 +162,11 @@
     });
 
     // Only the latest (HEAD) commit can be deleted via git reset.
-    // Find the last completed commit and mark all others as non-deletable.
     let foundHead = false;
     for (let i = all.length - 1; i >= 0; i--) {
       if (all[i].type === 'commit') {
         if (!foundHead) {
-          foundHead = true; // This is HEAD — leave deleteDisabledReason undefined
+          foundHead = true;
         } else {
           all[i].deleteDisabledReason = 'Only the latest commit can be deleted';
         }
@@ -170,6 +175,8 @@
 
     return all;
   });
+
+  // ── Handlers ──────────────────────────────────────────────────────────
 
   function handleItemClick(item: DisplayItem) {
     if (item.type === 'commit' && item.commitSha && onCommitClick) {
@@ -217,9 +224,34 @@
   }
 </script>
 
-{#if items.length === 0 && pendingDropNotes.length === 0}
+{#if items.length === 0 && !onNewNote && !onNewCommit && pendingDropNotes.length === 0}
   <p class="no-items">No commits or notes yet</p>
+{:else if items.length === 0}
+  <!-- Empty state: large action buttons -->
+  <div class="empty-state">
+    {#if onNewNote}
+      <button
+        class="empty-action-btn note-action"
+        onclick={onNewNote}
+        disabled={newSessionDisabled}
+      >
+        <FileText size={18} />
+        <span>Add Note</span>
+      </button>
+    {/if}
+    {#if onNewCommit}
+      <button
+        class="empty-action-btn commit-action"
+        onclick={onNewCommit}
+        disabled={newSessionDisabled}
+      >
+        <GitCommitHorizontal size={18} />
+        <span>Add Commit</span>
+      </button>
+    {/if}
+  </div>
 {:else}
+  <!-- Unified timeline (vertical) -->
   <div class="timeline">
     {#each items as item, index (item.key)}
       <TimelineRow
@@ -227,7 +259,10 @@
         title={item.title}
         meta={item.meta}
         secondaryMeta={item.secondaryMeta}
-        isLast={index === items.length - 1 && pendingDropNotes.length === 0}
+        isLast={index === items.length - 1 &&
+          !onNewNote &&
+          !onNewCommit &&
+          pendingDropNotes.length === 0}
         sessionId={item.sessionId}
         deleteDisabledReason={item.deleteDisabledReason}
         {onSessionClick}
@@ -240,13 +275,44 @@
         type="generating-note"
         title={drop.title}
         secondaryMeta="adding..."
-        isLast={index === pendingDropNotes.length - 1}
+        isLast={index === pendingDropNotes.length - 1 && !onNewNote && !onNewCommit}
       />
     {/each}
+    {#if onNewNote || onNewCommit || footerActions}
+      <div class="footer-row">
+        {#if onNewNote}
+          <button
+            class="add-item-btn note-btn"
+            onclick={onNewNote}
+            disabled={newSessionDisabled}
+            title="New note"
+          >
+            <FileText size={13} />
+            <span>New note</span>
+          </button>
+        {/if}
+        {#if onNewCommit}
+          <button
+            class="add-item-btn commit-btn"
+            onclick={onNewCommit}
+            disabled={newSessionDisabled}
+            title="New commit"
+          >
+            <GitCommitHorizontal size={13} />
+            <span>New commit</span>
+          </button>
+        {/if}
+        {#if footerActions}
+          {@render footerActions()}
+        {/if}
+      </div>
+    {/if}
   </div>
 {/if}
 
 <style>
+  /* ── Timeline ────────────────────────────────────────────────────────── */
+
   .timeline {
     display: flex;
     flex-direction: column;
@@ -259,5 +325,92 @@
     color: var(--text-faint);
     font-style: italic;
     text-align: center;
+  }
+
+  /* ── Empty state ────────────────────────────────────────────────────── */
+
+  .empty-state {
+    display: flex;
+    gap: 10px;
+    padding: 4px 0;
+  }
+
+  .empty-action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: 1;
+    padding: 14px 16px;
+    border-radius: 8px;
+    border: none;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      background-color 0.15s;
+  }
+
+  .empty-action-btn.note-action:hover:not(:disabled) {
+    color: var(--note-color);
+    background-color: var(--note-bg);
+  }
+
+  .empty-action-btn.commit-action:hover:not(:disabled) {
+    color: var(--commit-color);
+    background-color: var(--commit-bg);
+  }
+
+  .empty-action-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  /* ── Footer row with inline add buttons ─────────────────────────────── */
+
+  .footer-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    margin: 0 -8px;
+  }
+
+  .add-item-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px dashed var(--border-subtle);
+    background: none;
+    color: var(--text-faint);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .add-item-btn.note-btn:hover:not(:disabled) {
+    color: var(--note-color);
+    border-color: var(--note-color);
+    background-color: var(--note-bg);
+  }
+
+  .add-item-btn.commit-btn:hover:not(:disabled) {
+    color: var(--commit-color);
+    border-color: var(--commit-color);
+    background-color: var(--commit-bg);
+  }
+
+  .add-item-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
   }
 </style>

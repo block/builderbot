@@ -37,6 +37,9 @@
     onRetryWorktree,
   }: Props = $props();
 
+  /** Branches sorted by most recently updated first. */
+  let sortedBranches = $derived([...branches].sort((a, b) => b.updatedAt - a.updatedAt));
+
   let showProjectSettings = $state(false);
 
   const projectMenuItems: MenuItem[] = [
@@ -68,7 +71,12 @@
     </div>
   </div>
   <div class="branches-list">
-    {#each branches as branch (branch.id)}
+    <!-- New branch button -->
+    <button class="new-branch-button" onclick={() => onNewBranch?.()}>
+      <Plus size={16} />
+      New Branch
+    </button>
+    {#each sortedBranches as branch (branch.id)}
       {#if branch.branchType === 'remote'}
         <RemoteBranchCard
           {branch}
@@ -85,11 +93,6 @@
         />
       {/if}
     {/each}
-    <!-- New branch button -->
-    <button class="new-branch-button" onclick={() => onNewBranch?.()}>
-      <Plus size={16} />
-      New Branch
-    </button>
   </div>
 </div>
 

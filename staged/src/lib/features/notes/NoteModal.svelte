@@ -191,7 +191,7 @@
   }
 
   .share-btn.copied {
-    color: var(--ui-success);
+    color: var(--status-added);
   }
 
   .modal-content {

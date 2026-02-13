@@ -12,16 +12,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    Cloud,
-    Trash2,
-    AlertCircle,
-    CircleCheck,
-    CirclePause,
-    Copy,
-    GitCommitHorizontal,
-    StickyNote,
-  } from 'lucide-svelte';
+  import { Cloud, Trash2, AlertCircle, CircleCheck, CirclePause, Copy } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Spinner from '../../shared/Spinner.svelte';
   import type {
@@ -298,7 +289,7 @@
   }
 </script>
 
-<div class="branch-card remote" class:deleting>
+<div class="branch-card remote" class:deleting data-branch-id={branch.id}>
   {#if deleting}
     <div class="deleting-overlay">
       <Spinner size={16} />
@@ -307,9 +298,12 @@
   {:else}
     <!-- Header -->
     <div class="card-header">
-      <div class="branch-info">
-        <Cloud size={16} class="cloud-icon" />
+      <Cloud size={14} class="cloud-icon header-icon" />
+      <div class="header-left">
         <span class="branch-name">{branch.branchName}</span>
+        {#if branch.workspaceName}
+          <span class="base-branch-name">{branch.workspaceName}</span>
+        {/if}
       </div>
       <div class="header-actions">
         <div
@@ -333,13 +327,6 @@
         <DropdownMenu items={menuItems} />
       </div>
     </div>
-
-    <!-- Subheader: workspace info -->
-    {#if branch.workspaceName}
-      <div class="card-subheader">
-        <span class="workspace-name">{branch.workspaceName}</span>
-      </div>
-    {/if}
 
     <!-- Content area — varies by status -->
     <div class="card-content">
@@ -367,6 +354,9 @@
             onNoteClick={handleNoteClick}
             onDeletePendingCommit={handleDeletePendingCommit}
             onDeleteNote={handleDeleteNote}
+            onNewNote={() => openNewSession('note')}
+            onNewCommit={() => openNewSession('commit')}
+            newSessionDisabled={showNewSession}
           />
         {/if}
       {:else if status === 'stopped'}
@@ -391,32 +381,6 @@
         </div>
       {/if}
     </div>
-
-    <!-- Footer with separate note and commit buttons (only when running) -->
-    {#if status === 'running'}
-      <div class="card-footer">
-        <div class="new-btn-group">
-          <button
-            class="new-item-btn"
-            onclick={() => openNewSession('note')}
-            disabled={showNewSession}
-            title="New note"
-          >
-            <StickyNote size={13} />
-            <span>New note</span>
-          </button>
-          <button
-            class="new-item-btn"
-            onclick={() => openNewSession('commit')}
-            disabled={showNewSession}
-            title="New commit"
-          >
-            <GitCommitHorizontal size={13} />
-            <span>New commit</span>
-          </button>
-        </div>
-      </div>
-    {/if}
   {/if}
 </div>
 
@@ -488,20 +452,21 @@
   .card-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 14px 16px 0;
-  }
-
-  .branch-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
   }
 
   :global(.cloud-icon) {
     color: var(--ui-accent);
     flex-shrink: 0;
+  }
+
+  .header-left {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
   }
 
   .branch-name {
@@ -511,10 +476,15 @@
     letter-spacing: -0.01em;
   }
 
+  .base-branch-name {
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+  }
+
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
     flex-shrink: 0;
   }
 
@@ -548,24 +518,6 @@
   .status-badge.error {
     background-color: rgba(248, 81, 73, 0.1);
     color: var(--ui-danger);
-  }
-
-  /* Subheader */
-  .card-subheader {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 16px 12px;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .workspace-name {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-    font-family: 'SF Mono', 'Menlo', monospace;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* Content */
@@ -623,54 +575,6 @@
     font-size: var(--size-xs);
     color: var(--text-muted);
     max-width: 280px;
-  }
-
-  /* Footer */
-  .card-footer {
-    display: flex;
-    justify-content: flex-end;
-    padding: 6px 12px;
-  }
-
-  /* Footer with separate note/commit buttons */
-  .new-btn-group {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .new-item-btn {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    background: none;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    color: var(--text-faint);
-    font-size: var(--size-xs);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      border-color 0.15s,
-      background-color 0.15s;
-    white-space: nowrap;
-  }
-
-  .new-item-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--border-muted);
-    background: var(--bg-hover);
-  }
-
-  .new-item-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .new-item-btn :global(svg) {
-    flex-shrink: 0;
   }
 
   :global(.spinner) {

@@ -1,7 +1,6 @@
 <!--
-  TimelineRow.svelte - Renders a single timeline item
+  TimelineRow.svelte - Renders a single timeline item (commit, note, or review)
 
-  Supports: commit, note, pending commit, generating note, review.
   Icon + title + meta. Compact. The whole row is clickable to view the item.
   Hover reveals session and delete actions on the right.
 -->
@@ -52,6 +51,7 @@
     deleteDisabledReason,
   }: Props = $props();
 
+  let isNote = $derived(type === 'note' || type === 'generating-note' || type === 'failed-note');
   let isPending = $derived(type === 'pending-commit' || type === 'generating-note');
   let isFailed = $derived(type === 'failed-commit' || type === 'failed-note');
   let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
@@ -93,15 +93,13 @@
       class:review-icon={type === 'review'}
       class:failed-icon={isFailed}
     >
-      {#if type === 'pending-commit'}
+      {#if isPending}
         <Spinner size={12} />
-      {:else if type === 'generating-note'}
-        <Spinner size={12} />
-      {:else if type === 'failed-commit' || type === 'failed-note'}
+      {:else if isFailed}
         <AlertTriangle size={12} />
       {:else if type === 'commit'}
         <GitCommit size={12} />
-      {:else if type === 'note'}
+      {:else if isNote}
         <FileText size={12} />
       {:else if type === 'review'}
         <FileSearch size={12} />

@@ -321,7 +321,7 @@
     color: var(--ui-accent);
   }
   .session-indicator.status-completed {
-    color: var(--ui-success, #22c55e);
+    color: var(--status-added);
   }
   .session-indicator.status-error {
     color: var(--ui-danger);

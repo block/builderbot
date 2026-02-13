@@ -106,8 +106,8 @@
   let error = $state<string | null>(null);
   let showBranchDiff = $state(false);
 
-  // Whether the branch has any commits (used to gate PR button visibility)
-  let hasCommits = $derived(timeline != null && timeline.commits.length > 0);
+  /** True when the branch has at least one finalized commit (code changes vs base). */
+  let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
 
   // Actions state
   let actions = $state<ProjectAction[]>([]);
@@ -957,6 +957,7 @@
     !branch.worktreePath &&
     !worktreeError &&
     !deleting}
+  data-branch-id={branch.id}
   class:drag-over={dragOver}
 >
   {#if deleting}
@@ -966,10 +967,9 @@
     </div>
   {:else if branch.branchType === 'local' && !branch.worktreePath}
     <div class="card-header">
-      <div class="branch-info">
-        <GitBranch size={16} class="branch-icon" />
+      <GitBranch size={14} class="branch-icon header-icon" />
+      <div class="header-left">
         <span class="branch-name">{branch.branchName}</span>
-        <span class="branch-separator">›</span>
         <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
       </div>
       {#if worktreeError}
@@ -998,10 +998,9 @@
     </div>
   {:else}
     <div class="card-header">
-      <div class="branch-info">
-        <GitBranch size={16} class="branch-icon" />
+      <GitBranch size={14} class="branch-icon header-icon" />
+      <div class="header-left">
         <span class="branch-name">{branch.branchName}</span>
-        <span class="branch-separator">›</span>
         <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
       </div>
       <div class="header-actions">
@@ -1040,24 +1039,20 @@
                 primaryActionExecution
                   ? handleShowActionOutput(primaryActionExecution)
                   : handleRunAction(primaryRunAction)}
-              title={primaryActionExecution ? 'View output' : `Run ${primaryRunAction.name}`}
+              title={primaryRunAction.name}
             >
               {#if primaryActionExecution?.status === 'running'}
-                <Spinner size={13} />
+                <Spinner size={14} />
               {:else if primaryActionExecution?.status === 'completed'}
-                <CheckCircle size={13} />
+                <CheckCircle size={14} />
               {:else if primaryActionExecution?.status === 'failed'}
-                <AlertCircle size={13} />
+                <AlertCircle size={14} />
               {:else}
-                <Play size={13} />
+                <Play size={14} />
               {/if}
-              {primaryRunAction.name}
             </button>
           </div>
         {/if}
-        <button class="view-diff-btn" onclick={() => (showBranchDiff = true)} title="View diff">
-          <FileDiff size={16} />
-        </button>
         <div class="more-menu-container">
           <button class="more-button" onclick={toggleMoreMenu} title="More options">
             <MoreVertical size={16} />
@@ -1179,89 +1174,80 @@
           onDeleteCommit={handleDeleteCommit}
           onDeletePendingCommit={handleDeletePendingCommit}
           onDeleteNote={handleDeleteNote}
-        />
-      {/if}
-    </div>
-
-    <!-- Footer with PR button and note/commit buttons -->
-    <div class="card-footer">
-      {#if hasCommits || prState !== 'idle'}
-        <button
-          class="pr-btn"
-          class:creating={prState === 'creating'}
-          class:error={prState === 'error' || pushState === 'error'}
-          class:created={prState === 'created' && pushState !== 'error'}
-          class:pushing={pushState === 'pushing'}
-          onclick={handlePrButtonClick}
-          disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
-          title={pushState === 'pushing'
-            ? 'Pushing… (click to view)'
-            : pushState === 'error'
-              ? 'Push failed — click for details'
-              : prState === 'created' && hasUnpushed
-                ? 'Push new commits'
-                : prState === 'created'
-                  ? 'View PR'
-                  : prState === 'error'
-                    ? 'PR creation failed — click for details'
-                    : prState === 'creating'
-                      ? 'Creating PR… (click to view)'
-                      : 'Create PR'}
+          onNewNote={() => openNewSession('note')}
+          onNewCommit={() => openNewSession('commit')}
+          newSessionDisabled={showNewSession}
         >
-          {#if pushState === 'pushing'}
-            <Spinner size={13} />
-          {:else if pushState === 'error'}
-            <AlertCircle size={13} />
-          {:else if prState === 'creating'}
-            <Spinner size={13} />
-          {:else if prState === 'error'}
-            <AlertCircle size={13} />
-          {:else if prState === 'created' && hasUnpushed}
-            <GitPullRequestCreateArrow size={13} />
-          {:else if prState === 'created'}
-            <GitPullRequestArrow size={13} />
-          {:else}
-            <GitPullRequestCreateArrow size={13} />
-          {/if}
-          <span>
-            {#if pushState === 'pushing'}
-              Pushing…
-            {:else if pushState === 'error'}
-              Push failed
-            {:else if prState === 'created' && hasUnpushed}
-              Push{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
-            {:else if prState === 'created'}
-              View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
-            {:else if prState === 'creating'}
-              Creating PR…
-            {:else if prState === 'error'}
-              PR failed
-            {:else}
-              Create PR
+          {#snippet footerActions()}
+            {#if hasCodeChanges}
+              <div class="footer-actions">
+                <button
+                  class="pr-btn"
+                  class:creating={prState === 'creating'}
+                  class:error={prState === 'error' || pushState === 'error'}
+                  class:created={prState === 'created' && pushState !== 'error'}
+                  class:pushing={pushState === 'pushing'}
+                  onclick={handlePrButtonClick}
+                  disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
+                  title={pushState === 'pushing'
+                    ? 'Pushing… (click to view)'
+                    : pushState === 'error'
+                      ? 'Push failed — click for details'
+                      : prState === 'created' && hasUnpushed
+                        ? 'Push new commits'
+                        : prState === 'created'
+                          ? 'View PR'
+                          : prState === 'error'
+                            ? 'PR creation failed — click for details'
+                            : prState === 'creating'
+                              ? 'Creating PR… (click to view)'
+                              : 'Create PR'}
+                >
+                  {#if pushState === 'pushing'}
+                    <Spinner size={13} />
+                  {:else if pushState === 'error'}
+                    <AlertCircle size={13} />
+                  {:else if prState === 'creating'}
+                    <Spinner size={13} />
+                  {:else if prState === 'error'}
+                    <AlertCircle size={13} />
+                  {:else if prState === 'created' && hasUnpushed}
+                    <GitPullRequestCreateArrow size={13} />
+                  {:else if prState === 'created'}
+                    <GitPullRequestArrow size={13} />
+                  {:else}
+                    <GitPullRequestCreateArrow size={13} />
+                  {/if}
+                  <span>
+                    {#if pushState === 'pushing'}
+                      Pushing…
+                    {:else if pushState === 'error'}
+                      Push failed
+                    {:else if prState === 'created' && hasUnpushed}
+                      Push{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                    {:else if prState === 'created'}
+                      View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                    {:else if prState === 'creating'}
+                      Creating PR…
+                    {:else if prState === 'error'}
+                      PR failed
+                    {:else}
+                      Create PR
+                    {/if}
+                  </span>
+                </button>
+                <button
+                  class="view-diff-btn"
+                  onclick={() => (showBranchDiff = true)}
+                  title="View diff"
+                >
+                  <FileDiff size={14} />
+                </button>
+              </div>
             {/if}
-          </span>
-        </button>
+          {/snippet}
+        </BranchTimeline>
       {/if}
-      <div class="new-btn-group">
-        <button
-          class="new-item-btn note-btn"
-          onclick={() => openNewSession('note')}
-          disabled={showNewSession}
-          title="New note"
-        >
-          <FileText size={13} />
-          <span>New note</span>
-        </button>
-        <button
-          class="new-item-btn commit-btn"
-          onclick={() => openNewSession('commit')}
-          disabled={showNewSession}
-          title="New commit"
-        >
-          <GitCommitHorizontal size={13} />
-          <span>New commit</span>
-        </button>
-      </div>
     </div>
   {/if}
 </div>
@@ -1423,16 +1409,21 @@
   .card-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 14px 16px;
+    gap: 12px;
+    padding: 12px 16px;
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .branch-info {
+  :global(.header-icon) {
+    flex-shrink: 0;
+    align-self: center;
+  }
+
+  .header-left {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    flex-direction: column;
     min-width: 0;
+    flex: 1;
   }
 
   .header-actions {
@@ -1586,67 +1577,59 @@
     letter-spacing: -0.01em;
   }
 
-  .branch-separator {
-    color: var(--text-faint);
-    font-size: var(--size-md);
-    margin: 0 2px;
-  }
-
   .base-branch-name {
-    font-size: var(--size-md);
-    font-weight: 500;
-    color: var(--text-muted);
+    font-size: var(--size-xs);
+    color: var(--text-faint);
   }
 
-  /* Primary action button */
+  /* Primary action button — circular icon-only */
   .primary-action-container {
     display: flex;
     align-items: center;
-    gap: 4px;
   }
 
   .primary-action-button {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 12px;
-    background: transparent;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-weight: 500;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: var(--bg-elevated);
+    border: none;
+    border-radius: 50%;
+    color: var(--ui-accent);
     cursor: pointer;
     transition: all 0.15s ease;
-    white-space: nowrap;
   }
 
   .primary-action-button:hover {
-    border-color: var(--ui-accent);
-    color: var(--ui-accent);
-    background-color: var(--bg-hover);
+    background: var(--bg-hover);
   }
 
   .primary-action-button.running {
+    background: var(--bg-hover);
+    color: var(--text-muted);
+  }
+
+  .primary-action-button.running:hover {
     background: var(--bg-elevated);
-    border-color: var(--border-muted);
-    color: var(--text-primary);
   }
 
   .primary-action-button.completed {
-    border-color: var(--ui-success);
-    color: var(--ui-success);
+    background: var(--bg-hover);
+    color: var(--status-added);
   }
 
   .primary-action-button.failed {
-    border-color: var(--ui-danger);
+    background: var(--bg-hover);
     color: var(--ui-danger);
   }
 
   .primary-action-button :global(svg) {
     flex-shrink: 0;
-    width: 13px;
-    height: 13px;
+    width: 14px;
+    height: 14px;
   }
 
   /* Running actions */
@@ -1687,8 +1670,8 @@
   }
 
   .running-action-button.completed {
-    border-color: var(--ui-success);
-    color: var(--ui-success);
+    border-color: var(--status-added);
+    color: var(--status-added);
   }
 
   .running-action-button.failed {
@@ -1761,12 +1744,11 @@
     background-color: var(--bg-hover);
   }
 
-  /* Footer */
-  .card-footer {
+  /* Footer actions (rendered inline with "New commit" via snippet) */
+  .footer-actions {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 6px 12px;
+    gap: 4px;
   }
 
   /* PR button */
@@ -1832,58 +1814,6 @@
 
   .pr-btn :global(svg) {
     flex-shrink: 0;
-  }
-
-  /* Footer with separate note/commit buttons */
-  .new-btn-group {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: auto;
-  }
-
-  .new-item-btn {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    background: none;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    color: var(--text-faint);
-    font-size: var(--size-xs);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      border-color 0.15s,
-      background-color 0.15s;
-    white-space: nowrap;
-  }
-
-  .new-item-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--border-muted);
-    background: var(--bg-hover);
-  }
-
-  .new-item-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .new-item-btn :global(svg) {
-    flex-shrink: 0;
-    transition: color 0.15s;
-  }
-
-  /* Icon color on button hover */
-  .note-btn:hover :global(svg) {
-    color: var(--note-color);
-  }
-
-  .commit-btn:hover :global(svg) {
-    color: var(--commit-color);
   }
 
   :global(.spinner) {

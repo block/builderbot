@@ -5,22 +5,22 @@
     .dir-heading {
         font-size: 0.75em;
         font-weight: 600;
-        color: #999;
+        color: var(--text-faint);
         text-transform: uppercase;
         letter-spacing: 0.3px;
         padding: 6px 16px 2px;
-        border-top: 1px solid #f0f0f0;
+        border-top: 1px solid var(--border-divider);
         cursor: default;
     }
     .dir-heading:first-child {
         border-top: none;
     }
     .file-age {
-        color: #888;
+        color: var(--text-subtle);
         font-size: 0.85em;
         white-space: nowrap;
     }
-    .empty { color: #888; font-style: italic; }
+    .empty { color: var(--text-subtle); font-style: italic; }
 
     .review-badge {
         font-size: 0.7em;
@@ -28,24 +28,24 @@
         text-transform: uppercase;
         padding: 2px 6px;
         border-radius: 3px;
-        background: #ddf4ff;
-        color: #0969da;
+        background: var(--file-type-research-bg);
+        color: var(--file-type-research-color);
         flex-shrink: 0;
     }
     .review-badge.agent-active {
         animation: review-badge-pulse 2s infinite;
     }
     @keyframes review-badge-pulse {
-        0% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0.4); }
-        70% { box-shadow: 0 0 0 4px rgba(9, 105, 218, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(9, 105, 218, 0); }
+        0% { box-shadow: 0 0 0 0 var(--accent-primary-light); }
+        70% { box-shadow: 0 0 0 4px transparent; }
+        100% { box-shadow: 0 0 0 0 transparent; }
     }
 
     .file-typing {
         display: inline-flex;
         align-items: center;
         gap: 4px;
-        color: #2da44e;
+        color: var(--accent-success);
         font-size: 0.75em;
         font-weight: 500;
         flex-shrink: 0;
@@ -54,7 +54,7 @@
         display: inline-block;
         width: 6px;
         height: 6px;
-        background: #2da44e;
+        background: var(--accent-success);
         border-radius: 50%;
         flex-shrink: 0;
     }
@@ -73,12 +73,12 @@
         align-items: center;
         gap: 8px;
         padding: 10px 16px;
-        background: #fff5f5;
-        border: 1px solid #f0c0c0;
+        background: var(--accent-danger-light);
+        border: 1px solid var(--accent-danger);
         border-radius: 6px;
         margin-bottom: 24px;
         font-size: 0.9em;
-        color: #cf222e;
+        color: var(--accent-danger);
         font-weight: 500;
     }
     body.project-deleting .files,
@@ -91,14 +91,14 @@
     /* Source sections as boxed containers */
     .source-section {
         margin-bottom: 16px;
-        border: 1px solid #e8e8e8;
+        border: 1px solid var(--border-card);
         border-radius: 6px;
-        background: #fff;
+        background: var(--bg-surface);
         transition: border-color 0.15s;
     }
-    .source-section:hover { border-color: #0066cc; }
+    .source-section:hover { border-color: var(--accent-primary); }
     .source-section.selected {
-        border-color: #0066cc;
+        border-color: var(--accent-primary);
     }
     .source-header {
         display: flex;
@@ -109,9 +109,9 @@
         cursor: pointer;
         user-select: none;
     }
-    .source-header:hover { background: #eff0f1; }
+    .source-header:hover { background: var(--bg-surface-hover); }
     .source-header { border-radius: 6px 6px 0 0; }
-    .source-section.all-selected .source-header { background: #e8f0fe; }
+    .source-section.all-selected .source-header { background: var(--bg-surface-active); }
     .source-section .file:last-child { border-radius: 0 0 6px 6px; }
     .source-checkbox { display: none; }
     .source-header-label {
@@ -119,7 +119,7 @@
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.5px;
-        color: #888;
+        color: var(--text-subtle);
     }
     .source-header .source-badge {
         font-size: 0.65em;
@@ -133,7 +133,7 @@
         font-weight: 400;
         text-transform: none;
         letter-spacing: 0;
-        color: #aaa;
+        color: var(--text-disabled);
     }
 
     /* File rows within source boxes - override shared card styles */
@@ -142,16 +142,16 @@
         margin-bottom: 0;
         border: none;
         border-radius: 0;
-        border-top: 1px solid #f0f0f0;
+        border-top: 1px solid var(--border-divider);
         background: transparent;
     }
     .source-section .file:hover {
-        border-color: #f0f0f0;
-        background: #eff0f1;
+        border-color: var(--border-divider);
+        background: var(--bg-surface-hover);
     }
     .source-section .file.selected {
-        background: #e8f0fe;
-        border-color: #f0f0f0;
+        background: var(--bg-surface-active);
+        border-color: var(--border-divider);
     }
 
     /* Source three-dot menu */
@@ -160,21 +160,21 @@
         background: none;
         border: none;
         font-size: 1.1em;
-        color: #999;
+        color: var(--text-faint);
         cursor: pointer;
         padding: 2px 4px;
         line-height: 1;
     }
-    .source-dots:hover { color: #333; }
+    .source-dots:hover { color: var(--text-primary); }
     .source-header-menu {
         display: none;
         position: absolute;
         right: 0;
         top: 100%;
-        background: #fff;
-        border: 1px solid #ddd;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
         border-radius: 6px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        box-shadow: var(--shadow-menu);
         z-index: 100;
         min-width: 200px;
         padding: 4px 0;
@@ -188,39 +188,39 @@
         border: none;
         background: none;
         font-size: 0.8em;
-        color: #333;
+        color: var(--text-primary);
         cursor: pointer;
     }
-    .source-header-menu button:hover { background: #f5f5f5; }
+    .source-header-menu button:hover { background: var(--bg-surface-tertiary); }
     .source-header-menu .menu-divider {
-        border-top: 1px solid #eee;
+        border-top: 1px solid var(--border-divider);
         margin: 4px 0;
     }
-    .source-header-menu .menu-danger { color: #cf222e; }
-    .source-header-menu .menu-danger:hover { background: #fff5f5; }
+    .source-header-menu .menu-danger { color: var(--accent-danger); }
+    .source-header-menu .menu-danger:hover { background: var(--accent-danger-light); }
 
     /* File three-dot menu */
     .file-dots {
         background: none;
-        border: 1px solid #ddd;
+        border: 1px solid var(--border-subtle);
         border-radius: 4px;
         padding: 4px 6px;
         font-size: 0.85em;
-        color: #999;
+        color: var(--text-faint);
         cursor: pointer;
         line-height: 1;
     }
-    .file-dots:hover { color: #333; border-color: #ccc; }
+    .file-dots:hover { color: var(--text-primary); border-color: var(--border-strong); }
     .file-menu-wrap { position: relative; }
     .file-menu {
         display: none;
         position: absolute;
         right: 0;
         top: calc(100% + 4px);
-        background: #fff;
-        border: 1px solid #ddd;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
         border-radius: 6px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        box-shadow: var(--shadow-menu);
         z-index: 100;
         min-width: 200px;
         padding: 4px 0;
@@ -234,16 +234,16 @@
         border: none;
         background: none;
         font-size: 0.85em;
-        color: #333;
+        color: var(--text-primary);
         cursor: pointer;
     }
-    .file-menu button:hover { background: #f5f5f5; }
+    .file-menu button:hover { background: var(--bg-surface-tertiary); }
     .file-menu .menu-divider {
-        border-top: 1px solid #eee;
+        border-top: 1px solid var(--border-divider);
         margin: 4px 0;
     }
-    .file-menu .menu-danger { color: #cf222e; }
-    .file-menu .menu-danger:hover { background: #fff5f5; }
+    .file-menu .menu-danger { color: var(--accent-danger); }
+    .file-menu .menu-danger:hover { background: var(--accent-danger-light); }
 
     .agent-controls { margin-bottom: 0; }
     .agent-status {
@@ -252,9 +252,9 @@
         gap: 6px;
         padding: 6px 12px;
         font-size: 0.85em;
-        color: #2da44e;
-        background: #dafbe1;
-        border: 1px solid #aceebb;
+        color: var(--accent-success);
+        background: var(--copied-bg);
+        border: 1px solid var(--accent-success);
         border-radius: 6px;
         margin-bottom: 16px;
     }
@@ -262,43 +262,43 @@
         display: inline-block;
         width: 7px;
         height: 7px;
-        background: #2da44e;
+        background: var(--accent-success);
         border-radius: 50%;
         flex-shrink: 0;
         animation: sidebar-pulse 2s infinite;
     }
     .agent-status .agent-stop-btn {
         background: none;
-        border: 1px solid #aceebb;
+        border: 1px solid var(--accent-success);
         border-radius: 4px;
         padding: 2px 8px;
         font-size: 0.85em;
         cursor: pointer;
-        color: #656d76;
+        color: var(--text-muted);
         margin-left: 4px;
     }
     .agent-status .agent-stop-btn:hover {
-        background: #fff;
-        border-color: #656d76;
+        background: var(--bg-surface);
+        border-color: var(--text-muted);
     }
     .agent-status .context-bar {
         width: 60px;
         height: 6px;
-        background: #c8e6c9;
+        background: var(--bg-surface-tertiary);
         border-radius: 3px;
         overflow: hidden;
     }
     .agent-status .context-bar-fill {
         height: 100%;
-        background: #2da44e;
+        background: var(--accent-success);
         border-radius: 3px;
         transition: width 0.3s ease;
     }
     .agent-status .context-bar-fill.warning { background: #d29922; }
-    .agent-status .context-bar-fill.critical { background: #cf222e; }
+    .agent-status .context-bar-fill.critical { background: var(--accent-danger); }
     .agent-status .context-label {
         font-size: 0.85em;
-        color: #656d76;
+        color: var(--text-muted);
         cursor: default;
     }
     .agent-status .context-bar {
@@ -306,17 +306,17 @@
     }
     .add-source-btn {
         display: inline-block;
-        color: #aaa;
+        color: var(--text-disabled);
         font-size: 0.85em;
         cursor: pointer;
         padding: 8px 0;
     }
-    .add-source-btn:hover { color: #666; text-decoration: none; }
+    .add-source-btn:hover { color: var(--text-muted); text-decoration: none; }
     .main-content { scroll-behavior: smooth; }
 
     /* In Review virtual source section */
-    .source-section.in-review-section { border-color: #b6d4fe; }
-    .source-section.in-review-section:hover { border-color: #0969da; }
+    .source-section.in-review-section { border-color: var(--accent-primary); }
+    .source-section.in-review-section:hover { border-color: var(--link-color); }
     .source-section.in-review-section .source-header { cursor: default; }
     .source-section.in-review-section .source-header:hover { background: transparent; }
     /* Sidebar source type tags */

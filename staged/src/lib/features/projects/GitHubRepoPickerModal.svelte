@@ -33,6 +33,7 @@
   let selectedOwner = $state<string | null>(null); // null = personal / @me
   let ownerDropdownOpen = $state(false);
   let ownerLabel = $derived(selectedOwner ?? 'My repos');
+  let orgError = $state<string | null>(null);
 
   /**
    * Parse a GitHub URL into owner/repo format.
@@ -63,6 +64,9 @@
     ]);
     if (orgsResult.status === 'fulfilled') {
       orgs = orgsResult.value;
+    } else {
+      orgError =
+        'Could not load organizations. Check that your GitHub token has the read:org scope.';
     }
     if (reposResult.status === 'fulfilled') {
       repos = reposResult.value;
@@ -86,7 +90,17 @@
     try {
       repos = await commands.listGithubRepos(owner ?? undefined);
     } catch (e) {
-      error = typeof e === 'string' ? e : String(e);
+      const raw = typeof e === 'string' ? e : String(e);
+      if (
+        raw.includes('403') ||
+        raw.includes('auth') ||
+        raw.includes('token') ||
+        raw.includes('logged in')
+      ) {
+        error = `Could not access repositories for "${owner}". Your GitHub token may lack permission for this org — try: gh auth refresh -s read:org`;
+      } else {
+        error = `Could not load repositories for "${owner}": ${raw}`;
+      }
       repos = [];
     } finally {
       loading = false;
@@ -238,6 +252,10 @@
       {/if}
     </div>
 
+    {#if orgError}
+      <div class="org-error">{orgError}</div>
+    {/if}
+
     <div class="repo-list">
       {#if loading}
         <div class="loading-state">
@@ -299,7 +317,6 @@
     box-shadow: var(--shadow-elevated);
     display: flex;
     flex-direction: column;
-    overflow: hidden;
   }
 
   .modal-header {
@@ -444,6 +461,7 @@
     flex: 1;
     overflow-y: auto;
     padding: 4px 0;
+    border-radius: 0 0 12px 12px;
   }
 
   .loading-state,
@@ -460,6 +478,15 @@
 
   .error-state {
     color: var(--ui-danger);
+    text-align: center;
+  }
+
+  .org-error {
+    padding: 8px 16px;
+    background-color: var(--ui-danger-bg);
+    color: var(--ui-danger);
+    font-size: var(--size-xs);
+    border-bottom: 1px solid var(--border-subtle);
   }
 
   .repo-item {

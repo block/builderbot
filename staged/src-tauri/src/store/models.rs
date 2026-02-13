@@ -17,7 +17,7 @@ use crate::git::Span;
 /// A tracked repository (user opt-in).
 ///
 /// Projects are identified by their GitHub `owner/repo` slug. The local
-/// clone path is derived on demand: `~/.staged/repos/<owner>/<repo>/`.
+/// clone path is derived on demand via [`crate::paths::repos_dir`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -46,11 +46,11 @@ impl Project {
         self
     }
 
-    /// Derive the local clone path: `~/.staged/repos/<owner>/<repo>/`.
+    /// Derive the local clone path: `<repos_dir>/<owner>/<repo>/`.
     ///
-    /// Returns `None` if the home directory can't be determined.
+    /// Returns `None` if the data directory can't be determined.
     pub fn clone_path(&self) -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|home| home.join(".staged").join("repos").join(&self.github_repo))
+        crate::paths::repos_dir().map(|d| d.join(&self.github_repo))
     }
 
     /// Extract the repo name (last component of `owner/repo`).

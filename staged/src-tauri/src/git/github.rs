@@ -443,15 +443,15 @@ pub fn prune_remote_for_repo(_github_repo: &str) -> Result<(), GitError> {
     Ok(())
 }
 
-/// Ensure a local clone exists at `~/.staged/repos/<owner>/<repo>/`.
+/// Ensure a local clone exists at `<repos_dir>/<owner>/<repo>/`.
 ///
 /// If the directory already exists, runs `git fetch origin` to update.
 /// If not, clones the repo. Returns the path to the local clone.
 pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitError> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| GitError::CommandFailed("Cannot determine home directory".to_string()))?;
+    let repos = crate::paths::repos_dir()
+        .ok_or_else(|| GitError::CommandFailed("Cannot determine data directory".to_string()))?;
 
-    let clone_path = home.join(".staged").join("repos").join(github_repo);
+    let clone_path = repos.join(github_repo);
 
     if clone_path.join(".git").exists() {
         // Already cloned — fetch latest

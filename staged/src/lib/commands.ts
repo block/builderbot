@@ -467,7 +467,7 @@ export function pushBranch(branchId: string, provider?: string, force?: boolean)
 }
 
 // =============================================================================
-// Doctor (System Health Check)
+// Doctor (Health Check)
 // =============================================================================
 
 export interface DoctorCheck {

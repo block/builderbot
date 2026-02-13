@@ -50,7 +50,7 @@
   onMount(async () => {
     document.addEventListener('keydown', handleKonamiKey);
 
-    // Listen for the Help → System Health Check… menu item.
+    // Listen for the Help → Health Check… menu item.
     unlistenDoctor = await listen('menu:doctor', () => {
       showDoctor = true;
     });

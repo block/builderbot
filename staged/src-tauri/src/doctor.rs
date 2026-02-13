@@ -1,4 +1,4 @@
-//! System Health Check ("Doctor") — backend checks + optional auto-fix.
+//! Health Check ("Doctor") — backend checks + optional auto-fix.
 //!
 //! Each check probes a single external dependency and returns a status
 //! (pass / warn / fail) with a human-readable summary and optional fix.

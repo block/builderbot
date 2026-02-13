@@ -2159,13 +2159,8 @@ pub fn run() {
                     ],
                 )?;
 
-                let doctor_item = MenuItem::with_id(
-                    handle,
-                    "doctor",
-                    "System Health Check…",
-                    true,
-                    None::<&str>,
-                )?;
+                let doctor_item =
+                    MenuItem::with_id(handle, "doctor", "Health Check…", true, None::<&str>)?;
 
                 let help_menu = Submenu::with_id_and_items(
                     handle,

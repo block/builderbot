@@ -1,7 +1,7 @@
 <!--
-  DoctorModal.svelte — System Health Check modal.
+  DoctorModal.svelte — Health Check modal.
 
-  Opened via Help → System Health Check… menu item.
+  Opened via Help → Health Check menu item.
   Runs all checks on mount and displays results with optional fix buttons.
 -->
 <script lang="ts">
@@ -24,10 +24,15 @@
     }
   }
 
-  const passCount = $derived(
-    doctorState.report?.checks.filter((c) => c.status === 'pass').length ?? 0
+  /** Tool checks (non-agent). */
+  const toolChecks = $derived(
+    doctorState.report?.checks.filter((c) => !c.id.startsWith('ai-agent-')) ?? []
   );
-  const totalCount = $derived(doctorState.report?.checks.length ?? 0);
+
+  /** Agent checks. */
+  const agentChecks = $derived(
+    doctorState.report?.checks.filter((c) => c.id.startsWith('ai-agent-')) ?? []
+  );
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -41,12 +46,12 @@
       <div class="header-icon">
         <Stethoscope size={24} />
       </div>
-      <h2>System Health Check</h2>
+      <h2>Health Check</h2>
       <p class="subtitle">
         {#if doctorState.loading}
           Checking your environment…
         {:else if doctorState.report}
-          {passCount}/{totalCount} checks passed
+          Verifying required tools and configuration
         {:else}
           Verifying required tools and configuration
         {/if}
@@ -60,11 +65,29 @@
           <span>Running checks…</span>
         </div>
       {:else if doctorState.report}
-        <div class="checks-list">
-          {#each doctorState.report.checks as check (check.id)}
-            <DoctorCheckRow {check} fixing={doctorState.fixing.has(check.id)} onfix={fixCheck} />
-          {/each}
+        <div class="section">
+          <h3 class="section-label">Tools</h3>
+          <div class="checks-list">
+            {#each toolChecks as check (check.id)}
+              <DoctorCheckRow {check} fixing={doctorState.fixing.has(check.id)} onfix={fixCheck} />
+            {/each}
+          </div>
         </div>
+
+        {#if agentChecks.length > 0}
+          <div class="section">
+            <h3 class="section-label">Agents</h3>
+            <div class="checks-list">
+              {#each agentChecks as check (check.id)}
+                <DoctorCheckRow
+                  {check}
+                  fixing={doctorState.fixing.has(check.id)}
+                  onfix={fixCheck}
+                />
+              {/each}
+            </div>
+          </div>
+        {/if}
       {/if}
     </div>
 
@@ -168,6 +191,23 @@
     padding: 32px 0;
     color: var(--text-muted);
     font-size: var(--size-sm);
+  }
+
+  .section {
+    margin-bottom: 12px;
+  }
+
+  .section:last-child {
+    margin-bottom: 0;
+  }
+
+  .section-label {
+    margin: 0 0 6px 0;
+    font-size: var(--size-xs);
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
 
   .checks-list {

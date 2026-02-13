@@ -26,20 +26,36 @@ pub fn run(repo: &Path, args: &[&str]) -> Result<String, GitError> {
         .to_str()
         .ok_or_else(|| GitError::InvalidPath(repo.display().to_string()))?;
 
+    log::debug!("git -C {} {}", repo_str, args.join(" "));
+
     let output = Command::new("git")
         .args(["-C", repo_str])
         .args(args)
         .output()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
+                log::error!("git binary not found");
                 GitError::GitNotFound
             } else {
+                log::error!("failed to spawn git process: {e}");
                 GitError::CommandFailed(e.to_string())
             }
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        log::debug!(
+            "git command failed (exit {}): git -C {} {}\nstderr: {}\nstdout: {}",
+            output
+                .status
+                .code()
+                .map_or("signal".to_string(), |c| c.to_string()),
+            repo_str,
+            args.join(" "),
+            stderr.trim(),
+            stdout.trim()
+        );
         if stderr.contains("not a git repository") {
             return Err(GitError::NotARepo(repo.display().to_string()));
         }

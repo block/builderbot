@@ -41,21 +41,50 @@ pub fn create_worktree(
     branch_name: &str,
     start_point: &str,
 ) -> Result<PathBuf, GitError> {
+    log::info!(
+        "create_worktree: repo={}, branch={}, start_point={}",
+        repo.display(),
+        branch_name,
+        start_point
+    );
+
     let worktree_path = worktree_path_for(repo, branch_name)?;
+    log::debug!(
+        "create_worktree: resolved worktree path: {}",
+        worktree_path.display()
+    );
 
     // Ensure parent directory exists
     if let Some(parent) = worktree_path.parent() {
+        log::debug!(
+            "create_worktree: ensuring parent directory exists: {}",
+            parent.display()
+        );
         std::fs::create_dir_all(parent).map_err(|e| {
+            log::error!(
+                "create_worktree: failed to create parent directory {}: {e}",
+                parent.display()
+            );
             GitError::CommandFailed(format!("Failed to create worktree directory: {e}"))
         })?;
     }
 
     // Check if worktree already exists
     if worktree_path.exists() {
+        log::error!(
+            "create_worktree: worktree path already exists: {}",
+            worktree_path.display()
+        );
         return Err(GitError::CommandFailed(format!(
             "Worktree already exists at {}",
             worktree_path.display()
         )));
+    }
+
+    // Log existing worktrees for context (helps diagnose "branch already checked out" errors)
+    match cli::run(repo, &["worktree", "list"]) {
+        Ok(output) => log::debug!("create_worktree: existing worktrees:\n{output}"),
+        Err(e) => log::warn!("create_worktree: failed to list existing worktrees: {e}"),
     }
 
     let worktree_str = worktree_path
@@ -64,7 +93,13 @@ pub fn create_worktree(
 
     // Create worktree with new branch from start point:
     // git worktree add <path> -b <branch> <start-point>
-    cli::run(
+    log::info!(
+        "create_worktree: running `git worktree add {} -b {} {}`",
+        worktree_str,
+        branch_name,
+        start_point
+    );
+    let result = cli::run(
         repo,
         &[
             "worktree",
@@ -74,8 +109,40 @@ pub fn create_worktree(
             branch_name,
             start_point,
         ],
-    )?;
+    );
 
+    match &result {
+        Ok(output) => {
+            log::info!(
+                "create_worktree: successfully created worktree at {}",
+                worktree_path.display()
+            );
+            if !output.trim().is_empty() {
+                log::debug!("create_worktree: git output: {output}");
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "create_worktree: `git worktree add` failed for branch '{}' at '{}': {e}",
+                branch_name,
+                worktree_path.display()
+            );
+            // Log whether the directory was partially created (helps diagnose cleanup issues)
+            if worktree_path.exists() {
+                log::warn!(
+                    "create_worktree: worktree directory still exists after failure (partial creation): {}",
+                    worktree_path.display()
+                );
+            } else {
+                log::debug!(
+                    "create_worktree: worktree directory does not exist after failure (git cleaned up): {}",
+                    worktree_path.display()
+                );
+            }
+        }
+    }
+
+    result?;
     Ok(worktree_path)
 }
 
@@ -87,21 +154,49 @@ pub fn create_worktree_for_existing_branch(
     repo: &Path,
     branch_name: &str,
 ) -> Result<PathBuf, GitError> {
+    log::info!(
+        "create_worktree_for_existing_branch: repo={}, branch={}",
+        repo.display(),
+        branch_name
+    );
+
     let worktree_path = worktree_path_for(repo, branch_name)?;
+    log::debug!(
+        "create_worktree_for_existing_branch: resolved worktree path: {}",
+        worktree_path.display()
+    );
 
     // Ensure parent directory exists
     if let Some(parent) = worktree_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
+            log::error!(
+                "create_worktree_for_existing_branch: failed to create parent directory {}: {e}",
+                parent.display()
+            );
             GitError::CommandFailed(format!("Failed to create worktree directory: {e}"))
         })?;
     }
 
     // Check if worktree already exists
     if worktree_path.exists() {
+        log::error!(
+            "create_worktree_for_existing_branch: worktree path already exists: {}",
+            worktree_path.display()
+        );
         return Err(GitError::CommandFailed(format!(
             "Worktree already exists at {}",
             worktree_path.display()
         )));
+    }
+
+    // Log existing worktrees for context
+    match cli::run(repo, &["worktree", "list"]) {
+        Ok(output) => {
+            log::debug!("create_worktree_for_existing_branch: existing worktrees:\n{output}")
+        }
+        Err(e) => log::warn!(
+            "create_worktree_for_existing_branch: failed to list existing worktrees: {e}"
+        ),
     }
 
     let worktree_str = worktree_path
@@ -110,8 +205,44 @@ pub fn create_worktree_for_existing_branch(
 
     // Create worktree for existing branch:
     // git worktree add <path> <branch>
-    cli::run(repo, &["worktree", "add", worktree_str, branch_name])?;
+    log::info!(
+        "create_worktree_for_existing_branch: running `git worktree add {} {}`",
+        worktree_str,
+        branch_name
+    );
+    let result = cli::run(repo, &["worktree", "add", worktree_str, branch_name]);
 
+    match &result {
+        Ok(output) => {
+            log::info!(
+                "create_worktree_for_existing_branch: successfully created worktree at {}",
+                worktree_path.display()
+            );
+            if !output.trim().is_empty() {
+                log::debug!("create_worktree_for_existing_branch: git output: {output}");
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "create_worktree_for_existing_branch: `git worktree add` failed for branch '{}' at '{}': {e}",
+                branch_name,
+                worktree_path.display()
+            );
+            if worktree_path.exists() {
+                log::warn!(
+                    "create_worktree_for_existing_branch: worktree directory still exists after failure: {}",
+                    worktree_path.display()
+                );
+            } else {
+                log::debug!(
+                    "create_worktree_for_existing_branch: worktree directory does not exist after failure (git cleaned up): {}",
+                    worktree_path.display()
+                );
+            }
+        }
+    }
+
+    result?;
     Ok(worktree_path)
 }
 
@@ -127,10 +258,18 @@ pub fn create_worktree_for_existing_branch(
 /// The branch_name parameter is optional - if provided, the local branch will be deleted.
 /// This is important for allowing the branch to be recreated later.
 pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError> {
+    log::info!(
+        "remove_worktree: repo={}, worktree_path={}",
+        repo.display(),
+        worktree_path.display()
+    );
+
     // First, get the branch name from the worktree before removing it
     let branch_name = get_worktree_branch(repo, worktree_path);
+    log::debug!("remove_worktree: associated branch: {:?}", branch_name);
 
     if worktree_path.exists() {
+        log::debug!("remove_worktree: worktree directory exists on disk, attempting git removal");
         // Worktree directory exists on disk - try to remove it normally
         let worktree_str = worktree_path
             .to_str()
@@ -141,6 +280,7 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError
 
         if let Err(e) = result {
             let error_msg = e.to_string();
+            log::warn!("remove_worktree: `git worktree remove --force` failed: {error_msg}");
 
             // If git doesn't recognize it as a worktree (admin files already deleted),
             // or if directory is not empty (untracked files like node_modules),
@@ -148,7 +288,15 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError
             if error_msg.contains("is not a working tree")
                 || error_msg.contains("Directory not empty")
             {
+                log::info!(
+                    "remove_worktree: falling back to manual directory removal for {}",
+                    worktree_path.display()
+                );
                 std::fs::remove_dir_all(worktree_path).map_err(|io_err| {
+                    log::error!(
+                        "remove_worktree: failed to remove directory {}: {io_err}",
+                        worktree_path.display()
+                    );
                     GitError::CommandFailed(format!(
                         "Failed to remove worktree directory: {io_err}"
                     ))
@@ -158,17 +306,30 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError
             } else {
                 return Err(e);
             }
+        } else {
+            log::info!(
+                "remove_worktree: successfully removed worktree at {}",
+                worktree_path.display()
+            );
         }
     } else {
         // Worktree was already deleted from disk - prune stale references
+        log::info!(
+            "remove_worktree: worktree directory already gone, pruning stale git references"
+        );
         cli::run(repo, &["worktree", "prune"])?;
     }
 
     // Delete the local branch if we found one
     // Use -D (force delete) since the branch may not be fully merged
     if let Some(branch) = branch_name {
+        log::info!("remove_worktree: deleting local branch '{branch}'");
         // Ignore errors - branch may already be deleted or may be checked out elsewhere
-        let _ = cli::run(repo, &["branch", "-D", &branch]);
+        if let Err(e) = cli::run(repo, &["branch", "-D", &branch]) {
+            log::warn!(
+                "remove_worktree: failed to delete branch '{branch}' (may already be gone): {e}"
+            );
+        }
     }
 
     Ok(())
@@ -335,20 +496,40 @@ pub fn create_worktree_from_pr(
     head_ref: &str,
     base_ref: &str,
 ) -> Result<(PathBuf, String, String), GitError> {
+    log::info!(
+        "create_worktree_from_pr: repo={}, pr_number={}, head_ref={}, base_ref={}",
+        repo.display(),
+        pr_number,
+        head_ref,
+        base_ref
+    );
+
     // Use the PR's head_ref as the local branch name
     let branch_name = head_ref.to_string();
 
     // Check if branch already exists locally
     if branch_exists(repo, &branch_name)? {
+        log::error!(
+            "create_worktree_from_pr: branch '{}' already exists locally",
+            branch_name
+        );
         return Err(GitError::CommandFailed(format!(
             "Branch '{branch_name}' already exists locally"
         )));
     }
 
     let worktree_path = worktree_path_for(repo, &branch_name)?;
+    log::debug!(
+        "create_worktree_from_pr: resolved worktree path: {}",
+        worktree_path.display()
+    );
 
     // Check if worktree already exists
     if worktree_path.exists() {
+        log::error!(
+            "create_worktree_from_pr: worktree path already exists: {}",
+            worktree_path.display()
+        );
         return Err(GitError::CommandFailed(format!(
             "Worktree already exists at {}",
             worktree_path.display()
@@ -358,26 +539,44 @@ pub fn create_worktree_from_pr(
     // Ensure parent directory exists
     if let Some(parent) = worktree_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
+            log::error!(
+                "create_worktree_from_pr: failed to create parent directory {}: {e}",
+                parent.display()
+            );
             GitError::CommandFailed(format!("Failed to create worktree directory: {e}"))
         })?;
     }
 
     // Fetch the PR head ref
     let pr_ref = format!("refs/pull/{pr_number}/head");
+    log::info!("create_worktree_from_pr: fetching {pr_ref}");
     cli::run(repo, &["fetch", "origin", &pr_ref])?;
 
     // Get the SHA of the fetched PR head
     let head_sha = cli::run(repo, &["rev-parse", "FETCH_HEAD"])?
         .trim()
         .to_string();
+    log::debug!("create_worktree_from_pr: PR head SHA: {head_sha}");
 
     let worktree_str = worktree_path
         .to_str()
         .ok_or_else(|| GitError::InvalidPath(worktree_path.display().to_string()))?;
 
+    // Log existing worktrees for context
+    match cli::run(repo, &["worktree", "list"]) {
+        Ok(output) => log::debug!("create_worktree_from_pr: existing worktrees:\n{output}"),
+        Err(e) => log::warn!("create_worktree_from_pr: failed to list existing worktrees: {e}"),
+    }
+
     // Create worktree with new branch at the PR's head commit
     // git worktree add <path> -b <branch> <commit>
-    cli::run(
+    log::info!(
+        "create_worktree_from_pr: running `git worktree add {} -b {} {}`",
+        worktree_str,
+        branch_name,
+        head_sha
+    );
+    let result = cli::run(
         repo,
         &[
             "worktree",
@@ -387,7 +586,40 @@ pub fn create_worktree_from_pr(
             &branch_name,
             &head_sha,
         ],
-    )?;
+    );
+
+    match &result {
+        Ok(output) => {
+            log::info!(
+                "create_worktree_from_pr: successfully created worktree at {}",
+                worktree_path.display()
+            );
+            if !output.trim().is_empty() {
+                log::debug!("create_worktree_from_pr: git output: {output}");
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "create_worktree_from_pr: `git worktree add` failed for PR #{} (branch '{}') at '{}': {e}",
+                pr_number,
+                branch_name,
+                worktree_path.display()
+            );
+            if worktree_path.exists() {
+                log::warn!(
+                    "create_worktree_from_pr: worktree directory still exists after failure: {}",
+                    worktree_path.display()
+                );
+            } else {
+                log::debug!(
+                    "create_worktree_from_pr: worktree directory does not exist after failure (git cleaned up): {}",
+                    worktree_path.display()
+                );
+            }
+        }
+    }
+
+    result?;
 
     // The base branch for diffs should be the PR's target (e.g., "origin/main")
     let base_branch = format!("origin/{base_ref}");

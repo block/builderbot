@@ -661,6 +661,7 @@ async fn setup_worktree(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<BranchWithWorkdir, String> {
+    log::info!("setup_worktree: starting for branch_id={branch_id}");
     let store = get_store(&store)?;
 
     let branch = store
@@ -674,20 +675,44 @@ async fn setup_worktree(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
     let repo_path = Path::new(&project.repo_path);
+    log::info!(
+        "setup_worktree: repo={}, branch='{}', base='{}'",
+        repo_path.display(),
+        branch.branch_name,
+        branch.base_branch
+    );
 
     // Create git branch + worktree
     let worktree_path = git::create_worktree(repo_path, &branch.branch_name, &branch.base_branch)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+        log::error!(
+            "setup_worktree: failed to create worktree for branch '{}': {e}",
+            branch.branch_name
+        );
+        e.to_string()
+    })?;
 
     let worktree_str = worktree_path
         .to_str()
         .ok_or("Invalid worktree path")?
         .to_string();
 
+    log::info!(
+        "setup_worktree: worktree created at {}, creating workdir record",
+        worktree_str
+    );
+
     // Create workdir record assigned to this branch
     let workdir = store::Workdir::new(&branch.project_id, &worktree_str).with_branch(&branch.id);
-    store.create_workdir(&workdir).map_err(|e| e.to_string())?;
+    store.create_workdir(&workdir).map_err(|e| {
+        log::error!("setup_worktree: failed to create workdir record: {e}");
+        e.to_string()
+    })?;
 
+    log::info!(
+        "setup_worktree: completed successfully for branch '{}'",
+        branch.branch_name
+    );
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
 }
 

@@ -1598,7 +1598,7 @@
     background: var(--bg-elevated);
     border: none;
     border-radius: 50%;
-    color: var(--ui-accent);
+    color: var(--text-base);
     cursor: pointer;
     transition: all 0.15s ease;
   }

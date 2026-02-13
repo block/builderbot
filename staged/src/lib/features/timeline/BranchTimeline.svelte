@@ -13,6 +13,8 @@
 
   interface Props {
     timeline: BranchTimelineData;
+    /** Placeholder items for notes being created from drag-and-drop. */
+    pendingDropNotes?: { key: string; title: string }[];
     onSessionClick?: (sessionId: string) => void;
     onCommitClick?: (sha: string) => void;
     onNoteClick?: (noteId: string, title: string, content: string) => void;
@@ -27,6 +29,7 @@
 
   let {
     timeline,
+    pendingDropNotes = [],
     onSessionClick,
     onCommitClick,
     onNoteClick,
@@ -221,7 +224,7 @@
   }
 </script>
 
-{#if items.length === 0 && !onNewNote && !onNewCommit}
+{#if items.length === 0 && !onNewNote && !onNewCommit && pendingDropNotes.length === 0}
   <p class="no-items">No commits or notes yet</p>
 {:else if items.length === 0}
   <!-- Empty state: large action buttons -->
@@ -256,12 +259,23 @@
         title={item.title}
         meta={item.meta}
         secondaryMeta={item.secondaryMeta}
-        isLast={index === items.length - 1 && !onNewNote && !onNewCommit}
+        isLast={index === items.length - 1 &&
+          !onNewNote &&
+          !onNewCommit &&
+          pendingDropNotes.length === 0}
         sessionId={item.sessionId}
         deleteDisabledReason={item.deleteDisabledReason}
         {onSessionClick}
         onItemClick={() => handleItemClick(item)}
         onDeleteClick={item.deleteDisabledReason ? undefined : () => handleDeleteClick(item)}
+      />
+    {/each}
+    {#each pendingDropNotes as drop, index (drop.key)}
+      <TimelineRow
+        type="generating-note"
+        title={drop.title}
+        secondaryMeta="adding..."
+        isLast={index === pendingDropNotes.length - 1 && !onNewNote && !onNewCommit}
       />
     {/each}
     {#if onNewNote || onNewCommit || footerActions}

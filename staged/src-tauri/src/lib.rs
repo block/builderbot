@@ -6,6 +6,7 @@
 pub mod actions;
 pub mod agent;
 pub mod blox;
+pub mod doctor;
 pub mod git;
 pub mod paths;
 mod recent_repos;
@@ -17,7 +18,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use store::Store;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 // =============================================================================
 // Managed state
@@ -917,6 +918,28 @@ fn delete_project_action(
 // Timeline commands
 // =============================================================================
 
+/// Create a standalone note (no session) for a branch.
+#[tauri::command(rename_all = "camelCase")]
+fn create_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    title: String,
+    content: String,
+) -> Result<NoteTimelineItem, String> {
+    let store = get_store(&store)?;
+    let note = store::models::Note::new(&branch_id, &title, &content);
+    store.create_note(&note).map_err(|e| e.to_string())?;
+    Ok(NoteTimelineItem {
+        id: note.id,
+        title: note.title,
+        content: note.content,
+        session_id: None,
+        session_status: None,
+        created_at: note.created_at,
+        updated_at: note.updated_at,
+    })
+}
+
 /// Delete a note and optionally its linked session.
 #[tauri::command(rename_all = "camelCase")]
 fn delete_note(
@@ -1787,6 +1810,23 @@ fn is_sq_available() -> bool {
     blox::is_sq_available()
 }
 
+/// Read a text file from an absolute path.
+///
+/// Used by the frontend to read file contents from paths provided by
+/// Tauri's native drag-and-drop events (which give file paths, not
+/// File objects like browser drag events).
+#[tauri::command(rename_all = "camelCase")]
+fn read_text_file(file_path: String) -> Result<String, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err(format!("File does not exist: {file_path}"));
+    }
+    if !path.is_file() {
+        return Err(format!("Not a file: {file_path}"));
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))
+}
+
 // =============================================================================
 // Open In commands
 // =============================================================================
@@ -1965,7 +2005,7 @@ pub fn run() {
             // "Staged" instead of the lowercase Cargo package name "staged".
             #[cfg(target_os = "macos")]
             {
-                use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+                use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
                 let handle = app.handle();
                 let pkg_info = handle.package_info();
@@ -2040,12 +2080,15 @@ pub fn run() {
                     ],
                 )?;
 
+                let doctor_item =
+                    MenuItem::with_id(handle, "doctor", "Health Check…", true, None::<&str>)?;
+
                 let help_menu = Submenu::with_id_and_items(
                     handle,
                     tauri::menu::HELP_SUBMENU_ID,
                     "Help",
                     true,
-                    &[],
+                    &[&doctor_item],
                 )?;
 
                 let menu = Menu::with_items(
@@ -2063,16 +2106,40 @@ pub fn run() {
                 app.set_menu(menu)?;
             }
 
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("Cannot get app data dir: {e}"))?;
+            let data_dir = crate::paths::data_dir()
+                .ok_or_else(|| "Cannot determine data directory".to_string())?;
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|e| format!("Cannot create data dir: {e}"))?;
 
-            // Ensure the app data directory exists on first launch.
-            std::fs::create_dir_all(&app_data_dir)
-                .map_err(|e| format!("Cannot create app data dir: {e}"))?;
+            let db_path = data_dir.join("data.db");
 
-            let db_path = app_data_dir.join("data.db");
+            // Migrate from older data directories if the new location is empty.
+            // Priority: legacy ~/Library/Application Support/staged/ first,
+            // then original Tauri app_data_dir (com.staged.app).
+            if !db_path.exists() {
+                let legacy_candidates: Vec<PathBuf> = [
+                    crate::paths::legacy_data_dir(),
+                    app.path().app_data_dir().ok(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|d| d != &data_dir)
+                .collect();
+
+                for old_dir in legacy_candidates {
+                    let old_db = old_dir.join("data.db");
+                    if old_db.exists() {
+                        log::info!(
+                            "Migrating data from {} to {}",
+                            old_dir.display(),
+                            data_dir.display()
+                        );
+                        // Move the entire directory contents (db, repos, worktrees)
+                        crate::paths::migrate_directory_contents(&old_dir, &data_dir);
+                        break;
+                    }
+                }
+            }
 
             // Check compatibility *before* creating the store.
             let compat = store::check_db_compatibility(&db_path)
@@ -2135,6 +2202,14 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_menu_event(|app, event| {
+            if event.id() == "doctor" {
+                // Emit an event to the frontend to open the doctor modal.
+                if let Err(e) = app.emit("menu:doctor", ()) {
+                    log::warn!("Failed to emit menu:doctor event: {e}");
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_directory,
             search_directories,
@@ -2161,6 +2236,7 @@ pub fn run() {
             update_project_action,
             delete_project_action,
             get_branch_timeline,
+            create_note,
             delete_note,
             delete_commit,
             delete_pending_commit,
@@ -2176,6 +2252,7 @@ pub fn run() {
             push_branch,
             open_url,
             is_sq_available,
+            read_text_file,
             get_available_openers,
             open_in_app,
             session_commands::discover_acp_providers,
@@ -2209,6 +2286,8 @@ pub fn run() {
             delete_comment,
             add_reference_file,
             remove_reference_file,
+            // Doctor
+            doctor::run_doctor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

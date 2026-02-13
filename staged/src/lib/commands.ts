@@ -434,6 +434,12 @@ export function isSqAvailable(): Promise<boolean> {
   return invoke('is_sq_available');
 }
 
+/** Check whether the user is authenticated with Blox.
+ *  Resolves if authenticated, rejects with an error message if not. */
+export function checkBloxAuth(): Promise<void> {
+  return invoke('check_blox_auth');
+}
+
 export function listGitBranches(githubRepo: string): Promise<BranchRef[]> {
   return invoke('list_git_branches', { githubRepo });
 }

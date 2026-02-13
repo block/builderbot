@@ -144,6 +144,17 @@
           stopPolling();
         }
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+
+        // Auth errors are definitive — stop polling and show an actionable message.
+        if (isAuthError(msg)) {
+          console.error('Blox authentication error:', msg);
+          polledStatus = 'error';
+          error = msg;
+          stopPolling();
+          return;
+        }
+
         // During initial creation, `blox ws start` may still be running
         // when the first poll fires. The backend tolerates this when the
         // DB status is Starting, but as a safety net we also keep polling
@@ -153,17 +164,46 @@
         } else {
           console.error('Failed to poll workspace status:', e);
           polledStatus = 'error';
-          error = e instanceof Error ? e.message : String(e);
+          error = msg;
           stopPolling();
         }
       }
     }, 3000);
   }
 
+  function isAuthError(msg: string): boolean {
+    const lower = msg.toLowerCase();
+    return (
+      lower.includes('not authenticated') ||
+      lower.includes('not logged in') ||
+      lower.includes('sq login')
+    );
+  }
+
   function stopPolling() {
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
+    }
+  }
+
+  let retrying = $state(false);
+
+  async function retryWorkspace() {
+    retrying = true;
+    error = null;
+    polledStatus = 'starting';
+
+    try {
+      await commands.startWorkspace(branch.id);
+      // If startWorkspace succeeds (or returns Ok), start polling
+      startPolling();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      polledStatus = 'error';
+      error = msg;
+    } finally {
+      retrying = false;
     }
   }
 
@@ -374,6 +414,14 @@
           {:else}
             <span class="status-hint">Something went wrong. Try deleting and recreating.</span>
           {/if}
+          <button class="retry-btn" onclick={retryWorkspace} disabled={retrying}>
+            {#if retrying}
+              <Spinner size={12} />
+              Retrying…
+            {:else}
+              Retry
+            {/if}
+          </button>
         </div>
       {:else}
         <div class="status-view">
@@ -576,6 +624,35 @@
     color: var(--text-muted);
     max-width: 280px;
   }
+
+  .retry-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 6px 16px;
+    background: none;
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .retry-btn:hover:not(:disabled) {
+    border-color: var(--border-emphasis);
+    background: var(--bg-hover);
+  }
+
+  .retry-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
 
   :global(.spinner) {
     animation: spin 1s linear infinite;

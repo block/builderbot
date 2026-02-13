@@ -38,6 +38,10 @@ const RECENT_AGENTS_STORE_KEY = 'recent-agents';
 const RECENT_AGENTS_MAX = 10;
 const SIDEBAR_OPEN_STORE_KEY = 'sidebar-open';
 const SIDEBAR_GROUP_BY_PROJECT_STORE_KEY = 'sidebar-group-by-project';
+const SIDEBAR_WIDTH_STORE_KEY = 'sidebar-width';
+const SIDEBAR_WIDTH_DEFAULT = 220;
+const SIDEBAR_WIDTH_MIN = 140;
+const SIDEBAR_WIDTH_MAX = 480;
 
 const DEFAULT_SYNTAX_THEME: SyntaxThemeName = 'laserwave';
 
@@ -71,6 +75,8 @@ export const preferences = $state({
   sidebarOpen: true,
   /** Whether sidebar branches are grouped by project */
   sidebarGroupByProject: true,
+  /** Sidebar width in pixels */
+  sidebarWidth: SIDEBAR_WIDTH_DEFAULT,
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -146,6 +152,14 @@ export async function initPreferences(): Promise<void> {
   const savedSidebarGroup = await getStoreValue<boolean>(SIDEBAR_GROUP_BY_PROJECT_STORE_KEY);
   if (savedSidebarGroup !== undefined) {
     preferences.sidebarGroupByProject = savedSidebarGroup;
+  }
+  const savedSidebarWidth = await getStoreValue<number>(SIDEBAR_WIDTH_STORE_KEY);
+  if (
+    savedSidebarWidth !== undefined &&
+    savedSidebarWidth >= SIDEBAR_WIDTH_MIN &&
+    savedSidebarWidth <= SIDEBAR_WIDTH_MAX
+  ) {
+    preferences.sidebarWidth = savedSidebarWidth;
   }
 
   preferences.loaded = true;
@@ -253,4 +267,12 @@ export function toggleSidebar(): void {
 export function toggleSidebarGroupByProject(): void {
   preferences.sidebarGroupByProject = !preferences.sidebarGroupByProject;
   setStoreValue(SIDEBAR_GROUP_BY_PROJECT_STORE_KEY, preferences.sidebarGroupByProject);
+}
+
+/** Set the sidebar width (clamped) and persist the choice. */
+export function setSidebarWidth(width: number): void {
+  preferences.sidebarWidth = Math.round(
+    Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, width))
+  );
+  setStoreValue(SIDEBAR_WIDTH_STORE_KEY, preferences.sidebarWidth);
 }

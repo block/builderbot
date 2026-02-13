@@ -13,7 +13,11 @@
   import { projectStore } from './features/projects/projectStore.svelte';
   import { projectDisplayName } from './shared/utils';
   import * as commands from './commands';
-  import { preferences, toggleSidebarGroupByProject } from './features/settings/preferences.svelte';
+  import {
+    preferences,
+    toggleSidebarGroupByProject,
+    setSidebarWidth,
+  } from './features/settings/preferences.svelte';
 
   // ── Unified timeline item for display ──
 
@@ -176,9 +180,38 @@
   function scrollToBranch(branchId: string) {
     window.dispatchEvent(new CustomEvent('staged:scroll-to-branch', { detail: { branchId } }));
   }
+
+  // ── Resize handle logic ──
+
+  let resizing = $state(false);
+
+  function onResizeStart(e: MouseEvent) {
+    e.preventDefault();
+    resizing = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const startX = e.clientX;
+    const startWidth = preferences.sidebarWidth;
+
+    function onMouseMove(ev: MouseEvent) {
+      const newWidth = startWidth + (ev.clientX - startX);
+      setSidebarWidth(newWidth);
+    }
+
+    function onMouseUp() {
+      resizing = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    }
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }
 </script>
 
-<aside class="sidebar">
+<aside class="sidebar" class:resizing style:width="{preferences.sidebarWidth}px">
   <div class="sidebar-header">
     <span class="sidebar-title">Activity</span>
     <button
@@ -261,17 +294,53 @@
       {/each}
     {/if}
   </div>
+
+  <!-- Resize handle -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="resize-handle" onmousedown={onResizeStart}></div>
 </aside>
 
 <style>
   .sidebar {
-    width: 220px;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
     background-color: var(--bg-deepest);
     border-right: 1px solid var(--border-subtle);
     overflow: hidden;
+    position: relative;
+  }
+
+  /* Disable text selection and pointer events on content while dragging */
+  .sidebar.resizing {
+    user-select: none;
+  }
+
+  .resize-handle {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 10;
+  }
+
+  .resize-handle::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    width: 2px;
+    height: 100%;
+    transform: translateX(-50%);
+    background-color: transparent;
+    transition: background-color 0.15s;
+  }
+
+  .resize-handle:hover::after,
+  .sidebar.resizing .resize-handle::after {
+    background-color: var(--ui-accent);
   }
 
   .sidebar-header {

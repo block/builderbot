@@ -15,6 +15,9 @@ pub enum BloxError {
     #[error("sq CLI not found — is sq installed and on your PATH?")]
     NotFound,
 
+    #[error("Not authenticated with Blox. Run: sq login")]
+    NotAuthenticated,
+
     #[error("sq blox command failed: {0}")]
     CommandFailed(String),
 
@@ -72,6 +75,19 @@ where
     }
 }
 
+/// Heuristic: does the CLI stderr look like an authentication / login error?
+fn is_auth_error(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("not logged in")
+        || lower.contains("not authenticated")
+        || lower.contains("unauthenticated")
+        || lower.contains("login required")
+        || lower.contains("session expired")
+        || lower.contains("token expired")
+        || lower.contains("unauthorized")
+        || lower.contains("401")
+}
+
 /// Locate the `sq` binary, returning its path or `BloxError::NotFound`.
 fn sq_binary() -> Result<std::path::PathBuf, BloxError> {
     find_command("sq").ok_or(BloxError::NotFound)
@@ -91,6 +107,9 @@ fn run(args: &[&str]) -> Result<String, BloxError> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_auth_error(&stderr) {
+            return Err(BloxError::NotAuthenticated);
+        }
         return Err(BloxError::CommandFailed(stderr.into_owned()));
     }
 
@@ -151,6 +170,21 @@ pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
     let mut full_args = vec!["ws", "exec", name, "--"];
     full_args.extend_from_slice(args);
     run(&full_args)
+}
+
+/// Quick authentication check — runs `sq blox ws list` and inspects the result.
+///
+/// Returns `Ok(())` if the user appears to be authenticated, or
+/// `Err(BloxError::NotAuthenticated)` if the CLI reports an auth failure.
+pub fn check_auth() -> Result<(), BloxError> {
+    // `ws list` is lightweight and will fail fast if the user is not logged in.
+    match run(&["ws", "list"]) {
+        Ok(_) => Ok(()),
+        Err(BloxError::NotAuthenticated) => Err(BloxError::NotAuthenticated),
+        // Any other error (e.g. network timeout) — not necessarily an auth issue,
+        // so let it through and let the caller decide.
+        Err(_) => Ok(()),
+    }
 }
 
 // Phase 3: Pause/resume lifecycle — workspaces auto-suspend after idle;

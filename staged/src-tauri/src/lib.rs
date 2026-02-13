@@ -655,6 +655,16 @@ async fn start_workspace(
         .as_deref()
         .ok_or("Branch has no workspace name")?;
 
+    // Pre-flight: verify the user is authenticated with Blox before starting
+    // a workspace. Without this check, `blox ws start` can hang or fail
+    // opaquely, leaving the frontend spinning for minutes (issue #99).
+    if let Err(e) = blox::check_auth() {
+        store
+            .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
+            .ok();
+        return Err(e.to_string());
+    }
+
     // Construct the HTTPS git URL directly from github_repo.
     let ref_name = branch
         .base_branch
@@ -678,6 +688,14 @@ async fn start_workspace(
                 );
             }
             Ok(())
+        }
+        Err(blox::BloxError::NotAuthenticated) => {
+            // Auth errors are definitive — mark as Error so the frontend
+            // stops polling and shows an actionable message.
+            store
+                .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
+                .ok();
+            Err("Not authenticated with Blox. Run: sq login".to_string())
         }
         Err(e) => {
             // Don't set Error status here — `blox ws start` can fail (e.g.
@@ -739,6 +757,13 @@ async fn poll_workspace_status(
 
     let info = match blox::ws_info(ws_name) {
         Ok(info) => info,
+        Err(blox::BloxError::NotAuthenticated) => {
+            // Auth errors are definitive — stop polling and surface the error.
+            store
+                .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
+                .ok();
+            return Err("Not authenticated with Blox. Run: sq login".to_string());
+        }
         Err(e) => {
             // During initial creation, `blox ws start` may still be running
             // when the frontend's first poll fires `blox ws info`. The
@@ -1827,6 +1852,16 @@ fn read_text_file(file_path: String) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))
 }
 
+/// Check whether the user is authenticated with Blox.
+///
+/// Returns Ok(()) if authenticated, or an error string if not.
+/// The frontend can call this before starting a workspace to give
+/// an immediate, actionable error instead of a mysterious hang.
+#[tauri::command]
+fn check_blox_auth() -> Result<(), String> {
+    blox::check_auth().map_err(|e| e.to_string())
+}
+
 // =============================================================================
 // Open In commands
 // =============================================================================
@@ -2253,6 +2288,7 @@ pub fn run() {
             open_url,
             is_sq_available,
             read_text_file,
+            check_blox_auth,
             get_available_openers,
             open_in_app,
             session_commands::discover_acp_providers,

@@ -17,20 +17,24 @@
     project: Project;
     branches: Branch[];
     deletingBranches?: Set<string>;
+    worktreeErrors?: Map<string, string>;
     detecting?: boolean;
     onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onNewBranch?: () => void;
+    onRetryWorktree?: (branchId: string) => void;
   }
 
   let {
     project,
     branches,
     deletingBranches = new Set(),
+    worktreeErrors = new Map(),
     detecting = false,
     onDeleteProject,
     onDeleteBranch,
     onNewBranch,
+    onRetryWorktree,
   }: Props = $props();
 
   let showProjectSettings = $state(false);
@@ -75,7 +79,9 @@
         <BranchCard
           {branch}
           deleting={deletingBranches.has(branch.id)}
+          worktreeError={worktreeErrors.get(branch.id)}
           onDelete={() => onDeleteBranch?.(branch.id)}
+          onRetryWorktree={() => onRetryWorktree?.(branch.id)}
         />
       {/if}
     {/each}

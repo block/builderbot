@@ -129,6 +129,21 @@
 
   let branchName = $derived(sanitizeBranchName(branchTitle));
 
+  const REMOTE_BRANCH_MAX_LENGTH = 32;
+
+  /** For remote branches: replace slashes with dashes and enforce max length. */
+  let effectiveBranchName = $derived.by(() => {
+    if (branchType !== 'remote') return branchName;
+    let name = branchName
+      .replace(/\/+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (name.length > REMOTE_BRANCH_MAX_LENGTH) {
+      name = name.slice(0, REMOTE_BRANCH_MAX_LENGTH).replace(/-+$/, '');
+    }
+    return name;
+  });
+
   /** Generate a workspace name from the branch name. */
   function workspaceName(name: string): string {
     if (!name) return '';
@@ -290,7 +305,7 @@
   }
 
   async function handleCreate() {
-    if (!branchName.trim() || creating) return;
+    if (!effectiveBranchName.trim() || creating) return;
 
     creating = true;
     error = null;
@@ -299,16 +314,20 @@
       if (branchType === 'local') {
         const baseBranch = selectedBaseBranch ?? undefined;
         // Fast: creates DB record only (no git worktree yet)
-        const branch = await commands.createBranch(project.id, branchName.trim(), baseBranch);
+        const branch = await commands.createBranch(
+          project.id,
+          effectiveBranchName.trim(),
+          baseBranch
+        );
 
         // Dismiss immediately — the card will show "Creating worktree…" state.
         // ProjectHome handles worktree setup + prerun actions in the background.
         onCreated(branch);
       } else {
-        const wsName = workspaceName(branchName.trim());
+        const wsName = workspaceName(effectiveBranchName.trim());
         const branch = await commands.createRemoteBranch(
           project.id,
-          branchName.trim(),
+          effectiveBranchName.trim(),
           wsName,
           selectedBaseBranch ?? undefined
         );
@@ -371,7 +390,7 @@
         selectBaseBranch(filteredBranches[baseSelectedIndex]);
       }
     } else {
-      if (e.key === 'Enter' && branchName.trim()) {
+      if (e.key === 'Enter' && effectiveBranchName.trim()) {
         e.preventDefault();
         handleCreate();
       }
@@ -591,16 +610,16 @@
               autocapitalize="off"
               spellcheck="false"
             />
-            {#if branchTitle && branchName !== branchTitle.toLowerCase()}
+            {#if branchTitle && effectiveBranchName !== branchTitle.toLowerCase()}
               <div class="branch-preview">
                 <GitBranch size={12} />
-                <span>{branchName || '...'}</span>
+                <span>{effectiveBranchName || '...'}</span>
               </div>
             {/if}
-            {#if branchType === 'remote' && branchName}
+            {#if branchType === 'remote' && effectiveBranchName}
               <div class="workspace-preview">
                 <Cloud size={12} />
-                <span>Workspace: {workspaceName(branchName)}</span>
+                <span>Workspace: {workspaceName(effectiveBranchName)}</span>
               </div>
             {/if}
           </div>
@@ -616,7 +635,11 @@
 
           <div class="actions">
             <button class="cancel-button" onclick={onClose}>Cancel</button>
-            <button class="create-button" onclick={handleCreate} disabled={!branchName || creating}>
+            <button
+              class="create-button"
+              onclick={handleCreate}
+              disabled={!effectiveBranchName || creating}
+            >
               {#if creating}
                 <Spinner size={14} />
                 Creating...

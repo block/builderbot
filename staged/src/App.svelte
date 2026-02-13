@@ -7,16 +7,20 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import TopBar from './lib/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import AgentSetupModal from './lib/features/agents/AgentSetupModal.svelte';
+  import DoctorModal from './lib/features/doctor/DoctorModal.svelte';
   import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
   import { agentState, refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
 
   let showSessionLab = $state(false);
   let showAgentSetup = $state(false);
+  let showDoctor = $state(false);
+  let unlistenDoctor: UnlistenFn | undefined;
 
   // Konami code: ↑↑↓↓←→←→BA
   const konamiSequence = [
@@ -47,6 +51,12 @@
 
   onMount(async () => {
     document.addEventListener('keydown', handleKonamiKey);
+
+    // Listen for the Help → System Health Check… menu item.
+    unlistenDoctor = await listen('menu:doctor', () => {
+      showDoctor = true;
+    });
+
     const t0 = performance.now();
     try {
       await initPreferences();
@@ -74,6 +84,7 @@
 
   onDestroy(() => {
     document.removeEventListener('keydown', handleKonamiKey);
+    unlistenDoctor?.();
   });
 </script>
 
@@ -91,6 +102,10 @@
 
   {#if showSessionLab}
     <SessionLauncher onClose={() => (showSessionLab = false)} />
+  {/if}
+
+  {#if showDoctor}
+    <DoctorModal onClose={() => (showDoctor = false)} />
   {/if}
 {/if}
 

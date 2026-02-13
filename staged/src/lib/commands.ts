@@ -465,3 +465,29 @@ export function pushBranch(branchId: string, provider?: string, force?: boolean)
     force: force ?? null,
   });
 }
+
+// =============================================================================
+// Doctor (System Health Check)
+// =============================================================================
+
+export interface DoctorCheck {
+  id: string;
+  label: string;
+  status: 'pass' | 'warn' | 'fail';
+  message: string;
+  fixCommand: string | null;
+}
+
+export interface DoctorReport {
+  checks: DoctorCheck[];
+}
+
+/** Run all system health checks. */
+export function runDoctor(): Promise<DoctorReport> {
+  return invoke('run_doctor');
+}
+
+/** Execute a fix for a specific check and return the updated check. */
+export function runDoctorFix(checkId: string): Promise<DoctorCheck> {
+  return invoke('run_doctor_fix', { checkId });
+}

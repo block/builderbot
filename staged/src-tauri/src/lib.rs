@@ -435,13 +435,13 @@ fn create_project(
 
 /// List the authenticated user's GitHub repositories.
 #[tauri::command]
-fn list_github_repos() -> Result<Vec<git::GitHubRepo>, String> {
+async fn list_github_repos() -> Result<Vec<git::GitHubRepo>, String> {
     git::list_github_repos().map_err(|e| e.to_string())
 }
 
 /// Search the authenticated user's GitHub repositories.
 #[tauri::command]
-fn search_github_repos(query: String) -> Result<Vec<git::GitHubRepo>, String> {
+async fn search_github_repos(query: String) -> Result<Vec<git::GitHubRepo>, String> {
     git::search_github_repos(&query).map_err(|e| e.to_string())
 }
 

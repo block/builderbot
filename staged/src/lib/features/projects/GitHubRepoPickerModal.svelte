@@ -28,6 +28,18 @@
   let searchInputEl: HTMLInputElement | null = $state(null);
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Parse a GitHub URL into owner/repo format.
+   * Handles: https://github.com/owner/repo, github.com/owner/repo, etc.
+   */
+  function parseGitHubUrl(input: string): string | null {
+    const trimmed = input.trim();
+    const match = trimmed.match(
+      /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\/.*|\.git)?$/
+    );
+    return match ? match[1] : null;
+  }
+
   let filteredRepos = $derived.by(() => {
     if (!query.trim()) return repos;
     const q = query.toLowerCase();
@@ -50,6 +62,13 @@
   });
 
   async function handleSearch() {
+    // Check if input is a GitHub URL — select immediately
+    const parsed = parseGitHubUrl(query);
+    if (parsed) {
+      onSelect(parsed);
+      return;
+    }
+
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(async () => {
       if (query.trim().length >= 2) {
@@ -125,7 +144,7 @@
         bind:this={searchInputEl}
         bind:value={query}
         type="text"
-        placeholder="Search repositories..."
+        placeholder="Search or paste a GitHub URL..."
         autocomplete="off"
         autocorrect="off"
         spellcheck="false"

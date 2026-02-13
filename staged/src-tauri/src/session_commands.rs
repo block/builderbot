@@ -420,7 +420,7 @@ fn build_branch_context(
     }
 
     // Notes from DB
-    append_notes_context(&mut parts, store, branch_id);
+    append_notes_context(&mut parts, store, branch_id, false);
 
     parts.join("\n\n")
 }
@@ -463,8 +463,8 @@ fn build_remote_branch_context(
         }
     }
 
-    // Notes from DB
-    append_notes_context(&mut parts, store, branch_id);
+    // Notes from DB — inline content since remote agent can't access local temp files
+    append_notes_context(&mut parts, store, branch_id, true);
 
     parts.join("\n\n")
 }
@@ -479,7 +479,17 @@ fn context_preamble() -> String {
 }
 
 /// Append notes context from the DB to a parts vector.
-fn append_notes_context(parts: &mut Vec<String>, store: &Arc<Store>, branch_id: &str) {
+///
+/// When `is_remote` is true, note content is inlined directly into the prompt
+/// because the remote agent cannot access local temp files. For local branches,
+/// notes are written to temp files and referenced by path so the agent can read
+/// them on demand without bloating the prompt.
+fn append_notes_context(
+    parts: &mut Vec<String>,
+    store: &Arc<Store>,
+    branch_id: &str,
+    is_remote: bool,
+) {
     match store.list_notes_for_branch(branch_id) {
         Ok(notes) if !notes.is_empty() => {
             let mut note_section = String::from("## Notes\n");
@@ -487,17 +497,23 @@ fn append_notes_context(parts: &mut Vec<String>, store: &Arc<Store>, branch_id: 
                 if note.content.is_empty() {
                     continue; // skip notes still generating
                 }
-                // Write note to a temp file so the agent can read it if needed
-                let note_path = std::env::temp_dir().join(format!("staged-note-{}.md", note.id));
-                if let Err(e) = std::fs::write(&note_path, &note.content) {
-                    log::warn!("Failed to write note to temp file: {e}");
-                    continue;
+                if is_remote {
+                    // Inline the content — remote agent can't access local temp files
+                    note_section.push_str(&format!("\n### {}\n\n{}", note.title, note.content));
+                } else {
+                    // Write note to a temp file so the agent can read it if needed
+                    let note_path =
+                        std::env::temp_dir().join(format!("staged-note-{}.md", note.id));
+                    if let Err(e) = std::fs::write(&note_path, &note.content) {
+                        log::warn!("Failed to write note to temp file: {e}");
+                        continue;
+                    }
+                    note_section.push_str(&format!(
+                        "\n- **{}** — `{}`",
+                        note.title,
+                        note_path.display()
+                    ));
                 }
-                note_section.push_str(&format!(
-                    "\n- **{}** — `{}`",
-                    note.title,
-                    note_path.display()
-                ));
             }
             parts.push(note_section);
         }

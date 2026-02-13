@@ -2113,25 +2113,30 @@ pub fn run() {
 
             let db_path = data_dir.join("data.db");
 
-            // Migrate DB from old Tauri app_data_dir if needed
+            // Migrate from older data directories if the new location is empty.
+            // Priority: legacy ~/Library/Application Support/staged/ first,
+            // then original Tauri app_data_dir (com.staged.app).
             if !db_path.exists() {
-                if let Ok(old_dir) = app.path().app_data_dir() {
+                let legacy_candidates: Vec<PathBuf> = [
+                    crate::paths::legacy_data_dir(),
+                    app.path().app_data_dir().ok(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|d| d != &data_dir)
+                .collect();
+
+                for old_dir in legacy_candidates {
                     let old_db = old_dir.join("data.db");
                     if old_db.exists() {
                         log::info!(
-                            "Migrating database from {} to {}",
-                            old_db.display(),
-                            db_path.display()
+                            "Migrating data from {} to {}",
+                            old_dir.display(),
+                            data_dir.display()
                         );
-                        for suffix in ["", "-wal", "-shm"] {
-                            let old = PathBuf::from(format!("{}{suffix}", old_db.display()));
-                            let new = PathBuf::from(format!("{}{suffix}", db_path.display()));
-                            if old.exists() {
-                                if let Err(e) = std::fs::rename(&old, &new) {
-                                    log::warn!("Failed to migrate {}: {e}", old.display());
-                                }
-                            }
-                        }
+                        // Move the entire directory contents (db, repos, worktrees)
+                        crate::paths::migrate_directory_contents(&old_dir, &data_dir);
+                        break;
                     }
                 }
             }

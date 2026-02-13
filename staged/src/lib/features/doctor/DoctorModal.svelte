@@ -9,7 +9,7 @@
   import { X, Stethoscope, RefreshCw } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import DoctorCheckRow from './DoctorCheckRow.svelte';
-  import { doctorState, runChecks, fixCheck } from './doctor.svelte';
+  import { doctorState, runChecks } from './doctor.svelte';
 
   let { onClose }: { onClose: () => void } = $props();
 
@@ -69,7 +69,7 @@
           <h3 class="section-label">Tools</h3>
           <div class="checks-list">
             {#each toolChecks as check (check.id)}
-              <DoctorCheckRow {check} fixing={doctorState.fixing.has(check.id)} onfix={fixCheck} />
+              <DoctorCheckRow {check} />
             {/each}
           </div>
         </div>
@@ -79,11 +79,7 @@
             <h3 class="section-label">Agents</h3>
             <div class="checks-list">
               {#each agentChecks as check (check.id)}
-                <DoctorCheckRow
-                  {check}
-                  fixing={doctorState.fixing.has(check.id)}
-                  onfix={fixCheck}
-                />
+                <DoctorCheckRow {check} />
               {/each}
             </div>
           </div>

@@ -2,21 +2,18 @@
   DoctorCheckRow.svelte — A single row in the doctor report.
 
   Shows a status icon (✓ / ⚠ / ✗), the check label, a message,
-  and an optional "Fix" button when a fix_command is available.
+  and an optional "Install" link that opens the relevant page in
+  the user's browser.
 -->
 <script lang="ts">
-  import { CheckCircle, AlertTriangle, XCircle, Wrench } from 'lucide-svelte';
-  import Spinner from '../../shared/Spinner.svelte';
+  import { CheckCircle, AlertTriangle, XCircle, ExternalLink } from 'lucide-svelte';
+  import { openUrl } from '../../commands';
   import type { DoctorCheck } from '../../commands';
 
   let {
     check,
-    fixing = false,
-    onfix,
   }: {
     check: DoctorCheck;
-    fixing?: boolean;
-    onfix?: (id: string) => void;
   } = $props();
 </script>
 
@@ -41,15 +38,10 @@
     <span class="check-message">{check.message}</span>
   </div>
 
-  {#if check.fixCommand && check.status !== 'pass'}
-    <button class="fix-btn" disabled={fixing} onclick={() => onfix?.(check.id)}>
-      {#if fixing}
-        <Spinner size={12} />
-        Fixing…
-      {:else}
-        <Wrench size={12} />
-        Fix
-      {/if}
+  {#if check.fixUrl && check.status !== 'pass'}
+    <button class="install-link" onclick={() => openUrl(check.fixUrl!)}>
+      <ExternalLink size={12} />
+      Install
     </button>
   {/if}
 </div>
@@ -105,7 +97,7 @@
     text-overflow: ellipsis;
   }
 
-  .fix-btn {
+  .install-link {
     display: flex;
     align-items: center;
     gap: 4px;
@@ -123,13 +115,8 @@
       border-color 0.1s;
   }
 
-  .fix-btn:not(:disabled):hover {
+  .install-link:hover {
     color: var(--text-primary);
     border-color: var(--border-emphasis);
-  }
-
-  .fix-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 </style>

@@ -2338,7 +2338,6 @@ pub fn run() {
             remove_reference_file,
             // Doctor
             doctor::run_doctor,
-            doctor::run_doctor_fix,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

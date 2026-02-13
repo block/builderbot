@@ -1,7 +1,8 @@
-//! Health Check ("Doctor") — backend checks + optional auto-fix.
+//! Health Check ("Doctor") — backend checks for external dependencies.
 //!
 //! Each check probes a single external dependency and returns a status
-//! (pass / warn / fail) with a human-readable summary and optional fix.
+//! (pass / warn / fail) with a human-readable summary and an optional
+//! URL the user can visit to install or configure the dependency.
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -34,9 +35,8 @@ pub struct DoctorCheck {
     pub status: CheckStatus,
     /// One-line explanation shown next to the status badge.
     pub message: String,
-    /// If non-None, the UI can offer a "Fix" button.
-    /// The value is a shell command the backend will execute.
-    pub fix_command: Option<String>,
+    /// If non-None, the UI shows an "Install" link that opens this URL.
+    pub fix_url: Option<String>,
 }
 
 /// The full report returned to the frontend.
@@ -63,7 +63,7 @@ fn check_git() -> DoctorCheck {
                 label,
                 status: CheckStatus::Pass,
                 message: version,
-                fix_command: None,
+                fix_url: None,
             }
         }
         _ => DoctorCheck {
@@ -71,7 +71,7 @@ fn check_git() -> DoctorCheck {
             label,
             status: CheckStatus::Fail,
             message: "Git not found".to_string(),
-            fix_command: Some("brew install git".to_string()),
+            fix_url: Some("https://git-scm.com/downloads".to_string()),
         },
     }
 }
@@ -90,7 +90,7 @@ fn check_gh() -> DoctorCheck {
                 label,
                 status: CheckStatus::Pass,
                 message: first_line,
-                fix_command: None,
+                fix_url: None,
             }
         }
         _ => DoctorCheck {
@@ -98,7 +98,7 @@ fn check_gh() -> DoctorCheck {
             label,
             status: CheckStatus::Fail,
             message: "GitHub CLI not found".to_string(),
-            fix_command: Some("brew install gh".to_string()),
+            fix_url: Some("https://cli.github.com".to_string()),
         },
     }
 }
@@ -115,7 +115,7 @@ fn check_gh_auth() -> DoctorCheck {
             label,
             status: CheckStatus::Pass,
             message: "Authenticated".to_string(),
-            fix_command: None,
+            fix_url: None,
         }
     } else {
         DoctorCheck {
@@ -125,7 +125,7 @@ fn check_gh_auth() -> DoctorCheck {
             message: auth
                 .setup_hint
                 .unwrap_or_else(|| "Not authenticated".to_string()),
-            fix_command: Some("gh auth login".to_string()),
+            fix_url: Some("https://cli.github.com/manual/gh_auth_login".to_string()),
         }
     }
 }
@@ -143,7 +143,7 @@ fn check_git_lfs() -> DoctorCheck {
                 label,
                 status: CheckStatus::Pass,
                 message: version,
-                fix_command: None,
+                fix_url: None,
             }
         }
         _ => DoctorCheck {
@@ -151,7 +151,7 @@ fn check_git_lfs() -> DoctorCheck {
             label,
             status: CheckStatus::Warn,
             message: "Git LFS not installed (optional, needed for large files)".to_string(),
-            fix_command: Some("brew install git-lfs && git lfs install".to_string()),
+            fix_url: Some("https://git-lfs.com".to_string()),
         },
     }
 }
@@ -164,8 +164,8 @@ struct AgentCheckInfo {
     label: &'static str,
     /// CLI command name to search for.
     command: &'static str,
-    /// Install hint shown when the agent is not found.
-    install_hint: &'static str,
+    /// URL to open when the agent is not found (None if no install page).
+    install_url: Option<&'static str>,
 }
 
 /// All AI agents we check for individually.
@@ -175,31 +175,31 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         id: "ai-agent-goose",
         label: "Goose",
         command: "goose",
-        install_hint: "brew install goose",
+        install_url: Some("https://github.com/block/goose"),
     },
     AgentCheckInfo {
         id: "ai-agent-claude",
         label: "Claude Code",
         command: "claude-code-acp",
-        install_hint: "npm install -g claude-code-acp",
+        install_url: Some("https://github.com/anthropics/claude-code#getting-started"),
     },
     AgentCheckInfo {
         id: "ai-agent-codex",
         label: "Codex",
         command: "codex-acp",
-        install_hint: "npm install -g codex-acp",
+        install_url: Some("https://github.com/openai/codex#getting-started"),
     },
     AgentCheckInfo {
         id: "ai-agent-pi",
         label: "Pi",
         command: "pi-acp",
-        install_hint: "npm install -g pi-acp",
+        install_url: None,
     },
     AgentCheckInfo {
         id: "ai-agent-amp",
         label: "Amp",
         command: "amp-acp",
-        install_hint: "npm install -g amp-acp",
+        install_url: Some("https://www.npmjs.com/package/amp-acp"),
     },
 ];
 
@@ -215,7 +215,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
             label: info.label.to_string(),
             status: CheckStatus::Pass,
             message: "Installed".to_string(),
-            fix_command: None,
+            fix_url: None,
         }
     } else {
         DoctorCheck {
@@ -227,7 +227,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
             } else {
                 "Not installed — at least one AI agent is needed".to_string()
             },
-            fix_command: Some(info.install_hint.to_string()),
+            fix_url: info.install_url.map(|s| s.to_string()),
         }
     }
 }
@@ -251,13 +251,6 @@ fn check_ai_agents() -> Vec<DoctorCheck> {
         .collect()
 }
 
-/// Look up an AI agent check by its doctor check ID and re-run it.
-fn recheck_ai_agent(check_id: &str) -> Option<DoctorCheck> {
-    let info = AI_AGENT_CHECKS.iter().find(|a| a.id == check_id)?;
-    // For a re-check after fix we optimistically assume at least one is now found.
-    Some(check_single_ai_agent(info, true))
-}
-
 // =============================================================================
 // Tauri commands
 // =============================================================================
@@ -273,55 +266,4 @@ pub async fn run_doctor() -> DoctorReport {
     })
     .await
     .unwrap_or_else(|_| DoctorReport { checks: vec![] })
-}
-
-/// Execute a fix command for a specific check.
-/// Returns the updated check after re-running it.
-#[tauri::command]
-pub async fn run_doctor_fix(check_id: String) -> Result<DoctorCheck, String> {
-    tokio::task::spawn_blocking(move || {
-        // Find the check and its fix command
-        let check = match check_id.as_str() {
-            "git" => check_git(),
-            "gh" => check_gh(),
-            "gh-auth" => check_gh_auth(),
-            "git-lfs" => check_git_lfs(),
-            id if id.starts_with("ai-agent-") => {
-                recheck_ai_agent(id).ok_or_else(|| format!("Unknown check: {check_id}"))?
-            }
-            _ => return Err(format!("Unknown check: {check_id}")),
-        };
-
-        let fix_cmd = match &check.fix_command {
-            Some(cmd) => cmd.clone(),
-            None => return Err(format!("No fix available for: {check_id}")),
-        };
-
-        // Execute the fix command
-        let output = Command::new("sh")
-            .args(["-c", &fix_cmd])
-            .output()
-            .map_err(|e| format!("Failed to run fix: {e}"))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Fix command failed: {}", stderr.trim()));
-        }
-
-        // Re-run the check to get the updated status
-        let updated = match check_id.as_str() {
-            "git" => check_git(),
-            "gh" => check_gh(),
-            "gh-auth" => check_gh_auth(),
-            "git-lfs" => check_git_lfs(),
-            id if id.starts_with("ai-agent-") => {
-                recheck_ai_agent(id).ok_or_else(|| format!("Unknown check: {check_id}"))?
-            }
-            _ => unreachable!(),
-        };
-
-        Ok(updated)
-    })
-    .await
-    .map_err(|e| format!("Task panicked: {e}"))?
 }

@@ -475,7 +475,7 @@ export interface DoctorCheck {
   label: string;
   status: 'pass' | 'warn' | 'fail';
   message: string;
-  fixCommand: string | null;
+  fixUrl: string | null;
 }
 
 export interface DoctorReport {
@@ -485,9 +485,4 @@ export interface DoctorReport {
 /** Run all system health checks. */
 export function runDoctor(): Promise<DoctorReport> {
   return invoke('run_doctor');
-}
-
-/** Execute a fix for a specific check and return the updated check. */
-export function runDoctorFix(checkId: string): Promise<DoctorCheck> {
-  return invoke('run_doctor_fix', { checkId });
 }

@@ -156,12 +156,6 @@
 
   $effect(() => {
     const branchId = branch.id;
-    const branchName = branch.branchName;
-    console.log(
-      '[BranchCard] Setting up listeners for branch:',
-      () => branchId,
-      () => branchName
-    );
 
     listen<{
       sessionId: string;
@@ -181,36 +175,20 @@
       }
     }).then((unlisten) => {
       unlistenStatus = unlisten;
-      console.log('[BranchCard] Session status listener registered for:', () => branchId);
     });
 
     listen<ActionStatusEvent>('action_status', (event) => {
       const payload = event.payload;
-      console.log('[BranchCard] Received action_status event:', payload);
 
       // Only process events for this branch
       if (payload.branchId !== branchId) {
-        console.log(
-          '[BranchCard] Ignoring event for different branch:',
-          payload.branchId,
-          'vs',
-          () => branchId
-        );
         return;
       }
-
-      console.log(
-        '[BranchCard] Processing action_status for branch:',
-        () => branchId,
-        'status:',
-        payload.status
-      );
 
       const existingIndex = runningActions.findIndex((a) => a.executionId === payload.executionId);
 
       if (payload.status === 'running') {
         if (existingIndex === -1) {
-          console.log('[BranchCard] Adding running action:', payload.actionName);
           runningActions.push({
             executionId: payload.executionId,
             actionId: payload.actionId,
@@ -218,11 +196,6 @@
             status: 'running',
             startedAt: payload.startedAt ?? Date.now(),
           });
-          console.log(
-            '[BranchCard] runningActions now:',
-            runningActions.length,
-            runningActions.map((a) => a.actionName)
-          );
         }
       } else {
         // Action completed/failed/stopped - update status
@@ -262,7 +235,6 @@
       }
     }).then((unlisten) => {
       unlistenActionStatus = unlisten;
-      console.log('[BranchCard] Action status listener registered for:', () => branchId);
     });
 
     return () => {

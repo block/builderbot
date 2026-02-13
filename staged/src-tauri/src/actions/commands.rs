@@ -57,7 +57,7 @@ pub async fn detect_project_actions(
         None => std::env::temp_dir(),
     };
 
-    let provider = AcpAiProvider::new(provider_dir)
+    let provider = AcpAiProvider::new(provider_dir.clone())
         .map_err(|e| format!("Failed to create AI provider: {e}"))?;
 
     let detector = ActionDetector::new(Box::new(provider));
@@ -66,8 +66,11 @@ pub async fn detect_project_actions(
         Some(_) => {
             // Local clone exists – the agent can explore files directly via
             // shell commands since the provider's working dir is set to the
-            // clone path.
-            FileExplorationMode::Local
+            // clone path. Pass the working directory so we can check for git
+            // hooks path overrides.
+            FileExplorationMode::Local {
+                working_dir: provider_dir,
+            }
         }
         None => {
             // No local clone – instruct the agent to use `gh api` to explore

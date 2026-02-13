@@ -44,7 +44,10 @@ pub struct SuggestedAction {
 pub enum FileExplorationMode {
     /// The agent has a local checkout and can use normal shell commands
     /// (`ls`, `cat`, `find`, etc.) to explore files.
-    Local,
+    Local {
+        /// The working directory path (needed to check git config).
+        working_dir: std::path::PathBuf,
+    },
     /// No local clone exists. The agent should use `gh api` to explore
     /// the repository on GitHub.
     GitHub {
@@ -222,9 +225,11 @@ impl ActionDetector {
     /// Detect actions from a local project directory using AI.
     ///
     /// This is a convenience wrapper that uses [`FileExplorationMode::Local`].
-    pub async fn detect_actions(&self, _working_dir: &Path) -> Result<Vec<SuggestedAction>> {
-        self.detect_actions_with_mode(FileExplorationMode::Local)
-            .await
+    pub async fn detect_actions(&self, working_dir: &Path) -> Result<Vec<SuggestedAction>> {
+        self.detect_actions_with_mode(FileExplorationMode::Local {
+            working_dir: working_dir.to_path_buf(),
+        })
+        .await
     }
 
     /// Detect actions using the specified [`FileExplorationMode`].
@@ -233,7 +238,7 @@ impl ActionDetector {
         mode: FileExplorationMode,
     ) -> Result<Vec<SuggestedAction>> {
         let exploration_instructions = match &mode {
-            FileExplorationMode::Local => LOCAL_EXPLORATION_INSTRUCTIONS.to_string(),
+            FileExplorationMode::Local { .. } => LOCAL_EXPLORATION_INSTRUCTIONS.to_string(),
             FileExplorationMode::GitHub { repo, subpath } => {
                 let subpath_instructions = match subpath {
                     Some(sub) if !sub.is_empty() => {
@@ -249,17 +254,33 @@ impl ActionDetector {
             }
         };
 
-        // Default lefthook instructions (we can't check git config without a
-        // local clone, so we always include lefthook detection and let the
-        // agent decide based on whether lefthook.yml exists).
-        let lefthook_instructions =
-            "- If lefthook.yml is present in the project, ALWAYS include \"lefthook install\" as a prerun action\n\
-             - This ensures git hooks are properly installed in each new worktree";
+        // Check if the user has git hook overrides (core.hooksPath).
+        // If so, lefthook install is unnecessary since hooks are managed externally.
+        let lefthook_instructions = match &mode {
+            FileExplorationMode::Local { working_dir } => {
+                if has_git_hooks_path_override(working_dir) {
+                    "- SKIP lefthook detection entirely. The user has a custom git core.hooksPath configured, \
+                     so lefthook install is not needed and should NOT be suggested as an action."
+                        .to_string()
+                } else {
+                    "- If lefthook.yml is present in the project, ALWAYS include \"lefthook install\" as a prerun action\n\
+                     - This ensures git hooks are properly installed in each new worktree"
+                        .to_string()
+                }
+            }
+            FileExplorationMode::GitHub { .. } => {
+                // We can't check git config without a local clone, so we always include
+                // lefthook detection and let the agent decide based on whether lefthook.yml exists.
+                "- If lefthook.yml is present in the project, ALWAYS include \"lefthook install\" as a prerun action\n\
+                 - This ensures git hooks are properly installed in each new worktree"
+                    .to_string()
+            }
+        };
 
         let prompt = format!(
             "{DETECTION_PROMPT_CORE}\n{exploration_instructions}",
             DETECTION_PROMPT_CORE =
-                DETECTION_PROMPT_CORE.replace("{lefthook_instructions}", lefthook_instructions),
+                DETECTION_PROMPT_CORE.replace("{lefthook_instructions}", &lefthook_instructions),
         );
 
         // Call AI to analyze and suggest actions
@@ -277,6 +298,18 @@ impl ActionDetector {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Check if the repository has a custom git hooks path configured (core.hooksPath).
+/// When this is set, the user manages git hooks externally and lefthook install
+/// should be skipped.
+fn has_git_hooks_path_override(working_dir: &Path) -> bool {
+    std::process::Command::new("git")
+        .args(["config", "core.hooksPath"])
+        .current_dir(working_dir)
+        .output()
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false)
+}
 
 /// Parse the AI response and extract suggested actions
 fn parse_ai_response(response: &str) -> Result<Vec<SuggestedAction>> {

@@ -12,6 +12,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { untrack } from 'svelte';
   import {
     GitBranch,
     GitCommitHorizontal,
@@ -38,6 +39,7 @@
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { subscribeDragDrop } from './dragDrop';
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
@@ -312,7 +314,12 @@
     window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
   });
   async function loadTimeline() {
-    loading = true;
+    // Only show the loading spinner on the initial load. Subsequent refreshes
+    // keep the existing timeline visible to avoid a jarring flash/re-render
+    // that was causing UI freezes after drag-and-drop note creation.
+    if (!timeline) {
+      loading = true;
+    }
     error = null;
     try {
       timeline = await commands.getBranchTimeline(branch.id);
@@ -855,17 +862,102 @@
     prStateOverride = null;
     prError = null;
   }
+
+  // =========================================================================
+  // Drag-and-drop text files → notes (via Tauri native drag-drop events)
+  // =========================================================================
+
+  // Tauri v2 intercepts file drops at the OS level, so standard browser
+  // drag/drop events never fire for files dragged from Finder/Explorer.
+  // We use a shared drag-drop service (dragDrop.ts) that registers a single
+  // global Tauri onDragDropEvent listener and dispatches to the correct card
+  // via hit-testing.
+
+  let dragOver = $state(false);
+  let cardElement: HTMLDivElement | undefined = $state();
+
+  /** Pending note placeholders shown in the timeline while files are being added. */
+  let pendingDropNotes = $state<{ key: string; title: string }[]>([]);
+
+  /** Text-file extensions we accept for note creation. */
+  const TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.text', '.rst', '.org', '.adoc'];
+
+  function isTextFile(filePath: string): boolean {
+    const lower = filePath.toLowerCase();
+    return TEXT_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  }
+
+  function fileNameFromPath(filePath: string): string {
+    const parts = filePath.split('/');
+    const name = parts[parts.length - 1] || filePath;
+    return name.replace(/\.[^.]+$/, '');
+  }
+
+  function handleFileDrop(paths: string[]) {
+    const textPaths = paths.filter(isTextFile);
+    if (textPaths.length === 0) return;
+
+    // Show placeholder items immediately
+    const placeholders = textPaths.map((filePath) => ({
+      key: `drop-${Date.now()}-${filePath}`,
+      title: fileNameFromPath(filePath),
+    }));
+    pendingDropNotes = [...pendingDropNotes, ...placeholders];
+
+    // Process each file asynchronously without blocking the UI
+    Promise.all(
+      textPaths.map(async (filePath, i) => {
+        try {
+          const content = await commands.readTextFile(filePath);
+          const title = fileNameFromPath(filePath);
+          await commands.createNote(branch.id, title, content);
+        } catch (e) {
+          console.error('Failed to create note from dropped file:', e);
+        } finally {
+          // Remove this placeholder
+          pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
+        }
+      })
+    ).then(() => {
+      loadTimeline();
+    });
+  }
+
+  // Subscribe to the shared drag-drop service. A single global Tauri listener
+  // is shared across all BranchCards, eliminating the O(N) listener storm that
+  // caused UI freezes during drag-over events.
+  $effect(() => {
+    const el = cardElement;
+    if (!el) return;
+
+    const unsub = untrack(() =>
+      subscribeDragDrop({
+        element: el,
+        onDragOver: (over) => {
+          dragOver = over;
+        },
+        onDrop: (paths) => {
+          handleFileDrop(paths);
+        },
+      })
+    );
+
+    return unsub;
+  });
 </script>
 
 <svelte:window onclick={handleClickOutside} />
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+  bind:this={cardElement}
   class="branch-card"
   class:deleting
   class:creating-worktree={branch.branchType === 'local' &&
     !branch.worktreePath &&
     !worktreeError &&
     !deleting}
+  class:drag-over={dragOver}
 >
   {#if deleting}
     <div class="deleting-overlay">
@@ -1080,6 +1172,7 @@
       {:else if timeline}
         <BranchTimeline
           {timeline}
+          {pendingDropNotes}
           onSessionClick={handleTimelineSessionClick}
           onCommitClick={handleCommitClick}
           onNoteClick={handleNoteClick}
@@ -1308,6 +1401,12 @@
 
   .branch-card.deleting {
     opacity: 0.6;
+  }
+
+  /* Drag-and-drop highlight */
+  .branch-card.drag-over {
+    border-color: var(--note-color, var(--ui-accent));
+    background-color: color-mix(in srgb, var(--note-color, var(--ui-accent)) 5%, var(--bg-primary));
   }
 
   /* Deleting overlay */

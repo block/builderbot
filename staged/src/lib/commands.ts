@@ -207,6 +207,11 @@ export function openUrl(url: string): Promise<void> {
   return invoke('open_url', { url });
 }
 
+/** Read a text file from an absolute path (used for Tauri native drag-and-drop). */
+export function readTextFile(filePath: string): Promise<string> {
+  return invoke('read_text_file', { filePath });
+}
+
 /** Intercept link clicks so they open in the system browser, not the webview. */
 export function handleExternalLinkClick(e: MouseEvent): void {
   const anchor = (e.target as HTMLElement).closest('a');
@@ -292,6 +297,15 @@ export function startBranchSession(
 // =============================================================================
 // Timeline item deletion
 // =============================================================================
+
+/** Create a standalone note (no session) for a branch. */
+export function createNote(
+  branchId: string,
+  title: string,
+  content: string
+): Promise<{ id: string; title: string; content: string; createdAt: number; updatedAt: number }> {
+  return invoke('create_note', { branchId, title, content });
+}
 
 /** Delete a note and optionally its linked session. */
 export function deleteNote(noteId: string, deleteSession = true): Promise<void> {

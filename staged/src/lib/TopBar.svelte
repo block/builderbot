@@ -5,13 +5,11 @@
   for adding new projects.
 -->
 <script lang="ts">
-  import { Palette, Plus, Bot } from 'lucide-svelte';
+  import { Palette, Plus } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import ThemeSelectorModal from './features/settings/ThemeSelectorModal.svelte';
-  import AgentDropdown from './features/agents/AgentDropdown.svelte';
 
   let showThemeModal = $state(false);
-  let showAgentDropdown = $state(false);
 
   function startDrag(e: PointerEvent) {
     if (e.button !== 0) return;
@@ -39,24 +37,12 @@
     </button>
 
     <button
-      class="icon-btn agent-btn"
-      onclick={() => (showAgentDropdown = !showAgentDropdown)}
-      title="AI agents"
-    >
-      <Bot size={14} />
-    </button>
-
-    <button
       class="icon-btn theme-btn"
       onclick={() => (showThemeModal = !showThemeModal)}
       title="Select theme"
     >
       <Palette size={14} />
     </button>
-
-    {#if showAgentDropdown}
-      <AgentDropdown onClose={() => (showAgentDropdown = false)} />
-    {/if}
 
     {#if showThemeModal}
       <ThemeSelectorModal onClose={() => (showThemeModal = false)} />

@@ -6,6 +6,7 @@
 pub mod actions;
 pub mod agent;
 pub mod blox;
+pub mod doctor;
 pub mod git;
 pub mod paths;
 mod recent_repos;
@@ -17,7 +18,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use store::Store;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 // =============================================================================
 // Managed state
@@ -1965,7 +1966,7 @@ pub fn run() {
             // "Staged" instead of the lowercase Cargo package name "staged".
             #[cfg(target_os = "macos")]
             {
-                use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+                use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 
                 let handle = app.handle();
                 let pkg_info = handle.package_info();
@@ -2040,12 +2041,15 @@ pub fn run() {
                     ],
                 )?;
 
+                let doctor_item =
+                    MenuItem::with_id(handle, "doctor", "Health Check…", true, None::<&str>)?;
+
                 let help_menu = Submenu::with_id_and_items(
                     handle,
                     tauri::menu::HELP_SUBMENU_ID,
                     "Help",
                     true,
-                    &[],
+                    &[&doctor_item],
                 )?;
 
                 let menu = Menu::with_items(
@@ -2154,6 +2158,14 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_menu_event(|app, event| {
+            if event.id() == "doctor" {
+                // Emit an event to the frontend to open the doctor modal.
+                if let Err(e) = app.emit("menu:doctor", ()) {
+                    log::warn!("Failed to emit menu:doctor event: {e}");
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_directory,
             search_directories,
@@ -2228,6 +2240,8 @@ pub fn run() {
             delete_comment,
             add_reference_file,
             remove_reference_file,
+            // Doctor
+            doctor::run_doctor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

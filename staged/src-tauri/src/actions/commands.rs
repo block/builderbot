@@ -105,17 +105,29 @@ pub async fn run_branch_action(
         .map_err(|e| format!("Failed to get action: {e}"))?
         .ok_or_else(|| "Action not found".to_string())?;
 
-    // Get the branch (unused but validates it exists)
-    let _branch = store
+    // Get the branch and its project (for subpath)
+    let branch = store
         .get_branch(&branch_id)
         .map_err(|e| format!("Failed to get branch: {e}"))?
         .ok_or_else(|| "Branch not found".to_string())?;
 
-    // Get the worktree path for this branch
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| format!("Failed to get project: {e}"))?
+        .ok_or_else(|| "Project not found".to_string())?;
+
+    // Get the worktree path for this branch, then apply the project subpath
     let workdir = store
         .get_workdir_for_branch(&branch_id)
         .map_err(|e| format!("Failed to get workdir: {e}"))?
         .ok_or_else(|| "No worktree found for branch".to_string())?;
+
+    let working_dir = if let Some(subpath) = &project.subpath {
+        let path = std::path::PathBuf::from(&workdir.path).join(subpath);
+        path.to_string_lossy().to_string()
+    } else {
+        workdir.path
+    };
 
     // Create event listener
     let listener = Arc::new(TauriExecutionListener::new(
@@ -134,7 +146,7 @@ pub async fn run_branch_action(
 
     // Execute the action
     executor
-        .execute(action.command, workdir.path, metadata, listener)
+        .execute(action.command, working_dir, metadata, listener)
         .await
         .map_err(|e| format!("Failed to execute action: {e}"))
 }
@@ -189,6 +201,12 @@ pub async fn run_prerun_actions(
 ) -> Result<Vec<String>, String> {
     let store = get_store(&store)?;
 
+    // Get the project (for subpath)
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| format!("Failed to get project: {e}"))?
+        .ok_or_else(|| "Project not found".to_string())?;
+
     // Get all actions for the project
     let actions = store
         .list_project_actions(&project_id)
@@ -200,11 +218,18 @@ pub async fn run_prerun_actions(
         .filter(|a| matches!(a.action_type, builderbot_actions::ActionType::Prerun))
         .collect();
 
-    // Get the worktree path for this branch
+    // Get the worktree path for this branch, then apply the project subpath
     let workdir = store
         .get_workdir_for_branch(&branch_id)
         .map_err(|e| format!("Failed to get workdir: {e}"))?
         .ok_or_else(|| "No worktree found for branch".to_string())?;
+
+    let working_dir = if let Some(subpath) = &project.subpath {
+        let path = std::path::PathBuf::from(&workdir.path).join(subpath);
+        path.to_string_lossy().to_string()
+    } else {
+        workdir.path
+    };
 
     // Execute each prerun action sequentially, waiting for each to complete
     // before starting the next one
@@ -224,7 +249,7 @@ pub async fn run_prerun_actions(
         };
 
         let execution_id = executor
-            .execute_and_wait(action.command, workdir.path.clone(), metadata, listener)
+            .execute_and_wait(action.command, working_dir.clone(), metadata, listener)
             .await
             .map_err(|e| format!("Failed to execute prerun action: {e}"))?;
 

@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
-use crate::agent;
+use acp_client::find_command;
+
 use crate::git;
 
 // =============================================================================
@@ -155,30 +156,106 @@ fn check_git_lfs() -> DoctorCheck {
     }
 }
 
-/// Check that at least one ACP-compatible AI agent is discoverable.
-fn check_ai_agent() -> DoctorCheck {
-    let label = "AI Agent".to_string();
-    let id = "ai-agent".to_string();
+/// Metadata for an individual AI agent check.
+struct AgentCheckInfo {
+    /// Check ID used in the doctor report, e.g. "ai-agent-goose".
+    id: &'static str,
+    /// Human-readable label, e.g. "Goose".
+    label: &'static str,
+    /// CLI command name to search for.
+    command: &'static str,
+    /// Install hint shown when the agent is not found.
+    install_hint: &'static str,
+}
 
-    let providers = agent::discover_providers();
-    if providers.is_empty() {
+/// All AI agents we check for individually.
+/// At least one must be installed; the rest are optional.
+const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
+    AgentCheckInfo {
+        id: "ai-agent-goose",
+        label: "Goose",
+        command: "goose",
+        install_hint: "brew install goose",
+    },
+    AgentCheckInfo {
+        id: "ai-agent-claude",
+        label: "Claude Code",
+        command: "claude-code-acp",
+        install_hint: "npm install -g claude-code-acp",
+    },
+    AgentCheckInfo {
+        id: "ai-agent-codex",
+        label: "Codex",
+        command: "codex-acp",
+        install_hint: "npm install -g codex-acp",
+    },
+    AgentCheckInfo {
+        id: "ai-agent-pi",
+        label: "Pi",
+        command: "pi-acp",
+        install_hint: "npm install -g pi-acp",
+    },
+    AgentCheckInfo {
+        id: "ai-agent-amp",
+        label: "Amp",
+        command: "amp-acp",
+        install_hint: "npm install -g amp-acp",
+    },
+];
+
+/// Check whether a single AI agent is installed.
+///
+/// If at least one other agent is already found (`any_agent_found`), missing
+/// agents get `Warn`; otherwise the first missing agent gets `Warn` too since
+/// only one agent is required overall.
+fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> DoctorCheck {
+    if find_command(info.command).is_some() {
         DoctorCheck {
-            id,
-            label,
-            status: CheckStatus::Warn,
-            message: "No AI agent found. Install one to enable AI features.".to_string(),
+            id: info.id.to_string(),
+            label: info.label.to_string(),
+            status: CheckStatus::Pass,
+            message: "Installed".to_string(),
             fix_command: None,
         }
     } else {
-        let names: Vec<String> = providers.iter().map(|p| p.label.clone()).collect();
         DoctorCheck {
-            id,
-            label,
-            status: CheckStatus::Pass,
-            message: format!("Found: {}", names.join(", ")),
-            fix_command: None,
+            id: info.id.to_string(),
+            label: info.label.to_string(),
+            status: CheckStatus::Warn,
+            message: if any_agent_found {
+                "Not installed (optional)".to_string()
+            } else {
+                "Not installed — at least one AI agent is needed".to_string()
+            },
+            fix_command: Some(info.install_hint.to_string()),
         }
     }
+}
+
+/// Produce a `DoctorCheck` for each known AI agent.
+///
+/// Each agent gets its own row. At least one must be installed for full
+/// functionality, but each individual missing agent is only a warning.
+fn check_ai_agents() -> Vec<DoctorCheck> {
+    // First pass: determine which agents are installed.
+    let installed: Vec<bool> = AI_AGENT_CHECKS
+        .iter()
+        .map(|info| find_command(info.command).is_some())
+        .collect();
+    let any_found = installed.iter().any(|&b| b);
+
+    // Second pass: build the checks with appropriate messaging.
+    AI_AGENT_CHECKS
+        .iter()
+        .map(|info| check_single_ai_agent(info, any_found))
+        .collect()
+}
+
+/// Look up an AI agent check by its doctor check ID and re-run it.
+fn recheck_ai_agent(check_id: &str) -> Option<DoctorCheck> {
+    let info = AI_AGENT_CHECKS.iter().find(|a| a.id == check_id)?;
+    // For a re-check after fix we optimistically assume at least one is now found.
+    Some(check_single_ai_agent(info, true))
 }
 
 // =============================================================================
@@ -189,14 +266,10 @@ fn check_ai_agent() -> DoctorCheck {
 #[tauri::command]
 pub async fn run_doctor() -> DoctorReport {
     // Run checks on a blocking thread since they shell out.
-    tokio::task::spawn_blocking(|| DoctorReport {
-        checks: vec![
-            check_git(),
-            check_gh(),
-            check_gh_auth(),
-            check_git_lfs(),
-            check_ai_agent(),
-        ],
+    tokio::task::spawn_blocking(|| {
+        let mut checks = vec![check_git(), check_gh(), check_gh_auth(), check_git_lfs()];
+        checks.extend(check_ai_agents());
+        DoctorReport { checks }
     })
     .await
     .unwrap_or_else(|_| DoctorReport { checks: vec![] })
@@ -213,7 +286,9 @@ pub async fn run_doctor_fix(check_id: String) -> Result<DoctorCheck, String> {
             "gh" => check_gh(),
             "gh-auth" => check_gh_auth(),
             "git-lfs" => check_git_lfs(),
-            "ai-agent" => check_ai_agent(),
+            id if id.starts_with("ai-agent-") => {
+                recheck_ai_agent(id).ok_or_else(|| format!("Unknown check: {check_id}"))?
+            }
             _ => return Err(format!("Unknown check: {check_id}")),
         };
 
@@ -239,7 +314,9 @@ pub async fn run_doctor_fix(check_id: String) -> Result<DoctorCheck, String> {
             "gh" => check_gh(),
             "gh-auth" => check_gh_auth(),
             "git-lfs" => check_git_lfs(),
-            "ai-agent" => check_ai_agent(),
+            id if id.starts_with("ai-agent-") => {
+                recheck_ai_agent(id).ok_or_else(|| format!("Unknown check: {check_id}"))?
+            }
             _ => unreachable!(),
         };
 

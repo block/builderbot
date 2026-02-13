@@ -11,14 +11,12 @@
   import TopBar from './lib/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
-  import AgentSetupModal from './lib/features/agents/AgentSetupModal.svelte';
   import DoctorModal from './lib/features/doctor/DoctorModal.svelte';
   import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
-  import { agentState, refreshProviders } from './lib/features/agents/agent.svelte';
+  import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
 
   let showSessionLab = $state(false);
-  let showAgentSetup = $state(false);
   let showDoctor = $state(false);
   let unlistenDoctor: UnlistenFn | undefined;
 
@@ -66,17 +64,11 @@
     }
     console.debug(`[Staged] preferences ready in ${Math.round(performance.now() - t0)}ms`);
 
-    // Discover available agents. We await so we know whether to show
-    // the setup modal before revealing the window.
+    // Discover available agents in the background.
     await refreshProviders();
 
     // Check for `sq` CLI in the background (non-blocking).
     refreshSqAvailability();
-
-    // Show the setup modal only when no agents are installed at all.
-    if (agentState.providers.length === 0) {
-      showAgentSetup = true;
-    }
 
     // Window was created hidden — show it now that the theme is applied
     await getCurrentWindow().show();
@@ -95,10 +87,6 @@
       <ProjectHome />
     </div>
   </main>
-
-  {#if showAgentSetup}
-    <AgentSetupModal onClose={() => (showAgentSetup = false)} />
-  {/if}
 
   {#if showSessionLab}
     <SessionLauncher onClose={() => (showSessionLab = false)} />

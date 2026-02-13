@@ -38,6 +38,9 @@
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
 
+  // Worktree setup errors — maps branch ID → error message
+  let worktreeErrors = $state<Map<string, string>>(new Map());
+
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
 
@@ -168,30 +171,39 @@
     // For local branches without a worktree, set up the git worktree in the
     // background. The card will show "Creating worktree…" while this runs.
     if (branch.branchType === 'local' && !branch.worktreePath) {
-      const branchId = branch.id;
-      const projectId = branch.projectId;
-
-      commands
-        .setupWorktree(branchId)
-        .then((updated) => {
-          // Replace the branch record so the card picks up worktreePath
-          const branches = branchesByProject.get(projectId) || [];
-          branchesByProject = new Map(branchesByProject).set(
-            projectId,
-            branches.map((b) => (b.id === updated.id ? updated : b))
-          );
-
-          // Now that the worktree exists, run prerun actions
-          setTimeout(() => {
-            runPrerunActions(branchId, projectId).catch((e) => {
-              console.error('[ProjectHome] Failed to run prerun actions:', e);
-            });
-          }, 150);
-        })
-        .catch((e) => {
-          console.error('[ProjectHome] Failed to setup worktree:', e);
-        });
+      setupBranchWorktree(branch.id, branch.projectId);
     }
+  }
+
+  /** Set up a git worktree for a branch, updating the UI on success or error. */
+  function setupBranchWorktree(branchId: string, projectId: string) {
+    // Clear any previous error for this branch
+    const nextErrors = new Map(worktreeErrors);
+    nextErrors.delete(branchId);
+    worktreeErrors = nextErrors;
+
+    commands
+      .setupWorktree(branchId)
+      .then((updated) => {
+        // Replace the branch record so the card picks up worktreePath
+        const branches = branchesByProject.get(projectId) || [];
+        branchesByProject = new Map(branchesByProject).set(
+          projectId,
+          branches.map((b) => (b.id === updated.id ? updated : b))
+        );
+
+        // Now that the worktree exists, run prerun actions
+        setTimeout(() => {
+          runPrerunActions(branchId, projectId).catch((e) => {
+            console.error('[ProjectHome] Failed to run prerun actions:', e);
+          });
+        }, 150);
+      })
+      .catch((e) => {
+        console.error('[ProjectHome] Failed to setup worktree:', e);
+        const errMsg = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
+        worktreeErrors = new Map(worktreeErrors).set(branchId, errMsg);
+      });
   }
 
   function handleDeleteBranchRequest(branchId: string, project: Project) {
@@ -323,10 +335,12 @@
             {project}
             branches={branchesByProject.get(project.id) || []}
             {deletingBranches}
+            {worktreeErrors}
             detecting={detectingProjectIds.has(project.id)}
             onDeleteProject={() => handleDeleteProjectRequest(project)}
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onNewBranch={() => handleNewBranch(project)}
+            onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
           />
         {/each}
       </div>

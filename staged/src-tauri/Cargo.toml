@@ -47,7 +47,7 @@ tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-window-state = "2.4.1"
 reqwest = { version = "0.13.1", features = ["json"] }
 tokio = { version = "1.49.0", features = ["sync", "process", "io-util", "macros", "rt-multi-thread"] }
-open = "5"
+tauri-plugin-opener = "2"
 
 # Agent Client Protocol (ACP) for AI integration
 agent-client-protocol = "0.9"

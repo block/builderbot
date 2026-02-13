@@ -133,15 +133,15 @@
   function workspaceName(name: string): string {
     if (!name) return '';
     // Prefix with repo name for uniqueness
-    const repo = repoName(project.repoPath);
+    const repo = repoName(project.githubRepo);
     return `${repo}-${name}`;
   }
 
   onMount(async () => {
     // Fetch default branch and branch list in parallel
     const [defaultBranchResult, branchRefsResult] = await Promise.allSettled([
-      commands.detectDefaultBranch(project.repoPath),
-      commands.listGitBranches(project.repoPath),
+      commands.detectDefaultBranch(project.githubRepo),
+      commands.listGitBranches(project.githubRepo),
     ]);
 
     detectedDefaultBranch =
@@ -153,8 +153,8 @@
     // Fire-and-forget: prune stale remote-tracking refs in the background.
     // Once done, silently refresh the branch list so any stale refs disappear.
     commands
-      .pruneRemoteRefs(project.repoPath)
-      .then(() => commands.listGitBranches(project.repoPath))
+      .pruneRemoteRefs(project.githubRepo)
+      .then(() => commands.listGitBranches(project.githubRepo))
       .then((refs) => {
         allBranchRefs = refs;
       })
@@ -202,7 +202,7 @@
     prsLoading = true;
     githubError = null;
     commands
-      .listPullRequests(project.repoPath)
+      .listPullRequests(project.githubRepo)
       .then((result) => {
         pullRequests = result;
         prsLoaded = true;
@@ -220,7 +220,7 @@
     issuesLoading = true;
     githubError = null;
     commands
-      .listIssues(project.repoPath)
+      .listIssues(project.githubRepo)
       .then((result) => {
         issues = result;
         issuesLoaded = true;
@@ -451,7 +451,7 @@
           <div class="info-row">
             <GitBranch size={14} />
             <span class="info-label">Repository:</span>
-            <span class="info-value">{repoName(project.repoPath)}</span>
+            <span class="info-value">{repoName(project.githubRepo)}</span>
           </div>
           <button class="info-row base-row" onclick={toggleBasePicker}>
             <GitBranch size={14} class="base-icon" />

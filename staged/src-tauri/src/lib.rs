@@ -7,6 +7,7 @@ pub mod actions;
 pub mod agent;
 pub mod blox;
 pub mod git;
+pub mod paths;
 mod recent_repos;
 pub mod session_commands;
 pub mod session_runner;
@@ -408,152 +409,50 @@ fn list_projects(
         .map_err(|e| e.to_string())
 }
 
-/// Import existing worktrees for a project.
-///
-/// Scans the repository for existing worktrees and creates Branch + Workdir
-/// records for each one. Skips the main worktree (the repo itself).
-///
-/// Returns the number of worktrees imported.
-fn import_existing_worktrees(
-    store: &Arc<Store>,
-    project: &store::Project,
-) -> Result<usize, String> {
-    let repo_path = Path::new(&project.repo_path);
-
-    let default_branch = git::detect_default_branch(repo_path)
-        .map_err(|e| format!("Failed to detect default branch: {e}"))?;
-
-    let worktrees =
-        git::list_worktrees(repo_path).map_err(|e| format!("Failed to list worktrees: {e}"))?;
-
-    let mut imported_count = 0;
-
-    let canonical_repo = repo_path
-        .canonicalize()
-        .unwrap_or_else(|_| repo_path.to_path_buf());
-
-    for (worktree_path, branch_name) in worktrees {
-        // Skip the main worktree (the repo checkout itself)
-        let canonical_wt = worktree_path
-            .canonicalize()
-            .unwrap_or_else(|_| worktree_path.clone());
-        if canonical_wt == canonical_repo {
-            log::debug!("Skipping main worktree at {}", worktree_path.display());
-            continue;
-        }
-
-        let branch_name = match branch_name {
-            Some(name) => name,
-            None => {
-                log::debug!(
-                    "Skipping worktree at {} (detached HEAD)",
-                    worktree_path.display()
-                );
-                continue;
-            }
-        };
-
-        let existing_branches = store
-            .list_branches_for_project(&project.id)
-            .map_err(|e| e.to_string())?;
-
-        if existing_branches
-            .iter()
-            .any(|b| b.branch_name == branch_name)
-        {
-            log::debug!("Branch '{branch_name}' already exists, skipping import");
-            continue;
-        }
-
-        let branch = store::Branch::new(&project.id, &branch_name, &default_branch);
-        store
-            .create_branch(&branch)
-            .map_err(|e| format!("Failed to create branch '{branch_name}': {e}"))?;
-
-        let worktree_str = worktree_path
-            .to_str()
-            .ok_or_else(|| format!("Invalid worktree path: {}", worktree_path.display()))?;
-
-        let workdir = store::Workdir::new(&project.id, worktree_str).with_branch(&branch.id);
-
-        store
-            .create_workdir(&workdir)
-            .map_err(|e| format!("Failed to create workdir for '{branch_name}': {e}"))?;
-
-        log::info!(
-            "Imported worktree: {} -> {}",
-            branch_name,
-            worktree_path.display()
-        );
-        imported_count += 1;
-    }
-
-    Ok(imported_count)
-}
-
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    repo_path: String,
+    github_repo: String,
     subpath: Option<String>,
-    import_worktrees: Option<bool>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
-    let should_import = import_worktrees.unwrap_or(false);
 
-    // Validate that the path is a git repo
-    let path = Path::new(&repo_path);
-    if !path.join(".git").exists() && !path.is_dir() {
-        return Err(format!("Not a git repository: {repo_path}"));
-    }
-
-    // Check for duplicate — import worktrees for existing projects only if requested.
+    // Check for duplicate
     if let Some(existing) = store
-        .get_project_by_repo(&repo_path)
+        .get_project_by_repo(&github_repo)
         .map_err(|e| e.to_string())?
     {
-        if should_import {
-            match import_existing_worktrees(&store, &existing) {
-                Ok(count) if count > 0 => {
-                    log::info!(
-                        "Imported {count} worktree(s) for existing project '{}'",
-                        existing.repo_path
-                    );
-                }
-                Err(e) => {
-                    log::warn!("Failed to import worktrees for existing project: {e}");
-                }
-                _ => {}
-            }
-        }
         return Ok(existing);
     }
 
-    let mut project = store::Project::new(&repo_path);
+    let mut project = store::Project::new(&github_repo);
     if let Some(sub) = subpath {
         project = project.with_subpath(sub);
     }
     store.create_project(&project).map_err(|e| e.to_string())?;
 
-    // Import existing worktrees only if requested
-    if should_import {
-        match import_existing_worktrees(&store, &project) {
-            Ok(count) => {
-                if count > 0 {
-                    log::info!(
-                        "Imported {count} existing worktree(s) for project '{}'",
-                        project.repo_path
-                    );
-                }
-            }
-            Err(e) => {
-                // Log the error but don't fail project creation
-                log::warn!("Failed to import existing worktrees: {e}");
-            }
-        }
-    }
-
     Ok(project)
+}
+
+/// List the authenticated user's GitHub organization memberships.
+#[tauri::command]
+async fn list_github_orgs() -> Result<Vec<String>, String> {
+    git::list_github_orgs().map_err(|e| e.to_string())
+}
+
+/// List GitHub repositories for the authenticated user or a specific owner.
+#[tauri::command]
+async fn list_github_repos(owner: Option<String>) -> Result<Vec<git::GitHubRepo>, String> {
+    git::list_github_repos(owner.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Search GitHub repositories for the authenticated user or a specific owner.
+#[tauri::command]
+async fn search_github_repos(
+    query: String,
+    owner: Option<String>,
+) -> Result<Vec<git::GitHubRepo>, String> {
+    git::search_github_repos(&query, owner.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -630,18 +529,18 @@ fn create_branch(
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
 
-    // Get the project to find its repo path
+    // Get the project
     let project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
-    let repo_path = Path::new(&project.repo_path);
-
-    // Detect default branch if none specified
+    // Detect default branch if none specified (via GitHub API, no local clone needed)
     let effective_base = match base_branch {
         Some(b) => b,
-        None => git::detect_default_branch(repo_path).map_err(|e| e.to_string())?,
+        None => {
+            git::detect_default_branch_for_repo(&project.github_repo).map_err(|e| e.to_string())?
+        }
     };
 
     // Create branch record only — no git worktree yet
@@ -673,10 +572,11 @@ async fn setup_worktree(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
-    let repo_path = Path::new(&project.repo_path);
+    // Ensure we have a local clone (clones on first use, fetches on subsequent)
+    let repo_path = git::ensure_local_clone(&project.github_repo).map_err(|e| e.to_string())?;
 
     // Create git branch + worktree
-    let worktree_path = git::create_worktree(repo_path, &branch.branch_name, &branch.base_branch)
+    let worktree_path = git::create_worktree(&repo_path, &branch.branch_name, &branch.base_branch)
         .map_err(|e| e.to_string())?;
 
     let worktree_str = worktree_path
@@ -705,18 +605,18 @@ async fn create_remote_branch(
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
 
-    // Get the project to find its repo path (needed for default branch detection)
+    // Get the project
     let project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
-    let repo_path = Path::new(&project.repo_path);
-
-    // Detect default branch if none specified
+    // Detect default branch if none specified (via GitHub API, no local clone needed)
     let effective_base = match base_branch {
         Some(b) => b,
-        None => git::detect_default_branch(repo_path).map_err(|e| e.to_string())?,
+        None => {
+            git::detect_default_branch_for_repo(&project.github_repo).map_err(|e| e.to_string())?
+        }
     };
 
     // Create the branch record (starts in Starting status)
@@ -749,22 +649,20 @@ async fn start_workspace(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
-    let repo_path = Path::new(&project.repo_path);
-
     let ws_name = branch
         .workspace_name
         .as_deref()
         .ok_or("Branch has no workspace name")?;
 
-    // Resolve the source to an HTTPS git URL with ?ref=<base_branch>.
+    // Construct the HTTPS git URL directly from github_repo.
     let ref_name = branch
         .base_branch
         .strip_prefix("origin/")
         .unwrap_or(&branch.base_branch);
-    let resolved_source = git::get_remote_url(repo_path, "origin")
-        .ok()
-        .filter(|u| !u.is_empty())
-        .map(|u| format!("{}?ref={}", ssh_url_to_https(&u), ref_name));
+    let resolved_source = Some(format!(
+        "https://github.com/{}.git?ref={}",
+        project.github_repo, ref_name
+    ));
 
     match blox::ws_start(ws_name, resolved_source.as_deref()) {
         Ok(_) => {
@@ -903,7 +801,7 @@ async fn delete_branch(
 
     match branch.branch_type {
         store::BranchType::Local => {
-            // Get the project for the repo path
+            // Get the project for its github_repo (to derive clone path)
             let project = store
                 .get_project(&branch.project_id)
                 .map_err(|e| e.to_string())?
@@ -914,9 +812,9 @@ async fn delete_branch(
                 .map_err(|e| e.to_string())?;
 
             if let Some(ref wd) = workdir {
-                let repo_path = Path::new(&project.repo_path);
+                let repo_path = project.clone_path().ok_or("Cannot determine clone path")?;
                 let worktree_path = Path::new(&wd.path);
-                git::remove_worktree(repo_path, worktree_path).map_err(|e| e.to_string())?;
+                git::remove_worktree(&repo_path, worktree_path).map_err(|e| e.to_string())?;
                 store.delete_workdir(&wd.id).map_err(|e| e.to_string())?;
             }
         }
@@ -1293,26 +1191,6 @@ fn get_branch_timeline(
     })
 }
 
-/// Convert an SSH-style git URL to HTTPS.
-///
-/// `git@github.com:owner/repo.git` → `https://github.com/owner/repo.git`
-///
-/// If the URL is already HTTPS (or unrecognised), return it unchanged.
-fn ssh_url_to_https(url: &str) -> String {
-    let url = url.trim();
-    // Match: [user@]host:path (SSH shorthand used by GitHub, GitLab, etc.)
-    if let Some(colon) = url.find(':') {
-        let before_colon = &url[..colon];
-        // Must contain '@' and no '/' (to distinguish from https://…)
-        if before_colon.contains('@') && !before_colon.contains('/') {
-            let host = before_colon.rsplit('@').next().unwrap_or(before_colon);
-            let path = &url[colon + 1..];
-            return format!("https://{host}/{path}");
-        }
-    }
-    url.to_string()
-}
-
 // =============================================================================
 // Diff commands
 // =============================================================================
@@ -1582,40 +1460,35 @@ async fn remove_reference_file(
 // Git helper commands
 // =============================================================================
 
-#[tauri::command]
-async fn list_git_branches(repo_path: String) -> Result<Vec<git::BranchRef>, String> {
-    let path = Path::new(&repo_path);
-    git::list_branches(path).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn detect_default_branch_cmd(repo_path: String) -> Result<String, String> {
-    let path = Path::new(&repo_path);
-    git::detect_default_branch(path).map_err(|e| e.to_string())
-}
-
-/// Prune stale remote-tracking refs (branches deleted on the remote).
-///
-/// This is a network operation that can be slow, so it's exposed as a
-/// separate command to be called in the background after the UI has loaded.
-#[tauri::command]
-async fn prune_remote_refs(repo_path: String) -> Result<(), String> {
-    let path = Path::new(&repo_path);
-    git::prune_remote(path).map_err(|e| e.to_string())
-}
-
-/// List open pull requests for a repository.
+/// List branches for a repo via GitHub API (no local clone needed).
 #[tauri::command(rename_all = "camelCase")]
-fn list_pull_requests(repo_path: String) -> Result<Vec<git::github::PullRequest>, String> {
-    let path = Path::new(&repo_path);
-    git::github::list_pull_requests(path).map_err(|e| e.to_string())
+async fn list_git_branches(github_repo: String) -> Result<Vec<git::BranchRef>, String> {
+    git::list_branches_for_repo(&github_repo).map_err(|e| e.to_string())
 }
 
-/// List open issues for a repository.
+/// Detect default branch via GitHub API (no local clone needed).
 #[tauri::command(rename_all = "camelCase")]
-fn list_issues(repo_path: String) -> Result<Vec<git::github::Issue>, String> {
-    let path = Path::new(&repo_path);
-    git::github::list_issues(path).map_err(|e| e.to_string())
+async fn detect_default_branch_cmd(github_repo: String) -> Result<String, String> {
+    git::detect_default_branch_for_repo(&github_repo).map_err(|e| e.to_string())
+}
+
+/// Prune stale remote-tracking refs. With GitHub-repo-based projects,
+/// branch listing uses the API directly, so this is a no-op.
+#[tauri::command(rename_all = "camelCase")]
+async fn prune_remote_refs(github_repo: String) -> Result<(), String> {
+    git::prune_remote_for_repo(&github_repo).map_err(|e| e.to_string())
+}
+
+/// List open pull requests for a repository (via `-R owner/repo`).
+#[tauri::command(rename_all = "camelCase")]
+fn list_pull_requests(github_repo: String) -> Result<Vec<git::github::PullRequest>, String> {
+    git::list_pull_requests_for_repo(&github_repo).map_err(|e| e.to_string())
+}
+
+/// List open issues for a repository (via `-R owner/repo`).
+#[tauri::command(rename_all = "camelCase")]
+fn list_issues(github_repo: String) -> Result<Vec<git::github::Issue>, String> {
+    git::list_issues_for_repo(&github_repo).map_err(|e| e.to_string())
 }
 
 // =============================================================================
@@ -1710,6 +1583,43 @@ This is critical - the application parses this to link the PR.
     Ok(session.id)
 }
 
+/// Build the GitHub PR URL for a branch from its remote origin and PR number.
+///
+/// Parses the `origin` remote URL to extract the GitHub owner/repo, then
+/// returns `https://github.com/{owner}/{repo}/pull/{pr_number}`.
+#[tauri::command(rename_all = "camelCase")]
+fn get_pr_url(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    pr_number: u64,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    // project.github_repo is already "owner/repo"
+    let parts: Vec<&str> = project.github_repo.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "Invalid github_repo format: {}",
+            project.github_repo
+        ));
+    }
+    let (owner, repo_name) = (parts[0], parts[1]);
+
+    Ok(format!(
+        "https://github.com/{owner}/{repo_name}/pull/{pr_number}"
+    ))
+}
+
 /// Update the PR number for a branch.
 #[tauri::command(rename_all = "camelCase")]
 fn update_branch_pr(
@@ -1722,14 +1632,150 @@ fn update_branch_pr(
         .map_err(|e| e.to_string())
 }
 
+/// Check if a branch has commits that haven't been pushed to the remote.
+#[tauri::command(rename_all = "camelCase")]
+fn has_unpushed_commits(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<bool, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let workdir = store
+        .get_workdir_for_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+    git::has_unpushed_commits(Path::new(&workdir.path), &branch.branch_name)
+        .map_err(|e| e.to_string())
+}
+
+/// Push a branch to its remote by kicking off an agent session.
+///
+/// The agent runs `git push` and can diagnose and fix pre-push hook
+/// failures or other push errors. Returns the session ID so the
+/// frontend can track progress (same pattern as `create_pr`).
+///
+/// For remote branches the session runs inside the Blox workspace.
+#[tauri::command(rename_all = "camelCase")]
+fn push_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+    force: Option<bool>,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let is_remote = branch.branch_type == store::BranchType::Remote;
+
+    let (working_dir, workspace_name) = if is_remote {
+        let clone_path = project
+            .clone_path()
+            .ok_or_else(|| "Cannot determine clone path for remote branch".to_string())?;
+        (clone_path, branch.workspace_name.clone())
+    } else {
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+        let mut working_dir = PathBuf::from(&workdir.path);
+        if let Some(ref subpath) = project.subpath {
+            working_dir = working_dir.join(subpath);
+        }
+        (working_dir, None)
+    };
+
+    let force = force.unwrap_or(false);
+
+    let prompt = if force {
+        format!(
+            r#"<action>
+Push the current branch to the remote using force-with-lease.
+
+Run: `git push -u origin {branch_name} --force-with-lease`
+
+If the push fails due to pre-push hook errors, read the error output, fix the underlying issue, and retry the push.
+
+The push must succeed before you finish.
+</action>"#,
+            branch_name = branch.branch_name,
+        )
+    } else {
+        format!(
+            r#"<action>
+Push the current branch to the remote.
+
+Run: `git push -u origin {branch_name}`
+
+IMPORTANT: You MUST NOT use --force, --force-with-lease, or any force-push variant. Only a normal push is allowed.
+
+If the push fails due to pre-push hook errors, read the error output, fix the underlying issue, and retry the push.
+
+If the push is rejected because the remote has commits that would be lost (non-fast-forward rejection), do NOT attempt to fix it. Instead, output the following marker on its own line and stop:
+PUSH_REJECTED: NON_FAST_FORWARD
+
+For any other failure, diagnose the problem and fix it, then retry the push.
+
+The push must succeed before you finish (unless you output the non-fast-forward marker above).
+</action>"#,
+            branch_name = branch.branch_name,
+        )
+    };
+
+    // Create the session
+    let mut session = store::Session::new_running(&prompt, &working_dir);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
+    }
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    session_runner::start_session(
+        session_runner::SessionConfig {
+            session_id: session.id.clone(),
+            prompt,
+            working_dir,
+            agent_session_id: None,
+            pre_head_sha: None,
+            provider,
+            workspace_name,
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(session.id)
+}
+
 // =============================================================================
 // Utilities
 // =============================================================================
 
 /// Open a URL in the user's default browser.
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
-    open::that(&url).map_err(|e| format!("Failed to open URL: {e}"))
+fn open_url(app_handle: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app_handle
+        .opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| format!("Failed to open URL: {e}"))
 }
 
 /// Check whether the `sq` CLI is available on this system.
@@ -1900,6 +1946,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(
@@ -2098,6 +2145,9 @@ pub fn run() {
             list_projects,
             create_project,
             delete_project,
+            list_github_orgs,
+            list_github_repos,
+            search_github_repos,
             list_branches_for_project,
             create_branch,
             setup_worktree,
@@ -2120,7 +2170,10 @@ pub fn run() {
             list_pull_requests,
             list_issues,
             create_pr,
+            get_pr_url,
             update_branch_pr,
+            has_unpushed_commits,
+            push_branch,
             open_url,
             is_sq_available,
             get_available_openers,

@@ -155,8 +155,8 @@ pub fn get_current_branch(repo: &Path) -> Result<String, GitError> {
 
 /// Detect the default branch for this repository.
 /// Checks for common default branch names in order of preference.
-/// Returns the remote-tracking branch (e.g., "origin/main") if available,
-/// otherwise falls back to local branch name.
+/// Always returns the remote-tracking form (e.g., "origin/main") so that
+/// new branches start from the remote tip rather than the local HEAD.
 pub fn detect_default_branch(repo: &Path) -> Result<String, GitError> {
     let refs = list_refs(repo)?;
 
@@ -173,14 +173,17 @@ pub fn detect_default_branch(repo: &Path) -> Result<String, GitError> {
         }
     }
 
-    // Fall back to local branches
+    // If a local default branch exists, prefer its remote-tracking counterpart
+    // so that new worktrees start from the remote tip. The remote ref may not
+    // be in the local ref list yet (e.g. never fetched), but create_worktree
+    // will fetch before branching, so returning "origin/<branch>" is safe.
     let local_candidates = ["main", "master", "develop", "trunk"];
     for candidate in local_candidates {
         if refs.iter().any(|r| r == candidate) {
-            return Ok(candidate.to_string());
+            return Ok(format!("origin/{candidate}"));
         }
     }
 
-    // Last resort: use "main"
-    Ok("main".to_string())
+    // Last resort: use "origin/main" so we always branch from the remote
+    Ok("origin/main".to_string())
 }

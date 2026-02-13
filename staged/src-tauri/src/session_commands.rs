@@ -301,14 +301,18 @@ pub fn start_branch_session(
     // Resolve working directory and branch context.
     // Remote branches use ws_exec for git operations; local branches use the worktree directly.
     let (working_dir, branch_context) = if is_remote {
-        let repo_path = PathBuf::from(&project.repo_path);
+        // For remote branches, use the derived clone path as a fallback working dir.
+        // The actual work happens via ws_exec, not local filesystem.
+        let fallback_dir = project
+            .clone_path()
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
         let ctx = build_remote_branch_context(
             branch.workspace_name.as_deref().unwrap(),
             &branch.base_branch,
             &store,
             &branch_id,
         );
-        (repo_path, ctx)
+        (fallback_dir, ctx)
     } else {
         let workdir = store
             .get_workdir_for_branch(&branch_id)

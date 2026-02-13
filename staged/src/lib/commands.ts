@@ -405,6 +405,12 @@ export function detectDefaultBranch(repoPath: string): Promise<string> {
   return invoke('detect_default_branch_cmd', { repoPath });
 }
 
+/** Prune stale remote-tracking refs in the background.
+ *  This is a network operation — call fire-and-forget after the UI has loaded. */
+export function pruneRemoteRefs(repoPath: string): Promise<void> {
+  return invoke('prune_remote_refs', { repoPath });
+}
+
 export function listPullRequests(repoPath: string): Promise<PullRequest[]> {
   return invoke('list_pull_requests', { repoPath });
 }

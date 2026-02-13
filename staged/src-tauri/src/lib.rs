@@ -1571,15 +1571,25 @@ async fn remove_reference_file(
 // =============================================================================
 
 #[tauri::command]
-fn list_git_branches(repo_path: String) -> Result<Vec<git::BranchRef>, String> {
+async fn list_git_branches(repo_path: String) -> Result<Vec<git::BranchRef>, String> {
     let path = Path::new(&repo_path);
     git::list_branches(path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn detect_default_branch_cmd(repo_path: String) -> Result<String, String> {
+async fn detect_default_branch_cmd(repo_path: String) -> Result<String, String> {
     let path = Path::new(&repo_path);
     git::detect_default_branch(path).map_err(|e| e.to_string())
+}
+
+/// Prune stale remote-tracking refs (branches deleted on the remote).
+///
+/// This is a network operation that can be slow, so it's exposed as a
+/// separate command to be called in the background after the UI has loaded.
+#[tauri::command]
+async fn prune_remote_refs(repo_path: String) -> Result<(), String> {
+    let path = Path::new(&repo_path);
+    git::prune_remote(path).map_err(|e| e.to_string())
 }
 
 /// List open pull requests for a repository.
@@ -2094,6 +2104,7 @@ pub fn run() {
             delete_pending_commit,
             list_git_branches,
             detect_default_branch_cmd,
+            prune_remote_refs,
             list_pull_requests,
             list_issues,
             create_pr,

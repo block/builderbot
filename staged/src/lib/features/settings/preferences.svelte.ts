@@ -72,7 +72,7 @@ export const preferences = $state({
    */
   recentAgents: [] as string[],
   /** Whether the left sidebar is visible */
-  sidebarOpen: true,
+  sidebarOpen: false,
   /** Whether sidebar branches are grouped by project */
   sidebarGroupByProject: true,
   /** Sidebar width in pixels */

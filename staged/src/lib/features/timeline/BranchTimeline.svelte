@@ -253,6 +253,30 @@
 
 {#if noteItems.length === 0 && timelineItems.length === 0 && !onNewNote && !onNewCommit}
   <p class="no-items">No commits or notes yet</p>
+{:else if noteItems.length === 0 && timelineItems.length === 0}
+  <!-- Empty state: large action buttons -->
+  <div class="empty-state">
+    {#if onNewNote}
+      <button
+        class="empty-action-btn note-action"
+        onclick={onNewNote}
+        disabled={newSessionDisabled}
+      >
+        <FileText size={18} />
+        <span>Add Note</span>
+      </button>
+    {/if}
+    {#if onNewCommit}
+      <button
+        class="empty-action-btn commit-action"
+        onclick={onNewCommit}
+        disabled={newSessionDisabled}
+      >
+        <GitCommitHorizontal size={18} />
+        <span>Add Commit</span>
+      </button>
+    {/if}
+  </div>
 {:else}
   <!-- Notes strip (horizontal) -->
   {#if noteItems.length > 0 || onNewNote}
@@ -370,11 +394,14 @@
     gap: 8px;
     padding: 8px 12px;
     border-radius: 4px;
-    background-color: var(--bg-hover);
+    background-color: transparent;
+    border: 1px solid var(--border-subtle);
     width: calc((100% - 12px) / 3);
     min-width: 0;
     position: relative;
-    transition: background-color 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease;
   }
 
   .note-chip.clickable {
@@ -382,7 +409,7 @@
   }
 
   .note-chip.clickable:hover {
-    background-color: var(--note-bg);
+    border-color: var(--note-color);
   }
 
   .note-chip.pending {
@@ -514,6 +541,51 @@
     color: var(--text-faint);
     font-style: italic;
     text-align: center;
+  }
+
+  /* ── Empty state ────────────────────────────────────────────────────── */
+
+  .empty-state {
+    display: flex;
+    gap: 10px;
+    padding: 4px 0;
+  }
+
+  .empty-action-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex: 1;
+    padding: 14px 16px;
+    border-radius: 8px;
+    border: 1px dashed var(--border-muted);
+    background: none;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .empty-action-btn.note-action:hover:not(:disabled) {
+    color: var(--note-color);
+    border-color: var(--note-color);
+    background-color: var(--note-bg);
+  }
+
+  .empty-action-btn.commit-action:hover:not(:disabled) {
+    color: var(--commit-color);
+    border-color: var(--commit-color);
+    background-color: var(--commit-bg);
+  }
+
+  .empty-action-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
   }
 
   /* ── Inline add buttons ──────────────────────────────────────────────── */

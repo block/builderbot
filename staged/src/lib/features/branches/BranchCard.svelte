@@ -76,6 +76,19 @@
   let prUrl = $state<string | null>(null);
   let showPrErrorDialog = $state(false);
 
+  // Unpushed-commits state (only relevant when PR already exists)
+  let hasUnpushed = $state(false);
+
+  // Push session state (mirrors PR session pattern)
+  type PushState = 'idle' | 'pushing' | 'error' | 'done';
+  let pushStateOverride = $state<PushState | null>(null);
+  let pushState = $derived<PushState>(pushStateOverride ?? 'idle');
+  let pushSessionId = $state<string | null>(null);
+  let pushError = $state<string | null>(null);
+  let pushRejectedNonFastForward = $state(false);
+  let showPushErrorDialog = $state(false);
+  let showForcePushDialog = $state(false);
+
   // Dropdown state
   let showMoreMenu = $state(false);
   let showActionsSubmenu = $state(false);
@@ -88,6 +101,9 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showBranchDiff = $state(false);
+
+  // Whether the branch has any commits (used to gate PR button visibility)
+  let hasCommits = $derived(timeline != null && timeline.commits.length > 0);
 
   // Actions state
   let actions = $state<ProjectAction[]>([]);
@@ -140,12 +156,6 @@
 
   $effect(() => {
     const branchId = branch.id;
-    const branchName = branch.branchName;
-    console.log(
-      '[BranchCard] Setting up listeners for branch:',
-      () => branchId,
-      () => branchName
-    );
 
     listen<{
       sessionId: string;
@@ -158,39 +168,27 @@
         if (eventSessionId === prSessionId) {
           handlePrSessionComplete(status);
         }
+        // Handle push session completion
+        if (eventSessionId === pushSessionId) {
+          handlePushSessionComplete(status);
+        }
       }
     }).then((unlisten) => {
       unlistenStatus = unlisten;
-      console.log('[BranchCard] Session status listener registered for:', () => branchId);
     });
 
     listen<ActionStatusEvent>('action_status', (event) => {
       const payload = event.payload;
-      console.log('[BranchCard] Received action_status event:', payload);
 
       // Only process events for this branch
       if (payload.branchId !== branchId) {
-        console.log(
-          '[BranchCard] Ignoring event for different branch:',
-          payload.branchId,
-          'vs',
-          () => branchId
-        );
         return;
       }
-
-      console.log(
-        '[BranchCard] Processing action_status for branch:',
-        () => branchId,
-        'status:',
-        payload.status
-      );
 
       const existingIndex = runningActions.findIndex((a) => a.executionId === payload.executionId);
 
       if (payload.status === 'running') {
         if (existingIndex === -1) {
-          console.log('[BranchCard] Adding running action:', payload.actionName);
           runningActions.push({
             executionId: payload.executionId,
             actionId: payload.actionId,
@@ -198,11 +196,6 @@
             status: 'running',
             startedAt: payload.startedAt ?? Date.now(),
           });
-          console.log(
-            '[BranchCard] runningActions now:',
-            runningActions.length,
-            runningActions.map((a) => a.actionName)
-          );
         }
       } else {
         // Action completed/failed/stopped - update status
@@ -242,13 +235,64 @@
       }
     }).then((unlisten) => {
       unlistenActionStatus = unlisten;
-      console.log('[BranchCard] Action status listener registered for:', () => branchId);
     });
 
     return () => {
       unlistenStatus?.();
       unlistenActionStatus?.();
     };
+  });
+
+  // Fallback polling: if the session-status-changed event is missed (e.g. due to
+  // listener re-registration race), poll the session status every 5s while creating.
+  $effect(() => {
+    if (prState !== 'creating' || !prSessionId) return;
+
+    const sid = prSessionId;
+    const interval = setInterval(async () => {
+      try {
+        const session = await commands.getSession(sid);
+        if (session && session.status !== 'running') {
+          handlePrSessionComplete(session.status);
+        }
+      } catch {
+        // Session may have been deleted — clear the creating state
+        prStateOverride = 'error';
+        prError = 'Lost track of PR creation session.';
+        prSessionId = null;
+      }
+    }, 5_000);
+
+    return () => clearInterval(interval);
+  });
+
+  // Fallback polling for push session (same pattern as PR)
+  $effect(() => {
+    if (pushState !== 'pushing' || !pushSessionId) return;
+
+    const sid = pushSessionId;
+    const interval = setInterval(async () => {
+      try {
+        const session = await commands.getSession(sid);
+        if (session && session.status !== 'running') {
+          handlePushSessionComplete(session.status);
+        }
+      } catch {
+        pushStateOverride = 'error';
+        pushError = 'Lost track of push session.';
+        pushSessionId = null;
+      }
+    }, 5_000);
+
+    return () => clearInterval(interval);
+  });
+
+  // Re-check unpushed commits whenever the timeline refreshes and a PR exists
+  $effect(() => {
+    // Re-run when timeline changes (dependency) and PR exists
+    if (timeline && branch.prNumber && branch.branchType === 'local') {
+      commands.hasUnpushedCommits(branch.id).then((v) => (hasUnpushed = v));
+    }
   });
 
   onMount(() => {
@@ -578,16 +622,23 @@
 
   /**
    * Extract a PR URL from session messages.
-   * Looks for a line matching `PR_URL: <url>` in any assistant message.
-   * Also tries to find GitHub PR URLs directly in the text.
+   *
+   * Searches in two passes:
+   *  1. Look for the explicit `PR_URL: <url>` marker the agent is instructed
+   *     to emit — checked in assistant AND tool_result messages because the
+   *     marker may appear in shell output captured as a tool_result.
+   *  2. Fall back to any GitHub PR URL (`/pull/\d+`) found in any message
+   *     role, which covers `gh pr create` output stored as a tool_result.
    */
   function extractPrUrl(messages: { content: string; role: string }[]): string | null {
+    // Pass 1: explicit PR_URL marker (highest confidence)
     for (const msg of messages) {
-      if (msg.role !== 'assistant') continue;
-      // Look for explicit PR_URL marker
+      if (msg.role !== 'assistant' && msg.role !== 'tool_result') continue;
       const markerMatch = msg.content.match(/PR_URL:\s*(https?:\/\/\S+)/);
       if (markerMatch) return markerMatch[1];
-      // Fallback: look for GitHub PR URL pattern
+    }
+    // Pass 2: any GitHub PR URL in any message
+    for (const msg of messages) {
       const ghMatch = msg.content.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
       if (ghMatch) return ghMatch[0];
     }
@@ -600,19 +651,6 @@
   function extractPrNumber(url: string): number | null {
     const match = url.match(/\/pull\/(\d+)/);
     return match ? parseInt(match[1], 10) : null;
-  }
-
-  /**
-   * Build the PR URL from the branch's PR number.
-   * We store only the number, so we need the repo URL to reconstruct.
-   * Falls back to null if we can't determine the repo URL.
-   */
-  function getPrUrlFromNumber(prNumber: number): string | null {
-    // If we captured the URL during creation, use it
-    if (prUrl) return prUrl;
-    // Otherwise we can't reconstruct without the repo URL — return null
-    // The user will need to view from the repo directly
-    return null;
   }
 
   async function handleCreatePr() {
@@ -669,20 +707,140 @@
     prSessionId = null;
   }
 
+  // =========================================================================
+  // Push (session-based, mirrors PR creation pattern)
+  // =========================================================================
+
+  /**
+   * Check whether push session messages contain the non-fast-forward marker.
+   * The agent outputs `PUSH_REJECTED: NON_FAST_FORWARD` when the remote would
+   * lose commits on a normal push.
+   *
+   * Only checks assistant and tool_result messages to avoid matching the
+   * marker in the prompt instructions (user messages) which tell the agent
+   * what to output on rejection.
+   */
+  function isPushRejectedNonFastForward(messages: { content: string; role: string }[]): boolean {
+    return messages.some(
+      (msg) =>
+        (msg.role === 'assistant' || msg.role === 'tool_result') &&
+        msg.content.includes('PUSH_REJECTED: NON_FAST_FORWARD')
+    );
+  }
+
+  async function handlePush(force = false) {
+    if (pushState === 'pushing') return;
+
+    pushStateOverride = 'pushing';
+    pushError = null;
+
+    try {
+      const remote = branch.branchType === 'remote';
+      const agents = remote ? REMOTE_AGENTS : agentState.providers;
+      const provider = getPreferredAgent(agents) ?? undefined;
+      const sessionId = await commands.pushBranch(branch.id, provider, force);
+      pushSessionId = sessionId;
+      // The session-status-changed listener will handle completion
+    } catch (e) {
+      pushStateOverride = 'error';
+      pushError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function handlePushSessionComplete(status: string) {
+    if (status === 'completed' && pushSessionId) {
+      // Check session messages for the non-fast-forward rejection marker
+      try {
+        const messages = await commands.getSessionMessages(pushSessionId);
+        if (isPushRejectedNonFastForward(messages)) {
+          // The agent stopped because the remote would lose commits.
+          // Go to error state — clicking the button will open the force push dialog.
+          pushStateOverride = 'error';
+          pushRejectedNonFastForward = true;
+          pushError = null;
+          pushSessionId = null;
+          return;
+        }
+      } catch {
+        // If we can't read messages, treat as success (push likely worked)
+      }
+
+      pushStateOverride = 'done';
+      hasUnpushed = false;
+      // Reset to idle after a brief moment so the button returns to "View PR"
+      setTimeout(() => {
+        pushStateOverride = null;
+      }, 1_500);
+    } else {
+      pushStateOverride = 'error';
+      pushError = `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
+    }
+    pushSessionId = null;
+  }
+
+  function handleForcePushConfirm() {
+    showForcePushDialog = false;
+    pushRejectedNonFastForward = false;
+    handlePush(true);
+  }
+
+  function handleForcePushCancel() {
+    showForcePushDialog = false;
+    pushRejectedNonFastForward = false;
+    pushStateOverride = null;
+    pushError = null;
+  }
+
+  function handlePushErrorRetry() {
+    showPushErrorDialog = false;
+    handlePush();
+  }
+
+  function handlePushErrorClose() {
+    showPushErrorDialog = false;
+    pushStateOverride = null;
+    pushError = null;
+  }
+
   function handlePrButtonClick() {
-    if (prState === 'created') {
+    if (pushState === 'error') {
+      // Push failed — open the appropriate dialog based on failure type
+      if (pushRejectedNonFastForward) {
+        showForcePushDialog = true;
+      } else {
+        showPushErrorDialog = true;
+      }
+      return;
+    }
+    if (pushState === 'pushing' && pushSessionId) {
+      // While pushing, open the session chat so user can watch progress
+      openSessionId = pushSessionId;
+      return;
+    }
+    if (prState === 'created' && hasUnpushed && pushState === 'idle') {
+      handlePush();
+    } else if (prState === 'created') {
       // View PR - open in browser
-      const url = prUrl || (branch.prNumber ? getPrUrlFromNumber(branch.prNumber) : null);
-      if (url) {
-        commands.openUrl(url);
+      if (prUrl) {
+        commands.openUrl(prUrl);
+      } else if (branch.prNumber) {
+        commands
+          .getPrUrl(branch.id, branch.prNumber)
+          .then((url) => {
+            prUrl = url;
+            commands.openUrl(url);
+          })
+          .catch((e) => console.error('Failed to get PR URL:', e));
       }
     } else if (prState === 'error') {
       // Show error dialog
       showPrErrorDialog = true;
     } else if (prState === 'idle') {
       handleCreatePr();
+    } else if (prState === 'creating' && prSessionId) {
+      // While creating, open the session chat so user can watch progress
+      openSessionId = prSessionId;
     }
-    // 'creating' state — button shows spinner, no action on click
   }
 
   function handlePrErrorRetry() {
@@ -912,42 +1070,63 @@
 
     <!-- Footer with PR button and note/commit buttons -->
     <div class="card-footer">
-      <button
-        class="pr-btn"
-        class:creating={prState === 'creating'}
-        class:error={prState === 'error'}
-        class:created={prState === 'created'}
-        onclick={handlePrButtonClick}
-        disabled={prState === 'creating'}
-        title={prState === 'created'
-          ? 'View PR'
-          : prState === 'error'
-            ? 'PR creation failed — click for details'
-            : prState === 'creating'
-              ? 'Creating PR…'
-              : 'Create PR'}
-      >
-        {#if prState === 'creating'}
-          <Spinner size={13} />
-        {:else if prState === 'error'}
-          <AlertCircle size={13} />
-        {:else if prState === 'created'}
-          <GitPullRequestArrow size={13} />
-        {:else}
-          <GitPullRequestCreateArrow size={13} />
-        {/if}
-        <span>
-          {#if prState === 'created'}
-            View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+      {#if hasCommits || prState !== 'idle'}
+        <button
+          class="pr-btn"
+          class:creating={prState === 'creating'}
+          class:error={prState === 'error' || pushState === 'error'}
+          class:created={prState === 'created' && pushState !== 'error'}
+          class:pushing={pushState === 'pushing'}
+          onclick={handlePrButtonClick}
+          disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
+          title={pushState === 'pushing'
+            ? 'Pushing… (click to view)'
+            : pushState === 'error'
+              ? 'Push failed — click for details'
+              : prState === 'created' && hasUnpushed
+                ? 'Push new commits'
+                : prState === 'created'
+                  ? 'View PR'
+                  : prState === 'error'
+                    ? 'PR creation failed — click for details'
+                    : prState === 'creating'
+                      ? 'Creating PR… (click to view)'
+                      : 'Create PR'}
+        >
+          {#if pushState === 'pushing'}
+            <Spinner size={13} />
+          {:else if pushState === 'error'}
+            <AlertCircle size={13} />
           {:else if prState === 'creating'}
-            Creating PR…
+            <Spinner size={13} />
           {:else if prState === 'error'}
-            PR failed
+            <AlertCircle size={13} />
+          {:else if prState === 'created' && hasUnpushed}
+            <GitPullRequestCreateArrow size={13} />
+          {:else if prState === 'created'}
+            <GitPullRequestArrow size={13} />
           {:else}
-            Create PR
+            <GitPullRequestCreateArrow size={13} />
           {/if}
-        </span>
-      </button>
+          <span>
+            {#if pushState === 'pushing'}
+              Pushing…
+            {:else if pushState === 'error'}
+              Push failed
+            {:else if prState === 'created' && hasUnpushed}
+              Push{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+            {:else if prState === 'created'}
+              View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+            {:else if prState === 'creating'}
+              Creating PR…
+            {:else if prState === 'error'}
+              PR failed
+            {:else}
+              Create PR
+            {/if}
+          </span>
+        </button>
+      {/if}
       <div class="new-btn-group">
         <button
           class="new-item-btn note-btn"
@@ -1011,9 +1190,32 @@
 {#if openSessionId}
   <SessionModal
     sessionId={openSessionId}
-    onClose={() => {
+    onClose={async () => {
+      const closedSessionId = openSessionId;
       openSessionId = null;
       loadTimeline();
+      // If the closed modal was the PR session, check if it finished while open
+      if (prState === 'creating' && closedSessionId === prSessionId && closedSessionId) {
+        try {
+          const session = await commands.getSession(closedSessionId);
+          if (session && session.status !== 'running') {
+            handlePrSessionComplete(session.status);
+          }
+        } catch {
+          // Ignore — the polling fallback will catch it
+        }
+      }
+      // If the closed modal was the push session, check if it finished while open
+      if (pushState === 'pushing' && closedSessionId === pushSessionId && closedSessionId) {
+        try {
+          const session = await commands.getSession(closedSessionId);
+          if (session && session.status !== 'running') {
+            handlePushSessionComplete(session.status);
+          }
+        } catch {
+          // Ignore — the polling fallback will catch it
+        }
+      }
     }}
   />
 {/if}
@@ -1044,6 +1246,27 @@
     confirmLabel="Retry"
     onConfirm={handlePrErrorRetry}
     onCancel={handlePrErrorClose}
+  />
+{/if}
+
+{#if showPushErrorDialog}
+  <ConfirmDialog
+    title="Push Failed"
+    message={pushError ?? 'An unknown error occurred while pushing.'}
+    confirmLabel="Retry"
+    onConfirm={handlePushErrorRetry}
+    onCancel={handlePushErrorClose}
+  />
+{/if}
+
+{#if showForcePushDialog}
+  <ConfirmDialog
+    title="Push Rejected"
+    message="The remote branch has commits that would be lost. Do you want to force push? This will overwrite the remote branch with your local version."
+    confirmLabel="Force Push"
+    danger
+    onConfirm={handleForcePushConfirm}
+    onCancel={handleForcePushCancel}
   />
 {/if}
 
@@ -1438,6 +1661,12 @@
     background: var(--bg-hover);
   }
 
+  .pr-btn.pushing {
+    color: var(--text-muted);
+    border-color: var(--border-muted);
+    cursor: default;
+  }
+
   .pr-btn :global(svg) {
     flex-shrink: 0;
   }
@@ -1447,6 +1676,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    margin-left: auto;
   }
 
   .new-item-btn {

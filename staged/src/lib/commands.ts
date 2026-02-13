@@ -452,7 +452,28 @@ export function createPr(branchId: string, provider?: string): Promise<string> {
   return invoke('create_pr', { branchId, provider: provider ?? null });
 }
 
+/** Build the GitHub PR URL from the repo's origin remote and a PR number. */
+export function getPrUrl(branchId: string, prNumber: number): Promise<string> {
+  return invoke('get_pr_url', { branchId, prNumber });
+}
+
 /** Update the PR number stored for a branch. */
 export function updateBranchPr(branchId: string, prNumber: number | null): Promise<void> {
   return invoke('update_branch_pr', { branchId, prNumber });
+}
+
+/** Check whether a branch has local commits not yet pushed to the remote. */
+export function hasUnpushedCommits(branchId: string): Promise<boolean> {
+  return invoke('has_unpushed_commits', { branchId });
+}
+
+/** Push a branch to its remote via an agent session.
+ *  The agent runs git push and can fix pre-push hook failures.
+ *  Returns the session ID so the frontend can track progress. */
+export function pushBranch(branchId: string, provider?: string, force?: boolean): Promise<string> {
+  return invoke('push_branch', {
+    branchId,
+    provider: provider ?? null,
+    force: force ?? null,
+  });
 }

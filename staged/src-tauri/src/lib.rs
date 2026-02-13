@@ -418,9 +418,9 @@ fn create_project(
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
 
-    // Check for duplicate
+    // Check for duplicate (must match both repo and subpath)
     if let Some(existing) = store
-        .get_project_by_repo(&github_repo)
+        .get_project_by_repo_and_subpath(&github_repo, subpath.as_deref())
         .map_err(|e| e.to_string())?
     {
         return Ok(existing);

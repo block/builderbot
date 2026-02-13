@@ -60,6 +60,29 @@ impl Store {
         .map_err(Into::into)
     }
 
+    pub fn get_project_by_repo_and_subpath(
+        &self,
+        github_repo: &str,
+        subpath: Option<&str>,
+    ) -> Result<Option<Project>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, github_repo, subpath, created_at, updated_at FROM projects WHERE github_repo = ?1 AND subpath IS ?2",
+            params![github_repo, subpath],
+            |row| {
+                Ok(Project {
+                    id: row.get(0)?,
+                    github_repo: row.get(1)?,
+                    subpath: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn list_projects(&self) -> Result<Vec<Project>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

@@ -2,8 +2,8 @@
   DoctorCheckRow.svelte — A single row in the doctor report.
 
   Shows a status icon (✓ / ⚠ / ✗), the check label, a message,
-  and an optional "Install" link that opens the relevant page in
-  the user's browser.
+  and an optional external-link icon button that opens the relevant
+  install page in the user's browser.
 -->
 <script lang="ts">
   import { CheckCircle, AlertTriangle, XCircle, ExternalLink } from 'lucide-svelte';
@@ -39,9 +39,8 @@
   </div>
 
   {#if check.fixUrl && check.status !== 'pass'}
-    <button class="install-link" onclick={() => openUrl(check.fixUrl!)}>
-      <ExternalLink size={12} />
-      Install
+    <button class="install-btn" onclick={() => openUrl(check.fixUrl!)}>
+      <ExternalLink size={14} />
     </button>
   {/if}
 </div>
@@ -97,26 +96,24 @@
     text-overflow: ellipsis;
   }
 
-  .install-link {
+  .install-btn {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 4px 10px;
+    justify-content: center;
+    flex-shrink: 0;
+    padding: 4px;
     background: none;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
+    border: none;
     color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-family: inherit;
-    white-space: nowrap;
     cursor: pointer;
+    border-radius: 4px;
     transition:
       color 0.1s,
-      border-color 0.1s;
+      background 0.1s;
   }
 
-  .install-link:hover {
+  .install-btn:hover {
     color: var(--text-primary);
-    border-color: var(--border-emphasis);
+    background: var(--bg-hover, rgba(255, 255, 255, 0.06));
   }
 </style>

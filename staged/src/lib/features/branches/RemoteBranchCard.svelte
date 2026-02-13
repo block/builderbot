@@ -307,9 +307,12 @@
   {:else}
     <!-- Header -->
     <div class="card-header">
-      <div class="branch-info">
-        <Cloud size={16} class="cloud-icon" />
+      <Cloud size={14} class="cloud-icon header-icon" />
+      <div class="header-left">
         <span class="branch-name">{branch.branchName}</span>
+        {#if branch.workspaceName}
+          <span class="base-branch-name">{branch.workspaceName}</span>
+        {/if}
       </div>
       <div class="header-actions">
         <div
@@ -333,13 +336,6 @@
         <DropdownMenu items={menuItems} />
       </div>
     </div>
-
-    <!-- Subheader: workspace info -->
-    {#if branch.workspaceName}
-      <div class="card-subheader">
-        <span class="workspace-name">{branch.workspaceName}</span>
-      </div>
-    {/if}
 
     <!-- Content area — varies by status -->
     <div class="card-content">
@@ -491,20 +487,21 @@
   .card-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 14px 16px 0;
-  }
-
-  .branch-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
   }
 
   :global(.cloud-icon) {
     color: var(--ui-accent);
     flex-shrink: 0;
+  }
+
+  .header-left {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
   }
 
   .branch-name {
@@ -514,10 +511,15 @@
     letter-spacing: -0.01em;
   }
 
+  .base-branch-name {
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+  }
+
   .header-actions {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
     flex-shrink: 0;
   }
 
@@ -551,24 +553,6 @@
   .status-badge.error {
     background-color: rgba(248, 81, 73, 0.1);
     color: var(--ui-danger);
-  }
-
-  /* Subheader */
-  .card-subheader {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 16px 12px;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .workspace-name {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-    font-family: 'SF Mono', 'Menlo', monospace;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* Content */

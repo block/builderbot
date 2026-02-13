@@ -2,7 +2,7 @@
   ProjectSection.svelte - A project header + list of branch cards
 
   Shows the project name, a delete button, and all branches for this project.
-  Includes a "New Branch" dashed button at the bottom.
+  Includes a "New Branch" dashed button at the top of the branch list.
 -->
 <script lang="ts">
   import { Folder, Trash2, Plus, Settings, Loader2 } from 'lucide-svelte';
@@ -64,6 +64,11 @@
     </div>
   </div>
   <div class="branches-list">
+    <!-- New branch button -->
+    <button class="new-branch-button" onclick={() => onNewBranch?.()}>
+      <Plus size={16} />
+      New Branch
+    </button>
     {#each branches as branch (branch.id)}
       {#if branch.branchType === 'remote'}
         <RemoteBranchCard
@@ -79,11 +84,6 @@
         />
       {/if}
     {/each}
-    <!-- New branch button -->
-    <button class="new-branch-button" onclick={() => onNewBranch?.()}>
-      <Plus size={16} />
-      New Branch
-    </button>
   </div>
 </div>
 

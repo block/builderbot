@@ -293,6 +293,15 @@ export function startBranchSession(
 // Timeline item deletion
 // =============================================================================
 
+/** Create a standalone note (no session) for a branch. */
+export function createNote(
+  branchId: string,
+  title: string,
+  content: string
+): Promise<{ id: string; title: string; content: string; createdAt: number; updatedAt: number }> {
+  return invoke('create_note', { branchId, title, content });
+}
+
 /** Delete a note and optionally its linked session. */
 export function deleteNote(noteId: string, deleteSession = true): Promise<void> {
   return invoke('delete_note', { noteId, deleteSession });

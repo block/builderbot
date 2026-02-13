@@ -855,10 +855,68 @@
     prStateOverride = null;
     prError = null;
   }
+
+  // =========================================================================
+  // Drag-and-drop text files → notes
+  // =========================================================================
+
+  let dragOver = $state(false);
+  let dragCounter = $state(0);
+
+  function handleDragEnter(e: DragEvent) {
+    e.preventDefault();
+    dragCounter++;
+    if (e.dataTransfer?.types.includes('Files')) {
+      dragOver = true;
+    }
+  }
+
+  function handleDragOver(e: DragEvent) {
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  }
+
+  function handleDragLeave(e: DragEvent) {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      dragOver = false;
+    }
+  }
+
+  async function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    dragCounter = 0;
+
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+
+    const textFiles = Array.from(files).filter(
+      (f) => f.type.startsWith('text/') || f.name.endsWith('.md') || f.name.endsWith('.txt')
+    );
+    if (textFiles.length === 0) return;
+
+    for (const file of textFiles) {
+      try {
+        const content = await file.text();
+        const title = file.name.replace(/\.[^.]+$/, '');
+        await commands.createNote(branch.id, title, content);
+      } catch (e) {
+        console.error('Failed to create note from dropped file:', e);
+      }
+    }
+
+    loadTimeline();
+  }
 </script>
 
 <svelte:window onclick={handleClickOutside} />
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="branch-card"
   class:deleting
@@ -866,6 +924,11 @@
     !branch.worktreePath &&
     !worktreeError &&
     !deleting}
+  class:drag-over={dragOver}
+  ondragenter={handleDragEnter}
+  ondragover={handleDragOver}
+  ondragleave={handleDragLeave}
+  ondrop={handleDrop}
 >
   {#if deleting}
     <div class="deleting-overlay">
@@ -1308,6 +1371,12 @@
 
   .branch-card.deleting {
     opacity: 0.6;
+  }
+
+  /* Drag-and-drop highlight */
+  .branch-card.drag-over {
+    border-color: var(--note-color, var(--ui-accent));
+    background-color: color-mix(in srgb, var(--note-color, var(--ui-accent)) 5%, var(--bg-primary));
   }
 
   /* Deleting overlay */

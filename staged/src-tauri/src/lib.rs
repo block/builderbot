@@ -918,6 +918,28 @@ fn delete_project_action(
 // Timeline commands
 // =============================================================================
 
+/// Create a standalone note (no session) for a branch.
+#[tauri::command(rename_all = "camelCase")]
+fn create_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    title: String,
+    content: String,
+) -> Result<NoteTimelineItem, String> {
+    let store = get_store(&store)?;
+    let note = store::models::Note::new(&branch_id, &title, &content);
+    store.create_note(&note).map_err(|e| e.to_string())?;
+    Ok(NoteTimelineItem {
+        id: note.id,
+        title: note.title,
+        content: note.content,
+        session_id: None,
+        session_status: None,
+        created_at: note.created_at,
+        updated_at: note.updated_at,
+    })
+}
+
 /// Delete a note and optionally its linked session.
 #[tauri::command(rename_all = "camelCase")]
 fn delete_note(
@@ -2192,6 +2214,7 @@ pub fn run() {
             update_project_action,
             delete_project_action,
             get_branch_timeline,
+            create_note,
             delete_note,
             delete_commit,
             delete_pending_commit,

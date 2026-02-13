@@ -681,19 +681,6 @@
     return match ? parseInt(match[1], 10) : null;
   }
 
-  /**
-   * Build the PR URL from the branch's PR number.
-   * We store only the number, so we need the repo URL to reconstruct.
-   * Falls back to null if we can't determine the repo URL.
-   */
-  function getPrUrlFromNumber(prNumber: number): string | null {
-    // If we captured the URL during creation, use it
-    if (prUrl) return prUrl;
-    // Otherwise we can't reconstruct without the repo URL — return null
-    // The user will need to view from the repo directly
-    return null;
-  }
-
   async function handleCreatePr() {
     if (prState === 'creating') return;
 
@@ -862,9 +849,16 @@
       handlePush();
     } else if (prState === 'created') {
       // View PR - open in browser
-      const url = prUrl || (branch.prNumber ? getPrUrlFromNumber(branch.prNumber) : null);
-      if (url) {
-        commands.openUrl(url);
+      if (prUrl) {
+        commands.openUrl(prUrl);
+      } else if (branch.prNumber) {
+        commands
+          .getPrUrl(branch.id, branch.prNumber)
+          .then((url) => {
+            prUrl = url;
+            commands.openUrl(url);
+          })
+          .catch((e) => console.error('Failed to get PR URL:', e));
       }
     } else if (prState === 'error') {
       // Show error dialog

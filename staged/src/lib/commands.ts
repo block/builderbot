@@ -423,6 +423,11 @@ export function createPr(branchId: string, provider?: string): Promise<string> {
   return invoke('create_pr', { branchId, provider: provider ?? null });
 }
 
+/** Build the GitHub PR URL from the repo's origin remote and a PR number. */
+export function getPrUrl(branchId: string, prNumber: number): Promise<string> {
+  return invoke('get_pr_url', { branchId, prNumber });
+}
+
 /** Update the PR number stored for a branch. */
 export function updateBranchPr(branchId: string, prNumber: number | null): Promise<void> {
   return invoke('update_branch_pr', { branchId, prNumber });

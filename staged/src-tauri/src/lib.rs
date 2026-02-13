@@ -1688,6 +1688,36 @@ This is critical - the application parses this to link the PR.
     Ok(session.id)
 }
 
+/// Build the GitHub PR URL for a branch from its remote origin and PR number.
+///
+/// Parses the `origin` remote URL to extract the GitHub owner/repo, then
+/// returns `https://github.com/{owner}/{repo}/pull/{pr_number}`.
+#[tauri::command(rename_all = "camelCase")]
+fn get_pr_url(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    pr_number: u64,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let repo_path = Path::new(&project.repo_path);
+    let (owner, repo_name) = git::github::get_github_repo(repo_path).map_err(|e| e.to_string())?;
+
+    Ok(format!(
+        "https://github.com/{owner}/{repo_name}/pull/{pr_number}"
+    ))
+}
+
 /// Update the PR number for a branch.
 #[tauri::command(rename_all = "camelCase")]
 fn update_branch_pr(
@@ -2232,6 +2262,7 @@ pub fn run() {
             list_pull_requests,
             list_issues,
             create_pr,
+            get_pr_url,
             update_branch_pr,
             has_unpushed_commits,
             push_branch,

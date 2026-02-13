@@ -24,10 +24,17 @@
   let selectedIndex = $state(-1);
   let searchInputRef = $state<HTMLInputElement | null>(null);
   let dropdownRef = $state<HTMLDivElement | null>(null);
+  let themeListRef = $state<HTMLDivElement | null>(null);
 
-  // Focus search input on mount
+  // Focus search input and scroll to active theme on mount
   $effect(() => {
     searchInputRef?.focus();
+
+    // Scroll the active theme into view
+    if (themeListRef) {
+      const activeItem = themeListRef.querySelector('.theme-item.active');
+      activeItem?.scrollIntoView({ block: 'center' });
+    }
   });
 
   // Filter themes based on search
@@ -97,7 +104,7 @@
     />
   </div>
 
-  <div class="theme-list">
+  <div class="theme-list" bind:this={themeListRef}>
     {#each filteredThemes as theme, i (theme.name)}
       <button
         class="theme-item"

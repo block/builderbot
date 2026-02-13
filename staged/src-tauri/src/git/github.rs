@@ -332,11 +332,11 @@ pub fn search_github_repos(query: &str) -> Result<Vec<GitHubRepo>, GitError> {
 
 /// List open pull requests for a repo using `-R owner/repo` (no local dir needed).
 pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>, GitError> {
-    let r_flag = format!("-R{github_repo}");
     let output = run_gh_global(&[
         "pr",
         "list",
-        &r_flag,
+        "-R",
+        github_repo,
         "--state=open",
         "--limit=50",
         "--json=number,title,author,baseRefName,headRefName,isDraft,updatedAt",
@@ -350,11 +350,11 @@ pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>
 
 /// List open issues for a repo using `-R owner/repo` (no local dir needed).
 pub fn list_issues_for_repo(github_repo: &str) -> Result<Vec<Issue>, GitError> {
-    let r_flag = format!("-R{github_repo}");
     let output = run_gh_global(&[
         "issue",
         "list",
-        &r_flag,
+        "-R",
+        github_repo,
         "--state=open",
         "--limit=50",
         "--json=number,title,author,updatedAt,labels",
@@ -368,8 +368,7 @@ pub fn list_issues_for_repo(github_repo: &str) -> Result<Vec<Issue>, GitError> {
 
 /// Detect the default branch for a repo via GitHub API (no local clone needed).
 pub fn detect_default_branch_for_repo(github_repo: &str) -> Result<String, GitError> {
-    let r_flag = format!("-R{github_repo}");
-    let output = run_gh_global(&["repo", "view", &r_flag, "--json=defaultBranchRef"])?;
+    let output = run_gh_global(&["repo", "view", github_repo, "--json=defaultBranchRef"])?;
 
     #[derive(Debug, Deserialize)]
     struct RepoView {

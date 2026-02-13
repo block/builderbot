@@ -1499,7 +1499,7 @@
     background: var(--bg-elevated);
     border: none;
     border-radius: 50%;
-    color: #fff;
+    color: var(--ui-accent);
     cursor: pointer;
     transition: all 0.15s ease;
   }
@@ -1519,7 +1519,7 @@
 
   .primary-action-button.completed {
     background: var(--bg-hover);
-    color: var(--ui-success);
+    color: var(--status-added);
   }
 
   .primary-action-button.failed {
@@ -1571,8 +1571,8 @@
   }
 
   .running-action-button.completed {
-    border-color: var(--ui-success);
-    color: var(--ui-success);
+    border-color: var(--status-added);
+    color: var(--status-added);
   }
 
   .running-action-button.failed {

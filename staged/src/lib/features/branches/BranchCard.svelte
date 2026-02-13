@@ -12,6 +12,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { untrack } from 'svelte';
   import {
     GitBranch,
     GitCommitHorizontal,
@@ -38,6 +39,7 @@
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { subscribeDragDrop } from './dragDrop';
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
@@ -312,7 +314,12 @@
     window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
   });
   async function loadTimeline() {
-    loading = true;
+    // Only show the loading spinner on the initial load. Subsequent refreshes
+    // keep the existing timeline visible to avoid a jarring flash/re-render
+    // that was causing UI freezes after drag-and-drop note creation.
+    if (!timeline) {
+      loading = true;
+    }
     error = null;
     try {
       timeline = await commands.getBranchTimeline(branch.id);
@@ -862,12 +869,12 @@
 
   // Tauri v2 intercepts file drops at the OS level, so standard browser
   // drag/drop events never fire for files dragged from Finder/Explorer.
-  // Instead we use getCurrentWebview().onDragDropEvent() which provides
-  // file paths and a position we can use to hit-test our card.
+  // We use a shared drag-drop service (dragDrop.ts) that registers a single
+  // global Tauri onDragDropEvent listener and dispatches to the correct card
+  // via hit-testing.
 
   let dragOver = $state(false);
   let cardElement: HTMLDivElement | undefined = $state();
-  let unlistenDragDrop: UnlistenFn | null = null;
 
   /** Pending note placeholders shown in the timeline while files are being added. */
   let pendingDropNotes = $state<{ key: string; title: string }[]>([]);
@@ -884,14 +891,6 @@
     const parts = filePath.split('/');
     const name = parts[parts.length - 1] || filePath;
     return name.replace(/\.[^.]+$/, '');
-  }
-
-  /** Check if a logical position is within this card's bounding rect. */
-  function isPositionOverCard(x: number, y: number): boolean {
-    if (!cardElement) return false;
-    const rect = cardElement.getBoundingClientRect();
-    // Tauri on macOS gives logical coordinates that match getBoundingClientRect.
-    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
   }
 
   function handleFileDrop(paths: string[]) {
@@ -924,36 +923,26 @@
     });
   }
 
-  // Register the Tauri drag-drop listener once on mount
+  // Subscribe to the shared drag-drop service. A single global Tauri listener
+  // is shared across all BranchCards, eliminating the O(N) listener storm that
+  // caused UI freezes during drag-over events.
   $effect(() => {
-    // Import dynamically to avoid issues if running outside Tauri
-    import('@tauri-apps/api/webview').then(({ getCurrentWebview }) => {
-      getCurrentWebview()
-        .onDragDropEvent((event) => {
-          if (event.payload.type === 'enter' || event.payload.type === 'over') {
-            const { x, y } = event.payload.position;
-            const over = isPositionOverCard(x, y);
-            if (dragOver !== over) {
-              dragOver = over;
-            }
-          } else if (event.payload.type === 'drop') {
-            const { x, y } = event.payload.position;
-            if (isPositionOverCard(x, y)) {
-              handleFileDrop(event.payload.paths);
-            }
-            dragOver = false;
-          } else if (event.payload.type === 'leave') {
-            dragOver = false;
-          }
-        })
-        .then((unlisten) => {
-          unlistenDragDrop = unlisten;
-        });
-    });
+    const el = cardElement;
+    if (!el) return;
 
-    return () => {
-      unlistenDragDrop?.();
-    };
+    const unsub = untrack(() =>
+      subscribeDragDrop({
+        element: el,
+        onDragOver: (over) => {
+          dragOver = over;
+        },
+        onDrop: (paths) => {
+          handleFileDrop(paths);
+        },
+      })
+    );
+
+    return unsub;
   });
 </script>
 

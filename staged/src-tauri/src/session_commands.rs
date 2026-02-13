@@ -538,9 +538,13 @@ fn build_full_prompt(
         BranchSessionType::Note => {
             "\
 <action>
-The user is requesting to make a note out of the prompt below. To return a note, \
-include a horizontal rule (---). The content after the rule will be interpreted as \
-the note. Begin the note with a markdown H1 heading as the title.
+The user is requesting a note. Generate a note based on their prompt below.
+
+Do NOT use any tools — no file reads, no commands, no code changes, no commits. \
+Respond with text only.
+
+To return the note, include a horizontal rule (---) followed by the note content. \
+Begin the note with a markdown H1 heading as the title.
 </action>"
         }
         BranchSessionType::Commit => {

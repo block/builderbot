@@ -729,11 +729,14 @@
     </div>
   {:else if branch.branchType === 'local' && !branch.worktreePath}
     <div class="card-header">
-      <div class="branch-info">
-        <GitBranch size={16} class="branch-icon" />
-        <span class="branch-name">{branch.branchName}</span>
-        <span class="branch-separator">›</span>
-        <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
+      <div class="header-left">
+        <div class="header-top">
+          <span class="branch-name">{branch.branchName}</span>
+        </div>
+        <div class="header-bottom">
+          <GitBranch size={12} class="branch-icon" />
+          <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
+        </div>
       </div>
     </div>
     <div class="card-content">
@@ -744,11 +747,14 @@
     </div>
   {:else}
     <div class="card-header">
-      <div class="branch-info">
-        <GitBranch size={16} class="branch-icon" />
-        <span class="branch-name">{branch.branchName}</span>
-        <span class="branch-separator">›</span>
-        <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
+      <div class="header-left">
+        <div class="header-top">
+          <span class="branch-name">{branch.branchName}</span>
+        </div>
+        <div class="header-bottom">
+          <GitBranch size={12} class="branch-icon" />
+          <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
+        </div>
       </div>
       <div class="header-actions">
         <!-- Running actions (excluding primary action) -->
@@ -800,9 +806,6 @@
             </button>
           </div>
         {/if}
-        <button class="view-diff-btn" onclick={() => (showBranchDiff = true)} title="View diff">
-          <FileDiff size={16} />
-        </button>
         <div class="more-menu-container">
           <button class="more-button" onclick={toggleMoreMenu} title="More options">
             <MoreVertical size={16} />
@@ -932,42 +935,47 @@
 
     <!-- Footer with PR button and note/commit buttons -->
     <div class="card-footer">
-      <button
-        class="pr-btn"
-        class:creating={prState === 'creating'}
-        class:error={prState === 'error'}
-        class:created={prState === 'created'}
-        onclick={handlePrButtonClick}
-        disabled={prState === 'creating'}
-        title={prState === 'created'
-          ? 'View PR'
-          : prState === 'error'
-            ? 'PR creation failed — click for details'
-            : prState === 'creating'
-              ? 'Creating PR…'
-              : 'Create PR'}
-      >
-        {#if prState === 'creating'}
-          <Spinner size={13} />
-        {:else if prState === 'error'}
-          <AlertCircle size={13} />
-        {:else if prState === 'created'}
-          <GitPullRequestArrow size={13} />
-        {:else}
-          <GitPullRequestCreateArrow size={13} />
-        {/if}
-        <span>
-          {#if prState === 'created'}
-            View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
-          {:else if prState === 'creating'}
-            Creating PR…
+      <div class="footer-left">
+        <button class="view-diff-btn" onclick={() => (showBranchDiff = true)} title="View diff">
+          <FileDiff size={14} />
+        </button>
+        <button
+          class="pr-btn"
+          class:creating={prState === 'creating'}
+          class:error={prState === 'error'}
+          class:created={prState === 'created'}
+          onclick={handlePrButtonClick}
+          disabled={prState === 'creating'}
+          title={prState === 'created'
+            ? 'View PR'
+            : prState === 'error'
+              ? 'PR creation failed — click for details'
+              : prState === 'creating'
+                ? 'Creating PR…'
+                : 'Create PR'}
+        >
+          {#if prState === 'creating'}
+            <Spinner size={13} />
           {:else if prState === 'error'}
-            PR failed
+            <AlertCircle size={13} />
+          {:else if prState === 'created'}
+            <GitPullRequestArrow size={13} />
           {:else}
-            Create PR
+            <GitPullRequestCreateArrow size={13} />
           {/if}
-        </span>
-      </button>
+          <span>
+            {#if prState === 'created'}
+              View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+            {:else if prState === 'creating'}
+              Creating PR…
+            {:else if prState === 'error'}
+              PR failed
+            {:else}
+              Create PR
+            {/if}
+          </span>
+        </button>
+      </div>
       <div class="new-btn-group">
         <button
           class="new-item-btn note-btn"
@@ -1099,16 +1107,27 @@
   .card-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 14px 16px;
+    padding: 12px 16px;
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .branch-info {
+  .header-left {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .header-top {
     display: flex;
     align-items: center;
-    gap: 8px;
     min-width: 0;
+  }
+
+  .header-bottom {
+    display: flex;
+    align-items: center;
+    gap: 5px;
   }
 
   .header-actions {
@@ -1262,67 +1281,59 @@
     letter-spacing: -0.01em;
   }
 
-  .branch-separator {
-    color: var(--text-faint);
-    font-size: var(--size-md);
-    margin: 0 2px;
-  }
-
   .base-branch-name {
-    font-size: var(--size-md);
-    font-weight: 500;
-    color: var(--text-muted);
+    font-size: var(--size-xs);
+    color: var(--text-faint);
   }
 
-  /* Primary action button */
+  /* Primary action button — circular icon-only */
   .primary-action-container {
     display: flex;
     align-items: center;
-    gap: 4px;
   }
 
   .primary-action-button {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 12px;
-    background: transparent;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-weight: 500;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: #fff;
+    border: none;
+    border-radius: 50%;
+    color: var(--bg-deepest);
     cursor: pointer;
     transition: all 0.15s ease;
-    white-space: nowrap;
   }
 
   .primary-action-button:hover {
-    border-color: var(--ui-accent);
-    color: var(--ui-accent);
-    background-color: var(--bg-hover);
+    background: #e8e8e8;
   }
 
   .primary-action-button.running {
+    background: var(--bg-hover);
+    color: var(--text-muted);
+  }
+
+  .primary-action-button.running:hover {
     background: var(--bg-elevated);
-    border-color: var(--border-muted);
-    color: var(--text-primary);
   }
 
   .primary-action-button.completed {
-    border-color: var(--ui-success);
+    background: var(--bg-hover);
     color: var(--ui-success);
   }
 
   .primary-action-button.failed {
-    border-color: var(--ui-danger);
+    background: var(--bg-hover);
     color: var(--ui-danger);
   }
 
   .primary-action-button :global(svg) {
     flex-shrink: 0;
-    width: 13px;
-    height: 13px;
+    width: 14px;
+    height: 14px;
   }
 
   /* Running actions */
@@ -1401,6 +1412,12 @@
     justify-content: space-between;
     align-items: center;
     padding: 6px 12px;
+  }
+
+  .footer-left {
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
 
   /* PR button */

@@ -254,28 +254,12 @@
     };
   });
 
-  /** Handle the staged:show-action-output custom event from the sidebar. */
-  function handleShowActionOutputEvent(e: Event) {
-    const detail = (e as CustomEvent).detail as {
-      executionId: string;
-      actionName: string;
-      branchId: string;
-    };
-    if (detail.branchId !== branch.id) return;
-    actionOutputModal = {
-      executionId: detail.executionId,
-      actionName: detail.actionName,
-    };
-  }
-
   onMount(() => {
     loadTimeline();
     loadActions();
     getAvailableOpeners().then((apps) => (openerApps = apps));
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
-    // Listen for sidebar requests to open action output
-    window.addEventListener('staged:show-action-output', handleShowActionOutputEvent);
   });
 
   onDestroy(() => {
@@ -283,7 +267,6 @@
     unlistenActionStatus?.();
     // Clean up actions listener
     window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
-    window.removeEventListener('staged:show-action-output', handleShowActionOutputEvent);
   });
   async function loadTimeline() {
     loading = true;

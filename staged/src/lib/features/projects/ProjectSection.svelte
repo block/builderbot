@@ -2,7 +2,7 @@
   ProjectSection.svelte - A project header + list of branch cards
 
   Shows the project name, a delete button, and all branches for this project.
-  Includes a "New Branch" dashed button at the top of the branch list.
+  Includes a "New Branch" dashed button at the bottom.
 -->
 <script lang="ts">
   import { Folder, Trash2, Plus, Settings, Loader2 } from 'lucide-svelte';
@@ -33,6 +33,9 @@
     onNewBranch,
   }: Props = $props();
 
+  /** Branches sorted by most recently updated first. */
+  let sortedBranches = $derived([...branches].sort((a, b) => b.updatedAt - a.updatedAt));
+
   let showProjectSettings = $state(false);
 
   const projectMenuItems: MenuItem[] = [
@@ -50,10 +53,11 @@
 <div class="project-section">
   <div class="project-header">
     <div class="project-info">
-      <span class="project-name">{projectDisplayName(project)}</span>
       <div class="project-icon-slot">
+        <span class="folder-icon"><Folder size={14} /></span>
         <span class="menu-icon"><DropdownMenu items={projectMenuItems} align="left" /></span>
       </div>
+      <span class="project-name">{projectDisplayName(project)}</span>
       {#if detecting}
         <div class="detecting-status">
           <Loader2 size={12} class="spinner" />
@@ -68,7 +72,7 @@
       <Plus size={16} />
       New Branch
     </button>
-    {#each branches as branch (branch.id)}
+    {#each sortedBranches as branch (branch.id)}
       {#if branch.branchType === 'remote'}
         <RemoteBranchCard
           {branch}
@@ -125,16 +129,34 @@
     flex-shrink: 0;
   }
 
+  .folder-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    transition: opacity 0.15s ease;
+  }
+
   .menu-icon {
     position: absolute;
     inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+
+  .project-header:hover .folder-icon {
+    opacity: 0;
+  }
+
+  .project-header:hover .menu-icon {
+    opacity: 1;
   }
 
   .project-name {
-    font-size: var(--size-xl);
+    font-size: var(--size-lg);
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;

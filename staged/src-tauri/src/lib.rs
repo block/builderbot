@@ -2063,16 +2063,35 @@ pub fn run() {
                 app.set_menu(menu)?;
             }
 
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("Cannot get app data dir: {e}"))?;
+            let data_dir = crate::paths::data_dir()
+                .ok_or_else(|| "Cannot determine data directory".to_string())?;
+            std::fs::create_dir_all(&data_dir)
+                .map_err(|e| format!("Cannot create data dir: {e}"))?;
 
-            // Ensure the app data directory exists on first launch.
-            std::fs::create_dir_all(&app_data_dir)
-                .map_err(|e| format!("Cannot create app data dir: {e}"))?;
+            let db_path = data_dir.join("data.db");
 
-            let db_path = app_data_dir.join("data.db");
+            // Migrate DB from old Tauri app_data_dir if needed
+            if !db_path.exists() {
+                if let Ok(old_dir) = app.path().app_data_dir() {
+                    let old_db = old_dir.join("data.db");
+                    if old_db.exists() {
+                        log::info!(
+                            "Migrating database from {} to {}",
+                            old_db.display(),
+                            db_path.display()
+                        );
+                        for suffix in ["", "-wal", "-shm"] {
+                            let old = PathBuf::from(format!("{}{suffix}", old_db.display()));
+                            let new = PathBuf::from(format!("{}{suffix}", db_path.display()));
+                            if old.exists() {
+                                if let Err(e) = std::fs::rename(&old, &new) {
+                                    log::warn!("Failed to migrate {}: {e}", old.display());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             // Check compatibility *before* creating the store.
             let compat = store::check_db_compatibility(&db_path)

@@ -20,3 +20,8 @@ pub fn repos_dir() -> Option<PathBuf> {
 pub fn worktrees_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("worktrees"))
 }
+
+/// Path for the SQLite database: `<data_dir>/staged/data.db`
+pub fn db_path() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("data.db"))
+}

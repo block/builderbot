@@ -204,7 +204,18 @@
   }
 
   .theme-item.active {
-    background-color: var(--bg-primary);
+    background-color: var(--ui-selection);
+    border-left: 2px solid var(--ui-accent);
+    padding-left: 10px;
+  }
+
+  .theme-item.active .theme-name {
+    color: var(--ui-accent);
+    font-weight: 500;
+  }
+
+  .theme-item.active .theme-indicator {
+    color: var(--ui-accent);
   }
 
   .theme-indicator {

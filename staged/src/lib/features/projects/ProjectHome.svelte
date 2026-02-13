@@ -3,14 +3,29 @@
 
   Shows all projects with their branches. Empty state when no projects exist.
   Modals for creating/deleting projects and branches are layered on top.
+
+  Data is owned by projectStore.svelte.ts — this component reads and mutates
+  through the store so the sidebar can share the same reactive state.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import type { Project, Branch, StoreIncompatibility } from '../../types';
+  import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
   import { runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
+  import {
+    projectStore,
+    checkStoreAndLoad,
+    handleResetStore,
+    addProject,
+    removeProject,
+    addBranch,
+    updateBranch,
+    removeBranch,
+    setDeletingBranch,
+    clearDeletingBranch,
+  } from './projectStore.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import NewBranchModal from '../branches/NewBranchModal.svelte';
@@ -18,17 +33,7 @@
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
 
-  // Data
-  let projects = $state<Project[]>([]);
-  let branchesByProject = $state<Map<string, Branch[]>>(new Map());
-  let loading = $state(true);
-  let error = $state<string | null>(null);
-
-  // Store health — if non-null the DB needs a reset before we can proceed
-  let storeIncompat = $state<StoreIncompatibility | null>(null);
-  let resetting = $state(false);
-
-  // Modal state
+  // Modal state (local to this component)
   let showNewProjectModal = $state(false);
   let showNewBranchModal = $state(false);
   let newBranchProject = $state<Project | null>(null);
@@ -36,7 +41,6 @@
   // Delete confirmation state
   let projectToDelete = $state<Project | null>(null);
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
-  let deletingBranches = $state<Set<string>>(new Set());
 
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
@@ -46,66 +50,30 @@
 
     const onNewProject = () => handleNewProject();
     window.addEventListener('staged:new-project', onNewProject);
-    return () => window.removeEventListener('staged:new-project', onNewProject);
-  });
 
-  async function checkStoreAndLoad() {
-    loading = true;
-    try {
-      const status = await commands.getStoreStatus();
-      if (status) {
-        storeIncompat = status;
-        loading = false;
-        return;
+    const onScrollToBranch = (e: Event) => {
+      const branchId = (e as CustomEvent<{ branchId: string }>).detail.branchId;
+      const el = document.querySelector(`[data-branch-id="${branchId}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Brief highlight flash to draw attention
+        el.classList.add('scroll-highlight');
+        setTimeout(() => el.classList.remove('scroll-highlight'), 1200);
       }
-      await loadData();
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-      loading = false;
-    }
-  }
+    };
+    window.addEventListener('staged:scroll-to-branch', onScrollToBranch);
 
-  async function handleResetStore() {
-    resetting = true;
-    try {
-      await commands.confirmResetStore();
-      storeIncompat = null;
-      await loadData();
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      resetting = false;
-    }
-  }
+    return () => {
+      window.removeEventListener('staged:new-project', onNewProject);
+      window.removeEventListener('staged:scroll-to-branch', onScrollToBranch);
+    };
+  });
 
   function handleClose() {
     getCurrentWindow().close();
   }
 
-  async function loadData() {
-    loading = true;
-    error = null;
-    try {
-      const projectList = await commands.listProjects();
-      projects = projectList;
-
-      // Load branches for each project
-      const branchMap = new Map<string, Branch[]>();
-      await Promise.all(
-        projectList.map(async (project) => {
-          const branches = await commands.listBranchesForProject(project.id);
-          branchMap.set(project.id, branches);
-        })
-      );
-      branchesByProject = branchMap;
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      loading = false;
-    }
-  }
-
-  let hasContent = $derived(projects.length > 0);
+  let hasContent = $derived(projectStore.projects.length > 0);
 
   // ── Project actions ──
 
@@ -114,11 +82,7 @@
   }
 
   async function handleProjectCreated(project: Project) {
-    if (!projects.some((p) => p.id === project.id)) {
-      projects = [...projects, project];
-    }
-    const branches = await commands.listBranchesForProject(project.id);
-    branchesByProject = new Map(branchesByProject).set(project.id, branches);
+    await addProject(project);
     showNewProjectModal = false;
   }
 
@@ -142,11 +106,7 @@
     projectToDelete = null;
 
     try {
-      await commands.deleteProject(id);
-      projects = projects.filter((p) => p.id !== id);
-      const newMap = new Map(branchesByProject);
-      newMap.delete(id);
-      branchesByProject = newMap;
+      await removeProject(id);
     } catch (e) {
       console.error('Failed to delete project:', e);
     }
@@ -160,8 +120,7 @@
   }
 
   function handleBranchCreated(branch: Branch) {
-    const existing = branchesByProject.get(branch.projectId) || [];
-    branchesByProject = new Map(branchesByProject).set(branch.projectId, [...existing, branch]);
+    addBranch(branch);
     showNewBranchModal = false;
     newBranchProject = null;
 
@@ -175,11 +134,7 @@
         .setupWorktree(branchId)
         .then((updated) => {
           // Replace the branch record so the card picks up worktreePath
-          const branches = branchesByProject.get(projectId) || [];
-          branchesByProject = new Map(branchesByProject).set(
-            projectId,
-            branches.map((b) => (b.id === updated.id ? updated : b))
-          );
+          updateBranch(updated);
 
           // Now that the worktree exists, run prerun actions
           setTimeout(() => {
@@ -195,7 +150,7 @@
   }
 
   function handleDeleteBranchRequest(branchId: string, project: Project) {
-    const branches = branchesByProject.get(project.id) || [];
+    const branches = projectStore.branchesByProject.get(project.id) || [];
     const branch = branches.find((b) => b.id === branchId);
     if (branch) {
       branchToDelete = { branch, project };
@@ -208,22 +163,15 @@
     branchToDelete = null;
 
     // Show "Deleting…" state on the card immediately
-    deletingBranches = new Set([...deletingBranches, branch.id]);
+    setDeletingBranch(branch.id);
 
     try {
       await commands.deleteBranch(branch.id);
-      // Remove the branch from the list on success
-      const existing = branchesByProject.get(branch.projectId) || [];
-      branchesByProject = new Map(branchesByProject).set(
-        branch.projectId,
-        existing.filter((b) => b.id !== branch.id)
-      );
+      removeBranch(branch);
     } catch (e) {
       console.error('Failed to delete branch:', e);
     } finally {
-      const next = new Set(deletingBranches);
-      next.delete(branch.id);
-      deletingBranches = next;
+      clearDeletingBranch(branch.id);
     }
   }
 
@@ -238,8 +186,8 @@
       e.preventDefault();
       // If there's exactly one project, open new branch for it.
       // Otherwise, open new project.
-      if (projects.length === 1) {
-        handleNewBranch(projects[0]);
+      if (projectStore.projects.length === 1) {
+        handleNewBranch(projectStore.projects[0]);
       } else {
         handleNewProject();
       }
@@ -251,16 +199,16 @@
 
 <div class="project-home">
   <div class="content">
-    {#if loading}
+    {#if projectStore.loading}
       <div class="loading-state">
         <p>Loading...</p>
       </div>
-    {:else if storeIncompat && storeIncompat.kind === 'needs_reset'}
+    {:else if projectStore.storeIncompat && projectStore.storeIncompat.kind === 'needs_reset'}
       <div class="update-state">
         <div class="update-card">
           <div class="update-header">
             <h1 class="update-title">Update Required</h1>
-            <span class="version-badge new">v{storeIncompat.appVersion}</span>
+            <span class="version-badge new">v{projectStore.storeIncompat.appVersion}</span>
           </div>
           <p>
             Staged beta updates can require backwards-incompatible changes. The info stored by
@@ -269,27 +217,31 @@
           </p>
           <div class="update-footer">
             <p class="version-hint">
-              Not ready? Install <code>v{storeIncompat.dbAppVersion}</code> instead.
+              Not ready? Install <code>v{projectStore.storeIncompat.dbAppVersion}</code> instead.
             </p>
             <div class="update-actions">
               <button class="close-button" onclick={handleClose}>Close</button>
-              <button class="reset-button" onclick={handleResetStore} disabled={resetting}>
-                {resetting ? 'Resetting…' : 'Reset & Update'}
+              <button
+                class="reset-button"
+                onclick={handleResetStore}
+                disabled={projectStore.resetting}
+              >
+                {projectStore.resetting ? 'Resetting…' : 'Reset & Update'}
               </button>
             </div>
           </div>
         </div>
       </div>
-    {:else if storeIncompat && storeIncompat.kind === 'too_new'}
+    {:else if projectStore.storeIncompat && projectStore.storeIncompat.kind === 'too_new'}
       <div class="update-state">
         <div class="update-card">
           <div class="update-header">
             <h1 class="update-title">Update Staged</h1>
-            <span class="version-badge new">v{storeIncompat.dbAppVersion}</span>
+            <span class="version-badge new">v{projectStore.storeIncompat.dbAppVersion}</span>
           </div>
           <p>
             This database was last used by a newer version of Staged. Please install
-            <strong>v{storeIncompat.dbAppVersion}</strong> or newer to continue.
+            <strong>v{projectStore.storeIncompat.dbAppVersion}</strong> or newer to continue.
           </p>
           <div class="update-footer">
             <div></div>
@@ -299,9 +251,9 @@
           </div>
         </div>
       </div>
-    {:else if error}
+    {:else if projectStore.error}
       <div class="error-state">
-        <p>{error}</p>
+        <p>{projectStore.error}</p>
       </div>
     {:else if !hasContent}
       <div class="empty-state">
@@ -318,11 +270,13 @@
       </div>
     {:else}
       <div class="projects-list">
-        {#each projects as project (project.id)}
+        {#each projectStore.projects as project (project.id)}
           <ProjectSection
             {project}
-            branches={branchesByProject.get(project.id) || []}
-            {deletingBranches}
+            branches={[...(projectStore.branchesByProject.get(project.id) || [])].sort(
+              (a, b) => b.updatedAt - a.updatedAt
+            )}
+            deletingBranches={projectStore.deletingBranches}
             detecting={detectingProjectIds.has(project.id)}
             onDeleteProject={() => handleDeleteProjectRequest(project)}
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
@@ -596,5 +550,19 @@
     display: flex;
     flex-direction: column;
     gap: 32px;
+  }
+
+  /* Scroll-to highlight animation (applied via JS on branch cards) */
+  :global(.scroll-highlight) {
+    animation: scroll-highlight-flash 1.2s ease-out;
+  }
+
+  @keyframes scroll-highlight-flash {
+    0% {
+      box-shadow: 0 0 0 2px var(--ui-accent);
+    }
+    100% {
+      box-shadow: 0 0 0 2px transparent;
+    }
   }
 </style>

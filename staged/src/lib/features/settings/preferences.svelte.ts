@@ -36,6 +36,8 @@ const SYNTAX_THEME_STORE_KEY = 'syntax-theme';
 const RECENT_AGENTS_STORE_KEY = 'recent-agents';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
+const SIDEBAR_OPEN_STORE_KEY = 'sidebar-open';
+const SIDEBAR_GROUP_BY_PROJECT_STORE_KEY = 'sidebar-group-by-project';
 
 const DEFAULT_SYNTAX_THEME: SyntaxThemeName = 'laserwave';
 
@@ -65,6 +67,10 @@ export const preferences = $state({
    * Used to pick the best available agent for a given context (local vs remote).
    */
   recentAgents: [] as string[],
+  /** Whether the left sidebar is visible */
+  sidebarOpen: true,
+  /** Whether sidebar branches are grouped by project */
+  sidebarGroupByProject: true,
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -130,6 +136,16 @@ export async function initPreferences(): Promise<void> {
       preferences.recentAgents = [legacyAgent];
       await setStoreValue(RECENT_AGENTS_STORE_KEY, [legacyAgent]);
     }
+  }
+
+  // Load sidebar preferences
+  const savedSidebarOpen = await getStoreValue<boolean>(SIDEBAR_OPEN_STORE_KEY);
+  if (savedSidebarOpen !== undefined) {
+    preferences.sidebarOpen = savedSidebarOpen;
+  }
+  const savedSidebarGroup = await getStoreValue<boolean>(SIDEBAR_GROUP_BY_PROJECT_STORE_KEY);
+  if (savedSidebarGroup !== undefined) {
+    preferences.sidebarGroupByProject = savedSidebarGroup;
   }
 
   preferences.loaded = true;
@@ -221,4 +237,20 @@ export function getPreferredAgent(available: { id: string }[]): string | null {
     if (ids.has(agentId)) return agentId;
   }
   return null;
+}
+
+// =============================================================================
+// Sidebar Actions
+// =============================================================================
+
+/** Toggle the sidebar open/closed and persist the choice. */
+export function toggleSidebar(): void {
+  preferences.sidebarOpen = !preferences.sidebarOpen;
+  setStoreValue(SIDEBAR_OPEN_STORE_KEY, preferences.sidebarOpen);
+}
+
+/** Toggle the sidebar group-by-project mode and persist the choice. */
+export function toggleSidebarGroupByProject(): void {
+  preferences.sidebarGroupByProject = !preferences.sidebarGroupByProject;
+  setStoreValue(SIDEBAR_GROUP_BY_PROJECT_STORE_KEY, preferences.sidebarGroupByProject);
 }

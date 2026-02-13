@@ -703,6 +703,7 @@
   class="branch-card"
   class:deleting
   class:creating-worktree={branch.branchType === 'local' && !branch.worktreePath && !deleting}
+  data-branch-id={branch.id}
 >
   {#if deleting}
     <div class="deleting-overlay">

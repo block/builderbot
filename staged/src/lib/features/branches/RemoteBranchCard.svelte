@@ -298,7 +298,7 @@
   }
 </script>
 
-<div class="branch-card remote" class:deleting>
+<div class="branch-card remote" class:deleting data-branch-id={branch.id}>
   {#if deleting}
     <div class="deleting-overlay">
       <Spinner size={16} />

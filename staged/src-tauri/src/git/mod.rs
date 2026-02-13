@@ -24,7 +24,7 @@ pub use refs::{
 pub use types::*;
 pub use worktree::{
     branch_exists, create_worktree, create_worktree_for_existing_branch, create_worktree_from_pr,
-    get_commits_since_base, get_full_commit_log, get_head_sha, get_parent_commit, list_worktrees,
-    remove_worktree, reset_to_commit, switch_branch, update_branch_from_pr, worktree_path_for,
-    CommitInfo, UpdateFromPrResult,
+    get_commits_since_base, get_full_commit_log, get_head_sha, get_parent_commit,
+    has_unpushed_commits, list_worktrees, remove_worktree, reset_to_commit, switch_branch,
+    update_branch_from_pr, worktree_path_for, CommitInfo, UpdateFromPrResult,
 };

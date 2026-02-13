@@ -454,7 +454,7 @@ fn get_github_token() -> Result<String, GitError> {
 }
 
 /// Get the GitHub owner/repo from the repo's origin remote.
-fn get_github_repo(repo: &Path) -> Result<(String, String), GitError> {
+pub fn get_github_repo(repo: &Path) -> Result<(String, String), GitError> {
     use super::cli;
 
     let url = cli::run(repo, &["remote", "get-url", "origin"])?;

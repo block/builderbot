@@ -118,7 +118,74 @@ IMPORTANT: Only suggest actions suitable for development environments. Skip:
 - Deploy/production commands (like "deploy", "publish", "release")
 - CI/CD specific commands
 - Docker/container deployment commands
-- Cloud infrastructure commands"#;
+- Cloud infrastructure commands
+
+Return ONLY a JSON array with detected actions. Example (ordered by importance):
+[
+  {
+    "name": "Install Dependencies",
+    "command": "npm install",
+    "actionType": "prerun",
+    "autoCommit": false,
+    "source": "package.json"
+  },
+  {
+    "name": "Install Lefthook",
+    "command": "lefthook install",
+    "actionType": "prerun",
+    "autoCommit": false,
+    "source": "lefthook.yml"
+  },
+  {
+    "name": "Dev",
+    "command": "npm run dev",
+    "actionType": "run",
+    "autoCommit": false,
+    "source": "package.json"
+  },
+  {
+    "name": "Subproject Dev",
+    "command": "cd staged && just dev",
+    "actionType": "run",
+    "autoCommit": false,
+    "source": "staged/justfile"
+  },
+  {
+    "name": "Test",
+    "command": "npm test",
+    "actionType": "test",
+    "autoCommit": false,
+    "source": "package.json"
+  },
+  {
+    "name": "Build",
+    "command": "npm run build",
+    "actionType": "build",
+    "autoCommit": false,
+    "source": "package.json"
+  },
+  {
+    "name": "Subproject Format",
+    "command": "cd app && make fmt",
+    "actionType": "format",
+    "autoCommit": true,
+    "source": "app/Makefile"
+  },
+  {
+    "name": "Format",
+    "command": "prettier --write .",
+    "actionType": "format",
+    "autoCommit": true,
+    "source": "package.json"
+  },
+  {
+    "name": "Storybook",
+    "command": "npm run storybook",
+    "actionType": "run",
+    "autoCommit": false,
+    "source": "package.json"
+  }
+]"#;
 
 /// Extra instructions for local file exploration.
 const LOCAL_EXPLORATION_INSTRUCTIONS: &str = r#"

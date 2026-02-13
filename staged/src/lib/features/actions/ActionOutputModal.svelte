@@ -46,6 +46,12 @@
   // State
   // =========================================================================
 
+  /** A processed terminal line ready for display. */
+  interface TerminalLine {
+    text: string;
+    stream: 'stdout' | 'stderr';
+  }
+
   let status = $state<ActionStatus>('running');
   let exitCode = $state<number | null>(null);
   let outputChunks = $state<OutputChunk[]>([]);
@@ -67,6 +73,63 @@
   });
 
   let isRunning = $derived(status === 'running');
+
+  /**
+   * Process raw output chunks into terminal lines, handling carriage returns.
+   *
+   * Terminal programs use \r (carriage return without newline) to overwrite the
+   * current line in-place — e.g. for progress bars. This function simulates
+   * that behavior:
+   *   - \n finalizes the current line and starts a new one
+   *   - \r (not followed by \n) resets the cursor to the start of the current
+   *     line so subsequent text overwrites it
+   */
+  function processChunksToLines(chunks: OutputChunk[]): TerminalLine[] {
+    const lines: TerminalLine[] = [];
+    let currentText = '';
+    let currentStream: 'stdout' | 'stderr' = 'stdout';
+
+    for (const chunk of chunks) {
+      const raw = chunk.chunk;
+      const stream = chunk.stream;
+
+      for (let i = 0; i < raw.length; i++) {
+        const ch = raw[i];
+
+        if (ch === '\n') {
+          // Newline: finalize the current line and start a new one
+          lines.push({ text: currentText, stream: currentStream });
+          currentText = '';
+          currentStream = stream;
+        } else if (ch === '\r') {
+          // Carriage return: check if it's \r\n (treat as plain newline)
+          if (i + 1 < raw.length && raw[i + 1] === '\n') {
+            lines.push({ text: currentText, stream: currentStream });
+            currentText = '';
+            currentStream = stream;
+            i++; // skip the \n
+          } else {
+            // Bare \r: reset cursor to start of current line (overwrite)
+            currentText = '';
+            currentStream = stream;
+          }
+        } else {
+          currentText += ch;
+          currentStream = stream;
+        }
+      }
+    }
+
+    // Don't forget the last in-progress line
+    if (currentText.length > 0) {
+      lines.push({ text: currentText, stream: currentStream });
+    }
+
+    return lines;
+  }
+
+  /** Derived display lines — recomputed whenever outputChunks changes. */
+  let displayLines = $derived(processChunksToLines(outputChunks));
 
   // =========================================================================
   // Lifecycle
@@ -204,9 +267,9 @@
   // Rendering helpers
   // =========================================================================
 
-  function renderChunk(chunk: OutputChunk): string {
+  function renderLine(line: TerminalLine): string {
     // Convert ANSI codes to HTML
-    const html = ansiConverter.toHtml(chunk.chunk);
+    const html = ansiConverter.toHtml(line.text);
     // Sanitize the HTML to prevent XSS
     return sanitize(html);
   }
@@ -308,15 +371,15 @@
           <AlertCircle size={24} />
           <span>{error}</span>
         </div>
-      {:else if outputChunks.length === 0}
+      {:else if displayLines.length === 0}
         <div class="center-state">
           <span>No output yet…</span>
         </div>
       {:else}
         <div class="output">
-          {#each outputChunks as chunk}
-            <div class="output-line {chunk.stream === 'stderr' ? 'stderr' : 'stdout'}">
-              {@html renderChunk(chunk)}
+          {#each displayLines as line}
+            <div class="output-line {line.stream === 'stderr' ? 'stderr' : 'stdout'}">
+              {@html renderLine(line)}
             </div>
           {/each}
         </div>

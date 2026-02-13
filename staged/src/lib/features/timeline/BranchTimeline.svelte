@@ -370,7 +370,7 @@
     gap: 8px;
     padding: 8px 12px;
     border-radius: 4px;
-    background-color: var(--note-bg);
+    background-color: var(--bg-hover);
     width: calc((100% - 12px) / 3);
     min-width: 0;
     position: relative;
@@ -382,7 +382,7 @@
   }
 
   .note-chip.clickable:hover {
-    background-color: var(--note-bg-emphasis);
+    background-color: var(--note-bg);
   }
 
   .note-chip.pending {

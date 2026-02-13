@@ -205,17 +205,17 @@
 
   .theme-item.active {
     background-color: var(--ui-selection);
-    border-left: 2px solid var(--ui-accent);
+    border-left: 2px solid var(--text-accent);
     padding-left: 10px;
   }
 
   .theme-item.active .theme-name {
-    color: var(--ui-accent);
+    color: var(--text-accent);
     font-weight: 500;
   }
 
   .theme-item.active .theme-indicator {
-    color: var(--ui-accent);
+    color: var(--text-accent);
   }
 
   .theme-indicator {

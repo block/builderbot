@@ -5,7 +5,7 @@
   Read-only view.
 -->
 <script lang="ts">
-  import { X } from 'lucide-svelte';
+  import { X, Share, Check } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { handleExternalLinkClick } from '../../commands';
@@ -20,8 +20,21 @@
 
   let { title, content, onClose }: Props = $props();
 
+  let copied = $state(false);
+
   function renderMarkdown(text: string): string {
     return sanitize(marked.parse(text) as string);
+  }
+
+  async function handleShare() {
+    const text = title ? `# ${title}\n\n${content}` : content;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    } catch {
+      // clipboard API may fail in some contexts
+    }
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -53,9 +66,23 @@
   <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
     <header class="modal-header">
       <h2 class="modal-title">{title}</h2>
-      <button class="close-btn" onclick={onClose} title="Close (Esc)">
-        <X size={16} />
-      </button>
+      <div class="header-actions">
+        <button
+          class="share-btn"
+          class:copied
+          onclick={handleShare}
+          title={copied ? 'Copied!' : 'Copy note to clipboard'}
+        >
+          {#if copied}
+            <Check size={16} />
+          {:else}
+            <Share size={16} />
+          {/if}
+        </button>
+        <button class="close-btn" onclick={onClose} title="Close (Esc)">
+          <X size={16} />
+        </button>
+      </div>
     </header>
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modal-content" onclick={handleExternalLinkClick}>
@@ -133,6 +160,38 @@
   .close-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .share-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
+  }
+
+  .share-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+
+  .share-btn.copied {
+    color: var(--ui-success);
   }
 
   .modal-content {

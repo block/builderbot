@@ -60,10 +60,12 @@
   interface Props {
     branch: Branch;
     deleting?: boolean;
+    worktreeError?: string;
     onDelete?: () => void;
+    onRetryWorktree?: () => void;
   }
 
-  let { branch, deleting = false, onDelete }: Props = $props();
+  let { branch, deleting = false, worktreeError, onDelete, onRetryWorktree }: Props = $props();
 
   // =========================================================================
   // PR button state
@@ -860,7 +862,10 @@
 <div
   class="branch-card"
   class:deleting
-  class:creating-worktree={branch.branchType === 'local' && !branch.worktreePath && !deleting}
+  class:creating-worktree={branch.branchType === 'local' &&
+    !branch.worktreePath &&
+    !worktreeError &&
+    !deleting}
 >
   {#if deleting}
     <div class="deleting-overlay">
@@ -875,12 +880,29 @@
         <span class="branch-separator">›</span>
         <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
       </div>
+      {#if worktreeError}
+        <div class="header-actions">
+          <button class="more-button" onclick={() => onDelete?.()} title="Delete branch">
+            <Trash2 size={16} />
+          </button>
+        </div>
+      {/if}
     </div>
     <div class="card-content">
-      <div class="loading">
-        <Spinner size={14} />
-        <span>Creating worktree…</span>
-      </div>
+      {#if worktreeError}
+        <div class="worktree-error">
+          <div class="worktree-error-message">
+            <AlertCircle size={14} />
+            <span>Failed to create worktree: {worktreeError}</span>
+          </div>
+          <button class="worktree-retry-btn" onclick={() => onRetryWorktree?.()}> Retry </button>
+        </div>
+      {:else}
+        <div class="loading">
+          <Spinner size={14} />
+          <span>Creating worktree…</span>
+        </div>
+      {/if}
     </div>
   {:else}
     <div class="card-header">
@@ -1596,6 +1618,48 @@
   .error {
     color: var(--ui-danger);
     font-size: var(--size-sm);
+  }
+
+  /* Worktree error state */
+  .worktree-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .worktree-error-message {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    color: var(--ui-danger);
+    font-size: var(--size-sm);
+    line-height: 1.4;
+    min-width: 0;
+  }
+
+  .worktree-error-message :global(svg) {
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .worktree-retry-btn {
+    flex-shrink: 0;
+    padding: 5px 14px;
+    background: none;
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .worktree-retry-btn:hover {
+    border-color: var(--ui-accent);
+    color: var(--ui-accent);
+    background-color: var(--bg-hover);
   }
 
   /* Footer */

@@ -1836,8 +1836,12 @@ The push must succeed before you finish (unless you output the non-fast-forward 
 
 /// Open a URL in the user's default browser.
 #[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
-    open::that(&url).map_err(|e| format!("Failed to open URL: {e}"))
+fn open_url(app_handle: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app_handle
+        .opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| format!("Failed to open URL: {e}"))
 }
 
 /// Check whether the `sq` CLI is available on this system.
@@ -2008,6 +2012,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(

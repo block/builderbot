@@ -6,7 +6,7 @@
   Clicking a branch navigates and scrolls to that branch's card.
 -->
 <script lang="ts">
-  import { GitBranch, ChevronRight } from 'lucide-svelte';
+  import { GitBranch, Cloud, ChevronRight } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { selectProject, selectProjectAndBranch } from '../../navigation.svelte';
@@ -53,7 +53,15 @@
           onclick={() => selectProjectAndBranch(project.id, branch.id)}
           title={branch.branchName}
         >
-          <span class="branch-icon"><GitBranch size={12} /></span>
+          <span class="branch-icon">
+            {#if branch.branchType === 'remote'}
+              <span class="cloud-icon" class:running={branch.workspaceStatus === 'running'}
+                ><Cloud size={12} /></span
+              >
+            {:else}
+              <GitBranch size={12} />
+            {/if}
+          </span>
           <span class="branch-name">{branch.branchName}</span>
           <span class="branch-time">{formatRelativeTime(Math.floor(branch.updatedAt / 1000))}</span>
         </button>
@@ -161,6 +169,16 @@
 
   .branch-row:hover .branch-icon {
     opacity: 1;
+  }
+
+  .cloud-icon {
+    display: flex;
+    align-items: center;
+    color: var(--text-faint);
+  }
+
+  .cloud-icon.running {
+    color: var(--text-accent);
   }
 
   .branch-name {

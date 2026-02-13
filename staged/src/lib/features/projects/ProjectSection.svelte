@@ -50,11 +50,10 @@
 <div class="project-section">
   <div class="project-header">
     <div class="project-info">
+      <span class="project-name">{projectDisplayName(project)}</span>
       <div class="project-icon-slot">
-        <span class="folder-icon"><Folder size={14} /></span>
         <span class="menu-icon"><DropdownMenu items={projectMenuItems} align="left" /></span>
       </div>
-      <span class="project-name">{projectDisplayName(project)}</span>
       {#if detecting}
         <div class="detecting-status">
           <Loader2 size={12} class="spinner" />
@@ -126,34 +125,16 @@
     flex-shrink: 0;
   }
 
-  .folder-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-faint);
-    transition: opacity 0.15s ease;
-  }
-
   .menu-icon {
     position: absolute;
     inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    opacity: 0;
-    transition: opacity 0.15s ease;
-  }
-
-  .project-header:hover .folder-icon {
-    opacity: 0;
-  }
-
-  .project-header:hover .menu-icon {
-    opacity: 1;
   }
 
   .project-name {
-    font-size: var(--size-lg);
+    font-size: var(--size-xl);
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;

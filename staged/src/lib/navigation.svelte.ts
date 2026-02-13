@@ -17,11 +17,17 @@ export function selectProject(projectId: string): void {
 
 /** Navigate to a project and scroll to a specific branch card. */
 export function selectProjectAndBranch(projectId: string, branchId: string): void {
+  const alreadyOnProject = navigation.selectedProjectId === projectId;
   navigation.selectedProjectId = projectId;
-  // Allow ProjectHome to mount and register its scroll-to-branch listener.
-  setTimeout(() => {
+  if (alreadyOnProject) {
+    // Already mounted, scroll immediately.
     window.dispatchEvent(new CustomEvent('staged:scroll-to-branch', { detail: { branchId } }));
-  }, 150);
+  } else {
+    // Allow ProjectHome to mount and register its scroll-to-branch listener.
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('staged:scroll-to-branch', { detail: { branchId } }));
+    }, 150);
+  }
 }
 
 /** Navigate back to the projects list (landing page). */

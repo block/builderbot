@@ -1,36 +1,22 @@
 <!--
-  Sidebar.svelte - Collapsible left sidebar with project navigation and activity feed
+  Sidebar.svelte - Collapsible left sidebar with project navigation and recent branches
 
   Top section: clickable project list for navigation.
-  Bottom section: cumulative, recency-sorted list of commits and notes.
-  When a project is selected, the activity feed is filtered to that project.
+  Bottom section: flat list of all branches sorted by most recently updated.
 
   Also shows a "Builds" section when there are running
   (or recently finished) actions across any branch.
 -->
 <script lang="ts">
-  import {
-    Folder,
-    GitCommitHorizontal,
-    StickyNote,
-    FolderTree,
-    CheckCircle,
-    AlertCircle,
-    StopCircle,
-  } from 'lucide-svelte';
-  import { onMount, onDestroy } from 'svelte';
+  import { Folder, GitBranch, CheckCircle, AlertCircle, StopCircle } from 'lucide-svelte';
+  import { onDestroy } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Spinner from './shared/Spinner.svelte';
-  import type { Branch, CommitTimelineItem, NoteTimelineItem } from './types';
+  import type { Branch } from './types';
   import { projectStore } from './features/projects/projectStore.svelte';
   import { projectDisplayName } from './shared/utils';
-  import { navigation, goHome } from './navigation.svelte';
-  import * as commands from './commands';
-  import {
-    preferences,
-    toggleSidebarGroupByProject,
-    setSidebarWidth,
-  } from './features/settings/preferences.svelte';
+  import { navigation, goHome, selectProjectAndBranch } from './navigation.svelte';
+  import { preferences, setSidebarWidth } from './features/settings/preferences.svelte';
   import { type ActionStatusEvent, type ActionStatus } from './features/actions/actions';
 
   // ── Running builds ──
@@ -41,6 +27,7 @@
     actionName: string;
     branchId: string;
     branchName: string;
+    projectId: string;
     status: ActionStatus;
     startedAt: number;
     completedAt?: number | null;
@@ -71,6 +58,15 @@
     return branchId;
   }
 
+  /** Resolve a branchId to its owning project ID. */
+  function projectIdForBranch(branchId: string): string {
+    for (const project of projectStore.projects) {
+      const branches = projectStore.branchesByProject.get(project.id) || [];
+      if (branches.some((b) => b.id === branchId)) return project.id;
+    }
+    return '';
+  }
+
   // Subscribe to action_status events from the backend (same pattern as BranchCard).
   let unlistenActionStatus: UnlistenFn | null = null;
 
@@ -90,6 +86,7 @@
           actionName,
           branchId,
           branchName: branchNameFor(branchId),
+          projectId: projectIdForBranch(branchId),
           status: 'running',
           startedAt: startedAt ?? Date.now(),
         });
@@ -129,8 +126,10 @@
   }
 
   function handleBuildClick(build: RunningBuild) {
-    scrollToBranch(build.branchId);
-    // Give the scroll a moment then request the output modal to open.
+    const alreadyOnProject = navigation.selectedProjectId === build.projectId;
+    selectProjectAndBranch(build.projectId, build.branchId);
+    // Give navigation + scroll a moment then request the output modal to open.
+    const delay = alreadyOnProject ? 100 : 300;
     setTimeout(() => {
       window.dispatchEvent(
         new CustomEvent('staged:show-action-output', {
@@ -141,164 +140,34 @@
           },
         })
       );
-    }, 100);
+    }, delay);
   }
 
-  // ── Unified timeline item for display ──
+  // ── Recent branches (all projects, sorted by most recently updated) ──
 
-  type SidebarItem = {
-    key: string;
-    kind: 'commit' | 'note';
-    title: string;
-    /** Short SHA for commits, empty for notes. */
-    meta: string;
-    /** Unix seconds — used for sorting. */
-    timestamp: number;
-    branchId: string;
-    branchName: string;
-    projectId: string;
-    projectName: string;
-  };
+  type RecentBranch = Branch & { projectName: string };
 
-  // Timeline data fetched for all branches
-  let timelineItems = $state<SidebarItem[]>([]);
-  let timelineLoading = $state(false);
-
-  /** Strip XML-tagged context blocks from display text. */
-  function stripXmlTags(text: string): string {
-    return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
-  }
-
-  // Track which set of branch IDs we've already fetched for, so we only
-  // re-fetch when the branch list actually changes.
-  let lastBranchKey = '';
-
-  $effect(() => {
-    // Build a stable key from the set of branch IDs
-    const allBranches: Branch[] = [];
-    for (const project of projectStore.projects) {
-      const branches = projectStore.branchesByProject.get(project.id) || [];
-      allBranches.push(...branches);
-    }
-    const branchKey = allBranches
-      .map((b) => b.id)
-      .sort()
-      .join(',');
-
-    if (branchKey === lastBranchKey || projectStore.loading) return;
-    lastBranchKey = branchKey;
-
-    if (allBranches.length === 0) {
-      timelineItems = [];
-      return;
-    }
-
-    fetchAllTimelines(allBranches);
-  });
-
-  async function fetchAllTimelines(allBranches: Branch[]) {
-    timelineLoading = true;
-
-    // Build a lookup for branch → project info
+  let recentBranches = $derived.by(() => {
     const projectNameById = new Map<string, string>();
     for (const p of projectStore.projects) {
       projectNameById.set(p.id, projectDisplayName(p));
     }
 
-    try {
-      const items: SidebarItem[] = [];
-
-      await Promise.all(
-        allBranches.map(async (branch) => {
-          try {
-            const tl = await commands.getBranchTimeline(branch.id);
-            const pName = projectNameById.get(branch.projectId) || '';
-
-            for (const commit of tl.commits) {
-              // Skip pending/failed commits (no SHA)
-              if (!commit.sha) continue;
-              items.push({
-                key: `c-${commit.sha}`,
-                kind: 'commit',
-                title: stripXmlTags(commit.subject),
-                meta: commit.shortSha,
-                timestamp: commit.timestamp,
-                branchId: branch.id,
-                branchName: branch.branchName,
-                projectId: branch.projectId,
-                projectName: pName,
-              });
-            }
-
-            for (const note of tl.notes) {
-              // Skip generating/failed notes
-              if (note.sessionStatus === 'running' || !note.content?.trim()) continue;
-              items.push({
-                key: `n-${note.id}`,
-                kind: 'note',
-                title: stripXmlTags(note.title),
-                meta: '',
-                timestamp: Math.floor(note.createdAt / 1000),
-                branchId: branch.id,
-                branchName: branch.branchName,
-                projectId: branch.projectId,
-                projectName: pName,
-              });
-            }
-          } catch {
-            // If a single branch fails, skip it silently
-          }
-        })
-      );
-
-      // Sort descending by timestamp (most recent first)
-      items.sort((a, b) => b.timestamp - a.timestamp);
-      timelineItems = items;
-    } finally {
-      timelineLoading = false;
-    }
-  }
-
-  // ── Filtered view: when a project is selected, filter to that project ──
-
-  let filteredTimelineItems = $derived(
-    navigation.selectedProjectId
-      ? timelineItems.filter((item) => item.projectId === navigation.selectedProjectId)
-      : timelineItems
-  );
-
-  // ── Grouped view: items grouped by project, projects ordered by most recent item ──
-
-  let groupedItems = $derived.by(() => {
-    const groups = new Map<
-      string,
-      { projectId: string; projectName: string; items: SidebarItem[]; maxTs: number }
-    >();
-
-    for (const item of filteredTimelineItems) {
-      let group = groups.get(item.projectId);
-      if (!group) {
-        group = {
-          projectId: item.projectId,
-          projectName: item.projectName,
-          items: [],
-          maxTs: 0,
-        };
-        groups.set(item.projectId, group);
+    const branches: RecentBranch[] = [];
+    for (const project of projectStore.projects) {
+      for (const branch of projectStore.branchesByProject.get(project.id) || []) {
+        branches.push({ ...branch, projectName: projectNameById.get(project.id) || '' });
       }
-      group.items.push(item);
-      if (item.timestamp > group.maxTs) group.maxTs = item.timestamp;
     }
 
-    return [...groups.values()].sort((a, b) => b.maxTs - a.maxTs);
+    return branches.sort((a, b) => b.updatedAt - a.updatedAt);
   });
 
   // ── Helpers ──
 
-  function formatRelativeTime(timestamp: number): string {
-    const date = new Date(timestamp * 1000);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
+  /** Format a millisecond timestamp as a relative time string. */
+  function formatRelativeTime(timestampMs: number): string {
+    const diffMs = Date.now() - timestampMs;
     const diffMins = Math.floor(diffMs / 60000);
     const diffHours = Math.floor(diffMins / 60);
     const diffDays = Math.floor(diffHours / 24);
@@ -307,11 +176,7 @@
     if (diffMins < 60) return `${diffMins}m`;
     if (diffHours < 24) return `${diffHours}h`;
     if (diffDays < 7) return `${diffDays}d`;
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  }
-
-  function scrollToBranch(branchId: string) {
-    window.dispatchEvent(new CustomEvent('staged:scroll-to-branch', { detail: { branchId } }));
+    return new Date(timestampMs).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
   // ── Resize handle logic ──
@@ -358,17 +223,9 @@
     </button>
   </nav>
 
-  <!-- ── Activity feed ── -->
+  <!-- ── Recents header ── -->
   <div class="activity-header">
     <span class="sidebar-title">Recents</span>
-    <button
-      class="group-toggle"
-      class:active={preferences.sidebarGroupByProject}
-      onclick={toggleSidebarGroupByProject}
-      title={preferences.sidebarGroupByProject ? 'Show flat list' : 'Group by project'}
-    >
-      <FolderTree size={13} />
-    </button>
   </div>
 
   <div class="sidebar-list">
@@ -409,69 +266,25 @@
       </div>
     {/if}
 
-    {#if projectStore.loading || timelineLoading}
+    {#if projectStore.loading}
       <div class="sidebar-empty">Loading...</div>
-    {:else if filteredTimelineItems.length === 0}
-      <div class="sidebar-empty">No activity yet</div>
-    {:else if preferences.sidebarGroupByProject}
-      <!-- Grouped by project -->
-      {#each groupedItems as group (group.projectId)}
-        <div class="project-group">
-          <div class="project-group-header">
-            <span class="project-group-name">{group.projectName}</span>
-          </div>
-          {#each group.items as item (item.key)}
-            <button
-              class="timeline-item"
-              onclick={() => scrollToBranch(item.branchId)}
-              title={`${item.title}\n${item.branchName}`}
-            >
-              <span
-                class="item-icon"
-                class:commit={item.kind === 'commit'}
-                class:note={item.kind === 'note'}
-              >
-                {#if item.kind === 'commit'}
-                  <GitCommitHorizontal size={12} />
-                {:else}
-                  <StickyNote size={12} />
-                {/if}
-              </span>
-              <span class="item-content">
-                <span class="item-title">{item.title}</span>
-                <span class="item-meta">
-                  <span class="item-branch">{item.branchName}</span>
-                  <span class="item-time">{formatRelativeTime(item.timestamp)}</span>
-                </span>
-              </span>
-            </button>
-          {/each}
-        </div>
-      {/each}
+    {:else if recentBranches.length === 0}
+      <div class="sidebar-empty">No branches yet</div>
     {:else}
-      <!-- Flat list sorted by recency -->
-      {#each filteredTimelineItems as item (item.key)}
+      {#each recentBranches as branch (branch.id)}
         <button
           class="timeline-item"
-          onclick={() => scrollToBranch(item.branchId)}
-          title={`${item.title}\n${item.branchName} — ${item.projectName}`}
+          onclick={() => selectProjectAndBranch(branch.projectId, branch.id)}
+          title={`${branch.branchName}\n${branch.projectName}`}
         >
-          <span
-            class="item-icon"
-            class:commit={item.kind === 'commit'}
-            class:note={item.kind === 'note'}
-          >
-            {#if item.kind === 'commit'}
-              <GitCommitHorizontal size={12} />
-            {:else}
-              <StickyNote size={12} />
-            {/if}
+          <span class="item-icon">
+            <GitBranch size={12} />
           </span>
           <span class="item-content">
-            <span class="item-title">{item.title}</span>
+            <span class="item-title">{branch.branchName}</span>
             <span class="item-meta">
-              <span class="item-branch">{item.branchName}</span>
-              <span class="item-time">{formatRelativeTime(item.timestamp)}</span>
+              <span class="item-branch">{branch.projectName}</span>
+              <span class="item-time">{formatRelativeTime(branch.updatedAt)}</span>
             </span>
           </span>
         </button>
@@ -489,8 +302,8 @@
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    background-color: var(--bg-deepest);
-    border-right: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    margin: 8px 0 8px 8px;
     overflow: hidden;
     position: relative;
   }
@@ -546,7 +359,7 @@
     border: none;
     border-radius: 5px;
     color: var(--text-muted);
-    font-size: var(--size-base);
+    font-size: var(--size-lg);
     font-weight: 500;
     text-align: left;
     cursor: pointer;
@@ -565,7 +378,7 @@
   }
 
   .sidebar-title {
-    font-size: var(--size-xs);
+    font-size: var(--size-sm);
     font-weight: 600;
     color: var(--text-faint);
     text-transform: uppercase;
@@ -580,31 +393,6 @@
     justify-content: space-between;
     padding: 6px 12px 6px;
     flex-shrink: 0;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .group-toggle {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 3px;
-    background: transparent;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .group-toggle:hover {
-    color: var(--text-muted);
-    background-color: var(--bg-hover);
-  }
-
-  .group-toggle.active {
-    color: var(--ui-accent);
   }
 
   .sidebar-list {
@@ -634,7 +422,7 @@
 
   .sidebar-empty {
     padding: 16px 8px;
-    font-size: var(--size-base);
+    font-size: var(--size-lg);
     color: var(--text-faint);
     text-align: center;
   }
@@ -644,7 +432,6 @@
   .builds-section {
     padding-bottom: 6px;
     margin-bottom: 4px;
-    border-bottom: 1px solid var(--border-subtle);
   }
 
   .builds-header {
@@ -661,7 +448,7 @@
     border: none;
     border-radius: 5px;
     color: var(--text-muted);
-    font-size: var(--size-base);
+    font-size: var(--size-lg);
     text-align: left;
     cursor: pointer;
     transition:
@@ -693,22 +480,6 @@
     color: var(--ui-danger);
   }
 
-  /* Project group header */
-  .project-group {
-    margin-bottom: 4px;
-  }
-
-  .project-group-header {
-    padding: 8px 6px 4px;
-  }
-
-  .project-group-name {
-    font-size: var(--size-base);
-    font-weight: 600;
-    color: var(--text-muted);
-    letter-spacing: -0.01em;
-  }
-
   /* Timeline item */
   .timeline-item {
     display: flex;
@@ -720,7 +491,7 @@
     border: none;
     border-radius: 5px;
     color: var(--text-muted);
-    font-size: var(--size-base);
+    font-size: var(--size-lg);
     text-align: left;
     cursor: pointer;
     transition:
@@ -738,14 +509,6 @@
     align-items: center;
     flex-shrink: 0;
     margin-top: 2px;
-  }
-
-  .item-icon.commit {
-    color: var(--timeline-commit);
-  }
-
-  .item-icon.note {
-    color: var(--timeline-note);
   }
 
   .timeline-item:hover .item-icon {
@@ -770,7 +533,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: var(--size-sm);
+    font-size: var(--size-base);
     color: var(--text-faint);
     line-height: 1.2;
   }

@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 use builderbot_actions::{ActionDetector, ActionExecutor, ActionMetadata, SuggestedAction};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 
@@ -35,12 +34,14 @@ pub async fn detect_project_actions(
         .map_err(|e| format!("Failed to get project: {e}"))?
         .ok_or_else(|| "Project not found".to_string())?;
 
-    // Build the working directory path
-    let repo_path = PathBuf::from(&project.repo_path);
+    // Ensure the clone exists before trying to detect actions
+    let clone_path = crate::git::ensure_local_clone(&project.github_repo)
+        .map_err(|e| format!("Failed to ensure local clone: {e}"))?;
+
     let working_dir = if let Some(subpath) = &project.subpath {
-        repo_path.join(subpath)
+        clone_path.join(subpath)
     } else {
-        repo_path
+        clone_path
     };
 
     // Create AI provider with the working directory

@@ -6,10 +6,18 @@
 
 export interface Project {
   id: string;
-  repoPath: string;
+  githubRepo: string;
   subpath: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface GitHubRepo {
+  name: string;
+  nameWithOwner: string;
+  description: string | null;
+  isPrivate: boolean;
+  updatedAt: string;
 }
 
 export type BranchType = 'local' | 'remote';

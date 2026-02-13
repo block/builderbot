@@ -15,22 +15,26 @@ use crate::git::Span;
 // =============================================================================
 
 /// A tracked repository (user opt-in).
+///
+/// Projects are identified by their GitHub `owner/repo` slug. The local
+/// clone path is derived on demand: `~/.staged/repos/<owner>/<repo>/`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: String,
-    pub repo_path: String,
+    /// GitHub repository identifier, e.g. `"owner/repo"`.
+    pub github_repo: String,
     pub subpath: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 impl Project {
-    pub fn new(repo_path: &str) -> Self {
+    pub fn new(github_repo: &str) -> Self {
         let now = now_timestamp();
         Self {
             id: Uuid::new_v4().to_string(),
-            repo_path: repo_path.to_string(),
+            github_repo: github_repo.to_string(),
             subpath: None,
             created_at: now,
             updated_at: now,
@@ -40,6 +44,21 @@ impl Project {
     pub fn with_subpath(mut self, subpath: String) -> Self {
         self.subpath = Some(subpath);
         self
+    }
+
+    /// Derive the local clone path: `~/.staged/repos/<owner>/<repo>/`.
+    ///
+    /// Returns `None` if the home directory can't be determined.
+    pub fn clone_path(&self) -> Option<std::path::PathBuf> {
+        dirs::home_dir().map(|home| home.join(".staged").join("repos").join(&self.github_repo))
+    }
+
+    /// Extract the repo name (last component of `owner/repo`).
+    pub fn repo_name(&self) -> &str {
+        self.github_repo
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.github_repo)
     }
 }
 

@@ -8,18 +8,18 @@ use super::Store;
 #[test]
 fn test_create_and_get_project() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let fetched = store.get_project(&project.id).unwrap().unwrap();
-    assert_eq!(fetched.repo_path, "/tmp/test-repo");
+    assert_eq!(fetched.github_repo, "test-owner/test-repo");
     assert!(fetched.subpath.is_none());
 }
 
 #[test]
 fn test_project_with_subpath() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/monorepo").with_subpath("packages/app".to_string());
+    let project = Project::new("test-owner/monorepo").with_subpath("packages/app".to_string());
     store.create_project(&project).unwrap();
 
     let fetched = store.get_project(&project.id).unwrap().unwrap();
@@ -27,10 +27,10 @@ fn test_project_with_subpath() {
 }
 
 #[test]
-fn test_project_unique_repo_path() {
+fn test_project_unique_github_repo() {
     let store = Store::in_memory().unwrap();
-    let p1 = Project::new("/tmp/test-repo");
-    let p2 = Project::new("/tmp/test-repo");
+    let p1 = Project::new("test-owner/test-repo");
+    let p2 = Project::new("test-owner/test-repo");
     store.create_project(&p1).unwrap();
     assert!(store.create_project(&p2).is_err());
 }
@@ -38,8 +38,12 @@ fn test_project_unique_repo_path() {
 #[test]
 fn test_list_projects() {
     let store = Store::in_memory().unwrap();
-    store.create_project(&Project::new("/tmp/a")).unwrap();
-    store.create_project(&Project::new("/tmp/b")).unwrap();
+    store
+        .create_project(&Project::new("test-owner/repo-a"))
+        .unwrap();
+    store
+        .create_project(&Project::new("test-owner/repo-b"))
+        .unwrap();
     let projects = store.list_projects().unwrap();
     assert_eq!(projects.len(), 2);
 }
@@ -47,7 +51,7 @@ fn test_list_projects() {
 #[test]
 fn test_delete_project_cascades() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let branch = Branch::new(&project.id, "feature", "main");
@@ -78,7 +82,7 @@ fn test_delete_project_cascades() {
 #[test]
 fn test_branch_crud() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let branch = Branch::new(&project.id, "feature", "main").with_pr(42);
@@ -90,7 +94,7 @@ fn test_branch_crud() {
     assert_eq!(fetched.branch_type, BranchType::Local);
     assert!(fetched.workspace_name.is_none());
     assert!(fetched.workspace_status.is_none());
-    assert!(fetched.agent.is_none());
+    // No agent field — branch has workspace_name for remote tracking only
 
     store.update_branch_base(&branch.id, "develop").unwrap();
     let updated = store.get_branch(&branch.id).unwrap().unwrap();
@@ -100,16 +104,10 @@ fn test_branch_crud() {
 #[test]
 fn test_remote_branch_crud() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
-    let branch = Branch::new_remote(
-        &project.id,
-        "remote-feature",
-        "main",
-        "my-workspace",
-        "goose",
-    );
+    let branch = Branch::new_remote(&project.id, "remote-feature", "main", "my-workspace");
     store.create_branch(&branch).unwrap();
 
     let fetched = store.get_branch(&branch.id).unwrap().unwrap();
@@ -117,22 +115,15 @@ fn test_remote_branch_crud() {
     assert_eq!(fetched.branch_type, BranchType::Remote);
     assert_eq!(fetched.workspace_name.as_deref(), Some("my-workspace"));
     assert_eq!(fetched.workspace_status, Some(WorkspaceStatus::Starting));
-    assert_eq!(fetched.agent.as_deref(), Some("goose"));
 }
 
 #[test]
 fn test_update_workspace_status() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
-    let branch = Branch::new_remote(
-        &project.id,
-        "remote-feature",
-        "main",
-        "my-workspace",
-        "goose",
-    );
+    let branch = Branch::new_remote(&project.id, "remote-feature", "main", "my-workspace");
     store.create_branch(&branch).unwrap();
 
     // Starts as Starting
@@ -164,11 +155,11 @@ fn test_update_workspace_status() {
 #[test]
 fn test_list_branches_includes_both_types() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let local = Branch::new(&project.id, "local-feature", "main");
-    let remote = Branch::new_remote(&project.id, "remote-feature", "main", "ws-1", "goose");
+    let remote = Branch::new_remote(&project.id, "remote-feature", "main", "ws-1");
     store.create_branch(&local).unwrap();
     store.create_branch(&remote).unwrap();
 
@@ -318,7 +309,7 @@ fn test_session_messages() {
 #[test]
 fn test_workdir_crud() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let workdir = Workdir::new(&project.id, "/tmp/wt/feature");
@@ -332,7 +323,7 @@ fn test_workdir_crud() {
 #[test]
 fn test_workdir_assign_and_release() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let branch = Branch::new(&project.id, "feature", "main");
@@ -362,7 +353,7 @@ fn test_workdir_assign_and_release() {
 #[test]
 fn test_workdir_find_available() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let branch = Branch::new(&project.id, "feature", "main");
@@ -381,7 +372,7 @@ fn test_workdir_find_available() {
 #[test]
 fn test_workdir_find_available_none() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let branch = Branch::new(&project.id, "feature", "main");
@@ -397,7 +388,7 @@ fn test_workdir_find_available_none() {
 #[test]
 fn test_workdir_unique_path_per_project() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let w1 = Workdir::new(&project.id, "/tmp/wt/1");
@@ -409,7 +400,7 @@ fn test_workdir_unique_path_per_project() {
 #[test]
 fn test_workdir_branch_id_nulled_on_branch_delete() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let branch = Branch::new(&project.id, "feature", "main");
@@ -427,7 +418,7 @@ fn test_workdir_branch_id_nulled_on_branch_delete() {
 #[test]
 fn test_list_workdirs_for_project() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let w1 = Workdir::new(&project.id, "/tmp/wt/1");
@@ -446,7 +437,7 @@ fn test_list_workdirs_for_project() {
 #[test]
 fn test_commit_with_sha() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -477,7 +468,7 @@ fn test_commit_with_sha() {
 #[test]
 fn test_commit_pending_then_landed() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -515,7 +506,7 @@ fn test_commit_pending_then_landed() {
 #[test]
 fn test_commit_unique_sha_per_branch() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -535,7 +526,7 @@ fn test_commit_unique_sha_per_branch() {
 #[test]
 fn test_delete_branch_cascades_commits() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -569,7 +560,7 @@ fn test_delete_branch_cascades_commits() {
 #[test]
 fn test_completed_session_cleaned_up_on_branch_delete() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -594,7 +585,7 @@ fn test_completed_session_cleaned_up_on_branch_delete() {
 #[test]
 fn test_session_not_cleaned_up_if_still_referenced() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch_a = Branch::new(&project.id, "feature-a", "main");
     let branch_b = Branch::new(&project.id, "feature-b", "main");
@@ -625,7 +616,7 @@ fn test_session_not_cleaned_up_if_still_referenced() {
 #[test]
 fn test_running_session_not_cleaned_up() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -646,7 +637,7 @@ fn test_running_session_not_cleaned_up() {
 #[test]
 fn test_session_cleaned_up_via_note_delete() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -669,7 +660,7 @@ fn test_session_cleaned_up_via_note_delete() {
 #[test]
 fn test_session_cleaned_up_via_review_delete() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -692,7 +683,7 @@ fn test_session_cleaned_up_via_review_delete() {
 #[test]
 fn test_session_messages_cascade_from_session_cleanup() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -726,7 +717,7 @@ fn test_session_messages_cascade_from_session_cleanup() {
 #[test]
 fn test_notes() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -747,7 +738,7 @@ fn test_notes() {
 #[test]
 fn test_project_actions() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let action = ProjectAction::new(
@@ -770,7 +761,7 @@ fn test_project_actions() {
 #[test]
 fn test_reorder_actions() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
 
     let a1 = ProjectAction::new(
@@ -807,7 +798,7 @@ fn test_reorder_actions() {
 #[test]
 fn test_review_crud() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -827,7 +818,7 @@ fn test_review_crud() {
 #[test]
 fn test_review_unique_constraint() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -847,7 +838,7 @@ fn test_review_with_comments_and_files() {
     use crate::git::Span;
 
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -906,7 +897,7 @@ fn test_review_with_comments_and_files() {
 #[test]
 fn test_list_reviews_for_branch() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -927,7 +918,7 @@ fn test_delete_review_cascades() {
     use crate::git::Span;
 
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
@@ -950,7 +941,7 @@ fn test_delete_review_cascades() {
 #[test]
 fn test_delete_branch_cascades_reviews() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("/tmp/test-repo");
+    let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();

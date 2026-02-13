@@ -142,7 +142,7 @@ fn find_gh() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Run a gh command in the context of a repo
+/// Run a gh command in the context of a local repo directory
 fn run_gh(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     let gh_path = find_gh().ok_or_else(|| {
         GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
@@ -150,6 +150,30 @@ fn run_gh(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 
     let output = Command::new(&gh_path)
         .current_dir(repo)
+        .args(args)
+        .output()
+        .map_err(|e| GitError::CommandFailed(format!("Failed to run gh: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("not logged in") || stderr.contains("no oauth token") {
+            return Err(GitError::CommandFailed(
+                "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
+            ));
+        }
+        return Err(GitError::CommandFailed(stderr.into_owned()));
+    }
+
+    String::from_utf8(output.stdout).map_err(|_| GitError::InvalidUtf8)
+}
+
+/// Run a gh command without needing a local directory (uses `-R owner/repo` or global commands).
+fn run_gh_global(args: &[&str]) -> Result<String, GitError> {
+    let gh_path = find_gh().ok_or_else(|| {
+        GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
+    })?;
+
+    let output = Command::new(&gh_path)
         .args(args)
         .output()
         .map_err(|e| GitError::CommandFailed(format!("Failed to run gh: {e}")))?;
@@ -210,6 +234,238 @@ pub fn check_github_auth() -> GitHubAuthStatus {
         }
     }
 }
+
+// =============================================================================
+// GitHub repo-based operations (no local clone needed)
+// =============================================================================
+
+/// A GitHub repository from `gh repo list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubRepo {
+    pub name: String,
+    pub name_with_owner: String,
+    pub description: Option<String>,
+    pub is_private: bool,
+    pub updated_at: String,
+}
+
+/// Response from `gh repo list --json`
+#[derive(Debug, Deserialize)]
+struct GhRepoListItem {
+    name: String,
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
+    description: Option<String>,
+    #[serde(rename = "isPrivate")]
+    is_private: bool,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+}
+
+impl From<GhRepoListItem> for GitHubRepo {
+    fn from(item: GhRepoListItem) -> Self {
+        GitHubRepo {
+            name: item.name,
+            name_with_owner: item.name_with_owner,
+            description: item.description,
+            is_private: item.is_private,
+            updated_at: item.updated_at,
+        }
+    }
+}
+
+/// List the authenticated user's GitHub repositories.
+pub fn list_github_repos() -> Result<Vec<GitHubRepo>, GitError> {
+    let output = run_gh_global(&[
+        "repo",
+        "list",
+        "--json=name,nameWithOwner,description,isPrivate,updatedAt",
+        "--limit=100",
+        "--no-archived",
+    ])?;
+
+    let items: Vec<GhRepoListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
+}
+
+/// Search the authenticated user's GitHub repositories.
+pub fn search_github_repos(query: &str) -> Result<Vec<GitHubRepo>, GitError> {
+    let output = run_gh_global(&[
+        "search",
+        "repos",
+        query,
+        "--owner=@me",
+        "--json=name,fullName,description,isPrivate,updatedAt",
+        "--limit=50",
+    ])?;
+
+    // gh search repos uses `fullName` instead of `nameWithOwner`
+    #[derive(Debug, Deserialize)]
+    struct GhSearchRepoItem {
+        name: String,
+        #[serde(rename = "fullName")]
+        full_name: String,
+        description: Option<String>,
+        #[serde(rename = "isPrivate")]
+        is_private: bool,
+        #[serde(rename = "updatedAt")]
+        updated_at: String,
+    }
+
+    let items: Vec<GhSearchRepoItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items
+        .into_iter()
+        .map(|item| GitHubRepo {
+            name: item.name,
+            name_with_owner: item.full_name,
+            description: item.description,
+            is_private: item.is_private,
+            updated_at: item.updated_at,
+        })
+        .collect())
+}
+
+/// List open pull requests for a repo using `-R owner/repo` (no local dir needed).
+pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>, GitError> {
+    let r_flag = format!("-R{github_repo}");
+    let output = run_gh_global(&[
+        "pr",
+        "list",
+        &r_flag,
+        "--state=open",
+        "--limit=50",
+        "--json=number,title,author,baseRefName,headRefName,isDraft,updatedAt",
+    ])?;
+
+    let items: Vec<GhPrListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
+}
+
+/// List open issues for a repo using `-R owner/repo` (no local dir needed).
+pub fn list_issues_for_repo(github_repo: &str) -> Result<Vec<Issue>, GitError> {
+    let r_flag = format!("-R{github_repo}");
+    let output = run_gh_global(&[
+        "issue",
+        "list",
+        &r_flag,
+        "--state=open",
+        "--limit=50",
+        "--json=number,title,author,updatedAt,labels",
+    ])?;
+
+    let items: Vec<GhIssueListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
+}
+
+/// Detect the default branch for a repo via GitHub API (no local clone needed).
+pub fn detect_default_branch_for_repo(github_repo: &str) -> Result<String, GitError> {
+    let r_flag = format!("-R{github_repo}");
+    let output = run_gh_global(&["repo", "view", &r_flag, "--json=defaultBranchRef"])?;
+
+    #[derive(Debug, Deserialize)]
+    struct RepoView {
+        #[serde(rename = "defaultBranchRef")]
+        default_branch_ref: DefaultBranchRef,
+    }
+    #[derive(Debug, Deserialize)]
+    struct DefaultBranchRef {
+        name: String,
+    }
+
+    let view: RepoView =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(view.default_branch_ref.name)
+}
+
+/// A git branch reference from the GitHub API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubBranchRef {
+    pub name: String,
+}
+
+/// List branches for a repo via GitHub API (no local clone needed).
+pub fn list_branches_for_repo(github_repo: &str) -> Result<Vec<super::BranchRef>, GitError> {
+    let endpoint = format!("repos/{github_repo}/branches?per_page=100");
+    let output = run_gh_global(&["api", &endpoint])?;
+
+    #[derive(Debug, Deserialize)]
+    struct ApiBranch {
+        name: String,
+    }
+
+    let branches: Vec<ApiBranch> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(branches
+        .into_iter()
+        .map(|b| super::BranchRef {
+            name: b.name,
+            is_remote: true,
+            remote: Some("origin".to_string()),
+        })
+        .collect())
+}
+
+/// Prune remote refs for a repo. With the GitHub-repo-based model, this is a no-op
+/// since we use the GitHub API for branch listing. Kept for API compatibility.
+pub fn prune_remote_for_repo(_github_repo: &str) -> Result<(), GitError> {
+    Ok(())
+}
+
+/// Ensure a local clone exists at `~/.staged/repos/<owner>/<repo>/`.
+///
+/// If the directory already exists, runs `git fetch origin` to update.
+/// If not, clones the repo. Returns the path to the local clone.
+pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitError> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| GitError::CommandFailed("Cannot determine home directory".to_string()))?;
+
+    let clone_path = home.join(".staged").join("repos").join(github_repo);
+
+    if clone_path.join(".git").exists() {
+        // Already cloned — fetch latest
+        super::cli::run(&clone_path, &["fetch", "origin"])?;
+        return Ok(clone_path);
+    }
+
+    // Create parent directory
+    if let Some(parent) = clone_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            GitError::CommandFailed(format!("Failed to create clone directory: {e}"))
+        })?;
+    }
+
+    // Clone via gh for proper auth
+    let url = format!("https://github.com/{github_repo}.git");
+    let clone_str = clone_path.to_string_lossy().to_string();
+    run_gh_global(&["repo", "clone", github_repo, &clone_str])?;
+
+    // Verify the clone succeeded
+    if !clone_path.join(".git").exists() {
+        // Fallback: try git clone directly
+        super::cli::run(
+            clone_path.parent().unwrap_or(Path::new("/")),
+            &["clone", &url, &clone_str],
+        )?;
+    }
+
+    Ok(clone_path)
+}
+
+// =============================================================================
+// PR and Issue listing (local-dir-based, legacy)
+// =============================================================================
 
 /// Response from `gh pr list --json`
 #[derive(Debug, Deserialize)]

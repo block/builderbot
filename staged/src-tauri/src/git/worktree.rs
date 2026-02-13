@@ -33,7 +33,9 @@ pub fn worktree_path_for(repo: &Path, branch_name: &str) -> Result<PathBuf, GitE
 /// Create a new worktree with a new branch.
 ///
 /// Creates the branch from the specified start point and sets up a worktree
-/// at the standard location.
+/// at the standard location. If the start point is a remote-tracking ref
+/// (e.g. `origin/main`), fetches the latest from the remote first so the
+/// branch starts from the up-to-date remote tip rather than a stale local copy.
 ///
 /// Returns the path to the created worktree.
 pub fn create_worktree(
@@ -56,6 +58,14 @@ pub fn create_worktree(
             "Worktree already exists at {}",
             worktree_path.display()
         )));
+    }
+
+    // If the start point is a remote-tracking ref (e.g. "origin/main"),
+    // fetch the latest so we branch from the real remote tip.
+    if let Some((remote, refspec)) = start_point.split_once('/') {
+        // Best-effort fetch — if it fails (e.g. offline), we still use
+        // whatever the local remote-tracking ref currently points to.
+        let _ = cli::run(repo, &["fetch", remote, refspec]);
     }
 
     let worktree_str = worktree_path

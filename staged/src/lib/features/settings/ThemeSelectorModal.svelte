@@ -212,17 +212,17 @@
 
   .theme-item.active {
     background-color: var(--ui-selection);
-    border-left: 2px solid var(--text-accent);
+    border-left: 2px solid var(--text-primary);
     padding-left: 10px;
   }
 
   .theme-item.active .theme-name {
-    color: var(--text-accent);
+    color: var(--text-primary);
     font-weight: 500;
   }
 
   .theme-item.active .theme-indicator {
-    color: var(--text-accent);
+    color: var(--text-primary);
   }
 
   .theme-indicator {

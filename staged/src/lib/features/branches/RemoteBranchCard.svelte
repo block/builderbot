@@ -367,6 +367,9 @@
             onNoteClick={handleNoteClick}
             onDeletePendingCommit={handleDeletePendingCommit}
             onDeleteNote={handleDeleteNote}
+            onNewNote={() => openNewSession('note')}
+            onNewCommit={() => openNewSession('commit')}
+            newSessionDisabled={showNewSession}
           />
         {/if}
       {:else if status === 'stopped'}

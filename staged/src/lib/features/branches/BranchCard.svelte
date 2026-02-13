@@ -786,18 +786,17 @@
                 primaryActionExecution
                   ? handleShowActionOutput(primaryActionExecution)
                   : handleRunAction(primaryRunAction)}
-              title={primaryActionExecution ? 'View output' : `Run ${primaryRunAction.name}`}
+              title={primaryRunAction.name}
             >
               {#if primaryActionExecution?.status === 'running'}
-                <Spinner size={13} />
+                <StopCircle size={14} />
               {:else if primaryActionExecution?.status === 'completed'}
-                <CheckCircle size={13} />
+                <CheckCircle size={14} />
               {:else if primaryActionExecution?.status === 'failed'}
-                <AlertCircle size={13} />
+                <AlertCircle size={14} />
               {:else}
-                <Play size={13} />
+                <Play size={14} />
               {/if}
-              {primaryRunAction.name}
             </button>
           </div>
         {/if}
@@ -924,6 +923,9 @@
           onDeleteCommit={handleDeleteCommit}
           onDeletePendingCommit={handleDeletePendingCommit}
           onDeleteNote={handleDeleteNote}
+          onNewNote={() => openNewSession('note')}
+          onNewCommit={() => openNewSession('commit')}
+          newSessionDisabled={showNewSession}
         />
       {/if}
     </div>

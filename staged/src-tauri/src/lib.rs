@@ -767,7 +767,19 @@ async fn start_workspace(
         .map(|u| format!("{}?ref={}", ssh_url_to_https(&u), ref_name));
 
     match blox::ws_start(ws_name, resolved_source.as_deref()) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // Create the feature branch inside the workspace so work happens
+            // on `branch_name` rather than the detached base ref.
+            if let Err(e) = blox::ws_exec(ws_name, &["git", "checkout", "-b", &branch.branch_name])
+            {
+                log::warn!(
+                    "failed to create branch '{}' in workspace '{}': {e}",
+                    branch.branch_name,
+                    ws_name
+                );
+            }
+            Ok(())
+        }
         Err(e) => {
             // Don't set Error status here — `blox ws start` can fail (e.g.
             // timeout, transient network issue) even though the workspace was

@@ -1,15 +1,20 @@
 <!--
-  TimelineRow.svelte - Renders a single timeline item (commit or review)
+  TimelineRow.svelte - Renders a single timeline item (commit, note, or review)
 
   Icon + title + meta. Compact. The whole row is clickable to view the item.
   Hover reveals session and delete actions on the right.
-  Notes are rendered separately as horizontal chips in BranchTimeline.
 -->
 <script lang="ts">
-  import { GitCommit, FileSearch, MessageSquare, Trash2, AlertTriangle } from 'lucide-svelte';
+  import {
+    GitCommit,
+    FileText,
+    FileSearch,
+    MessageSquare,
+    Trash2,
+    AlertTriangle,
+  } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
 
-  // Note types kept in the union for backwards compatibility with DisplayItem.
   export type TimelineItemType =
     | 'commit'
     | 'pending-commit'
@@ -46,8 +51,9 @@
     deleteDisabledReason,
   }: Props = $props();
 
-  let isPending = $derived(type === 'pending-commit');
-  let isFailed = $derived(type === 'failed-commit');
+  let isNote = $derived(type === 'note' || type === 'generating-note' || type === 'failed-note');
+  let isPending = $derived(type === 'pending-commit' || type === 'generating-note');
+  let isFailed = $derived(type === 'failed-commit' || type === 'failed-note');
   let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
   let hasSession = $derived(!!sessionId);
 
@@ -83,15 +89,18 @@
     <div
       class="timeline-icon"
       class:commit-icon={type === 'commit' || type === 'pending-commit'}
+      class:note-icon={type === 'note' || type === 'generating-note'}
       class:review-icon={type === 'review'}
       class:failed-icon={isFailed}
     >
-      {#if type === 'pending-commit'}
+      {#if isPending}
         <Spinner size={12} />
-      {:else if type === 'failed-commit'}
+      {:else if isFailed}
         <AlertTriangle size={12} />
       {:else if type === 'commit'}
         <GitCommit size={12} />
+      {:else if isNote}
+        <FileText size={12} />
       {:else if type === 'review'}
         <FileSearch size={12} />
       {/if}
@@ -207,6 +216,12 @@
     border-color: transparent;
   }
 
+  .timeline-icon.note-icon {
+    color: var(--note-color);
+    background-color: var(--note-bg);
+    border-color: transparent;
+  }
+
   .timeline-icon.review-icon {
     color: var(--status-modified);
   }
@@ -218,6 +233,15 @@
 
   .timeline-row.pending .timeline-icon.commit-icon :global(.spinner) {
     color: var(--commit-color);
+  }
+
+  .timeline-row.pending .timeline-icon.note-icon {
+    background-color: var(--note-bg);
+    border-color: transparent;
+  }
+
+  .timeline-row.pending .timeline-icon.note-icon :global(.spinner) {
+    color: var(--note-color);
   }
 
   .timeline-icon.failed-icon {

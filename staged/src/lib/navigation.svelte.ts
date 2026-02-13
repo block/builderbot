@@ -15,6 +15,15 @@ export function selectProject(projectId: string): void {
   navigation.selectedProjectId = projectId;
 }
 
+/** Navigate to a project and scroll to a specific branch card. */
+export function selectProjectAndBranch(projectId: string, branchId: string): void {
+  navigation.selectedProjectId = projectId;
+  // Allow ProjectHome to mount and register its scroll-to-branch listener.
+  setTimeout(() => {
+    window.dispatchEvent(new CustomEvent('staged:scroll-to-branch', { detail: { branchId } }));
+  }, 150);
+}
+
 /** Navigate back to the projects list (landing page). */
 export function goHome(): void {
   navigation.selectedProjectId = null;

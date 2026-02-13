@@ -1,125 +1,104 @@
 <!--
-  ProjectCard.svelte — Card for the projects landing page
+  ProjectCard.svelte — Project entry on the landing page
 
-  Shows project name, branch count, last activity timestamp, and a short
-  list of recent commits. Clicking the card navigates to the project detail.
+  Flat title matching the project detail page style, with a list of recent
+  branches underneath. Clicking the title navigates to the project detail.
+  Clicking a branch navigates and scrolls to that branch's card.
 -->
 <script lang="ts">
-  import { Folder, GitBranch, GitCommitHorizontal } from 'lucide-svelte';
-  import type { Project } from '../../types';
+  import { GitBranch, ChevronRight } from 'lucide-svelte';
+  import type { Project, Branch } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
-  import { selectProject } from '../../navigation.svelte';
-
-  interface RecentCommit {
-    shortSha: string;
-    subject: string;
-    relativeTime: string;
-  }
+  import { selectProject, selectProjectAndBranch } from '../../navigation.svelte';
 
   interface Props {
     project: Project;
-    branchCount: number;
-    lastActivity: string;
-    recentCommits: RecentCommit[];
+    branches: Branch[];
   }
 
-  let { project, branchCount, lastActivity, recentCommits }: Props = $props();
+  let { project, branches }: Props = $props();
+
+  function formatRelativeTime(timestamp: number): string {
+    const date = new Date(timestamp * 1000);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m`;
+    if (diffHours < 24) return `${diffHours}h`;
+    if (diffDays < 7) return `${diffDays}d`;
+    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
 </script>
 
-<button class="project-card" onclick={() => selectProject(project.id)}>
-  <div class="card-header">
-    <div class="project-info">
-      <span class="folder-icon"><Folder size={16} /></span>
-      <span class="project-name">{projectDisplayName(project)}</span>
-    </div>
-    <span class="last-activity" title="Last activity">{lastActivity}</span>
-  </div>
-
-  <div class="card-meta">
+<div class="project-entry">
+  <button class="project-header" onclick={() => selectProject(project.id)}>
+    <span class="project-name">{projectDisplayName(project)}</span>
     <span class="meta-item">
       <GitBranch size={12} />
-      {branchCount}
-      {branchCount === 1 ? 'branch' : 'branches'}
+      {branches.length}
+      {branches.length === 1 ? 'branch' : 'branches'}
     </span>
-  </div>
+    <span class="chevron"><ChevronRight size={14} /></span>
+  </button>
 
-  {#if recentCommits.length > 0}
-    <div class="commits-list">
-      {#each recentCommits as commit}
-        <div class="commit-row">
-          <span class="commit-icon"><GitCommitHorizontal size={11} /></span>
-          <span class="commit-subject">{commit.subject}</span>
-          <span class="commit-time">{commit.relativeTime}</span>
-        </div>
+  {#if branches.length > 0}
+    <div class="branches-list">
+      {#each branches as branch (branch.id)}
+        <button
+          class="branch-row"
+          onclick={() => selectProjectAndBranch(project.id, branch.id)}
+          title={branch.branchName}
+        >
+          <span class="branch-icon"><GitBranch size={12} /></span>
+          <span class="branch-name">{branch.branchName}</span>
+          <span class="branch-time">{formatRelativeTime(Math.floor(branch.updatedAt / 1000))}</span>
+        </button>
       {/each}
     </div>
-  {:else}
-    <div class="no-commits">No commits yet</div>
   {/if}
-</button>
+</div>
 
 <style>
-  .project-card {
+  .project-entry {
     display: flex;
     flex-direction: column;
+    gap: 2px;
+    margin-left: -8px;
+    margin-right: -8px;
+  }
+
+  .project-header {
+    display: flex;
+    align-items: center;
     gap: 10px;
-    padding: 16px 18px;
-    background-color: var(--bg-elevated);
-    border: 1px solid var(--border-subtle);
-    border-radius: 10px;
+    padding: 6px 8px;
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
     cursor: pointer;
     text-align: left;
     transition:
-      border-color 0.15s ease,
-      background-color 0.15s ease;
+      background-color 0.15s ease,
+      color 0.1s;
   }
 
-  .project-card:hover {
-    border-color: var(--border-muted);
+  .project-header:hover {
     background-color: var(--bg-hover);
   }
 
-  .card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .project-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .folder-icon {
-    display: flex;
-    align-items: center;
-    color: var(--text-faint);
-    flex-shrink: 0;
-  }
-
   .project-name {
-    font-size: var(--size-lg);
+    font-size: var(--size-xl);
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .last-activity {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-    flex-shrink: 0;
-  }
-
-  .card-meta {
-    display: flex;
-    align-items: center;
-    gap: 14px;
+    min-width: 0;
   }
 
   .meta-item {
@@ -128,34 +107,63 @@
     gap: 5px;
     font-size: var(--size-xs);
     color: var(--text-muted);
+    flex-shrink: 0;
   }
 
-  .commits-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding-top: 4px;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .commit-row {
+  .chevron {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: var(--size-xs);
-    color: var(--text-muted);
-    line-height: 1.4;
+    margin-left: auto;
+    color: var(--text-faint);
+    opacity: 0;
+    transition: opacity 0.15s ease;
   }
 
-  .commit-icon {
+  .project-header:hover .chevron {
+    opacity: 1;
+  }
+
+  .branches-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  .branch-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 8px;
+    background-color: transparent;
+    border: none;
+    border-radius: 5px;
+    font-size: var(--size-sm);
+    color: var(--text-muted);
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      color 0.1s;
+  }
+
+  .branch-row:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .branch-icon {
     display: flex;
     align-items: center;
     flex-shrink: 0;
-    color: var(--commit-color);
+    color: var(--branch-color);
     opacity: 0.7;
   }
 
-  .commit-subject {
+  .branch-row:hover .branch-icon {
+    opacity: 1;
+  }
+
+  .branch-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -163,16 +171,9 @@
     flex: 1;
   }
 
-  .commit-time {
+  .branch-time {
     flex-shrink: 0;
-    color: var(--text-faint);
-    font-size: 10px;
-  }
-
-  .no-commits {
     font-size: var(--size-xs);
     color: var(--text-faint);
-    padding-top: 4px;
-    border-top: 1px solid var(--border-subtle);
   }
 </style>

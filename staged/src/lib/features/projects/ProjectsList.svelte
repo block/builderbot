@@ -1,17 +1,14 @@
 <!--
-  ProjectsList.svelte — Landing page showing all projects with metadata
+  ProjectsList.svelte — Landing page showing all projects with recent branches
 
-  Fetches commit timelines for every tracked branch to derive:
-  - Recent commits per project (top 5 across all branches)
-  - Last activity timestamp (most recent commit)
-
+  Each project shows a flat title with a list of recent branches underneath.
   Empty state shows the welcome UI with StagedIcon and GitTreeAnimation.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import type { Project, Branch } from '../../types';
-  import * as commands from '../../commands';
+  import { Plus } from 'lucide-svelte';
+  import type { Project } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { selectProject } from '../../navigation.svelte';
   import {
@@ -36,131 +33,13 @@
 
   let detectingProjectIds = $state<Set<string>>(new Set());
 
-  // ── Timeline data per project ──
-
-  type ProjectCommitInfo = {
-    shortSha: string;
-    subject: string;
-    timestamp: number;
-  };
-
-  let commitsByProject = $state(new Map<string, ProjectCommitInfo[]>());
-  let timelineLoading = $state(false);
-  let lastBranchKey = '';
-
-  /** Strip XML-tagged context blocks from display text. */
-  function stripXmlTags(text: string): string {
-    return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
-  }
-
-  // Re-fetch timelines when branches change
-  $effect(() => {
-    const allBranches: Branch[] = [];
-    for (const project of projectStore.projects) {
-      const branches = projectStore.branchesByProject.get(project.id) || [];
-      allBranches.push(...branches);
-    }
-    const branchKey = allBranches
-      .map((b) => b.id)
-      .sort()
-      .join(',');
-
-    if (branchKey === lastBranchKey || projectStore.loading) return;
-    lastBranchKey = branchKey;
-
-    if (allBranches.length === 0) {
-      commitsByProject = new Map();
-      return;
-    }
-
-    fetchAllTimelines(allBranches);
-  });
-
-  async function fetchAllTimelines(allBranches: Branch[]) {
-    timelineLoading = true;
-    try {
-      const result = new Map<string, ProjectCommitInfo[]>();
-
-      await Promise.all(
-        allBranches.map(async (branch) => {
-          try {
-            const tl = await commands.getBranchTimeline(branch.id);
-            const existing = result.get(branch.projectId) || [];
-
-            for (const commit of tl.commits) {
-              if (!commit.sha) continue;
-              existing.push({
-                shortSha: commit.shortSha,
-                subject: stripXmlTags(commit.subject),
-                timestamp: commit.timestamp,
-              });
-            }
-
-            result.set(branch.projectId, existing);
-          } catch {
-            // Skip branches that fail silently
-          }
-        })
-      );
-
-      // Sort each project's commits by timestamp descending
-      for (const [pid, commits] of result) {
-        commits.sort((a, b) => b.timestamp - a.timestamp);
-        result.set(pid, commits);
-      }
-
-      commitsByProject = result;
-    } finally {
-      timelineLoading = false;
-    }
-  }
-
-  // ── Relative time formatting ──
-
-  function formatRelativeTime(timestamp: number): string {
-    const date = new Date(timestamp * 1000);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMins / 60);
-    const diffDays = Math.floor(diffHours / 24);
-
-    if (diffMins < 1) return 'just now';
-    if (diffMins < 60) return `${diffMins}m`;
-    if (diffHours < 24) return `${diffHours}h`;
-    if (diffDays < 7) return `${diffDays}d`;
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  }
-
   // ── Derived data for each project card ──
 
-  const MAX_RECENT_COMMITS = 5;
+  const MAX_RECENT_BRANCHES = 5;
 
-  function getRecentCommits(projectId: string) {
-    const commits = commitsByProject.get(projectId) || [];
-    return commits.slice(0, MAX_RECENT_COMMITS).map((c) => ({
-      shortSha: c.shortSha,
-      subject: c.subject,
-      relativeTime: formatRelativeTime(c.timestamp),
-    }));
-  }
-
-  function getLastActivity(projectId: string): string {
-    const commits = commitsByProject.get(projectId) || [];
-    if (commits.length > 0) {
-      return formatRelativeTime(commits[0].timestamp);
-    }
-    // Fall back to branch updatedAt
-    const branches = projectStore.branchesByProject.get(projectId) || [];
-    if (branches.length > 0) {
-      const latest = Math.max(...branches.map((b) => b.updatedAt));
-      return formatRelativeTime(Math.floor(latest / 1000));
-    }
-    return '';
-  }
-
-  function getBranchCount(projectId: string): number {
-    return (projectStore.branchesByProject.get(projectId) || []).length;
+  function getRecentBranches(projectId: string) {
+    const branches = [...(projectStore.branchesByProject.get(projectId) || [])];
+    return branches.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_RECENT_BRANCHES);
   }
 
   // ── Event handlers ──
@@ -303,13 +182,14 @@
       </div>
     {:else}
       <div class="projects-grid">
+        <div class="page-header">
+          <h1 class="page-title">Projects</h1>
+          <button class="new-project-btn" onclick={handleNewProject} title="New project (⌘N)">
+            <Plus size={16} />
+          </button>
+        </div>
         {#each projectStore.projects as project (project.id)}
-          <ProjectCard
-            {project}
-            branchCount={getBranchCount(project.id)}
-            lastActivity={getLastActivity(project.id)}
-            recentCommits={getRecentCommits(project.id)}
-          />
+          <ProjectCard {project} branches={getRecentBranches(project.id)} />
         {/each}
       </div>
     {/if}
@@ -544,6 +424,43 @@
     font-size: var(--size-xs);
   }
 
+  .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .page-title {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.03em;
+  }
+
+  .new-project-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background-color: transparent;
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition:
+      border-color 0.15s ease,
+      color 0.15s ease,
+      background-color 0.15s ease;
+  }
+
+  .new-project-btn:hover {
+    border-color: var(--ui-accent);
+    color: var(--ui-accent);
+    background-color: var(--bg-hover);
+  }
+
   /* Projects grid */
   .projects-grid {
     width: 100%;
@@ -551,6 +468,6 @@
     margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 28px;
   }
 </style>

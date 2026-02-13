@@ -6,6 +6,7 @@
   Pending items (running sessions, generating notes) appear at the end of each section.
 -->
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import {
     FileText,
     GitCommitHorizontal,
@@ -30,6 +31,7 @@
     onNewNote?: () => void;
     onNewCommit?: () => void;
     newSessionDisabled?: boolean;
+    footerActions?: Snippet;
   }
 
   let {
@@ -43,6 +45,7 @@
     onNewNote,
     onNewCommit,
     newSessionDisabled = false,
+    footerActions,
   }: Props = $props();
 
   // Display item shared by both sections
@@ -361,17 +364,22 @@
           onDeleteClick={item.deleteDisabledReason ? undefined : () => handleDeleteClick(item)}
         />
       {/each}
-      {#if onNewCommit}
+      {#if onNewCommit || footerActions}
         <div class="add-commit-row">
-          <button
-            class="add-commit-btn"
-            onclick={onNewCommit}
-            disabled={newSessionDisabled}
-            title="New commit"
-          >
-            <Plus size={13} />
-            <span>New commit</span>
-          </button>
+          {#if onNewCommit}
+            <button
+              class="add-commit-btn"
+              onclick={onNewCommit}
+              disabled={newSessionDisabled}
+              title="New commit"
+            >
+              <Plus size={13} />
+              <span>New commit</span>
+            </button>
+          {/if}
+          {#if footerActions}
+            {@render footerActions()}
+          {/if}
         </div>
       {/if}
     </div>
@@ -559,27 +567,24 @@
     flex: 1;
     padding: 14px 16px;
     border-radius: 8px;
-    border: 1px dashed var(--border-muted);
-    background: none;
+    border: none;
+    background: var(--bg-elevated);
     color: var(--text-muted);
     font-size: var(--size-sm);
     font-weight: 500;
     cursor: pointer;
     transition:
       color 0.15s,
-      border-color 0.15s,
       background-color 0.15s;
   }
 
   .empty-action-btn.note-action:hover:not(:disabled) {
     color: var(--note-color);
-    border-color: var(--note-color);
     background-color: var(--note-bg);
   }
 
   .empty-action-btn.commit-action:hover:not(:disabled) {
     color: var(--commit-color);
-    border-color: var(--commit-color);
     background-color: var(--commit-bg);
   }
 
@@ -622,6 +627,9 @@
   }
 
   .add-commit-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     padding: 6px 8px;
     margin: 0 -8px;
   }

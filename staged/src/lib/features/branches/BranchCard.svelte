@@ -89,6 +89,9 @@
   let error = $state<string | null>(null);
   let showBranchDiff = $state(false);
 
+  /** True when the branch has at least one finalized commit (code changes vs base). */
+  let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
+
   // Actions state
   let actions = $state<ProjectAction[]>([]);
 
@@ -921,53 +924,58 @@
           onNewNote={() => openNewSession('note')}
           onNewCommit={() => openNewSession('commit')}
           newSessionDisabled={showNewSession}
-        />
-      {/if}
-    </div>
-
-    <!-- Footer with PR button and diff -->
-    <div class="card-footer">
-      <div class="footer-left">
-        <button class="view-diff-btn" onclick={() => (showBranchDiff = true)} title="View diff">
-          <FileDiff size={14} />
-        </button>
-        <button
-          class="pr-btn"
-          class:creating={prState === 'creating'}
-          class:error={prState === 'error'}
-          class:created={prState === 'created'}
-          onclick={handlePrButtonClick}
-          disabled={prState === 'creating'}
-          title={prState === 'created'
-            ? 'View PR'
-            : prState === 'error'
-              ? 'PR creation failed — click for details'
-              : prState === 'creating'
-                ? 'Creating PR…'
-                : 'Create PR'}
         >
-          {#if prState === 'creating'}
-            <Spinner size={13} />
-          {:else if prState === 'error'}
-            <AlertCircle size={13} />
-          {:else if prState === 'created'}
-            <GitPullRequestArrow size={13} />
-          {:else}
-            <GitPullRequestCreateArrow size={13} />
-          {/if}
-          <span>
-            {#if prState === 'created'}
-              View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
-            {:else if prState === 'creating'}
-              Creating PR…
-            {:else if prState === 'error'}
-              PR failed
-            {:else}
-              Create PR
+          {#snippet footerActions()}
+            {#if hasCodeChanges}
+              <div class="footer-actions">
+                <button
+                  class="pr-btn"
+                  class:creating={prState === 'creating'}
+                  class:error={prState === 'error'}
+                  class:created={prState === 'created'}
+                  onclick={handlePrButtonClick}
+                  disabled={prState === 'creating'}
+                  title={prState === 'created'
+                    ? 'View PR'
+                    : prState === 'error'
+                      ? 'PR creation failed — click for details'
+                      : prState === 'creating'
+                        ? 'Creating PR…'
+                        : 'Create PR'}
+                >
+                  {#if prState === 'creating'}
+                    <Spinner size={13} />
+                  {:else if prState === 'error'}
+                    <AlertCircle size={13} />
+                  {:else if prState === 'created'}
+                    <GitPullRequestArrow size={13} />
+                  {:else}
+                    <GitPullRequestCreateArrow size={13} />
+                  {/if}
+                  <span>
+                    {#if prState === 'created'}
+                      View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                    {:else if prState === 'creating'}
+                      Creating PR…
+                    {:else if prState === 'error'}
+                      PR failed
+                    {:else}
+                      Create PR
+                    {/if}
+                  </span>
+                </button>
+                <button
+                  class="view-diff-btn"
+                  onclick={() => (showBranchDiff = true)}
+                  title="View diff"
+                >
+                  <FileDiff size={14} />
+                </button>
+              </div>
             {/if}
-          </span>
-        </button>
-      </div>
+          {/snippet}
+        </BranchTimeline>
+      {/if}
     </div>
   {/if}
 </div>
@@ -1372,15 +1380,8 @@
     font-size: var(--size-sm);
   }
 
-  /* Footer */
-  .card-footer {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 6px 12px;
-  }
-
-  .footer-left {
+  /* Footer actions (rendered inline with "New commit" via snippet) */
+  .footer-actions {
     display: flex;
     align-items: center;
     gap: 4px;

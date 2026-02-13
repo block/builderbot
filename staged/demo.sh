@@ -21,6 +21,7 @@
 #   - A group of flamingos is called a "flamboyance."
 #   - Bananas are berries, but strawberries are not.
 #   - Sea otters hold hands while sleeping so they don't drift apart.
+#   - A single strand of spaghetti is called a "spaghetto."
 
 set -euo pipefail
 

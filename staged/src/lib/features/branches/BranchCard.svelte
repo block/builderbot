@@ -85,6 +85,7 @@
   let pushState = $derived<PushState>(pushStateOverride ?? 'idle');
   let pushSessionId = $state<string | null>(null);
   let pushError = $state<string | null>(null);
+  let pushRejectedNonFastForward = $state(false);
   let showPushErrorDialog = $state(false);
   let showForcePushDialog = $state(false);
 
@@ -755,9 +756,17 @@
    * Check whether push session messages contain the non-fast-forward marker.
    * The agent outputs `PUSH_REJECTED: NON_FAST_FORWARD` when the remote would
    * lose commits on a normal push.
+   *
+   * Only checks assistant and tool_result messages to avoid matching the
+   * marker in the prompt instructions (user messages) which tell the agent
+   * what to output on rejection.
    */
   function isPushRejectedNonFastForward(messages: { content: string; role: string }[]): boolean {
-    return messages.some((msg) => msg.content.includes('PUSH_REJECTED: NON_FAST_FORWARD'));
+    return messages.some(
+      (msg) =>
+        (msg.role === 'assistant' || msg.role === 'tool_result') &&
+        msg.content.includes('PUSH_REJECTED: NON_FAST_FORWARD')
+    );
   }
 
   async function handlePush(force = false) {
@@ -785,11 +794,11 @@
       try {
         const messages = await commands.getSessionMessages(pushSessionId);
         if (isPushRejectedNonFastForward(messages)) {
-          // The agent stopped because the remote would lose commits —
-          // prompt the user to decide whether to force push.
+          // The agent stopped because the remote would lose commits.
+          // Go to error state — clicking the button will open the force push dialog.
           pushStateOverride = 'error';
+          pushRejectedNonFastForward = true;
           pushError = null;
-          showForcePushDialog = true;
           pushSessionId = null;
           return;
         }
@@ -812,11 +821,13 @@
 
   function handleForcePushConfirm() {
     showForcePushDialog = false;
+    pushRejectedNonFastForward = false;
     handlePush(true);
   }
 
   function handleForcePushCancel() {
     showForcePushDialog = false;
+    pushRejectedNonFastForward = false;
     pushStateOverride = null;
     pushError = null;
   }
@@ -833,9 +844,13 @@
   }
 
   function handlePrButtonClick() {
-    if (pushState === 'error' && !showForcePushDialog) {
-      // Push failed — show error dialog
-      showPushErrorDialog = true;
+    if (pushState === 'error') {
+      // Push failed — open the appropriate dialog based on failure type
+      if (pushRejectedNonFastForward) {
+        showForcePushDialog = true;
+      } else {
+        showPushErrorDialog = true;
+      }
       return;
     }
     if (pushState === 'pushing' && pushSessionId) {
@@ -1093,13 +1108,11 @@
         <button
           class="pr-btn"
           class:creating={prState === 'creating'}
-          class:error={(prState === 'error' || pushState === 'error') &&
-            !showPushErrorDialog &&
-            !showForcePushDialog}
+          class:error={prState === 'error' || pushState === 'error'}
           class:created={prState === 'created' && pushState !== 'error'}
           class:pushing={pushState === 'pushing'}
           onclick={handlePrButtonClick}
-          disabled={showPushErrorDialog || showForcePushDialog}
+          disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
           title={pushState === 'pushing'
             ? 'Pushing… (click to view)'
             : pushState === 'error'

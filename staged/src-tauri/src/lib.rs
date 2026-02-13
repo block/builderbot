@@ -7,6 +7,7 @@ pub mod actions;
 pub mod agent;
 pub mod blox;
 pub mod git;
+pub mod paths;
 mod recent_repos;
 pub mod session_commands;
 pub mod session_runner;
@@ -2062,14 +2063,11 @@ pub fn run() {
                 app.set_menu(menu)?;
             }
 
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("Cannot get app data dir: {e}"))?;
+            let app_data_dir = paths::data_dir()?;
 
-            // Ensure the app data directory exists on first launch.
+            // Ensure the data directory exists on first launch.
             std::fs::create_dir_all(&app_data_dir)
-                .map_err(|e| format!("Cannot create app data dir: {e}"))?;
+                .map_err(|e| format!("Cannot create data dir: {e}"))?;
 
             let db_path = app_data_dir.join("data.db");
 

@@ -1,20 +1,19 @@
 //! Git worktree operations for branch-based workflow.
 //!
-//! Manages worktrees in a standard location (~/.staged/worktrees/<repo>/<branch>).
+//! Manages worktrees under `$XDG_DATA_HOME/staged/worktrees/<repo>/<branch>`.
 
 use super::cli::{self, GitError};
 use std::path::{Path, PathBuf};
 
 /// Get the standard worktree base directory.
-/// Returns ~/.staged/worktrees/
 fn worktree_base_dir() -> Result<PathBuf, GitError> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| GitError::CommandFailed("Cannot find home directory".to_string()))?;
-    Ok(home.join(".staged").join("worktrees"))
+    crate::paths::data_dir()
+        .map(|d| d.join("worktrees"))
+        .map_err(|e| GitError::CommandFailed(e))
 }
 
 /// Compute the worktree path for a given repo and branch.
-/// Format: ~/.staged/worktrees/<repo-name>/<sanitized-branch-name>/
+/// Format: `<data_dir>/worktrees/<repo-name>/<sanitized-branch-name>/`
 pub fn worktree_path_for(repo: &Path, branch_name: &str) -> Result<PathBuf, GitError> {
     let base = worktree_base_dir()?;
 

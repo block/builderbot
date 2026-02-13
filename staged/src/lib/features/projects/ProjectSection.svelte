@@ -162,7 +162,7 @@
   }
 
   .project-name {
-    font-size: var(--size-lg);
+    font-size: var(--size-xl);
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;
@@ -215,8 +215,8 @@
   }
 
   .new-branch-button:hover {
-    border-color: var(--ui-accent);
-    color: var(--ui-accent);
+    border-color: var(--border-emphasis);
+    color: var(--text-primary);
     background-color: var(--bg-hover);
   }
 </style>

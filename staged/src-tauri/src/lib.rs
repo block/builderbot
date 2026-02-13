@@ -433,16 +433,25 @@ fn create_project(
     Ok(project)
 }
 
-/// List the authenticated user's GitHub repositories.
+/// List the authenticated user's GitHub organization memberships.
 #[tauri::command]
-async fn list_github_repos() -> Result<Vec<git::GitHubRepo>, String> {
-    git::list_github_repos().map_err(|e| e.to_string())
+async fn list_github_orgs() -> Result<Vec<String>, String> {
+    git::list_github_orgs().map_err(|e| e.to_string())
 }
 
-/// Search the authenticated user's GitHub repositories.
+/// List GitHub repositories for the authenticated user or a specific owner.
 #[tauri::command]
-async fn search_github_repos(query: String) -> Result<Vec<git::GitHubRepo>, String> {
-    git::search_github_repos(&query).map_err(|e| e.to_string())
+async fn list_github_repos(owner: Option<String>) -> Result<Vec<git::GitHubRepo>, String> {
+    git::list_github_repos(owner.as_deref()).map_err(|e| e.to_string())
+}
+
+/// Search GitHub repositories for the authenticated user or a specific owner.
+#[tauri::command]
+async fn search_github_repos(
+    query: String,
+    owner: Option<String>,
+) -> Result<Vec<git::GitHubRepo>, String> {
+    git::search_github_repos(&query, owner.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1961,6 +1970,7 @@ pub fn run() {
             list_projects,
             create_project,
             delete_project,
+            list_github_orgs,
             list_github_repos,
             search_github_repos,
             list_branches_for_project,

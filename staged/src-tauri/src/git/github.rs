@@ -275,15 +275,32 @@ impl From<GhRepoListItem> for GitHubRepo {
     }
 }
 
-/// List the authenticated user's GitHub repositories.
-pub fn list_github_repos() -> Result<Vec<GitHubRepo>, GitError> {
-    let output = run_gh_global(&[
-        "repo",
-        "list",
+/// List the authenticated user's GitHub organization memberships.
+pub fn list_github_orgs() -> Result<Vec<String>, GitError> {
+    let output = run_gh_global(&["api", "/user/orgs", "--jq", ".[].login"])?;
+    Ok(output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+/// List GitHub repositories for the authenticated user or a specific owner.
+pub fn list_github_repos(owner: Option<&str>) -> Result<Vec<GitHubRepo>, GitError> {
+    let mut args = vec!["repo", "list"];
+    // When an owner is provided, pass it as a positional arg to scope the listing
+    let owner_string;
+    if let Some(o) = owner {
+        owner_string = o.to_string();
+        args.push(&owner_string);
+    }
+    args.extend_from_slice(&[
         "--json=name,nameWithOwner,description,isPrivate,updatedAt",
         "--limit=100",
         "--no-archived",
-    ])?;
+    ]);
+
+    let output = run_gh_global(&args)?;
 
     let items: Vec<GhRepoListItem> =
         serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
@@ -291,13 +308,17 @@ pub fn list_github_repos() -> Result<Vec<GitHubRepo>, GitError> {
     Ok(items.into_iter().map(Into::into).collect())
 }
 
-/// Search the authenticated user's GitHub repositories.
-pub fn search_github_repos(query: &str) -> Result<Vec<GitHubRepo>, GitError> {
+/// Search GitHub repositories for the authenticated user or a specific owner.
+pub fn search_github_repos(query: &str, owner: Option<&str>) -> Result<Vec<GitHubRepo>, GitError> {
+    let owner_flag = match owner {
+        Some(o) => format!("--owner={o}"),
+        None => "--owner=@me".to_string(),
+    };
     let output = run_gh_global(&[
         "search",
         "repos",
         query,
-        "--owner=@me",
+        &owner_flag,
         "--json=name,fullName,description,isPrivate,updatedAt",
         "--limit=50",
     ])?;

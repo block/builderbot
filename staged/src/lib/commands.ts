@@ -56,14 +56,19 @@ export function deleteProject(id: string): Promise<void> {
   return invoke('delete_project', { id });
 }
 
-/** List the authenticated user's GitHub repositories. */
-export function listGithubRepos(): Promise<GitHubRepo[]> {
-  return invoke('list_github_repos');
+/** List the authenticated user's GitHub organization memberships. */
+export function listGithubOrgs(): Promise<string[]> {
+  return invoke('list_github_orgs');
 }
 
-/** Search the authenticated user's GitHub repositories. */
-export function searchGithubRepos(query: string): Promise<GitHubRepo[]> {
-  return invoke('search_github_repos', { query });
+/** List GitHub repositories for the authenticated user or a specific owner. */
+export function listGithubRepos(owner?: string): Promise<GitHubRepo[]> {
+  return invoke('list_github_repos', { owner: owner ?? null });
+}
+
+/** Search GitHub repositories for the authenticated user or a specific owner. */
+export function searchGithubRepos(query: string, owner?: string): Promise<GitHubRepo[]> {
+  return invoke('search_github_repos', { query, owner: owner ?? null });
 }
 
 // =============================================================================

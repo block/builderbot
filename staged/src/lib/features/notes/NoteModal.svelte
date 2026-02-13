@@ -8,6 +8,7 @@
   import { X } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
+  import { openUrl } from '../../commands';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -35,6 +36,17 @@
       onClose();
     }
   }
+
+  /** Intercept link clicks so they open in the system browser, not the webview. */
+  function handleContentClick(e: MouseEvent) {
+    const anchor = (e.target as HTMLElement).closest('a');
+    if (!anchor) return;
+    const href = anchor.getAttribute('href');
+    if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+      e.preventDefault();
+      openUrl(href);
+    }
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -56,7 +68,8 @@
         <X size={16} />
       </button>
     </header>
-    <div class="modal-content">
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-content" onclick={handleContentClick}>
       {#if content.trim()}
         <div class="markdown-content">
           {@html renderMarkdown(content)}

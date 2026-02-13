@@ -8,6 +8,7 @@
   import { X } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
+  import { handleExternalLinkClick } from '../../commands';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -56,7 +57,8 @@
         <X size={16} />
       </button>
     </header>
-    <div class="modal-content">
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-content" onclick={handleExternalLinkClick}>
       {#if content.trim()}
         <div class="markdown-content">
           {@html renderMarkdown(content)}

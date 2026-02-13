@@ -47,6 +47,7 @@
     getSession,
     getSessionMessages,
     getSessionMessagesSince,
+    handleExternalLinkClick,
     resumeSession,
   } from '../../commands';
 
@@ -530,7 +531,13 @@
     </header>
 
     <!-- Messages area -->
-    <div class="modal-content" bind:this={messagesEl} onscroll={handleScroll}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div
+      class="modal-content"
+      bind:this={messagesEl}
+      onscroll={handleScroll}
+      onclick={handleExternalLinkClick}
+    >
       {#if loading}
         <div class="center-state">
           <Spinner size={24} />

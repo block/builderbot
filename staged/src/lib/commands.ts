@@ -195,6 +195,17 @@ export function openUrl(url: string): Promise<void> {
   return invoke('open_url', { url });
 }
 
+/** Intercept link clicks so they open in the system browser, not the webview. */
+export function handleExternalLinkClick(e: MouseEvent): void {
+  const anchor = (e.target as HTMLElement).closest('a');
+  if (!anchor) return;
+  const href = anchor.getAttribute('href');
+  if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+    e.preventDefault();
+    openUrl(href);
+  }
+}
+
 // =============================================================================
 // Agent discovery
 // =============================================================================

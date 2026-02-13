@@ -1,144 +1,107 @@
 <!--
-  ProjectHome.svelte - The single main page
+  ProjectHome.svelte — Single-project detail view
 
-  Shows all projects with their branches. Empty state when no projects exist.
-  Modals for creating/deleting projects and branches are layered on top.
+  Shows branches for a specific project. Rendered when a project is selected
+  from the landing page. Includes branch management (create, delete, worktree)
+  and a back button to return to the projects list.
 
   Data is owned by projectStore.svelte.ts — this component reads and mutates
   through the store so the sidebar can share the same reactive state.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { ArrowLeft } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
   import { runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
   import {
     projectStore,
-    checkStoreAndLoad,
-    handleResetStore,
-    addProject,
-    removeProject,
     addBranch,
     updateBranch,
     removeBranch,
+    removeProject,
     setDeletingBranch,
     clearDeletingBranch,
   } from './projectStore.svelte';
+  import { goHome } from '../../navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
-  import NewProjectModal from './NewProjectModal.svelte';
   import NewBranchModal from '../branches/NewBranchModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
-  import StagedIcon from '../../shared/StagedIcon.svelte';
 
-  // Modal state (local to this component)
-  let showNewProjectModal = $state(false);
+  interface Props {
+    projectId: string;
+  }
+
+  let { projectId }: Props = $props();
+
+  // Resolve the project from the store
+  let project = $derived(projectStore.projects.find((p) => p.id === projectId));
+  let branches = $derived(
+    [...(projectStore.branchesByProject.get(projectId) || [])].sort(
+      (a, b) => b.updatedAt - a.updatedAt
+    )
+  );
+
+  // If the project was deleted (e.g. from sidebar), go back to the list
+  $effect(() => {
+    if (!projectStore.loading && !project) {
+      goHome();
+    }
+  });
+
+  // Modal state
   let showNewBranchModal = $state(false);
-  let newBranchProject = $state<Project | null>(null);
-
-  // Delete confirmation state
-  let projectToDelete = $state<Project | null>(null);
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
+  let projectToDelete = $state<Project | null>(null);
 
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
 
   onMount(() => {
-    checkStoreAndLoad();
-
-    const onNewProject = () => handleNewProject();
-    window.addEventListener('staged:new-project', onNewProject);
-
     const onScrollToBranch = (e: Event) => {
       const branchId = (e as CustomEvent<{ branchId: string }>).detail.branchId;
       const el = document.querySelector(`[data-branch-id="${branchId}"]`);
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        // Brief highlight flash to draw attention
         el.classList.add('scroll-highlight');
         setTimeout(() => el.classList.remove('scroll-highlight'), 1200);
       }
     };
     window.addEventListener('staged:scroll-to-branch', onScrollToBranch);
 
+    // Listen for TopBar "+" button when in project detail view
+    const onNewBranch = () => handleNewBranch();
+    window.addEventListener('staged:new-branch', onNewBranch);
+
     return () => {
-      window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:scroll-to-branch', onScrollToBranch);
+      window.removeEventListener('staged:new-branch', onNewBranch);
     };
   });
 
-  function handleClose() {
-    getCurrentWindow().close();
-  }
-
-  let hasContent = $derived(projectStore.projects.length > 0);
-
-  // ── Project actions ──
-
-  function handleNewProject() {
-    showNewProjectModal = true;
-  }
-
-  async function handleProjectCreated(project: Project) {
-    await addProject(project);
-    showNewProjectModal = false;
-  }
-
-  function handleProjectDetecting(projectId: string, detecting: boolean) {
-    if (detecting) {
-      detectingProjectIds = new Set([...detectingProjectIds, projectId]);
-    } else {
-      const next = new Set(detectingProjectIds);
-      next.delete(projectId);
-      detectingProjectIds = next;
-    }
-  }
-
-  function handleDeleteProjectRequest(project: Project) {
-    projectToDelete = project;
-  }
-
-  async function confirmDeleteProject() {
-    if (!projectToDelete) return;
-    const id = projectToDelete.id;
-    projectToDelete = null;
-
-    try {
-      await removeProject(id);
-    } catch (e) {
-      console.error('Failed to delete project:', e);
-    }
-  }
-
   // ── Branch actions ──
 
-  function handleNewBranch(project: Project) {
-    newBranchProject = project;
+  function handleNewBranch() {
     showNewBranchModal = true;
   }
 
   function handleBranchCreated(branch: Branch) {
     addBranch(branch);
     showNewBranchModal = false;
-    newBranchProject = null;
 
     // For local branches without a worktree, set up the git worktree in the
     // background. The card will show "Creating worktree…" while this runs.
     if (branch.branchType === 'local' && !branch.worktreePath) {
       const branchId = branch.id;
-      const projectId = branch.projectId;
+      const bProjectId = branch.projectId;
 
       commands
         .setupWorktree(branchId)
         .then((updated) => {
-          // Replace the branch record so the card picks up worktreePath
           updateBranch(updated);
-
-          // Now that the worktree exists, run prerun actions
           setTimeout(() => {
-            runPrerunActions(branchId, projectId).catch((e) => {
+            runPrerunActions(branchId, bProjectId).catch((e) => {
               console.error('[ProjectHome] Failed to run prerun actions:', e);
             });
           }, 150);
@@ -149,9 +112,10 @@
     }
   }
 
-  function handleDeleteBranchRequest(branchId: string, project: Project) {
-    const branches = projectStore.branchesByProject.get(project.id) || [];
-    const branch = branches.find((b) => b.id === branchId);
+  function handleDeleteBranchRequest(branchId: string) {
+    if (!project) return;
+    const branchList = projectStore.branchesByProject.get(project.id) || [];
+    const branch = branchList.find((b) => b.id === branchId);
     if (branch) {
       branchToDelete = { branch, project };
     }
@@ -162,7 +126,6 @@
     const { branch } = branchToDelete;
     branchToDelete = null;
 
-    // Show "Deleting…" state on the card immediately
     setDeletingBranch(branch.id);
 
     try {
@@ -175,6 +138,23 @@
     }
   }
 
+  function handleDeleteProjectRequest() {
+    if (project) projectToDelete = project;
+  }
+
+  async function confirmDeleteProject() {
+    if (!projectToDelete) return;
+    const id = projectToDelete.id;
+    projectToDelete = null;
+
+    try {
+      await removeProject(id);
+      // goHome() will be triggered by the $effect above when project disappears
+    } catch (e) {
+      console.error('Failed to delete project:', e);
+    }
+  }
+
   // ── Keyboard shortcuts ──
 
   function handleKeydown(e: KeyboardEvent) {
@@ -184,13 +164,7 @@
 
     if (e.metaKey && e.key === 'n') {
       e.preventDefault();
-      // If there's exactly one project, open new branch for it.
-      // Otherwise, open new project.
-      if (projectStore.projects.length === 1) {
-        handleNewBranch(projectStore.projects[0]);
-      } else {
-        handleNewProject();
-      }
+      handleNewBranch();
     }
   }
 </script>
@@ -199,112 +173,40 @@
 
 <div class="project-home">
   <div class="content">
-    {#if projectStore.loading}
-      <div class="loading-state">
-        <p>Loading...</p>
+    {#if project}
+      <div class="back-bar">
+        <button class="back-button" onclick={goHome}>
+          <ArrowLeft size={14} />
+          <span>Projects</span>
+        </button>
       </div>
-    {:else if projectStore.storeIncompat && projectStore.storeIncompat.kind === 'needs_reset'}
-      <div class="update-state">
-        <div class="update-card">
-          <div class="update-header">
-            <h1 class="update-title">Update Required</h1>
-            <span class="version-badge new">v{projectStore.storeIncompat.appVersion}</span>
-          </div>
-          <p>
-            Staged beta updates can require backwards-incompatible changes. The info stored by
-            Staged (session history, notes) will be cleared, but your
-            <strong>git repos and branches are not affected</strong>.
-          </p>
-          <div class="update-footer">
-            <p class="version-hint">
-              Not ready? Install <code>v{projectStore.storeIncompat.dbAppVersion}</code> instead.
-            </p>
-            <div class="update-actions">
-              <button class="close-button" onclick={handleClose}>Close</button>
-              <button
-                class="reset-button"
-                onclick={handleResetStore}
-                disabled={projectStore.resetting}
-              >
-                {projectStore.resetting ? 'Resetting…' : 'Reset & Update'}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    {:else if projectStore.storeIncompat && projectStore.storeIncompat.kind === 'too_new'}
-      <div class="update-state">
-        <div class="update-card">
-          <div class="update-header">
-            <h1 class="update-title">Update Staged</h1>
-            <span class="version-badge new">v{projectStore.storeIncompat.dbAppVersion}</span>
-          </div>
-          <p>
-            This database was last used by a newer version of Staged. Please install
-            <strong>v{projectStore.storeIncompat.dbAppVersion}</strong> or newer to continue.
-          </p>
-          <div class="update-footer">
-            <div></div>
-            <div class="update-actions">
-              <button class="close-button" onclick={handleClose}>Close</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    {:else if projectStore.error}
-      <div class="error-state">
-        <p>{projectStore.error}</p>
-      </div>
-    {:else if !hasContent}
-      <div class="empty-state">
-        <div class="welcome-header">
-          <StagedIcon size={28} />
-          <h2>welcome to <span class="mono accent">staged</span></h2>
-        </div>
-        <p class="welcome-subtitle">
-          Add one of your repos as a project to get started —
-          <button class="kbd-btn" onclick={handleNewProject} title="New project">+</button>
-          <span class="shortcut-hint">(⌘N)</span>
-        </p>
-        <GitTreeAnimation />
+
+      <div class="projects-list">
+        <ProjectSection
+          {project}
+          {branches}
+          deletingBranches={projectStore.deletingBranches}
+          detecting={detectingProjectIds.has(project.id)}
+          onDeleteProject={handleDeleteProjectRequest}
+          onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId)}
+          onNewBranch={handleNewBranch}
+        />
       </div>
     {:else}
-      <div class="projects-list">
-        {#each projectStore.projects as project (project.id)}
-          <ProjectSection
-            {project}
-            branches={[...(projectStore.branchesByProject.get(project.id) || [])].sort(
-              (a, b) => b.updatedAt - a.updatedAt
-            )}
-            deletingBranches={projectStore.deletingBranches}
-            detecting={detectingProjectIds.has(project.id)}
-            onDeleteProject={() => handleDeleteProjectRequest(project)}
-            onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
-            onNewBranch={() => handleNewBranch(project)}
-          />
-        {/each}
+      <div class="loading-state">
+        <p>Loading...</p>
       </div>
     {/if}
   </div>
 </div>
 
-<!-- New project modal -->
-{#if showNewProjectModal}
-  <NewProjectModal
-    onCreated={handleProjectCreated}
-    onDetecting={handleProjectDetecting}
-    onClose={() => (showNewProjectModal = false)}
-  />
-{/if}
-
 <!-- New branch modal -->
-{#if showNewBranchModal && newBranchProject}
+{#if showNewBranchModal && project}
   <NewBranchModal
-    project={newBranchProject}
+    {project}
     onCreated={handleBranchCreated}
     onClose={() => {
       showNewBranchModal = false;
-      newBranchProject = null;
     }}
   />
 {/if}
@@ -352,8 +254,7 @@
     flex-direction: column;
   }
 
-  .loading-state,
-  .error-state {
+  .loading-state {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -361,185 +262,34 @@
     color: var(--text-muted);
   }
 
-  .error-state {
-    color: var(--ui-danger);
+  .back-bar {
+    margin-bottom: 12px;
+    max-width: 800px;
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
   }
 
-  /* Store update state */
-  .update-state {
-    display: flex;
+  .back-button {
+    display: inline-flex;
     align-items: center;
-    justify-content: center;
-    flex: 1;
-  }
-
-  .update-card {
-    width: 460px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .update-header {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-  }
-
-  .update-title {
-    margin: 0;
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.03em;
-  }
-
-  .version-badge.new {
-    font-family: 'SF Mono', 'Menlo', monospace;
-    font-size: var(--size-xs);
-    font-weight: 600;
-    padding: 2px 7px;
-    border-radius: 4px;
-    background-color: rgba(63, 185, 80, 0.12);
-    color: var(--ui-accent);
-  }
-
-  .update-card > p {
-    margin: 0;
-    font-size: var(--size-sm);
-    color: var(--text-muted);
-    line-height: 1.6;
-  }
-
-  .update-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-  }
-
-  .version-hint {
-    margin: 0;
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-  }
-
-  .version-hint code {
-    font-family: 'SF Mono', 'Menlo', monospace;
-    font-size: var(--size-xs);
-    padding: 1px 5px;
-    background-color: var(--bg-elevated);
-    border-radius: 3px;
-    color: var(--text-muted);
-  }
-
-  .update-actions {
-    display: flex;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
-  .close-button {
-    padding: 7px 16px;
-    background: none;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .close-button:hover {
-    border-color: var(--border-emphasis);
-    color: var(--text-primary);
-  }
-
-  .reset-button {
-    padding: 7px 16px;
-    background-color: var(--ui-accent);
+    gap: 5px;
+    padding: 4px 8px;
+    background: transparent;
     border: none;
-    border-radius: 8px;
-    color: var(--bg-deepest);
-    font-size: var(--size-sm);
-    font-weight: 600;
-    cursor: pointer;
-    transition: background-color 0.15s ease;
-  }
-
-  .reset-button:hover {
-    background-color: var(--ui-accent-hover);
-  }
-
-  .reset-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  /* Empty state */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    gap: 20px;
-  }
-
-  .welcome-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .welcome-header h2 {
-    font-size: var(--size-xl);
-    font-weight: 500;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
-  .welcome-header .mono {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    letter-spacing: -0.02em;
-  }
-
-  .welcome-header .accent {
-    color: var(--ui-accent);
-  }
-
-  .welcome-subtitle {
-    margin: 0;
-    font-size: var(--size-sm);
+    border-radius: 6px;
     color: var(--text-muted);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .welcome-subtitle .kbd-btn {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    font-size: var(--size-xs);
-    padding: 1px 5px;
-    background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-radius: 4px;
-    color: var(--ui-accent);
+    font-size: var(--size-sm);
+    font-weight: 500;
     cursor: pointer;
     transition:
-      background-color 0.15s ease,
-      border-color 0.15s ease;
+      color 0.1s,
+      background-color 0.1s;
   }
 
-  .welcome-subtitle .kbd-btn:hover {
+  .back-button:hover {
+    color: var(--text-primary);
     background-color: var(--bg-hover);
-    border-color: var(--ui-accent);
-  }
-
-  .welcome-subtitle .shortcut-hint {
-    color: var(--text-faint);
-    font-size: var(--size-xs);
   }
 
   /* Projects list */

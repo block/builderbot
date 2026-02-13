@@ -9,6 +9,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import ThemeSelectorModal from './features/settings/ThemeSelectorModal.svelte';
   import AgentDropdown from './features/agents/AgentDropdown.svelte';
+  import { navigation } from './navigation.svelte';
 
   interface Props {
     onToggleSidebar?: () => void;
@@ -19,6 +20,14 @@
 
   let showThemeModal = $state(false);
   let showAgentDropdown = $state(false);
+
+  function handlePlusClick() {
+    if (navigation.selectedProjectId) {
+      window.dispatchEvent(new CustomEvent('staged:new-branch'));
+    } else {
+      window.dispatchEvent(new CustomEvent('staged:new-project'));
+    }
+  }
 
   function startDrag(e: PointerEvent) {
     if (e.button !== 0) return;
@@ -49,8 +58,8 @@
   <div class="top-bar-actions">
     <button
       class="icon-btn"
-      onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
-      title="New project (⌘N)"
+      onclick={handlePlusClick}
+      title={navigation.selectedProjectId ? 'New branch (⌘N)' : 'New project (⌘N)'}
     >
       <Plus size={14} />
     </button>

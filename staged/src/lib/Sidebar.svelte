@@ -1,17 +1,17 @@
 <!--
-  Sidebar.svelte - Collapsible left sidebar showing all commits and notes
+  Sidebar.svelte - Collapsible left sidebar with project navigation and activity feed
 
-  Fetches timelines for every tracked branch and renders a cumulative,
-  recency-sorted list of commits and notes across all projects.
-  Supports a "group by project" toggle that organizes items under
-  project headings. Clicking an item scrolls the main content to its
-  parent branch card.
+  Top section: clickable project list for navigation.
+  Bottom section: cumulative, recency-sorted list of commits and notes.
+  When a project is selected, the activity feed is filtered to that project.
 
-  Also shows a "Builds" section at the top when there are running
+  Also shows a "Builds" section when there are running
   (or recently finished) actions across any branch.
 -->
 <script lang="ts">
   import {
+    Folder,
+    Home,
     GitCommitHorizontal,
     StickyNote,
     FolderTree,
@@ -25,6 +25,7 @@
   import type { Branch, CommitTimelineItem, NoteTimelineItem } from './types';
   import { projectStore } from './features/projects/projectStore.svelte';
   import { projectDisplayName } from './shared/utils';
+  import { navigation, selectProject, goHome } from './navigation.svelte';
   import * as commands from './commands';
   import {
     preferences,
@@ -259,6 +260,14 @@
     }
   }
 
+  // ── Filtered view: when a project is selected, filter to that project ──
+
+  let filteredTimelineItems = $derived(
+    navigation.selectedProjectId
+      ? timelineItems.filter((item) => item.projectId === navigation.selectedProjectId)
+      : timelineItems
+  );
+
   // ── Grouped view: items grouped by project, projects ordered by most recent item ──
 
   let groupedItems = $derived.by(() => {
@@ -267,7 +276,7 @@
       { projectId: string; projectName: string; items: SidebarItem[]; maxTs: number }
     >();
 
-    for (const item of timelineItems) {
+    for (const item of filteredTimelineItems) {
       let group = groups.get(item.projectId);
       if (!group) {
         group = {
@@ -284,6 +293,21 @@
 
     return [...groups.values()].sort((a, b) => b.maxTs - a.maxTs);
   });
+
+  // ── Project last-activity helpers ──
+
+  function getProjectLastActivity(projectId: string): string {
+    const items = timelineItems.filter((i) => i.projectId === projectId);
+    if (items.length > 0) {
+      return formatRelativeTime(items[0].timestamp);
+    }
+    const branches = projectStore.branchesByProject.get(projectId) || [];
+    if (branches.length > 0) {
+      const latest = Math.max(...branches.map((b) => b.updatedAt));
+      return formatRelativeTime(Math.floor(latest / 1000));
+    }
+    return '';
+  }
 
   // ── Helpers ──
 
@@ -337,7 +361,34 @@
 </script>
 
 <aside class="sidebar" class:resizing style:width="{preferences.sidebarWidth}px">
+  <!-- ── Projects navigation ── -->
   <div class="sidebar-header">
+    <button class="sidebar-title-btn" onclick={goHome} title="All projects">
+      <span class="sidebar-title">Projects</span>
+    </button>
+  </div>
+
+  {#if projectStore.projects.length > 0}
+    <div class="projects-nav">
+      {#each projectStore.projects as p (p.id)}
+        <button
+          class="project-nav-item"
+          class:active={navigation.selectedProjectId === p.id}
+          onclick={() => selectProject(p.id)}
+          title={projectDisplayName(p)}
+        >
+          <span class="project-nav-icon"><Folder size={12} /></span>
+          <span class="project-nav-name">{projectDisplayName(p)}</span>
+          {#if getProjectLastActivity(p.id)}
+            <span class="project-nav-time">{getProjectLastActivity(p.id)}</span>
+          {/if}
+        </button>
+      {/each}
+    </div>
+  {/if}
+
+  <!-- ── Activity feed ── -->
+  <div class="activity-header">
     <span class="sidebar-title">Activity</span>
     <button
       class="group-toggle"
@@ -389,7 +440,7 @@
 
     {#if projectStore.loading || timelineLoading}
       <div class="sidebar-empty">Loading...</div>
-    {:else if timelineItems.length === 0}
+    {:else if filteredTimelineItems.length === 0}
       <div class="sidebar-empty">No activity yet</div>
     {:else if preferences.sidebarGroupByProject}
       <!-- Grouped by project -->
@@ -428,7 +479,7 @@
       {/each}
     {:else}
       <!-- Flat list sorted by recency -->
-      {#each timelineItems as item (item.key)}
+      {#each filteredTimelineItems as item (item.key)}
         <button
           class="timeline-item"
           onclick={() => scrollToBranch(item.branchId)}
@@ -509,8 +560,21 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 12px 8px;
+    padding: 10px 12px 6px;
     flex-shrink: 0;
+  }
+
+  .sidebar-title-btn {
+    display: flex;
+    align-items: center;
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .sidebar-title-btn:hover .sidebar-title {
+    color: var(--text-muted);
   }
 
   .sidebar-title {
@@ -519,6 +583,80 @@
     color: var(--text-faint);
     text-transform: uppercase;
     letter-spacing: 0.04em;
+  }
+
+  /* ── Projects navigation ── */
+
+  .projects-nav {
+    display: flex;
+    flex-direction: column;
+    padding: 0 6px 6px;
+    flex-shrink: 0;
+  }
+
+  .project-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 5px 6px;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      color 0.1s;
+  }
+
+  .project-nav-item:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .project-nav-item.active {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .project-nav-icon {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    color: var(--text-faint);
+  }
+
+  .project-nav-item.active .project-nav-icon {
+    color: var(--ui-accent);
+  }
+
+  .project-nav-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .project-nav-time {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--text-faint);
+    opacity: 0.7;
+  }
+
+  /* ── Activity header ── */
+
+  .activity-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px 6px;
+    flex-shrink: 0;
+    border-top: 1px solid var(--border-subtle);
   }
 
   .group-toggle {

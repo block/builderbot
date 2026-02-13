@@ -9,6 +9,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import TopBar from './lib/TopBar.svelte';
   import Sidebar from './lib/Sidebar.svelte';
+  import ProjectsList from './lib/features/projects/ProjectsList.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import AgentSetupModal from './lib/features/agents/AgentSetupModal.svelte';
@@ -19,6 +20,7 @@
   } from './lib/features/settings/preferences.svelte';
   import { agentState, refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
+  import { navigation } from './lib/navigation.svelte';
 
   let showSessionLab = $state(false);
   let showAgentSetup = $state(false);
@@ -104,7 +106,11 @@
         <Sidebar />
       {/if}
       <div class="content">
-        <ProjectHome />
+        {#if navigation.selectedProjectId}
+          <ProjectHome projectId={navigation.selectedProjectId} />
+        {:else}
+          <ProjectsList />
+        {/if}
       </div>
     </div>
   </main>

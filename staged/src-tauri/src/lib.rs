@@ -7,6 +7,7 @@ pub mod actions;
 pub mod agent;
 pub mod blox;
 pub mod git;
+pub mod paths;
 mod recent_repos;
 pub mod session_commands;
 pub mod session_runner;

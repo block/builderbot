@@ -729,14 +729,10 @@
     </div>
   {:else if branch.branchType === 'local' && !branch.worktreePath}
     <div class="card-header">
+      <GitBranch size={14} class="branch-icon header-icon" />
       <div class="header-left">
-        <div class="header-top">
-          <span class="branch-name">{branch.branchName}</span>
-        </div>
-        <div class="header-bottom">
-          <GitBranch size={12} class="branch-icon" />
-          <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
-        </div>
+        <span class="branch-name">{branch.branchName}</span>
+        <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
       </div>
     </div>
     <div class="card-content">
@@ -747,14 +743,10 @@
     </div>
   {:else}
     <div class="card-header">
+      <GitBranch size={14} class="branch-icon header-icon" />
       <div class="header-left">
-        <div class="header-top">
-          <span class="branch-name">{branch.branchName}</span>
-        </div>
-        <div class="header-bottom">
-          <GitBranch size={12} class="branch-icon" />
-          <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
-        </div>
+        <span class="branch-name">{branch.branchName}</span>
+        <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
       </div>
       <div class="header-actions">
         <!-- Running actions (excluding primary action) -->
@@ -1107,8 +1099,14 @@
   .card-header {
     display: flex;
     align-items: center;
+    gap: 12px;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border-subtle);
+  }
+
+  :global(.header-icon) {
+    flex-shrink: 0;
+    align-self: center;
   }
 
   .header-left {
@@ -1116,18 +1114,6 @@
     flex-direction: column;
     min-width: 0;
     flex: 1;
-  }
-
-  .header-top {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-  }
-
-  .header-bottom {
-    display: flex;
-    align-items: center;
-    gap: 5px;
   }
 
   .header-actions {

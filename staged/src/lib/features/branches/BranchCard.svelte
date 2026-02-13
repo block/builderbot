@@ -261,6 +261,29 @@
     };
   });
 
+  // Fallback polling: if the session-status-changed event is missed (e.g. due to
+  // listener re-registration race), poll the session status every 5s while creating.
+  $effect(() => {
+    if (prState !== 'creating' || !prSessionId) return;
+
+    const sid = prSessionId;
+    const interval = setInterval(async () => {
+      try {
+        const session = await commands.getSession(sid);
+        if (session && session.status !== 'running') {
+          handlePrSessionComplete(session.status);
+        }
+      } catch {
+        // Session may have been deleted — clear the creating state
+        prStateOverride = 'error';
+        prError = 'Lost track of PR creation session.';
+        prSessionId = null;
+      }
+    }, 5_000);
+
+    return () => clearInterval(interval);
+  });
+
   // Re-check unpushed commits whenever the timeline refreshes and a PR exists
   $effect(() => {
     // Re-run when timeline changes (dependency) and PR exists
@@ -596,16 +619,23 @@
 
   /**
    * Extract a PR URL from session messages.
-   * Looks for a line matching `PR_URL: <url>` in any assistant message.
-   * Also tries to find GitHub PR URLs directly in the text.
+   *
+   * Searches in two passes:
+   *  1. Look for the explicit `PR_URL: <url>` marker the agent is instructed
+   *     to emit — checked in assistant AND tool_result messages because the
+   *     marker may appear in shell output captured as a tool_result.
+   *  2. Fall back to any GitHub PR URL (`/pull/\d+`) found in any message
+   *     role, which covers `gh pr create` output stored as a tool_result.
    */
   function extractPrUrl(messages: { content: string; role: string }[]): string | null {
+    // Pass 1: explicit PR_URL marker (highest confidence)
     for (const msg of messages) {
-      if (msg.role !== 'assistant') continue;
-      // Look for explicit PR_URL marker
+      if (msg.role !== 'assistant' && msg.role !== 'tool_result') continue;
       const markerMatch = msg.content.match(/PR_URL:\s*(https?:\/\/\S+)/);
       if (markerMatch) return markerMatch[1];
-      // Fallback: look for GitHub PR URL pattern
+    }
+    // Pass 2: any GitHub PR URL in any message
+    for (const msg of messages) {
       const ghMatch = msg.content.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
       if (ghMatch) return ghMatch[0];
     }
@@ -977,11 +1007,11 @@
         <button
           class="pr-btn"
           class:creating={prState === 'creating'}
-          class:error={prState === 'error' || !!pushError}
+          class:error={(prState === 'error' || !!pushError) && !showPushErrorDialog}
           class:created={prState === 'created' && !pushError}
           class:pushing
           onclick={handlePrButtonClick}
-          disabled={pushing}
+          disabled={pushing || showPushErrorDialog}
           title={pushing
             ? 'Pushing…'
             : pushError
@@ -1093,9 +1123,21 @@
 {#if openSessionId}
   <SessionModal
     sessionId={openSessionId}
-    onClose={() => {
+    onClose={async () => {
+      const closedSessionId = openSessionId;
       openSessionId = null;
       loadTimeline();
+      // If the closed modal was the PR session, check if it finished while open
+      if (prState === 'creating' && closedSessionId === prSessionId) {
+        try {
+          const session = await commands.getSession(closedSessionId);
+          if (session && session.status !== 'running') {
+            handlePrSessionComplete(session.status);
+          }
+        } catch {
+          // Ignore — the polling fallback will catch it
+        }
+      }
     }}
   />
 {/if}

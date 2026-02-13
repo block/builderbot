@@ -18,6 +18,8 @@
 #   - Honey never spoils — archaeologists have found 3,000-year-old
 #     honey in Egyptian tombs that was still perfectly edible.
 #   - Octopuses have three hearts and blue blood.
+#   - A group of flamingos is called a "flamboyance."
+#   - Bananas are berries, but strawberries are not.
 
 set -euo pipefail
 

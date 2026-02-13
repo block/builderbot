@@ -1128,7 +1128,7 @@
       openSessionId = null;
       loadTimeline();
       // If the closed modal was the PR session, check if it finished while open
-      if (prState === 'creating' && closedSessionId === prSessionId) {
+      if (prState === 'creating' && closedSessionId === prSessionId && closedSessionId) {
         try {
           const session = await commands.getSession(closedSessionId);
           if (session && session.status !== 'running') {

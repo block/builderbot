@@ -5,7 +5,7 @@
   Read-only view.
 -->
 <script lang="ts">
-  import { X, Share, Check } from 'lucide-svelte';
+  import { X, Copy, Check } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { handleExternalLinkClick } from '../../commands';
@@ -76,7 +76,7 @@
           {#if copied}
             <Check size={16} />
           {:else}
-            <Share size={16} />
+            <Copy size={16} />
           {/if}
         </button>
         <button class="close-btn" onclick={onClose} title="Close (Esc)">

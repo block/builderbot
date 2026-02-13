@@ -3,7 +3,12 @@
 {{define "head"}}
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-    <script>mermaid.initialize({ startOnLoad: false, theme: 'default' });</script>
+    <script>
+        function getMermaidTheme() {
+            return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default';
+        }
+        mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
+    </script>
 {{end}}
 
 {{define "pagestyle"}}
@@ -1530,6 +1535,8 @@
     });
 
     // --- Mermaid diagram rendering ---
+    var mermaidSources = []; // Store sources for re-rendering on theme change
+
     function renderMermaidBlocks() {
         var content = document.getElementById('content');
         if (!content) return;
@@ -1550,11 +1557,32 @@
             div.appendChild(mermaidDiv);
             pre.parentNode.replaceChild(div, pre);
             containers.push(mermaidDiv);
+            mermaidSources.push({ container: div, source: text, sourceLine: sourceLine });
         });
         if (containers.length > 0) {
             mermaid.run({ nodes: containers });
         }
     }
+
+    function reRenderMermaidForTheme() {
+        if (mermaidSources.length === 0) return;
+        mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
+        var containers = [];
+        mermaidSources.forEach(function(item) {
+            var mermaidDiv = item.container.querySelector('.mermaid');
+            if (mermaidDiv) {
+                mermaidDiv.removeAttribute('data-processed');
+                mermaidDiv.innerHTML = item.source;
+                containers.push(mermaidDiv);
+            }
+        });
+        if (containers.length > 0) {
+            mermaid.run({ nodes: containers });
+        }
+    }
+
+    // Listen for theme changes
+    document.addEventListener('themechange', reRenderMermaidForTheme);
 
     // Initial render
     initFileMenus();

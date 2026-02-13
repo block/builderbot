@@ -1246,6 +1246,7 @@
             }
             localStorage.setItem('birdseye-theme', newTheme);
             updateThemeIcon();
+            document.dispatchEvent(new CustomEvent('themechange', { detail: { theme: newTheme } }));
         }
 
         function updateThemeIcon() {
@@ -1264,12 +1265,14 @@
         // Listen for system theme changes
         window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
             if (!localStorage.getItem('birdseye-theme')) {
+                var newTheme = e.matches ? 'dark' : 'light';
                 if (e.matches) {
                     document.documentElement.setAttribute('data-theme', 'dark');
                 } else {
                     document.documentElement.removeAttribute('data-theme');
                 }
                 updateThemeIcon();
+                document.dispatchEvent(new CustomEvent('themechange', { detail: { theme: newTheme } }));
             }
         });
 

@@ -9,11 +9,11 @@ impl Store {
     pub fn create_project(&self, project: &Project) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO projects (id, repo_path, subpath, created_at, updated_at)
+            "INSERT INTO projects (id, github_repo, subpath, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 project.id,
-                project.repo_path,
+                project.github_repo,
                 project.subpath,
                 project.created_at,
                 project.updated_at,
@@ -25,12 +25,12 @@ impl Store {
     pub fn get_project(&self, id: &str) -> Result<Option<Project>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, repo_path, subpath, created_at, updated_at FROM projects WHERE id = ?1",
+            "SELECT id, github_repo, subpath, created_at, updated_at FROM projects WHERE id = ?1",
             params![id],
             |row| {
                 Ok(Project {
                     id: row.get(0)?,
-                    repo_path: row.get(1)?,
+                    github_repo: row.get(1)?,
                     subpath: row.get(2)?,
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
@@ -41,15 +41,15 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub fn get_project_by_repo(&self, repo_path: &str) -> Result<Option<Project>, StoreError> {
+    pub fn get_project_by_repo(&self, github_repo: &str) -> Result<Option<Project>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, repo_path, subpath, created_at, updated_at FROM projects WHERE repo_path = ?1",
-            params![repo_path],
+            "SELECT id, github_repo, subpath, created_at, updated_at FROM projects WHERE github_repo = ?1",
+            params![github_repo],
             |row| {
                 Ok(Project {
                     id: row.get(0)?,
-                    repo_path: row.get(1)?,
+                    github_repo: row.get(1)?,
                     subpath: row.get(2)?,
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
@@ -63,12 +63,12 @@ impl Store {
     pub fn list_projects(&self) -> Result<Vec<Project>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, repo_path, subpath, created_at, updated_at FROM projects ORDER BY created_at ASC",
+            "SELECT id, github_repo, subpath, created_at, updated_at FROM projects ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Project {
                 id: row.get(0)?,
-                repo_path: row.get(1)?,
+                github_repo: row.get(1)?,
                 subpath: row.get(2)?,
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,

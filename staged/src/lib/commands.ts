@@ -7,6 +7,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   Project,
+  GitHubRepo,
   Branch,
   BranchTimeline,
   BranchRef,
@@ -47,16 +48,27 @@ export function listProjects(): Promise<Project[]> {
   return invoke('list_projects');
 }
 
-export function createProject(
-  repoPath: string,
-  subpath?: string,
-  importWorktrees?: boolean
-): Promise<Project> {
-  return invoke('create_project', { repoPath, subpath, importWorktrees });
+export function createProject(githubRepo: string, subpath?: string): Promise<Project> {
+  return invoke('create_project', { githubRepo, subpath });
 }
 
 export function deleteProject(id: string): Promise<void> {
   return invoke('delete_project', { id });
+}
+
+/** List the authenticated user's GitHub organization memberships. */
+export function listGithubOrgs(): Promise<string[]> {
+  return invoke('list_github_orgs');
+}
+
+/** List GitHub repositories for the authenticated user or a specific owner. */
+export function listGithubRepos(owner?: string): Promise<GitHubRepo[]> {
+  return invoke('list_github_repos', { owner: owner ?? null });
+}
+
+/** Search GitHub repositories for the authenticated user or a specific owner. */
+export function searchGithubRepos(query: string, owner?: string): Promise<GitHubRepo[]> {
+  return invoke('search_github_repos', { query, owner: owner ?? null });
 }
 
 // =============================================================================
@@ -408,26 +420,26 @@ export function isSqAvailable(): Promise<boolean> {
   return invoke('is_sq_available');
 }
 
-export function listGitBranches(repoPath: string): Promise<BranchRef[]> {
-  return invoke('list_git_branches', { repoPath });
+export function listGitBranches(githubRepo: string): Promise<BranchRef[]> {
+  return invoke('list_git_branches', { githubRepo });
 }
 
-export function detectDefaultBranch(repoPath: string): Promise<string> {
-  return invoke('detect_default_branch_cmd', { repoPath });
+export function detectDefaultBranch(githubRepo: string): Promise<string> {
+  return invoke('detect_default_branch_cmd', { githubRepo });
 }
 
 /** Prune stale remote-tracking refs in the background.
- *  This is a network operation — call fire-and-forget after the UI has loaded. */
-export function pruneRemoteRefs(repoPath: string): Promise<void> {
-  return invoke('prune_remote_refs', { repoPath });
+ *  With GitHub-repo-based projects, this is a no-op. */
+export function pruneRemoteRefs(githubRepo: string): Promise<void> {
+  return invoke('prune_remote_refs', { githubRepo });
 }
 
-export function listPullRequests(repoPath: string): Promise<PullRequest[]> {
-  return invoke('list_pull_requests', { repoPath });
+export function listPullRequests(githubRepo: string): Promise<PullRequest[]> {
+  return invoke('list_pull_requests', { githubRepo });
 }
 
-export function listIssues(repoPath: string): Promise<Issue[]> {
-  return invoke('list_issues', { repoPath });
+export function listIssues(githubRepo: string): Promise<Issue[]> {
+  return invoke('list_issues', { githubRepo });
 }
 
 // =============================================================================

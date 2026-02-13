@@ -107,9 +107,6 @@
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
 
-  // Whether the branch has any commits (used to gate PR button visibility)
-  let hasCommits = $derived(timeline != null && timeline.commits.length > 0);
-
   // Actions state
   let actions = $state<ProjectAction[]>([]);
 

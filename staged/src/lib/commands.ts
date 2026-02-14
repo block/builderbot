@@ -96,6 +96,18 @@ export function setupWorktree(branchId: string): Promise<Branch> {
   return invoke('setup_worktree', { branchId });
 }
 
+/** Import a GitHub PR: fetch its head ref, create a local branch + worktree,
+ *  and record everything in the DB. Returns the branch with worktreePath
+ *  already populated (no separate setupWorktree call needed). */
+export function setupWorktreeFromPr(
+  projectId: string,
+  prNumber: number,
+  headRef: string,
+  baseRef: string
+): Promise<Branch> {
+  return invoke('setup_worktree_from_pr', { projectId, prNumber, headRef, baseRef });
+}
+
 /** Create a remote branch record (does not start the workspace). */
 export function createRemoteBranch(
   projectId: string,

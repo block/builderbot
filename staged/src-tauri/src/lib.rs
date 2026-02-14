@@ -592,6 +592,51 @@ async fn setup_worktree(
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
 }
 
+/// Import a GitHub PR as a local branch with a worktree.
+///
+/// Fetches the PR's head ref, creates a local branch at that commit, sets up
+/// a git worktree, and records everything in the DB. Returns the branch with
+/// `worktree_path` already populated so the frontend doesn't need to call
+/// `setup_worktree` separately.
+#[tauri::command(rename_all = "camelCase")]
+async fn setup_worktree_from_pr(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    pr_number: u64,
+    head_ref: String,
+    base_ref: String,
+) -> Result<BranchWithWorkdir, String> {
+    let store = get_store(&store)?;
+
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+
+    // Ensure we have a local clone
+    let repo_path = git::ensure_local_clone(&project.github_repo).map_err(|e| e.to_string())?;
+
+    // Fetch PR head and create worktree
+    let (worktree_path, branch_name, base_branch) =
+        git::create_worktree_from_pr(&repo_path, pr_number, &head_ref, &base_ref)
+            .map_err(|e| e.to_string())?;
+
+    let worktree_str = worktree_path
+        .to_str()
+        .ok_or("Invalid worktree path")?
+        .to_string();
+
+    // Create branch record with PR number
+    let branch = store::Branch::new(&project_id, &branch_name, &base_branch).with_pr(pr_number);
+    store.create_branch(&branch).map_err(|e| e.to_string())?;
+
+    // Create workdir record
+    let workdir = store::Workdir::new(&project_id, &worktree_str).with_branch(&branch.id);
+    store.create_workdir(&workdir).map_err(|e| e.to_string())?;
+
+    Ok(to_branch_with_workdir(branch, Some(worktree_str)))
+}
+
 /// Create a remote branch record.
 ///
 /// Creates the branch DB record with type=remote and status=Starting.
@@ -2261,6 +2306,7 @@ pub fn run() {
             list_branches_for_project,
             create_branch,
             setup_worktree,
+            setup_worktree_from_pr,
             create_remote_branch,
             start_workspace,
             delete_branch,

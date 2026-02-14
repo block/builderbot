@@ -69,6 +69,7 @@
   let prsLoaded = $state(false);
   let issuesLoading = $state(false);
   let issuesLoaded = $state(false);
+  let selectedPr = $state<PullRequest | null>(null);
 
   let githubSearchEl: HTMLInputElement | null = $state(null);
 
@@ -271,7 +272,8 @@
   }
 
   function selectPullRequest(pr: PullRequest) {
-    branchTitle = `pr-${pr.number}-${pr.title}`;
+    selectedPr = pr;
+    branchTitle = pr.headRef;
     // Auto-set base branch to the PR's target
     selectedBaseBranch = pr.baseRef;
     showGithubPicker = false;
@@ -311,7 +313,18 @@
     error = null;
 
     try {
-      if (branchType === 'local') {
+      if (selectedPr && branchType === 'local') {
+        // PR import: fetch the PR's head ref and create a worktree of that branch.
+        // This does everything in one shot (clone, fetch, branch, worktree, DB records)
+        // and returns a branch with worktreePath already populated.
+        const branch = await commands.setupWorktreeFromPr(
+          project.id,
+          selectedPr.number,
+          selectedPr.headRef,
+          selectedPr.baseRef
+        );
+        onCreated(branch);
+      } else if (branchType === 'local') {
         const baseBranch = selectedBaseBranch ?? undefined;
         // Fast: creates DB record only (no git worktree yet)
         const branch = await commands.createBranch(

@@ -443,8 +443,18 @@ fn build_remote_branch_context(
 
     parts.push(context_preamble());
 
-    // Full commit log via ws_exec
-    let range = format!("{base_branch}..HEAD");
+    // Full commit log via ws_exec.
+    // Use merge-base to find the fork point so that only the branch's own
+    // commits are included, even after a rebase or when the base ref has
+    // moved forward.
+    let range = if let Ok(mb_output) =
+        blox::ws_exec(workspace_name, &["git", "merge-base", base_branch, "HEAD"])
+    {
+        let mb = mb_output.trim().to_string();
+        format!("{mb}..HEAD")
+    } else {
+        format!("{base_branch}..HEAD")
+    };
     match blox::ws_exec(
         workspace_name,
         &[

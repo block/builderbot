@@ -257,10 +257,20 @@ pub struct CommitInfo {
 
 /// Get commits between base and head.
 /// Returns commits in reverse chronological order (newest first).
+///
+/// Uses `merge-base` to find the actual fork point so that only the
+/// branch's own commits are returned, even after a rebase or when the
+/// base ref (e.g. `origin/main`) has moved forward.
 pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitInfo>, GitError> {
+    // Find the merge-base (fork point) between the base ref and HEAD.
+    // This is more robust than a raw `base..HEAD` range because it
+    // handles the case where `base` has advanced beyond where the branch
+    // was originally created or last rebased onto.
+    let merge_base = super::refs::merge_base(worktree, base, "HEAD")?;
+
     // Format: sha|short_sha|subject|author|timestamp
     let format = "--format=%H|%h|%s|%an|%ct";
-    let range = format!("{base}..HEAD");
+    let range = format!("{merge_base}..HEAD");
 
     let output = cli::run(worktree, &["log", format, &range])?;
 
@@ -289,8 +299,12 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
 /// Returns a formatted string suitable for inclusion in a prompt, with
 /// commits listed oldest-first. Each entry includes SHA, author, date,
 /// and the full commit message (subject + body).
+///
+/// Uses `merge-base` to find the actual fork point, consistent with
+/// [`get_commits_since_base`].
 pub fn get_full_commit_log(worktree: &Path, base: &str) -> Result<String, GitError> {
-    let range = format!("{base}..HEAD");
+    let merge_base = super::refs::merge_base(worktree, base, "HEAD")?;
+    let range = format!("{merge_base}..HEAD");
 
     // --reverse gives oldest-first ordering
     // %B is the full commit message (subject + body)

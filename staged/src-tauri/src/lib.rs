@@ -1161,8 +1161,20 @@ fn get_branch_timeline(
     // Get commits from git (the source of truth for commit data)
     let mut commits = Vec::new();
     if let Some(ref ws_name) = branch.workspace_name {
-        // Remote branch: fetch commits via ws_exec
-        let range = format!("{}..HEAD", &branch.base_branch);
+        // Remote branch: fetch commits via ws_exec.
+        // Use merge-base to find the fork point so that only the branch's
+        // own commits are shown, even after a rebase or when the base ref
+        // has moved forward.
+        let range = if let Ok(mb_output) =
+            blox::ws_exec(ws_name, &["git", "merge-base", &branch.base_branch, "HEAD"])
+        {
+            let mb = mb_output.trim().to_string();
+            format!("{mb}..HEAD")
+        } else {
+            // Fallback: if merge-base fails (e.g. shallow clone), use
+            // the raw base ref.
+            format!("{}..HEAD", &branch.base_branch)
+        };
         let format_arg = "--format=%H|%h|%s|%an|%ct";
         if let Ok(output) = blox::ws_exec(ws_name, &["git", "log", format_arg, &range]) {
             for line in output.lines() {

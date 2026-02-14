@@ -82,7 +82,7 @@
         secondaryMeta = 'Session finished — no commit created';
       } else if (isPending || isRunning) {
         type = 'pending-commit';
-        secondaryMeta = 'generating...';
+        secondaryMeta = 'Generating commit';
       } else {
         type = 'commit';
         secondaryMeta = formatRelativeTime(commit.timestamp);
@@ -113,7 +113,7 @@
         secondaryMeta = 'Session finished — no note created';
       } else if (isRunning) {
         type = 'generating-note';
-        secondaryMeta = 'generating...';
+        secondaryMeta = 'Generating note';
       } else {
         type = 'note';
         secondaryMeta = formatRelativeTimeMs(note.createdAt);
@@ -236,7 +236,7 @@
         disabled={newSessionDisabled}
       >
         <FileText size={18} />
-        <span>Add Note</span>
+        <span>New note</span>
       </button>
     {/if}
     {#if onNewCommit}
@@ -246,7 +246,7 @@
         disabled={newSessionDisabled}
       >
         <GitCommitHorizontal size={18} />
-        <span>Add Commit</span>
+        <span>New commit</span>
       </button>
     {/if}
   </div>
@@ -341,7 +341,7 @@
     justify-content: center;
     gap: 8px;
     flex: 1;
-    padding: 14px 16px;
+    padding: 10px 6px;
     border-radius: 8px;
     border: none;
     background: var(--bg-elevated);

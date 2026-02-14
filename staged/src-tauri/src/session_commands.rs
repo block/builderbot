@@ -550,8 +550,8 @@ fn build_full_prompt(
 <action>
 The user is requesting a note. Generate a note based on their prompt below.
 
-Do NOT use any tools — no file reads, no commands, no code changes, no commits. \
-Respond with text only.
+You may use any tools needed to research and gather information, but do NOT create \
+any commits.
 
 To return the note, include a horizontal rule (---) followed by the note content. \
 Begin the note with a markdown H1 heading as the title.

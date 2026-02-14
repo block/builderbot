@@ -134,27 +134,29 @@
 
   /**
    * Derive a workspace-safe name from the branch name.
-   * Workspace names cannot contain slashes and must be ≤ 32 chars.
+   * Workspace names cannot contain slashes.
    * This is used ONLY for the Blox workspace identifier, not the git branch.
    */
   let workspaceSafeName = $derived.by(() => {
     if (branchType !== 'remote') return branchName;
-    let name = branchName
+    return branchName
       .replace(/\/+/g, '-')
       .replace(/-+/g, '-')
       .replace(/^-+|-+$/g, '');
-    if (name.length > WORKSPACE_NAME_MAX_LENGTH) {
-      name = name.slice(0, WORKSPACE_NAME_MAX_LENGTH).replace(/-+$/, '');
-    }
-    return name;
   });
 
-  /** Generate a workspace name from the workspace-safe branch name. */
+  /**
+   * Generate a workspace name from the workspace-safe branch name.
+   * The final name (repo prefix + branch part) must be ≤ 32 chars.
+   */
   function workspaceName(name: string): string {
     if (!name) return '';
-    // Prefix with repo name for uniqueness
     const repo = repoName(project.githubRepo);
-    return `${repo}-${name}`;
+    let fullName = `${repo}-${name}`;
+    if (fullName.length > WORKSPACE_NAME_MAX_LENGTH) {
+      fullName = fullName.slice(0, WORKSPACE_NAME_MAX_LENGTH).replace(/-+$/, '');
+    }
+    return fullName;
   }
 
   onMount(async () => {
@@ -338,7 +340,7 @@
         onCreated(branch);
       } else {
         // Branch name is the user's original git branch (preserves slashes, no truncation).
-        // Workspace name is sanitized (no slashes, ≤ 32 chars) for the Blox workspace identifier.
+        // Workspace name is sanitized (no slashes, ≤ 32 chars total) for the Blox workspace identifier.
         const wsName = workspaceName(workspaceSafeName.trim());
         const branch = await commands.createRemoteBranch(
           project.id,

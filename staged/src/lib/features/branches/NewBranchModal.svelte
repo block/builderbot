@@ -133,27 +133,33 @@
 
   let branchName = $derived(sanitizeBranchName(branchTitle));
 
-  const REMOTE_BRANCH_MAX_LENGTH = 32;
+  const WORKSPACE_NAME_MAX_LENGTH = 32;
 
-  /** For remote branches: replace slashes with dashes and enforce max length. */
-  let effectiveBranchName = $derived.by(() => {
+  /**
+   * Derive a workspace-safe name from the branch name.
+   * Workspace names cannot contain slashes.
+   * This is used ONLY for the Blox workspace identifier, not the git branch.
+   */
+  let workspaceSafeName = $derived.by(() => {
     if (branchType !== 'remote') return branchName;
-    let name = branchName
+    return branchName
       .replace(/\/+/g, '-')
       .replace(/-+/g, '-')
       .replace(/^-+|-+$/g, '');
-    if (name.length > REMOTE_BRANCH_MAX_LENGTH) {
-      name = name.slice(0, REMOTE_BRANCH_MAX_LENGTH).replace(/-+$/, '');
-    }
-    return name;
   });
 
-  /** Generate a workspace name from the branch name. */
+  /**
+   * Generate a workspace name from the workspace-safe branch name.
+   * Uses a short "stg-" prefix instead of the repo name to maximize the
+   * space available for the branch portion within the 32-char limit.
+   */
   function workspaceName(name: string): string {
     if (!name) return '';
-    // Prefix with repo name for uniqueness
-    const repo = repoName(project.githubRepo);
-    return `${repo}-${name}`;
+    let fullName = `stg-${name}`;
+    if (fullName.length > WORKSPACE_NAME_MAX_LENGTH) {
+      fullName = fullName.slice(0, WORKSPACE_NAME_MAX_LENGTH).replace(/-+$/, '');
+    }
+    return fullName;
   }
 
   onMount(async () => {
@@ -312,7 +318,7 @@
   }
 
   async function handleCreate() {
-    if (!effectiveBranchName.trim() || creating) return;
+    if (!branchName.trim() || creating) return;
 
     creating = true;
     error = null;
@@ -332,11 +338,7 @@
       } else if (branchType === 'local') {
         const baseBranch = selectedBaseBranch ?? undefined;
         // Fast: creates DB record only (no git worktree yet)
-        const branch = await commands.createBranch(
-          project.id,
-          effectiveBranchName.trim(),
-          baseBranch
-        );
+        const branch = await commands.createBranch(project.id, branchName.trim(), baseBranch);
 
         // If an issue was selected, create a note with the issue title and body
         if (selectedIssue) {
@@ -351,10 +353,12 @@
         // ProjectHome handles worktree setup + prerun actions in the background.
         onCreated(branch);
       } else {
-        const wsName = workspaceName(effectiveBranchName.trim());
+        // Branch name is the user's original git branch (preserves slashes, no truncation).
+        // Workspace name is sanitized (no slashes, ≤ 32 chars total) for the Blox workspace identifier.
+        const wsName = workspaceName(workspaceSafeName.trim());
         const branch = await commands.createRemoteBranch(
           project.id,
-          effectiveBranchName.trim(),
+          branchName.trim(),
           wsName,
           selectedBaseBranch ?? undefined
         );
@@ -426,7 +430,7 @@
         selectBaseBranch(filteredBranches[baseSelectedIndex]);
       }
     } else {
-      if (e.key === 'Enter' && effectiveBranchName.trim()) {
+      if (e.key === 'Enter' && branchName.trim()) {
         e.preventDefault();
         handleCreate();
       }
@@ -646,16 +650,16 @@
               autocapitalize="off"
               spellcheck="false"
             />
-            {#if branchTitle && effectiveBranchName !== branchTitle.toLowerCase()}
+            {#if branchTitle && branchName !== branchTitle.toLowerCase()}
               <div class="branch-preview">
                 <GitBranch size={12} />
-                <span>{effectiveBranchName || '...'}</span>
+                <span>{branchName || '...'}</span>
               </div>
             {/if}
-            {#if branchType === 'remote' && effectiveBranchName}
+            {#if branchType === 'remote' && workspaceSafeName}
               <div class="workspace-preview">
                 <Cloud size={12} />
-                <span>Workspace: {workspaceName(effectiveBranchName)}</span>
+                <span>Workspace: {workspaceName(workspaceSafeName)}</span>
               </div>
             {/if}
           </div>
@@ -671,11 +675,7 @@
 
           <div class="actions">
             <button class="cancel-button" onclick={onClose}>Cancel</button>
-            <button
-              class="create-button"
-              onclick={handleCreate}
-              disabled={!effectiveBranchName || creating}
-            >
+            <button class="create-button" onclick={handleCreate} disabled={!branchName || creating}>
               {#if creating}
                 <Spinner size={14} />
                 Creating...

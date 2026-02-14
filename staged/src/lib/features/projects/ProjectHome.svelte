@@ -44,6 +44,9 @@
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
 
+  // Project filter — null means "All Projects"
+  let selectedProjectId = $state<string | null>(null);
+
   onMount(() => {
     checkStoreAndLoad();
 
@@ -109,6 +112,9 @@
   }
 
   let hasContent = $derived(projects.length > 0);
+  let filteredProjects = $derived(
+    selectedProjectId ? projects.filter((p) => p.id === selectedProjectId) : projects
+  );
 
   // ── Project actions ──
 
@@ -150,6 +156,11 @@
       const newMap = new Map(branchesByProject);
       newMap.delete(id);
       branchesByProject = newMap;
+
+      // Reset filter if the deleted project was selected
+      if (selectedProjectId === id) {
+        selectedProjectId = null;
+      }
     } catch (e) {
       console.error('Failed to delete project:', e);
     }
@@ -330,7 +341,22 @@
       </div>
     {:else}
       <div class="projects-list">
-        {#each projects as project (project.id)}
+        {#if projects.length > 1}
+          <select
+            class="project-filter"
+            value={selectedProjectId ?? ''}
+            onchange={(e) => {
+              const v = e.currentTarget.value;
+              selectedProjectId = v === '' ? null : v;
+            }}
+          >
+            <option value="">All Projects</option>
+            {#each projects as p (p.id)}
+              <option value={p.id}>{projectDisplayName(p)}</option>
+            {/each}
+          </select>
+        {/if}
+        {#each filteredProjects as project (project.id)}
           <ProjectSection
             {project}
             branches={branchesByProject.get(project.id) || []}
@@ -600,6 +626,43 @@
   .welcome-subtitle .shortcut-hint {
     color: var(--text-faint);
     font-size: var(--size-xs);
+  }
+
+  /* Project filter */
+  .project-filter {
+    width: 100%;
+    padding: 8px 10px;
+    background-color: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    transition:
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
+    -webkit-appearance: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 30px;
+  }
+
+  .project-filter:hover {
+    border-color: var(--border-emphasis);
+  }
+
+  .project-filter:focus {
+    border-color: var(--ui-accent);
+    box-shadow: 0 0 0 1px var(--ui-accent);
+  }
+
+  .project-filter option {
+    background-color: var(--bg-elevated);
+    color: var(--text-primary);
   }
 
   /* Projects list */

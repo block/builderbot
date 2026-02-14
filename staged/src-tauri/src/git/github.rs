@@ -46,6 +46,7 @@ pub struct PullRequest {
 pub struct Issue {
     pub number: u64,
     pub title: String,
+    pub body: String,
     pub author: String,
     pub updated_at: String,
     pub labels: Vec<String>,
@@ -378,7 +379,7 @@ pub fn list_issues_for_repo(github_repo: &str) -> Result<Vec<Issue>, GitError> {
         github_repo,
         "--state=open",
         "--limit=50",
-        "--json=number,title,author,updatedAt,labels",
+        "--json=number,title,body,author,updatedAt,labels",
     ])?;
 
     let items: Vec<GhIssueListItem> =
@@ -582,6 +583,8 @@ pub fn search_pull_requests(repo: &Path, query: &str) -> Result<Vec<PullRequest>
 struct GhIssueListItem {
     number: u64,
     title: String,
+    #[serde(default)]
+    body: String,
     author: GhAuthor,
     #[serde(rename = "updatedAt")]
     updated_at: String,
@@ -598,6 +601,7 @@ impl From<GhIssueListItem> for Issue {
         Issue {
             number: item.number,
             title: item.title,
+            body: item.body,
             author: item.author.login,
             updated_at: item.updated_at,
             labels: item.labels.into_iter().map(|l| l.name).collect(),
@@ -614,7 +618,7 @@ pub fn list_issues(repo: &Path) -> Result<Vec<Issue>, GitError> {
             "list",
             "--state=open",
             "--limit=50",
-            "--json=number,title,author,updatedAt,labels",
+            "--json=number,title,body,author,updatedAt,labels",
         ],
     )?;
 
@@ -635,7 +639,7 @@ pub fn search_issues(repo: &Path, query: &str) -> Result<Vec<Issue>, GitError> {
             "--state=open",
             "--limit=50",
             &format!("--search={query}"),
-            "--json=number,title,author,updatedAt,labels",
+            "--json=number,title,body,author,updatedAt,labels",
         ],
     )?;
 

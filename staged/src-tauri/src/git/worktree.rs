@@ -59,20 +59,25 @@ pub fn create_worktree(
         )));
     }
 
-    // If the start point is a remote-tracking ref (e.g. "origin/main"),
-    // fetch the latest so we branch from the real remote tip.
-    if let Some((remote, refspec)) = start_point.split_once('/') {
-        // Best-effort fetch — if it fails (e.g. offline), we still use
-        // whatever the local remote-tracking ref currently points to.
-        let _ = cli::run(repo, &["fetch", remote, refspec]);
-    }
+    // Always branch from the remote tip on origin, not from a (potentially
+    // stale) local branch.  Normalise the start point to "origin/<branch>"
+    // form and fetch the latest before creating the worktree.
+    let (remote_start, fetch_ref) = if let Some(rest) = start_point.strip_prefix("origin/") {
+        (start_point.to_string(), rest.to_string())
+    } else {
+        (format!("origin/{start_point}"), start_point.to_string())
+    };
+
+    // Best-effort fetch — if it fails (e.g. offline) we still use whatever
+    // the local remote-tracking ref currently points to.
+    let _ = cli::run(repo, &["fetch", "origin", &fetch_ref]);
 
     let worktree_str = worktree_path
         .to_str()
         .ok_or_else(|| GitError::InvalidPath(worktree_path.display().to_string()))?;
 
     // Create worktree with new branch from start point:
-    // git worktree add <path> -b <branch> <start-point>
+    // git worktree add <path> -b <branch> origin/<start-point>
     cli::run(
         repo,
         &[
@@ -81,7 +86,7 @@ pub fn create_worktree(
             worktree_str,
             "-b",
             branch_name,
-            start_point,
+            &remote_start,
         ],
     )?;
 

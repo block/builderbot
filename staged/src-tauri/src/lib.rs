@@ -544,6 +544,14 @@ fn create_branch(
         }
     };
 
+    // Normalise to "origin/<branch>" so diffs and worktree creation always
+    // use the remote-tracking ref rather than a stale local branch.
+    let effective_base = if effective_base.starts_with("origin/") {
+        effective_base
+    } else {
+        format!("origin/{effective_base}")
+    };
+
     // Create branch record only — no git worktree yet
     let branch = store::Branch::new(&project_id, &branch_name, &effective_base);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
@@ -618,6 +626,14 @@ async fn create_remote_branch(
         None => {
             git::detect_default_branch_for_repo(&project.github_repo).map_err(|e| e.to_string())?
         }
+    };
+
+    // Normalise to "origin/<branch>" so diffs and worktree creation always
+    // use the remote-tracking ref rather than a stale local branch.
+    let effective_base = if effective_base.starts_with("origin/") {
+        effective_base
+    } else {
+        format!("origin/{effective_base}")
     };
 
     // Create the branch record (starts in Starting status)

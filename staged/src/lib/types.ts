@@ -100,6 +100,7 @@ export interface PullRequest {
 export interface Issue {
   number: number;
   title: string;
+  body: string;
   author: string;
   updatedAt: string;
   labels: string[];

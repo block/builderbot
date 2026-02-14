@@ -41,6 +41,9 @@
   // State
   let branchTitle = $state('');
   let creating = $state(false);
+
+  // Track selected issue for note creation
+  let selectedIssue = $state<Issue | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
 
@@ -276,11 +279,13 @@
     branchTitle = pr.headRef;
     // Auto-set base branch to the PR's target
     selectedBaseBranch = pr.baseRef;
+    selectedIssue = null;
     showGithubPicker = false;
   }
 
   function selectIssue(issue: Issue) {
     branchTitle = `issue-${issue.number}-${issue.title}`;
+    selectedIssue = issue;
     showGithubPicker = false;
   }
 
@@ -333,6 +338,15 @@
           baseBranch
         );
 
+        // If an issue was selected, create a note with the issue title and body
+        if (selectedIssue) {
+          const noteTitle = `#${selectedIssue.number} ${selectedIssue.title}`;
+          const noteContent = selectedIssue.body || '';
+          commands.createNote(branch.id, noteTitle, noteContent).catch((e) => {
+            console.error('[NewBranchModal] Failed to create note from issue:', e);
+          });
+        }
+
         // Dismiss immediately — the card will show "Creating worktree…" state.
         // ProjectHome handles worktree setup + prerun actions in the background.
         onCreated(branch);
@@ -344,6 +358,15 @@
           wsName,
           selectedBaseBranch ?? undefined
         );
+
+        // If an issue was selected, create a note with the issue title and body
+        if (selectedIssue) {
+          const noteTitle = `#${selectedIssue.number} ${selectedIssue.title}`;
+          const noteContent = selectedIssue.body || '';
+          commands.createNote(branch.id, noteTitle, noteContent).catch((e) => {
+            console.error('[NewBranchModal] Failed to create note from issue:', e);
+          });
+        }
 
         // Dismiss immediately — the card will show "Provisioning…" state
         onCreated(branch);

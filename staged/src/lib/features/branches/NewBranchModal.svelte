@@ -147,12 +147,12 @@
 
   /**
    * Generate a workspace name from the workspace-safe branch name.
-   * The final name (repo prefix + branch part) must be ≤ 32 chars.
+   * Uses a short "stg-" prefix instead of the repo name to maximize the
+   * space available for the branch portion within the 32-char limit.
    */
   function workspaceName(name: string): string {
     if (!name) return '';
-    const repo = repoName(project.githubRepo);
-    let fullName = `${repo}-${name}`;
+    let fullName = `stg-${name}`;
     if (fullName.length > WORKSPACE_NAME_MAX_LENGTH) {
       fullName = fullName.slice(0, WORKSPACE_NAME_MAX_LENGTH).replace(/-+$/, '');
     }

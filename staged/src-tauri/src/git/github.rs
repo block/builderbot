@@ -313,10 +313,15 @@ pub fn list_github_repos(owner: Option<&str>) -> Result<Vec<GitHubRepo>, GitErro
 /// Uses the Events API to find repos from actual user activity (pushes, PRs, issues, etc).
 /// This is more accurate than /user/repos which includes all org repos.
 pub fn list_user_repos(limit: u32) -> Result<Vec<GitHubRepo>, GitError> {
+    // Resolve the authenticated user's login (needed for user events endpoint)
+    let login = run_gh_global(&["api", "/user", "--jq", ".login"])?
+        .trim()
+        .to_string();
+
     // Fetch user events - this shows actual activity, not just membership
     // Events API returns up to 300 events (10 pages of 30) going back ~90 days
     let events_limit = 100.min(limit * 3); // Fetch more events since we'll dedupe
-    let endpoint = format!("/user/events?per_page={}", events_limit);
+    let endpoint = format!("/users/{login}/events?per_page={events_limit}");
     let output = run_gh_global(&["api", &endpoint])?;
 
     #[derive(Debug, Deserialize)]

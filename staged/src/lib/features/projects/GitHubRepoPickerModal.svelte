@@ -1,12 +1,13 @@
 <!--
   GitHubRepoPickerModal.svelte - Pick a GitHub repository
 
-  Simplified UX:
-  - Shows recently pushed repos on mount (across all orgs)
-  - Type to search (debounced)
-  - Typing "owner/repo" does a direct fetch
+  UX:
+  - Shows repos from recent activity on mount (via Events API)
+  - Type to search (debounced):
+    - "owner/" or "owner/partial" → search within that org
+    - No slash → search all of GitHub
+  - Exact "owner/repo" does a direct fetch for instant match
   - Pasting a GitHub URL selects immediately
-  - No org dropdown needed
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
@@ -23,6 +24,7 @@
   let { onSelect, onClose }: Props = $props();
 
   let repos = $state<GitHubRepo[]>([]);
+  let searchResults = $state<GitHubRepo[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let query = $state('');
@@ -47,7 +49,7 @@
   }
 
   /**
-   * Check if input looks like owner/repo format.
+   * Check if input looks like a complete owner/repo format.
    */
   function isOwnerRepoFormat(input: string): boolean {
     const trimmed = input.trim();
@@ -55,17 +57,45 @@
   }
 
   /**
-   * Build the display list: direct fetch result (if any) + filtered repos.
+   * Parse query to extract owner (if slash present) and search term.
+   * "squareup/" → { owner: "squareup", term: "" }
+   * "squareup/goo" → { owner: "squareup", term: "goo" }
+   * "goose" → { owner: null, term: "goose" }
+   */
+  function parseQuery(input: string): { owner: string | null; term: string } {
+    const trimmed = input.trim();
+    const slashIndex = trimmed.indexOf('/');
+    if (slashIndex > 0) {
+      return {
+        owner: trimmed.slice(0, slashIndex),
+        term: trimmed.slice(slashIndex + 1),
+      };
+    }
+    return { owner: null, term: trimmed };
+  }
+
+  /**
+   * Build the display list: direct fetch result (if any) + search results + filtered recent repos.
    */
   let displayRepos = $derived.by(() => {
+    const seen = new Set<string>();
     const result: GitHubRepo[] = [];
 
     // If we have a direct fetch result, show it first
     if (directFetchRepo) {
       result.push(directFetchRepo);
+      seen.add(directFetchRepo.nameWithOwner);
     }
 
-    // Filter repos by query (client-side)
+    // Add search results next (already ranked by GitHub)
+    for (const r of searchResults) {
+      if (!seen.has(r.nameWithOwner)) {
+        result.push(r);
+        seen.add(r.nameWithOwner);
+      }
+    }
+
+    // Filter recent repos by query (client-side) and add remaining
     const q = query.toLowerCase().trim();
     const filtered = q
       ? repos.filter(
@@ -75,10 +105,10 @@
         )
       : repos;
 
-    // Add filtered repos, avoiding duplicates with direct fetch
     for (const r of filtered) {
-      if (!directFetchRepo || r.nameWithOwner !== directFetchRepo.nameWithOwner) {
+      if (!seen.has(r.nameWithOwner)) {
         result.push(r);
+        seen.add(r.nameWithOwner);
       }
     }
 
@@ -87,7 +117,7 @@
 
   onMount(async () => {
     try {
-      // Load recently pushed repos (across all orgs)
+      // Load repos from recent activity (via Events API)
       repos = await commands.listUserRepos(30);
     } catch (e) {
       error = typeof e === 'string' ? e : String(e);
@@ -111,8 +141,9 @@
       return;
     }
 
-    // Clear previous direct fetch
+    // Clear previous results
     directFetchRepo = null;
+    searchResults = [];
 
     // Debounce search
     if (searchTimer) clearTimeout(searchTimer);
@@ -123,40 +154,41 @@
     }
 
     searchTimer = setTimeout(async () => {
-      // If it looks like owner/repo, try direct fetch first
-      if (isOwnerRepoFormat(trimmed)) {
-        const [owner, repo] = trimmed.split('/');
-        isSearching = true;
-        try {
-          const result = await commands.getGithubRepo(owner, repo);
-          if (result) {
-            directFetchRepo = result;
-            selectedIndex = 0;
-          }
-        } catch {
-          // Direct fetch failed, fall through to search
-        }
-        isSearching = false;
-      }
+      isSearching = true;
 
-      // Also run a search to find partial matches
-      if (trimmed.length >= 2) {
-        isSearching = true;
-        try {
-          const results = await commands.searchGithubRepos(trimmed);
-          // Merge search results with existing, deduplicating
-          const existing = new Set(repos.map((r) => r.nameWithOwner));
-          for (const r of results) {
-            if (!existing.has(r.nameWithOwner)) {
-              repos = [...repos, r];
+      try {
+        // If it looks like exact owner/repo, try direct fetch first
+        if (isOwnerRepoFormat(trimmed)) {
+          const [owner, repo] = trimmed.split('/');
+          try {
+            const result = await commands.getGithubRepo(owner, repo);
+            if (result) {
+              directFetchRepo = result;
+              selectedIndex = 0;
             }
+          } catch {
+            // Direct fetch failed, continue to search
           }
-        } catch {
-          // Search failed — just use client-side filter
         }
-        isSearching = false;
+
+        // Run search if we have enough characters
+        const { owner, term } = parseQuery(trimmed);
+
+        // Search strategy:
+        // - If owner is specified (has slash), search within that org
+        // - Otherwise, search all of GitHub
+        if (term.length >= 1 || owner) {
+          const searchQuery = term || (owner ? `org:${owner}` : '');
+          if (searchQuery) {
+            const results = await commands.searchGithubRepos(searchQuery, owner ?? undefined);
+            searchResults = results;
+          }
+        }
+      } catch {
+        // Search failed — just use client-side filter
       }
 
+      isSearching = false;
       selectedIndex = 0;
     }, 300);
   }

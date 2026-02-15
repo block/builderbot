@@ -103,8 +103,8 @@ Special instructions for lefthook:
 
 Special instructions for subdirectory build files:
 - If justfile/Justfile/Makefile/makefile files are found in subdirectories, detect actions from them
-- For commands from subdirectory build files, prefix the command with "cd <subpath> && "
-- Example: if "staged/justfile" contains a "dev" target, the command should be "cd staged && just dev"
+- Commands will be executed from the same directory you are exploring from
+- If you need to run a command from a different directory, include the appropriate "cd <path> && " prefix
 - Include the subdirectory path in the source field (e.g., "source": "staged/justfile")
 
 Action ordering (list most important first):
@@ -147,13 +147,6 @@ Return ONLY a JSON array with detected actions. Example (ordered by importance):
     "source": "package.json"
   },
   {
-    "name": "Subproject Dev",
-    "command": "cd staged && just dev",
-    "actionType": "run",
-    "autoCommit": false,
-    "source": "staged/justfile"
-  },
-  {
     "name": "Test",
     "command": "npm test",
     "actionType": "test",
@@ -166,13 +159,6 @@ Return ONLY a JSON array with detected actions. Example (ordered by importance):
     "actionType": "build",
     "autoCommit": false,
     "source": "package.json"
-  },
-  {
-    "name": "Subproject Format",
-    "command": "cd app && make fmt",
-    "actionType": "format",
-    "autoCommit": true,
-    "source": "app/Makefile"
   },
   {
     "name": "Format",
@@ -194,7 +180,7 @@ Return ONLY a JSON array with detected actions. Example (ordered by importance):
 const LOCAL_EXPLORATION_INSTRUCTIONS: &str = r#"
 HOW TO EXPLORE THE PROJECT:
 - Use shell commands like `ls`, `cat`, `find`, etc. to explore the project files
-- You are already in the project root directory
+- You are running in the project directory, and all commands you generate will also be executed from this same directory
 - Start by listing the top-level files, then read relevant build/config files
 - Check subdirectories (1-2 levels) for additional build files"#;
 

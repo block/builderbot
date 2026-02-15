@@ -1,14 +1,16 @@
 <!--
   GitHubRepoPickerModal.svelte - Pick a GitHub repository
 
-  Keyboard-driven repo selection:
-  - Lists authenticated user's repos on mount
-  - Type to filter/search
-  - Arrow keys to navigate, Enter to select
+  Simplified UX:
+  - Shows recently pushed repos on mount (across all orgs)
+  - Type to search (debounced)
+  - Typing "owner/repo" does a direct fetch
+  - Pasting a GitHub URL selects immediately
+  - No org dropdown needed
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { X, Search, Lock, Globe, ChevronDown, Check } from 'lucide-svelte';
+  import { X, Search, Lock, Globe } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import * as commands from '../../commands';
   import type { GitHubRepo } from '../../types';
@@ -27,13 +29,10 @@
   let selectedIndex = $state(0);
   let searchInputEl: HTMLInputElement | null = $state(null);
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  let isSearching = $state(false);
 
-  // Org selector state
-  let orgs = $state<string[]>([]);
-  let selectedOwner = $state<string | null>(null); // null = personal / @me
-  let ownerDropdownOpen = $state(false);
-  let ownerLabel = $derived(selectedOwner ?? 'My repos');
-  let orgError = $state<string | null>(null);
+  // Track if we've done a direct fetch for the current query
+  let directFetchRepo = $state<GitHubRepo | null>(null);
 
   /**
    * Parse a GitHub URL into owner/repo format.
@@ -47,93 +46,104 @@
     return match ? match[1] : null;
   }
 
-  let filteredRepos = $derived.by(() => {
-    if (!query.trim()) return repos;
-    const q = query.toLowerCase();
-    return repos.filter(
-      (r) =>
-        r.nameWithOwner.toLowerCase().includes(q) ||
-        (r.description && r.description.toLowerCase().includes(q))
-    );
+  /**
+   * Check if input looks like owner/repo format.
+   */
+  function isOwnerRepoFormat(input: string): boolean {
+    const trimmed = input.trim();
+    return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(trimmed);
+  }
+
+  /**
+   * Build the display list: direct fetch result (if any) + filtered repos.
+   */
+  let displayRepos = $derived.by(() => {
+    const result: GitHubRepo[] = [];
+
+    // If we have a direct fetch result, show it first
+    if (directFetchRepo) {
+      result.push(directFetchRepo);
+    }
+
+    // Filter repos by query (client-side)
+    const q = query.toLowerCase().trim();
+    const filtered = q
+      ? repos.filter(
+          (r) =>
+            r.nameWithOwner.toLowerCase().includes(q) ||
+            (r.description && r.description.toLowerCase().includes(q))
+        )
+      : repos;
+
+    // Add filtered repos, avoiding duplicates with direct fetch
+    for (const r of filtered) {
+      if (!directFetchRepo || r.nameWithOwner !== directFetchRepo.nameWithOwner) {
+        result.push(r);
+      }
+    }
+
+    return result;
   });
 
   onMount(async () => {
-    const [orgsResult, reposResult] = await Promise.allSettled([
-      commands.listGithubOrgs(),
-      commands.listGithubRepos(),
-    ]);
-    if (orgsResult.status === 'fulfilled') {
-      orgs = orgsResult.value;
-    } else {
-      orgError =
-        'Could not load organizations. Check that your GitHub token has the read:org scope.';
-    }
-    if (reposResult.status === 'fulfilled') {
-      repos = reposResult.value;
-    } else {
-      error =
-        typeof reposResult.reason === 'string' ? reposResult.reason : String(reposResult.reason);
-    }
-    loading = false;
-    searchInputEl?.focus();
-    document.addEventListener('click', handleOwnerClickOutside);
-  });
-
-  async function selectOwner(owner: string | null) {
-    ownerDropdownOpen = false;
-    if (owner === selectedOwner) return;
-    selectedOwner = owner;
-    query = '';
-    selectedIndex = 0;
-    loading = true;
-    error = null;
     try {
-      repos = await commands.listGithubRepos(owner ?? undefined);
+      // Load recently pushed repos (across all orgs)
+      repos = await commands.listUserRepos(30);
     } catch (e) {
-      const raw = typeof e === 'string' ? e : String(e);
-      if (
-        raw.includes('403') ||
-        raw.includes('auth') ||
-        raw.includes('token') ||
-        raw.includes('logged in')
-      ) {
-        error = `Could not access repositories for "${owner}". Your GitHub token may lack permission for this org — try: gh auth refresh -s read:org`;
-      } else {
-        error = `Could not load repositories for "${owner}": ${raw}`;
-      }
-      repos = [];
+      error = typeof e === 'string' ? e : String(e);
     } finally {
       loading = false;
+      searchInputEl?.focus();
     }
-  }
-
-  function handleOwnerClickOutside(event: MouseEvent) {
-    const target = event.target as HTMLElement;
-    if (ownerDropdownOpen && !target.closest('.owner-dropdown')) {
-      ownerDropdownOpen = false;
-    }
-  }
-
-  onDestroy(() => {
-    document.removeEventListener('click', handleOwnerClickOutside);
   });
 
-  async function handleSearch() {
+  onDestroy(() => {
+    if (searchTimer) clearTimeout(searchTimer);
+  });
+
+  async function handleInput() {
+    const trimmed = query.trim();
+
     // Check if input is a GitHub URL — select immediately
-    const parsed = parseGitHubUrl(query);
+    const parsed = parseGitHubUrl(trimmed);
     if (parsed) {
       onSelect(parsed);
       return;
     }
 
+    // Clear previous direct fetch
+    directFetchRepo = null;
+
+    // Debounce search
     if (searchTimer) clearTimeout(searchTimer);
+
+    if (!trimmed) {
+      selectedIndex = 0;
+      return;
+    }
+
     searchTimer = setTimeout(async () => {
-      if (query.trim().length >= 2) {
+      // If it looks like owner/repo, try direct fetch first
+      if (isOwnerRepoFormat(trimmed)) {
+        const [owner, repo] = trimmed.split('/');
+        isSearching = true;
         try {
-          const results = await commands.searchGithubRepos(
-            query.trim(),
-            selectedOwner ?? undefined
-          );
+          const result = await commands.getGithubRepo(owner, repo);
+          if (result) {
+            directFetchRepo = result;
+            selectedIndex = 0;
+          }
+        } catch {
+          // Direct fetch failed, fall through to search
+        }
+        isSearching = false;
+      }
+
+      // Also run a search to find partial matches
+      if (trimmed.length >= 2) {
+        isSearching = true;
+        try {
+          const results = await commands.searchGithubRepos(trimmed);
           // Merge search results with existing, deduplicating
           const existing = new Set(repos.map((r) => r.nameWithOwner));
           for (const r of results) {
@@ -144,7 +154,9 @@
         } catch {
           // Search failed — just use client-side filter
         }
+        isSearching = false;
       }
+
       selectedIndex = 0;
     }, 300);
   }
@@ -152,7 +164,7 @@
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      selectedIndex = Math.min(selectedIndex + 1, filteredRepos.length - 1);
+      selectedIndex = Math.min(selectedIndex + 1, displayRepos.length - 1);
       scrollSelectedIntoView();
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
@@ -160,8 +172,8 @@
       scrollSelectedIntoView();
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (filteredRepos[selectedIndex]) {
-        onSelect(filteredRepos[selectedIndex].nameWithOwner);
+      if (displayRepos[selectedIndex]) {
+        onSelect(displayRepos[selectedIndex].nameWithOwner);
       }
     } else if (e.key === 'Escape') {
       e.preventDefault();
@@ -204,57 +216,16 @@
         bind:this={searchInputEl}
         bind:value={query}
         type="text"
-        placeholder="Search or paste a GitHub URL..."
+        placeholder="Search repos or paste owner/repo..."
         autocomplete="off"
         autocorrect="off"
         spellcheck="false"
-        oninput={handleSearch}
+        oninput={handleInput}
       />
-      {#if orgs.length > 0}
-        <div class="owner-dropdown">
-          <button
-            type="button"
-            class="owner-btn"
-            onclick={() => (ownerDropdownOpen = !ownerDropdownOpen)}
-          >
-            <span class="owner-label">{ownerLabel}</span>
-            <ChevronDown size={14} />
-          </button>
-          {#if ownerDropdownOpen}
-            <div class="owner-menu">
-              <button
-                type="button"
-                class="owner-menu-item"
-                class:selected={selectedOwner === null}
-                onclick={() => selectOwner(null)}
-              >
-                <span>My repos</span>
-                {#if selectedOwner === null}
-                  <Check size={14} />
-                {/if}
-              </button>
-              {#each orgs as org (org)}
-                <button
-                  type="button"
-                  class="owner-menu-item"
-                  class:selected={selectedOwner === org}
-                  onclick={() => selectOwner(org)}
-                >
-                  <span>{org}</span>
-                  {#if selectedOwner === org}
-                    <Check size={14} />
-                  {/if}
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
+      {#if isSearching}
+        <Spinner size={14} />
       {/if}
     </div>
-
-    {#if orgError}
-      <div class="org-error">{orgError}</div>
-    {/if}
 
     <div class="repo-list">
       {#if loading}
@@ -264,12 +235,20 @@
         </div>
       {:else if error}
         <div class="error-state">{error}</div>
-      {:else if filteredRepos.length === 0}
+      {:else if displayRepos.length === 0}
         <div class="empty-state">
-          {query ? 'No matching repositories' : 'No repositories found'}
+          {#if query.trim()}
+            {#if isOwnerRepoFormat(query.trim())}
+              <span>No repository found for "{query.trim()}"</span>
+            {:else}
+              <span>No matching repositories</span>
+            {/if}
+          {:else}
+            <span>No repositories found</span>
+          {/if}
         </div>
       {:else}
-        {#each filteredRepos as repo, i (repo.nameWithOwner)}
+        {#each displayRepos as repo, i (repo.nameWithOwner)}
           <button
             class="repo-item"
             class:selected={i === selectedIndex}
@@ -354,82 +333,6 @@
     color: var(--text-primary);
   }
 
-  .owner-dropdown {
-    position: relative;
-    flex-shrink: 0;
-  }
-
-  .owner-btn {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 8px;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    font-family: inherit;
-    cursor: pointer;
-    transition:
-      background-color 0.1s,
-      color 0.1s;
-  }
-
-  .owner-btn:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .owner-label {
-    white-space: nowrap;
-  }
-
-  .owner-menu {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    margin-top: 4px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    overflow: hidden;
-    z-index: 10;
-    min-width: 160px;
-    max-height: 200px;
-    overflow-y: auto;
-  }
-
-  .owner-menu-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    padding: 8px 12px;
-    background: none;
-    border: none;
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-family: inherit;
-    text-align: left;
-    cursor: pointer;
-    transition: background-color 0.1s;
-  }
-
-  .owner-menu-item:hover {
-    background-color: var(--bg-hover);
-  }
-
-  .owner-menu-item.selected {
-    color: var(--ui-accent);
-  }
-
-  .owner-menu-item.selected :global(svg) {
-    color: var(--ui-accent);
-  }
-
   .search-bar {
     display: flex;
     align-items: center;
@@ -479,14 +382,6 @@
   .error-state {
     color: var(--ui-danger);
     text-align: center;
-  }
-
-  .org-error {
-    padding: 8px 16px;
-    background-color: var(--ui-danger-bg);
-    color: var(--ui-danger);
-    font-size: var(--size-xs);
-    border-bottom: 1px solid var(--border-subtle);
   }
 
   .repo-item {

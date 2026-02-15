@@ -309,6 +309,81 @@ pub fn list_github_repos(owner: Option<&str>) -> Result<Vec<GitHubRepo>, GitErro
     Ok(items.into_iter().map(Into::into).collect())
 }
 
+/// List repositories the authenticated user has recently pushed to.
+/// Uses /user/repos?sort=pushed which surfaces repos across all orgs.
+pub fn list_user_repos(limit: u32) -> Result<Vec<GitHubRepo>, GitError> {
+    let endpoint = format!(
+        "/user/repos?sort=pushed&per_page={}&affiliation=owner,collaborator,organization_member",
+        limit.min(100)
+    );
+    let output = run_gh_global(&["api", &endpoint])?;
+
+    #[derive(Debug, Deserialize)]
+    struct ApiRepo {
+        name: String,
+        full_name: String,
+        description: Option<String>,
+        private: bool,
+        pushed_at: Option<String>,
+        archived: bool,
+    }
+
+    let items: Vec<ApiRepo> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items
+        .into_iter()
+        .filter(|r| !r.archived)
+        .map(|item| GitHubRepo {
+            name: item.name,
+            name_with_owner: item.full_name,
+            description: item.description,
+            is_private: item.private,
+            updated_at: item.pushed_at.unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Fetch a single GitHub repository by owner/repo.
+/// Returns None if the repo doesn't exist or user lacks access.
+pub fn fetch_github_repo(owner: &str, repo: &str) -> Result<Option<GitHubRepo>, GitError> {
+    let endpoint = format!("/repos/{owner}/{repo}");
+    let output = run_gh_global(&["api", &endpoint]);
+
+    match output {
+        Ok(json) => {
+            #[derive(Debug, Deserialize)]
+            struct ApiRepo {
+                name: String,
+                full_name: String,
+                description: Option<String>,
+                private: bool,
+                pushed_at: Option<String>,
+            }
+
+            let item: ApiRepo =
+                serde_json::from_str(&json).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+            Ok(Some(GitHubRepo {
+                name: item.name,
+                name_with_owner: item.full_name,
+                description: item.description,
+                is_private: item.private,
+                updated_at: item.pushed_at.unwrap_or_default(),
+            }))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            // 404 means repo doesn't exist or no access - not an error
+            if msg.contains("404") || msg.contains("Not Found") {
+                Ok(None)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Search GitHub repositories for the authenticated user or a specific owner.
 pub fn search_github_repos(query: &str, owner: Option<&str>) -> Result<Vec<GitHubRepo>, GitError> {
     let owner_flag = match owner {

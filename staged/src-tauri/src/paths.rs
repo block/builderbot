@@ -5,8 +5,9 @@
 use std::path::PathBuf;
 
 /// Base data directory: `~/.staged/`
+/// TODO: REMOVE BEFORE MERGING - Temporarily using .staged-pr-status for this branch
 pub fn data_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|d| d.join(".staged"))
+    dirs::home_dir().map(|d| d.join(".staged-pr-status"))
 }
 
 /// Legacy data directory used before the move to `~/.staged/`.

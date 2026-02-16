@@ -37,8 +37,8 @@
     onRetryWorktree,
   }: Props = $props();
 
-  /** Branches sorted by most recently updated first. */
-  let sortedBranches = $derived([...branches].sort((a, b) => b.updatedAt - a.updatedAt));
+  /** Branches sorted by most recently created first. */
+  let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
 
   let showProjectSettings = $state(false);
 

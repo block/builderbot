@@ -2,7 +2,8 @@
   BranchTimeline.svelte - Renders the unified timeline for a branch
 
   Commits, notes, and reviews are merged by timestamp into a single linear list.
-  Pending items (running sessions, generating notes) appear at the bottom.
+  Active pending items (running sessions, generating notes) appear at the bottom.
+  Failed sessions appear in chronological order with completed items.
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
@@ -147,18 +148,10 @@
       });
     }
 
-    // Sort by timestamp ascending; pending/failed items at bottom
+    // Sort by timestamp ascending; pending/generating items at bottom
     all.sort((a, b) => {
-      const aIsTransient =
-        a.type === 'pending-commit' ||
-        a.type === 'generating-note' ||
-        a.type === 'failed-commit' ||
-        a.type === 'failed-note';
-      const bIsTransient =
-        b.type === 'pending-commit' ||
-        b.type === 'generating-note' ||
-        b.type === 'failed-commit' ||
-        b.type === 'failed-note';
+      const aIsTransient = a.type === 'pending-commit' || a.type === 'generating-note';
+      const bIsTransient = b.type === 'pending-commit' || b.type === 'generating-note';
       if (aIsTransient !== bIsTransient) return aIsTransient ? 1 : -1;
       return a.timestamp - b.timestamp;
     });

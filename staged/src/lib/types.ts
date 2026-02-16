@@ -51,6 +51,27 @@ export interface Branch {
   worktreePath: string | null;
   createdAt: number;
   updatedAt: number;
+  // PR status fields
+  prStatusState: PrStatusState | null;
+  prStatusChecksStatus: string | null;
+  prStatusChecksTotal: number | null;
+  prStatusChecksPassed: number | null;
+  prStatusChecksFailed: number | null;
+  prStatusChecksPending: number | null;
+  prStatusUpdatedAt: number | null;
+}
+
+// PR status types
+export type PrStatusState = 'pending' | 'success' | 'failure' | 'error';
+
+export interface PrStatus {
+  state: PrStatusState;
+  checksStatus: string | null;
+  checksTotal: number | null;
+  checksPassed: number | null;
+  checksFailed: number | null;
+  checksPending: number | null;
+  updatedAt: number;
 }
 
 export interface CommitTimelineItem {

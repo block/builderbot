@@ -54,6 +54,7 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
+  import PrStatusBadge from './PrStatusBadge.svelte';
   import { runBranchAction, type ActionStatusEvent } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
   import { getPreferredAgent } from '../settings/preferences.svelte';
@@ -90,6 +91,10 @@
 
   // Unpushed-commits state (only relevant when PR already exists)
   let hasUnpushed = $state(false);
+
+  // PR status polling state
+  let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+  let prStatusRefreshing = $state(false);
 
   // Push session state (mirrors PR session pattern)
   type PushState = 'idle' | 'pushing' | 'error' | 'done';
@@ -158,6 +163,7 @@
   // Listen for session completion to refresh timeline
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenActionStatus: UnlistenFn | null = null;
+  let unlistenPrStatus: UnlistenFn | null = null;
 
   // Set up event listeners immediately (synchronously) at module level like old codebase
   // Listen for project actions changes to refresh actions list
@@ -250,9 +256,32 @@
       unlistenActionStatus = unlisten;
     });
 
+    listen<{
+      branchId: string;
+      state: string;
+      checksTotal: number | null;
+      checksPassed: number | null;
+      checksFailed: number | null;
+      checksPending: number | null;
+    }>('pr-status-changed', (event) => {
+      const payload = event.payload;
+      if (payload.branchId === branchId) {
+        // Update branch object with new status
+        branch.prStatusState = payload.state as any;
+        branch.prStatusChecksTotal = payload.checksTotal;
+        branch.prStatusChecksPassed = payload.checksPassed;
+        branch.prStatusChecksFailed = payload.checksFailed;
+        branch.prStatusChecksPending = payload.checksPending;
+        branch.prStatusUpdatedAt = Date.now();
+      }
+    }).then((unlisten) => {
+      unlistenPrStatus = unlisten;
+    });
+
     return () => {
       unlistenStatus?.();
       unlistenActionStatus?.();
+      unlistenPrStatus?.();
     };
   });
 
@@ -328,11 +357,31 @@
     getAvailableOpeners().then((apps) => (openerApps = apps));
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
+    // Fetch initial PR status if PR exists
+    if (branch.prNumber) {
+      commands
+        .refreshPrStatus(branch.id)
+        .then((status) => {
+          branch.prStatusState = status.state;
+          branch.prStatusChecksTotal = status.checksTotal;
+          branch.prStatusChecksPassed = status.checksPassed;
+          branch.prStatusChecksFailed = status.checksFailed;
+          branch.prStatusChecksPending = status.checksPending;
+          branch.prStatusUpdatedAt = status.updatedAt;
+        })
+        .catch((e) => console.error('Failed to fetch initial PR status:', e));
+    }
   });
 
   onDestroy(() => {
     unlistenStatus?.();
     unlistenActionStatus?.();
+    unlistenPrStatus?.();
+    // Clean up PR status polling
+    if (prStatusPollTimer) {
+      clearInterval(prStatusPollTimer);
+      prStatusPollTimer = null;
+    }
     // Clean up actions listener
     window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
   });
@@ -1065,6 +1114,16 @@
         <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
       </div>
       <div class="header-actions">
+        <!-- PR status badge (shown when PR exists and has status) -->
+        {#if branch.prNumber && branch.prStatusState}
+          <PrStatusBadge
+            state={branch.prStatusState}
+            checksTotal={branch.prStatusChecksTotal}
+            checksPassed={branch.prStatusChecksPassed}
+            checksFailed={branch.prStatusChecksFailed}
+            checksPending={branch.prStatusChecksPending}
+          />
+        {/if}
         <!-- Running actions (excluding primary action) -->
         {#each secondaryRunningActions as execution (execution.executionId)}
           <div class="running-action-container" class:fading={execution.fading}>

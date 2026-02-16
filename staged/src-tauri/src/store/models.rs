@@ -16,8 +16,9 @@ use crate::git::Span;
 
 /// A tracked repository (user opt-in).
 ///
-/// Projects are identified by their GitHub `owner/repo` slug. The local
-/// clone path is derived on demand via [`crate::paths::repos_dir`].
+/// Projects are identified by their `id` and may share the same GitHub
+/// `owner/repo` slug when they use different subpaths. The local clone path
+/// is derived on demand via [`crate::paths::repos_dir`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {

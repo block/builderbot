@@ -171,7 +171,7 @@ fn check_git_lfs() -> DoctorCheck {
 /// On macOS (APFS), `core.clonefile = true` enables copy-on-write clones
 /// which makes git worktrees use significantly less disk space.
 fn check_clonefile() -> DoctorCheck {
-    let label = "Copy on Write Clones".to_string();
+    let label = "Copy on Write Git Clones".to_string();
     let id = "git-clonefile".to_string();
     let fix_cmd = "git config --global core.clonefile true".to_string();
 

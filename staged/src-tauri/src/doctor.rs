@@ -171,7 +171,7 @@ fn check_git_lfs() -> DoctorCheck {
 /// On macOS (APFS), `core.clonefile = true` enables copy-on-write clones
 /// which makes git worktrees use significantly less disk space.
 fn check_clonefile() -> DoctorCheck {
-    let label = "Git Clone File (CoW)".to_string();
+    let label = "Copy on Write Clones".to_string();
     let id = "git-clonefile".to_string();
     let fix_cmd = "git config --global core.clonefile true".to_string();
 
@@ -188,7 +188,7 @@ fn check_clonefile() -> DoctorCheck {
                     id,
                     label,
                     status: CheckStatus::Pass,
-                    message: "Enabled — worktrees use copy-on-write clones".to_string(),
+                    message: "Enabled — reduces disk space used by new worktrees".to_string(),
                     fix_url: None,
                     fix_command: None,
                 }
@@ -197,7 +197,8 @@ fn check_clonefile() -> DoctorCheck {
                     id,
                     label,
                     status: CheckStatus::Warn,
-                    message: "Disabled — enable to reduce worktree disk usage".to_string(),
+                    message: "Disabled — enable to reduce disk space used by new worktrees"
+                        .to_string(),
                     fix_url: None,
                     fix_command: Some(fix_cmd),
                 }
@@ -208,7 +209,7 @@ fn check_clonefile() -> DoctorCheck {
             id,
             label,
             status: CheckStatus::Warn,
-            message: "Not set — enable to reduce worktree disk usage".to_string(),
+            message: "Not set — enable to reduce disk space used by new worktrees".to_string(),
             fix_url: None,
             fix_command: Some(fix_cmd),
         },

@@ -105,6 +105,7 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showBranchDiff = $state(false);
+  let loadedTimelineKey = $state<string | null>(null);
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
@@ -299,8 +300,22 @@
     }
   });
 
-  onMount(() => {
+  // Load timeline when a branch becomes timeline-ready, including when a local
+  // branch transitions from "creating worktree" to an attached worktree path.
+  $effect(() => {
+    if (branch.branchType === 'local' && !branch.worktreePath) return;
+
+    const timelineKey =
+      branch.branchType === 'remote'
+        ? `${branch.id}:<remote>`
+        : `${branch.id}:${branch.worktreePath}`;
+    if (timelineKey === loadedTimelineKey) return;
+
+    loadedTimelineKey = timelineKey;
     loadTimeline();
+  });
+
+  onMount(() => {
     loadActions();
     getAvailableOpeners().then((apps) => (openerApps = apps));
     // Listen for actions changes

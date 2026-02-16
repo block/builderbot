@@ -60,7 +60,11 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
+<<<<<<< HEAD
 pub const SCHEMA_VERSION: i64 = 9;
+=======
+pub const SCHEMA_VERSION: i64 = 7;
+>>>>>>> 5a4f0e7 (feat(pr-status): add database schema for PR status tracking)
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -265,6 +269,14 @@ impl Store {
                 workspace_name      TEXT,
                 workspace_status    TEXT,
                 agent               TEXT,
+                pr_state            TEXT,
+                pr_checks_status    TEXT,
+                pr_review_decision  TEXT,
+                pr_mergeable        INTEGER,
+                pr_draft            INTEGER,
+                pr_url              TEXT,
+                pr_updated_at       INTEGER,
+                pr_fetched_at       INTEGER,
                 created_at          INTEGER NOT NULL,
                 updated_at          INTEGER NOT NULL,
                 UNIQUE(project_id, project_repo_id, branch_name)

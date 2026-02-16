@@ -257,6 +257,22 @@ pub struct Branch {
     pub workspace_name: Option<String>,
     /// Current lifecycle status of the workspace (remote branches only).
     pub workspace_status: Option<WorkspaceStatus>,
+    /// PR state: "OPEN", "CLOSED", "MERGED", etc.
+    pub pr_state: Option<String>,
+    /// Combined checks status: "SUCCESS", "FAILURE", "PENDING", etc.
+    pub pr_checks_status: Option<String>,
+    /// Review decision: "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", etc.
+    pub pr_review_decision: Option<String>,
+    /// Whether the PR can be merged (not blocked by conflicts, required checks, etc.)
+    pub pr_mergeable: Option<bool>,
+    /// Whether the PR is a draft
+    pub pr_draft: Option<bool>,
+    /// GitHub URL to the PR
+    pub pr_url: Option<String>,
+    /// When the PR was last updated on GitHub (milliseconds since epoch)
+    pub pr_updated_at: Option<i64>,
+    /// When we last fetched PR status from GitHub (milliseconds since epoch)
+    pub pr_fetched_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -275,6 +291,14 @@ impl Branch {
             branch_type: BranchType::Local,
             workspace_name: None,
             workspace_status: None,
+            pr_state: None,
+            pr_checks_status: None,
+            pr_review_decision: None,
+            pr_mergeable: None,
+            pr_draft: None,
+            pr_url: None,
+            pr_updated_at: None,
+            pr_fetched_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -298,6 +322,14 @@ impl Branch {
             branch_type: BranchType::Remote,
             workspace_name: Some(workspace_name.to_string()),
             workspace_status: Some(WorkspaceStatus::Starting),
+            pr_state: None,
+            pr_checks_status: None,
+            pr_review_decision: None,
+            pr_mergeable: None,
+            pr_draft: None,
+            pr_url: None,
+            pr_updated_at: None,
+            pr_fetched_at: None,
             created_at: now,
             updated_at: now,
         }

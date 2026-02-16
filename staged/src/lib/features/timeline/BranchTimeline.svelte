@@ -377,6 +377,8 @@
     gap: 6px;
     padding: 6px 8px;
     margin: 0 -8px;
+    position: relative;
+    z-index: 1;
   }
 
   .add-item-btn {

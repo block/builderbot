@@ -69,7 +69,7 @@
           <h3 class="section-label">Tools</h3>
           <div class="checks-list">
             {#each toolChecks as check (check.id)}
-              <DoctorCheckRow {check} />
+              <DoctorCheckRow {check} onFixed={runChecks} />
             {/each}
           </div>
         </div>
@@ -79,7 +79,7 @@
             <h3 class="section-label">Agents</h3>
             <div class="checks-list">
               {#each agentChecks as check (check.id)}
-                <DoctorCheckRow {check} />
+                <DoctorCheckRow {check} onFixed={runChecks} />
               {/each}
             </div>
           </div>

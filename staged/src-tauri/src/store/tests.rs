@@ -27,7 +27,28 @@ fn test_project_with_subpath() {
 }
 
 #[test]
-fn test_project_unique_github_repo() {
+fn test_project_allows_same_repo_with_different_subpaths() {
+    let store = Store::in_memory().unwrap();
+    let p1 = Project::new("test-owner/test-repo").with_subpath("packages/app-a".to_string());
+    let p2 = Project::new("test-owner/test-repo").with_subpath("packages/app-b".to_string());
+    store.create_project(&p1).unwrap();
+    store.create_project(&p2).unwrap();
+
+    let projects = store.list_projects().unwrap();
+    assert_eq!(projects.len(), 2);
+}
+
+#[test]
+fn test_project_unique_repo_and_subpath() {
+    let store = Store::in_memory().unwrap();
+    let p1 = Project::new("test-owner/test-repo").with_subpath("packages/app".to_string());
+    let p2 = Project::new("test-owner/test-repo").with_subpath("packages/app".to_string());
+    store.create_project(&p1).unwrap();
+    assert!(store.create_project(&p2).is_err());
+}
+
+#[test]
+fn test_project_unique_repo_with_no_subpath() {
     let store = Store::in_memory().unwrap();
     let p1 = Project::new("test-owner/test-repo");
     let p2 = Project::new("test-owner/test-repo");

@@ -59,7 +59,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -228,11 +228,13 @@ impl Store {
             "
             CREATE TABLE IF NOT EXISTS projects (
                 id          TEXT PRIMARY KEY,
-                github_repo TEXT NOT NULL UNIQUE,
+                github_repo TEXT NOT NULL,
                 subpath     TEXT,
                 created_at  INTEGER NOT NULL,
                 updated_at  INTEGER NOT NULL
             );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repo_subpath
+                ON projects(github_repo, COALESCE(subpath, ''));
 
             CREATE TABLE IF NOT EXISTS branches (
                 id                  TEXT PRIMARY KEY,

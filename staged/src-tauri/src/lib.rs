@@ -1064,6 +1064,29 @@ fn delete_note(
     Ok(())
 }
 
+/// Delete a review and all its comments, optionally deleting its linked session.
+#[tauri::command(rename_all = "camelCase")]
+fn delete_review(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    review_id: String,
+    delete_session: Option<bool>,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    let review = store
+        .get_review(&review_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Review not found: {review_id}"))?;
+
+    store.delete_review(&review_id).map_err(|e| e.to_string())?;
+
+    if delete_session.unwrap_or(false) {
+        if let Some(sid) = review.session_id {
+            let _ = store.delete_session(&sid);
+        }
+    }
+    Ok(())
+}
+
 /// Delete a pending commit (one with no SHA) by its DB id.
 /// This does NOT touch git — it only removes the DB record and optionally its session.
 #[tauri::command(rename_all = "camelCase")]
@@ -2380,6 +2403,7 @@ pub fn run() {
             get_branch_timeline,
             create_note,
             delete_note,
+            delete_review,
             delete_commit,
             delete_pending_commit,
             list_git_branches,

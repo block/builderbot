@@ -254,6 +254,7 @@ pub fn delete_session(
 pub enum BranchSessionType {
     Note,
     Commit,
+    Review,
 }
 
 /// Response from starting a branch session.
@@ -367,6 +368,25 @@ pub fn start_branch_session(
                 )
             };
             (commit.id, head_sha)
+        }
+        BranchSessionType::Review => {
+            // Get the current tip SHA for the review anchor
+            let tip_sha = if is_remote {
+                blox::ws_exec(
+                    branch.workspace_name.as_deref().unwrap(),
+                    &["git", "rev-parse", "HEAD"],
+                )
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+            } else {
+                git::get_head_sha(&working_dir)
+                    .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
+            };
+
+            let review = store::Review::new(&branch_id, &tip_sha, store::ReviewScope::Branch)
+                .with_session(&session.id);
+            store.create_review(&review).map_err(|e| e.to_string())?;
+            (review.id, None)
         }
     };
 
@@ -564,6 +584,33 @@ The user is requesting you make a commit based on the prompt below. Make the nec
 code changes, following any verification or formatting steps as instructed, and then \
 create a commit with a conventional commit message. This commit should describe what \
 was requested and how it was fulfilled.
+</action>"
+        }
+        BranchSessionType::Review => {
+            "\
+<action>
+The user is requesting an AI code review of the current branch.
+
+Review the code changes on this branch by running `git diff $(git merge-base origin/HEAD HEAD)..HEAD` \
+(or the appropriate base branch) and provide feedback as structured comments. \
+Focus on: correctness, potential bugs, readability, and adherence to best practices.
+
+Do NOT create any commits or modify any files.
+
+Return your review as a JSON block fenced with ```review-comments markers:
+
+```review-comments
+[
+  {
+    \"path\": \"src/foo.ts\",
+    \"span\": { \"start\": 10, \"end\": 15 },
+    \"content\": \"This function doesn't handle the null case...\"
+  }
+]
+```
+
+The `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end). \
+Only comment on changed files. Be specific and actionable.
 </action>"
         }
     };

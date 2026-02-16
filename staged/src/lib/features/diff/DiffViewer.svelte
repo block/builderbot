@@ -867,6 +867,14 @@
     if (!afterPane || !commentingEnabled) return;
 
     const { span, commentId } = info;
+
+    // Agent comments are read-only — just scroll to the location, don't open editor
+    const comment = commentId ? findCommentById(commentId) : null;
+    if (comment?.author === 'agent') {
+      scrollController.scrollToRow(span.start, 'after');
+      return;
+    }
+
     scrollController.scrollToRow(span.start, 'after');
 
     const start = span.start;

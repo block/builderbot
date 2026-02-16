@@ -564,7 +564,7 @@
     openNote = { title, content };
   }
 
-  function handleReviewClick() {
+  function handleReviewClick(reviewId: string) {
     showBranchDiff = true;
   }
 
@@ -606,6 +606,31 @@
           loadTimeline();
         } catch (e) {
           console.error('Failed to delete note:', e);
+        }
+      },
+    };
+  }
+
+  function handleDeleteReview(reviewId: string, sessionId?: string) {
+    confirmDelete = {
+      title: 'Delete Review',
+      message:
+        'Are you sure you want to delete this review and all its comments?' +
+        (sessionId ? ' The linked session will also be deleted.' : ''),
+      onConfirm: async () => {
+        confirmDelete = null;
+        try {
+          if (sessionId) {
+            try {
+              await commands.cancelSession(sessionId);
+            } catch {
+              // Session may already be finished
+            }
+          }
+          await commands.deleteReview(reviewId, !!sessionId);
+          loadTimeline();
+        } catch (e) {
+          console.error('Failed to delete review:', e);
         }
       },
     };
@@ -1175,12 +1200,14 @@
           onSessionClick={handleTimelineSessionClick}
           onCommitClick={handleCommitClick}
           onNoteClick={handleNoteClick}
-          onReviewClick={handleReviewClick}
+          onReviewClick={(reviewId) => handleReviewClick(reviewId)}
           onDeleteCommit={handleDeleteCommit}
           onDeletePendingCommit={handleDeletePendingCommit}
           onDeleteNote={handleDeleteNote}
+          onDeleteReview={handleDeleteReview}
           onNewNote={() => openNewSession('note')}
           onNewCommit={() => openNewSession('commit')}
+          onNewReview={() => openNewSession('review')}
           newSessionDisabled={showNewSession}
         >
           {#snippet footerActions()}

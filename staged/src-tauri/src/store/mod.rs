@@ -59,7 +59,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -315,8 +315,7 @@ impl Store {
                 scope           TEXT NOT NULL,
                 session_id      TEXT,
                 created_at      INTEGER NOT NULL,
-                updated_at      INTEGER NOT NULL,
-                UNIQUE(branch_id, commit_sha, scope)
+                updated_at      INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_reviews_branch ON reviews(branch_id);
 
@@ -333,6 +332,7 @@ impl Store {
                 span_start  INTEGER NOT NULL,
                 span_end    INTEGER NOT NULL,
                 content     TEXT NOT NULL,
+                author      TEXT NOT NULL DEFAULT 'user',
                 created_at  INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_comments_review ON comments(review_id);

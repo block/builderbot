@@ -163,8 +163,8 @@ impl Store {
     pub fn add_comment(&self, review_id: &str, comment: &Comment) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO comments (id, review_id, path, span_start, span_end, content, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO comments (id, review_id, path, span_start, span_end, content, author, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 comment.id,
                 review_id,
@@ -172,6 +172,7 @@ impl Store {
                 comment.span.start,
                 comment.span.end,
                 comment.content,
+                comment.author.as_str(),
                 comment.created_at,
             ],
         )?;
@@ -240,6 +241,27 @@ impl Store {
         Ok(())
     }
 
+    /// Find a review by its session ID (for post-completion hooks).
+    pub fn get_review_by_session(&self, session_id: &str) -> Result<Option<Review>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let review = conn
+            .query_row(
+                "SELECT id, branch_id, commit_sha, scope, session_id, created_at, updated_at
+                 FROM reviews WHERE session_id = ?1",
+                params![session_id],
+                Self::row_to_review_header,
+            )
+            .optional()?;
+
+        match review {
+            Some(mut r) => {
+                Self::load_review_children(&conn, &mut r)?;
+                Ok(Some(r))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Delete an entire review and all associated data (cascades).
     pub fn delete_review(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
@@ -284,17 +306,20 @@ impl Store {
 
         // Load comments
         let mut stmt = conn.prepare(
-            "SELECT id, path, span_start, span_end, content, created_at
+            "SELECT id, path, span_start, span_end, content, author, created_at
              FROM comments WHERE review_id = ?1 ORDER BY created_at ASC",
         )?;
         review.comments = stmt
             .query_map(params![&review.id], |row| {
+                let author_str: String = row.get(5)?;
                 Ok(Comment {
                     id: row.get(0)?,
                     path: row.get(1)?,
                     span: Span::new(row.get(2)?, row.get(3)?),
                     content: row.get(4)?,
-                    created_at: row.get(5)?,
+                    author: super::models::CommentAuthor::parse(&author_str)
+                        .unwrap_or(super::models::CommentAuthor::User),
+                    created_at: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

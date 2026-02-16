@@ -351,6 +351,11 @@ export function deletePendingCommit(commitId: string, deleteSession = true): Pro
   return invoke('delete_pending_commit', { commitId, deleteSession });
 }
 
+/** Delete a review and all its comments, optionally its linked session. */
+export function deleteReview(reviewId: string, deleteSession = true): Promise<void> {
+  return invoke('delete_review', { reviewId, deleteSession });
+}
+
 // =============================================================================
 // Diff
 // =============================================================================

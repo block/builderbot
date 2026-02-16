@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { FileText, GitCommitHorizontal } from 'lucide-svelte';
+  import { FileText, GitCommitHorizontal, FileSearch } from 'lucide-svelte';
   import type { BranchTimeline as BranchTimelineData } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType } from './TimelineRow.svelte';
@@ -19,12 +19,14 @@
     onSessionClick?: (sessionId: string) => void;
     onCommitClick?: (sha: string) => void;
     onNoteClick?: (noteId: string, title: string, content: string) => void;
-    onReviewClick?: () => void;
+    onReviewClick?: (reviewId: string) => void;
     onDeleteCommit?: (sha: string, sessionId?: string) => void;
     onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
     onDeleteNote?: (noteId: string, sessionId?: string) => void;
+    onDeleteReview?: (reviewId: string, sessionId?: string) => void;
     onNewNote?: () => void;
     onNewCommit?: () => void;
+    onNewReview?: () => void;
     newSessionDisabled?: boolean;
     footerActions?: Snippet;
   }
@@ -39,8 +41,10 @@
     onDeleteCommit,
     onDeletePendingCommit,
     onDeleteNote,
+    onDeleteReview,
     onNewNote,
     onNewCommit,
+    onNewReview,
     newSessionDisabled = false,
     footerActions,
   }: Props = $props();
@@ -59,6 +63,7 @@
     noteId?: string;
     noteTitle?: string;
     noteContent?: string;
+    reviewId?: string;
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
   };
@@ -137,21 +142,45 @@
     }
 
     for (const review of timeline.reviews) {
+      const isRunning = review.sessionStatus === 'running';
+      const isFailed = !isRunning && !!review.sessionId && review.commentCount === 0;
+
+      let type: TimelineItemType;
+      let secondaryMeta: string | undefined;
+
+      if (isFailed) {
+        type = 'failed-review';
+        secondaryMeta = 'Session finished — no comments created';
+      } else if (isRunning) {
+        type = 'generating-review';
+        secondaryMeta = 'Generating review';
+      } else {
+        type = 'review';
+        secondaryMeta = formatRelativeTimeMs(review.createdAt);
+      }
+
       all.push({
         key: `review-${review.id}`,
-        type: 'review',
+        type,
         title: `Code Review (${review.scope})`,
         meta: review.commentCount > 0 ? `${review.commentCount} comments` : undefined,
-        secondaryMeta: formatRelativeTimeMs(review.createdAt),
+        secondaryMeta,
         timestamp: Math.floor(review.createdAt / 1000),
         sessionId: review.sessionId ?? undefined,
+        reviewId: review.id,
       });
     }
 
     // Sort by timestamp ascending; pending/generating items at bottom
     all.sort((a, b) => {
-      const aIsTransient = a.type === 'pending-commit' || a.type === 'generating-note';
-      const bIsTransient = b.type === 'pending-commit' || b.type === 'generating-note';
+      const aIsTransient =
+        a.type === 'pending-commit' ||
+        a.type === 'generating-note' ||
+        a.type === 'generating-review';
+      const bIsTransient =
+        b.type === 'pending-commit' ||
+        b.type === 'generating-note' ||
+        b.type === 'generating-review';
       if (aIsTransient !== bIsTransient) return aIsTransient ? 1 : -1;
       return a.timestamp - b.timestamp;
     });
@@ -178,8 +207,8 @@
       onCommitClick(item.commitSha);
     } else if (item.type === 'note' && item.noteId && onNoteClick) {
       onNoteClick(item.noteId, item.noteTitle ?? '', item.noteContent ?? '');
-    } else if (item.type === 'review' && onReviewClick) {
-      onReviewClick();
+    } else if (item.type === 'review' && item.reviewId && onReviewClick) {
+      onReviewClick(item.reviewId);
     }
   }
 
@@ -198,6 +227,14 @@
       onDeleteNote
     ) {
       onDeleteNote(item.noteId, item.sessionId);
+    } else if (
+      (item.type === 'review' ||
+        item.type === 'failed-review' ||
+        item.type === 'generating-review') &&
+      item.reviewId &&
+      onDeleteReview
+    ) {
+      onDeleteReview(item.reviewId, item.sessionId);
     }
   }
 
@@ -221,7 +258,7 @@
   }
 </script>
 
-{#if items.length === 0 && !onNewNote && !onNewCommit && pendingDropNotes.length === 0}
+{#if items.length === 0 && !onNewNote && !onNewCommit && !onNewReview && pendingDropNotes.length === 0}
   <p class="no-items">No commits or notes yet</p>
 {:else if items.length === 0}
   <!-- Empty state: large action buttons -->
@@ -244,6 +281,16 @@
       >
         <GitCommitHorizontal size={18} />
         <span>New commit</span>
+      </button>
+    {/if}
+    {#if onNewReview}
+      <button
+        class="empty-action-btn review-action"
+        onclick={onNewReview}
+        disabled={newSessionDisabled}
+      >
+        <FileSearch size={18} />
+        <span>New AI review</span>
       </button>
     {/if}
   </div>
@@ -275,7 +322,7 @@
         isLast={index === pendingDropNotes.length - 1 && !onNewNote && !onNewCommit}
       />
     {/each}
-    {#if onNewNote || onNewCommit || footerActions}
+    {#if onNewNote || onNewCommit || onNewReview || footerActions}
       <div class="footer-row">
         {#if onNewNote}
           <button
@@ -297,6 +344,17 @@
           >
             <GitCommitHorizontal size={13} />
             <span>New commit</span>
+          </button>
+        {/if}
+        {#if onNewReview}
+          <button
+            class="add-item-btn review-btn"
+            onclick={onNewReview}
+            disabled={newSessionDisabled}
+            title="New AI review"
+          >
+            <FileSearch size={13} />
+            <span>AI review</span>
           </button>
         {/if}
         {#if footerActions}
@@ -361,6 +419,11 @@
     background-color: var(--commit-bg);
   }
 
+  .empty-action-btn.review-action:hover:not(:disabled) {
+    color: var(--status-modified);
+    background-color: var(--bg-hover);
+  }
+
   .empty-action-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
@@ -406,6 +469,12 @@
     color: var(--commit-color);
     border-color: var(--commit-color);
     background-color: var(--commit-bg);
+  }
+
+  .add-item-btn.review-btn:hover:not(:disabled) {
+    color: var(--status-modified);
+    border-color: var(--status-modified);
+    background-color: var(--bg-hover);
   }
 
   .add-item-btn:disabled {

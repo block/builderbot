@@ -1491,6 +1491,23 @@ async fn ensure_review(
         .map_err(|e| e.to_string())
 }
 
+/// Find an existing review by (branch, commit, scope) without creating one.
+#[tauri::command(rename_all = "camelCase")]
+async fn find_review(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    commit_sha: String,
+    scope: String,
+) -> Result<Option<store::Review>, String> {
+    let store = get_store(&store)?;
+    let review_scope =
+        store::ReviewScope::parse(&scope).ok_or_else(|| format!("Invalid scope: {scope}"))?;
+
+    store
+        .find_review(&branch_id, &commit_sha, review_scope)
+        .map_err(|e| e.to_string())
+}
+
 /// Get a review by ID with all child data.
 #[tauri::command(rename_all = "camelCase")]
 async fn get_review(
@@ -2404,6 +2421,7 @@ pub fn run() {
             get_file_at_ref,
             // Review
             ensure_review,
+            find_review,
             get_review,
             mark_reviewed,
             unmark_reviewed,

@@ -403,6 +403,15 @@ export function ensureReview(
   return invoke('ensure_review', { branchId, commitSha, scope });
 }
 
+/** Find an existing review by (branch, commit, scope) without creating one. */
+export function findReview(
+  branchId: string,
+  commitSha: string,
+  scope: 'branch' | 'commit'
+): Promise<Review | null> {
+  return invoke('find_review', { branchId, commitSha, scope });
+}
+
 /** Get a review by ID with all child data. */
 export function getReview(reviewId: string): Promise<Review | null> {
   return invoke('get_review', { reviewId });

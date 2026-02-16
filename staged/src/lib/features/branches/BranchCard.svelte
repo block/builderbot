@@ -1258,7 +1258,10 @@
     scope="branch"
     beforeLabel={formatBaseBranch(branch.baseBranch)}
     afterLabel={branch.branchName}
-    onClose={() => (showBranchDiff = false)}
+    onClose={() => {
+      showBranchDiff = false;
+      loadTimeline();
+    }}
   />
 {/if}
 
@@ -1270,7 +1273,10 @@
     beforeLabel="parent"
     afterLabel={commitDiffSha.slice(0, 7)}
     readonly
-    onClose={() => (commitDiffSha = null)}
+    onClose={() => {
+      commitDiffSha = null;
+      loadTimeline();
+    }}
   />
 {/if}
 

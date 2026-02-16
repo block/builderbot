@@ -74,6 +74,33 @@ impl Store {
         Ok(review)
     }
 
+    /// Find a review by (branch, commit, scope) without creating one.
+    pub fn find_review(
+        &self,
+        branch_id: &str,
+        commit_sha: &str,
+        scope: ReviewScope,
+    ) -> Result<Option<Review>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let existing: Option<Review> = conn
+            .query_row(
+                "SELECT id, branch_id, commit_sha, scope, session_id, created_at, updated_at
+                 FROM reviews
+                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3",
+                params![branch_id, commit_sha, scope.as_str()],
+                Self::row_to_review_header,
+            )
+            .optional()?;
+
+        match existing {
+            Some(mut review) => {
+                Self::load_review_children(&conn, &mut review)?;
+                Ok(Some(review))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Get a review by id, loading all child data.
     pub fn get_review(&self, id: &str) -> Result<Option<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();

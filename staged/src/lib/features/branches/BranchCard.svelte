@@ -564,6 +564,10 @@
     openNote = { title, content };
   }
 
+  function handleReviewClick() {
+    showBranchDiff = true;
+  }
+
   function handleDeleteCommit(sha: string, sessionId?: string) {
     confirmDelete = {
       title: 'Delete Commit',
@@ -1171,6 +1175,7 @@
           onSessionClick={handleTimelineSessionClick}
           onCommitClick={handleCommitClick}
           onNoteClick={handleNoteClick}
+          onReviewClick={handleReviewClick}
           onDeleteCommit={handleDeleteCommit}
           onDeletePendingCommit={handleDeletePendingCommit}
           onDeleteNote={handleDeleteNote}
@@ -1258,7 +1263,10 @@
     scope="branch"
     beforeLabel={formatBaseBranch(branch.baseBranch)}
     afterLabel={branch.branchName}
-    onClose={() => (showBranchDiff = false)}
+    onClose={() => {
+      showBranchDiff = false;
+      loadTimeline();
+    }}
   />
 {/if}
 
@@ -1270,7 +1278,10 @@
     beforeLabel="parent"
     afterLabel={commitDiffSha.slice(0, 7)}
     readonly
-    onClose={() => (commitDiffSha = null)}
+    onClose={() => {
+      commitDiffSha = null;
+      loadTimeline();
+    }}
   />
 {/if}
 

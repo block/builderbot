@@ -90,6 +90,33 @@ export function createReviewState(branchId: string, commitSha: string, scope: 'b
   }
 
   // =========================================================================
+  // Initial load: fetch existing review without creating one
+  // =========================================================================
+
+  async function loadExistingReview(): Promise<void> {
+    state.loading = true;
+    try {
+      const review = await commands.findReview(branchId, commitSha, scope);
+      if (review) {
+        state.review = review;
+        state.comments = review.comments;
+        state.reviewedPaths = review.reviewed;
+
+        if (review.referenceFiles.length > 0) {
+          loadReferenceFilesFromPaths(review.referenceFiles);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load existing review:', e);
+    } finally {
+      state.loading = false;
+    }
+  }
+
+  // Fire on creation — non-blocking
+  loadExistingReview();
+
+  // =========================================================================
   // Comment actions
   // =========================================================================
 

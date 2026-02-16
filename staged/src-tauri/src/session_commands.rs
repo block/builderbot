@@ -341,7 +341,7 @@ pub fn start_branch_session(
     // Create artifact stub and compute pre-head SHA
     let (artifact_id, pre_head_sha) = match session_type {
         BranchSessionType::Note => {
-            let note = store::Note::new(&branch_id, "Generating…", "").with_session(&session.id);
+            let note = store::Note::new(&branch_id, &prompt, "").with_session(&session.id);
             store.create_note(&note).map_err(|e| e.to_string())?;
             (note.id, None)
         }

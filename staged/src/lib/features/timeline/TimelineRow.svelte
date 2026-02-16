@@ -117,7 +117,7 @@
       {#if meta || secondaryMeta}
         <div class="timeline-meta">
           {#if meta}
-            <span class="meta-item">{meta}</span>
+            <span class="meta-item meta-sha">{meta}</span>
           {/if}
           {#if secondaryMeta}
             <span class="meta-item" class:failed-meta={isFailed}>{secondaryMeta}</span>
@@ -267,8 +267,6 @@
 
   .skeleton-title {
     color: var(--text-muted);
-    font-style: italic;
-    font-weight: normal;
   }
 
   .failed-title {
@@ -293,7 +291,7 @@
     color: var(--text-faint);
   }
 
-  .meta-item:first-child {
+  .meta-sha {
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
   }
 

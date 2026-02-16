@@ -2,19 +2,38 @@
   DoctorCheckRow.svelte — A single row in the doctor report.
 
   Shows a status icon (✓ / ⚠ / ✗), the check label, a message,
-  and an optional external-link icon button that opens the relevant
-  install page in the user's browser.
+  and optional action buttons: an external-link icon to open an
+  install page, or a "Fix" button that runs a shell command.
 -->
 <script lang="ts">
-  import { CheckCircle, AlertTriangle, XCircle, ExternalLink } from 'lucide-svelte';
-  import { openUrl } from '../../commands';
+  import { CheckCircle, AlertTriangle, XCircle, ExternalLink, Wrench } from 'lucide-svelte';
+  import { openUrl, runDoctorFix } from '../../commands';
   import type { DoctorCheck } from '../../commands';
 
   let {
     check,
+    onFixed,
   }: {
     check: DoctorCheck;
+    onFixed?: () => void;
   } = $props();
+
+  let fixing = $state(false);
+  let fixError = $state<string | null>(null);
+
+  async function handleFix() {
+    if (!check.fixCommand) return;
+    fixing = true;
+    fixError = null;
+    try {
+      await runDoctorFix(check.fixCommand);
+      onFixed?.();
+    } catch (e) {
+      fixError = String(e);
+    } finally {
+      fixing = false;
+    }
+  }
 </script>
 
 <div
@@ -36,7 +55,17 @@
   <div class="check-info">
     <span class="check-label">{check.label}</span>
     <span class="check-message">{check.message}</span>
+    {#if fixError}
+      <span class="fix-error">{fixError}</span>
+    {/if}
   </div>
+
+  {#if check.fixCommand && check.status !== 'pass'}
+    <button class="fix-btn" onclick={handleFix} disabled={fixing}>
+      <Wrench size={14} />
+      {fixing ? 'Fixing…' : 'Fix'}
+    </button>
+  {/if}
 
   {#if check.fixUrl && check.status !== 'pass'}
     <button class="install-btn" onclick={() => openUrl(check.fixUrl!)}>
@@ -94,6 +123,40 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .fix-error {
+    font-size: var(--size-xs);
+    color: var(--color-danger, #f85149);
+  }
+
+  .fix-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    padding: 4px 8px;
+    background: none;
+    border: 1px solid var(--border-primary, rgba(255, 255, 255, 0.1));
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: var(--size-xs);
+    transition:
+      color 0.1s,
+      background 0.1s,
+      border-color 0.1s;
+  }
+
+  .fix-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+    border-color: var(--border-hover, rgba(255, 255, 255, 0.2));
+  }
+
+  .fix-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .install-btn {

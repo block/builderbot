@@ -37,6 +37,8 @@ pub struct DoctorCheck {
     pub message: String,
     /// If non-None, the UI shows an "Install" link that opens this URL.
     pub fix_url: Option<String>,
+    /// If non-None, the UI shows a "Fix" button that runs this shell command.
+    pub fix_command: Option<String>,
 }
 
 /// The full report returned to the frontend.
@@ -64,6 +66,7 @@ fn check_git() -> DoctorCheck {
                 status: CheckStatus::Pass,
                 message: version,
                 fix_url: None,
+                fix_command: None,
             }
         }
         _ => DoctorCheck {
@@ -72,6 +75,7 @@ fn check_git() -> DoctorCheck {
             status: CheckStatus::Fail,
             message: "Git not found".to_string(),
             fix_url: Some("https://git-scm.com/downloads".to_string()),
+            fix_command: None,
         },
     }
 }
@@ -91,6 +95,7 @@ fn check_gh() -> DoctorCheck {
                 status: CheckStatus::Pass,
                 message: first_line,
                 fix_url: None,
+                fix_command: None,
             }
         }
         _ => DoctorCheck {
@@ -99,6 +104,7 @@ fn check_gh() -> DoctorCheck {
             status: CheckStatus::Fail,
             message: "GitHub CLI not found".to_string(),
             fix_url: Some("https://cli.github.com".to_string()),
+            fix_command: None,
         },
     }
 }
@@ -116,6 +122,7 @@ fn check_gh_auth() -> DoctorCheck {
             status: CheckStatus::Pass,
             message: "Authenticated".to_string(),
             fix_url: None,
+            fix_command: None,
         }
     } else {
         DoctorCheck {
@@ -126,6 +133,7 @@ fn check_gh_auth() -> DoctorCheck {
                 .setup_hint
                 .unwrap_or_else(|| "Not authenticated".to_string()),
             fix_url: Some("https://cli.github.com/manual/gh_auth_login".to_string()),
+            fix_command: None,
         }
     }
 }
@@ -144,6 +152,7 @@ fn check_git_lfs() -> DoctorCheck {
                 status: CheckStatus::Pass,
                 message: version,
                 fix_url: None,
+                fix_command: None,
             }
         }
         _ => DoctorCheck {
@@ -152,6 +161,56 @@ fn check_git_lfs() -> DoctorCheck {
             status: CheckStatus::Warn,
             message: "Git LFS not installed (optional, needed for large files)".to_string(),
             fix_url: Some("https://git-lfs.com".to_string()),
+            fix_command: None,
+        },
+    }
+}
+
+/// Check that `core.clonefile` is enabled in the global git config.
+///
+/// On macOS (APFS), `core.clonefile = true` enables copy-on-write clones
+/// which makes git worktrees use significantly less disk space.
+fn check_clonefile() -> DoctorCheck {
+    let label = "Git Clone File (CoW)".to_string();
+    let id = "git-clonefile".to_string();
+    let fix_cmd = "git config --global core.clonefile true".to_string();
+
+    match Command::new("git")
+        .args(["config", "--global", "core.clonefile"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let value = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_lowercase();
+            if value == "true" {
+                DoctorCheck {
+                    id,
+                    label,
+                    status: CheckStatus::Pass,
+                    message: "Enabled — worktrees use copy-on-write clones".to_string(),
+                    fix_url: None,
+                    fix_command: None,
+                }
+            } else {
+                DoctorCheck {
+                    id,
+                    label,
+                    status: CheckStatus::Warn,
+                    message: "Disabled — enable to reduce worktree disk usage".to_string(),
+                    fix_url: None,
+                    fix_command: Some(fix_cmd),
+                }
+            }
+        }
+        // Key not set — treat as not enabled
+        _ => DoctorCheck {
+            id,
+            label,
+            status: CheckStatus::Warn,
+            message: "Not set — enable to reduce worktree disk usage".to_string(),
+            fix_url: None,
+            fix_command: Some(fix_cmd),
         },
     }
 }
@@ -216,6 +275,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
             status: CheckStatus::Pass,
             message: "Installed".to_string(),
             fix_url: None,
+            fix_command: None,
         }
     } else {
         DoctorCheck {
@@ -228,6 +288,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                 "Not installed — at least one AI agent is needed".to_string()
             },
             fix_url: info.install_url.map(|s| s.to_string()),
+            fix_command: None,
         }
     }
 }
@@ -260,10 +321,43 @@ fn check_ai_agents() -> Vec<DoctorCheck> {
 pub async fn run_doctor() -> DoctorReport {
     // Run checks on a blocking thread since they shell out.
     tokio::task::spawn_blocking(|| {
-        let mut checks = vec![check_git(), check_gh(), check_gh_auth(), check_git_lfs()];
+        let mut checks = vec![
+            check_git(),
+            check_gh(),
+            check_gh_auth(),
+            check_git_lfs(),
+            check_clonefile(),
+        ];
         checks.extend(check_ai_agents());
         DoctorReport { checks }
     })
     .await
     .unwrap_or_else(|_| DoctorReport { checks: vec![] })
+}
+
+/// Run a fix command from a doctor check.
+///
+/// Executes the given shell command and returns Ok(()) on success,
+/// or an error message if the command fails.
+#[tauri::command]
+pub async fn run_doctor_fix(command: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let output = Command::new("sh")
+            .args(["-c", &command])
+            .output()
+            .map_err(|e| format!("Failed to run command: {e}"))?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if stderr.is_empty() {
+                format!("Command failed with exit code {}", output.status)
+            } else {
+                stderr
+            })
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
 }

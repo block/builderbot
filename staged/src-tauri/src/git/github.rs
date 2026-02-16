@@ -309,20 +309,124 @@ pub fn list_github_repos(owner: Option<&str>) -> Result<Vec<GitHubRepo>, GitErro
     Ok(items.into_iter().map(Into::into).collect())
 }
 
-/// Search GitHub repositories for the authenticated user or a specific owner.
+/// List repositories the authenticated user has recently interacted with.
+/// Uses the Events API to find repos from actual user activity (pushes, PRs, issues, etc).
+/// This is more accurate than /user/repos which includes all org repos.
+pub fn list_user_repos(limit: u32) -> Result<Vec<GitHubRepo>, GitError> {
+    // Resolve the authenticated user's login (needed for user events endpoint)
+    let login = run_gh_global(&["api", "/user", "--jq", ".login"])?
+        .trim()
+        .to_string();
+
+    // Fetch user events - this shows actual activity, not just membership
+    // Events API returns up to 300 events (10 pages of 30) going back ~90 days
+    let events_limit = 100.min(limit * 3); // Fetch more events since we'll dedupe
+    let endpoint = format!("/users/{login}/events?per_page={events_limit}");
+    let output = run_gh_global(&["api", &endpoint])?;
+
+    #[derive(Debug, Deserialize)]
+    struct Event {
+        repo: EventRepo,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct EventRepo {
+        name: String, // "owner/repo" format
+    }
+
+    let events: Vec<Event> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    // Extract unique repo names in order of recency (events are already sorted)
+    let mut seen = std::collections::HashSet::new();
+    let mut repo_names: Vec<String> = Vec::new();
+
+    for event in events {
+        if seen.insert(event.repo.name.clone()) {
+            repo_names.push(event.repo.name);
+            if repo_names.len() >= limit as usize {
+                break;
+            }
+        }
+    }
+
+    // Fetch full repo details for each unique repo
+    // We do this in parallel-ish by collecting results
+    let mut repos = Vec::new();
+    for name in repo_names {
+        let parts: Vec<&str> = name.split('/').collect();
+        if parts.len() == 2 {
+            match fetch_github_repo(parts[0], parts[1]) {
+                Ok(Some(repo)) => repos.push(repo),
+                Ok(None) => {} // Repo no longer exists or no access
+                Err(_) => {}   // Skip on error
+            }
+        }
+    }
+
+    Ok(repos)
+}
+
+/// Fetch a single GitHub repository by owner/repo.
+/// Returns None if the repo doesn't exist or user lacks access.
+pub fn fetch_github_repo(owner: &str, repo: &str) -> Result<Option<GitHubRepo>, GitError> {
+    let endpoint = format!("/repos/{owner}/{repo}");
+    let output = run_gh_global(&["api", &endpoint]);
+
+    match output {
+        Ok(json) => {
+            #[derive(Debug, Deserialize)]
+            struct ApiRepo {
+                name: String,
+                full_name: String,
+                description: Option<String>,
+                private: bool,
+                pushed_at: Option<String>,
+            }
+
+            let item: ApiRepo =
+                serde_json::from_str(&json).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+            Ok(Some(GitHubRepo {
+                name: item.name,
+                name_with_owner: item.full_name,
+                description: item.description,
+                is_private: item.private,
+                updated_at: item.pushed_at.unwrap_or_default(),
+            }))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            // 404 means repo doesn't exist or no access - not an error
+            if msg.contains("404") || msg.contains("Not Found") {
+                Ok(None)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Search GitHub repositories.
+/// - If owner contains "/", treat it as "owner/partial-repo" and search within that org
+/// - If owner is provided without "/", search within that org
+/// - If owner is None, search all of GitHub
 pub fn search_github_repos(query: &str, owner: Option<&str>) -> Result<Vec<GitHubRepo>, GitError> {
-    let owner_flag = match owner {
-        Some(o) => format!("--owner={o}"),
-        None => "--owner=@me".to_string(),
-    };
-    let output = run_gh_global(&[
-        "search",
-        "repos",
-        query,
-        &owner_flag,
+    let mut args = vec!["search", "repos", query];
+    let owner_flag;
+
+    if let Some(o) = owner {
+        owner_flag = format!("--owner={o}");
+        args.push(&owner_flag);
+    }
+    // No owner = search all of GitHub (don't add --owner flag)
+
+    args.extend_from_slice(&[
         "--json=name,fullName,description,isPrivate,updatedAt",
-        "--limit=50",
-    ])?;
+        "--limit=30",
+    ]);
+
+    let output = run_gh_global(&args)?;
 
     // gh search repos uses `fullName` instead of `nameWithOwner`
     #[derive(Debug, Deserialize)]

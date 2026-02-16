@@ -653,7 +653,6 @@
     cursor: not-allowed;
   }
 
-
   :global(.spinner) {
     animation: spin 1s linear infinite;
     flex-shrink: 0;

@@ -447,6 +447,20 @@ async fn list_github_repos(owner: Option<String>) -> Result<Vec<git::GitHubRepo>
     git::list_github_repos(owner.as_deref()).map_err(|e| e.to_string())
 }
 
+/// List repositories the authenticated user has recently pushed to.
+/// Returns repos across all orgs, sorted by most recently pushed.
+#[tauri::command]
+async fn list_user_repos(limit: Option<u32>) -> Result<Vec<git::GitHubRepo>, String> {
+    git::list_user_repos(limit.unwrap_or(30)).map_err(|e| e.to_string())
+}
+
+/// Fetch a single GitHub repository by owner/repo.
+/// Returns None if the repo doesn't exist or user lacks access.
+#[tauri::command]
+async fn get_github_repo(owner: String, repo: String) -> Result<Option<git::GitHubRepo>, String> {
+    git::fetch_github_repo(&owner, &repo).map_err(|e| e.to_string())
+}
+
 /// Search GitHub repositories for the authenticated user or a specific owner.
 #[tauri::command]
 async fn search_github_repos(
@@ -2330,6 +2344,8 @@ pub fn run() {
             delete_project,
             list_github_orgs,
             list_github_repos,
+            list_user_repos,
+            get_github_repo,
             search_github_repos,
             list_branches_for_project,
             create_branch,

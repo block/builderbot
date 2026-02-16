@@ -66,6 +66,18 @@ export function listGithubRepos(owner?: string): Promise<GitHubRepo[]> {
   return invoke('list_github_repos', { owner: owner ?? null });
 }
 
+/** List repositories the authenticated user has recently pushed to.
+ *  Returns repos across all orgs, sorted by most recently pushed. */
+export function listUserRepos(limit?: number): Promise<GitHubRepo[]> {
+  return invoke('list_user_repos', { limit: limit ?? null });
+}
+
+/** Fetch a single GitHub repository by owner/repo.
+ *  Returns null if the repo doesn't exist or user lacks access. */
+export function getGithubRepo(owner: string, repo: string): Promise<GitHubRepo | null> {
+  return invoke('get_github_repo', { owner, repo });
+}
+
 /** Search GitHub repositories for the authenticated user or a specific owner. */
 export function searchGithubRepos(query: string, owner?: string): Promise<GitHubRepo[]> {
   return invoke('search_github_repos', { query, owner: owner ?? null });

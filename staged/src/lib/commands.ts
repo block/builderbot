@@ -487,6 +487,11 @@ export function pruneRemoteRefs(githubRepo: string): Promise<void> {
   return invoke('prune_remote_refs', { githubRepo });
 }
 
+/** Check whether a branch already exists locally for this project. */
+export function checkExistingLocalBranch(projectId: string, branchName: string): Promise<boolean> {
+  return invoke('check_existing_local_branch', { projectId, branchName });
+}
+
 export function listPullRequests(githubRepo: string): Promise<PullRequest[]> {
   return invoke('list_pull_requests', { githubRepo });
 }

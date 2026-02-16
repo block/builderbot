@@ -75,6 +75,10 @@
   let selectedPr = $state<PullRequest | null>(null);
 
   let githubSearchEl: HTMLInputElement | null = $state(null);
+  let existingLocalBranch = $state(false);
+  let checkingExistingLocalBranch = $state(false);
+  let localBranchCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  let localBranchCheckToken = 0;
 
   let effectiveBaseBranch = $derived(selectedBaseBranch ?? detectedDefaultBranch ?? 'main');
 
@@ -207,6 +211,48 @@
     if (showGithubPicker && githubSearchEl) {
       githubSearchEl.focus();
     }
+  });
+
+  // Detect whether the typed branch already exists locally for this project.
+  $effect(() => {
+    const candidate = branchType === 'local' ? branchName.trim() : '';
+    if (!candidate || loading) {
+      existingLocalBranch = false;
+      checkingExistingLocalBranch = false;
+      return;
+    }
+
+    const token = ++localBranchCheckToken;
+    checkingExistingLocalBranch = true;
+
+    if (localBranchCheckTimer) {
+      clearTimeout(localBranchCheckTimer);
+      localBranchCheckTimer = null;
+    }
+
+    localBranchCheckTimer = setTimeout(() => {
+      commands
+        .checkExistingLocalBranch(project.id, candidate)
+        .then((exists) => {
+          if (token !== localBranchCheckToken) return;
+          existingLocalBranch = exists;
+        })
+        .catch(() => {
+          if (token !== localBranchCheckToken) return;
+          existingLocalBranch = false;
+        })
+        .finally(() => {
+          if (token !== localBranchCheckToken) return;
+          checkingExistingLocalBranch = false;
+        });
+    }, 180);
+
+    return () => {
+      if (localBranchCheckTimer) {
+        clearTimeout(localBranchCheckTimer);
+        localBranchCheckTimer = null;
+      }
+    };
   });
 
   function toggleBasePicker() {
@@ -662,6 +708,12 @@
                 <span>Workspace: {workspaceName(workspaceSafeName)}</span>
               </div>
             {/if}
+            {#if branchType === 'local' && branchName && existingLocalBranch && !checkingExistingLocalBranch}
+              <div class="existing-branch-hint">
+                <GitBranch size={12} />
+                <span>Local branch exists. We’ll use/reuse it.</span>
+              </div>
+            {/if}
           </div>
 
           <button class="github-import-button" onclick={openGithubPicker}>
@@ -679,6 +731,8 @@
               {#if creating}
                 <Spinner size={14} />
                 Creating...
+              {:else if branchType === 'local' && existingLocalBranch}
+                Use Existing Branch
               {:else}
                 Create Branch
               {/if}
@@ -1011,6 +1065,19 @@
 
   .workspace-preview span {
     font-family: 'SF Mono', 'Menlo', monospace;
+  }
+
+  .existing-branch-hint {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+    font-size: var(--size-xs);
+    color: var(--ui-accent);
+  }
+
+  .existing-branch-hint :global(svg) {
+    flex-shrink: 0;
   }
 
   /* GitHub import button */

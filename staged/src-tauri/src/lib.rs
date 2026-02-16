@@ -595,21 +595,69 @@ async fn setup_worktree(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
+    // Idempotent fast-path: if this branch already has a workdir, reuse it.
+    if let Some(existing) = store
+        .get_workdir_for_branch(&branch.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(to_branch_with_workdir(branch, Some(existing.path)));
+    }
+
     // Ensure we have a local clone (clones on first use, fetches on subsequent)
     let repo_path = git::ensure_local_clone(&project.github_repo).map_err(|e| e.to_string())?;
 
-    // Create git branch + worktree
-    let worktree_path = git::create_worktree(&repo_path, &branch.branch_name, &branch.base_branch)
-        .map_err(|e| e.to_string())?;
+    // Reuse any existing worktree for this branch; otherwise create one.
+    let existing_worktree_path = git::list_worktrees(&repo_path)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find_map(|(path, wt_branch)| match wt_branch.as_deref() {
+            Some(name) if name == branch.branch_name => Some(path),
+            _ => None,
+        });
+
+    let worktree_path = if let Some(path) = existing_worktree_path {
+        path
+    } else if git::branch_exists(&repo_path, &branch.branch_name).map_err(|e| e.to_string())? {
+        git::create_worktree_for_existing_branch(&repo_path, &branch.branch_name)
+            .map_err(|e| e.to_string())?
+    } else {
+        git::create_worktree(&repo_path, &branch.branch_name, &branch.base_branch)
+            .map_err(|e| e.to_string())?
+    };
 
     let worktree_str = worktree_path
         .to_str()
         .ok_or("Invalid worktree path")?
         .to_string();
 
-    // Create workdir record assigned to this branch
-    let workdir = store::Workdir::new(&branch.project_id, &worktree_str).with_branch(&branch.id);
-    store.create_workdir(&workdir).map_err(|e| e.to_string())?;
+    // Link this path to the branch in DB (create or assign existing record).
+    let tracked_workdir = store
+        .list_workdirs_for_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|wd| wd.path == worktree_str);
+
+    match tracked_workdir {
+        Some(wd) => match wd.branch_id.as_deref() {
+            Some(existing_branch_id) if existing_branch_id != branch.id => {
+                return Err(format!(
+                    "Worktree '{}' is already assigned to another branch",
+                    wd.path
+                ));
+            }
+            Some(_) => {}
+            None => {
+                store
+                    .assign_workdir(&wd.id, &branch.id)
+                    .map_err(|e| e.to_string())?;
+            }
+        },
+        None => {
+            let workdir =
+                store::Workdir::new(&branch.project_id, &worktree_str).with_branch(&branch.id);
+            store.create_workdir(&workdir).map_err(|e| e.to_string())?;
+        }
+    }
 
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
 }
@@ -1631,6 +1679,47 @@ async fn prune_remote_refs(github_repo: String) -> Result<(), String> {
     git::prune_remote_for_repo(&github_repo).map_err(|e| e.to_string())
 }
 
+/// Check if a local branch already exists in the project's local clone.
+///
+/// Used for "new branch" modal copy so users can intentionally attach to
+/// existing local branches.
+#[tauri::command(rename_all = "camelCase")]
+async fn check_existing_local_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    branch_name: String,
+) -> Result<bool, String> {
+    let store = get_store(&store)?;
+    let branch_name = branch_name.trim();
+    if branch_name.is_empty() {
+        return Ok(false);
+    }
+
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+
+    let Some(repo_path) = project.clone_path() else {
+        return Ok(false);
+    };
+
+    if !repo_path.exists() {
+        return Ok(false);
+    }
+
+    match git::branch_exists(&repo_path, branch_name) {
+        Ok(exists) => Ok(exists),
+        Err(e) => {
+            log::debug!(
+                "check_existing_local_branch failed for '{}': {e}",
+                project.github_repo
+            );
+            Ok(false)
+        }
+    }
+}
+
 /// List open pull requests for a repository (via `-R owner/repo`).
 #[tauri::command(rename_all = "camelCase")]
 fn list_pull_requests(github_repo: String) -> Result<Vec<git::github::PullRequest>, String> {
@@ -2385,6 +2474,7 @@ pub fn run() {
             list_git_branches,
             detect_default_branch_cmd,
             prune_remote_refs,
+            check_existing_local_branch,
             list_pull_requests,
             list_issues,
             create_pr,

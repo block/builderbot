@@ -18,6 +18,7 @@
     onSessionClick?: (sessionId: string) => void;
     onCommitClick?: (sha: string) => void;
     onNoteClick?: (noteId: string, title: string, content: string) => void;
+    onReviewClick?: () => void;
     onDeleteCommit?: (sha: string, sessionId?: string) => void;
     onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
     onDeleteNote?: (noteId: string, sessionId?: string) => void;
@@ -33,6 +34,7 @@
     onSessionClick,
     onCommitClick,
     onNoteClick,
+    onReviewClick,
     onDeleteCommit,
     onDeletePendingCommit,
     onDeleteNote,
@@ -183,6 +185,8 @@
       onCommitClick(item.commitSha);
     } else if (item.type === 'note' && item.noteId && onNoteClick) {
       onNoteClick(item.noteId, item.noteTitle ?? '', item.noteContent ?? '');
+    } else if (item.type === 'review' && onReviewClick) {
+      onReviewClick();
     }
   }
 

@@ -564,6 +564,10 @@
     openNote = { title, content };
   }
 
+  function handleReviewClick() {
+    showBranchDiff = true;
+  }
+
   function handleDeleteCommit(sha: string, sessionId?: string) {
     confirmDelete = {
       title: 'Delete Commit',
@@ -1171,6 +1175,7 @@
           onSessionClick={handleTimelineSessionClick}
           onCommitClick={handleCommitClick}
           onNoteClick={handleNoteClick}
+          onReviewClick={handleReviewClick}
           onDeleteCommit={handleDeleteCommit}
           onDeletePendingCommit={handleDeletePendingCommit}
           onDeleteNote={handleDeleteNote}

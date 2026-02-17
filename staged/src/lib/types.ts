@@ -52,26 +52,29 @@ export interface Branch {
   createdAt: number;
   updatedAt: number;
   // PR status fields
-  prStatusState: PrStatusState | null;
-  prStatusChecksStatus: string | null;
-  prStatusChecksTotal: number | null;
-  prStatusChecksPassed: number | null;
-  prStatusChecksFailed: number | null;
-  prStatusChecksPending: number | null;
-  prStatusUpdatedAt: number | null;
+  prState: string | null; // "OPEN", "CLOSED", "MERGED"
+  prChecksStatus: string | null; // "SUCCESS", "FAILURE", "PENDING", "EXPECTED"
+  prReviewDecision: string | null; // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"
+  prMergeable: boolean | null;
+  prDraft: boolean | null;
+  prUrl: string | null;
+  prUpdatedAt: number | null;
+  prFetchedAt: number | null;
 }
 
 // PR status types
-export type PrStatusState = 'pending' | 'success' | 'failure' | 'error';
-
 export interface PrStatus {
-  state: PrStatusState;
-  checksStatus: string | null;
-  checksTotal: number | null;
-  checksPassed: number | null;
-  checksFailed: number | null;
-  checksPending: number | null;
-  updatedAt: number;
+  state: string; // "OPEN", "CLOSED", "MERGED"
+  isDraft: boolean;
+  mergeable: string;
+  reviewDecision: string | null;
+  checksSummary: {
+    total: number;
+    passed: number;
+    failed: number;
+    pending: number;
+    state: string; // "SUCCESS", "FAILURE", "PENDING", "EXPECTED"
+  };
 }
 
 export interface CommitTimelineItem {

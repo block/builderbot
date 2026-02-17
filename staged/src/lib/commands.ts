@@ -623,8 +623,8 @@ export function runDoctorFix(command: string): Promise<void> {
 // PR Status
 // =============================================================================
 
-/** Refresh PR status for a specific branch. */
-export function refreshPrStatus(branchId: string): Promise<PrStatus> {
+/** Refresh PR status for a specific branch. Emits 'pr-status-changed' event. */
+export function refreshPrStatus(branchId: string): Promise<void> {
   return invoke('refresh_pr_status', { branchId });
 }
 

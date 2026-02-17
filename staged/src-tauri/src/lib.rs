@@ -2347,8 +2347,12 @@ async fn refresh_pr_status(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
     // Fetch PR status from GitHub
-    let pr_status = git::fetch_pr_status_for_repo(&project.github_repo, pr_number)
-        .map_err(|e| e.to_string())?;
+    let github_repo = project
+        .github_repo
+        .as_ref()
+        .ok_or_else(|| "Project has no GitHub repo configured".to_string())?;
+    let pr_status =
+        git::fetch_pr_status_for_repo(github_repo, pr_number).map_err(|e| e.to_string())?;
 
     // Parse mergeable status (GitHub returns "MERGEABLE", "CONFLICTING", "UNKNOWN")
     let mergeable = pr_status.mergeable == "MERGEABLE";
@@ -2368,8 +2372,29 @@ async fn refresh_pr_status(
         .map_err(|e| e.to_string())?;
 
     // Emit event for real-time UI updates
+    #[derive(Serialize, Clone)]
+    #[serde(rename_all = "camelCase")]
+    struct PrStatusEvent {
+        branch_id: String,
+        pr_state: String,
+        pr_checks_status: String,
+        pr_review_decision: Option<String>,
+        pr_mergeable: bool,
+        pr_draft: bool,
+    }
+
     app_handle
-        .emit("pr-status-changed", &branch_id)
+        .emit(
+            "pr-status-changed",
+            PrStatusEvent {
+                branch_id: branch_id.clone(),
+                pr_state: pr_status.state,
+                pr_checks_status: pr_status.checks_summary.state,
+                pr_review_decision: pr_status.review_decision,
+                pr_mergeable: mergeable,
+                pr_draft: pr_status.is_draft,
+            },
+        )
         .map_err(|e| format!("Failed to emit event: {}", e))?;
 
     Ok(())
@@ -2405,12 +2430,20 @@ async fn refresh_all_pr_statuses(
 
     let mut refreshed_count = 0u32;
 
+    // Check if project has a GitHub repo
+    let github_repo = match project.github_repo.as_ref() {
+        Some(repo) => repo,
+        None => {
+            return Err("Project has no GitHub repo configured".to_string());
+        }
+    };
+
     // Fetch status for each branch with a PR
     for branch in branches_with_prs {
         let pr_number = branch.pr_number.unwrap(); // Safe because we filtered
 
         // Fetch PR status from GitHub
-        match git::fetch_pr_status_for_repo(&project.github_repo, pr_number) {
+        match git::fetch_pr_status_for_repo(github_repo, pr_number) {
             Ok(pr_status) => {
                 let mergeable = pr_status.mergeable == "MERGEABLE";
 
@@ -2432,7 +2465,28 @@ async fn refresh_all_pr_statuses(
                 refreshed_count += 1;
 
                 // Emit individual event for each branch
-                if let Err(e) = app_handle.emit("pr-status-changed", &branch.id) {
+                #[derive(Serialize, Clone)]
+                #[serde(rename_all = "camelCase")]
+                struct PrStatusEvent {
+                    branch_id: String,
+                    pr_state: String,
+                    pr_checks_status: String,
+                    pr_review_decision: Option<String>,
+                    pr_mergeable: bool,
+                    pr_draft: bool,
+                }
+
+                if let Err(e) = app_handle.emit(
+                    "pr-status-changed",
+                    PrStatusEvent {
+                        branch_id: branch.id.clone(),
+                        pr_state: pr_status.state,
+                        pr_checks_status: pr_status.checks_summary.state,
+                        pr_review_decision: pr_status.review_decision,
+                        pr_mergeable: mergeable,
+                        pr_draft: pr_status.is_draft,
+                    },
+                ) {
                     log::warn!("Failed to emit pr-status-changed event: {}", e);
                 }
             }

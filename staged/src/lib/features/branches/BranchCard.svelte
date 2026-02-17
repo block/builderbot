@@ -54,7 +54,6 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
-  import PrStatusBadge from './PrStatusBadge.svelte';
   import { runBranchAction, type ActionStatusEvent } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
   import { getPreferredAgent } from '../settings/preferences.svelte';
@@ -165,6 +164,10 @@
   let unlistenActionStatus: UnlistenFn | null = null;
   let unlistenPrStatus: UnlistenFn | null = null;
 
+  // Window focus handlers (stored for cleanup)
+  let handleFocus: (() => void) | null = null;
+  let handleBlur: (() => void) | null = null;
+
   // Set up event listeners immediately (synchronously) at module level like old codebase
   // Listen for project actions changes to refresh actions list
   function handleActionsChanged(event: CustomEvent) {
@@ -258,21 +261,21 @@
 
     listen<{
       branchId: string;
-      state: string;
-      checksTotal: number | null;
-      checksPassed: number | null;
-      checksFailed: number | null;
-      checksPending: number | null;
+      prState: string;
+      prChecksStatus: string;
+      prReviewDecision: string | null;
+      prMergeable: boolean;
+      prDraft: boolean;
     }>('pr-status-changed', (event) => {
       const payload = event.payload;
       if (payload.branchId === branchId) {
         // Update branch object with new status
-        branch.prStatusState = payload.state as any;
-        branch.prStatusChecksTotal = payload.checksTotal;
-        branch.prStatusChecksPassed = payload.checksPassed;
-        branch.prStatusChecksFailed = payload.checksFailed;
-        branch.prStatusChecksPending = payload.checksPending;
-        branch.prStatusUpdatedAt = Date.now();
+        branch.prState = payload.prState;
+        branch.prChecksStatus = payload.prChecksStatus;
+        branch.prReviewDecision = payload.prReviewDecision;
+        branch.prMergeable = payload.prMergeable;
+        branch.prDraft = payload.prDraft;
+        branch.prUpdatedAt = Date.now();
       }
     }).then((unlisten) => {
       unlistenPrStatus = unlisten;
@@ -352,24 +355,89 @@
     loadTimeline();
   });
 
+  // Track window focus for smart polling
+  let isWindowFocused = $state(true);
+
+  // PR status polling: adaptive intervals based on status
+  $effect(() => {
+    // Determine if we should poll and at what interval
+    const shouldPoll = branch.prNumber && isWindowFocused;
+
+    // Don't poll if PR is merged or closed
+    if (branch.prState === 'MERGED' || branch.prState === 'CLOSED') {
+      if (prStatusPollTimer) {
+        clearInterval(prStatusPollTimer);
+        prStatusPollTimer = null;
+      }
+      return;
+    }
+
+    // Choose interval based on status
+    let pollInterval: number;
+    if (branch.prChecksStatus === 'PENDING') {
+      // Checks are running - poll frequently
+      pollInterval = 15_000; // 15 seconds
+    } else {
+      // Checks passed/failed or no status - poll less frequently
+      pollInterval = 60_000; // 60 seconds
+    }
+
+    if (shouldPoll) {
+      // Restart polling if interval changed
+      if (prStatusPollTimer) {
+        clearInterval(prStatusPollTimer);
+      }
+
+      prStatusPollTimer = setInterval(async () => {
+        if (prStatusRefreshing) return; // Skip if already refreshing
+        try {
+          prStatusRefreshing = true;
+          await commands.refreshPrStatus(branch.id);
+          // Status will be updated via pr-status-changed event
+        } catch (e) {
+          console.error('Failed to refresh PR status:', e);
+        } finally {
+          prStatusRefreshing = false;
+        }
+      }, pollInterval);
+    } else {
+      // Stop polling when window not focused
+      if (prStatusPollTimer) {
+        clearInterval(prStatusPollTimer);
+        prStatusPollTimer = null;
+      }
+    }
+
+    return () => {
+      if (prStatusPollTimer) {
+        clearInterval(prStatusPollTimer);
+        prStatusPollTimer = null;
+      }
+    };
+  });
+
   onMount(() => {
     loadActions();
     getAvailableOpeners().then((apps) => (openerApps = apps));
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
+
+    // Window focus tracking for smart polling
+    handleFocus = () => {
+      isWindowFocused = true;
+    };
+    handleBlur = () => {
+      isWindowFocused = false;
+    };
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+
     // Fetch initial PR status if PR exists
     if (branch.prNumber) {
       commands
         .refreshPrStatus(branch.id)
-        .then((status) => {
-          branch.prStatusState = status.state;
-          branch.prStatusChecksTotal = status.checksTotal;
-          branch.prStatusChecksPassed = status.checksPassed;
-          branch.prStatusChecksFailed = status.checksFailed;
-          branch.prStatusChecksPending = status.checksPending;
-          branch.prStatusUpdatedAt = status.updatedAt;
-        })
         .catch((e) => console.error('Failed to fetch initial PR status:', e));
+      // Status will be updated via pr-status-changed event
     }
   });
 
@@ -384,6 +452,9 @@
     }
     // Clean up actions listener
     window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
+    // Clean up window focus listeners
+    if (handleFocus) window.removeEventListener('focus', handleFocus);
+    if (handleBlur) window.removeEventListener('blur', handleBlur);
   });
   async function loadTimeline() {
     // Only show the loading spinner on the initial load. Subsequent refreshes
@@ -607,6 +678,37 @@
   function formatBaseBranch(baseBranch: string): string {
     return baseBranch.replace(/^origin\//, '');
   }
+
+  // =========================================================================
+  // PR status display
+  // =========================================================================
+
+  /** Get concise PR status text for the button */
+  function getPrStatusText(): string | null {
+    if (!branch.prNumber) return null;
+
+    // Check PR state first
+    if (branch.prState === 'MERGED') return 'Merged';
+    if (branch.prState === 'CLOSED') return 'Closed';
+    if (branch.prDraft) return 'Draft';
+
+    // Check checks status
+    if (branch.prChecksStatus === 'FAILURE') return 'Checks failing';
+    if (branch.prChecksStatus === 'PENDING') return 'Checks pending';
+
+    // Check review decision
+    if (branch.prReviewDecision === 'CHANGES_REQUESTED') return 'Changes requested';
+    if (branch.prReviewDecision === 'APPROVED' && branch.prMergeable) return 'Ready to merge';
+    if (branch.prReviewDecision === 'APPROVED') return 'Approved';
+
+    // Check mergeable status
+    if (branch.prMergeable === false) return 'Has conflicts';
+    if (branch.prChecksStatus === 'SUCCESS') return 'Checks passed';
+
+    return null; // No specific status to show
+  }
+
+  let prStatusText = $derived(getPrStatusText());
 
   // =========================================================================
   // New session modal
@@ -1114,16 +1216,6 @@
         <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
       </div>
       <div class="header-actions">
-        <!-- PR status badge (shown when PR exists and has status) -->
-        {#if branch.prNumber && branch.prStatusState}
-          <PrStatusBadge
-            state={branch.prStatusState}
-            checksTotal={branch.prStatusChecksTotal}
-            checksPassed={branch.prStatusChecksPassed}
-            checksFailed={branch.prStatusChecksFailed}
-            checksPending={branch.prStatusChecksPending}
-          />
-        {/if}
         <!-- Running actions (excluding primary action) -->
         {#each secondaryRunningActions as execution (execution.executionId)}
           <div class="running-action-container" class:fading={execution.fading}>
@@ -1354,7 +1446,11 @@
                     {:else if prState === 'created' && hasUnpushed}
                       Push{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
                     {:else if prState === 'created'}
-                      View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                      {#if prStatusText}
+                        {prStatusText}
+                      {:else}
+                        View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                      {/if}
                     {:else if prState === 'creating'}
                       Creating PR…
                     {:else if prState === 'error'}

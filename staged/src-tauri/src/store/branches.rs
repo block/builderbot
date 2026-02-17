@@ -114,6 +114,7 @@ impl Store {
     }
 
     /// Update PR status fields for a branch.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_branch_pr_status(
         &self,
         id: &str,

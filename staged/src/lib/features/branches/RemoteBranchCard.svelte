@@ -20,6 +20,7 @@
     CirclePause,
     Copy,
     Pencil,
+    FileDiff,
   } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Spinner from '../../shared/Spinner.svelte';
@@ -32,11 +33,13 @@
   import * as commands from '../../commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
   import DropdownMenu, { type MenuItem } from '../../shared/DropdownMenu.svelte';
+  import DiffModal from '../diff/DiffModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
+  import { formatBaseBranch } from './branchCardHelpers';
   import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
@@ -92,12 +95,19 @@
   // Note modal
   let openNote = $state<{ title: string; content: string } | null>(null);
 
+  // Branch diff modal
+  let showBranchDiff = $state(false);
+  let commitDiffSha = $state<string | null>(null);
+
   // Confirm delete dialog
   let confirmDelete = $state<{
     title: string;
     message: string;
     onConfirm: () => void;
   } | null>(null);
+
+  /** True when the branch has at least one finalized commit (code changes vs base). */
+  let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
 
   // Listen for session completion to refresh timeline
   let unlistenStatus: UnlistenFn | null = null;
@@ -313,6 +323,10 @@
     openNote = { title, content };
   }
 
+  function handleCommitClick(sha: string) {
+    commitDiffSha = sha;
+  }
+
   function handleDeleteNote(noteId: string, sessionId?: string) {
     confirmDelete = {
       title: 'Delete Note',
@@ -437,13 +451,28 @@
           <BranchTimeline
             {timeline}
             onSessionClick={handleTimelineSessionClick}
+            onCommitClick={handleCommitClick}
             onNoteClick={handleNoteClick}
             onDeletePendingCommit={handleDeletePendingCommit}
             onDeleteNote={handleDeleteNote}
             onNewNote={() => openNewSession('note')}
             onNewCommit={() => openNewSession('commit')}
             newSessionDisabled={showNewSession}
-          />
+          >
+            {#snippet footerActions()}
+              {#if hasCodeChanges}
+                <div class="footer-right-actions">
+                  <button
+                    class="view-diff-btn"
+                    onclick={() => (showBranchDiff = true)}
+                    title="View diff"
+                  >
+                    <FileDiff size={14} />
+                  </button>
+                </div>
+              {/if}
+            {/snippet}
+          </BranchTimeline>
         {/if}
       {:else if status === 'stopped'}
         <div class="status-view stopped-view">
@@ -490,6 +519,34 @@
     remote
     onClose={handleNewSessionClose}
     onStarted={handleNewSessionStarted}
+  />
+{/if}
+
+{#if showBranchDiff}
+  <DiffModal
+    branchId={branch.id}
+    scope="branch"
+    beforeLabel={formatBaseBranch(branch.baseBranch)}
+    afterLabel={branch.branchName}
+    onClose={() => {
+      showBranchDiff = false;
+      loadTimeline();
+    }}
+  />
+{/if}
+
+{#if commitDiffSha}
+  <DiffModal
+    branchId={branch.id}
+    commitSha={commitDiffSha}
+    scope="commit"
+    beforeLabel="parent"
+    afterLabel={commitDiffSha.slice(0, 7)}
+    readonly
+    onClose={() => {
+      commitDiffSha = null;
+      loadTimeline();
+    }}
   />
 {/if}
 
@@ -563,6 +620,26 @@
     flex-shrink: 0;
   }
 
+  .view-diff-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
+  }
+
+  .view-diff-btn:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-hover);
+  }
+
   /* Status badge */
   .status-badge {
     display: flex;
@@ -615,6 +692,12 @@
   .timeline-error {
     color: var(--ui-danger);
     font-size: var(--size-sm);
+  }
+
+  .footer-right-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
 
   /* Status views (starting, stopped, error) */

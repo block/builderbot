@@ -27,7 +27,9 @@
       showNewProjectModal = true;
     };
     window.addEventListener('staged:new-project', onNewProject);
-    return () => window.removeEventListener('staged:new-project', onNewProject);
+    return () => {
+      window.removeEventListener('staged:new-project', onNewProject);
+    };
   });
 
   async function loadProjects() {
@@ -50,6 +52,14 @@
     selectProject(project.id);
   }
 
+  function verifyCommandKeyState(e: KeyboardEvent | MouseEvent) {
+    // Verify the command key is actually held down by checking the event's metaKey/ctrlKey
+    const actuallyHeld = e.metaKey || e.ctrlKey;
+    if (isCommandKeyHeld && !actuallyHeld) {
+      isCommandKeyHeld = false;
+    }
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     const target = e.target as HTMLElement;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
@@ -58,6 +68,9 @@
     // Track command key state
     if (e.metaKey || e.ctrlKey) {
       isCommandKeyHeld = true;
+    } else {
+      // Any non-command key press while we think command is held means it's not
+      verifyCommandKeyState(e);
     }
 
     // Command+N to open new project modal
@@ -78,6 +91,8 @@
   }
 
   function handleKeyup(e: KeyboardEvent) {
+    // Verify the actual state first
+    verifyCommandKeyState(e);
     if (!e.metaKey && !e.ctrlKey) {
       isCommandKeyHeld = false;
     }
@@ -88,9 +103,22 @@
     // This handles cases like Command+Tab where keyup isn't received
     isCommandKeyHeld = false;
   }
+
+  function handleMouseMove(e: MouseEvent) {
+    // Verify command key state on mouse movement
+    // This catches cases where the state got stuck (e.g., Command+Tab back to app)
+    if (isCommandKeyHeld) {
+      verifyCommandKeyState(e);
+    }
+  }
 </script>
 
-<svelte:window onkeydown={handleKeydown} onkeyup={handleKeyup} onblur={handleBlur} />
+<svelte:window
+  onkeydown={handleKeydown}
+  onkeyup={handleKeyup}
+  onblur={handleBlur}
+  onmousemove={handleMouseMove}
+/>
 
 <div class="projects-list-page">
   <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>

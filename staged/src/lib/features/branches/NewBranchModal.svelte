@@ -20,6 +20,13 @@
   import Spinner from '../../shared/Spinner.svelte';
   import type { Branch, BranchRef, Project, PullRequest, Issue } from '../../types';
   import * as commands from '../../commands';
+  import {
+    formatBranchName,
+    formatTimeAgo,
+    repoName,
+    sanitizeBranchName,
+    workspaceName,
+  } from './newBranchModalHelpers';
 
   interface Props {
     project: Project;
@@ -118,21 +125,7 @@
   let currentGithubList = $derived(githubTab === 'pr' ? filteredPullRequests : filteredIssues);
   let githubLoading = $derived(githubTab === 'pr' ? prsLoading : issuesLoading);
 
-  /**
-   * Sanitize a branch title into a valid git branch name.
-   */
-  function sanitizeBranchName(title: string): string {
-    return title
-      .toLowerCase()
-      .replace(/[\s_]+/g, '-')
-      .replace(/[~^:?*\[\]\\@{}"'`!#$%&()|<>=+;,]/g, '')
-      .replace(/[-.]+/g, '-')
-      .replace(/^[-.]+|[-.]+$/g, '');
-  }
-
   let branchName = $derived(sanitizeBranchName(branchTitle));
-
-  const WORKSPACE_NAME_MAX_LENGTH = 32;
 
   /**
    * Derive a workspace-safe name from the branch name.
@@ -146,20 +139,6 @@
       .replace(/-+/g, '-')
       .replace(/^-+|-+$/g, '');
   });
-
-  /**
-   * Generate a workspace name from the workspace-safe branch name.
-   * Uses a short "stg-" prefix instead of the repo name to maximize the
-   * space available for the branch portion within the 32-char limit.
-   */
-  function workspaceName(name: string): string {
-    if (!name) return '';
-    let fullName = `stg-${name}`;
-    if (fullName.length > WORKSPACE_NAME_MAX_LENGTH) {
-      fullName = fullName.slice(0, WORKSPACE_NAME_MAX_LENGTH).replace(/-+$/, '');
-    }
-    return fullName;
-  }
 
   onMount(async () => {
     if (!branchTitle) {
@@ -359,18 +338,6 @@
     }
   }
 
-  function formatTimeAgo(dateStr: string): string {
-    const date = new Date(dateStr);
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    if (diffMins < 60) return `${diffMins}m ago`;
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
-    const diffDays = Math.floor(diffHours / 24);
-    return `${diffDays}d ago`;
-  }
-
   async function handleCreate() {
     if (!branchName.trim() || creating) return;
 
@@ -489,14 +456,6 @@
         handleCreate();
       }
     }
-  }
-
-  function formatBranchName(name: string): string {
-    return name.replace(/^origin\//, '');
-  }
-
-  function repoName(path: string): string {
-    return path.split('/').pop() || path;
   }
 
   function handleBackdropClick(event: MouseEvent) {

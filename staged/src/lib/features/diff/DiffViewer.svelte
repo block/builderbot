@@ -37,6 +37,25 @@
     isBinaryDiff,
     getTextLines,
   } from './diffUtils';
+  import {
+    buildAfterMarkers,
+    buildBeforeMarkers,
+    buildLineToAlignmentMap,
+    findCommentById,
+    getCommentsForAlignment,
+    getTokensForLine,
+    isLineInChangedAlignment as helperIsLineInChangedAlignment,
+    isLineInIndexedRange,
+    isLineSelected as helperIsLineSelected,
+    buildLineCommentEditorLayout,
+    buildLineSelectionToolbarLayout,
+    buildRangeCommentEditorLayout,
+    decideCommentPositionBySpace,
+    measureContentWidth,
+    measureLineHeight,
+    normalizeLineSelection,
+    resolveLineSelectionToolbarLeft,
+  } from './diffViewerHelpers';
   import { setupDiffKeyboardNav } from './diffKeyboard';
   import CommentEditor from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
@@ -183,10 +202,7 @@
 
   // Normalized selection range (start <= end)
   let selectedLineRange = $derived.by(() => {
-    if (!lineSelection) return null;
-    const start = Math.min(lineSelection.anchorLine, lineSelection.focusLine);
-    const end = Math.max(lineSelection.anchorLine, lineSelection.focusLine);
-    return { pane: lineSelection.pane, start, end };
+    return normalizeLineSelection(lineSelection);
   });
 
   // Alignments from the current diff
@@ -261,23 +277,11 @@
 
   // Line-to-alignment maps for hover detection
   let beforeLineToAlignment = $derived.by(() => {
-    const map = new Map<number, number>();
-    changedAlignments.forEach(({ alignment }, alignmentIdx) => {
-      for (let i = alignment.before.start; i < alignment.before.end; i++) {
-        map.set(i, alignmentIdx);
-      }
-    });
-    return map;
+    return buildLineToAlignmentMap(changedAlignments, 'before');
   });
 
   let afterLineToAlignment = $derived.by(() => {
-    const map = new Map<number, number>();
-    changedAlignments.forEach(({ alignment }, alignmentIdx) => {
-      for (let i = alignment.after.start; i < alignment.after.end; i++) {
-        map.set(i, alignmentIdx);
-      }
-    });
-    return map;
+    return buildLineToAlignmentMap(changedAlignments, 'after');
   });
 
   // Comments for the current file
@@ -294,20 +298,6 @@
     const filePath = diff ? getFilePath(diff) : null;
     scrollController.setAlignments(activeAlignments, filePath);
   });
-
-  // Measure line height from DOM
-  function measureLineHeight(pane: HTMLElement | null): number {
-    if (!pane) return 20;
-    const firstLine = pane.querySelector('.line') as HTMLElement | null;
-    return firstLine ? firstLine.getBoundingClientRect().height : 20;
-  }
-
-  // Measure content width (max line width)
-  function measureContentWidth(pane: HTMLElement | null): number {
-    if (!pane) return 0;
-    const linesWrapper = pane.querySelector('.lines-wrapper') as HTMLElement | null;
-    return linesWrapper ? linesWrapper.scrollWidth : 0;
-  }
 
   // Update dimensions when panes are available or content changes
   $effect(() => {
@@ -340,58 +330,16 @@
 
   // Scrollbar marker computation
   let beforeMarkers = $derived.by(() => {
-    if (beforeLines.length === 0) return [];
-    const changeMarkers = changedAlignments.map(({ alignment }) => {
-      const span = alignment.before;
-      const startPercent = (span.start / beforeLines.length) * 100;
-      const rangeSize = span.end - span.start;
-      const heightPercent = Math.max(0.5, (rangeSize / beforeLines.length) * 100);
-      return { top: startPercent, height: heightPercent, type: 'change' as const };
-    });
-
-    const annotationMarkers = beforeFileAnnotations
-      .filter((a) => a.before_span)
-      .map((annotation) => {
-        const span = annotation.before_span!;
-        const startPercent = (span.start / beforeLines.length) * 100;
-        const rangeSize = Math.max(1, span.end - span.start);
-        const heightPercent = Math.max(0.5, (rangeSize / beforeLines.length) * 100);
-        return { top: startPercent, height: heightPercent, type: 'annotation' as const };
-      });
-
-    return [...changeMarkers, ...annotationMarkers];
+    return buildBeforeMarkers(beforeLines.length, changedAlignments, beforeFileAnnotations);
   });
 
   let afterMarkers = $derived.by(() => {
-    if (afterLines.length === 0) return [];
-    const changeMarkers = changedAlignments.map(({ alignment }) => {
-      const span = alignment.after;
-      const startPercent = (span.start / afterLines.length) * 100;
-      const rangeSize = span.end - span.start;
-      const heightPercent = Math.max(0.5, (rangeSize / afterLines.length) * 100);
-      return { top: startPercent, height: heightPercent, type: 'change' as const };
-    });
-
-    const commentMarkers = currentFileComments
-      .filter((c) => c.span.start !== 0 || c.span.end !== 0)
-      .map((comment) => {
-        const startPercent = (comment.span.start / afterLines.length) * 100;
-        const rangeSize = Math.max(1, comment.span.end - comment.span.start);
-        const heightPercent = Math.max(0.5, (rangeSize / afterLines.length) * 100);
-        return { top: startPercent, height: heightPercent, type: 'comment' as const };
-      });
-
-    const annotationMarkers = currentFileAnnotations
-      .filter((a) => a.after_span)
-      .map((annotation) => {
-        const span = annotation.after_span!;
-        const startPercent = (span.start / afterLines.length) * 100;
-        const rangeSize = Math.max(1, span.end - span.start);
-        const heightPercent = Math.max(0.5, (rangeSize / afterLines.length) * 100);
-        return { top: startPercent, height: heightPercent, type: 'annotation' as const };
-      });
-
-    return [...changeMarkers, ...commentMarkers, ...annotationMarkers];
+    return buildAfterMarkers(
+      afterLines.length,
+      changedAlignments,
+      currentFileComments,
+      currentFileAnnotations
+    );
   });
 
   // Content dimensions for scrollbars
@@ -625,11 +573,11 @@
   // ==========================================================================
 
   function getBeforeTokens(index: number): Token[] {
-    return beforeTokens[index] || [{ content: '', color: 'inherit' }];
+    return getTokensForLine(beforeTokens, index);
   }
 
   function getAfterTokens(index: number): Token[] {
-    return afterTokens[index] || [{ content: '', color: 'inherit' }];
+    return getTokensForLine(afterTokens, index);
   }
 
   // ==========================================================================
@@ -637,46 +585,44 @@
   // ==========================================================================
 
   function isLineInChangedAlignment(side: 'before' | 'after', lineIndex: number): boolean {
-    const map = side === 'before' ? beforeLineToAlignment : afterLineToAlignment;
-    return map.has(lineIndex);
+    return helperIsLineInChangedAlignment(
+      side,
+      lineIndex,
+      beforeLineToAlignment,
+      afterLineToAlignment
+    );
   }
 
   function isLineSelected(pane: 'before' | 'after', lineIndex: number): boolean {
-    if (!selectedLineRange || selectedLineRange.pane !== pane) return false;
-    return lineIndex >= selectedLineRange.start && lineIndex <= selectedLineRange.end;
+    return helperIsLineSelected(pane, lineIndex, selectedLineRange);
   }
 
   function isLineInHoveredRange(pane: 'before' | 'after', lineIndex: number): boolean {
-    if (hoveredRangeIndex === null) return false;
-    const map = pane === 'before' ? beforeLineToAlignment : afterLineToAlignment;
-    return map.get(lineIndex) === hoveredRangeIndex;
+    return isLineInIndexedRange(
+      pane,
+      lineIndex,
+      hoveredRangeIndex,
+      beforeLineToAlignment,
+      afterLineToAlignment
+    );
   }
 
   function isLineInFocusedHunk(pane: 'before' | 'after', lineIndex: number): boolean {
-    if (focusedHunkIndex === null) return false;
-    const map = pane === 'before' ? beforeLineToAlignment : afterLineToAlignment;
-    return map.get(lineIndex) === focusedHunkIndex;
+    return isLineInIndexedRange(
+      pane,
+      lineIndex,
+      focusedHunkIndex,
+      beforeLineToAlignment,
+      afterLineToAlignment
+    );
   }
 
   // ==========================================================================
   // Comment helpers
   // ==========================================================================
 
-  function findCommentById(id: string): Comment | null {
-    return comments.find((c) => c.id === id) ?? null;
-  }
-
-  function getCommentsForAlignment(alignmentIndex: number): Comment[] {
-    const alignmentData = changedAlignments[alignmentIndex];
-    if (!alignmentData) return [];
-    const { alignment } = alignmentData;
-    return currentFileComments.filter(
-      (c) => c.span.start < alignment.after.end && c.span.end > alignment.after.start
-    );
-  }
-
   function alignmentHasComments(alignmentIndex: number): boolean {
-    return getCommentsForAlignment(alignmentIndex).length > 0;
+    return getCommentsForAlignment(alignmentIndex, changedAlignments, currentFileComments).length > 0;
   }
 
   // ==========================================================================
@@ -869,7 +815,7 @@
     const { span, commentId } = info;
 
     // Agent comments are read-only — just scroll to the location, don't open editor
-    const comment = commentId ? findCommentById(commentId) : null;
+    const comment = commentId ? findCommentById(comments, commentId) : null;
     if (comment?.author === 'agent') {
       scrollController.scrollToRow(span.start, 'after');
       return;
@@ -922,10 +868,7 @@
     const firstLineRect = firstLineEl.getBoundingClientRect();
     const spaceAbove = firstLineRect.top - paneRect.top;
 
-    if (spaceBelow >= editorHeight) return 'below';
-    if (spaceAbove >= editorHeight) return 'above';
-
-    return spaceBelow >= spaceAbove ? 'below' : 'above';
+    return decideCommentPositionBySpace(spaceBelow, spaceAbove, editorHeight);
   }
 
   function updateCommentEditorPosition() {
@@ -944,8 +887,6 @@
     const viewerRect = diffViewerEl.getBoundingClientRect();
     const paneRect = afterPane.getBoundingClientRect();
     const editorHeight = 120;
-
-    let top: number;
     let anchorLineEl: HTMLElement | null;
 
     if (commentPositionPreference === 'below') {
@@ -955,8 +896,6 @@
         commentEditorStyle = null;
         return;
       }
-      const lineRect = anchorLineEl.getBoundingClientRect();
-      top = lineRect.bottom - viewerRect.top;
     } else {
       anchorLineEl = afterPane.querySelectorAll('.line')[
         alignment.after.start
@@ -965,22 +904,15 @@
         commentEditorStyle = null;
         return;
       }
-      const lineRect = anchorLineEl.getBoundingClientRect();
-      top = lineRect.top - viewerRect.top - editorHeight;
     }
 
-    const paneContentTop = paneRect.top - viewerRect.top;
-    const paneContentBottom = paneRect.bottom - viewerRect.top;
-    const editorBottom = top + editorHeight;
-    const visible = editorBottom > paneContentTop && top < paneContentBottom;
-
-    commentEditorStyle = {
-      top,
-      left: paneRect.left - viewerRect.left + 12,
-      width: paneRect.width - 24,
-      position: commentPositionPreference,
-      visible,
-    };
+    commentEditorStyle = buildRangeCommentEditorLayout(
+      viewerRect,
+      paneRect,
+      anchorLineEl.getBoundingClientRect(),
+      commentPositionPreference,
+      editorHeight
+    );
   }
 
   async function handleCommentSubmit(content: string) {
@@ -1099,21 +1031,22 @@
 
     const viewerRect = diffViewerEl.getBoundingClientRect();
     const lineRect = lineEl.getBoundingClientRect();
+    const lineContent = lineEl.querySelector('.line-content') as HTMLElement | null;
+    const lineContentRect = lineContent?.getBoundingClientRect() ?? null;
 
-    if (recalculateLeft || lineSelectionToolbarLeft === null) {
-      const lineContent = lineEl.querySelector('.line-content') as HTMLElement | null;
-      if (lineContent) {
-        const lineContentRect = lineContent.getBoundingClientRect();
-        lineSelectionToolbarLeft = lineContentRect.left - viewerRect.left;
-      } else {
-        lineSelectionToolbarLeft = lineRect.left - viewerRect.left;
-      }
-    }
+    lineSelectionToolbarLeft = resolveLineSelectionToolbarLeft(
+      viewerRect,
+      lineRect,
+      lineContentRect,
+      lineSelectionToolbarLeft,
+      recalculateLeft
+    );
 
-    lineSelectionToolbarStyle = {
-      top: lineRect.top - viewerRect.top,
-      left: lineSelectionToolbarLeft,
-    };
+    lineSelectionToolbarStyle = buildLineSelectionToolbarLayout(
+      viewerRect,
+      lineRect,
+      lineSelectionToolbarLeft
+    );
   }
 
   function handleStartLineComment() {
@@ -1144,20 +1077,11 @@
       return;
     }
 
-    const lineRect = lastLineEl.getBoundingClientRect();
-    const top = lineRect.bottom - viewerRect.top;
-
-    const editorHeight = 120;
-    const paneContentTop = paneRect.top - viewerRect.top;
-    const paneContentBottom = paneRect.bottom - viewerRect.top;
-    const visible = top + editorHeight > paneContentTop && top < paneContentBottom;
-
-    lineCommentEditorStyle = {
-      top,
-      left: paneRect.left - viewerRect.left + 12,
-      width: paneRect.width - 24,
-      visible,
-    };
+    lineCommentEditorStyle = buildLineCommentEditorLayout(
+      viewerRect,
+      paneRect,
+      lastLineEl.getBoundingClientRect()
+    );
   }
 
   async function handleLineCommentSubmit(content: string) {
@@ -1770,7 +1694,7 @@
     <!-- Range comment editor (two-pane mode only) -->
     {#if commentingOnRange !== null && commentEditorStyle}
       {@const existingComment = editingRangeCommentId
-        ? findCommentById(editingRangeCommentId)
+        ? findCommentById(comments, editingRangeCommentId)
         : null}
       <CommentEditor
         top={commentEditorStyle.top}
@@ -1823,7 +1747,7 @@
 
     <!-- Line comment editor -->
     {#if commentingOnLines && lineCommentEditorStyle}
-      {@const existingComment = editingCommentId ? findCommentById(editingCommentId) : null}
+      {@const existingComment = editingCommentId ? findCommentById(comments, editingCommentId) : null}
       <CommentEditor
         top={lineCommentEditorStyle.top}
         left={lineCommentEditorStyle.left}

@@ -103,12 +103,15 @@
   let showPrErrorDialog = $state(false);
 
   // Initialize PR state from store on mount
+  // Run only once per branch by tracking the branch ID
   $effect(() => {
-    const storedState = prStateStore.getPrState(branch.id);
+    const currentBranchId = branch.id;
+    const storedState = prStateStore.getPrState(currentBranchId);
     if (storedState) {
       // If PR already exists (has prNumber), clear any stale creating state
       if (branch.prNumber && storedState.state === 'creating') {
-        prStateStore.clearPrState(branch.id);
+        prStateStore.clearPrState(currentBranchId);
+        prStateOverride = 'created';
         return;
       }
       prStateOverride = storedState.state;
@@ -901,6 +904,7 @@
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.createPr(branch.id, provider);
       prSessionId = sessionId;
+      prStateOverride = 'creating';
       // Store the creating state globally
       prStateStore.setPrCreating(branch.id, sessionId);
       // The session-status-changed listener will handle completion
@@ -920,13 +924,13 @@
 
         if (foundUrl) {
           prUrl = foundUrl;
+          prStateOverride = 'created';
           const prNumber = extractPrNumber(foundUrl);
           if (prNumber) {
             // Save PR number to storage
             await commands.updateBranchPr(branch.id, prNumber);
             branch.prNumber = prNumber;
           }
-          prStateOverride = 'created';
           prStateStore.setPrCreated(branch.id, foundUrl);
         } else {
           // Session completed but we couldn't find a PR URL

@@ -39,6 +39,9 @@ pub async fn detect_project_actions(
         .get_project(&project_id)
         .map_err(|e| format!("Failed to get project: {e}"))?
         .ok_or_else(|| "Project not found".to_string())?;
+    let primary_repo = project
+        .primary_repo()
+        .ok_or_else(|| "Project has no repository attached".to_string())?;
 
     // Check whether a local clone already exists on disk.
     let local_clone = project.clone_path().filter(|p| p.exists());
@@ -76,7 +79,7 @@ pub async fn detect_project_actions(
             // No local clone – instruct the agent to use `gh api` to explore
             // the repository on GitHub.
             FileExplorationMode::GitHub {
-                repo: project.github_repo.clone(),
+                repo: primary_repo.to_string(),
                 subpath: project.subpath.clone(),
             }
         }

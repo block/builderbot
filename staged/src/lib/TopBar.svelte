@@ -5,9 +5,10 @@
   for adding new projects.
 -->
 <script lang="ts">
-  import { Palette, Plus } from 'lucide-svelte';
+  import { House, Palette, Plus } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import ThemeSelectorModal from './features/settings/ThemeSelectorModal.svelte';
+  import { navigation, goHome } from './navigation.svelte';
 
   let showThemeModal = $state(false);
 
@@ -28,6 +29,12 @@
   <div class="drag-spacer"></div>
 
   <div class="top-bar-actions">
+    {#if navigation.selectedProjectId}
+      <button class="icon-btn" onclick={goHome} title="Projects list">
+        <House size={14} />
+      </button>
+    {/if}
+
     <button
       class="icon-btn"
       onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}

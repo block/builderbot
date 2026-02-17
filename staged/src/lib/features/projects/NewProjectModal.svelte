@@ -1,9 +1,7 @@
 <!--
-  NewProjectModal.svelte - Create a new project from a GitHub repository
+  NewProjectModal.svelte - Create a named project
 
-  Two-phase flow:
-  1. GitHubRepoPickerModal to select a GitHub repo (owner/repo)
-  2. Confirmation with optional subpath, then create
+  A project can be created with or without a repository.
 -->
 <script lang="ts">
   import { X, GitBranch } from 'lucide-svelte';
@@ -20,29 +18,34 @@
 
   let { onCreated, onDetecting, onClose }: Props = $props();
 
+  let name = $state('');
   let selectedRepo = $state<string | null>(null);
   let subpath = $state('');
   let saving = $state(false);
   let error = $state<string | null>(null);
-
-  function handleRepoSelected(nameWithOwner: string) {
-    selectedRepo = nameWithOwner;
-    error = null;
-  }
+  let showRepoPicker = $state(false);
 
   async function handleCreate() {
-    if (!selectedRepo || saving) return;
+    if (!name.trim() || saving) return;
 
     saving = true;
     error = null;
 
     try {
-      const normalizedSubpath = subpath.trim().replace(/^\/+|\/+$/g, '') || undefined;
-      const project = await commands.createProject(selectedRepo, normalizedSubpath);
+      const normalizedSubpath = selectedRepo
+        ? (subpath.trim().replace(/^\/+|\/+$/g, '') || undefined)
+        : undefined;
 
-      // Auto-trigger action detection in background
-      detectAndSaveActions(project.id).catch(() => {}); // Silent failure
-      onDetecting(project.id, true);
+      const project = await commands.createProject(
+        name.trim(),
+        selectedRepo ?? undefined,
+        normalizedSubpath
+      );
+
+      if (selectedRepo) {
+        detectAndSaveActions(project.id).catch(() => {});
+        onDetecting(project.id, true);
+      }
 
       onCreated(project);
     } catch (e) {
@@ -61,7 +64,6 @@
     try {
       const suggested = await detectProjectActions(projectId);
 
-      // Save suggested actions
       for (let i = 0; i < suggested.length; i++) {
         const action = suggested[i];
         await commands.createProjectAction(
@@ -79,12 +81,9 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    // Only handle keys when in confirmation phase (repo selected)
-    if (!selectedRepo) return;
-
     if (e.key === 'Escape') {
       e.preventDefault();
-      selectedRepo = null;
+      onClose();
     } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       handleCreate();
@@ -93,49 +92,68 @@
 
   function handleBackdropClick(event: MouseEvent) {
     if (event.target === event.currentTarget) {
-      if (selectedRepo) {
-        selectedRepo = null;
-      } else {
-        onClose();
-      }
+      onClose();
     }
   }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if !selectedRepo}
-  <GitHubRepoPickerModal onSelect={handleRepoSelected} {onClose} />
-{:else}
-  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-  <div
-    class="modal-backdrop"
-    role="dialog"
-    aria-modal="true"
-    tabindex="-1"
-    onclick={handleBackdropClick}
-    onkeydown={(e) => e.key === 'Escape' && (selectedRepo = null)}
-  >
-    <div class="modal">
-      <div class="modal-header">
-        <h2>New Project</h2>
-        <button class="close-button" onclick={onClose}>
-          <X size={18} />
-        </button>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div
+  class="modal-backdrop"
+  role="dialog"
+  aria-modal="true"
+  tabindex="-1"
+  onclick={handleBackdropClick}
+  onkeydown={(e) => e.key === 'Escape' && onClose()}
+>
+  <div class="modal">
+    <div class="modal-header">
+      <h2>New Project</h2>
+      <button class="close-button" onclick={onClose}>
+        <X size={18} />
+      </button>
+    </div>
+
+    <div class="modal-body">
+      <div class="form-group">
+        <label for="project-name">Name</label>
+        <input
+          bind:value={name}
+          id="project-name"
+          type="text"
+          placeholder="e.g., Billing Platform"
+          disabled={saving}
+          autocomplete="off"
+        />
       </div>
 
-      <div class="modal-body">
-        <div class="repo-info">
-          <GitBranch size={14} class="repo-info-icon" />
-          <div class="repo-details">
-            <span class="repo-name">{selectedRepo}</span>
+      <div class="form-group">
+        <label for="project-repo-select">Repository <span class="optional-label">(optional)</span></label>
+        {#if selectedRepo}
+          <div class="repo-info">
+            <GitBranch size={14} class="repo-info-icon" />
+            <div class="repo-details">
+              <span class="repo-name">{selectedRepo}</span>
+            </div>
+            <button class="change-button" onclick={() => (showRepoPicker = true)}>Change</button>
+            <button class="change-button" onclick={() => (selectedRepo = null)}>Clear</button>
           </div>
-          <button class="change-button" onclick={() => (selectedRepo = null)}>Change</button>
-        </div>
-
-        <div class="form-group">
-          <label for="project-subpath">Subpath <span class="optional-label">(optional)</span></label
+        {:else}
+          <button
+            id="project-repo-select"
+            class="select-repo-button"
+            onclick={() => (showRepoPicker = true)}
           >
+            Select repository
+          </button>
+        {/if}
+      </div>
+
+      {#if selectedRepo}
+        <div class="form-group">
+          <label for="project-subpath">Subpath <span class="optional-label">(optional)</span></label>
           <input
             bind:value={subpath}
             id="project-subpath"
@@ -147,24 +165,31 @@
             autocapitalize="off"
             spellcheck="false"
           />
-          <span class="help-text">
-            For monorepos: subdirectory to use as working directory for AI sessions
-          </span>
         </div>
+      {/if}
 
-        {#if error}
-          <div class="error-message">{error}</div>
-        {/if}
+      {#if error}
+        <div class="error-message">{error}</div>
+      {/if}
 
-        <div class="actions">
-          <button class="cancel-button" onclick={onClose} disabled={saving}>Cancel</button>
-          <button class="create-button" onclick={handleCreate} disabled={saving}>
-            {saving ? 'Creating...' : 'Create Project'}
-          </button>
-        </div>
+      <div class="actions">
+        <button class="cancel-button" onclick={onClose} disabled={saving}>Cancel</button>
+        <button class="create-button" onclick={handleCreate} disabled={saving || !name.trim()}>
+          {saving ? 'Creating...' : 'Create Project'}
+        </button>
       </div>
     </div>
   </div>
+</div>
+
+{#if showRepoPicker}
+  <GitHubRepoPickerModal
+    onSelect={(nameWithOwner) => {
+      selectedRepo = nameWithOwner;
+      showRepoPicker = false;
+    }}
+    onClose={() => (showRepoPicker = false)}
+  />
 {/if}
 
 <style>
@@ -229,52 +254,7 @@
     padding: 16px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
-  }
-
-  .repo-info {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    background-color: var(--bg-hover);
-    border-radius: 6px;
-  }
-
-  :global(.repo-info-icon) {
-    color: var(--text-accent);
-    flex-shrink: 0;
-  }
-
-  .repo-details {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    min-width: 0;
-  }
-
-  .repo-name {
-    font-size: var(--size-sm);
-    font-weight: 500;
-    color: var(--text-primary);
-  }
-
-  .change-button {
-    padding: 4px 8px;
-    background: transparent;
-    border: 1px solid var(--border-muted);
-    border-radius: 4px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: all 0.15s ease;
-  }
-
-  .change-button:hover {
-    border-color: var(--ui-accent);
-    color: var(--ui-accent);
+    gap: 14px;
   }
 
   .form-group {
@@ -283,105 +263,99 @@
     gap: 6px;
   }
 
-  .form-group label {
-    font-size: var(--size-sm);
-    font-weight: 500;
-    color: var(--text-primary);
-  }
-
-  .optional-label {
-    font-weight: 400;
-    color: var(--text-faint);
-  }
-
-  .form-group input {
-    width: 100%;
-    padding: 10px 12px;
-    background-color: var(--bg-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    font-size: var(--size-md);
-    color: var(--text-primary);
-    outline: none;
-    transition: border-color 0.15s;
-    box-sizing: border-box;
-  }
-
-  .form-group input:focus {
-    border-color: var(--ui-accent);
-  }
-
-  .form-group input:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .form-group input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .help-text {
+  label {
     font-size: var(--size-xs);
     color: var(--text-muted);
   }
 
-  .error-message {
-    padding: 10px 12px;
-    background-color: var(--ui-danger-bg);
-    border-radius: 6px;
-    color: var(--ui-danger);
+  .optional-label {
+    color: var(--text-faint);
+  }
+
+  input {
+    border: 1px solid var(--border-muted);
+    background: var(--bg-deepest);
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 9px 10px;
     font-size: var(--size-sm);
+    outline: none;
+  }
+
+  input:focus {
+    border-color: var(--ui-accent);
+  }
+
+  .repo-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background-color: var(--bg-hover);
+    border-radius: 8px;
+  }
+
+  .repo-details {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .repo-name {
+    font-size: var(--size-sm);
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .change-button,
+  .select-repo-button {
+    border: 1px solid var(--border-muted);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 6px 10px;
+    cursor: pointer;
+  }
+
+  .change-button:hover,
+  .select-repo-button:hover {
+    color: var(--text-primary);
+    border-color: var(--border-emphasis);
+    background: var(--bg-hover);
+  }
+
+  .error-message {
+    color: var(--ui-danger);
+    font-size: var(--size-xs);
   }
 
   .actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
-    margin-top: 8px;
   }
 
-  .cancel-button {
-    padding: 8px 16px;
-    background: transparent;
+  .cancel-button,
+  .create-button {
+    border-radius: 8px;
+    padding: 8px 12px;
     border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .cancel-button:hover:not(:disabled) {
-    border-color: var(--border-emphasis);
+    background: transparent;
     color: var(--text-primary);
-  }
-
-  .cancel-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+    cursor: pointer;
   }
 
   .create-button {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 16px;
-    background-color: var(--ui-accent);
-    border: none;
-    border-radius: 6px;
+    background: var(--ui-accent);
+    border-color: var(--ui-accent);
     color: var(--bg-deepest);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: background-color 0.15s;
+    font-weight: 600;
   }
 
-  .create-button:hover:not(:disabled) {
-    background-color: var(--ui-accent-hover);
-  }
-
-  .create-button:disabled {
-    opacity: 0.5;
+  .create-button:disabled,
+  .cancel-button:disabled {
+    opacity: 0.6;
     cursor: not-allowed;
   }
 </style>

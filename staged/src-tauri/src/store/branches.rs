@@ -9,12 +9,13 @@ impl Store {
     pub fn create_branch(&self, branch: &Branch) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO branches (id, project_id, branch_name, base_branch, pr_number,
+            "INSERT INTO branches (id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                 branch_type, workspace_name, workspace_status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 branch.id,
                 branch.project_id,
+                branch.project_repo_id,
                 branch.branch_name,
                 branch.base_branch,
                 branch.pr_number.map(|n| n as i64),
@@ -32,7 +33,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         Self::row_to_branch_query(
             &conn,
-            "SELECT id, project_id, branch_name, base_branch, pr_number,
+            "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                     branch_type, workspace_name, workspace_status,
                     created_at, updated_at
              FROM branches WHERE id = ?1",
@@ -43,7 +44,7 @@ impl Store {
     pub fn list_branches_for_project(&self, project_id: &str) -> Result<Vec<Branch>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, branch_name, base_branch, pr_number,
+            "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                     branch_type, workspace_name, workspace_status,
                     created_at, updated_at
              FROM branches WHERE project_id = ?1 ORDER BY created_at ASC",
@@ -96,20 +97,21 @@ impl Store {
     }
 
     fn row_to_branch(row: &rusqlite::Row) -> rusqlite::Result<Branch> {
-        let pr_number: Option<i64> = row.get(4)?;
-        let branch_type_str: String = row.get(5)?;
-        let workspace_status_str: Option<String> = row.get(7)?;
+        let pr_number: Option<i64> = row.get(5)?;
+        let branch_type_str: String = row.get(6)?;
+        let workspace_status_str: Option<String> = row.get(8)?;
         Ok(Branch {
             id: row.get(0)?,
             project_id: row.get(1)?,
-            branch_name: row.get(2)?,
-            base_branch: row.get(3)?,
+            project_repo_id: row.get(2)?,
+            branch_name: row.get(3)?,
+            base_branch: row.get(4)?,
             pr_number: pr_number.map(|n| n as u64),
             branch_type: branch_type_str.parse().unwrap_or(BranchType::Local),
-            workspace_name: row.get(6)?,
+            workspace_name: row.get(7)?,
             workspace_status: workspace_status_str.and_then(|s| s.parse().ok()),
-            created_at: row.get(8)?,
-            updated_at: row.get(9)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
         })
     }
 

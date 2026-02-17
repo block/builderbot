@@ -557,11 +557,31 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
         .ok_or_else(|| GitError::CommandFailed("Cannot determine data directory".to_string()))?;
 
     let clone_path = repos.join(github_repo);
+    let https_url = format!("https://github.com/{github_repo}.git");
 
     if clone_path.join(".git").exists() {
-        // Already cloned — fetch latest
-        super::cli::run(&clone_path, &["fetch", "origin"])?;
+        // Already cloned — fetch latest. If origin is SSH and auth fails,
+        // switch to HTTPS and retry.
+        if let Err(fetch_err) = super::cli::run(&clone_path, &["fetch", "origin"]) {
+            log::warn!(
+                "fetch origin failed for '{}': {}. Retrying with HTTPS origin.",
+                github_repo,
+                fetch_err
+            );
+            super::cli::run(&clone_path, &["remote", "set-url", "origin", &https_url])?;
+            super::cli::run(&clone_path, &["fetch", "origin"])?;
+        }
         return Ok(clone_path);
+    }
+
+    // If a previous clone attempt failed, clear the stale directory so clone can retry.
+    if clone_path.exists() {
+        std::fs::remove_dir_all(&clone_path).map_err(|e| {
+            GitError::CommandFailed(format!(
+                "Failed to clear stale clone directory '{}': {e}",
+                clone_path.display()
+            ))
+        })?;
     }
 
     // Create parent directory
@@ -571,17 +591,43 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
         })?;
     }
 
-    // Clone via gh for proper auth
-    let url = format!("https://github.com/{github_repo}.git");
+    // Prefer `gh repo clone` first (works well when gh auth is configured).
+    // If this fails (e.g. gh is set to SSH protocol and org requires SSH certs),
+    // fall back to plain HTTPS git clone.
     let clone_str = clone_path.to_string_lossy().to_string();
-    run_gh_global(&["repo", "clone", github_repo, &clone_str])?;
+    let gh_clone_result = (|| -> Result<(), GitError> {
+        let gh_path = find_gh().ok_or_else(|| {
+            GitError::CommandFailed(
+                "GitHub CLI not found. Install with: brew install gh".to_string(),
+            )
+        })?;
 
-    // Verify the clone succeeded
-    if !clone_path.join(".git").exists() {
-        // Fallback: try git clone directly
+        let output = Command::new(&gh_path)
+            .env("GH_GIT_PROTOCOL", "https")
+            .args(["repo", "clone", github_repo, &clone_str])
+            .output()
+            .map_err(|e| GitError::CommandFailed(format!("Failed to run gh: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("not logged in") || stderr.contains("no oauth token") {
+                return Err(GitError::CommandFailed(
+                    "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
+                ));
+            }
+            return Err(GitError::CommandFailed(stderr.into_owned()));
+        }
+        Ok(())
+    })();
+
+    if gh_clone_result.is_err() || !clone_path.join(".git").exists() {
+        log::warn!(
+            "gh repo clone failed for '{}', retrying with direct HTTPS git clone",
+            github_repo
+        );
         super::cli::run(
             clone_path.parent().unwrap_or(Path::new("/")),
-            &["clone", &url, &clone_str],
+            &["clone", &https_url, &clone_str],
         )?;
     }
 

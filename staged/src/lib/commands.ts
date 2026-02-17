@@ -7,6 +7,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   Project,
+  ProjectRepo,
   GitHubRepo,
   Branch,
   BranchTimeline,
@@ -48,12 +49,38 @@ export function listProjects(): Promise<Project[]> {
   return invoke('list_projects');
 }
 
-export function createProject(githubRepo: string, subpath?: string): Promise<Project> {
-  return invoke('create_project', { githubRepo, subpath });
+export function createProject(name: string, githubRepo?: string, subpath?: string): Promise<Project> {
+  return invoke('create_project', { name, githubRepo: githubRepo ?? null, subpath });
 }
 
 export function deleteProject(id: string): Promise<void> {
   return invoke('delete_project', { id });
+}
+
+export function listProjectRepos(projectId: string): Promise<ProjectRepo[]> {
+  return invoke('list_project_repos', { projectId });
+}
+
+export function addProjectRepo(
+  projectId: string,
+  githubRepo: string,
+  subpath?: string,
+  setAsPrimary?: boolean
+): Promise<ProjectRepo> {
+  return invoke('add_project_repo', {
+    projectId,
+    githubRepo,
+    subpath: subpath ?? null,
+    setAsPrimary: setAsPrimary ?? null,
+  });
+}
+
+export function removeProjectRepo(projectId: string, projectRepoId: string): Promise<void> {
+  return invoke('remove_project_repo', { projectId, projectRepoId });
+}
+
+export function setPrimaryProjectRepo(projectId: string, projectRepoId: string): Promise<void> {
+  return invoke('set_primary_project_repo', { projectId, projectRepoId });
 }
 
 /** List the authenticated user's GitHub organization memberships. */

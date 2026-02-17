@@ -47,7 +47,10 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn get_primary_project_repo(&self, project_id: &str) -> Result<Option<ProjectRepo>, StoreError> {
+    pub fn get_primary_project_repo(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ProjectRepo>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT id, project_id, github_repo, subpath, is_primary, created_at, updated_at
@@ -60,7 +63,11 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub fn set_primary_project_repo(&self, project_id: &str, repo_id: &str) -> Result<(), StoreError> {
+    pub fn set_primary_project_repo(
+        &self,
+        project_id: &str,
+        repo_id: &str,
+    ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
         conn.execute(
@@ -93,4 +100,3 @@ impl Store {
         })
     }
 }
-

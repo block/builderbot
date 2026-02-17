@@ -466,7 +466,9 @@ fn add_project_repo(
     if set_as_primary.unwrap_or(false) {
         repo = repo.primary();
     }
-    store.create_project_repo(&repo).map_err(|e| e.to_string())?;
+    store
+        .create_project_repo(&repo)
+        .map_err(|e| e.to_string())?;
 
     let project = store
         .get_project(&project_id)
@@ -706,10 +708,8 @@ fn create_branch(
     // Detect default branch if none specified (via GitHub API, no local clone needed)
     let effective_base = match base_branch {
         Some(b) => b,
-        None => {
-            git::detect_default_branch_for_repo(project_primary_repo(&project)?)
-                .map_err(|e| e.to_string())?
-        }
+        None => git::detect_default_branch_for_repo(project_primary_repo(&project)?)
+            .map_err(|e| e.to_string())?,
     };
 
     // Normalise to "origin/<branch>" so diffs and worktree creation always
@@ -726,8 +726,8 @@ fn create_branch(
         .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?;
 
     // Create branch record only — no git worktree yet
-    let branch =
-        store::Branch::new(&project_id, &branch_name, &effective_base).with_project_repo(&primary_repo.id);
+    let branch = store::Branch::new(&project_id, &branch_name, &effective_base)
+        .with_project_repo(&primary_repo.id);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, None))
@@ -898,10 +898,8 @@ async fn create_remote_branch(
     // Detect default branch if none specified (via GitHub API, no local clone needed)
     let effective_base = match base_branch {
         Some(b) => b,
-        None => {
-            git::detect_default_branch_for_repo(project_primary_repo(&project)?)
-                .map_err(|e| e.to_string())?
-        }
+        None => git::detect_default_branch_for_repo(project_primary_repo(&project)?)
+            .map_err(|e| e.to_string())?,
     };
 
     // Normalise to "origin/<branch>" so diffs and worktree creation always
@@ -917,8 +915,9 @@ async fn create_remote_branch(
         .get_primary_project_repo(&project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?;
-    let branch = store::Branch::new_remote(&project_id, &branch_name, &effective_base, &workspace_name)
-        .with_project_repo(&primary_repo.id);
+    let branch =
+        store::Branch::new_remote(&project_id, &branch_name, &effective_base, &workspace_name)
+            .with_project_repo(&primary_repo.id);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, None))
@@ -2049,10 +2048,7 @@ fn get_pr_url(
     let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
     let parts: Vec<&str> = repo_slug.splitn(2, '/').collect();
     if parts.len() != 2 {
-        return Err(format!(
-            "Invalid github_repo format: {}",
-            repo_slug
-        ));
+        return Err(format!("Invalid github_repo format: {}", repo_slug));
     }
     let (owner, repo_name) = (parts[0], parts[1]);
 

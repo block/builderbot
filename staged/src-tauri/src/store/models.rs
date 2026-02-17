@@ -77,12 +77,9 @@ impl Project {
 
     /// Extract the repo name (last component of `owner/repo`) if set.
     pub fn repo_name(&self) -> Option<&str> {
-        self.github_repo.as_deref().map(|repo| {
-            repo
-            .rsplit('/')
-            .next()
-            .unwrap_or(repo)
-        })
+        self.github_repo
+            .as_deref()
+            .map(|repo| repo.rsplit('/').next().unwrap_or(repo))
     }
 
     pub fn primary_repo(&self) -> Option<&str> {

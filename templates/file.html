@@ -1648,7 +1648,7 @@
         var threadId = threadCard ? threadCard.getAttribute('data-thread-id') : '';
         // Don't trigger card-level focus when clicking inside reply forms
         if (action === 'focus-thread' && e.target.closest('.reply-form')) return;
-        e.stopPropagation();
+        if (action !== 'focus-thread') e.stopPropagation();
         switch (action) {
             case 'focus-thread':
                 focusThread(threadId);
@@ -1678,7 +1678,9 @@
     });
     document.getElementById('comments-panel').addEventListener('keydown', function(e) {
         if (e.target.matches('.reply-form textarea')) {
-            var threadId = e.target.closest('[data-thread-id]').getAttribute('data-thread-id');
+            var threadCard = e.target.closest('[data-thread-id]');
+            if (!threadCard) return;
+            var threadId = threadCard.getAttribute('data-thread-id');
             handleReplyKeydown(e, threadId);
         }
     });

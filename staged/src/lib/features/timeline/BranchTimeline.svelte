@@ -354,7 +354,7 @@
             title="New AI review"
           >
             <FileSearch size={13} />
-            <span>AI review</span>
+            <span>New AI review</span>
           </button>
         {/if}
         {#if footerActions}

@@ -1533,6 +1533,7 @@ fn list_repo_actions(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 fn create_repo_action(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,

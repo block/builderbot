@@ -1321,6 +1321,7 @@
     {branch}
     mode={newSessionMode}
     initialPrompt={draftPrompt}
+    remote={branch.branchType === 'remote'}
     onClose={handleNewSessionClose}
     onStarted={handleNewSessionStarted}
   />

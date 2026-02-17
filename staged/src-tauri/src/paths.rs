@@ -20,14 +20,66 @@ pub fn repos_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("repos"))
 }
 
-/// Directory for worktrees: `~/.staged/worktrees/`
-pub fn worktrees_dir() -> Option<PathBuf> {
+/// Root directory for workspace-scoped local data: `~/.staged/workspaces/`
+pub fn workspaces_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("workspaces"))
+}
+
+/// Legacy directory for local worktrees: `~/.staged/worktrees/`
+pub fn legacy_worktrees_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("worktrees"))
+}
+
+/// Directory for local git worktrees: `~/.staged/workspaces/local/`
+pub fn worktrees_dir() -> Option<PathBuf> {
+    workspaces_dir().map(|d| d.join("local"))
 }
 
 /// Path for the SQLite database: `~/.staged/data.db`
 pub fn db_path() -> Option<PathBuf> {
     data_dir().map(|d| d.join("data.db"))
+}
+
+/// Migrate local worktrees from the legacy path to the new workspace-scoped path.
+///
+/// Moves entries from `~/.staged/worktrees/` to `~/.staged/workspaces/local/`.
+/// Safe to call repeatedly.
+pub fn migrate_legacy_worktrees_layout() {
+    let Some(old_dir) = legacy_worktrees_dir() else {
+        return;
+    };
+    let Some(new_dir) = worktrees_dir() else {
+        return;
+    };
+    if old_dir == new_dir || !old_dir.exists() {
+        return;
+    }
+
+    log::info!(
+        "Migrating local worktrees from {} to {}",
+        old_dir.display(),
+        new_dir.display()
+    );
+    migrate_directory_contents(&old_dir, &new_dir);
+
+    match std::fs::read_dir(&old_dir) {
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                if let Err(e) = std::fs::remove_dir(&old_dir) {
+                    log::warn!(
+                        "Failed to remove empty legacy worktrees dir {}: {e}",
+                        old_dir.display()
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "Cannot verify legacy worktrees dir after migration {}: {e}",
+                old_dir.display()
+            );
+        }
+    }
 }
 
 /// Move all entries from `src` into `dst`, creating `dst` if needed.

@@ -427,6 +427,9 @@ pub async fn setup_worktree(
     // Ensure we have a local clone (clones on first use, fetches on subsequent)
     let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
     let repo_path = git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
+    let desired_worktree_path =
+        git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
+            .map_err(|e| e.to_string())?;
 
     // Reuse any existing worktree for this branch; otherwise create one.
     let existing_worktree_path = git::list_worktrees(&repo_path)
@@ -440,11 +443,20 @@ pub async fn setup_worktree(
     let worktree_path = if let Some(path) = existing_worktree_path {
         path
     } else if git::branch_exists(&repo_path, &branch.branch_name).map_err(|e| e.to_string())? {
-        git::create_worktree_for_existing_branch(&repo_path, &branch.branch_name)
-            .map_err(|e| e.to_string())?
+        git::create_worktree_for_existing_branch_at_path(
+            &repo_path,
+            &branch.branch_name,
+            &desired_worktree_path,
+        )
+        .map_err(|e| e.to_string())?
     } else {
-        git::create_worktree(&repo_path, &branch.branch_name, &branch.base_branch)
-            .map_err(|e| e.to_string())?
+        git::create_worktree_at_path(
+            &repo_path,
+            &branch.branch_name,
+            &branch.base_branch,
+            &desired_worktree_path,
+        )
+        .map_err(|e| e.to_string())?
     };
 
     let worktree_str = worktree_path
@@ -513,11 +525,19 @@ pub async fn setup_worktree_from_pr(
     };
     // Ensure we have a local clone
     let repo_path = git::ensure_local_clone(&target_repo.github_repo).map_err(|e| e.to_string())?;
+    let desired_worktree_path =
+        git::project_worktree_path_for(&project_id, &target_repo.github_repo, &head_ref)
+            .map_err(|e| e.to_string())?;
 
     // Fetch PR head and create worktree
-    let (worktree_path, branch_name, base_branch) =
-        git::create_worktree_from_pr(&repo_path, pr_number, &head_ref, &base_ref)
-            .map_err(|e| e.to_string())?;
+    let (worktree_path, branch_name, base_branch) = git::create_worktree_from_pr_at_path(
+        &repo_path,
+        pr_number,
+        &head_ref,
+        &base_ref,
+        &desired_worktree_path,
+    )
+    .map_err(|e| e.to_string())?;
 
     let worktree_str = worktree_path
         .to_str()

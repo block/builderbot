@@ -35,6 +35,64 @@ struct DbState {
     needs_reset: Mutex<Option<StoreIncompatibility>>,
 }
 
+fn migrate_db_path_prefixes(
+    db_path: &Path,
+    old_prefix: &Path,
+    new_prefix: &Path,
+) -> Result<(), String> {
+    if !db_path.exists() {
+        return Ok(());
+    }
+
+    let old_prefix = old_prefix.to_string_lossy().to_string();
+    let new_prefix = new_prefix.to_string_lossy().to_string();
+    if old_prefix == new_prefix {
+        return Ok(());
+    }
+
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("Cannot open database for path migration: {e}"))?;
+
+    for (table, column) in [("workdirs", "path"), ("sessions", "working_dir")] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name = ?1
+                )",
+                rusqlite::params![table],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Cannot inspect schema for path migration: {e}"))?;
+        if exists == 0 {
+            continue;
+        }
+
+        let sql = format!(
+            "UPDATE {table}
+             SET {column} = replace({column}, ?1, ?2)
+             WHERE {column} = ?1
+                OR {column} LIKE (?1 || '/%')
+                OR {column} LIKE (?1 || '\\\\%')"
+        );
+        let updated = conn
+            .execute(&sql, rusqlite::params![old_prefix, new_prefix])
+            .map_err(|e| format!("Failed migrating paths in {table}.{column}: {e}"))?;
+        if updated > 0 {
+            log::info!(
+                "Migrated {updated} row(s) in {}.{} from '{}' to '{}'",
+                table,
+                column,
+                old_prefix,
+                new_prefix
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Structured info about a database incompatibility, passed to the frontend.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -793,6 +851,20 @@ async fn delete_project(
         .map_err(|e| e.to_string())?;
     for branch in &branches {
         branches::cleanup_branch_resources_best_effort(&store, branch);
+    }
+
+    // Best-effort cleanup for project-scoped local worktree roots.
+    // Worktree-level cleanup removes individual directories; this removes any
+    // leftover project container folder.
+    if let Ok(project_root) = git::project_worktree_root_for(&id) {
+        if project_root.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&project_root) {
+                log::warn!(
+                    "failed to remove project worktree root '{}': {e}",
+                    project_root.display()
+                );
+            }
+        }
     }
 
     store.delete_project(&id).map_err(|e| e.to_string())
@@ -2003,10 +2075,22 @@ pub fn run() {
                             old_dir.display(),
                             data_dir.display()
                         );
-                        // Move the entire directory contents (db, repos, worktrees)
+                        // Move the entire directory contents (db, repos, worktree/workspace data)
                         crate::paths::migrate_directory_contents(&old_dir, &data_dir);
                         break;
                     }
+                }
+            }
+
+            // Move local worktrees from the legacy top-level `worktrees/` folder
+            // into the workspace-scoped `workspaces/local/` folder.
+            if let (Some(old_worktrees), Some(new_worktrees)) = (
+                crate::paths::legacy_worktrees_dir(),
+                crate::paths::worktrees_dir(),
+            ) {
+                if old_worktrees.exists() && old_worktrees != new_worktrees {
+                    migrate_db_path_prefixes(&db_path, &old_worktrees, &new_worktrees)?;
+                    crate::paths::migrate_legacy_worktrees_layout();
                 }
             }
 

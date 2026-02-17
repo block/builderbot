@@ -17,6 +17,7 @@
     repoLabelsById?: Map<string, string>;
     canAddRepo?: boolean;
     addRepoHint?: string | null;
+    deleting?: boolean;
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
     detecting?: boolean;
@@ -34,6 +35,7 @@
     repoLabelsById = new Map(),
     canAddRepo = true,
     addRepoHint = null,
+    deleting = false,
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
     detecting = false,
@@ -47,6 +49,14 @@
 
   /** Branches sorted by most recently created first. */
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
+  let addRepoDisabled = $derived(deleting || !canAddRepo);
+  let addRepoTitle = $derived(
+    deleting
+      ? 'Project deletion in progress'
+      : !canAddRepo && addRepoHint
+        ? addRepoHint
+        : 'Add repository to project'
+  );
 
   function repoLabelForBranch(branch: Branch): string | null {
     if (!branch.projectRepoId) return project.githubRepo;
@@ -59,13 +69,21 @@
 </script>
 
 <div class="project-section">
-  <div class="project-header">
+  <div class="project-header" class:deleting>
     <div class="project-info">
       <div class="project-icon-slot">
         <span class="folder-icon"><Folder size={14} /></span>
-        <span class="menu-icon"><DropdownMenu items={projectMenuItems} align="left" /></span>
+        {#if !deleting}
+          <span class="menu-icon"><DropdownMenu items={projectMenuItems} align="left" /></span>
+        {/if}
       </div>
       <span class="project-name">{projectDisplayName(project)}</span>
+      {#if deleting}
+        <div class="deleting-status" role="status" aria-live="polite">
+          <Loader2 size={12} class="spinner" />
+          <span>Deleting…</span>
+        </div>
+      {/if}
       {#if detecting}
         <div class="detecting-status">
           <Loader2 size={12} class="spinner" />
@@ -74,17 +92,17 @@
       {/if}
     </div>
   </div>
-  <div class="branches-list">
+  <div class="branches-list" class:deleting>
     <button
       class="manage-repos-button"
       onclick={() => onAddRepo?.()}
-      disabled={!canAddRepo}
-      title={!canAddRepo && addRepoHint ? addRepoHint : 'Add repository to project'}
+      disabled={addRepoDisabled}
+      title={addRepoTitle}
     >
       <Plus size={16} />
       Add Repo
     </button>
-    {#if !canAddRepo && addRepoHint}
+    {#if !deleting && !canAddRepo && addRepoHint}
       <div class="repo-hint">{addRepoHint}</div>
     {/if}
     {#each sortedBranches as branch (branch.id)}
@@ -159,11 +177,11 @@
     transition: opacity 0.15s ease;
   }
 
-  .project-header:hover .folder-icon {
+  .project-header:not(.deleting):hover .folder-icon {
     opacity: 0;
   }
 
-  .project-header:hover .menu-icon {
+  .project-header:not(.deleting):hover .menu-icon {
     opacity: 1;
   }
 
@@ -190,6 +208,26 @@
     border: 1px solid var(--border-muted);
   }
 
+  .deleting-status {
+    height: 22px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 500;
+    line-height: 1;
+    border: 1px solid var(--border-muted);
+  }
+
+  .deleting-status :global(.spinner) {
+    animation: spin 1s linear infinite;
+  }
+
   .detecting-status :global(.spinner) {
     animation: spin 1s linear infinite;
   }
@@ -207,6 +245,11 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  .branches-list.deleting {
+    opacity: 0.65;
+    pointer-events: none;
   }
 
   .manage-repos-button {

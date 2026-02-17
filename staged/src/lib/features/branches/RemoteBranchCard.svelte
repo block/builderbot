@@ -323,6 +323,10 @@
     openNote = { title, content };
   }
 
+  function handleReviewClick(_reviewId: string) {
+    showBranchDiff = true;
+  }
+
   function handleCommitClick(sha: string) {
     commitDiffSha = sha;
   }
@@ -368,6 +372,32 @@
       console.error('Failed to delete pending commit:', e);
       notifyError('Failed to delete pending commit', e);
     }
+  }
+
+  function handleDeleteReview(reviewId: string, sessionId?: string) {
+    confirmDelete = {
+      title: 'Delete Review',
+      message:
+        'Are you sure you want to delete this review and all its comments?' +
+        (sessionId ? ' The linked session will also be deleted.' : ''),
+      onConfirm: async () => {
+        confirmDelete = null;
+        try {
+          if (sessionId) {
+            try {
+              await commands.cancelSession(sessionId);
+            } catch {
+              // Session may already be finished
+            }
+          }
+          await commands.deleteReview(reviewId, !!sessionId);
+          loadTimeline();
+        } catch (e) {
+          console.error('Failed to delete review:', e);
+          notifyError('Failed to delete review', e);
+        }
+      },
+    };
   }
 
   // =========================================================================
@@ -453,10 +483,13 @@
             onSessionClick={handleTimelineSessionClick}
             onCommitClick={handleCommitClick}
             onNoteClick={handleNoteClick}
+            onReviewClick={handleReviewClick}
             onDeletePendingCommit={handleDeletePendingCommit}
             onDeleteNote={handleDeleteNote}
+            onDeleteReview={handleDeleteReview}
             onNewNote={() => openNewSession('note')}
             onNewCommit={() => openNewSession('commit')}
+            onNewReview={hasCodeChanges ? () => openNewSession('review') : undefined}
             newSessionDisabled={showNewSession}
           >
             {#snippet footerActions()}

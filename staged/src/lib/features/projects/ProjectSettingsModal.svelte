@@ -1,30 +1,13 @@
 <!--
-  ProjectSettingsModal.svelte - Manage project actions
+  ProjectSettingsModal.svelte - Manage project repositories
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import {
-    X,
-    Play,
-    Hammer,
-    FlaskConical,
-    Wand2,
-    CheckCircle,
-    Zap,
-    Plus,
-    Trash2,
-    Save,
-    Pencil,
-    Code2,
-    Star,
-  } from 'lucide-svelte';
-  import Spinner from '../../shared/Spinner.svelte';
+  import { X, Plus, Trash2, FolderGit2, Pencil } from 'lucide-svelte';
   import type { Project, ProjectRepo } from '../../types';
-  import type { ProjectAction } from '../../commands';
   import * as commands from '../../commands';
-  import { detectProjectActions } from '../actions/actions';
-  import type { SuggestedAction, ActionType } from '../actions/actions';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
+  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
 
   interface Props {
     project: Project;
@@ -32,29 +15,17 @@
     onClose: () => void;
   }
 
-  let { project, detecting: externalDetecting = false, onClose }: Props = $props();
+  let { project, onClose }: Props = $props();
 
-  // Actions state
-  let actions = $state<ProjectAction[]>([]);
   let projectRepos = $state<ProjectRepo[]>([]);
+  let savingBranchIds = $state<Set<string>>(new Set());
+  let renamingRepo = $state<ProjectRepo | null>(null);
+  let repoToRemove = $state<ProjectRepo | null>(null);
+  let renameDraft = $state('');
   let loadingRepos = $state(false);
   let showRepoPicker = $state(false);
-  let loadingActions = $state(false);
-  let internalDetecting = $state(false);
-  let editingAction = $state<ProjectAction | null>(null);
-  let editForm = $state({
-    name: '',
-    command: '',
-    actionType: 'run' as ActionType,
-    autoCommit: false,
-  });
 
-  // Combine internal and external detecting states
-  let detecting = $derived(internalDetecting || externalDetecting);
-
-  // Load actions on mount
   onMount(() => {
-    loadActions();
     loadRepos();
   });
 
@@ -71,7 +42,13 @@
 
   async function addRepo(githubRepo: string) {
     try {
-      await commands.addProjectRepo(project.id, githubRepo, undefined, projectRepos.length === 0);
+      await commands.addProjectRepo(
+        project.id,
+        githubRepo,
+        undefined,
+        undefined,
+        projectRepos.length === 0
+      );
       await loadRepos();
       showRepoPicker = false;
     } catch (e) {
@@ -88,218 +65,59 @@
     }
   }
 
-  async function setPrimary(repoId: string) {
+  function requestRemoveRepo(repo: ProjectRepo) {
+    repoToRemove = repo;
+  }
+
+  async function confirmRemoveRepo() {
+    if (!repoToRemove) return;
+    const repoId = repoToRemove.id;
+    repoToRemove = null;
+    await removeRepo(repoId);
+  }
+
+  function startRename(repo: ProjectRepo) {
+    renamingRepo = repo;
+    renameDraft = repo.branchName;
+  }
+
+  function cancelRename() {
+    renamingRepo = null;
+    renameDraft = '';
+  }
+
+  async function saveRepoBranch() {
+    if (!renamingRepo) return;
+    const repoId = renamingRepo.id;
+    const branchName = renameDraft.trim();
+    if (!branchName) return;
+    if (savingBranchIds.has(repoId)) return;
     try {
-      await commands.setPrimaryProjectRepo(project.id, repoId);
+      savingBranchIds = new Set([...savingBranchIds, repoId]);
+      await commands.updateProjectRepoBranchName(project.id, repoId, branchName);
+      projectRepos = projectRepos.map((repo) =>
+        repo.id === repoId ? { ...repo, branchName } : repo
+      );
+    } catch (e) {
+      console.error('Failed to update repo branch name:', e);
       await loadRepos();
-    } catch (e) {
-      console.error('Failed to set primary repo:', e);
-    }
-  }
-
-  // Track previous detecting state to detect when external detection completes
-  let previousExternalDetecting = $state(false);
-  $effect(() => {
-    // When external detection changes from true to false, reload actions
-    if (previousExternalDetecting && !externalDetecting) {
-      loadActions();
-    }
-    previousExternalDetecting = externalDetecting;
-  });
-
-  async function loadActions() {
-    loadingActions = true;
-    try {
-      actions = await commands.listProjectActions(project.id);
-    } catch (e) {
-      console.error('Failed to load actions:', e);
     } finally {
-      loadingActions = false;
+      const next = new Set(savingBranchIds);
+      next.delete(repoId);
+      savingBranchIds = next;
+      cancelRename();
     }
   }
-
-  async function detectActions() {
-    internalDetecting = true;
-    try {
-      const suggested = await detectProjectActions(project.id);
-
-      // Add suggested actions that don't already exist
-      const existingCommands = new Set(actions.map((a) => a.command));
-      let nextSortOrder = Math.max(...actions.map((a) => a.sortOrder), 0) + 1;
-
-      let actionsAdded = false;
-      for (const suggestion of suggested) {
-        if (!existingCommands.has(suggestion.command)) {
-          const newAction = await commands.createProjectAction(
-            project.id,
-            suggestion.name,
-            suggestion.command,
-            suggestion.actionType,
-            nextSortOrder++,
-            suggestion.autoCommit
-          );
-          actions = [...actions, newAction];
-          actionsAdded = true;
-        }
-      }
-
-      // Notify all BranchCard components to reload actions if any were added
-      if (actionsAdded) {
-        window.dispatchEvent(
-          new CustomEvent('project-actions-changed', { detail: { projectId: project.id } })
-        );
-      }
-    } catch (e) {
-      console.error('Failed to detect actions:', e);
-    } finally {
-      internalDetecting = false;
-    }
-  }
-
-  function startAddAction() {
-    editForm = {
-      name: '',
-      command: '',
-      actionType: 'run',
-      autoCommit: false,
-    };
-    editingAction = {} as ProjectAction; // Empty object signals "adding"
-  }
-
-  function startEditAction(action: ProjectAction) {
-    editForm = {
-      name: action.name,
-      command: action.command,
-      actionType: action.actionType as ActionType,
-      autoCommit: action.autoCommit,
-    };
-    editingAction = action;
-  }
-
-  function cancelEdit() {
-    editingAction = null;
-  }
-
-  async function saveAction() {
-    if (!editForm.name || !editForm.command) return;
-
-    try {
-      if (!editingAction?.id) {
-        // Adding new action
-        const nextSortOrder = Math.max(...actions.map((a) => a.sortOrder), 0) + 1;
-        const newAction = await commands.createProjectAction(
-          project.id,
-          editForm.name,
-          editForm.command,
-          editForm.actionType,
-          nextSortOrder,
-          editForm.autoCommit
-        );
-        actions = [...actions, newAction];
-      } else if (editingAction) {
-        // Updating existing action
-        const actionId = editingAction.id;
-        await commands.updateProjectAction(
-          actionId,
-          editForm.name,
-          editForm.command,
-          editForm.actionType,
-          editingAction.sortOrder,
-          editForm.autoCommit
-        );
-        actions = actions.map((a) =>
-          a.id === actionId
-            ? {
-                ...a,
-                name: editForm.name,
-                command: editForm.command,
-                actionType: editForm.actionType,
-                autoCommit: editForm.autoCommit,
-              }
-            : a
-        );
-      }
-      editingAction = null;
-      // Notify all BranchCard components to reload actions
-      window.dispatchEvent(
-        new CustomEvent('project-actions-changed', { detail: { projectId: project.id } })
-      );
-    } catch (e) {
-      console.error('Failed to save action:', e);
-    }
-  }
-
-  async function deleteAction(actionId: string) {
-    try {
-      await commands.deleteProjectAction(actionId);
-      actions = actions.filter((a) => a.id !== actionId);
-      // Notify all BranchCard components to reload actions
-      window.dispatchEvent(
-        new CustomEvent('project-actions-changed', { detail: { projectId: project.id } })
-      );
-    } catch (e) {
-      console.error('Failed to delete action:', e);
-    }
-  }
-
-  function getActionIcon(actionType: string) {
-    switch (actionType) {
-      case 'prerun':
-        return Zap;
-      case 'build':
-        return Hammer;
-      case 'test':
-        return FlaskConical;
-      case 'format':
-        return Wand2;
-      case 'check':
-        return CheckCircle;
-      case 'run':
-        return Play;
-      case 'cleanUp':
-        return Trash2;
-      default:
-        return Play;
-    }
-  }
-
-  function getActionTypeColor(actionType: string): string {
-    return 'var(--ui-accent)';
-  }
-
-  // Group actions by type
-  let groupedActions = $derived.by(() => {
-    const groups: Record<string, ProjectAction[]> = {
-      prerun: [],
-      run: [],
-      build: [],
-      test: [],
-      format: [],
-      check: [],
-      cleanUp: [],
-    };
-    for (const action of actions) {
-      const type = action.actionType;
-      if (groups[type]) {
-        groups[type].push(action);
-      } else {
-        // Fallback for unknown types
-        if (!groups['run']) groups['run'] = [];
-        groups['run'].push(action);
-      }
-    }
-    return groups;
-  });
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && !editingAction) {
+    if (event.key === 'Escape') {
       onClose();
       event.preventDefault();
     }
   }
 
   function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget && !editingAction) {
+    if (event.target === event.currentTarget) {
       onClose();
     }
   }
@@ -314,13 +132,13 @@
   aria-modal="true"
   tabindex="-1"
   onclick={handleBackdropClick}
-  onkeydown={(e) => e.key === 'Escape' && !editingAction && onClose()}
+  onkeydown={(e) => e.key === 'Escape' && onClose()}
 >
   <div class="modal">
     <header class="modal-header">
       <h2>
-        <Play size={16} />
-        Actions
+        <FolderGit2 size={16} />
+        Manage Repositories
       </h2>
       <button class="close-btn" onclick={onClose}>
         <X size={16} />
@@ -328,204 +146,113 @@
     </header>
 
     <div class="modal-body">
-      <div class="content-wrapper">
-        <div class="repos-section">
-          <div class="repos-header">
-            <div class="section-title">Repositories</div>
-            <button class="secondary-btn" onclick={() => (showRepoPicker = true)}>
-              <Plus size={14} />
-              Add Repo
-            </button>
-          </div>
-          {#if loadingRepos}
-            <div class="empty-hint">Loading repositories...</div>
-          {:else if projectRepos.length === 0}
-            <div class="empty-hint">No repositories attached.</div>
-          {:else}
-            <div class="repos-list">
-              {#each projectRepos as repo (repo.id)}
-                <div class="repo-item">
-                  <div class="repo-main">
-                    <code>{repo.githubRepo}</code>
-                    {#if repo.isPrimary}
-                      <span class="action-badge">Primary</span>
-                    {/if}
-                  </div>
-                  <div class="action-controls">
-                    {#if !repo.isPrimary}
-                      <button class="icon-btn" onclick={() => setPrimary(repo.id)} title="Set primary">
-                        <Star size={14} />
-                      </button>
-                    {/if}
-                    <button class="icon-btn danger" onclick={() => removeRepo(repo.id)} title="Remove">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
+      <div class="repos-header">
+        <div class="section-title">Repositories</div>
+        <button class="secondary-btn" onclick={() => (showRepoPicker = true)}>
+          <Plus size={14} />
+          Add Repo
+        </button>
+      </div>
+      <div class="repo-hint">
+        Each repo has a default branch name used when Staged creates its branch/worktree.
+      </div>
+
+      {#if loadingRepos}
+        <div class="empty-hint">Loading repositories...</div>
+      {:else if projectRepos.length === 0}
+        <div class="empty-hint">No repositories attached.</div>
+      {:else}
+        <div class="repos-list">
+          {#each projectRepos as repo (repo.id)}
+            <div class="repo-item">
+              <div class="repo-main">
+                <div class="repo-title">
+                  <code>{repo.githubRepo}</code>
                 </div>
-              {/each}
+                <div class="repo-branch-label">Branch: <code>{repo.branchName}</code></div>
+              </div>
+              <div class="action-controls">
+                <button class="icon-btn" onclick={() => startRename(repo)} title="Rename branch">
+                  <Pencil size={14} />
+                </button>
+                <button
+                  class="icon-btn danger"
+                  onclick={() => requestRemoveRepo(repo)}
+                  title="Remove"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
             </div>
-          {/if}
+          {/each}
         </div>
+      {/if}
+    </div>
+  </div>
+</div>
 
-        <div class="actions-header">
-          <button class="secondary-btn" onclick={detectActions} disabled={detecting}>
-            {#if detecting}
-              <Spinner size={14} />
-            {:else}
-              <Zap size={14} />
-            {/if}
-            Detect Actions
-          </button>
-          <button class="primary-btn" onclick={startAddAction}>
-            <Plus size={14} />
-            Add Action
-          </button>
-        </div>
-
-        {#if loadingActions}
-          <div class="loading-state">
-            <Spinner size={24} />
-            <span>Loading...</span>
-          </div>
-        {:else if actions.length === 0}
-          <div class="empty-state">
-            <Play size={32} />
-            <p>No actions configured</p>
-            <p class="empty-hint">
-              Click "Detect Actions" to find common scripts, or add one manually
-            </p>
-          </div>
-        {:else}
-          <div class="actions-list">
-            {#each Object.entries(groupedActions) as [type, typeActions]}
-              {#if typeActions.length > 0}
-                <div class="action-group">
-                  <div class="group-header" style="color: {getActionTypeColor(type)}">
-                    <!-- svelte-ignore svelte_component_deprecated -->
-                    <svelte:component this={getActionIcon(type)} size={14} />
-                    {type.charAt(0).toUpperCase() + type.slice(1)}
-                  </div>
-                  {#if type === 'prerun'}
-                    <div class="group-subtitle">
-                      These actions will run automatically when a new worktree is created
-                    </div>
-                  {/if}
-                  {#each typeActions as action (action.id)}
-                    <div class="action-item">
-                      <div class="action-info">
-                        <div class="action-name">
-                          {action.name}
-                          {#if action.autoCommit}
-                            <span class="action-badge">Commits to git</span>
-                          {/if}
-                        </div>
-                        <code class="action-command">{action.command}</code>
-                      </div>
-                      <div class="action-controls">
-                        <button
-                          class="icon-btn"
-                          onclick={() => startEditAction(action)}
-                          title="Edit"
-                        >
-                          <Pencil size={14} />
-                        </button>
-                        <button
-                          class="icon-btn danger"
-                          onclick={() => deleteAction(action.id)}
-                          title="Delete"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            {/each}
-          </div>
-        {/if}
+{#if renamingRepo}
+  <div
+    class="rename-backdrop"
+    role="presentation"
+    tabindex="-1"
+    onclick={(event) => {
+      if (event.target === event.currentTarget) cancelRename();
+    }}
+    onkeydown={(event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        cancelRename();
+      }
+    }}
+  >
+    <div class="rename-modal" role="dialog" aria-modal="true">
+      <div class="rename-title">Rename Branch</div>
+      <div class="rename-repo">{renamingRepo.githubRepo}</div>
+      <input
+        value={renameDraft}
+        oninput={(event) => {
+          const target = event.currentTarget as HTMLInputElement;
+          renameDraft = target.value;
+        }}
+        onkeydown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            saveRepoBranch();
+          } else if (event.key === 'Escape') {
+            event.preventDefault();
+            cancelRename();
+          }
+        }}
+        placeholder="Branch name"
+      />
+      <div class="rename-actions">
+        <button class="secondary-btn" onclick={cancelRename}>Cancel</button>
+        <button
+          class="primary-btn"
+          onclick={saveRepoBranch}
+          disabled={!renameDraft.trim() || savingBranchIds.has(renamingRepo.id)}
+        >
+          Save
+        </button>
       </div>
     </div>
   </div>
-
-  <!-- Edit Action Modal (separate overlay) -->
-  {#if editingAction}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="edit-modal-backdrop" role="presentation" onclick={cancelEdit}>
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="edit-modal" role="dialog" tabindex="-1" onclick={(e) => e.stopPropagation()}>
-        <header class="edit-modal-header">
-          <h3>{editingAction.id ? 'Edit Action' : 'New Action'}</h3>
-          <button class="close-btn" onclick={cancelEdit}>
-            <X size={16} />
-          </button>
-        </header>
-
-        <div class="edit-modal-body">
-          <div class="form-group">
-            <label for="action-name">Name</label>
-            <input
-              id="action-name"
-              type="text"
-              bind:value={editForm.name}
-              placeholder="e.g., Lint"
-            />
-          </div>
-
-          <div class="form-group">
-            <label for="action-command">Command</label>
-            <input
-              id="action-command"
-              type="text"
-              bind:value={editForm.command}
-              placeholder="e.g., npm run lint"
-            />
-          </div>
-
-          <div class="form-group">
-            <label for="action-type">Type</label>
-            <select id="action-type" bind:value={editForm.actionType}>
-              <option value="run">Run - Dev servers & manual commands</option>
-              <option value="build">Build - Compile/bundle</option>
-              <option value="test">Test - Run tests</option>
-              <option value="format">Format - Auto-fix formatting</option>
-              <option value="check">Check - Validate code (lint, typecheck)</option>
-              <option value="cleanUp">Clean Up - Remove build artifacts</option>
-              <option value="prerun">Prerun - Auto-run on branch creation</option>
-            </select>
-            {#if editForm.actionType === 'prerun'}
-              <div class="type-hint">
-                Prerun actions will run automatically when a new worktree is created
-              </div>
-            {/if}
-          </div>
-
-          <div class="form-group checkbox-group">
-            <label>
-              <input type="checkbox" bind:checked={editForm.autoCommit} />
-              Auto-commit changes after successful execution
-            </label>
-          </div>
-        </div>
-
-        <footer class="edit-modal-footer">
-          <button class="secondary-btn" onclick={cancelEdit}> Cancel </button>
-          <button
-            class="primary-btn"
-            onclick={saveAction}
-            disabled={!editForm.name || !editForm.command}
-          >
-            <Save size={14} />
-            Save
-          </button>
-        </footer>
-      </div>
-    </div>
-  {/if}
-</div>
+{/if}
 
 {#if showRepoPicker}
   <GitHubRepoPickerModal onSelect={addRepo} onClose={() => (showRepoPicker = false)} />
+{/if}
+
+{#if repoToRemove}
+  <ConfirmDialog
+    title="Remove Repository"
+    message={`Remove "${repoToRemove.githubRepo}" from this project? Existing branch/worktree history in Staged for that repo may be affected.`}
+    confirmLabel="Remove"
+    danger={true}
+    onConfirm={confirmRemoveRepo}
+    onCancel={() => (repoToRemove = null)}
+  />
 {/if}
 
 <style>
@@ -545,7 +272,7 @@
   .modal {
     background: var(--bg-chrome);
     border-radius: 12px;
-    width: min(700px, 90vw);
+    width: min(640px, 90vw);
     max-height: 85vh;
     display: flex;
     flex-direction: column;
@@ -580,7 +307,6 @@
     display: flex;
     align-items: center;
     border-radius: 4px;
-    transition: all 0.15s;
   }
 
   .close-btn:hover {
@@ -589,24 +315,11 @@
   }
 
   .modal-body {
-    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
     overflow-y: auto;
-    padding: 20px;
-  }
-
-  .content-wrapper {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .repos-section {
-    border: 1px solid var(--border-muted);
-    border-radius: 10px;
-    padding: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
   }
 
   .repos-header {
@@ -624,53 +337,74 @@
   .repos-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
   }
 
   .repo-item {
     display: flex;
     justify-content: space-between;
-    align-items: center;
-    gap: 8px;
-    padding: 8px;
+    gap: 10px;
+    padding: 12px;
     border-radius: 8px;
-    background: var(--bg-hover);
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-primary);
   }
 
   .repo-main {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .repo-title {
     display: flex;
     align-items: center;
     gap: 8px;
     min-width: 0;
   }
 
-  .repo-main code {
+  .repo-title code {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .primary-btn,
+  .repo-branch-label {
+    margin-top: 2px;
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+  }
+
   .secondary-btn {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 8px 16px;
+    padding: 8px 14px;
     border-radius: 6px;
     font-size: var(--size-xs);
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.15s;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-muted);
+  }
+
+  .secondary-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-emphasis);
   }
 
   .primary-btn {
     background: var(--ui-accent);
     color: var(--bg-primary);
     border: none;
-  }
-
-  .primary-btn:hover:not(:disabled) {
-    background: var(--ui-accent-hover);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: var(--size-xs);
+    font-weight: 600;
+    cursor: pointer;
   }
 
   .primary-btn:disabled {
@@ -678,280 +412,98 @@
     cursor: not-allowed;
   }
 
-  .secondary-btn {
-    background: var(--bg-primary);
-    color: var(--text-primary);
+  .action-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .icon-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
     border: 1px solid var(--border-muted);
-  }
-
-  .secondary-btn:hover:not(:disabled) {
-    background: var(--bg-hover);
-    border-color: var(--border-emphasis);
-  }
-
-  .secondary-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .actions-header {
+    background: var(--bg-primary);
+    color: var(--text-secondary);
     display: flex;
-    gap: 8px;
-    justify-content: flex-end;
-  }
-
-  .loading-state,
-  .empty-state {
-    display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 60px 20px;
-    color: var(--text-secondary);
-    text-align: center;
-    gap: 12px;
+    cursor: pointer;
   }
 
-  .empty-state {
-    gap: 12px;
+  .icon-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-emphasis);
+    background: var(--bg-hover);
   }
 
-  .empty-state p {
-    margin: 0;
+  .icon-btn.danger:hover {
+    color: var(--ui-danger);
+    border-color: var(--ui-danger);
   }
 
   .empty-hint {
     font-size: 12px;
     color: var(--text-tertiary);
+    padding: 10px 2px;
   }
 
-  .actions-list {
-    display: flex;
-    flex-direction: column;
-    gap: 24px;
+  .repo-hint {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
   }
 
-  .action-group {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .group-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 4px;
-  }
-
-  .group-subtitle {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    font-weight: 400;
-  }
-
-  .action-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 12px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-  }
-
-  .action-info {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .action-name {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--text-primary);
-    margin-bottom: 4px;
-  }
-
-  .action-command {
-    display: inline-block;
-    font-size: 12px;
-    color: var(--text-secondary);
-    font-family: var(--font-mono);
-    background: var(--bg-hover);
-    padding: 4px 8px;
-    border-radius: 4px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    margin-top: 4px;
-    max-width: 100%;
-  }
-
-  .action-badge {
-    display: inline-flex;
-    align-items: center;
-    font-size: 10px;
-    padding: 3px 8px;
-    background: var(--bg-hover);
-    color: var(--text-secondary);
-    border-radius: 4px;
-    font-weight: 400;
-    white-space: nowrap;
-  }
-
-  .action-controls {
-    display: flex;
-    gap: 4px;
-  }
-
-  .icon-btn {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding: 6px;
-    display: flex;
-    align-items: center;
-    border-radius: 4px;
-    transition: all 0.15s;
-  }
-
-  .icon-btn:hover {
-    background: var(--bg-primary);
-    color: var(--text-primary);
-  }
-
-  .icon-btn.danger:hover {
-    background: var(--color-error);
-    color: white;
-  }
-
-  /* Edit Modal */
-  .edit-modal-backdrop {
+  .rename-backdrop {
     position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: transparent;
+    inset: 0;
+    background: var(--shadow-overlay);
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1100;
+    z-index: 1001;
   }
 
-  .edit-modal {
+  .rename-modal {
+    width: min(420px, 90vw);
     background: var(--bg-chrome);
-    border-radius: 8px;
-    width: min(500px, 90vw);
-    max-height: 85vh;
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    box-shadow: var(--shadow-elevated);
+    padding: 14px;
     display: flex;
     flex-direction: column;
-    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.4);
-    border: 1px solid var(--border-subtle);
+    gap: 10px;
   }
 
-  .edit-modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 20px;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .edit-modal-header h3 {
-    margin: 0;
-    font-size: 16px;
+  .rename-title {
+    font-size: var(--size-sm);
     font-weight: 600;
     color: var(--text-primary);
   }
 
-  .edit-modal-body {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px;
+  .rename-repo {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+    font-family: 'SF Mono', 'Menlo', monospace;
   }
 
-  .edit-modal-footer {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-end;
-    padding: 16px 20px;
-    border-top: 1px solid var(--border-subtle);
-    background: var(--bg-primary);
-  }
-
-  .form-group {
-    margin-bottom: 16px;
-  }
-
-  .form-group label {
-    display: block;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--text-primary);
-    margin-bottom: 6px;
-  }
-
-  .form-group input[type='text'],
-  .form-group select {
-    width: 100%;
-    padding: 9px 12px;
-    background: var(--bg-primary);
+  .rename-modal input {
     border: 1px solid var(--border-muted);
-    border-radius: 6px;
+    background: var(--bg-deepest);
     color: var(--text-primary);
-    font-size: 13px;
-    transition: all 0.15s;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: var(--size-sm);
   }
 
-  .form-group input[type='text']:focus,
-  .form-group select:focus {
+  .rename-modal input:focus {
     outline: none;
     border-color: var(--ui-accent);
-    box-shadow: 0 0 0 2px rgba(var(--color-primary-rgb, 59, 130, 246), 0.1);
   }
 
-  .form-group input[type='text']::placeholder {
-    color: var(--text-tertiary);
-  }
-
-  .checkbox-group label {
+  .rename-actions {
     display: flex;
-    align-items: center;
+    justify-content: flex-end;
     gap: 8px;
-    cursor: pointer;
-    font-weight: 400;
-  }
-
-  .checkbox-group input[type='checkbox'] {
-    cursor: pointer;
-    width: 16px;
-    height: 16px;
-  }
-
-  .type-hint {
-    font-size: 12px;
-    color: var(--text-secondary);
-    margin-top: 8px;
-    padding: 10px 12px;
-    background: var(--bg-secondary);
-    border-radius: 6px;
-    border-left: 3px solid var(--color-warning);
-  }
-
-  .loading-state :global(svg),
-  .actions-header :global(.spinner),
-  .primary-btn :global(.spinner) {
-    animation: spin 1s linear infinite;
   }
 </style>

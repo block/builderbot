@@ -1,12 +1,8 @@
 <!--
-  NewBranchModal.svelte - Create a new branch (local worktree or remote Blox workspace)
+  NewBranchModal.svelte - Create a new branch for a project.
 
-  Two modes toggled by a segmented control:
-  - Local: branch name + base branch picker → creates git worktree
-  - Remote: branch name → starts a Blox workspace
-
-  Optionally import from a GitHub PR or issue to auto-populate the branch name
-  and (for PRs) set the base branch.
+  The project's location determines whether branch setup is local worktree
+  or remote workspace.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -16,16 +12,14 @@
     Search,
     ChevronsUpDown,
     Check,
-    Monitor,
     Cloud,
     Github,
     GitPullRequest,
     CircleDot,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
-  import type { Branch, BranchRef, Project, BranchType, PullRequest, Issue } from '../../types';
+  import type { Branch, BranchRef, Project, PullRequest, Issue } from '../../types';
   import * as commands from '../../commands';
-  import { sqState } from '../settings/sq.svelte';
 
   interface Props {
     project: Project;
@@ -37,8 +31,7 @@
   let activeRepo = $derived(project.githubRepo);
   let hasRepo = $derived(!!activeRepo);
 
-  // Branch type toggle
-  let branchType = $state<BranchType>('local');
+  let isRemoteProject = $derived(project.location === 'remote');
 
   // State
   let branchTitle = $state('');
@@ -87,7 +80,7 @@
   // For remote branches, only show remote-tracking refs (branches that exist on the remote).
   // For local branches, show all refs.
   let availableBranches = $derived.by(() => {
-    if (branchType === 'remote') {
+    if (isRemoteProject) {
       return allBranchRefs.filter((r) => r.isRemote).map((r) => r.name);
     }
     return allBranchRefs.map((r) => r.name);
@@ -147,7 +140,7 @@
    * This is used ONLY for the Blox workspace identifier, not the git branch.
    */
   let workspaceSafeName = $derived.by(() => {
-    if (branchType !== 'remote') return branchName;
+    if (!isRemoteProject) return branchName;
     return branchName
       .replace(/\/+/g, '-')
       .replace(/-+/g, '-')
@@ -169,6 +162,15 @@
   }
 
   onMount(async () => {
+    if (!branchTitle) {
+      try {
+        const repos = await commands.listProjectRepos(project.id);
+        const primary = repos.find((repo) => repo.isPrimary) ?? repos[0];
+        branchTitle = primary?.branchName || project.name;
+      } catch {
+        branchTitle = project.name;
+      }
+    }
     if (!activeRepo) {
       loading = false;
       return;
@@ -221,7 +223,7 @@
 
   // Detect whether the typed branch already exists locally for this project.
   $effect(() => {
-    const candidate = branchType === 'local' ? branchName.trim() : '';
+    const candidate = !isRemoteProject ? branchName.trim() : '';
     if (!candidate || loading) {
       existingLocalBranch = false;
       checkingExistingLocalBranch = false;
@@ -376,7 +378,7 @@
     error = null;
 
     try {
-      if (selectedPr && branchType === 'local') {
+      if (selectedPr && !isRemoteProject) {
         // PR import: fetch the PR's head ref and create a worktree of that branch.
         // This does everything in one shot (clone, fetch, branch, worktree, DB records)
         // and returns a branch with worktreePath already populated.
@@ -387,7 +389,7 @@
           selectedPr.baseRef
         );
         onCreated(branch);
-      } else if (branchType === 'local') {
+      } else if (!isRemoteProject) {
         const baseBranch = selectedBaseBranch ?? undefined;
         // Fast: creates DB record only (no git worktree yet)
         const branch = await commands.createBranch(project.id, branchName.trim(), baseBranch);
@@ -535,34 +537,6 @@
           <button class="cancel-button" onclick={onClose}>Close</button>
         </div>
       {:else}
-        <!-- Branch type toggle (only shown when sq CLI is available) -->
-        {#if sqState.available}
-          <div class="type-toggle">
-            <button
-              class="toggle-option"
-              class:active={branchType === 'local'}
-              onclick={() => {
-                branchType = 'local';
-                selectedBaseBranch = null;
-              }}
-            >
-              <Monitor size={14} />
-              Local
-            </button>
-            <button
-              class="toggle-option"
-              class:active={branchType === 'remote'}
-              onclick={() => {
-                branchType = 'remote';
-                selectedBaseBranch = null;
-              }}
-            >
-              <Cloud size={14} />
-              Remote
-            </button>
-          </div>
-        {/if}
-
         <div class="selected-info">
           <div class="info-row">
             <GitBranch size={14} />
@@ -700,7 +674,7 @@
               bind:value={branchTitle}
               id="branch-title"
               type="text"
-              placeholder={branchType === 'local' ? 'Fix login issue' : 'Add user auth'}
+              placeholder={isRemoteProject ? 'Add user auth' : 'Fix login issue'}
               class="branch-input"
               autocomplete="off"
               autocorrect="off"
@@ -713,13 +687,13 @@
                 <span>{branchName || '...'}</span>
               </div>
             {/if}
-            {#if branchType === 'remote' && workspaceSafeName}
+            {#if isRemoteProject && workspaceSafeName}
               <div class="workspace-preview">
                 <Cloud size={12} />
                 <span>Workspace: {workspaceName(workspaceSafeName)}</span>
               </div>
             {/if}
-            {#if branchType === 'local' && branchName && existingLocalBranch && !checkingExistingLocalBranch}
+            {#if !isRemoteProject && branchName && existingLocalBranch && !checkingExistingLocalBranch}
               <div class="existing-branch-hint">
                 <GitBranch size={12} />
                 <span>Local branch exists. We’ll use/reuse it.</span>
@@ -742,7 +716,7 @@
               {#if creating}
                 <Spinner size={14} />
                 Creating...
-              {:else if branchType === 'local' && existingLocalBranch}
+              {:else if !isRemoteProject && existingLocalBranch}
                 Use Existing Branch
               {:else}
                 Create Branch
@@ -829,46 +803,6 @@
     padding: 32px 16px;
     color: var(--text-muted);
     font-size: var(--size-sm);
-  }
-
-  /* Branch type toggle */
-  .type-toggle {
-    display: flex;
-    gap: 2px;
-    padding: 3px;
-    background-color: var(--bg-hover);
-    border-radius: 8px;
-  }
-
-  .toggle-option {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 7px 12px;
-    background: transparent;
-    border: none;
-    border-radius: 6px;
-    font-size: var(--size-sm);
-    font-weight: 500;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .toggle-option:hover:not(.active) {
-    color: var(--text-primary);
-  }
-
-  .toggle-option.active {
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-  }
-
-  .toggle-option :global(svg) {
-    flex-shrink: 0;
   }
 
   .selected-info {

@@ -416,6 +416,7 @@ fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     name: String,
     github_repo: Option<String>,
+    location: Option<String>,
     subpath: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
@@ -423,7 +424,13 @@ fn create_project(
     if trimmed.is_empty() {
         return Err("Project name is required".to_string());
     }
+    let project_location = match location.as_deref() {
+        Some("remote") => store::ProjectLocation::Remote,
+        _ => store::ProjectLocation::Local,
+    };
+    let inferred_branch_name = infer_branch_name(trimmed);
     let mut project = store::Project::named(trimmed);
+    project.location = project_location;
     if let Some(repo) = github_repo.clone() {
         project = project.with_primary_repo(&repo);
     }
@@ -433,10 +440,42 @@ fn create_project(
     store.create_project(&project).map_err(|e| e.to_string())?;
 
     if let Some(repo) = github_repo {
-        let project_repo = store::ProjectRepo::new(&project.id, &repo, subpath).primary();
+        let project_repo =
+            store::ProjectRepo::new(&project.id, &repo, &inferred_branch_name, subpath).primary();
         store
             .create_project_repo(&project_repo)
             .map_err(|e| e.to_string())?;
+
+        // Create the initial branch record for the first repo so each new
+        // project starts with exactly one branch tracked for that repository.
+        // Worktree/workspace setup runs asynchronously from the frontend.
+        let detected_base =
+            git::detect_default_branch_for_repo(&repo).unwrap_or_else(|_| "main".to_string());
+        let effective_base = if detected_base.starts_with("origin/") {
+            detected_base
+        } else {
+            format!("origin/{detected_base}")
+        };
+
+        match project.location {
+            store::ProjectLocation::Local => {
+                let branch =
+                    store::Branch::new(&project.id, &inferred_branch_name, &effective_base)
+                        .with_project_repo(&project_repo.id);
+                store.create_branch(&branch).map_err(|e| e.to_string())?;
+            }
+            store::ProjectLocation::Remote => {
+                let workspace_name = infer_workspace_name(&inferred_branch_name);
+                let branch = store::Branch::new_remote(
+                    &project.id,
+                    &inferred_branch_name,
+                    &effective_base,
+                    &workspace_name,
+                )
+                .with_project_repo(&project_repo.id);
+                store.create_branch(&branch).map_err(|e| e.to_string())?;
+            }
+        }
     }
 
     Ok(project)
@@ -458,11 +497,23 @@ fn add_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     github_repo: String,
+    branch_name: Option<String>,
     subpath: Option<String>,
     set_as_primary: Option<bool>,
 ) -> Result<store::ProjectRepo, String> {
     let store = get_store(&store)?;
-    let mut repo = store::ProjectRepo::new(&project_id, &github_repo, subpath);
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+    let resolved_branch_name = branch_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| infer_branch_name(&project.name));
+    let mut repo =
+        store::ProjectRepo::new(&project_id, &github_repo, &resolved_branch_name, subpath);
     if set_as_primary.unwrap_or(false) {
         repo = repo.primary();
     }
@@ -470,10 +521,6 @@ fn add_project_repo(
         .create_project_repo(&repo)
         .map_err(|e| e.to_string())?;
 
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
     let should_be_primary = repo.is_primary
         || store
             .get_primary_project_repo(&project_id)
@@ -488,11 +535,34 @@ fn add_project_repo(
                 &project_id,
                 &project.name,
                 Some(&repo.github_repo),
+                &project.location,
                 repo.subpath.as_deref(),
             )
             .map_err(|e| e.to_string())?;
         repo.is_primary = true;
     }
+
+    // Ensure each repo has one tracked branch record.
+    let detected_base = git::detect_default_branch_for_repo(&repo.github_repo)
+        .unwrap_or_else(|_| "main".to_string());
+    let effective_base = if detected_base.starts_with("origin/") {
+        detected_base
+    } else {
+        format!("origin/{detected_base}")
+    };
+    let branch = match project.location {
+        store::ProjectLocation::Local => {
+            store::Branch::new(&project_id, &repo.branch_name, &effective_base)
+                .with_project_repo(&repo.id)
+        }
+        store::ProjectLocation::Remote => {
+            let ws_name = infer_workspace_name(&repo.branch_name);
+            store::Branch::new_remote(&project_id, &repo.branch_name, &effective_base, &ws_name)
+                .with_project_repo(&repo.id)
+        }
+    };
+    store.create_branch(&branch).map_err(|e| e.to_string())?;
+
     Ok(repo)
 }
 
@@ -507,6 +577,16 @@ fn remove_project_repo(
         .get_project_repo(&project_repo_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
+    let branches = store
+        .list_branches_for_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|b| b.project_repo_id.as_deref() == Some(project_repo_id.as_str()))
+        .collect::<Vec<_>>();
+    for branch in branches {
+        cleanup_branch_resources(&store, &branch)?;
+        store.delete_branch(&branch.id).map_err(|e| e.to_string())?;
+    }
     store
         .delete_project_repo(&project_repo_id)
         .map_err(|e| e.to_string())?;
@@ -530,12 +610,13 @@ fn remove_project_repo(
                     &project_id,
                     &project.name,
                     Some(&next.github_repo),
+                    &project.location,
                     next.subpath.as_deref(),
                 )
                 .map_err(|e| e.to_string())?;
         } else {
             store
-                .update_project(&project_id, &project.name, None, None)
+                .update_project(&project_id, &project.name, None, &project.location, None)
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -565,8 +646,26 @@ fn set_primary_project_repo(
             &project_id,
             &project.name,
             Some(&repo.github_repo),
+            &project.location,
             repo.subpath.as_deref(),
         )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn update_project_repo_branch_name(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    project_repo_id: String,
+    branch_name: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    let trimmed = branch_name.trim();
+    if trimmed.is_empty() {
+        return Err("Branch name is required".to_string());
+    }
+    store
+        .update_project_repo_branch_name(&project_id, &project_repo_id, trimmed)
         .map_err(|e| e.to_string())
 }
 
@@ -606,13 +705,22 @@ async fn search_github_repos(
 }
 
 #[tauri::command]
-fn delete_project(
+async fn delete_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     id: String,
 ) -> Result<(), String> {
-    get_store(&store)?
-        .delete_project(&id)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+
+    // Clean up branch-backed resources (local worktrees / remote workspaces)
+    // before removing DB records via cascade.
+    let branches = store
+        .list_branches_for_project(&id)
+        .map_err(|e| e.to_string())?;
+    for branch in &branches {
+        cleanup_branch_resources_best_effort(&store, branch);
+    }
+
+    store.delete_project(&id).map_err(|e| e.to_string())
 }
 
 // =============================================================================
@@ -659,6 +767,105 @@ fn resolve_branch_repo_slug(
     Ok(project_primary_repo(project)?.to_string())
 }
 
+fn cleanup_branch_resources(store: &Arc<Store>, branch: &store::Branch) -> Result<(), String> {
+    match branch.branch_type {
+        store::BranchType::Local => {
+            let project = store
+                .get_project(&branch.project_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+            let workdir = store
+                .get_workdir_for_branch(&branch.id)
+                .map_err(|e| e.to_string())?;
+
+            if let Some(ref wd) = workdir {
+                let repo_slug = resolve_branch_repo_slug(store, &project, branch)?;
+                let repo_path = crate::paths::repos_dir()
+                    .map(|d| d.join(repo_slug))
+                    .ok_or("Cannot determine clone path")?;
+                let worktree_path = Path::new(&wd.path);
+                git::remove_worktree(&repo_path, worktree_path).map_err(|e| e.to_string())?;
+                store.delete_workdir(&wd.id).map_err(|e| e.to_string())?;
+            }
+        }
+        store::BranchType::Remote => {
+            if let Some(ref ws_name) = branch.workspace_name {
+                match blox::ws_delete(ws_name) {
+                    Ok(_) => {}
+                    Err(blox::BloxError::CommandFailed(msg))
+                        if msg.to_lowercase().contains("not found") => {}
+                    Err(e) => {
+                        return Err(format!("Failed to delete workspace {ws_name}: {e}"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_branch_resources_best_effort(store: &Arc<Store>, branch: &store::Branch) {
+    if let Err(e) = cleanup_branch_resources(store, branch) {
+        log::warn!(
+            "project delete cleanup warning for branch '{}': {e}",
+            branch.branch_name
+        );
+        if branch.branch_type == store::BranchType::Local {
+            if let Ok(Some(wd)) = store.get_workdir_for_branch(&branch.id) {
+                let path = Path::new(&wd.path);
+                if path.exists() {
+                    if let Err(io_err) = std::fs::remove_dir_all(path) {
+                        log::warn!(
+                            "failed fallback removal for worktree '{}': {io_err}",
+                            wd.path
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn infer_branch_name(project_name: &str) -> String {
+    let branch = project_name
+        .to_lowercase()
+        .replace([' ', '_'], "-")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '/' || *c == '.')
+        .collect::<String>()
+        .replace(['.', '/'], "-")
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if branch.is_empty() {
+        "feature".to_string()
+    } else {
+        branch
+    }
+}
+
+fn infer_workspace_name(branch_name: &str) -> String {
+    const WORKSPACE_NAME_MAX_LENGTH: usize = 32;
+    let safe = branch_name
+        .replace('/', "-")
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if safe.is_empty() {
+        return "stg-feature".to_string();
+    }
+    let mut full = format!("stg-{safe}");
+    if full.len() > WORKSPACE_NAME_MAX_LENGTH {
+        full = full[..WORKSPACE_NAME_MAX_LENGTH]
+            .trim_end_matches('-')
+            .to_string();
+    }
+    full
+}
+
 #[tauri::command]
 fn list_branches_for_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -696,19 +903,24 @@ fn create_branch(
     project_id: String,
     branch_name: String,
     base_branch: Option<String>,
+    project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
 
-    // Get the project
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
-
     // Detect default branch if none specified (via GitHub API, no local clone needed)
+    let target_repo = match project_repo_id {
+        Some(repo_id) => store
+            .get_project_repo(&repo_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
+        None => store
+            .get_primary_project_repo(&project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
+    };
     let effective_base = match base_branch {
         Some(b) => b,
-        None => git::detect_default_branch_for_repo(project_primary_repo(&project)?)
+        None => git::detect_default_branch_for_repo(&target_repo.github_repo)
             .map_err(|e| e.to_string())?,
     };
 
@@ -720,14 +932,9 @@ fn create_branch(
         format!("origin/{effective_base}")
     };
 
-    let primary_repo = store
-        .get_primary_project_repo(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?;
-
     // Create branch record only — no git worktree yet
     let branch = store::Branch::new(&project_id, &branch_name, &effective_base)
-        .with_project_repo(&primary_repo.id);
+        .with_project_repo(&target_repo.id);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, None))
@@ -836,17 +1043,22 @@ async fn setup_worktree_from_pr(
     pr_number: u64,
     head_ref: String,
     base_ref: String,
+    project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
 
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
-
+    let target_repo = match project_repo_id {
+        Some(repo_id) => store
+            .get_project_repo(&repo_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
+        None => store
+            .get_primary_project_repo(&project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
+    };
     // Ensure we have a local clone
-    let repo_path =
-        git::ensure_local_clone(project_primary_repo(&project)?).map_err(|e| e.to_string())?;
+    let repo_path = git::ensure_local_clone(&target_repo.github_repo).map_err(|e| e.to_string())?;
 
     // Fetch PR head and create worktree
     let (worktree_path, branch_name, base_branch) =
@@ -859,12 +1071,8 @@ async fn setup_worktree_from_pr(
         .to_string();
 
     // Create branch record with PR number
-    let primary_repo = store
-        .get_primary_project_repo(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?;
     let branch = store::Branch::new(&project_id, &branch_name, &base_branch)
-        .with_project_repo(&primary_repo.id)
+        .with_project_repo(&target_repo.id)
         .with_pr(pr_number);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
@@ -886,19 +1094,24 @@ async fn create_remote_branch(
     branch_name: String,
     base_branch: Option<String>,
     workspace_name: String,
+    project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
 
-    // Get the project
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
-
     // Detect default branch if none specified (via GitHub API, no local clone needed)
+    let target_repo = match project_repo_id {
+        Some(repo_id) => store
+            .get_project_repo(&repo_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
+        None => store
+            .get_primary_project_repo(&project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
+    };
     let effective_base = match base_branch {
         Some(b) => b,
-        None => git::detect_default_branch_for_repo(project_primary_repo(&project)?)
+        None => git::detect_default_branch_for_repo(&target_repo.github_repo)
             .map_err(|e| e.to_string())?,
     };
 
@@ -911,13 +1124,9 @@ async fn create_remote_branch(
     };
 
     // Create the branch record (starts in Starting status)
-    let primary_repo = store
-        .get_primary_project_repo(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?;
     let branch =
         store::Branch::new_remote(&project_id, &branch_name, &effective_base, &workspace_name)
-            .with_project_repo(&primary_repo.id);
+            .with_project_repo(&target_repo.id);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, None))
@@ -1121,39 +1330,79 @@ async fn delete_branch(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
+    cleanup_branch_resources(&store, &branch)?;
+
+    // Delete the branch record (cascades to commits, notes, reviews)
+    store.delete_branch(&branch_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn rename_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    branch_name: String,
+) -> Result<BranchWithWorkdir, String> {
+    let store = get_store(&store)?;
+    let new_name = branch_name.trim();
+    if new_name.is_empty() {
+        return Err("Branch name is required".to_string());
+    }
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    if branch.branch_name == new_name {
+        let workdir = store
+            .get_workdir_for_branch(&branch.id)
+            .map_err(|e| e.to_string())?
+            .map(|w| w.path);
+        return Ok(to_branch_with_workdir(branch, workdir));
+    }
+
     match branch.branch_type {
         store::BranchType::Local => {
-            // Get the project for its github_repo (to derive clone path)
-            let project = store
-                .get_project(&branch.project_id)
+            if let Some(wd) = store
+                .get_workdir_for_branch(&branch.id)
                 .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-            let workdir = store
-                .get_workdir_for_branch(&branch_id)
-                .map_err(|e| e.to_string())?;
-
-            if let Some(ref wd) = workdir {
-                let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
-                let repo_path = crate::paths::repos_dir()
-                    .map(|d| d.join(repo_slug))
-                    .ok_or("Cannot determine clone path")?;
-                let worktree_path = Path::new(&wd.path);
-                git::remove_worktree(&repo_path, worktree_path).map_err(|e| e.to_string())?;
-                store.delete_workdir(&wd.id).map_err(|e| e.to_string())?;
+            {
+                let status = std::process::Command::new("git")
+                    .args(["-C", &wd.path, "branch", "-m", new_name])
+                    .status()
+                    .map_err(|e| format!("Failed to run git rename: {e}"))?;
+                if !status.success() {
+                    return Err("Failed to rename local git branch".to_string());
+                }
             }
         }
         store::BranchType::Remote => {
-            if let Some(ref ws_name) = branch.workspace_name {
-                if let Err(e) = blox::ws_delete(ws_name) {
-                    log::warn!("Failed to delete workspace {ws_name}: {e}");
+            if let Some(ws_name) = &branch.workspace_name {
+                if let Err(e) = blox::ws_exec(ws_name, &["git", "branch", "-m", new_name]) {
+                    log::warn!("Failed to rename branch in workspace '{ws_name}': {e}");
                 }
             }
         }
     }
 
-    // Delete the branch record (cascades to commits, notes, reviews)
-    store.delete_branch(&branch_id).map_err(|e| e.to_string())
+    store
+        .update_branch_name(&branch.id, new_name)
+        .map_err(|e| e.to_string())?;
+    if let Some(repo_id) = &branch.project_repo_id {
+        store
+            .update_project_repo_branch_name(&branch.project_id, repo_id, new_name)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let updated = store
+        .get_branch(&branch.id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {}", branch.id))?;
+    let workdir = store
+        .get_workdir_for_branch(&updated.id)
+        .map_err(|e| e.to_string())?
+        .map(|w| w.path);
+    Ok(to_branch_with_workdir(updated, workdir))
 }
 
 // =============================================================================
@@ -2646,6 +2895,7 @@ pub fn run() {
             create_project,
             list_project_repos,
             add_project_repo,
+            update_project_repo_branch_name,
             remove_project_repo,
             set_primary_project_repo,
             delete_project,
@@ -2661,6 +2911,7 @@ pub fn run() {
             create_remote_branch,
             start_workspace,
             delete_branch,
+            rename_branch,
             get_workspace_info,
             poll_workspace_status,
             list_project_actions,

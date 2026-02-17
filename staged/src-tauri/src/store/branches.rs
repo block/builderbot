@@ -62,6 +62,15 @@ impl Store {
         Ok(())
     }
 
+    pub fn update_branch_name(&self, id: &str, branch_name: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE branches SET branch_name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![branch_name, now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     /// Update the workspace status for a remote branch.
     pub fn update_branch_workspace_status(
         &self,

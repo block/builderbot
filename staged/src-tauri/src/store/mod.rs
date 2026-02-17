@@ -60,7 +60,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -231,6 +231,7 @@ impl Store {
                 id          TEXT PRIMARY KEY,
                 name        TEXT NOT NULL,
                 github_repo TEXT,
+                location    TEXT NOT NULL DEFAULT 'local',
                 subpath     TEXT,
                 created_at  INTEGER NOT NULL,
                 updated_at  INTEGER NOT NULL
@@ -242,6 +243,7 @@ impl Store {
                 id          TEXT PRIMARY KEY,
                 project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 github_repo TEXT NOT NULL,
+                branch_name TEXT NOT NULL,
                 subpath     TEXT,
                 is_primary  INTEGER NOT NULL DEFAULT 0,
                 created_at  INTEGER NOT NULL,

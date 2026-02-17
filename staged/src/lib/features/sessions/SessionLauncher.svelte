@@ -18,6 +18,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
     onClose: () => void;
@@ -37,7 +38,6 @@
 
   let prompt = $state('');
   let creating = $state(false);
-  let error = $state<string | null>(null);
 
   let unlistenStatus: UnlistenFn | null = null;
 
@@ -78,7 +78,6 @@
     const text = prompt.trim();
     if (!text || creating) return;
     creating = true;
-    error = null;
     try {
       // startSession creates the session + kicks off goose in the background.
       // We need a working directory — use the user's home dir as a default
@@ -92,7 +91,12 @@
       sessions = [...sessions, s];
       prompt = '';
     } catch (e) {
-      error = `Failed to start: ${e}`;
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to start session',
+        message: e instanceof Error ? e.message : String(e),
+        durationMs: 0,
+      });
     } finally {
       creating = false;
     }
@@ -109,13 +113,17 @@
   }
 
   async function handleDelete(id: string) {
-    error = null;
     try {
       await deleteSession(id);
       closeModal(id);
       sessions = sessions.filter((s) => s.id !== id);
     } catch (e) {
-      error = `Failed to delete: ${e}`;
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to delete session',
+        message: e instanceof Error ? e.message : String(e),
+        durationMs: 0,
+      });
     }
   }
 
@@ -180,10 +188,6 @@
       {/if}
     </button>
   </div>
-
-  {#if error}
-    <div class="error-line">{error}</div>
-  {/if}
 
   <!-- Session list -->
   {#if sessions.length > 0}
@@ -423,12 +427,6 @@
   }
 
   .mini-btn.danger:hover {
-    color: var(--ui-danger);
-  }
-
-  .error-line {
-    padding: 4px 14px 8px;
-    font-size: var(--size-2xs, 10px);
     color: var(--ui-danger);
   }
 

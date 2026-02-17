@@ -74,6 +74,7 @@
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
+  import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
     branch: Branch;
@@ -94,6 +95,15 @@
     onRename,
     onRetryWorktree,
   }: Props = $props();
+
+  function notifyError(title: string, e: unknown): void {
+    alerts.show({
+      tone: 'error',
+      title,
+      message: e instanceof Error ? e.message : String(e),
+      durationMs: 0,
+    });
+  }
 
   // =========================================================================
   // PR button state
@@ -630,7 +640,7 @@
       // Don't auto-show output modal - user can click to view
     } catch (e) {
       console.error('Failed to run action:', e);
-      error = e instanceof Error ? e.message : String(e);
+      notifyError(`Failed to run action "${action.name}"`, e);
     }
   }
 
@@ -806,6 +816,7 @@
           loadTimeline();
         } catch (e) {
           console.error('Failed to delete commit:', e);
+          notifyError('Failed to delete commit', e);
         }
       },
     };
@@ -831,6 +842,7 @@
           loadTimeline();
         } catch (e) {
           console.error('Failed to delete note:', e);
+          notifyError('Failed to delete note', e);
         }
       },
     };
@@ -856,6 +868,7 @@
           loadTimeline();
         } catch (e) {
           console.error('Failed to delete review:', e);
+          notifyError('Failed to delete review', e);
         }
       },
     };
@@ -876,6 +889,7 @@
       loadTimeline();
     } catch (e) {
       console.error('Failed to delete pending commit:', e);
+      notifyError('Failed to delete pending commit', e);
     }
   }
 

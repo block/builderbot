@@ -19,6 +19,7 @@
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
+  import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -41,7 +42,6 @@
   let showNewProjectModal = $state(false);
   let showRepoPicker = $state(false);
   let repoPickerProject = $state<Project | null>(null);
-  let repoAddError = $state<string | null>(null);
 
   // Delete confirmation state
   let projectToDelete = $state<Project | null>(null);
@@ -245,10 +245,13 @@
 
   function handleAddRepo(project: Project) {
     if (!canAddRepo(project)) {
-      repoAddError = addRepoHint(project);
+      alerts.show({
+        tone: 'warning',
+        title: 'Unable to add repository',
+        message: addRepoHint(project),
+      });
       return;
     }
-    repoAddError = null;
     repoPickerProject = project;
     showRepoPicker = true;
   }
@@ -256,7 +259,6 @@
   async function handleRepoSelected(nameWithOwner: string) {
     if (!repoPickerProject) return;
     try {
-      repoAddError = null;
       await commands.addProjectRepo(repoPickerProject.id, nameWithOwner);
       const [projectsList, branches, repos] = await Promise.all([
         commands.listProjects(),
@@ -272,7 +274,13 @@
       startInitialBranchSetup(repoPickerProject.id, branches);
     } catch (e) {
       console.error('Failed to add repo:', e);
-      repoAddError = e instanceof Error ? e.message : String(e);
+      const message = e instanceof Error ? e.message : String(e);
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to add repository',
+        message,
+        durationMs: 0,
+      });
     } finally {
       showRepoPicker = false;
       repoPickerProject = null;
@@ -314,12 +322,6 @@
     if (!changed) return;
 
     branchesByProject = new Map(branchesByProject).set(projectId, nextBranches);
-
-    // Clear stale gating errors once a remote workspace becomes ready.
-    const project = projects.find((p) => p.id === projectId);
-    if (project && canAddRepo(project)) {
-      repoAddError = null;
-    }
   }
 
   function startInitialBranchSetup(projectId: string, branches: Branch[]) {
@@ -561,9 +563,6 @@
           </button>
           <div class="project-title">{projectDisplayName(selectedProject)}</div>
         </div>
-      {/if}
-      {#if repoAddError}
-        <div class="repo-add-error">{repoAddError}</div>
       {/if}
       <div class="projects-list">
         {#each visibleProjects as project (project.id)}
@@ -869,18 +868,6 @@
     display: flex;
     flex-direction: column;
     gap: 32px;
-  }
-
-  .repo-add-error {
-    width: 100%;
-    max-width: 800px;
-    margin: 0 auto 12px;
-    padding: 10px 12px;
-    border: 1px solid var(--ui-danger);
-    border-radius: 8px;
-    color: var(--ui-danger);
-    background: var(--ui-danger-bg);
-    font-size: var(--size-sm);
   }
 
   .project-toolbar {

@@ -8,6 +8,7 @@
   import * as commands from '../../commands';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
+  import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
     project: Project;
@@ -25,7 +26,11 @@
   let loadingRepos = $state(false);
   let showRepoPicker = $state(false);
   let branches = $state<Branch[]>([]);
-  let repoError = $state<string | null>(null);
+
+  function errorMessageFrom(e: unknown): string {
+    if (e instanceof Error) return e.message;
+    return String(e);
+  }
 
   onMount(() => {
     loadRepos();
@@ -42,6 +47,12 @@
       branches = branchList;
     } catch (e) {
       console.error('Failed to load project repos:', e);
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to load repositories',
+        message: errorMessageFrom(e),
+        durationMs: 0,
+      });
     } finally {
       loadingRepos = false;
     }
@@ -49,11 +60,14 @@
 
   async function addRepo(githubRepo: string) {
     if (!canAddRepo()) {
-      repoError = addRepoHint();
+      alerts.show({
+        tone: 'warning',
+        title: 'Unable to add repository',
+        message: addRepoHint(),
+      });
       return;
     }
     try {
-      repoError = null;
       await commands.addProjectRepo(
         project.id,
         githubRepo,
@@ -65,7 +79,12 @@
       showRepoPicker = false;
     } catch (e) {
       console.error('Failed to add repo:', e);
-      repoError = e instanceof Error ? e.message : String(e);
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to add repository',
+        message: errorMessageFrom(e),
+        durationMs: 0,
+      });
     }
   }
 
@@ -75,6 +94,12 @@
       await loadRepos();
     } catch (e) {
       console.error('Failed to remove repo:', e);
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to remove repository',
+        message: errorMessageFrom(e),
+        durationMs: 0,
+      });
     }
   }
 
@@ -113,6 +138,12 @@
       );
     } catch (e) {
       console.error('Failed to update repo branch name:', e);
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to rename branch',
+        message: errorMessageFrom(e),
+        durationMs: 0,
+      });
       await loadRepos();
     } finally {
       const next = new Set(savingBranchIds);
@@ -189,9 +220,6 @@
       </div>
       {#if !canAddRepo()}
         <div class="repo-hint">{addRepoHint()}</div>
-      {/if}
-      {#if repoError}
-        <div class="empty-hint error">{repoError}</div>
       {/if}
 
       {#if loadingRepos}
@@ -488,10 +516,6 @@
     font-size: 12px;
     color: var(--text-tertiary);
     padding: 10px 2px;
-  }
-
-  .empty-hint.error {
-    color: var(--ui-danger);
   }
 
   .repo-hint {

@@ -8,7 +8,7 @@ use super::{now_timestamp, Store, StoreError};
 impl Store {
     pub fn create_branch(&self, branch: &Branch) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        if let Err(e) = conn.execute(
             "INSERT INTO branches (id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                 branch_type, workspace_name, workspace_status,
                 pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
@@ -35,7 +35,20 @@ impl Store {
                 branch.created_at,
                 branch.updated_at,
             ],
-        )?;
+        ) {
+            if is_duplicate_branch_error(&e) {
+                let scope = if branch.project_repo_id.is_some() {
+                    "for this repository in the project"
+                } else {
+                    "for this project"
+                };
+                return Err(StoreError(format!(
+                    "Branch '{}' is already tracked {}.",
+                    branch.branch_name, scope
+                )));
+            }
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -199,5 +212,17 @@ impl Store {
         conn.query_row(sql, params, Self::row_to_branch)
             .optional()
             .map_err(Into::into)
+    }
+}
+
+fn is_duplicate_branch_error(err: &rusqlite::Error) -> bool {
+    match err {
+        rusqlite::Error::SqliteFailure(_, Some(msg)) => {
+            msg.contains("UNIQUE constraint failed")
+                && msg.contains("branches.project_id")
+                && msg.contains("branches.project_repo_id")
+                && msg.contains("branches.branch_name")
+        }
+        _ => false,
     }
 }

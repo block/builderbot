@@ -8,7 +8,7 @@ use super::{now_timestamp, Store, StoreError};
 impl Store {
     pub fn create_project_repo(&self, repo: &ProjectRepo) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
+        if let Err(e) = conn.execute(
             "INSERT INTO project_repos (id, project_id, github_repo, branch_name, subpath, is_primary, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -21,7 +21,22 @@ impl Store {
                 repo.created_at,
                 repo.updated_at,
             ],
-        )?;
+        ) {
+            if is_duplicate_project_repo_error(&e) {
+                let subpath_hint = repo
+                    .subpath
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!(" at subpath '{s}'"))
+                    .unwrap_or_default();
+                return Err(StoreError(format!(
+                    "Repository '{}'{} is already attached to this project.",
+                    repo.github_repo, subpath_hint
+                )));
+            }
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -114,5 +129,17 @@ impl Store {
             created_at: row.get(6)?,
             updated_at: row.get(7)?,
         })
+    }
+}
+
+fn is_duplicate_project_repo_error(err: &rusqlite::Error) -> bool {
+    match err {
+        rusqlite::Error::SqliteFailure(_, Some(msg)) => {
+            msg.contains("idx_project_repos_unique")
+                || (msg.contains("UNIQUE constraint failed")
+                    && msg.contains("project_repos.project_id")
+                    && msg.contains("project_repos.github_repo"))
+        }
+        _ => false,
     }
 }

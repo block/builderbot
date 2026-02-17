@@ -37,6 +37,7 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
+  import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
     branch: Branch;
@@ -55,6 +56,15 @@
     onRename,
     onWorkspaceStatusChange,
   }: Props = $props();
+
+  function notifyError(title: string, e: unknown): void {
+    alerts.show({
+      tone: 'error',
+      title,
+      message: e instanceof Error ? e.message : String(e),
+      durationMs: 0,
+    });
+  }
 
   // Reactive workspace status (updated by polling)
   let polledStatus = $state<WorkspaceStatus | null>(null);
@@ -323,6 +333,7 @@
           loadTimeline();
         } catch (e) {
           console.error('Failed to delete note:', e);
+          notifyError('Failed to delete note', e);
         }
       },
     };
@@ -341,6 +352,7 @@
       loadTimeline();
     } catch (e) {
       console.error('Failed to delete pending commit:', e);
+      notifyError('Failed to delete pending commit', e);
     }
   }
 

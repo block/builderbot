@@ -15,6 +15,7 @@
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import DoctorModal from './lib/features/doctor/DoctorModal.svelte';
   import ActionsPreferencesModal from './lib/features/settings/ActionsPreferencesModal.svelte';
+  import ToastHost from './lib/shared/ToastHost.svelte';
   import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
@@ -215,6 +216,8 @@
   {#if showActionsPreferences}
     <ActionsPreferencesModal onClose={() => (showActionsPreferences = false)} />
   {/if}
+
+  <ToastHost />
 {/if}
 
 <style>

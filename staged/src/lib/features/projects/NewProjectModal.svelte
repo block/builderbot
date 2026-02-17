@@ -4,10 +4,11 @@
   A project can be created with or without a repository.
 -->
 <script lang="ts">
-  import { X, GitBranch } from 'lucide-svelte';
-  import type { Project } from '../../types';
+  import { X, GitBranch, Clock } from 'lucide-svelte';
+  import type { Project, RecentRepo } from '../../types';
   import * as commands from '../../commands';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
+  import { onMount } from 'svelte';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -23,6 +24,15 @@
   let saving = $state(false);
   let error = $state<string | null>(null);
   let showRepoPicker = $state(false);
+  let recentRepos = $state<RecentRepo[]>([]);
+
+  onMount(async () => {
+    try {
+      recentRepos = await commands.listRecentRepos(3);
+    } catch (e) {
+      // Fail silently - recent repos are optional
+    }
+  });
 
   async function handleCreate() {
     if (!name.trim() || saving) return;
@@ -146,6 +156,29 @@
           >
             Select repository
           </button>
+          {#if recentRepos.length > 0}
+            <div class="recent-repos-section">
+              {#each recentRepos as recent}
+                <button
+                  class="recent-repo-item"
+                  onclick={() => {
+                    selectedRepo = recent.githubRepo;
+                    if (recent.subpath) {
+                      subpath = recent.subpath;
+                    }
+                  }}
+                >
+                  <Clock size={14} class="recent-icon" />
+                  <div class="recent-repo-info">
+                    <span class="recent-repo-name">{recent.githubRepo}</span>
+                    {#if recent.subpath}
+                      <span class="recent-repo-subpath">{recent.subpath}</span>
+                    {/if}
+                  </div>
+                </button>
+              {/each}
+            </div>
+          {/if}
         {/if}
       </div>
 
@@ -351,6 +384,60 @@
     color: var(--text-primary);
     border-color: var(--border-emphasis);
     background: var(--bg-hover);
+  }
+
+  .recent-repos-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+  }
+
+  .recent-repo-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--bg-deepest);
+    border: 1px solid var(--border-muted);
+    border-left: 2px solid var(--ui-accent);
+    border-radius: 7px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .recent-repo-item:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-emphasis);
+  }
+
+  :global(.recent-icon) {
+    color: var(--ui-accent);
+    flex-shrink: 0;
+  }
+
+  .recent-repo-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .recent-repo-name {
+    font-size: var(--size-sm);
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-repo-subpath {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .error-message {

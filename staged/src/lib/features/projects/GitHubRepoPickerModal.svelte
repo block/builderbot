@@ -77,7 +77,8 @@
   }
 
   /**
-   * Build the display list: recent repos (from DB) + direct fetch result + search results + recent activity.
+   * Build the display list: direct fetch result + search results + recent activity.
+   * Recent repos are displayed separately above the loading state.
    */
   let displayItems = $derived.by(() => {
     const seen = new Set<string>();
@@ -97,21 +98,8 @@
       }
     }
 
-    // Filter recent repos from DB by query (client-side) and add them
-    const q = query.toLowerCase().trim();
-    const filteredRecent = q
-      ? recentRepos.filter((r) => r.githubRepo.toLowerCase().includes(q))
-      : recentRepos;
-
-    for (const r of filteredRecent) {
-      const key = r.subpath ? `${r.githubRepo}:${r.subpath}` : r.githubRepo;
-      if (!seen.has(key)) {
-        result.push({ type: 'recent', data: r });
-        seen.add(key);
-      }
-    }
-
     // Filter activity repos by query (client-side) and add remaining
+    const q = query.toLowerCase().trim();
     const filtered = q
       ? repos.filter(
           (r) =>
@@ -128,6 +116,14 @@
     }
 
     return result;
+  });
+
+  /**
+   * Recent repos filtered by query, shown separately above the loading state.
+   */
+  let filteredRecentRepos = $derived.by(() => {
+    const q = query.toLowerCase().trim();
+    return q ? recentRepos.filter((r) => r.githubRepo.toLowerCase().includes(q)) : recentRepos;
   });
 
   onMount(async () => {
@@ -211,9 +207,11 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    const totalItems = filteredRecentRepos.length + displayItems.length;
+
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      selectedIndex = Math.min(selectedIndex + 1, displayItems.length - 1);
+      selectedIndex = Math.min(selectedIndex + 1, totalItems - 1);
       scrollSelectedIntoView();
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
@@ -221,12 +219,15 @@
       scrollSelectedIntoView();
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      const item = displayItems[selectedIndex];
-      if (item) {
-        if (item.type === 'recent') {
-          const recent = item.data as RecentRepo;
-          onSelect(recent.githubRepo, recent.subpath ?? undefined);
-        } else {
+      if (selectedIndex < filteredRecentRepos.length) {
+        // Selected a recent repo
+        const recent = filteredRecentRepos[selectedIndex];
+        onSelect(recent.githubRepo, recent.subpath ?? undefined);
+      } else {
+        // Selected from displayItems
+        const adjustedIndex = selectedIndex - filteredRecentRepos.length;
+        const item = displayItems[adjustedIndex];
+        if (item && item.type === 'repo') {
           const repo = item.data as GitHubRepo;
           onSelect(repo.nameWithOwner);
         }
@@ -284,6 +285,27 @@
     </div>
 
     <div class="repo-list">
+      {#if filteredRecentRepos.length > 0}
+        {#each filteredRecentRepos as recent, i}
+          <button
+            class="repo-item recent"
+            class:selected={i === selectedIndex}
+            onclick={() => onSelect(recent.githubRepo, recent.subpath ?? undefined)}
+            onmouseenter={() => (selectedIndex = i)}
+          >
+            <div class="repo-icon recent-icon">
+              <Clock size={14} />
+            </div>
+            <div class="repo-info">
+              <span class="repo-name">{recent.githubRepo}</span>
+              {#if recent.subpath}
+                <span class="repo-description">Subpath: {recent.subpath}</span>
+              {/if}
+            </div>
+          </button>
+        {/each}
+      {/if}
+
       {#if loading}
         <div class="loading-state">
           <Spinner size={20} />
@@ -291,7 +313,7 @@
         </div>
       {:else if error}
         <div class="error-state">{error}</div>
-      {:else if displayItems.length === 0}
+      {:else if displayItems.length === 0 && filteredRecentRepos.length === 0}
         <div class="empty-state">
           {#if query.trim()}
             {#if isOwnerRepoFormat(query.trim())}
@@ -305,31 +327,14 @@
         </div>
       {:else}
         {#each displayItems as item, i}
-          {#if item.type === 'recent'}
-            {@const recent = item.data as RecentRepo}
-            <button
-              class="repo-item recent"
-              class:selected={i === selectedIndex}
-              onclick={() => onSelect(recent.githubRepo, recent.subpath ?? undefined)}
-              onmouseenter={() => (selectedIndex = i)}
-            >
-              <div class="repo-icon recent-icon">
-                <Clock size={14} />
-              </div>
-              <div class="repo-info">
-                <span class="repo-name">{recent.githubRepo}</span>
-                {#if recent.subpath}
-                  <span class="repo-description">Subpath: {recent.subpath}</span>
-                {/if}
-              </div>
-            </button>
-          {:else}
+          {@const actualIndex = i + filteredRecentRepos.length}
+          {#if item.type === 'repo'}
             {@const repo = item.data as GitHubRepo}
             <button
               class="repo-item"
-              class:selected={i === selectedIndex}
+              class:selected={actualIndex === selectedIndex}
               onclick={() => onSelect(repo.nameWithOwner)}
-              onmouseenter={() => (selectedIndex = i)}
+              onmouseenter={() => (selectedIndex = actualIndex)}
             >
               <div class="repo-icon">
                 {#if repo.isPrivate}

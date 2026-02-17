@@ -104,6 +104,12 @@ func (w *Watcher) Refresh(workspacePaths []string, projects []discovery.Project)
 
 // watchProject sets up file watches for all sources and comments of a project.
 func (w *Watcher) watchProject(p discovery.Project) {
+	// Watch the project root directory itself so we can detect new
+	// auto-detectable source directories (e.g., thoughts/, .rp1/) at runtime.
+	if err := w.watcher.Add(p.Path); err != nil {
+		log.Printf("Warning: could not watch project root %s: %v", p.Path, err)
+	}
+
 	for _, src := range p.Sources {
 		if src.RootPath != "" {
 			if err := w.watchDir(src.RootPath); err != nil {
@@ -220,6 +226,43 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			return
 		}
 	}
+
+	// Check if a new auto-detectable source directory was created/removed
+	// under a project root (e.g., someone creates thoughts/ or .rp1/).
+	// For Create events, verify it's actually a directory (not a file with
+	// the same name). For Remove/Rename the path is already gone so we
+	// can't stat it — just trigger the rescan and let DetectSources sort it out.
+	if event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+		if event.Op&fsnotify.Create != 0 {
+			if info, err := os.Stat(path); err != nil || !info.IsDir() {
+				goto notAutoDetect
+			}
+		}
+		dirName := filepath.Base(path)
+		for _, st := range discovery.AllSourceTypes() {
+			if st.AutoDetectDir != "" && st.AutoDetectDir == dirName {
+				// Check if parent is a project root
+				for _, p := range w.cache.Projects() {
+					if parentDir == p.Path {
+						w.debounceRefresh("sources:"+p.QualifiedName(), func() {
+							if w.discoverFn != nil {
+								projects, err := w.discoverFn()
+								if err == nil {
+									w.cache.RescanWith(projects)
+									for _, proj := range projects {
+										w.watchProject(proj)
+									}
+									w.Broadcast(Event{Type: EventProjectsChanged})
+								}
+							}
+						})
+						return
+					}
+				}
+			}
+		}
+	}
+notAutoDetect:
 
 	// Find which project this path belongs to
 	projectName := w.findProjectForPath(path)

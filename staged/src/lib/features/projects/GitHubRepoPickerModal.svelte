@@ -297,10 +297,11 @@
               <Clock size={14} />
             </div>
             <div class="repo-info">
-              <span class="repo-name">{recent.githubRepo}</span>
-              {#if recent.subpath}
-                <span class="repo-description">Subpath: {recent.subpath}</span>
-              {/if}
+              <span class="repo-name">
+                {recent.githubRepo}{#if recent.subpath}<span class="repo-subpath"
+                    >/{recent.subpath}</span
+                  >{/if}
+              </span>
             </div>
           </button>
         {/each}
@@ -510,6 +511,12 @@
     font-size: var(--size-sm);
     font-weight: 500;
     color: var(--text-primary);
+  }
+
+  .repo-subpath {
+    font-size: var(--size-sm);
+    font-weight: 500;
+    color: var(--text-muted);
   }
 
   .repo-description {

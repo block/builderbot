@@ -170,10 +170,11 @@
                 >
                   <Plus size={14} class="recent-icon" />
                   <div class="recent-repo-info">
-                    <span class="recent-repo-name">{recent.githubRepo}</span>
-                    {#if recent.subpath}
-                      <span class="recent-repo-subpath">{recent.subpath}</span>
-                    {/if}
+                    <span class="recent-repo-name">
+                      {recent.githubRepo}{#if recent.subpath}<span class="recent-repo-subpath"
+                          >/{recent.subpath}</span
+                        >{/if}
+                    </span>
                   </div>
                 </button>
               {/each}
@@ -418,9 +419,6 @@
 
   .recent-repo-info {
     flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
     min-width: 0;
   }
 
@@ -433,11 +431,8 @@
   }
 
   .recent-repo-subpath {
-    font-size: var(--size-xs);
+    font-size: var(--size-sm);
     color: var(--text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .error-message {

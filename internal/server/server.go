@@ -255,6 +255,12 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sanitize: only allow a bare filename (no slashes, no traversal).
+	if strings.ContainsAny(name, "/\\") || name == "." || name == ".." || strings.Contains(name, "..") {
+		http.NotFound(w, r)
+		return
+	}
+
 	// In dev mode, serve from disk for live reload
 	if s.templateDir != "" {
 		http.ServeFile(w, r, filepath.Join(s.templateDir, name))

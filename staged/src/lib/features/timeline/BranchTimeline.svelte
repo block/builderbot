@@ -409,6 +409,19 @@
       background-color 0.15s;
   }
 
+  /* Colored icons only in passive state */
+  .empty-action-btn.note-action :global(svg) {
+    color: var(--note-color);
+  }
+
+  .empty-action-btn.commit-action :global(svg) {
+    color: var(--commit-color);
+  }
+
+  .empty-action-btn.review-action :global(svg) {
+    color: var(--status-modified);
+  }
+
   .empty-action-btn.note-action:hover:not(:disabled) {
     color: var(--note-color);
     background-color: var(--note-bg);
@@ -457,6 +470,19 @@
       color 0.15s,
       border-color 0.15s,
       background-color 0.15s;
+  }
+
+  /* Colored icons only in passive state */
+  .add-item-btn.note-btn :global(svg) {
+    color: var(--note-color);
+  }
+
+  .add-item-btn.commit-btn :global(svg) {
+    color: var(--commit-color);
+  }
+
+  .add-item-btn.review-btn :global(svg) {
+    color: var(--status-modified);
   }
 
   .add-item-btn.note-btn:hover:not(:disabled) {

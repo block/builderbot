@@ -555,7 +555,7 @@ fn add_project_repo(
                 .unwrap_or_else(|| branches::infer_remote_repo_subpath(&github_repo)),
         )
     } else {
-        subpath
+        subpath.clone()
     };
     let mut repo = store::ProjectRepo::new(
         &project_id,

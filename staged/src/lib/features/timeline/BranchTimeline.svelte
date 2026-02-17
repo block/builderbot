@@ -324,39 +324,41 @@
     {/each}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}
       <div class="footer-row">
-        {#if onNewNote}
-          <button
-            class="add-item-btn note-btn"
-            onclick={onNewNote}
-            disabled={newSessionDisabled}
-            title="New note"
-          >
-            <FileText size={13} />
-            <span>New note</span>
-          </button>
-        {/if}
-        {#if onNewCommit}
-          <button
-            class="add-item-btn commit-btn"
-            onclick={onNewCommit}
-            disabled={newSessionDisabled}
-            title="New commit"
-          >
-            <GitCommitHorizontal size={13} />
-            <span>New commit</span>
-          </button>
-        {/if}
-        {#if onNewReview}
-          <button
-            class="add-item-btn review-btn"
-            onclick={onNewReview}
-            disabled={newSessionDisabled}
-            title="New AI review"
-          >
-            <FileSearch size={13} />
-            <span>New AI review</span>
-          </button>
-        {/if}
+        <div class="footer-left-actions">
+          {#if onNewNote}
+            <button
+              class="add-item-btn note-btn"
+              onclick={onNewNote}
+              disabled={newSessionDisabled}
+              title="New note"
+            >
+              <FileText size={13} />
+              <span>New note</span>
+            </button>
+          {/if}
+          {#if onNewCommit}
+            <button
+              class="add-item-btn commit-btn"
+              onclick={onNewCommit}
+              disabled={newSessionDisabled}
+              title="New commit"
+            >
+              <GitCommitHorizontal size={13} />
+              <span>New commit</span>
+            </button>
+          {/if}
+          {#if onNewReview}
+            <button
+              class="add-item-btn review-btn"
+              onclick={onNewReview}
+              disabled={newSessionDisabled}
+              title="New AI review"
+            >
+              <FileSearch size={13} />
+              <span>New AI review</span>
+            </button>
+          {/if}
+        </div>
         {#if footerActions}
           {@render footerActions()}
         {/if}
@@ -447,11 +449,18 @@
   .footer-row {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 6px;
     padding: 6px 8px;
     margin: 0 -8px;
     position: relative;
     z-index: 1;
+  }
+
+  .footer-left-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .add-item-btn {

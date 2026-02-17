@@ -1227,7 +1227,7 @@
         >
           {#snippet footerActions()}
             {#if hasCodeChanges}
-              <div class="footer-actions">
+              <div class="footer-right-actions">
                 <button
                   class="pr-btn"
                   class:creating={prState === 'creating'}
@@ -1798,8 +1798,8 @@
     background-color: var(--bg-hover);
   }
 
-  /* Footer actions (rendered inline with "New commit" via snippet) */
-  .footer-actions {
+  /* Footer right actions (PR and diff buttons) */
+  .footer-right-actions {
     display: flex;
     align-items: center;
     gap: 4px;

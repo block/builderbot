@@ -324,39 +324,41 @@
     {/each}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}
       <div class="footer-row">
-        {#if onNewNote}
-          <button
-            class="add-item-btn note-btn"
-            onclick={onNewNote}
-            disabled={newSessionDisabled}
-            title="New note"
-          >
-            <FileText size={13} />
-            <span>New note</span>
-          </button>
-        {/if}
-        {#if onNewCommit}
-          <button
-            class="add-item-btn commit-btn"
-            onclick={onNewCommit}
-            disabled={newSessionDisabled}
-            title="New commit"
-          >
-            <GitCommitHorizontal size={13} />
-            <span>New commit</span>
-          </button>
-        {/if}
-        {#if onNewReview}
-          <button
-            class="add-item-btn review-btn"
-            onclick={onNewReview}
-            disabled={newSessionDisabled}
-            title="New AI review"
-          >
-            <FileSearch size={13} />
-            <span>AI review</span>
-          </button>
-        {/if}
+        <div class="footer-left-actions">
+          {#if onNewNote}
+            <button
+              class="add-item-btn note-btn"
+              onclick={onNewNote}
+              disabled={newSessionDisabled}
+              title="New note"
+            >
+              <FileText size={13} />
+              <span>New note</span>
+            </button>
+          {/if}
+          {#if onNewCommit}
+            <button
+              class="add-item-btn commit-btn"
+              onclick={onNewCommit}
+              disabled={newSessionDisabled}
+              title="New commit"
+            >
+              <GitCommitHorizontal size={13} />
+              <span>New commit</span>
+            </button>
+          {/if}
+          {#if onNewReview}
+            <button
+              class="add-item-btn review-btn"
+              onclick={onNewReview}
+              disabled={newSessionDisabled}
+              title="New AI review"
+            >
+              <FileSearch size={13} />
+              <span>New AI review</span>
+            </button>
+          {/if}
+        </div>
         {#if footerActions}
           {@render footerActions()}
         {/if}
@@ -377,7 +379,7 @@
     margin: 0;
     padding: 8px 0;
     font-size: var(--size-sm);
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-style: italic;
     text-align: center;
   }
@@ -409,6 +411,19 @@
       background-color 0.15s;
   }
 
+  /* Colored icons only in passive state */
+  .empty-action-btn.note-action :global(svg) {
+    color: var(--note-color);
+  }
+
+  .empty-action-btn.commit-action :global(svg) {
+    color: var(--commit-color);
+  }
+
+  .empty-action-btn.review-action :global(svg) {
+    color: var(--review-color);
+  }
+
   .empty-action-btn.note-action:hover:not(:disabled) {
     color: var(--note-color);
     background-color: var(--note-bg);
@@ -420,8 +435,8 @@
   }
 
   .empty-action-btn.review-action:hover:not(:disabled) {
-    color: var(--status-modified);
-    background-color: var(--bg-hover);
+    color: var(--review-color);
+    background-color: var(--review-bg);
   }
 
   .empty-action-btn:disabled {
@@ -434,11 +449,18 @@
   .footer-row {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 6px;
     padding: 6px 8px;
     margin: 0 -8px;
     position: relative;
     z-index: 1;
+  }
+
+  .footer-left-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .add-item-btn {
@@ -449,7 +471,7 @@
     border-radius: 6px;
     border: 1px dashed var(--border-subtle);
     background: none;
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-size: var(--size-xs);
     font-weight: 500;
     cursor: pointer;
@@ -457,6 +479,19 @@
       color 0.15s,
       border-color 0.15s,
       background-color 0.15s;
+  }
+
+  /* Colored icons only in passive state */
+  .add-item-btn.note-btn :global(svg) {
+    color: var(--note-color);
+  }
+
+  .add-item-btn.commit-btn :global(svg) {
+    color: var(--commit-color);
+  }
+
+  .add-item-btn.review-btn :global(svg) {
+    color: var(--review-color);
   }
 
   .add-item-btn.note-btn:hover:not(:disabled) {
@@ -472,9 +507,9 @@
   }
 
   .add-item-btn.review-btn:hover:not(:disabled) {
-    color: var(--status-modified);
-    border-color: var(--status-modified);
-    background-color: var(--bg-hover);
+    color: var(--review-color);
+    border-color: var(--review-color);
+    background-color: var(--review-bg);
   }
 
   .add-item-btn:disabled {

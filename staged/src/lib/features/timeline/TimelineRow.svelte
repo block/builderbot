@@ -232,7 +232,9 @@
   }
 
   .timeline-icon.review-icon {
-    color: var(--status-modified);
+    color: var(--review-color);
+    background-color: var(--review-bg);
+    border-color: transparent;
   }
 
   .timeline-row.pending .timeline-icon.commit-icon {
@@ -254,12 +256,12 @@
   }
 
   .timeline-row.pending .timeline-icon.review-icon {
-    background-color: var(--bg-elevated);
+    background-color: var(--review-bg);
     border-color: transparent;
   }
 
   .timeline-row.pending .timeline-icon.review-icon :global(.spinner) {
-    color: var(--status-modified);
+    color: var(--review-color);
   }
 
   .timeline-icon.failed-icon {

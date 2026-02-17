@@ -18,6 +18,7 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showNewProjectModal = $state(false);
+  let isCommandKeyHeld = $state(false);
 
   onMount(() => {
     loadProjects();
@@ -26,7 +27,9 @@
       showNewProjectModal = true;
     };
     window.addEventListener('staged:new-project', onNewProject);
-    return () => window.removeEventListener('staged:new-project', onNewProject);
+    return () => {
+      window.removeEventListener('staged:new-project', onNewProject);
+    };
   });
 
   async function loadProjects() {
@@ -49,19 +52,73 @@
     selectProject(project.id);
   }
 
+  function verifyCommandKeyState(e: KeyboardEvent | MouseEvent) {
+    // Verify the command key is actually held down by checking the event's metaKey/ctrlKey
+    const actuallyHeld = e.metaKey || e.ctrlKey;
+    if (isCommandKeyHeld && !actuallyHeld) {
+      isCommandKeyHeld = false;
+    }
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     const target = e.target as HTMLElement;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
     if (isInput) return;
 
+    // Track command key state
+    if (e.metaKey || e.ctrlKey) {
+      isCommandKeyHeld = true;
+    } else {
+      // Any non-command key press while we think command is held means it's not
+      verifyCommandKeyState(e);
+    }
+
+    // Command+N to open new project modal
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
       e.preventDefault();
       showNewProjectModal = true;
+      return;
+    }
+
+    // Command+1-9 to open projects by number
+    if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+      e.preventDefault();
+      const index = parseInt(e.key) - 1;
+      if (index < projects.length) {
+        selectProject(projects[index].id);
+      }
+    }
+  }
+
+  function handleKeyup(e: KeyboardEvent) {
+    // Verify the actual state first
+    verifyCommandKeyState(e);
+    if (!e.metaKey && !e.ctrlKey) {
+      isCommandKeyHeld = false;
+    }
+  }
+
+  function handleBlur() {
+    // Reset command key state when window loses focus
+    // This handles cases like Command+Tab where keyup isn't received
+    isCommandKeyHeld = false;
+  }
+
+  function handleMouseMove(e: MouseEvent) {
+    // Verify command key state on mouse movement
+    // This catches cases where the state got stuck (e.g., Command+Tab back to app)
+    if (isCommandKeyHeld) {
+      verifyCommandKeyState(e);
     }
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window
+  onkeydown={handleKeydown}
+  onkeyup={handleKeyup}
+  onblur={handleBlur}
+  onmousemove={handleMouseMove}
+/>
 
 <div class="projects-list-page">
   <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>
@@ -98,8 +155,14 @@
             <span class="new-project-label">+ New project</span>
           </div>
         </button>
-        {#each projects as project (project.id)}
+        {#each projects as project, index (project.id)}
           <button class="project-card" onclick={() => selectProject(project.id)}>
+            {#if isCommandKeyHeld && index < 9}
+              <div class="keyboard-shortcut-overlay">
+                <span class="command-icon">⌘</span>
+                <span class="number">{index + 1}</span>
+              </div>
+            {/if}
             <div class="card-header">
               <FolderGit2 size={16} />
               <span>{projectDisplayName(project)}</span>
@@ -253,6 +316,7 @@
   }
 
   .project-card {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -314,5 +378,34 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .keyboard-shortcut-overlay {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background-color: var(--bg-elevated);
+    border: 1px solid var(--border-emphasis);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: var(--size-xs);
+    font-weight: 600;
+    color: var(--text-primary);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  .keyboard-shortcut-overlay .command-icon {
+    color: var(--ui-accent);
+    font-size: var(--size-sm);
+  }
+
+  .keyboard-shortcut-overlay .number {
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    color: var(--ui-accent);
   }
 </style>

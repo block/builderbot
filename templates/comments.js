@@ -6,7 +6,7 @@
     function orderComments(comments) {
         if (!comments || comments.length <= 1) return comments;
         var byId = {};
-        comments.forEach(function(c) { byId[c.id] = c; });
+        comments.forEach(function(c) { byId[c.id] = true; });
 
         var children = {};
         var roots = [];

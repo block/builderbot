@@ -95,6 +95,22 @@
   let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
   let prStatusRefreshing = $state(false);
 
+  // PR status fields (local state, updated via events)
+  let prStatusState = $state<string | null>(branch.prState);
+  let prStatusChecks = $state<string | null>(branch.prChecksStatus);
+  let prStatusReviewDecision = $state<string | null>(branch.prReviewDecision);
+  let prStatusMergeable = $state<boolean | null>(branch.prMergeable);
+  let prStatusDraft = $state<boolean | null>(branch.prDraft);
+
+  // Sync local PR status state when branch prop changes
+  $effect(() => {
+    prStatusState = branch.prState;
+    prStatusChecks = branch.prChecksStatus;
+    prStatusReviewDecision = branch.prReviewDecision;
+    prStatusMergeable = branch.prMergeable;
+    prStatusDraft = branch.prDraft;
+  });
+
   // Push session state (mirrors PR session pattern)
   type PushState = 'idle' | 'pushing' | 'error' | 'done';
   let pushStateOverride = $state<PushState | null>(null);
@@ -269,13 +285,12 @@
     }>('pr-status-changed', (event) => {
       const payload = event.payload;
       if (payload.branchId === branchId) {
-        // Update branch object with new status
-        branch.prState = payload.prState;
-        branch.prChecksStatus = payload.prChecksStatus;
-        branch.prReviewDecision = payload.prReviewDecision;
-        branch.prMergeable = payload.prMergeable;
-        branch.prDraft = payload.prDraft;
-        branch.prUpdatedAt = Date.now();
+        // Update local PR status state
+        prStatusState = payload.prState;
+        prStatusChecks = payload.prChecksStatus;
+        prStatusReviewDecision = payload.prReviewDecision;
+        prStatusMergeable = payload.prMergeable;
+        prStatusDraft = payload.prDraft;
       }
     }).then((unlisten) => {
       unlistenPrStatus = unlisten;
@@ -364,7 +379,7 @@
     const shouldPoll = branch.prNumber && isWindowFocused;
 
     // Don't poll if PR is merged or closed
-    if (branch.prState === 'MERGED' || branch.prState === 'CLOSED') {
+    if (prStatusState === 'MERGED' || prStatusState === 'CLOSED') {
       if (prStatusPollTimer) {
         clearInterval(prStatusPollTimer);
         prStatusPollTimer = null;
@@ -374,7 +389,7 @@
 
     // Choose interval based on status
     let pollInterval: number;
-    if (branch.prChecksStatus === 'PENDING') {
+    if (prStatusChecks === 'PENDING') {
       // Checks are running - poll frequently
       pollInterval = 15_000; // 15 seconds
     } else {
@@ -688,27 +703,58 @@
     if (!branch.prNumber) return null;
 
     // Check PR state first
-    if (branch.prState === 'MERGED') return 'Merged';
-    if (branch.prState === 'CLOSED') return 'Closed';
-    if (branch.prDraft) return 'Draft';
+    if (prStatusState === 'MERGED') return 'Merged';
+    if (prStatusState === 'CLOSED') return 'Closed';
+    if (prStatusDraft) return 'Draft';
 
     // Check checks status
-    if (branch.prChecksStatus === 'FAILURE') return 'Checks failing';
-    if (branch.prChecksStatus === 'PENDING') return 'Checks pending';
+    if (prStatusChecks === 'FAILURE') return 'Checks failing';
+    if (prStatusChecks === 'PENDING') return 'Checks pending';
 
     // Check review decision
-    if (branch.prReviewDecision === 'CHANGES_REQUESTED') return 'Changes requested';
-    if (branch.prReviewDecision === 'APPROVED' && branch.prMergeable) return 'Ready to merge';
-    if (branch.prReviewDecision === 'APPROVED') return 'Approved';
+    if (prStatusReviewDecision === 'CHANGES_REQUESTED') return 'Changes requested';
+    if (prStatusReviewDecision === 'APPROVED' && prStatusMergeable) return 'Approved';
+    if (prStatusReviewDecision === 'APPROVED') return 'Approved';
 
     // Check mergeable status
-    if (branch.prMergeable === false) return 'Has conflicts';
-    if (branch.prChecksStatus === 'SUCCESS') return 'Checks passed';
+    if (prStatusMergeable === false) return 'Has conflicts';
+    if (prStatusChecks === 'SUCCESS') return 'Open';
 
     return null; // No specific status to show
   }
 
   let prStatusText = $derived(getPrStatusText());
+
+  /** Get the status indicator color for the PR button */
+  function getPrStatusIndicator(): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
+    // Push/PR creation states
+    if (pushState === 'pushing' || prState === 'creating') return 'pending';
+    if (pushState === 'error' || prState === 'error') return 'error';
+
+    if (!branch.prNumber) return null;
+
+    // PR exists - check status
+    if (prStatusState === 'MERGED') return 'success';
+    if (prStatusState === 'CLOSED') return 'neutral';
+    if (prStatusDraft) return 'neutral';
+
+    // Check-based states
+    if (prStatusChecks === 'FAILURE') return 'error';
+    if (prStatusChecks === 'PENDING') return 'pending';
+    if (prStatusChecks === 'SUCCESS') return 'success';
+
+    // Review-based states
+    if (prStatusReviewDecision === 'CHANGES_REQUESTED') return 'warning';
+    if (prStatusReviewDecision === 'APPROVED' && prStatusMergeable) return 'success';
+    if (prStatusReviewDecision === 'APPROVED') return 'success';
+
+    // Mergeable status
+    if (prStatusMergeable === false) return 'error';
+
+    return 'neutral';
+  }
+
+  let prStatusIndicator = $derived(getPrStatusIndicator());
 
   // =========================================================================
   // New session modal
@@ -1414,7 +1460,7 @@
                     : pushState === 'error'
                       ? 'Push failed — click for details'
                       : prState === 'created' && hasUnpushed
-                        ? 'Push new commits'
+                        ? 'Push changes to remote'
                         : prState === 'created'
                           ? 'View PR'
                           : prState === 'error'
@@ -1444,7 +1490,7 @@
                     {:else if pushState === 'error'}
                       Push failed
                     {:else if prState === 'created' && hasUnpushed}
-                      Push{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                      Push changes
                     {:else if prState === 'created'}
                       {#if prStatusText}
                         {prStatusText}
@@ -1459,6 +1505,9 @@
                       Create PR
                     {/if}
                   </span>
+                  {#if prStatusIndicator}
+                    <span class="pr-status-indicator {prStatusIndicator}"></span>
+                  {/if}
                 </button>
                 <button
                   class="view-diff-btn"
@@ -2045,6 +2094,46 @@
 
   .pr-btn :global(svg) {
     flex-shrink: 0;
+  }
+
+  /* PR status indicator circle */
+  .pr-status-indicator {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-left: 2px;
+  }
+
+  .pr-status-indicator.success {
+    background-color: var(--status-added, #4ade80);
+  }
+
+  .pr-status-indicator.warning {
+    background-color: var(--status-modified, #fb923c);
+  }
+
+  .pr-status-indicator.error {
+    background-color: var(--ui-danger, #ef4444);
+  }
+
+  .pr-status-indicator.neutral {
+    background-color: var(--text-faint, #64748b);
+  }
+
+  .pr-status-indicator.pending {
+    background-color: var(--text-muted, #94a3b8);
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
   }
 
   :global(.spinner) {

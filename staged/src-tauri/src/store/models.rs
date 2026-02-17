@@ -625,7 +625,33 @@ impl Note {
 }
 
 // =============================================================================
-// Actions
+// Recent Repos
+// =============================================================================
+
+/// A recently used repository to simplify project creation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentRepo {
+    pub id: String,
+    pub github_repo: String,
+    pub subpath: Option<String>,
+    pub last_used_at: i64,
+}
+
+impl RecentRepo {
+    pub fn new(github_repo: &str, subpath: Option<String>) -> Self {
+        let now = now_timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            github_repo: github_repo.to_string(),
+            subpath,
+            last_used_at: now,
+        }
+    }
+}
+
+// =============================================================================
+// Project Actions
 // =============================================================================
 
 /// Re-export ActionType from builderbot-actions crate as the single source of truth.

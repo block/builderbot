@@ -256,10 +256,10 @@
     showRepoPicker = true;
   }
 
-  async function handleRepoSelected(nameWithOwner: string) {
+  async function handleRepoSelected(nameWithOwner: string, subpath?: string) {
     if (!repoPickerProject) return;
     try {
-      await commands.addProjectRepo(repoPickerProject.id, nameWithOwner);
+      await commands.addProjectRepo(repoPickerProject.id, nameWithOwner, undefined, subpath);
       const [projectsList, branches, repos] = await Promise.all([
         commands.listProjects(),
         commands.listBranchesForProject(repoPickerProject.id),

@@ -17,6 +17,7 @@ mod messages;
 mod notes;
 mod project_repos;
 mod projects;
+mod recent_repos;
 mod reviews;
 mod sessions;
 mod workdirs;
@@ -395,6 +396,17 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_repo_actions_context
                 ON repo_actions(context_id);
+
+            CREATE TABLE IF NOT EXISTS recent_repos (
+                id              TEXT PRIMARY KEY,
+                github_repo     TEXT NOT NULL,
+                subpath         TEXT,
+                last_used_at    INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_recent_repos_unique
+                ON recent_repos(github_repo, COALESCE(subpath, ''));
+            CREATE INDEX IF NOT EXISTS idx_recent_repos_last_used
+                ON recent_repos(last_used_at DESC);
 
             -- Session cleanup triggers: when a commit, note, or review is
             -- deleted (directly or via cascade from branch/project deletion),

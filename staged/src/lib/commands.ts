@@ -8,6 +8,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   Project,
   ProjectRepo,
+  RecentRepo,
   GitHubRepo,
   Branch,
   BranchTimeline,
@@ -65,6 +66,10 @@ export function deleteProject(id: string): Promise<void> {
 
 export function listProjectRepos(projectId: string): Promise<ProjectRepo[]> {
   return invoke('list_project_repos', { projectId });
+}
+
+export function listRecentRepos(limit?: number): Promise<RecentRepo[]> {
+  return invoke('list_recent_repos', { limit: limit ?? 10 });
 }
 
 export function addProjectRepo(

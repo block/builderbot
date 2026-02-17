@@ -18,6 +18,7 @@
     CircleDot,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import { alerts } from '../../shared/alerts.svelte';
   import type { Branch, BranchRef, Project, PullRequest, Issue } from '../../types';
   import * as commands from '../../commands';
   import {
@@ -47,7 +48,6 @@
   // Track selected issue for note creation
   let selectedIssue = $state<Issue | null>(null);
   let loading = $state(true);
-  let error = $state<string | null>(null);
 
   // Default branch (detected on mount)
   let detectedDefaultBranch = $state<string | null>(null);
@@ -139,6 +139,12 @@
       .replace(/-+/g, '-')
       .replace(/^-+|-+$/g, '');
   });
+
+  function errorMessageFrom(e: unknown): string {
+    if (typeof e === 'string') return e;
+    if (e instanceof Error) return e.message;
+    return String(e);
+  }
 
   onMount(async () => {
     if (!branchTitle) {
@@ -342,7 +348,6 @@
     if (!branchName.trim() || creating) return;
 
     creating = true;
-    error = null;
 
     try {
       if (selectedPr && !isRemoteProject) {
@@ -402,13 +407,13 @@
         });
       }
     } catch (e) {
-      if (typeof e === 'string') {
-        error = e;
-      } else if (e instanceof Error) {
-        error = e.message;
-      } else {
-        error = String(e);
-      }
+      const message = errorMessageFrom(e);
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to create branch',
+        message,
+        durationMs: 0,
+      });
       creating = false;
     }
   }
@@ -664,10 +669,6 @@
             <Github size={14} />
             Import from GitHub...
           </button>
-
-          {#if error}
-            <div class="error-message">{error}</div>
-          {/if}
 
           <div class="actions">
             <button class="cancel-button" onclick={onClose}>Cancel</button>

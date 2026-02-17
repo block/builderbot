@@ -49,6 +49,14 @@
     footerActions,
   }: Props = $props();
 
+  // Disable creating new branch sessions while one is actively generating.
+  let hasRunningSessionGeneration = $derived(
+    timeline.commits.some((commit) => commit.sessionStatus === 'running') ||
+      timeline.notes.some((note) => note.sessionStatus === 'running') ||
+      timeline.reviews.some((review) => review.sessionStatus === 'running')
+  );
+  let disableNewSessionActions = $derived(newSessionDisabled || hasRunningSessionGeneration);
+
   // Unified timeline item for display
   type DisplayItem = {
     key: string;
@@ -267,7 +275,7 @@
       <button
         class="empty-action-btn note-action"
         onclick={onNewNote}
-        disabled={newSessionDisabled}
+        disabled={disableNewSessionActions}
       >
         <FileText size={18} />
         <span>New note</span>
@@ -277,7 +285,7 @@
       <button
         class="empty-action-btn commit-action"
         onclick={onNewCommit}
-        disabled={newSessionDisabled}
+        disabled={disableNewSessionActions}
       >
         <GitCommitHorizontal size={18} />
         <span>New commit</span>
@@ -287,7 +295,7 @@
       <button
         class="empty-action-btn review-action"
         onclick={onNewReview}
-        disabled={newSessionDisabled}
+        disabled={disableNewSessionActions}
       >
         <FileSearch size={18} />
         <span>New AI review</span>
@@ -329,7 +337,7 @@
             <button
               class="add-item-btn note-btn"
               onclick={onNewNote}
-              disabled={newSessionDisabled}
+              disabled={disableNewSessionActions}
               title="New note"
             >
               <FileText size={13} />
@@ -340,7 +348,7 @@
             <button
               class="add-item-btn commit-btn"
               onclick={onNewCommit}
-              disabled={newSessionDisabled}
+              disabled={disableNewSessionActions}
               title="New commit"
             >
               <GitCommitHorizontal size={13} />
@@ -351,7 +359,7 @@
             <button
               class="add-item-btn review-btn"
               onclick={onNewReview}
-              disabled={newSessionDisabled}
+              disabled={disableNewSessionActions}
               title="New AI review"
             >
               <FileSearch size={13} />

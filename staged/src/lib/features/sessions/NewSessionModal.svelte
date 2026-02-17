@@ -21,6 +21,7 @@
   import AgentSelector from '../agents/AgentSelector.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
     branch: Branch;
@@ -37,7 +38,6 @@
   let currentMode = $state<BranchSessionType>('commit');
   let starting = $state(false);
   let initialized = false;
-  let error = $state<string | null>(null);
   let textareaEl: HTMLTextAreaElement | null = $state(null);
 
   let isCommit = $derived(currentMode === 'commit');
@@ -71,7 +71,6 @@
     if (starting) return;
 
     starting = true;
-    error = null;
 
     try {
       const agents = remote ? REMOTE_AGENTS : agentState.providers;
@@ -85,7 +84,12 @@
       );
       onStarted({ sessionId: result.sessionId, artifactId: result.artifactId });
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to start session',
+        message: e instanceof Error ? e.message : String(e),
+        durationMs: 0,
+      });
     } finally {
       starting = false;
     }
@@ -173,10 +177,6 @@
         ></textarea>
         <span class="hint">⌘ Enter to start</span>
       </div>
-
-      {#if error}
-        <div class="error-message">{error}</div>
-      {/if}
 
       <div class="form-actions">
         <AgentSelector disabled={starting} {remote} />
@@ -366,14 +366,6 @@
     font-size: var(--size-xs);
     color: var(--text-faint);
     text-align: right;
-  }
-
-  .error-message {
-    padding: 8px 12px;
-    background: var(--ui-danger-bg);
-    border-radius: 6px;
-    color: var(--ui-danger);
-    font-size: var(--size-sm);
   }
 
   /* Actions */

@@ -3,6 +3,7 @@
 {{define "head"}}
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script src="/static/comments.js"></script>
     <script>
         function getMermaidTheme() {
             return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default';
@@ -679,51 +680,9 @@
 
     // --- Comments panel logic ---
 
-    function formatTime(isoStr) {
-        if (!isoStr) return '';
-        var d = new Date(isoStr);
-        var now = new Date();
-        var diffMs = now - d;
-        var diffMins = Math.floor(diffMs / 60000);
-        if (diffMins < 1) return 'just now';
-        if (diffMins < 60) return diffMins + 'm ago';
-        var diffHours = Math.floor(diffMins / 60);
-        if (diffHours < 24) return diffHours + 'h ago';
-        var diffDays = Math.floor(diffHours / 24);
-        if (diffDays < 7) return diffDays + 'd ago';
-        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    }
-
-    function orderComments(comments) {
-        if (!comments || comments.length <= 1) return comments;
-        var byId = {};
-        comments.forEach(function(c) { byId[c.id] = c; });
-
-        var children = {};
-        var roots = [];
-        comments.forEach(function(c) {
-            var parent = c.inReplyTo || '';
-            if (parent && byId[parent]) {
-                (children[parent] = children[parent] || []).push(c);
-            } else {
-                roots.push(c);
-            }
-        });
-
-        var byTime = function(a, b) { return a.createdAt < b.createdAt ? -1 : 1; };
-        roots.sort(byTime);
-        Object.keys(children).forEach(function(k) { children[k].sort(byTime); });
-
-        var result = [];
-        function walk(id) {
-            (children[id] || []).forEach(function(c) {
-                result.push(c);
-                walk(c.id);
-            });
-        }
-        roots.forEach(function(c) { result.push(c); walk(c.id); });
-        return result;
-    }
+    // Utility functions loaded from /static/comments.js (birdseye.* namespace)
+    var formatTime = birdseye.formatTime;
+    var orderComments = birdseye.orderComments;
 
     function renderCommentMarkdown(text) {
         if (!text) return '';
@@ -741,10 +700,7 @@
         return tmp.innerHTML;
     }
 
-    function truncateText(text, maxLen) {
-        if (!text) return '';
-        return text.length > maxLen ? text.substring(0, maxLen) + '...' : text;
-    }
+    var truncateText = birdseye.truncateText;
 
     // --- Review banner ---
 

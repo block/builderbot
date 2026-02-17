@@ -4,7 +4,7 @@
   A project can be created with or without a repository.
 -->
 <script lang="ts">
-  import { X, GitBranch, Clock } from 'lucide-svelte';
+  import { X, GitBranch, Plus } from 'lucide-svelte';
   import type { Project, RecentRepo } from '../../types';
   import * as commands from '../../commands';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
@@ -168,7 +168,7 @@
                     }
                   }}
                 >
-                  <Clock size={14} class="recent-icon" />
+                  <Plus size={14} class="recent-icon" />
                   <div class="recent-repo-info">
                     <span class="recent-repo-name">{recent.githubRepo}</span>
                     {#if recent.subpath}

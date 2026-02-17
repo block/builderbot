@@ -49,8 +49,13 @@ export function listProjects(): Promise<Project[]> {
   return invoke('list_projects');
 }
 
-export function createProject(name: string, githubRepo?: string, subpath?: string): Promise<Project> {
-  return invoke('create_project', { name, githubRepo: githubRepo ?? null, subpath });
+export function createProject(
+  name: string,
+  location: 'local' | 'remote',
+  githubRepo?: string,
+  subpath?: string
+): Promise<Project> {
+  return invoke('create_project', { name, location, githubRepo: githubRepo ?? null, subpath });
 }
 
 export function deleteProject(id: string): Promise<void> {
@@ -64,15 +69,25 @@ export function listProjectRepos(projectId: string): Promise<ProjectRepo[]> {
 export function addProjectRepo(
   projectId: string,
   githubRepo: string,
+  branchName?: string,
   subpath?: string,
   setAsPrimary?: boolean
 ): Promise<ProjectRepo> {
   return invoke('add_project_repo', {
     projectId,
     githubRepo,
+    branchName: branchName ?? null,
     subpath: subpath ?? null,
     setAsPrimary: setAsPrimary ?? null,
   });
+}
+
+export function updateProjectRepoBranchName(
+  projectId: string,
+  projectRepoId: string,
+  branchName: string
+): Promise<void> {
+  return invoke('update_project_repo_branch_name', { projectId, projectRepoId, branchName });
 }
 
 export function removeProjectRepo(projectId: string, projectRepoId: string): Promise<void> {
@@ -124,9 +139,10 @@ export function listBranchesForProject(projectId: string): Promise<Branch[]> {
 export function createBranch(
   projectId: string,
   branchName: string,
-  baseBranch?: string
+  baseBranch?: string,
+  projectRepoId?: string
 ): Promise<Branch> {
-  return invoke('create_branch', { projectId, branchName, baseBranch });
+  return invoke('create_branch', { projectId, branchName, baseBranch, projectRepoId });
 }
 
 /** Create the git worktree for a local branch and record its workdir.
@@ -142,9 +158,10 @@ export function setupWorktreeFromPr(
   projectId: string,
   prNumber: number,
   headRef: string,
-  baseRef: string
+  baseRef: string,
+  projectRepoId?: string
 ): Promise<Branch> {
-  return invoke('setup_worktree_from_pr', { projectId, prNumber, headRef, baseRef });
+  return invoke('setup_worktree_from_pr', { projectId, prNumber, headRef, baseRef, projectRepoId });
 }
 
 /** Create a remote branch record (does not start the workspace). */
@@ -152,13 +169,15 @@ export function createRemoteBranch(
   projectId: string,
   branchName: string,
   workspaceName: string,
-  baseBranch?: string
+  baseBranch?: string,
+  projectRepoId?: string
 ): Promise<Branch> {
   return invoke('create_remote_branch', {
     projectId,
     branchName,
     baseBranch,
     workspaceName,
+    projectRepoId,
   });
 }
 
@@ -169,6 +188,10 @@ export function startWorkspace(branchId: string): Promise<void> {
 
 export function deleteBranch(branchId: string): Promise<void> {
   return invoke('delete_branch', { branchId });
+}
+
+export function renameBranch(branchId: string, branchName: string): Promise<Branch> {
+  return invoke('rename_branch', { branchId, branchName });
 }
 
 /** Get info about a remote branch's Blox workspace. */

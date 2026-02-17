@@ -14,6 +14,37 @@ use crate::git::Span;
 // Projects
 // =============================================================================
 
+/// Where a project's branches run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectLocation {
+    /// Local git worktrees on this machine.
+    Local,
+    /// Remote Blox workstations.
+    Remote,
+}
+
+impl ProjectLocation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
+    }
+}
+
+impl FromStr for ProjectLocation {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "local" => Ok(Self::Local),
+            "remote" => Ok(Self::Remote),
+            other => Err(format!("unknown project location: {other}")),
+        }
+    }
+}
+
 /// A tracked repository (user opt-in).
 ///
 /// Projects are identified by their `id` and may share the same GitHub
@@ -28,6 +59,8 @@ pub struct Project {
     /// Primary repository identifier, e.g. `"owner/repo"`.
     /// Optional so projects can be created before a repo is attached.
     pub github_repo: Option<String>,
+    /// Where this project's branches run by default.
+    pub location: ProjectLocation,
     pub subpath: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -50,6 +83,7 @@ impl Project {
             id: Uuid::new_v4().to_string(),
             name: name.to_string(),
             github_repo: None,
+            location: ProjectLocation::Local,
             subpath: None,
             created_at: now,
             updated_at: now,
@@ -93,6 +127,8 @@ pub struct ProjectRepo {
     pub id: String,
     pub project_id: String,
     pub github_repo: String,
+    /// Preferred branch name for this repository inside the project.
+    pub branch_name: String,
     pub subpath: Option<String>,
     pub is_primary: bool,
     pub created_at: i64,
@@ -100,12 +136,18 @@ pub struct ProjectRepo {
 }
 
 impl ProjectRepo {
-    pub fn new(project_id: &str, github_repo: &str, subpath: Option<String>) -> Self {
+    pub fn new(
+        project_id: &str,
+        github_repo: &str,
+        branch_name: &str,
+        subpath: Option<String>,
+    ) -> Self {
         let now = now_timestamp();
         Self {
             id: Uuid::new_v4().to_string(),
             project_id: project_id.to_string(),
             github_repo: github_repo.to_string(),
+            branch_name: branch_name.to_string(),
             subpath,
             is_primary: false,
             created_at: now,

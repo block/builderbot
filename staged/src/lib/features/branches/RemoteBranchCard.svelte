@@ -12,7 +12,15 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Cloud, Trash2, AlertCircle, CircleCheck, CirclePause, Copy } from 'lucide-svelte';
+  import {
+    Cloud,
+    Trash2,
+    AlertCircle,
+    CircleCheck,
+    CirclePause,
+    Copy,
+    Pencil,
+  } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Spinner from '../../shared/Spinner.svelte';
   import type {
@@ -33,9 +41,10 @@
     branch: Branch;
     deleting?: boolean;
     onDelete?: () => void;
+    onRename?: (branchName: string) => void;
   }
 
-  let { branch, deleting = false, onDelete }: Props = $props();
+  let { branch, deleting = false, onDelete, onRename }: Props = $props();
 
   // Reactive workspace status (updated by polling)
   let polledStatus = $state<WorkspaceStatus | null>(null);
@@ -84,7 +93,18 @@
         ]
       : []),
     {
-      label: 'Delete Branch',
+      label: 'Rename Branch',
+      icon: Pencil,
+      action: () => {
+        const next = window.prompt('Rename branch', branch.branchName);
+        if (!next) return;
+        const trimmed = next.trim();
+        if (!trimmed || trimmed === branch.branchName) return;
+        onRename?.(trimmed);
+      },
+    },
+    {
+      label: 'Delete Repo',
       icon: Trash2,
       danger: true,
       action: () => {

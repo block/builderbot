@@ -1,17 +1,15 @@
 <!--
   ProjectSection.svelte - A project header + list of branch cards
 
-  Shows the project name, a delete button, and all branches for this project.
-  Includes a "New Branch" dashed button at the bottom.
+  Shows the project name, repo controls, and all branch cards for this project.
 -->
 <script lang="ts">
-  import { Folder, Trash2, Plus, Settings, Loader2 } from 'lucide-svelte';
+  import { Folder, Trash2, Plus, Loader2 } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import BranchCard from '../branches/BranchCard.svelte';
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import DropdownMenu, { type MenuItem } from '../../shared/DropdownMenu.svelte';
-  import ProjectSettingsModal from './ProjectSettingsModal.svelte';
 
   interface Props {
     project: Project;
@@ -21,7 +19,8 @@
     detecting?: boolean;
     onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
-    onNewBranch?: () => void;
+    onRenameBranch?: (branchId: string, branchName: string) => void;
+    onAddRepo?: () => void;
     onRetryWorktree?: (branchId: string) => void;
   }
 
@@ -33,24 +32,15 @@
     detecting = false,
     onDeleteProject,
     onDeleteBranch,
-    onNewBranch,
+    onRenameBranch,
+    onAddRepo,
     onRetryWorktree,
   }: Props = $props();
 
   /** Branches sorted by most recently created first. */
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
 
-  let showProjectSettings = $state(false);
-  let canCreateBranch = $derived(!!project.githubRepo);
-
   const projectMenuItems: MenuItem[] = [
-    {
-      label: 'Actions',
-      icon: Settings,
-      action: () => {
-        showProjectSettings = true;
-      },
-    },
     { label: 'Remove Project', icon: Trash2, danger: true, action: () => onDeleteProject?.() },
   ];
 </script>
@@ -72,10 +62,9 @@
     </div>
   </div>
   <div class="branches-list">
-    <!-- New branch button -->
-    <button class="new-branch-button" onclick={() => onNewBranch?.()} disabled={!canCreateBranch}>
+    <button class="manage-repos-button" onclick={() => onAddRepo?.()}>
       <Plus size={16} />
-      {canCreateBranch ? 'New Branch' : 'Add a repo to create branches'}
+      Add Repo
     </button>
     {#each sortedBranches as branch (branch.id)}
       {#if branch.branchType === 'remote'}
@@ -83,6 +72,7 @@
           {branch}
           deleting={deletingBranches.has(branch.id)}
           onDelete={() => onDeleteBranch?.(branch.id)}
+          onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
         />
       {:else}
         <BranchCard
@@ -90,22 +80,13 @@
           deleting={deletingBranches.has(branch.id)}
           worktreeError={worktreeErrors.get(branch.id)}
           onDelete={() => onDeleteBranch?.(branch.id)}
+          onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
           onRetryWorktree={() => onRetryWorktree?.(branch.id)}
         />
       {/if}
     {/each}
   </div>
 </div>
-
-{#if showProjectSettings}
-  <ProjectSettingsModal
-    {project}
-    {detecting}
-    onClose={() => {
-      showProjectSettings = false;
-    }}
-  />
-{/if}
 
 <style>
   .project-section {
@@ -200,7 +181,7 @@
     gap: 12px;
   }
 
-  .new-branch-button {
+  .manage-repos-button {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -215,14 +196,9 @@
     transition: all 0.15s ease;
   }
 
-  .new-branch-button:hover {
+  .manage-repos-button:hover {
     border-color: var(--border-emphasis);
     color: var(--text-primary);
     background-color: var(--bg-hover);
-  }
-
-  .new-branch-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
   }
 </style>

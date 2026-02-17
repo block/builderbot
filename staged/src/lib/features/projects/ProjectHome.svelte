@@ -12,10 +12,10 @@
   import * as commands from '../../commands';
   import { runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome } from '../../navigation.svelte';
+  import { goHome, selectProject } from '../../navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
-  import NewBranchModal from '../branches/NewBranchModal.svelte';
+  import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
@@ -38,8 +38,8 @@
 
   // Modal state
   let showNewProjectModal = $state(false);
-  let showNewBranchModal = $state(false);
-  let newBranchProject = $state<Project | null>(null);
+  let showRepoPicker = $state(false);
+  let repoPickerProject = $state<Project | null>(null);
 
   // Delete confirmation state
   let projectToDelete = $state<Project | null>(null);
@@ -48,6 +48,7 @@
 
   // Worktree setup errors — maps branch ID → error message
   let worktreeErrors = $state<Map<string, string>>(new Map());
+  let pendingSetupBranches = $state<Set<string>>(new Set());
 
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
@@ -109,6 +110,7 @@
         })
       );
       branchesByProject = branchMap;
+      kickOffPendingBranchSetup(branchMap);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -142,7 +144,9 @@
     }
     const branches = await commands.listBranchesForProject(project.id);
     branchesByProject = new Map(branchesByProject).set(project.id, branches);
+    startInitialBranchSetup(project.id, branches);
     showNewProjectModal = false;
+    selectProject(project.id);
   }
 
   function handleProjectDetecting(projectId: string, detecting: boolean) {
@@ -180,53 +184,114 @@
 
   // ── Branch actions ──
 
-  function handleNewBranch(project: Project) {
-    newBranchProject = project;
-    showNewBranchModal = true;
+  function handleAddRepo(project: Project) {
+    repoPickerProject = project;
+    showRepoPicker = true;
   }
 
-  function handleBranchCreated(branch: Branch) {
-    const existing = branchesByProject.get(branch.projectId) || [];
-    branchesByProject = new Map(branchesByProject).set(branch.projectId, [...existing, branch]);
-    showNewBranchModal = false;
-    newBranchProject = null;
-
-    // For local branches without a worktree, set up the git worktree in the
-    // background. The card will show "Creating worktree…" while this runs.
-    if (branch.branchType === 'local' && !branch.worktreePath) {
-      setupBranchWorktree(branch.id, branch.projectId);
+  async function handleRepoSelected(nameWithOwner: string) {
+    if (!repoPickerProject) return;
+    try {
+      await commands.addProjectRepo(repoPickerProject.id, nameWithOwner);
+      const [projectsList, branches] = await Promise.all([
+        commands.listProjects(),
+        commands.listBranchesForProject(repoPickerProject.id),
+      ]);
+      projects = projectsList;
+      branchesByProject = new Map(branchesByProject).set(repoPickerProject.id, branches);
+      startInitialBranchSetup(repoPickerProject.id, branches);
+    } catch (e) {
+      console.error('Failed to add repo:', e);
+    } finally {
+      showRepoPicker = false;
+      repoPickerProject = null;
     }
   }
 
+  function startInitialBranchSetup(projectId: string, branches: Branch[]) {
+    for (const branch of branches) {
+      if (branch.branchType === 'local' && !branch.worktreePath) {
+        setupBranchWorktree(branch.id, projectId).catch(() => {});
+      } else if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
+        commands.startWorkspace(branch.id).catch((e) => {
+          console.error('[ProjectHome] Failed to start workspace:', e);
+        });
+      }
+    }
+  }
+
+  function kickOffPendingBranchSetup(branchMap: Map<string, Branch[]>) {
+    for (const [projectId, branches] of branchMap.entries()) {
+      for (const branch of branches) {
+        if (pendingSetupBranches.has(branch.id)) continue;
+        if (
+          branch.branchType === 'local' &&
+          !branch.worktreePath &&
+          !worktreeErrors.has(branch.id)
+        ) {
+          setupBranchWorktree(branch.id, projectId).catch(() => {});
+          continue;
+        }
+        if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
+          pendingSetupBranches = new Set([...pendingSetupBranches, branch.id]);
+          commands
+            .startWorkspace(branch.id)
+            .catch((e) => {
+              console.error('[ProjectHome] Failed to start workspace:', e);
+            })
+            .finally(() => {
+              const next = new Set(pendingSetupBranches);
+              next.delete(branch.id);
+              pendingSetupBranches = next;
+            });
+        }
+      }
+    }
+  }
+
+  $effect(() => {
+    // Ensure pending setup starts even when we navigated to a project page
+    // after creation and only loaded persisted branch records.
+    if (!loading) {
+      kickOffPendingBranchSetup(branchesByProject);
+    }
+  });
+
   /** Set up a git worktree for a branch, updating the UI on success or error. */
-  function setupBranchWorktree(branchId: string, projectId: string) {
+  async function setupBranchWorktree(branchId: string, projectId: string): Promise<void> {
+    if (pendingSetupBranches.has(branchId)) return;
+    pendingSetupBranches = new Set([...pendingSetupBranches, branchId]);
+
     // Clear any previous error for this branch
     const nextErrors = new Map(worktreeErrors);
     nextErrors.delete(branchId);
     worktreeErrors = nextErrors;
 
-    commands
-      .setupWorktree(branchId)
-      .then((updated) => {
-        // Replace the branch record so the card picks up worktreePath
-        const branches = branchesByProject.get(projectId) || [];
-        branchesByProject = new Map(branchesByProject).set(
-          projectId,
-          branches.map((b) => (b.id === updated.id ? updated : b))
-        );
+    try {
+      const updated = await commands.setupWorktree(branchId);
+      // Replace the branch record so the card picks up worktreePath
+      const branches = branchesByProject.get(projectId) || [];
+      branchesByProject = new Map(branchesByProject).set(
+        projectId,
+        branches.map((b) => (b.id === updated.id ? updated : b))
+      );
 
-        // Now that the worktree exists, run prerun actions
-        setTimeout(() => {
-          runPrerunActions(branchId, projectId).catch((e) => {
-            console.error('[ProjectHome] Failed to run prerun actions:', e);
-          });
-        }, 150);
-      })
-      .catch((e) => {
-        console.error('[ProjectHome] Failed to setup worktree:', e);
-        const errMsg = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
-        worktreeErrors = new Map(worktreeErrors).set(branchId, errMsg);
-      });
+      // Now that the worktree exists, run prerun actions
+      setTimeout(() => {
+        runPrerunActions(branchId, projectId).catch((e) => {
+          console.error('[ProjectHome] Failed to run prerun actions:', e);
+        });
+      }, 150);
+    } catch (e) {
+      console.error('[ProjectHome] Failed to setup worktree:', e);
+      const errMsg = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
+      worktreeErrors = new Map(worktreeErrors).set(branchId, errMsg);
+      throw e;
+    } finally {
+      const next = new Set(pendingSetupBranches);
+      next.delete(branchId);
+      pendingSetupBranches = next;
+    }
   }
 
   function handleDeleteBranchRequest(branchId: string, project: Project) {
@@ -246,19 +311,42 @@
     deletingBranches = new Set([...deletingBranches, branch.id]);
 
     try {
-      await commands.deleteBranch(branch.id);
-      // Remove the branch from the list on success
-      const existing = branchesByProject.get(branch.projectId) || [];
-      branchesByProject = new Map(branchesByProject).set(
-        branch.projectId,
-        existing.filter((b) => b.id !== branch.id)
-      );
+      if (branch.projectRepoId) {
+        await commands.removeProjectRepo(branch.projectId, branch.projectRepoId);
+        const [projectsList, branches] = await Promise.all([
+          commands.listProjects(),
+          commands.listBranchesForProject(branch.projectId),
+        ]);
+        projects = projectsList;
+        branchesByProject = new Map(branchesByProject).set(branch.projectId, branches);
+      } else {
+        await commands.deleteBranch(branch.id);
+        // Fallback for legacy branches without repo linkage
+        const existing = branchesByProject.get(branch.projectId) || [];
+        branchesByProject = new Map(branchesByProject).set(
+          branch.projectId,
+          existing.filter((b) => b.id !== branch.id)
+        );
+      }
     } catch (e) {
       console.error('Failed to delete branch:', e);
     } finally {
       const next = new Set(deletingBranches);
       next.delete(branch.id);
       deletingBranches = next;
+    }
+  }
+
+  async function handleRenameBranch(branchId: string, projectId: string, branchName: string) {
+    try {
+      const updated = await commands.renameBranch(branchId, branchName);
+      const existing = branchesByProject.get(projectId) || [];
+      branchesByProject = new Map(branchesByProject).set(
+        projectId,
+        existing.map((b) => (b.id === updated.id ? updated : b))
+      );
+    } catch (e) {
+      console.error('Failed to rename branch:', e);
     }
   }
 
@@ -271,15 +359,7 @@
 
     if (e.metaKey && e.key === 'n') {
       e.preventDefault();
-      // If we're on a selected project page, create a new branch there.
-      // Otherwise preserve current behavior.
-      if (selectedProject) {
-        handleNewBranch(selectedProject);
-      } else if (projects.length === 1) {
-        handleNewBranch(projects[0]);
-      } else {
-        handleNewProject();
-      }
+      handleNewProject();
     }
   }
 </script>
@@ -373,7 +453,9 @@
             detecting={detectingProjectIds.has(project.id)}
             onDeleteProject={() => handleDeleteProjectRequest(project)}
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
-            onNewBranch={() => handleNewBranch(project)}
+            onRenameBranch={(branchId, branchName) =>
+              handleRenameBranch(branchId, project.id, branchName)}
+            onAddRepo={() => handleAddRepo(project)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
           />
         {/each}
@@ -391,14 +473,12 @@
   />
 {/if}
 
-<!-- New branch modal -->
-{#if showNewBranchModal && newBranchProject}
-  <NewBranchModal
-    project={newBranchProject}
-    onCreated={handleBranchCreated}
+{#if showRepoPicker}
+  <GitHubRepoPickerModal
+    onSelect={handleRepoSelected}
     onClose={() => {
-      showNewBranchModal = false;
-      newBranchProject = null;
+      showRepoPicker = false;
+      repoPickerProject = null;
     }}
   />
 {/if}
@@ -418,10 +498,8 @@
 <!-- Delete branch confirmation -->
 {#if branchToDelete}
   <ConfirmDialog
-    title={branchToDelete.branch.branchType === 'remote' ? 'Delete Remote Branch' : 'Delete Branch'}
-    message={branchToDelete.branch.branchType === 'remote'
-      ? `Delete branch "${branchToDelete.branch.branchName}" and stop its workspace? The workspace may be reused later, but session history will be lost.`
-      : `Delete branch "${branchToDelete.branch.branchName}" and its worktree? This cannot be undone.`}
+    title="Delete Repo"
+    message={`Delete repo for branch "${branchToDelete.branch.branchName}"? This removes its tracked branch and local worktree/remote workspace.`}
     confirmLabel="Delete"
     danger={true}
     onConfirm={confirmDeleteBranch}

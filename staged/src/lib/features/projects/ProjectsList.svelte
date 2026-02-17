@@ -46,6 +46,7 @@
       projects = [...projects, project];
     }
     showNewProjectModal = false;
+    selectProject(project.id);
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -99,6 +100,9 @@
               <span>{projectDisplayName(project)}</span>
             </div>
             <div class="repo">{project.githubRepo ?? 'No repo attached'}</div>
+            <div class="repo">
+              {project.location === 'remote' ? 'Remote workspace' : 'Local worktrees'}
+            </div>
           </button>
         {/each}
       </div>

@@ -19,6 +19,7 @@
   let { onCreated, onDetecting, onClose }: Props = $props();
 
   let name = $state('');
+  let location = $state<'local' | 'remote'>('local');
   let selectedRepo = $state<string | null>(null);
   let subpath = $state('');
   let saving = $state(false);
@@ -33,11 +34,12 @@
 
     try {
       const normalizedSubpath = selectedRepo
-        ? (subpath.trim().replace(/^\/+|\/+$/g, '') || undefined)
+        ? subpath.trim().replace(/^\/+|\/+$/g, '') || undefined
         : undefined;
 
       const project = await commands.createProject(
         name.trim(),
+        location,
         selectedRepo ?? undefined,
         normalizedSubpath
       );
@@ -130,7 +132,31 @@
       </div>
 
       <div class="form-group">
-        <label for="project-repo-select">Repository <span class="optional-label">(optional)</span></label>
+        <div class="field-label">Location</div>
+        <div class="type-toggle">
+          <button
+            class="toggle-option"
+            class:active={location === 'local'}
+            onclick={() => (location = 'local')}
+            disabled={saving}
+          >
+            Local
+          </button>
+          <button
+            class="toggle-option"
+            class:active={location === 'remote'}
+            onclick={() => (location = 'remote')}
+            disabled={saving}
+          >
+            Remote
+          </button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="project-repo-select"
+          >Repository <span class="optional-label">(optional)</span></label
+        >
         {#if selectedRepo}
           <div class="repo-info">
             <GitBranch size={14} class="repo-info-icon" />
@@ -153,7 +179,8 @@
 
       {#if selectedRepo}
         <div class="form-group">
-          <label for="project-subpath">Subpath <span class="optional-label">(optional)</span></label>
+          <label for="project-subpath">Subpath <span class="optional-label">(optional)</span></label
+          >
           <input
             bind:value={subpath}
             id="project-subpath"
@@ -268,8 +295,34 @@
     color: var(--text-muted);
   }
 
+  .field-label {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+  }
+
   .optional-label {
     color: var(--text-faint);
+  }
+
+  .type-toggle {
+    display: flex;
+    gap: 6px;
+  }
+
+  .toggle-option {
+    flex: 1;
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 8px 10px;
+    cursor: pointer;
+  }
+
+  .toggle-option.active {
+    border-color: var(--ui-accent);
+    color: var(--text-primary);
+    background-color: var(--bg-hover);
   }
 
   input {

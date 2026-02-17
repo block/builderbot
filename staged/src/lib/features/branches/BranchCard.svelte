@@ -64,10 +64,18 @@
     deleting?: boolean;
     worktreeError?: string;
     onDelete?: () => void;
+    onRename?: (branchName: string) => void;
     onRetryWorktree?: () => void;
   }
 
-  let { branch, deleting = false, worktreeError, onDelete, onRetryWorktree }: Props = $props();
+  let {
+    branch,
+    deleting = false,
+    worktreeError,
+    onDelete,
+    onRename,
+    onRetryWorktree,
+  }: Props = $props();
 
   // =========================================================================
   // PR button state
@@ -494,6 +502,15 @@
   function handleDeleteFromMenu() {
     showMoreMenu = false;
     onDelete?.();
+  }
+
+  function handleRenameFromMenu() {
+    showMoreMenu = false;
+    const next = window.prompt('Rename branch', branch.branchName);
+    if (!next) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === branch.branchName) return;
+    onRename?.(trimmed);
   }
 
   function getActionIcon(actionType: string) {
@@ -1188,9 +1205,14 @@
 
               <!-- Delete last -->
               <div class="menu-separator"></div>
+              <button class="more-menu-item" onclick={handleRenameFromMenu}>
+                <GitBranch size={14} />
+                Rename Branch
+              </button>
+              <div class="menu-separator"></div>
               <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
                 <Trash2 size={14} />
-                Delete
+                Delete Repo
               </button>
             </div>
           {/if}

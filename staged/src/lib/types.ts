@@ -8,15 +8,19 @@ export interface Project {
   id: string;
   name: string;
   githubRepo: string | null;
+  location: ProjectLocation;
   subpath: string | null;
   createdAt: number;
   updatedAt: number;
 }
 
+export type ProjectLocation = 'local' | 'remote';
+
 export interface ProjectRepo {
   id: string;
   projectId: string;
   githubRepo: string;
+  branchName: string;
   subpath: string | null;
   isPrimary: boolean;
   createdAt: number;

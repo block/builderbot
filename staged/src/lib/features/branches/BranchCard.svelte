@@ -1814,7 +1814,7 @@
     background: none;
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-size: var(--size-xs);
     font-weight: 500;
     cursor: pointer;
@@ -1850,7 +1850,7 @@
   }
 
   .pr-btn.created {
-    color: var(--text-faint);
+    color: var(--text-muted);
     border-color: var(--border-subtle);
   }
 

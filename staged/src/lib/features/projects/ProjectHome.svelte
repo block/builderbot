@@ -1,22 +1,30 @@
 <!--
-  ProjectHome.svelte - The single main page
+  ProjectHome.svelte - Project workspace page
 
-  Shows all projects with their branches. Empty state when no projects exist.
-  Modals for creating/deleting projects and branches are layered on top.
+  In app navigation this is the "project page". It can render a single selected
+  project (detail view) or multiple projects when no filter is provided.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { ArrowLeft } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import type { Project, Branch, StoreIncompatibility } from '../../types';
   import * as commands from '../../commands';
   import { runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
+  import { goHome } from '../../navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import NewBranchModal from '../branches/NewBranchModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
+
+  interface Props {
+    selectedProjectId?: string | null;
+  }
+
+  let { selectedProjectId = null }: Props = $props();
 
   // Data
   let projects = $state<Project[]>([]);
@@ -108,7 +116,19 @@
     }
   }
 
-  let hasContent = $derived(projects.length > 0);
+  let visibleProjects = $derived(
+    selectedProjectId ? projects.filter((project) => project.id === selectedProjectId) : projects
+  );
+  let hasContent = $derived(visibleProjects.length > 0);
+  let selectedProject = $derived(
+    selectedProjectId ? projects.find((project) => project.id === selectedProjectId) || null : null
+  );
+
+  $effect(() => {
+    if (!loading && selectedProjectId && projects.length > 0 && !selectedProject) {
+      goHome();
+    }
+  });
 
   // ── Project actions ──
 
@@ -150,6 +170,9 @@
       const newMap = new Map(branchesByProject);
       newMap.delete(id);
       branchesByProject = newMap;
+      if (selectedProjectId === id) {
+        goHome();
+      }
     } catch (e) {
       console.error('Failed to delete project:', e);
     }
@@ -248,9 +271,11 @@
 
     if (e.metaKey && e.key === 'n') {
       e.preventDefault();
-      // If there's exactly one project, open new branch for it.
-      // Otherwise, open new project.
-      if (projects.length === 1) {
+      // If we're on a selected project page, create a new branch there.
+      // Otherwise preserve current behavior.
+      if (selectedProject) {
+        handleNewBranch(selectedProject);
+      } else if (projects.length === 1) {
         handleNewBranch(projects[0]);
       } else {
         handleNewProject();
@@ -329,8 +354,17 @@
         <GitTreeAnimation />
       </div>
     {:else}
+      {#if selectedProject}
+        <div class="project-toolbar">
+          <button class="back-button" onclick={goHome} title="Back to projects list">
+            <ArrowLeft size={14} />
+            Projects
+          </button>
+          <div class="project-title">{projectDisplayName(selectedProject)}</div>
+        </div>
+      {/if}
       <div class="projects-list">
-        {#each projects as project (project.id)}
+        {#each visibleProjects as project (project.id)}
           <ProjectSection
             {project}
             branches={branchesByProject.get(project.id) || []}
@@ -610,5 +644,40 @@
     display: flex;
     flex-direction: column;
     gap: 32px;
+  }
+
+  .project-toolbar {
+    width: 100%;
+    max-width: 800px;
+    margin: 0 auto 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .back-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 6px 10px;
+    font-size: var(--size-xs);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .back-button:hover {
+    color: var(--text-primary);
+    border-color: var(--border-emphasis);
+    background-color: var(--bg-hover);
+  }
+
+  .project-title {
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-weight: 600;
   }
 </style>

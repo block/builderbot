@@ -10,11 +10,13 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import TopBar from './lib/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
+  import ProjectsList from './lib/features/projects/ProjectsList.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import DoctorModal from './lib/features/doctor/DoctorModal.svelte';
   import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
+  import { navigation } from './lib/navigation.svelte';
 
   let showSessionLab = $state(false);
   let showDoctor = $state(false);
@@ -84,7 +86,11 @@
   <main>
     <TopBar />
     <div class="content">
-      <ProjectHome />
+      {#if navigation.selectedProjectId}
+        <ProjectHome selectedProjectId={navigation.selectedProjectId} />
+      {:else}
+        <ProjectsList />
+      {/if}
     </div>
   </main>
 

@@ -1,6 +1,7 @@
 package comments
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -461,5 +462,154 @@ func TestFilesInReviewDerivedFromOpenThreads(t *testing.T) {
 	}
 	if len(files) != 2 {
 		t.Fatalf("expected 2 files in review after reopen, got %d", len(files))
+	}
+}
+
+func TestMigrateInReplyToOnSave(t *testing.T) {
+	store := newTestStore(t)
+
+	// Write legacy JSON without inReplyTo fields
+	legacy := &FileComments{
+		Threads: []Thread{{
+			ID:     "t1",
+			Status: "open",
+			Anchor: Anchor{SelectedText: "text"},
+			Comments: []Comment{
+				{ID: "c1", Author: "alice", Role: "human", Body: "First"},
+				{ID: "c2", Author: "bob", Role: "agent", Body: "Second"},
+				{ID: "c3", Author: "alice", Role: "human", Body: "Third"},
+			},
+		}},
+	}
+
+	// Save — should trigger migration
+	if err := store.Save(testProject, "legacy.md", legacy); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Load the raw JSON and verify inReplyTo was backfilled
+	p, _ := store.commentsPath(testProject, "legacy.md")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	var fc FileComments
+	if err := json.Unmarshal(data, &fc); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	comments := fc.Threads[0].Comments
+	if comments[0].InReplyTo != "" {
+		t.Errorf("first comment should have no inReplyTo, got %q", comments[0].InReplyTo)
+	}
+	if comments[1].InReplyTo != "c1" {
+		t.Errorf("second comment inReplyTo should be 'c1', got %q", comments[1].InReplyTo)
+	}
+	if comments[2].InReplyTo != "c2" {
+		t.Errorf("third comment inReplyTo should be 'c2', got %q", comments[2].InReplyTo)
+	}
+}
+
+func TestMigratePreservesExistingInReplyTo(t *testing.T) {
+	store := newTestStore(t)
+
+	// Comments where c2 already has inReplyTo set
+	fc := &FileComments{
+		Threads: []Thread{{
+			ID:     "t1",
+			Status: "open",
+			Anchor: Anchor{SelectedText: "text"},
+			Comments: []Comment{
+				{ID: "c1", Author: "alice", Role: "human", Body: "First"},
+				{ID: "c2", Author: "bob", Role: "agent", Body: "Second", InReplyTo: "c1"},
+				{ID: "c3", Author: "alice", Role: "human", Body: "Third"},
+			},
+		}},
+	}
+
+	if err := store.Save(testProject, "existing.md", fc); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := store.Load(testProject, "existing.md")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	comments := loaded.Threads[0].Comments
+	if comments[1].InReplyTo != "c1" {
+		t.Errorf("c2 inReplyTo should remain 'c1', got %q", comments[1].InReplyTo)
+	}
+	if comments[2].InReplyTo != "c2" {
+		t.Errorf("c3 inReplyTo should be backfilled to 'c2', got %q", comments[2].InReplyTo)
+	}
+}
+
+func TestAddCommentSetsInReplyTo(t *testing.T) {
+	store := newTestStore(t)
+
+	anchor := Anchor{SelectedText: "text"}
+	first := Comment{Author: "alice", Role: "human", Body: "First"}
+	thread, err := store.CreateThread(testProject, "reply.md", anchor, first)
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	second := Comment{Author: "bot", Role: "agent", Body: "Reply"}
+	updated, err := store.AddComment(testProject, "reply.md", thread.ID, second)
+	if err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+
+	if updated.Comments[1].InReplyTo != updated.Comments[0].ID {
+		t.Errorf("reply InReplyTo should be %q, got %q",
+			updated.Comments[0].ID, updated.Comments[1].InReplyTo)
+	}
+}
+
+func TestLegacyJSONWithoutInReplyToLoads(t *testing.T) {
+	store := newTestStore(t)
+
+	// Manually write JSON without inReplyTo fields (simulating legacy data)
+	legacyJSON := `{
+		"threads": [{
+			"id": "t1",
+			"status": "open",
+			"anchor": {"selectedText": "text"},
+			"comments": [
+				{"id": "c1", "author": "alice", "role": "human", "body": "Hello", "createdAt": "2025-01-01T00:00:00Z"},
+				{"id": "c2", "author": "bob", "role": "agent", "body": "World", "createdAt": "2025-01-01T00:01:00Z"}
+			],
+			"createdAt": "2025-01-01T00:00:00Z"
+		}]
+	}`
+
+	p, _ := store.commentsPath(testProject, "old.md")
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(p, []byte(legacyJSON), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	fc, err := store.Load(testProject, "old.md")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if len(fc.Threads) != 1 {
+		t.Fatalf("expected 1 thread, got %d", len(fc.Threads))
+	}
+	if len(fc.Threads[0].Comments) != 2 {
+		t.Fatalf("expected 2 comments, got %d", len(fc.Threads[0].Comments))
+	}
+	// InReplyTo should be empty (not backfilled until Save)
+	if fc.Threads[0].Comments[0].InReplyTo != "" {
+		t.Errorf("expected empty InReplyTo for first comment, got %q", fc.Threads[0].Comments[0].InReplyTo)
+	}
+	if fc.Threads[0].Comments[1].InReplyTo != "" {
+		t.Errorf("expected empty InReplyTo for second comment (not yet migrated), got %q", fc.Threads[0].Comments[1].InReplyTo)
 	}
 }

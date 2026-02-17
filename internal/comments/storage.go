@@ -44,10 +44,24 @@ func (s *Store) Load(projectName, filePath string) (*FileComments, error) {
 	return &fc, nil
 }
 
+// migrateInReplyTo backfills missing InReplyTo fields by walking each
+// thread's comments in array order. comment[0] stays root; comment[N]
+// gets InReplyTo = comment[N-1].ID if not already set.
+func migrateInReplyTo(fc *FileComments) {
+	for i, t := range fc.Threads {
+		for j := 1; j < len(t.Comments); j++ {
+			if fc.Threads[i].Comments[j].InReplyTo == "" {
+				fc.Threads[i].Comments[j].InReplyTo = t.Comments[j-1].ID
+			}
+		}
+	}
+}
+
 // Save writes the FileComments to the sidecar JSON file atomically.
 // It writes to a temporary file first, then renames it into place.
 // Directories are created as needed.
 func (s *Store) Save(projectName, filePath string, fc *FileComments) error {
+	migrateInReplyTo(fc)
 	p, err := s.commentsPath(projectName, filePath)
 	if err != nil {
 		return err

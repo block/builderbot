@@ -59,6 +59,7 @@ type Comment struct {
 	Body             string    `json:"body"`
 	CreatedAt        time.Time `json:"createdAt"`
 	SuggestedReplies []string  `json:"suggestedReplies,omitempty"`
+	InReplyTo        string    `json:"inReplyTo,omitempty"`
 }
 
 // ThreadWithFile pairs a thread with the file path it belongs to.

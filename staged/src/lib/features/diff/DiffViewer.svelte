@@ -622,7 +622,9 @@
   // ==========================================================================
 
   function alignmentHasComments(alignmentIndex: number): boolean {
-    return getCommentsForAlignment(alignmentIndex, changedAlignments, currentFileComments).length > 0;
+    return (
+      getCommentsForAlignment(alignmentIndex, changedAlignments, currentFileComments).length > 0
+    );
   }
 
   // ==========================================================================
@@ -1747,7 +1749,9 @@
 
     <!-- Line comment editor -->
     {#if commentingOnLines && lineCommentEditorStyle}
-      {@const existingComment = editingCommentId ? findCommentById(comments, editingCommentId) : null}
+      {@const existingComment = editingCommentId
+        ? findCommentById(comments, editingCommentId)
+        : null}
       <CommentEditor
         top={lineCommentEditorStyle.top}
         left={lineCommentEditorStyle.left}

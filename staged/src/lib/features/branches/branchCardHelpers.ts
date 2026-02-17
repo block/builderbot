@@ -22,11 +22,15 @@ export function groupActionsByType(actions: ProjectAction[]): Record<string, Pro
   return groups;
 }
 
-export function getPrimaryRunAction(groupedActions: Record<string, ProjectAction[]>): ProjectAction | null {
+export function getPrimaryRunAction(
+  groupedActions: Record<string, ProjectAction[]>
+): ProjectAction | null {
   return groupedActions.run?.[0] ?? null;
 }
 
-export function getRemainingRunActions(groupedActions: Record<string, ProjectAction[]>): ProjectAction[] {
+export function getRemainingRunActions(
+  groupedActions: Record<string, ProjectAction[]>
+): ProjectAction[] {
   return groupedActions.run?.slice(1) ?? [];
 }
 

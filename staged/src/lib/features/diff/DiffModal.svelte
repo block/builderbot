@@ -13,9 +13,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import {
-    X,
-  } from 'lucide-svelte';
+  import { X } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import DiffViewer from './DiffViewer.svelte';
   import DiffCommentsSection from './DiffCommentsSection.svelte';

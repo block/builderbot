@@ -38,7 +38,12 @@
   </div>
   <div class="section-right">
     {#if comments.length > 0}
-      <button class="copy-btn" class:copied={copiedFeedback} onclick={onCopyAll} title="Copy all comments">
+      <button
+        class="copy-btn"
+        class:copied={copiedFeedback}
+        onclick={onCopyAll}
+        title="Copy all comments"
+      >
         {#if copiedFeedback}
           <Check size={12} />
         {:else}

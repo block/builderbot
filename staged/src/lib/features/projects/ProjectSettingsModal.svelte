@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { X, Plus, Trash2, FolderGit2, Pencil } from 'lucide-svelte';
-  import type { Project, ProjectRepo } from '../../types';
+  import type { Branch, Project, ProjectRepo } from '../../types';
   import * as commands from '../../commands';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
@@ -24,6 +24,8 @@
   let renameDraft = $state('');
   let loadingRepos = $state(false);
   let showRepoPicker = $state(false);
+  let branches = $state<Branch[]>([]);
+  let repoError = $state<string | null>(null);
 
   onMount(() => {
     loadRepos();
@@ -32,7 +34,12 @@
   async function loadRepos() {
     loadingRepos = true;
     try {
-      projectRepos = await commands.listProjectRepos(project.id);
+      const [repos, branchList] = await Promise.all([
+        commands.listProjectRepos(project.id),
+        commands.listBranchesForProject(project.id),
+      ]);
+      projectRepos = repos;
+      branches = branchList;
     } catch (e) {
       console.error('Failed to load project repos:', e);
     } finally {
@@ -41,7 +48,12 @@
   }
 
   async function addRepo(githubRepo: string) {
+    if (!canAddRepo()) {
+      repoError = addRepoHint();
+      return;
+    }
     try {
+      repoError = null;
       await commands.addProjectRepo(
         project.id,
         githubRepo,
@@ -53,6 +65,7 @@
       showRepoPicker = false;
     } catch (e) {
       console.error('Failed to add repo:', e);
+      repoError = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -121,6 +134,19 @@
       onClose();
     }
   }
+
+  function canAddRepo(): boolean {
+    if (project.location !== 'remote') return true;
+    return branches.some((b) => b.branchType === 'remote' && b.workspaceStatus === 'running');
+  }
+
+  function addRepoHint(): string {
+    if (project.location !== 'remote') return '';
+    if (branches.some((b) => b.branchType === 'remote' && b.workspaceStatus === 'starting')) {
+      return 'Workspace is provisioning. Wait until it is running, then add another repo.';
+    }
+    return 'Workspace must be running before adding another repo.';
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -148,7 +174,12 @@
     <div class="modal-body">
       <div class="repos-header">
         <div class="section-title">Repositories</div>
-        <button class="secondary-btn" onclick={() => (showRepoPicker = true)}>
+        <button
+          class="secondary-btn"
+          onclick={() => (showRepoPicker = true)}
+          disabled={!canAddRepo()}
+          title={!canAddRepo() ? addRepoHint() : 'Add repository'}
+        >
           <Plus size={14} />
           Add Repo
         </button>
@@ -156,6 +187,12 @@
       <div class="repo-hint">
         Each repo has a default branch name used when Staged creates its branch/worktree.
       </div>
+      {#if !canAddRepo()}
+        <div class="repo-hint">{addRepoHint()}</div>
+      {/if}
+      {#if repoError}
+        <div class="empty-hint error">{repoError}</div>
+      {/if}
 
       {#if loadingRepos}
         <div class="empty-hint">Loading repositories...</div>
@@ -396,6 +433,11 @@
     border-color: var(--border-emphasis);
   }
 
+  .secondary-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
   .primary-btn {
     background: var(--ui-accent);
     color: var(--bg-primary);
@@ -446,6 +488,10 @@
     font-size: 12px;
     color: var(--text-tertiary);
     padding: 10px 2px;
+  }
+
+  .empty-hint.error {
+    color: var(--ui-danger);
   }
 
   .repo-hint {

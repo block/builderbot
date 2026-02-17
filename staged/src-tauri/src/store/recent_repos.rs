@@ -1,6 +1,6 @@
 //! Recent repository tracking operations.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 
 use super::models::RecentRepo;
 use super::{now_timestamp, Store, StoreError};
@@ -49,7 +49,7 @@ impl Store {
         )?;
 
         let repos = stmt
-            .query_map(params![limit], |row| {
+            .query_map(params![limit as i64], |row| {
                 Ok(RecentRepo {
                     id: row.get(0)?,
                     github_repo: row.get(1)?,

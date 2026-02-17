@@ -16,13 +16,15 @@
     Save,
     Pencil,
     Code2,
+    Star,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
-  import type { Project } from '../../types';
+  import type { Project, ProjectRepo } from '../../types';
   import type { ProjectAction } from '../../commands';
   import * as commands from '../../commands';
   import { detectProjectActions } from '../actions/actions';
   import type { SuggestedAction, ActionType } from '../actions/actions';
+  import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
 
   interface Props {
     project: Project;
@@ -34,6 +36,9 @@
 
   // Actions state
   let actions = $state<ProjectAction[]>([]);
+  let projectRepos = $state<ProjectRepo[]>([]);
+  let loadingRepos = $state(false);
+  let showRepoPicker = $state(false);
   let loadingActions = $state(false);
   let internalDetecting = $state(false);
   let editingAction = $state<ProjectAction | null>(null);
@@ -50,7 +55,47 @@
   // Load actions on mount
   onMount(() => {
     loadActions();
+    loadRepos();
   });
+
+  async function loadRepos() {
+    loadingRepos = true;
+    try {
+      projectRepos = await commands.listProjectRepos(project.id);
+    } catch (e) {
+      console.error('Failed to load project repos:', e);
+    } finally {
+      loadingRepos = false;
+    }
+  }
+
+  async function addRepo(githubRepo: string) {
+    try {
+      await commands.addProjectRepo(project.id, githubRepo, undefined, projectRepos.length === 0);
+      await loadRepos();
+      showRepoPicker = false;
+    } catch (e) {
+      console.error('Failed to add repo:', e);
+    }
+  }
+
+  async function removeRepo(repoId: string) {
+    try {
+      await commands.removeProjectRepo(project.id, repoId);
+      await loadRepos();
+    } catch (e) {
+      console.error('Failed to remove repo:', e);
+    }
+  }
+
+  async function setPrimary(repoId: string) {
+    try {
+      await commands.setPrimaryProjectRepo(project.id, repoId);
+      await loadRepos();
+    } catch (e) {
+      console.error('Failed to set primary repo:', e);
+    }
+  }
 
   // Track previous detecting state to detect when external detection completes
   let previousExternalDetecting = $state(false);
@@ -284,6 +329,44 @@
 
     <div class="modal-body">
       <div class="content-wrapper">
+        <div class="repos-section">
+          <div class="repos-header">
+            <div class="section-title">Repositories</div>
+            <button class="secondary-btn" onclick={() => (showRepoPicker = true)}>
+              <Plus size={14} />
+              Add Repo
+            </button>
+          </div>
+          {#if loadingRepos}
+            <div class="empty-hint">Loading repositories...</div>
+          {:else if projectRepos.length === 0}
+            <div class="empty-hint">No repositories attached.</div>
+          {:else}
+            <div class="repos-list">
+              {#each projectRepos as repo (repo.id)}
+                <div class="repo-item">
+                  <div class="repo-main">
+                    <code>{repo.githubRepo}</code>
+                    {#if repo.isPrimary}
+                      <span class="action-badge">Primary</span>
+                    {/if}
+                  </div>
+                  <div class="action-controls">
+                    {#if !repo.isPrimary}
+                      <button class="icon-btn" onclick={() => setPrimary(repo.id)} title="Set primary">
+                        <Star size={14} />
+                      </button>
+                    {/if}
+                    <button class="icon-btn danger" onclick={() => removeRepo(repo.id)} title="Remove">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+
         <div class="actions-header">
           <button class="secondary-btn" onclick={detectActions} disabled={detecting}>
             {#if detecting}
@@ -441,6 +524,10 @@
   {/if}
 </div>
 
+{#if showRepoPicker}
+  <GitHubRepoPickerModal onSelect={addRepo} onClose={() => (showRepoPicker = false)} />
+{/if}
+
 <style>
   .modal-backdrop {
     position: fixed;
@@ -511,6 +598,56 @@
     display: flex;
     flex-direction: column;
     gap: 16px;
+  }
+
+  .repos-section {
+    border: 1px solid var(--border-muted);
+    border-radius: 10px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .repos-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .section-title {
+    font-size: var(--size-sm);
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .repos-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .repo-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    border-radius: 8px;
+    background: var(--bg-hover);
+  }
+
+  .repo-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .repo-main code {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .primary-btn,

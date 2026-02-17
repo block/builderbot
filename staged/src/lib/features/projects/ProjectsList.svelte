@@ -5,12 +5,14 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { FolderGit2, Plus } from 'lucide-svelte';
+  import { FolderGit2 } from 'lucide-svelte';
   import type { Project } from '../../types';
   import * as commands from '../../commands';
   import { projectDisplayName } from '../../shared/utils';
   import { selectProject } from '../../navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
+  import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
+  import StagedIcon from '../../shared/StagedIcon.svelte';
 
   let projects = $state<Project[]>([]);
   let loading = $state(true);
@@ -48,13 +50,13 @@
 </script>
 
 <div class="projects-list-page">
-  <div class="content">
-    <div class="header">
-      <h1>Projects</h1>
-      {#if !loading && projects.length > 0}
+  <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>
+    {#if !loading && !error && projects.length > 0}
+      <div class="header">
+        <h1>Projects</h1>
         <span class="count">{projects.length}</span>
-      {/if}
-    </div>
+      </div>
+    {/if}
 
     {#if loading}
       <div class="state">Loading projects…</div>
@@ -62,11 +64,18 @@
       <div class="state error">{error}</div>
     {:else if projects.length === 0}
       <div class="empty-state">
-        <p>No projects yet.</p>
-        <button class="new-project-button" onclick={() => (showNewProjectModal = true)}>
-          <Plus size={14} />
-          Add Project
-        </button>
+        <div class="welcome-header">
+          <StagedIcon size={28} />
+          <h2>welcome to <span class="mono accent">staged</span></h2>
+        </div>
+        <p class="welcome-subtitle">
+          Create your first project to get started
+          <button class="kbd-btn" onclick={() => (showNewProjectModal = true)} title="New project">
+            +
+          </button>
+          <span class="shortcut-hint">(⌘N)</span>
+        </p>
+        <GitTreeAnimation />
       </div>
     {:else}
       <div class="projects-grid">
@@ -76,7 +85,7 @@
               <FolderGit2 size={16} />
               <span>{projectDisplayName(project)}</span>
             </div>
-            <div class="repo">{project.githubRepo}</div>
+            <div class="repo">{project.githubRepo ?? 'No repo attached'}</div>
           </button>
         {/each}
       </div>
@@ -109,6 +118,13 @@
     width: 100%;
     margin: 0 auto;
     box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+
+  .content.empty-layout {
+    max-width: none;
   }
 
   .header {
@@ -145,33 +161,71 @@
   }
 
   .empty-state {
-    color: var(--text-muted);
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    gap: 20px;
   }
 
-  .empty-state p {
+  .welcome-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .welcome-header h2 {
+    font-size: var(--size-xl);
+    font-weight: 500;
+    color: var(--text-primary);
     margin: 0;
   }
 
-  .new-project-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-primary);
-    cursor: pointer;
-    transition: all 0.15s ease;
+  .welcome-header .mono {
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    letter-spacing: -0.02em;
   }
 
-  .new-project-button:hover {
-    border-color: var(--border-emphasis);
+  .welcome-header .accent {
+    color: var(--ui-accent);
+  }
+
+  .welcome-subtitle {
+    margin: 0;
+    font-size: var(--size-sm);
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .welcome-subtitle .kbd-btn {
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: var(--size-xs);
+    padding: 1px 5px;
+    background-color: var(--bg-elevated);
+    border: 1px solid var(--border-muted);
+    border-radius: 4px;
+    color: var(--ui-accent);
+    cursor: pointer;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease;
+  }
+
+  .welcome-subtitle .kbd-btn:hover {
     background-color: var(--bg-hover);
+    border-color: var(--ui-accent);
+  }
+
+  .welcome-subtitle .shortcut-hint {
+    color: var(--text-faint);
+    font-size: var(--size-xs);
+  }
+
+  .empty-state :global(.animation-wrapper) {
+    width: min(1400px, calc(100vw - 48px));
   }
 
   .projects-grid {

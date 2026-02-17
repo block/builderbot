@@ -5,7 +5,7 @@
 //! incompatible version, it is deleted and recreated after user
 //! confirmation.
 //!
-//! Tables: schema_version, projects, branches, workdirs, commits,
+//! Tables: schema_version, projects, project_repos, branches, workdirs, commits,
 //! sessions, session_messages, notes, reviews, project_actions.
 
 pub mod models;
@@ -15,6 +15,7 @@ mod branches;
 mod commits;
 mod messages;
 mod notes;
+mod project_repos;
 mod projects;
 mod reviews;
 mod sessions;
@@ -59,7 +60,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -228,17 +229,33 @@ impl Store {
             "
             CREATE TABLE IF NOT EXISTS projects (
                 id          TEXT PRIMARY KEY,
-                github_repo TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                github_repo TEXT,
                 subpath     TEXT,
                 created_at  INTEGER NOT NULL,
                 updated_at  INTEGER NOT NULL
             );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repo_subpath
-                ON projects(github_repo, COALESCE(subpath, ''));
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_name
+                ON projects(name);
+
+            CREATE TABLE IF NOT EXISTS project_repos (
+                id          TEXT PRIMARY KEY,
+                project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                github_repo TEXT NOT NULL,
+                subpath     TEXT,
+                is_primary  INTEGER NOT NULL DEFAULT 0,
+                created_at  INTEGER NOT NULL,
+                updated_at  INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_project_repos_unique
+                ON project_repos(project_id, github_repo, COALESCE(subpath, ''));
+            CREATE INDEX IF NOT EXISTS idx_project_repos_project
+                ON project_repos(project_id);
 
             CREATE TABLE IF NOT EXISTS branches (
                 id                  TEXT PRIMARY KEY,
                 project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                project_repo_id     TEXT REFERENCES project_repos(id) ON DELETE SET NULL,
                 branch_name         TEXT NOT NULL,
                 base_branch         TEXT NOT NULL,
                 pr_number           INTEGER,
@@ -248,7 +265,7 @@ impl Store {
                 agent               TEXT,
                 created_at          INTEGER NOT NULL,
                 updated_at          INTEGER NOT NULL,
-                UNIQUE(project_id, branch_name)
+                UNIQUE(project_id, project_repo_id, branch_name)
             );
 
             CREATE TABLE IF NOT EXISTS workdirs (

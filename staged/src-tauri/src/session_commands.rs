@@ -41,6 +41,19 @@ fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<
         .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
 }
 
+fn resolve_branch_repo_slug(
+    store: &Arc<Store>,
+    project: &store::Project,
+    branch: &store::Branch,
+) -> Option<String> {
+    if let Some(repo_id) = &branch.project_repo_id {
+        if let Ok(Some(repo)) = store.get_project_repo(repo_id) {
+            return Some(repo.github_repo);
+        }
+    }
+    project.primary_repo().map(|s| s.to_string())
+}
+
 // =============================================================================
 // Provider discovery
 // =============================================================================
@@ -304,8 +317,8 @@ pub fn start_branch_session(
     let (working_dir, branch_context) = if is_remote {
         // For remote branches, use the derived clone path as a fallback working dir.
         // The actual work happens via ws_exec, not local filesystem.
-        let fallback_dir = project
-            .clone_path()
+        let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
+            .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         let ctx = build_remote_branch_context(
             branch.workspace_name.as_deref().unwrap(),

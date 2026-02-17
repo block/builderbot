@@ -12,7 +12,7 @@ fn test_create_and_get_project() {
     store.create_project(&project).unwrap();
 
     let fetched = store.get_project(&project.id).unwrap().unwrap();
-    assert_eq!(fetched.github_repo, "test-owner/test-repo");
+    assert_eq!(fetched.github_repo.as_deref(), Some("test-owner/test-repo"));
     assert!(fetched.subpath.is_none());
 }
 

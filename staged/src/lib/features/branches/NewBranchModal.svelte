@@ -34,6 +34,8 @@
   }
 
   let { project, onCreated, onClose }: Props = $props();
+  let activeRepo = $derived(project.githubRepo);
+  let hasRepo = $derived(!!activeRepo);
 
   // Branch type toggle
   let branchType = $state<BranchType>('local');
@@ -167,10 +169,14 @@
   }
 
   onMount(async () => {
+    if (!activeRepo) {
+      loading = false;
+      return;
+    }
     // Fetch default branch and branch list in parallel
     const [defaultBranchResult, branchRefsResult] = await Promise.allSettled([
-      commands.detectDefaultBranch(project.githubRepo),
-      commands.listGitBranches(project.githubRepo),
+      commands.detectDefaultBranch(activeRepo),
+      commands.listGitBranches(activeRepo),
     ]);
 
     detectedDefaultBranch =
@@ -182,8 +188,8 @@
     // Fire-and-forget: prune stale remote-tracking refs in the background.
     // Once done, silently refresh the branch list so any stale refs disappear.
     commands
-      .pruneRemoteRefs(project.githubRepo)
-      .then(() => commands.listGitBranches(project.githubRepo))
+      .pruneRemoteRefs(activeRepo)
+      .then(() => commands.listGitBranches(activeRepo))
       .then((refs) => {
         allBranchRefs = refs;
       })
@@ -273,7 +279,7 @@
     prsLoading = true;
     githubError = null;
     commands
-      .listPullRequests(project.githubRepo)
+      .listPullRequests(activeRepo!)
       .then((result) => {
         pullRequests = result;
         prsLoaded = true;
@@ -291,7 +297,7 @@
     issuesLoading = true;
     githubError = null;
     commands
-      .listIssues(project.githubRepo)
+      .listIssues(activeRepo!)
       .then((result) => {
         issues = result;
         issuesLoaded = true;
@@ -523,6 +529,11 @@
           <Spinner size={20} />
           <span>Loading branches…</span>
         </div>
+      {:else if !hasRepo}
+        <div class="error-message">This project has no primary repository yet. Add one first.</div>
+        <div class="actions">
+          <button class="cancel-button" onclick={onClose}>Close</button>
+        </div>
       {:else}
         <!-- Branch type toggle (only shown when sq CLI is available) -->
         {#if sqState.available}
@@ -556,7 +567,7 @@
           <div class="info-row">
             <GitBranch size={14} />
             <span class="info-label">Repository:</span>
-            <span class="info-value">{repoName(project.githubRepo)}</span>
+            <span class="info-value">{repoName(activeRepo!)}</span>
           </div>
           <button class="info-row base-row" onclick={toggleBasePicker}>
             <GitBranch size={14} class="base-icon" />

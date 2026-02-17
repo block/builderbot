@@ -41,6 +41,7 @@
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
 
   let showProjectSettings = $state(false);
+  let canCreateBranch = $derived(!!project.githubRepo);
 
   const projectMenuItems: MenuItem[] = [
     {
@@ -72,9 +73,9 @@
   </div>
   <div class="branches-list">
     <!-- New branch button -->
-    <button class="new-branch-button" onclick={() => onNewBranch?.()}>
+    <button class="new-branch-button" onclick={() => onNewBranch?.()} disabled={!canCreateBranch}>
       <Plus size={16} />
-      New Branch
+      {canCreateBranch ? 'New Branch' : 'Add a repo to create branches'}
     </button>
     {#each sortedBranches as branch (branch.id)}
       {#if branch.branchType === 'remote'}
@@ -218,5 +219,10 @@
     border-color: var(--border-emphasis);
     color: var(--text-primary);
     background-color: var(--bg-hover);
+  }
+
+  .new-branch-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 </style>

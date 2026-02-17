@@ -6,8 +6,19 @@
 
 export interface Project {
   id: string;
+  name: string;
+  githubRepo: string | null;
+  subpath: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProjectRepo {
+  id: string;
+  projectId: string;
   githubRepo: string;
   subpath: string | null;
+  isPrimary: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -26,6 +37,7 @@ export type WorkspaceStatus = 'starting' | 'running' | 'stopped' | 'error';
 export interface Branch {
   id: string;
   projectId: string;
+  projectRepoId: string | null;
   branchName: string;
   baseBranch: string;
   prNumber: number | null;

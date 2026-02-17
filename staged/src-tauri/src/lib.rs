@@ -56,6 +56,7 @@ struct StoreIncompatibility {
 pub struct BranchWithWorkdir {
     pub id: String,
     pub project_id: String,
+    pub project_repo_id: Option<String>,
     pub branch_name: String,
     pub base_branch: String,
     pub pr_number: Option<u64>,
@@ -413,26 +414,158 @@ fn list_projects(
 #[tauri::command(rename_all = "camelCase")]
 fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    github_repo: String,
+    name: String,
+    github_repo: Option<String>,
     subpath: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
-
-    // Check for duplicate (must match both repo and subpath)
-    if let Some(existing) = store
-        .get_project_by_repo_and_subpath(&github_repo, subpath.as_deref())
-        .map_err(|e| e.to_string())?
-    {
-        return Ok(existing);
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Project name is required".to_string());
     }
-
-    let mut project = store::Project::new(&github_repo);
-    if let Some(sub) = subpath {
+    let mut project = store::Project::named(trimmed);
+    if let Some(repo) = github_repo.clone() {
+        project = project.with_primary_repo(&repo);
+    }
+    if let Some(sub) = subpath.clone() {
         project = project.with_subpath(sub);
     }
     store.create_project(&project).map_err(|e| e.to_string())?;
 
+    if let Some(repo) = github_repo {
+        let project_repo = store::ProjectRepo::new(&project.id, &repo, subpath).primary();
+        store
+            .create_project_repo(&project_repo)
+            .map_err(|e| e.to_string())?;
+    }
+
     Ok(project)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn list_project_repos(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+) -> Result<Vec<store::ProjectRepo>, String> {
+    let store = get_store(&store)?;
+    store
+        .list_project_repos(&project_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn add_project_repo(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    github_repo: String,
+    subpath: Option<String>,
+    set_as_primary: Option<bool>,
+) -> Result<store::ProjectRepo, String> {
+    let store = get_store(&store)?;
+    let mut repo = store::ProjectRepo::new(&project_id, &github_repo, subpath);
+    if set_as_primary.unwrap_or(false) {
+        repo = repo.primary();
+    }
+    store.create_project_repo(&repo).map_err(|e| e.to_string())?;
+
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+    let should_be_primary = repo.is_primary
+        || store
+            .get_primary_project_repo(&project_id)
+            .map_err(|e| e.to_string())?
+            .is_none();
+    if should_be_primary {
+        store
+            .set_primary_project_repo(&project_id, &repo.id)
+            .map_err(|e| e.to_string())?;
+        store
+            .update_project(
+                &project_id,
+                &project.name,
+                Some(&repo.github_repo),
+                repo.subpath.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+        repo.is_primary = true;
+    }
+    Ok(repo)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn remove_project_repo(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    project_repo_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    let removed = store
+        .get_project_repo(&project_repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
+    store
+        .delete_project_repo(&project_repo_id)
+        .map_err(|e| e.to_string())?;
+
+    if removed.is_primary {
+        let next_primary = store
+            .list_project_repos(&project_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .next();
+        let project = store
+            .get_project(&project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project not found: {project_id}"))?;
+        if let Some(next) = next_primary {
+            store
+                .set_primary_project_repo(&project_id, &next.id)
+                .map_err(|e| e.to_string())?;
+            store
+                .update_project(
+                    &project_id,
+                    &project.name,
+                    Some(&next.github_repo),
+                    next.subpath.as_deref(),
+                )
+                .map_err(|e| e.to_string())?;
+        } else {
+            store
+                .update_project(&project_id, &project.name, None, None)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_primary_project_repo(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    project_repo_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    let repo = store
+        .get_project_repo(&project_repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
+    store
+        .set_primary_project_repo(&project_id, &project_repo_id)
+        .map_err(|e| e.to_string())?;
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+    store
+        .update_project(
+            &project_id,
+            &project.name,
+            Some(&repo.github_repo),
+            repo.subpath.as_deref(),
+        )
+        .map_err(|e| e.to_string())
 }
 
 /// List the authenticated user's GitHub organization memberships.
@@ -492,6 +625,7 @@ fn to_branch_with_workdir(
     BranchWithWorkdir {
         id: branch.id,
         project_id: branch.project_id,
+        project_repo_id: branch.project_repo_id,
         branch_name: branch.branch_name,
         base_branch: branch.base_branch,
         pr_number: branch.pr_number,
@@ -502,6 +636,25 @@ fn to_branch_with_workdir(
         created_at: branch.created_at,
         updated_at: branch.updated_at,
     }
+}
+
+fn project_primary_repo(project: &store::Project) -> Result<&str, String> {
+    project
+        .primary_repo()
+        .ok_or_else(|| format!("Project '{}' has no repository attached", project.name))
+}
+
+fn resolve_branch_repo_slug(
+    store: &Arc<Store>,
+    project: &store::Project,
+    branch: &store::Branch,
+) -> Result<String, String> {
+    if let Some(repo_id) = &branch.project_repo_id {
+        if let Some(repo) = store.get_project_repo(repo_id).map_err(|e| e.to_string())? {
+            return Ok(repo.github_repo);
+        }
+    }
+    Ok(project_primary_repo(project)?.to_string())
 }
 
 #[tauri::command]
@@ -554,7 +707,8 @@ fn create_branch(
     let effective_base = match base_branch {
         Some(b) => b,
         None => {
-            git::detect_default_branch_for_repo(&project.github_repo).map_err(|e| e.to_string())?
+            git::detect_default_branch_for_repo(project_primary_repo(&project)?)
+                .map_err(|e| e.to_string())?
         }
     };
 
@@ -566,8 +720,14 @@ fn create_branch(
         format!("origin/{effective_base}")
     };
 
+    let primary_repo = store
+        .get_primary_project_repo(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?;
+
     // Create branch record only — no git worktree yet
-    let branch = store::Branch::new(&project_id, &branch_name, &effective_base);
+    let branch =
+        store::Branch::new(&project_id, &branch_name, &effective_base).with_project_repo(&primary_repo.id);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, None))
@@ -604,7 +764,8 @@ async fn setup_worktree(
     }
 
     // Ensure we have a local clone (clones on first use, fetches on subsequent)
-    let repo_path = git::ensure_local_clone(&project.github_repo).map_err(|e| e.to_string())?;
+    let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
+    let repo_path = git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
 
     // Reuse any existing worktree for this branch; otherwise create one.
     let existing_worktree_path = git::list_worktrees(&repo_path)
@@ -684,7 +845,8 @@ async fn setup_worktree_from_pr(
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
     // Ensure we have a local clone
-    let repo_path = git::ensure_local_clone(&project.github_repo).map_err(|e| e.to_string())?;
+    let repo_path =
+        git::ensure_local_clone(project_primary_repo(&project)?).map_err(|e| e.to_string())?;
 
     // Fetch PR head and create worktree
     let (worktree_path, branch_name, base_branch) =
@@ -697,7 +859,13 @@ async fn setup_worktree_from_pr(
         .to_string();
 
     // Create branch record with PR number
-    let branch = store::Branch::new(&project_id, &branch_name, &base_branch).with_pr(pr_number);
+    let primary_repo = store
+        .get_primary_project_repo(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?;
+    let branch = store::Branch::new(&project_id, &branch_name, &base_branch)
+        .with_project_repo(&primary_repo.id)
+        .with_pr(pr_number);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
     // Create workdir record
@@ -731,7 +899,8 @@ async fn create_remote_branch(
     let effective_base = match base_branch {
         Some(b) => b,
         None => {
-            git::detect_default_branch_for_repo(&project.github_repo).map_err(|e| e.to_string())?
+            git::detect_default_branch_for_repo(project_primary_repo(&project)?)
+                .map_err(|e| e.to_string())?
         }
     };
 
@@ -744,8 +913,12 @@ async fn create_remote_branch(
     };
 
     // Create the branch record (starts in Starting status)
-    let branch =
-        store::Branch::new_remote(&project_id, &branch_name, &effective_base, &workspace_name);
+    let primary_repo = store
+        .get_primary_project_repo(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?;
+    let branch = store::Branch::new_remote(&project_id, &branch_name, &effective_base, &workspace_name)
+        .with_project_repo(&primary_repo.id);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, None))
@@ -795,7 +968,8 @@ async fn start_workspace(
         .unwrap_or(&branch.base_branch);
     let resolved_source = Some(format!(
         "https://github.com/{}.git?ref={}",
-        project.github_repo, ref_name
+        resolve_branch_repo_slug(&store, &project, &branch)?,
+        ref_name
     ));
 
     match blox::ws_start(ws_name, resolved_source.as_deref()) {
@@ -961,7 +1135,10 @@ async fn delete_branch(
                 .map_err(|e| e.to_string())?;
 
             if let Some(ref wd) = workdir {
-                let repo_path = project.clone_path().ok_or("Cannot determine clone path")?;
+                let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
+                let repo_path = crate::paths::repos_dir()
+                    .map(|d| d.join(repo_slug))
+                    .ok_or("Cannot determine clone path")?;
                 let worktree_path = Path::new(&wd.path);
                 git::remove_worktree(&repo_path, worktree_path).map_err(|e| e.to_string())?;
                 store.delete_workdir(&wd.id).map_err(|e| e.to_string())?;
@@ -1736,7 +1913,7 @@ async fn check_existing_local_branch(
         Err(e) => {
             log::debug!(
                 "check_existing_local_branch failed for '{}': {e}",
-                project.github_repo
+                project_primary_repo(&project).unwrap_or("<no-primary-repo>")
             );
             Ok(false)
         }
@@ -1869,12 +2046,12 @@ fn get_pr_url(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
-    // project.github_repo is already "owner/repo"
-    let parts: Vec<&str> = project.github_repo.splitn(2, '/').collect();
+    let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
+    let parts: Vec<&str> = repo_slug.splitn(2, '/').collect();
     if parts.len() != 2 {
         return Err(format!(
             "Invalid github_repo format: {}",
-            project.github_repo
+            repo_slug
         ));
     }
     let (owner, repo_name) = (parts[0], parts[1]);
@@ -1949,8 +2126,9 @@ fn push_branch(
     let is_remote = branch.branch_type == store::BranchType::Remote;
 
     let (working_dir, workspace_name) = if is_remote {
-        let clone_path = project
-            .clone_path()
+        let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
+        let clone_path = crate::paths::repos_dir()
+            .map(|d| d.join(repo_slug))
             .ok_or_else(|| "Cannot determine clone path for remote branch".to_string())?;
         (clone_path, branch.workspace_name.clone())
     } else {
@@ -2470,6 +2648,10 @@ pub fn run() {
             confirm_reset_store,
             list_projects,
             create_project,
+            list_project_repos,
+            add_project_repo,
+            remove_project_repo,
+            set_primary_project_repo,
             delete_project,
             list_github_orgs,
             list_github_repos,

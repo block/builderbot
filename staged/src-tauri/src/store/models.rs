@@ -23,23 +23,42 @@ use crate::git::Span;
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: String,
-    /// GitHub repository identifier, e.g. `"owner/repo"`.
-    pub github_repo: String,
+    /// User-facing project name.
+    pub name: String,
+    /// Primary repository identifier, e.g. `"owner/repo"`.
+    /// Optional so projects can be created before a repo is attached.
+    pub github_repo: Option<String>,
     pub subpath: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
 impl Project {
+    /// Backwards-compatible constructor: creates a project named from a repo.
     pub fn new(github_repo: &str) -> Self {
+        let fallback_name = github_repo
+            .rsplit('/')
+            .next()
+            .unwrap_or(github_repo)
+            .to_string();
+        Self::named(&fallback_name).with_primary_repo(github_repo)
+    }
+
+    pub fn named(name: &str) -> Self {
         let now = now_timestamp();
         Self {
             id: Uuid::new_v4().to_string(),
-            github_repo: github_repo.to_string(),
+            name: name.to_string(),
+            github_repo: None,
             subpath: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    pub fn with_primary_repo(mut self, github_repo: &str) -> Self {
+        self.github_repo = Some(github_repo.to_string());
+        self
     }
 
     pub fn with_subpath(mut self, subpath: String) -> Self {
@@ -51,15 +70,55 @@ impl Project {
     ///
     /// Returns `None` if the data directory can't be determined.
     pub fn clone_path(&self) -> Option<std::path::PathBuf> {
-        crate::paths::repos_dir().map(|d| d.join(&self.github_repo))
+        self.github_repo
+            .as_ref()
+            .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
     }
 
-    /// Extract the repo name (last component of `owner/repo`).
-    pub fn repo_name(&self) -> &str {
-        self.github_repo
+    /// Extract the repo name (last component of `owner/repo`) if set.
+    pub fn repo_name(&self) -> Option<&str> {
+        self.github_repo.as_deref().map(|repo| {
+            repo
             .rsplit('/')
             .next()
-            .unwrap_or(&self.github_repo)
+            .unwrap_or(repo)
+        })
+    }
+
+    pub fn primary_repo(&self) -> Option<&str> {
+        self.github_repo.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRepo {
+    pub id: String,
+    pub project_id: String,
+    pub github_repo: String,
+    pub subpath: Option<String>,
+    pub is_primary: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl ProjectRepo {
+    pub fn new(project_id: &str, github_repo: &str, subpath: Option<String>) -> Self {
+        let now = now_timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            project_id: project_id.to_string(),
+            github_repo: github_repo.to_string(),
+            subpath,
+            is_primary: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn primary(mut self) -> Self {
+        self.is_primary = true;
+        self
     }
 }
 
@@ -148,6 +207,8 @@ impl FromStr for WorkspaceStatus {
 pub struct Branch {
     pub id: String,
     pub project_id: String,
+    /// Repository inside the project this branch belongs to.
+    pub project_repo_id: Option<String>,
     pub branch_name: String,
     pub base_branch: String,
     pub pr_number: Option<u64>,
@@ -168,6 +229,7 @@ impl Branch {
         Self {
             id: Uuid::new_v4().to_string(),
             project_id: project_id.to_string(),
+            project_repo_id: None,
             branch_name: branch_name.to_string(),
             base_branch: base_branch.to_string(),
             pr_number: None,
@@ -190,6 +252,7 @@ impl Branch {
         Self {
             id: Uuid::new_v4().to_string(),
             project_id: project_id.to_string(),
+            project_repo_id: None,
             branch_name: branch_name.to_string(),
             base_branch: base_branch.to_string(),
             pr_number: None,
@@ -203,6 +266,11 @@ impl Branch {
 
     pub fn with_pr(mut self, pr_number: u64) -> Self {
         self.pr_number = Some(pr_number);
+        self
+    }
+
+    pub fn with_project_repo(mut self, project_repo_id: &str) -> Self {
+        self.project_repo_id = Some(project_repo_id.to_string());
         self
     }
 }

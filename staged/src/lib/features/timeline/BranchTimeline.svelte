@@ -377,7 +377,7 @@
     margin: 0;
     padding: 8px 0;
     font-size: var(--size-sm);
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-style: italic;
     text-align: center;
   }
@@ -462,7 +462,7 @@
     border-radius: 6px;
     border: 1px dashed var(--border-subtle);
     background: none;
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-size: var(--size-xs);
     font-weight: 500;
     cursor: pointer;

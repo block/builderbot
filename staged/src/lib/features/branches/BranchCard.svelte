@@ -73,9 +73,11 @@
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
+  import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
 
   interface Props {
     branch: Branch;
+    repoLabel?: string | null;
     deleting?: boolean;
     worktreeError?: string;
     onDelete?: () => void;
@@ -85,6 +87,7 @@
 
   let {
     branch,
+    repoLabel = null,
     deleting = false,
     worktreeError,
     onDelete,
@@ -1190,10 +1193,11 @@
   {:else if branch.branchType === 'local' && !branch.worktreePath}
     <div class="card-header">
       <GitBranch size={14} class="branch-icon header-icon" />
-      <div class="header-left">
-        <span class="branch-name">{branch.branchName}</span>
-        <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
-      </div>
+      <BranchCardHeaderInfo
+        branchName={branch.branchName}
+        {repoLabel}
+        secondaryLabel={formatBaseBranch(branch.baseBranch)}
+      />
       {#if worktreeError}
         <div class="header-actions">
           <button class="more-button" onclick={() => onDelete?.()} title="Delete branch">
@@ -1221,10 +1225,11 @@
   {:else}
     <div class="card-header">
       <GitBranch size={14} class="branch-icon header-icon" />
-      <div class="header-left">
-        <span class="branch-name">{branch.branchName}</span>
-        <span class="base-branch-name">{formatBaseBranch(branch.baseBranch)}</span>
-      </div>
+      <BranchCardHeaderInfo
+        branchName={branch.branchName}
+        {repoLabel}
+        secondaryLabel={formatBaseBranch(branch.baseBranch)}
+      />
       <div class="header-actions">
         <!-- Running actions (excluding primary action) -->
         {#each secondaryRunningActions as execution (execution.executionId)}
@@ -1663,13 +1668,6 @@
     align-self: center;
   }
 
-  .header-left {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    flex: 1;
-  }
-
   .header-actions {
     display: flex;
     align-items: center;
@@ -1812,18 +1810,6 @@
   :global(.branch-icon) {
     color: var(--branch-color);
     flex-shrink: 0;
-  }
-
-  .branch-name {
-    font-size: var(--size-md);
-    font-weight: 600;
-    color: var(--text-primary);
-    letter-spacing: -0.01em;
-  }
-
-  .base-branch-name {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
   }
 
   /* Primary action button — circular icon-only */

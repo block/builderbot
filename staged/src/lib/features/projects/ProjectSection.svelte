@@ -100,6 +100,7 @@
       {:else}
         <BranchCard
           {branch}
+          repoLabel={repoLabelForBranch(branch)}
           deleting={deletingBranches.has(branch.id)}
           worktreeError={worktreeErrors.get(branch.id)}
           onDelete={() => onDeleteBranch?.(branch.id)}

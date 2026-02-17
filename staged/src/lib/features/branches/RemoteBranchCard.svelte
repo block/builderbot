@@ -36,6 +36,7 @@
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
+  import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
 
   interface Props {
     branch: Branch;
@@ -373,15 +374,11 @@
     <!-- Header -->
     <div class="card-header">
       <Cloud size={14} class="cloud-icon header-icon" />
-      <div class="header-left">
-        <span class="branch-name">{branch.branchName}</span>
-        {#if repoLabel}
-          <span class="repo-name">{repoLabel}</span>
-        {/if}
-        {#if branch.workspaceName}
-          <span class="base-branch-name">{branch.workspaceName}</span>
-        {/if}
-      </div>
+      <BranchCardHeaderInfo
+        branchName={branch.branchName}
+        {repoLabel}
+        secondaryLabel={branch.workspaceName}
+      />
       <div class="header-actions">
         <div
           class="status-badge"
@@ -545,30 +542,6 @@
   :global(.cloud-icon) {
     color: var(--ui-accent);
     flex-shrink: 0;
-  }
-
-  .header-left {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    flex: 1;
-  }
-
-  .branch-name {
-    font-size: var(--size-md);
-    font-weight: 600;
-    color: var(--text-primary);
-    letter-spacing: -0.01em;
-  }
-
-  .base-branch-name {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-  }
-
-  .repo-name {
-    font-size: var(--size-xs);
-    color: var(--text-muted);
   }
 
   .header-actions {

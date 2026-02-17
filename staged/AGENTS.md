@@ -14,7 +14,17 @@ Generally we want to avoid reconciliation of state, so git is authoritative for 
 
 ## Frontend
 
+### Components
+
+Prefer small, composable components over large monolithic ones.
+Extract repeated UI blocks into focused subcomponents with clear props.
+
 ### Theming
 
 Colors defined in `src/lib/theme.ts`, applied via CSS custom properties in `app.css`.
 All components use `var(--*)` for colors—no hardcoded values.
+
+## Rust
+
+Keep `src/lib` code files smaller and organized by responsibility.
+Split growing modules into focused submodules before files become hard to navigate.

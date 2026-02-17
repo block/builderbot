@@ -27,6 +27,13 @@ export interface ProjectRepo {
   updatedAt: number;
 }
 
+export interface RecentRepo {
+  id: string;
+  githubRepo: string;
+  subpath: string | null;
+  lastUsedAt: number;
+}
+
 export interface GitHubRepo {
   name: string;
   nameWithOwner: string;

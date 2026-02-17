@@ -183,8 +183,11 @@
 
 {#if showRepoPicker}
   <GitHubRepoPickerModal
-    onSelect={(nameWithOwner) => {
+    onSelect={(nameWithOwner, selectedSubpath) => {
       selectedRepo = nameWithOwner;
+      if (selectedSubpath) {
+        subpath = selectedSubpath;
+      }
       showRepoPicker = false;
     }}
     onClose={() => (showRepoPicker = false)}

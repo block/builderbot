@@ -58,7 +58,7 @@
     }
   }
 
-  async function addRepo(githubRepo: string) {
+  async function addRepo(githubRepo: string, subpath?: string) {
     if (!canAddRepo()) {
       alerts.show({
         tone: 'warning',
@@ -72,7 +72,7 @@
         project.id,
         githubRepo,
         undefined,
-        undefined,
+        subpath,
         projectRepos.length === 0
       );
       await loadRepos();

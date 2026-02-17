@@ -446,6 +446,13 @@ fn create_project(
             .map_err(|e| e.to_string())?;
     }
 
+    if let Some(repo) = github_repo.clone() {
+        // Record this repo as recently used
+        store
+            .record_recent_repo(&repo, subpath.clone())
+            .map_err(|e| e.to_string())?;
+    }
+
     if let Some(repo) = github_repo {
         let project_repo =
             store::ProjectRepo::new(&project.id, &repo, &inferred_branch_name, subpath).primary();
@@ -496,6 +503,18 @@ fn list_project_repos(
     let store = get_store(&store)?;
     store
         .list_project_repos(&project_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn list_recent_repos(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    limit: Option<usize>,
+) -> Result<Vec<store::RecentRepo>, String> {
+    let store = get_store(&store)?;
+    let effective_limit = limit.unwrap_or(10);
+    store
+        .list_recent_repos(effective_limit)
         .map_err(|e| e.to_string())
 }
 
@@ -571,6 +590,11 @@ fn add_project_repo(
 
     store
         .create_project_repo(&repo)
+        .map_err(|e| e.to_string())?;
+
+    // Record this repo as recently used
+    store
+        .record_recent_repo(&github_repo, subpath)
         .map_err(|e| e.to_string())?;
 
     let should_be_primary = repo.is_primary
@@ -2065,6 +2089,7 @@ pub fn run() {
             list_projects,
             create_project,
             list_project_repos,
+            list_recent_repos,
             add_project_repo,
             update_project_repo_branch_name,
             remove_project_repo,

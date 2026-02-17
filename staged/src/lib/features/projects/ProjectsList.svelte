@@ -47,7 +47,20 @@
     }
     showNewProjectModal = false;
   }
+
+  function handleKeydown(e: KeyboardEvent) {
+    const target = e.target as HTMLElement;
+    const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+    if (isInput) return;
+
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+      e.preventDefault();
+      showNewProjectModal = true;
+    }
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="projects-list-page">
   <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>

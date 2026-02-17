@@ -884,7 +884,7 @@
         var tid = escapeHtml(thread.id);
         var html = '<div class="thread-card' + (isResolved ? ' thread-resolved' : '') +
             '" data-thread-id="' + tid + '" data-line="' + (line || -1) +
-            '" onclick="focusThread(\'' + tid + '\')">';
+            '" data-action="focus-thread">';
 
         html += '<div class="thread-anchor">' +
             '<span class="thread-status ' + thread.status + '">' + thread.status + '</span> ' +
@@ -903,8 +903,8 @@
                 var prevId = i > 0 ? ordered[i - 1].id : '';
                 if (c.inReplyTo !== prevId) {
                     var parentAuthor = byId[c.inReplyTo].author;
-                    html += '<div class="comment-reply-marker" onclick="event.stopPropagation(); scrollToComment(\'' +
-                        escapeHtml(c.inReplyTo) + '\')">' +
+                    html += '<div class="comment-reply-marker" data-action="scroll-to-comment" data-comment-id="' +
+                        escapeHtml(c.inReplyTo) + '">' +
                         'in reply to @' + escapeHtml(parentAuthor) + '</div>';
                 }
             }
@@ -920,8 +920,7 @@
                 c.role === 'agent' && thread.status === 'open') {
                 html += '<div class="suggested-replies">';
                 c.suggestedReplies.forEach(function(suggestion) {
-                    html += '<button class="suggested-reply-pill" onclick="event.stopPropagation(); submitSuggestedReply(\'' +
-                        tid + '\', this)">' +
+                    html += '<button class="suggested-reply-pill" data-action="suggested-reply">' +
                         escapeHtml(suggestion) + '</button>';
                 });
                 html += '</div>';
@@ -936,20 +935,20 @@
         }
 
         html += '<div class="thread-actions">';
-        html += '<button onclick="event.stopPropagation(); toggleReplyForm(\'' + tid + '\')">Reply</button>';
+        html += '<button data-action="toggle-reply">Reply</button>';
         if (thread.status === 'open') {
-            html += '<button class="resolve-btn" onclick="event.stopPropagation(); resolveThread(\'' + tid + '\')">Resolve</button>';
+            html += '<button class="resolve-btn" data-action="resolve">Resolve</button>';
         } else {
-            html += '<button class="reopen-btn" onclick="event.stopPropagation(); reopenThread(\'' + tid + '\')">Reopen</button>';
+            html += '<button class="reopen-btn" data-action="reopen">Reopen</button>';
         }
         html += '</div>';
 
         html += '<div class="reply-form" id="reply-form-' + tid + '" style="display:none;">';
-        html += '<textarea placeholder="Write a reply..." onkeydown="handleReplyKeydown(event, \'' + tid + '\')"></textarea>';
+        html += '<textarea placeholder="Write a reply..."></textarea>';
         html += '<input type="text" class="author-field" placeholder="Your name" value="' + escapeHtml(getSavedAuthor()) + '" />';
         html += '<div class="form-actions">';
-        html += '<button class="btn-cancel-form" onclick="event.stopPropagation(); hideReplyForm(\'' + tid + '\')">Cancel</button>';
-        html += '<button class="btn-submit" onclick="event.stopPropagation(); submitReply(\'' + tid + '\')">Reply</button>';
+        html += '<button class="btn-cancel-form" data-action="hide-reply">Cancel</button>';
+        html += '<button class="btn-submit" data-action="submit-reply">Reply</button>';
         html += '</div></div>';
 
         html += '</div>';
@@ -1639,6 +1638,52 @@
 
     // Listen for theme changes
     document.addEventListener('themechange', reRenderMermaidForTheme);
+
+    // --- Event delegation for thread actions ---
+    document.getElementById('comments-panel').addEventListener('click', function(e) {
+        var actionEl = e.target.closest('[data-action]');
+        if (!actionEl) return;
+        var action = actionEl.getAttribute('data-action');
+        var threadCard = actionEl.closest('[data-thread-id]');
+        var threadId = threadCard ? threadCard.getAttribute('data-thread-id') : '';
+        // Don't trigger card-level focus when clicking inside reply forms
+        if (action === 'focus-thread' && e.target.closest('.reply-form')) return;
+        if (action !== 'focus-thread') e.stopPropagation();
+        switch (action) {
+            case 'focus-thread':
+                focusThread(threadId);
+                break;
+            case 'scroll-to-comment':
+                scrollToComment(actionEl.getAttribute('data-comment-id'));
+                break;
+            case 'suggested-reply':
+                submitSuggestedReply(threadId, actionEl);
+                break;
+            case 'toggle-reply':
+                toggleReplyForm(threadId);
+                break;
+            case 'resolve':
+                resolveThread(threadId);
+                break;
+            case 'reopen':
+                reopenThread(threadId);
+                break;
+            case 'hide-reply':
+                hideReplyForm(threadId);
+                break;
+            case 'submit-reply':
+                submitReply(threadId);
+                break;
+        }
+    });
+    document.getElementById('comments-panel').addEventListener('keydown', function(e) {
+        if (e.target.matches('.reply-form textarea')) {
+            var threadCard = e.target.closest('[data-thread-id]');
+            if (!threadCard) return;
+            var threadId = threadCard.getAttribute('data-thread-id');
+            handleReplyKeydown(e, threadId);
+        }
+    });
 
     // Initial render
     initFileMenus();

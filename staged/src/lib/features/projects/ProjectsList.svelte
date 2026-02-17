@@ -82,9 +82,15 @@
       isCommandKeyHeld = false;
     }
   }
+
+  function handleBlur() {
+    // Reset command key state when window loses focus
+    // This handles cases like Command+Tab where keyup isn't received
+    isCommandKeyHeld = false;
+  }
 </script>
 
-<svelte:window onkeydown={handleKeydown} onkeyup={handleKeyup} />
+<svelte:window onkeydown={handleKeydown} onkeyup={handleKeyup} onblur={handleBlur} />
 
 <div class="projects-list-page">
   <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>

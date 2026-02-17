@@ -594,7 +594,7 @@ fn add_project_repo(
 
     // Record this repo as recently used
     store
-        .record_recent_repo(&github_repo, subpath)
+        .record_recent_repo(&github_repo, subpath.clone())
         .map_err(|e| e.to_string())?;
 
     let should_be_primary = repo.is_primary

@@ -556,7 +556,7 @@ fn add_project_repo(
                 .with_project_repo(&repo.id)
         }
         store::ProjectLocation::Remote => {
-            let ws_name = infer_workspace_name(&repo.branch_name);
+            let ws_name = resolve_project_workspace_name(&store, &project, None)?;
             store::Branch::new_remote(&project_id, &repo.branch_name, &effective_base, &ws_name)
                 .with_project_repo(&repo.id)
         }
@@ -767,6 +767,36 @@ fn resolve_branch_repo_slug(
     Ok(project_primary_repo(project)?.to_string())
 }
 
+/// Resolve the shared workspace name for a remote project.
+///
+/// If any remote branch already exists for the project, reuse its workspace
+/// name so all project repos stay on the same Blox workspace.
+fn resolve_project_workspace_name(
+    store: &Arc<Store>,
+    project: &store::Project,
+    fallback_workspace_name: Option<&str>,
+) -> Result<String, String> {
+    let existing = store
+        .list_branches_for_project(&project.id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|b| b.branch_type == store::BranchType::Remote)
+        .and_then(|b| b.workspace_name)
+        .filter(|name| !name.trim().is_empty());
+    if let Some(name) = existing {
+        return Ok(name);
+    }
+
+    if let Some(name) = fallback_workspace_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(name.to_string());
+    }
+
+    Ok(infer_workspace_name(&infer_branch_name(&project.name)))
+}
+
 fn cleanup_branch_resources(store: &Arc<Store>, branch: &store::Branch) -> Result<(), String> {
     match branch.branch_type {
         store::BranchType::Local => {
@@ -791,6 +821,18 @@ fn cleanup_branch_resources(store: &Arc<Store>, branch: &store::Branch) -> Resul
         }
         store::BranchType::Remote => {
             if let Some(ref ws_name) = branch.workspace_name {
+                let in_use_elsewhere = store
+                    .list_branches_for_project(&branch.project_id)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .any(|b| {
+                        b.id != branch.id
+                            && b.branch_type == store::BranchType::Remote
+                            && b.workspace_name.as_deref() == Some(ws_name.as_str())
+                    });
+                if in_use_elsewhere {
+                    return Ok(());
+                }
                 match blox::ws_delete(ws_name) {
                     Ok(_) => {}
                     Err(blox::BloxError::CommandFailed(msg))
@@ -1097,6 +1139,12 @@ async fn create_remote_branch(
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+    let resolved_workspace_name =
+        resolve_project_workspace_name(&store, &project, Some(&workspace_name))?;
 
     // Detect default branch if none specified (via GitHub API, no local clone needed)
     let target_repo = match project_repo_id {
@@ -1124,9 +1172,13 @@ async fn create_remote_branch(
     };
 
     // Create the branch record (starts in Starting status)
-    let branch =
-        store::Branch::new_remote(&project_id, &branch_name, &effective_base, &workspace_name)
-            .with_project_repo(&target_repo.id);
+    let branch = store::Branch::new_remote(
+        &project_id,
+        &branch_name,
+        &effective_base,
+        &resolved_workspace_name,
+    )
+    .with_project_repo(&target_repo.id);
     store.create_branch(&branch).map_err(|e| e.to_string())?;
 
     Ok(to_branch_with_workdir(branch, None))

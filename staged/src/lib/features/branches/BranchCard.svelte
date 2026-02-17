@@ -91,6 +91,27 @@
   // Unpushed-commits state (only relevant when PR already exists)
   let hasUnpushed = $state(false);
 
+  // PR status polling state
+  let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+  let prStatusRefreshing = $state(false);
+
+  // PR status fields (local state, updated via events)
+  // Initialize to null, $effect will sync with branch prop
+  let prStatusState = $state<string | null>(null);
+  let prStatusChecks = $state<string | null>(null);
+  let prStatusReviewDecision = $state<string | null>(null);
+  let prStatusMergeable = $state<boolean | null>(null);
+  let prStatusDraft = $state<boolean | null>(null);
+
+  // Sync local PR status state when branch prop changes
+  $effect(() => {
+    prStatusState = branch.prState;
+    prStatusChecks = branch.prChecksStatus;
+    prStatusReviewDecision = branch.prReviewDecision;
+    prStatusMergeable = branch.prMergeable;
+    prStatusDraft = branch.prDraft;
+  });
+
   // Push session state (mirrors PR session pattern)
   type PushState = 'idle' | 'pushing' | 'error' | 'done';
   let pushStateOverride = $state<PushState | null>(null);
@@ -158,6 +179,11 @@
   // Listen for session completion to refresh timeline
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenActionStatus: UnlistenFn | null = null;
+  let unlistenPrStatus: UnlistenFn | null = null;
+
+  // Window focus handlers (stored for cleanup)
+  let handleFocus: (() => void) | null = null;
+  let handleBlur: (() => void) | null = null;
 
   // Set up event listeners immediately (synchronously) at module level like old codebase
   // Listen for project actions changes to refresh actions list
@@ -250,9 +276,31 @@
       unlistenActionStatus = unlisten;
     });
 
+    listen<{
+      branchId: string;
+      prState: string;
+      prChecksStatus: string;
+      prReviewDecision: string | null;
+      prMergeable: boolean;
+      prDraft: boolean;
+    }>('pr-status-changed', (event) => {
+      const payload = event.payload;
+      if (payload.branchId === branchId) {
+        // Update local PR status state
+        prStatusState = payload.prState;
+        prStatusChecks = payload.prChecksStatus;
+        prStatusReviewDecision = payload.prReviewDecision;
+        prStatusMergeable = payload.prMergeable;
+        prStatusDraft = payload.prDraft;
+      }
+    }).then((unlisten) => {
+      unlistenPrStatus = unlisten;
+    });
+
     return () => {
       unlistenStatus?.();
       unlistenActionStatus?.();
+      unlistenPrStatus?.();
     };
   });
 
@@ -323,18 +371,106 @@
     loadTimeline();
   });
 
+  // Track window focus for smart polling
+  let isWindowFocused = $state(true);
+
+  // PR status polling: adaptive intervals based on status
+  $effect(() => {
+    // Determine if we should poll and at what interval
+    const shouldPoll = branch.prNumber && isWindowFocused;
+
+    // Don't poll if PR is merged or closed
+    if (prStatusState === 'MERGED' || prStatusState === 'CLOSED') {
+      if (prStatusPollTimer) {
+        clearInterval(prStatusPollTimer);
+        prStatusPollTimer = null;
+      }
+      return;
+    }
+
+    // Choose interval based on status
+    let pollInterval: number;
+    if (prStatusChecks === 'PENDING') {
+      // Checks are running - poll frequently
+      pollInterval = 15_000; // 15 seconds
+    } else {
+      // Checks passed/failed or no status - poll less frequently
+      pollInterval = 60_000; // 60 seconds
+    }
+
+    if (shouldPoll) {
+      // Restart polling if interval changed
+      if (prStatusPollTimer) {
+        clearInterval(prStatusPollTimer);
+      }
+
+      prStatusPollTimer = setInterval(async () => {
+        if (prStatusRefreshing) return; // Skip if already refreshing
+        try {
+          prStatusRefreshing = true;
+          await commands.refreshPrStatus(branch.id);
+          // Status will be updated via pr-status-changed event
+        } catch (e) {
+          console.error('Failed to refresh PR status:', e);
+        } finally {
+          prStatusRefreshing = false;
+        }
+      }, pollInterval);
+    } else {
+      // Stop polling when window not focused
+      if (prStatusPollTimer) {
+        clearInterval(prStatusPollTimer);
+        prStatusPollTimer = null;
+      }
+    }
+
+    return () => {
+      if (prStatusPollTimer) {
+        clearInterval(prStatusPollTimer);
+        prStatusPollTimer = null;
+      }
+    };
+  });
+
   onMount(() => {
     loadActions();
     getAvailableOpeners().then((apps) => (openerApps = apps));
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
+
+    // Window focus tracking for smart polling
+    handleFocus = () => {
+      isWindowFocused = true;
+    };
+    handleBlur = () => {
+      isWindowFocused = false;
+    };
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+
+    // Fetch initial PR status if PR exists
+    if (branch.prNumber) {
+      commands
+        .refreshPrStatus(branch.id)
+        .catch((e) => console.error('Failed to fetch initial PR status:', e));
+      // Status will be updated via pr-status-changed event
+    }
   });
 
   onDestroy(() => {
     unlistenStatus?.();
     unlistenActionStatus?.();
+    unlistenPrStatus?.();
+    // Clean up PR status polling
+    if (prStatusPollTimer) {
+      clearInterval(prStatusPollTimer);
+      prStatusPollTimer = null;
+    }
     // Clean up actions listener
     window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
+    // Clean up window focus listeners
+    if (handleFocus) window.removeEventListener('focus', handleFocus);
+    if (handleBlur) window.removeEventListener('blur', handleBlur);
   });
   async function loadTimeline() {
     // Only show the loading spinner on the initial load. Subsequent refreshes
@@ -558,6 +694,68 @@
   function formatBaseBranch(baseBranch: string): string {
     return baseBranch.replace(/^origin\//, '');
   }
+
+  // =========================================================================
+  // PR status display
+  // =========================================================================
+
+  /** Get concise PR status text for the button */
+  function getPrStatusText(): string | null {
+    if (!branch.prNumber) return null;
+
+    // Check PR state first
+    if (prStatusState === 'MERGED') return 'Merged';
+    if (prStatusState === 'CLOSED') return 'Closed';
+    if (prStatusDraft) return 'Draft';
+
+    // Check checks status
+    if (prStatusChecks === 'FAILURE') return 'Checks failing';
+    if (prStatusChecks === 'PENDING') return 'Checks pending';
+
+    // Check review decision
+    if (prStatusReviewDecision === 'CHANGES_REQUESTED') return 'Changes requested';
+    if (prStatusReviewDecision === 'APPROVED' && prStatusMergeable) return 'Approved';
+    if (prStatusReviewDecision === 'APPROVED') return 'Approved';
+
+    // Check mergeable status
+    if (prStatusMergeable === false) return 'Has conflicts';
+    if (prStatusChecks === 'SUCCESS') return 'Open';
+
+    return null; // No specific status to show
+  }
+
+  let prStatusText = $derived(getPrStatusText());
+
+  /** Get the status indicator color for the PR button */
+  function getPrStatusIndicator(): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
+    // Push/PR creation states
+    if (pushState === 'pushing' || prState === 'creating') return 'pending';
+    if (pushState === 'error' || prState === 'error') return 'error';
+
+    if (!branch.prNumber) return null;
+
+    // PR exists - check status
+    if (prStatusState === 'MERGED') return 'success';
+    if (prStatusState === 'CLOSED') return 'neutral';
+    if (prStatusDraft) return 'neutral';
+
+    // Check-based states
+    if (prStatusChecks === 'FAILURE') return 'error';
+    if (prStatusChecks === 'PENDING') return 'pending';
+    if (prStatusChecks === 'SUCCESS') return 'success';
+
+    // Review-based states
+    if (prStatusReviewDecision === 'CHANGES_REQUESTED') return 'warning';
+    if (prStatusReviewDecision === 'APPROVED' && prStatusMergeable) return 'success';
+    if (prStatusReviewDecision === 'APPROVED') return 'success';
+
+    // Mergeable status
+    if (prStatusMergeable === false) return 'error';
+
+    return 'neutral';
+  }
+
+  let prStatusIndicator = $derived(getPrStatusIndicator());
 
   // =========================================================================
   // New session modal
@@ -1263,7 +1461,7 @@
                     : pushState === 'error'
                       ? 'Push failed — click for details'
                       : prState === 'created' && hasUnpushed
-                        ? 'Push new commits'
+                        ? 'Push changes to remote'
                         : prState === 'created'
                           ? 'View PR'
                           : prState === 'error'
@@ -1293,9 +1491,13 @@
                     {:else if pushState === 'error'}
                       Push failed
                     {:else if prState === 'created' && hasUnpushed}
-                      Push{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                      Push changes
                     {:else if prState === 'created'}
-                      View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                      {#if prStatusText}
+                        {prStatusText}
+                      {:else}
+                        View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                      {/if}
                     {:else if prState === 'creating'}
                       Creating PR…
                     {:else if prState === 'error'}
@@ -1304,6 +1506,9 @@
                       Create PR
                     {/if}
                   </span>
+                  {#if prStatusIndicator}
+                    <span class="pr-status-indicator {prStatusIndicator}"></span>
+                  {/if}
                 </button>
                 <button
                   class="view-diff-btn"
@@ -1890,6 +2095,46 @@
 
   .pr-btn :global(svg) {
     flex-shrink: 0;
+  }
+
+  /* PR status indicator circle */
+  .pr-status-indicator {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-left: 2px;
+  }
+
+  .pr-status-indicator.success {
+    background-color: var(--status-added, #4ade80);
+  }
+
+  .pr-status-indicator.warning {
+    background-color: var(--status-modified, #fb923c);
+  }
+
+  .pr-status-indicator.error {
+    background-color: var(--ui-danger, #ef4444);
+  }
+
+  .pr-status-indicator.neutral {
+    background-color: var(--text-faint, #64748b);
+  }
+
+  .pr-status-indicator.pending {
+    background-color: var(--text-muted, #94a3b8);
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.5;
+    }
   }
 
   :global(.spinner) {

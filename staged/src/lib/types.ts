@@ -51,6 +51,30 @@ export interface Branch {
   worktreePath: string | null;
   createdAt: number;
   updatedAt: number;
+  // PR status fields
+  prState: string | null; // "OPEN", "CLOSED", "MERGED"
+  prChecksStatus: string | null; // "SUCCESS", "FAILURE", "PENDING", "EXPECTED"
+  prReviewDecision: string | null; // "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"
+  prMergeable: boolean | null;
+  prDraft: boolean | null;
+  prUrl: string | null;
+  prUpdatedAt: number | null;
+  prFetchedAt: number | null;
+}
+
+// PR status types
+export interface PrStatus {
+  state: string; // "OPEN", "CLOSED", "MERGED"
+  isDraft: boolean;
+  mergeable: string;
+  reviewDecision: string | null;
+  checksSummary: {
+    total: number;
+    passed: number;
+    failed: number;
+    pending: number;
+    state: string; // "SUCCESS", "FAILURE", "PENDING", "EXPECTED"
+  };
 }
 
 export interface CommitTimelineItem {

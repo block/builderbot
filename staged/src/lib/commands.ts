@@ -25,6 +25,7 @@ import type {
   WorkspaceInfo,
   PullRequest,
   Issue,
+  PrStatus,
 } from './types';
 
 // =============================================================================
@@ -616,4 +617,18 @@ export function runDoctor(): Promise<DoctorReport> {
 /** Run a fix command from a doctor check. */
 export function runDoctorFix(command: string): Promise<void> {
   return invoke('run_doctor_fix', { command });
+}
+
+// =============================================================================
+// PR Status
+// =============================================================================
+
+/** Refresh PR status for a specific branch. Emits 'pr-status-changed' event. */
+export function refreshPrStatus(branchId: string): Promise<void> {
+  return invoke('refresh_pr_status', { branchId });
+}
+
+/** Refresh PR status for all branches with PRs. */
+export function refreshAllPrStatuses(projectId: string): Promise<void> {
+  return invoke('refresh_all_pr_statuses', { projectId });
 }

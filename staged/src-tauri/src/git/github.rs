@@ -40,6 +40,38 @@ pub struct PullRequest {
     pub updated_at: String,
 }
 
+/// Status of a pull request, including CI checks and review state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrStatus {
+    /// Overall PR state (OPEN, CLOSED, MERGED)
+    pub state: String,
+    /// Whether the PR is a draft
+    pub is_draft: bool,
+    /// Whether the PR is mergeable
+    pub mergeable: String,
+    /// Review decision (APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or empty)
+    pub review_decision: Option<String>,
+    /// Summary of status checks
+    pub checks_summary: ChecksSummary,
+}
+
+/// Summary of CI/status checks for a PR
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecksSummary {
+    /// Total number of checks
+    pub total: u32,
+    /// Number of passing checks
+    pub passed: u32,
+    /// Number of failed checks
+    pub failed: u32,
+    /// Number of pending checks
+    pub pending: u32,
+    /// Overall state (SUCCESS, FAILURE, PENDING, or EXPECTED if no checks)
+    pub state: String,
+}
+
 /// A GitHub issue (for display in picker)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1389,6 +1421,178 @@ pub fn get_pr_for_branch(repo: &Path, branch: &str) -> Result<Option<PullRequest
             }
         }
     }
+}
+
+/// Response from `gh pr view --json` for status fields
+#[derive(Debug, Deserialize)]
+struct GhPrStatusItem {
+    state: String,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+    mergeable: String,
+    #[serde(rename = "reviewDecision")]
+    review_decision: Option<String>,
+    #[serde(rename = "statusCheckRollup")]
+    status_check_rollup: Vec<GhStatusCheck>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhStatusCheck {
+    #[serde(rename = "__typename")]
+    typename: String,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
+}
+
+/// Fetch detailed status information for a PR by number.
+/// This includes CI checks, review decisions, and mergeability.
+pub fn fetch_pr_status(repo: &Path, pr_number: u64) -> Result<PrStatus, GitError> {
+    let output = run_gh(
+        repo,
+        &[
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup",
+        ],
+    )?;
+
+    let item: GhPrStatusItem =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    // Analyze status checks
+    let mut total = 0u32;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let mut pending = 0u32;
+
+    for check in &item.status_check_rollup {
+        total += 1;
+
+        // GitHub status checks have different types and fields
+        // StatusContext uses 'state', CheckRun uses 'status' and 'conclusion'
+        let check_state = if check.typename == "StatusContext" {
+            check.state.as_deref()
+        } else if check.typename == "CheckRun" {
+            // For CheckRun, check conclusion first, then status
+            check.conclusion.as_deref().or(check.status.as_deref())
+        } else {
+            None
+        };
+
+        match check_state {
+            Some("SUCCESS") | Some("COMPLETED") => passed += 1,
+            Some("FAILURE")
+            | Some("ERROR")
+            | Some("CANCELLED")
+            | Some("TIMED_OUT")
+            | Some("ACTION_REQUIRED") => failed += 1,
+            Some("PENDING") | Some("IN_PROGRESS") | Some("QUEUED") | Some("WAITING") => {
+                pending += 1
+            }
+            _ => pending += 1, // Unknown states treated as pending
+        }
+    }
+
+    // Determine overall checks state
+    let checks_state = if total == 0 {
+        "EXPECTED".to_string()
+    } else if failed > 0 {
+        "FAILURE".to_string()
+    } else if pending > 0 {
+        "PENDING".to_string()
+    } else {
+        "SUCCESS".to_string()
+    };
+
+    Ok(PrStatus {
+        state: item.state.to_uppercase(),
+        is_draft: item.is_draft,
+        mergeable: item.mergeable.to_uppercase(),
+        review_decision: item.review_decision,
+        checks_summary: ChecksSummary {
+            total,
+            passed,
+            failed,
+            pending,
+            state: checks_state,
+        },
+    })
+}
+
+/// Fetch PR status using repo slug format (owner/repo) instead of local path.
+/// Useful when you don't have a local clone.
+pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrStatus, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "-R",
+        github_repo,
+        "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup",
+    ])?;
+
+    let item: GhPrStatusItem =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    // Analyze status checks (same logic as fetch_pr_status)
+    let mut total = 0u32;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let mut pending = 0u32;
+
+    for check in &item.status_check_rollup {
+        total += 1;
+
+        let check_state = if check.typename == "StatusContext" {
+            check.state.as_deref()
+        } else if check.typename == "CheckRun" {
+            check.conclusion.as_deref().or(check.status.as_deref())
+        } else {
+            None
+        };
+
+        match check_state {
+            Some("SUCCESS") | Some("COMPLETED") => passed += 1,
+            Some("FAILURE")
+            | Some("ERROR")
+            | Some("CANCELLED")
+            | Some("TIMED_OUT")
+            | Some("ACTION_REQUIRED") => failed += 1,
+            Some("PENDING") | Some("IN_PROGRESS") | Some("QUEUED") | Some("WAITING") => {
+                pending += 1
+            }
+            _ => pending += 1,
+        }
+    }
+
+    let checks_state = if total == 0 {
+        "EXPECTED".to_string()
+    } else if failed > 0 {
+        "FAILURE".to_string()
+    } else if pending > 0 {
+        "PENDING".to_string()
+    } else {
+        "SUCCESS".to_string()
+    };
+
+    Ok(PrStatus {
+        state: item.state.to_uppercase(),
+        is_draft: item.is_draft,
+        mergeable: item.mergeable.to_uppercase(),
+        review_decision: item.review_decision,
+        checks_summary: ChecksSummary {
+            total,
+            passed,
+            failed,
+            pending,
+            state: checks_state,
+        },
+    })
 }
 
 /// Push a branch to the remote.

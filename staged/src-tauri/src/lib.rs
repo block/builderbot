@@ -2318,6 +2318,198 @@ fn update_branch_pr(
         .map_err(|e| e.to_string())
 }
 
+/// Refresh PR status for a single branch.
+/// Fetches the latest status from GitHub and updates the database.
+/// Emits a 'pr-status-changed' event with the branch_id.
+#[tauri::command(rename_all = "camelCase")]
+async fn refresh_pr_status(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+
+    // Get the branch
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    // Branch must have a PR number
+    let pr_number = branch
+        .pr_number
+        .ok_or_else(|| "Branch does not have an associated PR".to_string())?;
+
+    // Get the project to access the GitHub repo
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    // Fetch PR status from GitHub
+    let github_repo = project
+        .github_repo
+        .as_ref()
+        .ok_or_else(|| "Project has no GitHub repo configured".to_string())?;
+    let pr_status =
+        git::fetch_pr_status_for_repo(github_repo, pr_number).map_err(|e| e.to_string())?;
+
+    // Parse mergeable status (GitHub returns "MERGEABLE", "CONFLICTING", "UNKNOWN")
+    let mergeable = pr_status.mergeable == "MERGEABLE";
+
+    // Update the database
+    store
+        .update_branch_pr_status(
+            &branch_id,
+            Some(pr_status.state.clone()),
+            Some(pr_status.checks_summary.state.clone()),
+            pr_status.review_decision.clone(),
+            Some(mergeable),
+            Some(pr_status.is_draft),
+            None, // pr_url - we're not updating this here
+            None, // pr_updated_at - we're not updating this here
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Emit event for real-time UI updates
+    #[derive(Serialize, Clone)]
+    #[serde(rename_all = "camelCase")]
+    struct PrStatusEvent {
+        branch_id: String,
+        pr_state: String,
+        pr_checks_status: String,
+        pr_review_decision: Option<String>,
+        pr_mergeable: bool,
+        pr_draft: bool,
+    }
+
+    app_handle
+        .emit(
+            "pr-status-changed",
+            PrStatusEvent {
+                branch_id: branch_id.clone(),
+                pr_state: pr_status.state,
+                pr_checks_status: pr_status.checks_summary.state,
+                pr_review_decision: pr_status.review_decision,
+                pr_mergeable: mergeable,
+                pr_draft: pr_status.is_draft,
+            },
+        )
+        .map_err(|e| format!("Failed to emit event: {}", e))?;
+
+    Ok(())
+}
+
+/// Refresh PR status for all branches in a project.
+/// Fetches the latest status from GitHub for all branches with PRs.
+/// Emits a 'pr-statuses-refreshed' event with the project_id when complete.
+#[tauri::command(rename_all = "camelCase")]
+async fn refresh_all_pr_statuses(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
+    project_id: String,
+) -> Result<u32, String> {
+    let store = get_store(&store)?;
+
+    // Get the project
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+
+    // List all branches for the project
+    let branches = store
+        .list_branches_for_project(&project_id)
+        .map_err(|e| e.to_string())?;
+
+    // Filter branches that have PR numbers
+    let branches_with_prs: Vec<_> = branches
+        .into_iter()
+        .filter(|b| b.pr_number.is_some())
+        .collect();
+
+    let mut refreshed_count = 0u32;
+
+    // Check if project has a GitHub repo
+    let github_repo = match project.github_repo.as_ref() {
+        Some(repo) => repo,
+        None => {
+            return Err("Project has no GitHub repo configured".to_string());
+        }
+    };
+
+    // Fetch status for each branch with a PR
+    for branch in branches_with_prs {
+        let pr_number = branch.pr_number.unwrap(); // Safe because we filtered
+
+        // Fetch PR status from GitHub
+        match git::fetch_pr_status_for_repo(github_repo, pr_number) {
+            Ok(pr_status) => {
+                let mergeable = pr_status.mergeable == "MERGEABLE";
+
+                // Update the database
+                if let Err(e) = store.update_branch_pr_status(
+                    &branch.id,
+                    Some(pr_status.state.clone()),
+                    Some(pr_status.checks_summary.state.clone()),
+                    pr_status.review_decision.clone(),
+                    Some(mergeable),
+                    Some(pr_status.is_draft),
+                    None,
+                    None,
+                ) {
+                    log::warn!("Failed to update PR status for branch {}: {}", branch.id, e);
+                    continue;
+                }
+
+                refreshed_count += 1;
+
+                // Emit individual event for each branch
+                #[derive(Serialize, Clone)]
+                #[serde(rename_all = "camelCase")]
+                struct PrStatusEvent {
+                    branch_id: String,
+                    pr_state: String,
+                    pr_checks_status: String,
+                    pr_review_decision: Option<String>,
+                    pr_mergeable: bool,
+                    pr_draft: bool,
+                }
+
+                if let Err(e) = app_handle.emit(
+                    "pr-status-changed",
+                    PrStatusEvent {
+                        branch_id: branch.id.clone(),
+                        pr_state: pr_status.state,
+                        pr_checks_status: pr_status.checks_summary.state,
+                        pr_review_decision: pr_status.review_decision,
+                        pr_mergeable: mergeable,
+                        pr_draft: pr_status.is_draft,
+                    },
+                ) {
+                    log::warn!("Failed to emit pr-status-changed event: {}", e);
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to fetch PR status for branch {} (PR #{}): {}",
+                    branch.id,
+                    pr_number,
+                    e
+                );
+                // Continue with other branches even if one fails
+            }
+        }
+    }
+
+    // Emit summary event
+    app_handle
+        .emit("pr-statuses-refreshed", &project_id)
+        .map_err(|e| format!("Failed to emit event: {}", e))?;
+
+    Ok(refreshed_count)
+}
+
 /// Check if a branch has commits that haven't been pushed to the remote.
 #[tauri::command(rename_all = "camelCase")]
 fn has_unpushed_commits(
@@ -2933,6 +3125,8 @@ pub fn run() {
             create_pr,
             get_pr_url,
             update_branch_pr,
+            refresh_pr_status,
+            refresh_all_pr_statuses,
             has_unpushed_commits,
             push_branch,
             open_url,

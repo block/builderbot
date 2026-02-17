@@ -21,16 +21,14 @@
     ChevronDown,
     Folder,
     Eye,
-    Trash2,
-    Copy,
     MessageSquare,
-    Bot,
     CirclePlus,
     CircleMinus,
     CircleArrowUp,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import DiffViewer from './DiffViewer.svelte';
+  import DiffCommentsSection from './DiffCommentsSection.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
   import type { Span } from '../../types';
@@ -142,8 +140,7 @@
     return path.split('/').pop() || path;
   }
 
-  async function handleDeleteComment(event: MouseEvent, commentId: string) {
-    event.stopPropagation();
+  async function handleDeleteComment(commentId: string) {
     await reviewHandle?.deleteComment(commentId);
   }
 
@@ -293,44 +290,6 @@
   {/each}
 {/snippet}
 
-{#snippet commentList()}
-  {#each currentComments as comment (comment.id)}
-    <li class="tree-item-wrapper">
-      <div class="comment-item-container">
-        <button
-          class="tree-item comment-item"
-          style="padding-left: 8px"
-          onclick={() => diffViewer.selectFile(comment.path)}
-        >
-          <span class="comment-icon" class:agent-comment={comment.author === 'agent'}>
-            {#if comment.author === 'agent'}
-              <Bot size={12} />
-            {:else}
-              <MessageSquare size={12} />
-            {/if}
-          </span>
-          <span class="comment-details">
-            <span class="comment-location">
-              <span class="comment-file">{getFileName(comment.path)}</span>
-              <span class="comment-line">{formatLineRange(comment.span)}</span>
-            </span>
-            <span class="comment-preview">{truncateText(comment.content)}</span>
-          </span>
-        </button>
-        {#if comment.author !== 'agent'}
-          <button
-            class="comment-delete-btn"
-            onclick={(e) => handleDeleteComment(e, comment.id)}
-            title="Delete comment"
-          >
-            <Trash2 size={12} />
-          </button>
-        {/if}
-      </div>
-    </li>
-  {/each}
-{/snippet}
-
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="diff-modal-backdrop" onkeydown={handleKeydown}>
   <div class="diff-modal">
@@ -459,44 +418,15 @@
                 </ul>
               {/if}
 
-              <!-- Comments section -->
-              <div class="section-header comments-header">
-                <div class="section-left"></div>
-                <div class="section-divider">
-                  <span class="divider-label">COMMENTS</span>
-                  {#if currentComments.length > 0}
-                    <span class="count-capsule">{currentComments.length}</span>
-                  {/if}
-                </div>
-                <div class="section-right">
-                  {#if currentComments.length > 0}
-                    <button
-                      class="copy-btn"
-                      class:copied={copiedFeedback}
-                      onclick={handleCopyComments}
-                      title="Copy all comments"
-                    >
-                      {#if copiedFeedback}
-                        <Check size={12} />
-                      {:else}
-                        <Copy size={12} />
-                      {/if}
-                    </button>
-                    <button
-                      class="delete-all-btn"
-                      onclick={handleDeleteAllComments}
-                      title="Delete all comments"
-                    >
-                      <Trash2 size={12} />
-                    </button>
-                  {/if}
-                </div>
-              </div>
-              {#if currentComments.length > 0}
-                <ul class="tree-section comments-section">
-                  {@render commentList()}
-                </ul>
-              {/if}
+              <DiffCommentsSection
+                comments={currentComments}
+                selectedFile={diffViewer.state.selectedFile}
+                {copiedFeedback}
+                onSelectFile={(path) => diffViewer.selectFile(path)}
+                onCopyAll={handleCopyComments}
+                onDeleteAll={handleDeleteAllComments}
+                onDeleteComment={handleDeleteComment}
+              />
             {/if}
           </div>
         {/if}
@@ -883,141 +813,6 @@
   .remove-btn:hover {
     background-color: var(--bg-hover);
     color: var(--text-primary);
-  }
-
-  /* ========================================================================
-   * Comments section
-   * ====================================================================== */
-
-  .comments-section {
-    margin-bottom: 8px;
-  }
-
-  .comment-item-container {
-    position: relative;
-    width: 100%;
-  }
-
-  .comment-item {
-    position: relative;
-    flex-direction: column;
-    align-items: flex-start !important;
-    gap: 2px !important;
-    padding-top: 6px !important;
-    padding-bottom: 6px !important;
-    padding-left: 28px !important;
-    width: 100%;
-  }
-
-  .comment-icon {
-    position: absolute;
-    left: 8px;
-    top: 8px;
-    color: var(--text-faint);
-  }
-
-  .comment-icon.agent-comment {
-    color: var(--status-modified);
-  }
-
-  .comment-details {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    width: 100%;
-    min-width: 0;
-    padding-right: 32px;
-  }
-
-  .comment-location {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--size-xs);
-  }
-
-  .comment-file {
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .comment-line {
-    flex-shrink: 0;
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: calc(var(--size-xs) - 1px);
-    color: var(--text-faint);
-  }
-
-  .comment-preview {
-    font-size: calc(var(--size-xs) - 1px);
-    color: var(--text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .comment-delete-btn {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-faint);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity 0.1s,
-      color 0.1s,
-      background-color 0.1s;
-    z-index: 1;
-  }
-
-  .comment-item-container:hover .comment-delete-btn {
-    opacity: 1;
-  }
-
-  .comment-delete-btn:hover {
-    color: var(--status-deleted);
-    background-color: var(--bg-primary);
-  }
-
-  /* Copy / delete-all buttons */
-  .copy-btn,
-  .delete-all-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2px;
-    background: none;
-    border: none;
-    border-radius: 3px;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition:
-      background-color 0.1s,
-      color 0.1s;
-  }
-
-  .copy-btn:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .copy-btn.copied {
-    color: var(--status-added);
-  }
-
-  .delete-all-btn:hover {
-    background-color: var(--bg-hover);
-    color: var(--status-deleted);
   }
 
   /* ========================================================================

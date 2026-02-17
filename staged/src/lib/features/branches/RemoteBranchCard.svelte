@@ -272,9 +272,11 @@
       sessionId: string;
       status: string;
     }>('session-status-changed', (event) => {
-      const { status } = event.payload;
+      const { sessionId: eventSessionId, status } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         loadTimeline();
+        // Clean up running session state
+        projectStateStore.removeRunningSession(branch.projectId, eventSessionId);
       }
     });
   }

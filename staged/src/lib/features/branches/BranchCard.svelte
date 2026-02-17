@@ -72,6 +72,7 @@
   } from './branchCardHelpers';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
+  import { prStateStore, type PrState } from '../../stores/prState.svelte';
 
   interface Props {
     branch: Branch;
@@ -94,13 +95,28 @@
   // =========================================================================
   // PR button state
   // =========================================================================
-  type PrState = 'idle' | 'creating' | 'error' | 'created';
   let prStateOverride = $state<PrState | null>(null);
   let prState = $derived<PrState>(prStateOverride ?? (branch.prNumber ? 'created' : 'idle'));
   let prSessionId = $state<string | null>(null);
   let prError = $state<string | null>(null);
   let prUrl = $state<string | null>(null);
   let showPrErrorDialog = $state(false);
+
+  // Initialize PR state from store on mount
+  $effect(() => {
+    const storedState = prStateStore.getPrState(branch.id);
+    if (storedState) {
+      // If PR already exists (has prNumber), clear any stale creating state
+      if (branch.prNumber && storedState.state === 'creating') {
+        prStateStore.clearPrState(branch.id);
+        return;
+      }
+      prStateOverride = storedState.state;
+      prSessionId = storedState.sessionId;
+      prError = storedState.error;
+      prUrl = storedState.url;
+    }
+  });
 
   // Unpushed-commits state (only relevant when PR already exists)
   let hasUnpushed = $state(false);
@@ -885,10 +901,13 @@
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.createPr(branch.id, provider);
       prSessionId = sessionId;
+      // Store the creating state globally
+      prStateStore.setPrCreating(branch.id, sessionId);
       // The session-status-changed listener will handle completion
     } catch (e) {
       prStateOverride = 'error';
       prError = e instanceof Error ? e.message : String(e);
+      prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -908,19 +927,29 @@
             branch.prNumber = prNumber;
           }
           prStateOverride = 'created';
+          prStateStore.setPrCreated(branch.id, foundUrl);
         } else {
           // Session completed but we couldn't find a PR URL
           prStateOverride = 'error';
           prError = 'PR session completed but no PR URL was found in the output.';
+          prStateStore.setPrError(
+            branch.id,
+            'PR session completed but no PR URL was found in the output.'
+          );
         }
       } catch (e) {
         prStateOverride = 'error';
         prError = e instanceof Error ? e.message : String(e);
+        prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
       }
     } else {
       // Session errored or was cancelled
       prStateOverride = 'error';
       prError = `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
+      prStateStore.setPrError(
+        branch.id,
+        `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
+      );
     }
     prSessionId = null;
   }
@@ -1055,6 +1084,7 @@
 
   function handlePrErrorRetry() {
     showPrErrorDialog = false;
+    prStateStore.clearPrState(branch.id);
     handleCreatePr();
   }
 
@@ -1062,6 +1092,7 @@
     showPrErrorDialog = false;
     prStateOverride = null;
     prError = null;
+    prStateStore.clearPrState(branch.id);
   }
 
   // =========================================================================

@@ -45,6 +45,7 @@
   let projectToDelete = $state<Project | null>(null);
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
+  let deletingProjectNames = $state<Map<string, string>>(new Map());
 
   // Worktree setup errors — maps branch ID → error message
   let worktreeErrors = $state<Map<string, string>>(new Map());
@@ -166,20 +167,32 @@
   async function confirmDeleteProject() {
     if (!projectToDelete) return;
     const id = projectToDelete.id;
+    const name = projectDisplayName(projectToDelete);
     projectToDelete = null;
+    deletingProjectNames = new Map(deletingProjectNames).set(id, name);
 
-    try {
-      await commands.deleteProject(id);
-      projects = projects.filter((p) => p.id !== id);
-      const newMap = new Map(branchesByProject);
-      newMap.delete(id);
-      branchesByProject = newMap;
-      if (selectedProjectId === id) {
-        goHome();
-      }
-    } catch (e) {
-      console.error('Failed to delete project:', e);
+    // Optimistic UI removal so the interface stays responsive while backend
+    // cleanup (worktrees/workspaces) completes.
+    projects = projects.filter((p) => p.id !== id);
+    const newMap = new Map(branchesByProject);
+    newMap.delete(id);
+    branchesByProject = newMap;
+    if (selectedProjectId === id) {
+      goHome();
     }
+
+    commands
+      .deleteProject(id)
+      .catch(async (e) => {
+        console.error('Failed to delete project:', e);
+        // Recover from optimistic removal if backend delete fails.
+        await loadData();
+      })
+      .finally(() => {
+        const next = new Map(deletingProjectNames);
+        next.delete(id);
+        deletingProjectNames = next;
+      });
   }
 
   // ── Branch actions ──
@@ -464,6 +477,16 @@
   </div>
 </div>
 
+{#if deletingProjectNames.size > 0}
+  <div class="delete-toast" role="status" aria-live="polite">
+    {#if deletingProjectNames.size === 1}
+      Deleting project “{[...deletingProjectNames.values()][0]}”…
+    {:else}
+      Deleting {deletingProjectNames.size} projects…
+    {/if}
+  </div>
+{/if}
+
 <!-- New project modal -->
 {#if showNewProjectModal}
   <NewProjectModal
@@ -522,6 +545,20 @@
     padding: 12px 24px 24px;
     display: flex;
     flex-direction: column;
+  }
+
+  .delete-toast {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 1200;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-muted);
+    box-shadow: var(--shadow-elevated);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
   }
 
   .loading-state,

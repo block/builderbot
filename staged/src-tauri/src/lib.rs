@@ -717,7 +717,7 @@ async fn delete_project(
         .list_branches_for_project(&id)
         .map_err(|e| e.to_string())?;
     for branch in &branches {
-        cleanup_branch_resources(&store, branch)?;
+        cleanup_branch_resources_best_effort(&store, branch);
     }
 
     store.delete_project(&id).map_err(|e| e.to_string())
@@ -805,6 +805,28 @@ fn cleanup_branch_resources(store: &Arc<Store>, branch: &store::Branch) -> Resul
     Ok(())
 }
 
+fn cleanup_branch_resources_best_effort(store: &Arc<Store>, branch: &store::Branch) {
+    if let Err(e) = cleanup_branch_resources(store, branch) {
+        log::warn!(
+            "project delete cleanup warning for branch '{}': {e}",
+            branch.branch_name
+        );
+        if branch.branch_type == store::BranchType::Local {
+            if let Ok(Some(wd)) = store.get_workdir_for_branch(&branch.id) {
+                let path = Path::new(&wd.path);
+                if path.exists() {
+                    if let Err(io_err) = std::fs::remove_dir_all(path) {
+                        log::warn!(
+                            "failed fallback removal for worktree '{}': {io_err}",
+                            wd.path
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn infer_branch_name(project_name: &str) -> String {
     let branch = project_name
         .to_lowercase()
@@ -884,12 +906,6 @@ fn create_branch(
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
-
-    // Get the project
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
     // Detect default branch if none specified (via GitHub API, no local clone needed)
     let target_repo = match project_repo_id {
@@ -1031,11 +1047,6 @@ async fn setup_worktree_from_pr(
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
 
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
-
     let target_repo = match project_repo_id {
         Some(repo_id) => store
             .get_project_repo(&repo_id)
@@ -1086,12 +1097,6 @@ async fn create_remote_branch(
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
-
-    // Get the project
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
     // Detect default branch if none specified (via GitHub API, no local clone needed)
     let target_repo = match project_repo_id {

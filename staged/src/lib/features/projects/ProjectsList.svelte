@@ -93,6 +93,11 @@
       </div>
     {:else}
       <div class="projects-grid">
+        <button class="project-card new-project-card" onclick={() => (showNewProjectModal = true)}>
+          <div class="new-project-content">
+            <span class="new-project-label">+ New project</span>
+          </div>
+        </button>
         {#each projects as project (project.id)}
           <button class="project-card" onclick={() => selectProject(project.id)}>
             <div class="card-header">
@@ -272,6 +277,30 @@
     border-color: var(--border-emphasis);
     background-color: var(--bg-hover);
     transform: translateY(-1px);
+  }
+
+  .new-project-card {
+    border-style: dashed;
+    color: var(--text-primary);
+    align-items: center;
+    justify-content: center;
+  }
+
+  .new-project-content {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .new-project-label {
+    font-size: var(--size-sm);
+    font-weight: 600;
+    color: var(--ui-accent);
+  }
+
+  .new-project-card:hover {
+    border-color: var(--ui-accent);
+    background-color: var(--bg-elevated);
   }
 
   .card-header {

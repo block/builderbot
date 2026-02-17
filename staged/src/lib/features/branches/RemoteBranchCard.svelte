@@ -39,12 +39,21 @@
 
   interface Props {
     branch: Branch;
+    repoLabel?: string | null;
     deleting?: boolean;
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
+    onWorkspaceStatusChange?: (status: WorkspaceStatus) => void;
   }
 
-  let { branch, deleting = false, onDelete, onRename }: Props = $props();
+  let {
+    branch,
+    repoLabel = null,
+    deleting = false,
+    onDelete,
+    onRename,
+    onWorkspaceStatusChange,
+  }: Props = $props();
 
   // Reactive workspace status (updated by polling)
   let polledStatus = $state<WorkspaceStatus | null>(null);
@@ -149,6 +158,7 @@
       if (pollStartedAt && Date.now() - pollStartedAt > POLL_TIMEOUT_MS) {
         console.error('Workspace polling timed out after 5 minutes');
         polledStatus = 'error';
+        onWorkspaceStatusChange?.('error');
         error = 'Workspace provisioning timed out';
         stopPolling();
         return;
@@ -157,6 +167,7 @@
       try {
         const newStatus = (await commands.pollWorkspaceStatus(branch.id)) as WorkspaceStatus;
         polledStatus = newStatus;
+        onWorkspaceStatusChange?.(newStatus);
         if (newStatus === 'running') {
           stopPolling();
           loadTimeline();
@@ -170,6 +181,7 @@
         if (isAuthError(msg)) {
           console.error('Blox authentication error:', msg);
           polledStatus = 'error';
+          onWorkspaceStatusChange?.('error');
           error = msg;
           stopPolling();
           return;
@@ -184,6 +196,7 @@
         } else {
           console.error('Failed to poll workspace status:', e);
           polledStatus = 'error';
+          onWorkspaceStatusChange?.('error');
           error = msg;
           stopPolling();
         }
@@ -221,6 +234,7 @@
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       polledStatus = 'error';
+      onWorkspaceStatusChange?.('error');
       error = msg;
     } finally {
       retrying = false;
@@ -361,6 +375,9 @@
       <Cloud size={14} class="cloud-icon header-icon" />
       <div class="header-left">
         <span class="branch-name">{branch.branchName}</span>
+        {#if repoLabel}
+          <span class="repo-name">{repoLabel}</span>
+        {/if}
         {#if branch.workspaceName}
           <span class="base-branch-name">{branch.workspaceName}</span>
         {/if}
@@ -547,6 +564,11 @@
   .base-branch-name {
     font-size: var(--size-xs);
     color: var(--text-faint);
+  }
+
+  .repo-name {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
   }
 
   .header-actions {

@@ -5,7 +5,7 @@
 -->
 <script lang="ts">
   import { Folder, Trash2, Plus, Loader2 } from 'lucide-svelte';
-  import type { Project, Branch } from '../../types';
+  import type { Project, Branch, WorkspaceStatus } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import BranchCard from '../branches/BranchCard.svelte';
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
@@ -14,12 +14,16 @@
   interface Props {
     project: Project;
     branches: Branch[];
+    repoLabelsById?: Map<string, string>;
+    canAddRepo?: boolean;
+    addRepoHint?: string | null;
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
     detecting?: boolean;
     onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void;
+    onWorkspaceStatusChange?: (branchId: string, status: WorkspaceStatus) => void;
     onAddRepo?: () => void;
     onRetryWorktree?: (branchId: string) => void;
   }
@@ -27,18 +31,27 @@
   let {
     project,
     branches,
+    repoLabelsById = new Map(),
+    canAddRepo = true,
+    addRepoHint = null,
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
     detecting = false,
     onDeleteProject,
     onDeleteBranch,
     onRenameBranch,
+    onWorkspaceStatusChange,
     onAddRepo,
     onRetryWorktree,
   }: Props = $props();
 
   /** Branches sorted by most recently created first. */
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
+
+  function repoLabelForBranch(branch: Branch): string | null {
+    if (!branch.projectRepoId) return project.githubRepo;
+    return repoLabelsById.get(branch.projectRepoId) ?? project.githubRepo;
+  }
 
   const projectMenuItems: MenuItem[] = [
     { label: 'Remove Project', icon: Trash2, danger: true, action: () => onDeleteProject?.() },
@@ -62,17 +75,27 @@
     </div>
   </div>
   <div class="branches-list">
-    <button class="manage-repos-button" onclick={() => onAddRepo?.()}>
+    <button
+      class="manage-repos-button"
+      onclick={() => onAddRepo?.()}
+      disabled={!canAddRepo}
+      title={!canAddRepo && addRepoHint ? addRepoHint : 'Add repository to project'}
+    >
       <Plus size={16} />
       Add Repo
     </button>
+    {#if !canAddRepo && addRepoHint}
+      <div class="repo-hint">{addRepoHint}</div>
+    {/if}
     {#each sortedBranches as branch (branch.id)}
       {#if branch.branchType === 'remote'}
         <RemoteBranchCard
           {branch}
+          repoLabel={repoLabelForBranch(branch)}
           deleting={deletingBranches.has(branch.id)}
           onDelete={() => onDeleteBranch?.(branch.id)}
           onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
+          onWorkspaceStatusChange={(status) => onWorkspaceStatusChange?.(branch.id, status)}
         />
       {:else}
         <BranchCard
@@ -204,5 +227,20 @@
     border-color: var(--border-emphasis);
     color: var(--text-primary);
     background-color: var(--bg-hover);
+  }
+
+  .manage-repos-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+    border-color: var(--border-muted);
+    color: var(--text-muted);
+    background-color: transparent;
+  }
+
+  .repo-hint {
+    margin-top: -4px;
+    padding: 0 4px;
+    font-size: var(--size-xs);
+    color: var(--text-muted);
   }
 </style>

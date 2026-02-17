@@ -517,11 +517,56 @@ fn add_project_repo(
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| infer_branch_name(&project.name));
-    let mut repo =
-        store::ProjectRepo::new(&project_id, &github_repo, &resolved_branch_name, subpath);
+    let repo_subpath = if project.location == store::ProjectLocation::Remote {
+        let requested = subpath
+            .as_deref()
+            .map(validate_workspace_subpath)
+            .transpose()?;
+        Some(
+            requested
+                .map(|s| {
+                    if s.starts_with("repo:") || s.starts_with("repos/") {
+                        s
+                    } else {
+                        format!("repo:{s}")
+                    }
+                })
+                .unwrap_or_else(|| infer_remote_repo_subpath(&github_repo)),
+        )
+    } else {
+        subpath
+    };
+    let mut repo = store::ProjectRepo::new(
+        &project_id,
+        &github_repo,
+        &resolved_branch_name,
+        repo_subpath,
+    );
     if set_as_primary.unwrap_or(false) {
         repo = repo.primary();
     }
+    if project.location == store::ProjectLocation::Remote {
+        let ws_name = resolve_project_workspace_name(&store, &project, None)?;
+        let ws_info = blox::ws_info(&ws_name).map_err(|e| {
+            format!("Workspace '{ws_name}' must be running before adding another repo: {e}")
+        })?;
+        let ws_status = ws_info
+            .status
+            .as_deref()
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if ws_status != "running" {
+            return Err(format!(
+                "Workspace '{ws_name}' is not ready (status: {}). Wait until it is running, then retry.",
+                if ws_status.is_empty() {
+                    "unknown"
+                } else {
+                    ws_status.as_str()
+                }
+            ));
+        }
+    }
+
     store
         .create_project_repo(&repo)
         .map_err(|e| e.to_string())?;
@@ -567,7 +612,6 @@ fn add_project_repo(
         }
     };
     store.create_branch(&branch).map_err(|e| e.to_string())?;
-
     Ok(repo)
 }
 
@@ -800,6 +844,129 @@ fn resolve_project_workspace_name(
     }
 
     Ok(infer_workspace_name(&infer_branch_name(&project.name)))
+}
+
+/// Reject unsafe workspace-relative paths.
+fn validate_workspace_subpath(subpath: &str) -> Result<String, String> {
+    let trimmed = subpath.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return Err("Workspace subpath must not be empty".to_string());
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return Err(format!(
+            "Workspace subpath '{trimmed}' must be relative, not absolute"
+        ));
+    }
+    if trimmed
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(format!(
+            "Workspace subpath '{trimmed}' contains an invalid path segment"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn infer_remote_repo_subpath(github_repo: &str) -> String {
+    let repo_name = github_repo
+        .rsplit('/')
+        .next()
+        .unwrap_or(github_repo)
+        .to_string();
+    let collapsed = repo_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let suffix = if collapsed.is_empty() {
+        "repo".to_string()
+    } else {
+        collapsed
+    };
+    // Marker format for workspace repo roots. The actual folder path in the
+    // workspace is the value after `repo:` (e.g. `repo:builderbot` -> `~/builderbot`).
+    format!("repo:{suffix}")
+}
+
+fn run_workspace_git(
+    workspace_name: &str,
+    repo_subpath: Option<&str>,
+    git_args: &[&str],
+) -> Result<String, blox::BloxError> {
+    let mut owned = Vec::<String>::new();
+    owned.push("git".to_string());
+    if let Some(subpath) = repo_subpath.map(str::trim).filter(|s| !s.is_empty()) {
+        let resolved = resolve_workspace_repo_path(workspace_name, subpath)?;
+        owned.push("-C".to_string());
+        owned.push(resolved);
+    }
+    owned.extend(git_args.iter().map(|arg| (*arg).to_string()));
+    let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
+    blox::ws_exec(workspace_name, &borrowed)
+}
+
+fn workspace_home_dir(workspace_name: &str) -> Result<String, blox::BloxError> {
+    let out = blox::ws_exec(workspace_name, &["sh", "-lc", "cd ~ && pwd"])?;
+    let home = out.trim();
+    if home.is_empty() {
+        return Err(blox::BloxError::CommandFailed(
+            "Could not resolve workspace home directory".to_string(),
+        ));
+    }
+    Ok(home.to_string())
+}
+
+fn resolve_workspace_repo_path(
+    workspace_name: &str,
+    repo_subpath: &str,
+) -> Result<String, blox::BloxError> {
+    if let Some(rest) = repo_subpath.strip_prefix("home:") {
+        let home = workspace_home_dir(workspace_name)?;
+        return Ok(format!("{home}/{rest}"));
+    }
+    Ok(repo_subpath.to_string())
+}
+
+fn resolve_branch_workspace_subpath(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+) -> Result<Option<String>, String> {
+    let Some(repo_id) = branch.project_repo_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(repo) = store.get_project_repo(repo_id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let Some(subpath) = repo.subpath else {
+        return Ok(None);
+    };
+    let validated = validate_workspace_subpath(&subpath)?;
+    if let Some(repo_dir) = validated.strip_prefix("repo:") {
+        let dir = validate_workspace_subpath(repo_dir)?;
+        return Ok(Some(format!("home:{dir}")));
+    }
+    // Backward compatibility for previously created repos under `repos/...`.
+    if validated.starts_with("repos/") {
+        return Ok(Some(validated));
+    }
+    // Existing plain subpaths (e.g. monorepo paths like `packages/web`) are
+    // project-internal paths, not repo roots in the shared workspace.
+    Ok(None)
+}
+
+fn normalize_branch_ref(branch: &str) -> String {
+    branch.strip_prefix("origin/").unwrap_or(branch).to_string()
 }
 
 fn cleanup_branch_resources(store: &Arc<Store>, branch: &store::Branch) -> Result<(), String> {
@@ -1215,6 +1382,9 @@ async fn start_workspace(
         .workspace_name
         .as_deref()
         .ok_or("Branch has no workspace name")?;
+    let repo_subpath = resolve_branch_workspace_subpath(&store, &branch)?;
+    let ref_name = normalize_branch_ref(&branch.base_branch);
+    let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
 
     // Pre-flight: verify the user is authenticated with Blox before starting
     // a workspace. Without this check, `blox ws start` can hang or fail
@@ -1226,23 +1396,75 @@ async fn start_workspace(
         return Err(e.to_string());
     }
 
+    // Secondary repo setup in an already-running shared workspace.
+    if let Some(repo_subpath) = repo_subpath.as_deref() {
+        let repo_path = resolve_workspace_repo_path(ws_name, repo_subpath)
+            .map_err(|e| format!("Failed to resolve workspace repo path '{repo_subpath}': {e}"))?;
+        if let Ok(info) = blox::ws_info(ws_name) {
+            let ws_status = info
+                .status
+                .as_deref()
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            if ws_status == "running" {
+                match blox::ws_exec(ws_name, &["test", "-d", &format!("{repo_path}/.git")]) {
+                    Ok(_) => {}
+                    Err(blox::BloxError::CommandFailed(_)) => {
+                        let repo_url = format!("https://github.com/{repo_slug}.git");
+                        blox::ws_exec(ws_name, &["git", "clone", &repo_url, &repo_path]).map_err(
+                            |e| {
+                                format!(
+                                    "Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}"
+                                )
+                            },
+                        )?;
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Failed to verify repo path '{repo_subpath}' in workspace '{ws_name}': {e}"
+                        ));
+                    }
+                }
+                run_workspace_git(ws_name, Some(repo_subpath), &["fetch", "origin", &ref_name])
+                    .map_err(|e| {
+                        format!(
+                            "Failed to fetch base branch '{ref_name}' for '{repo_slug}' in workspace '{ws_name}': {e}"
+                        )
+                    })?;
+                run_workspace_git(
+                    ws_name,
+                    Some(repo_subpath),
+                    &["checkout", "-B", &branch.branch_name, &format!("origin/{ref_name}")],
+                )
+                .map_err(|e| {
+                    format!(
+                        "Failed to create branch '{}' for '{repo_slug}' in workspace '{ws_name}': {e}",
+                        branch.branch_name
+                    )
+                })?;
+                store
+                    .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Running)
+                    .map_err(|e| e.to_string())?;
+                return Ok(());
+            }
+        }
+    }
+
     // Construct the HTTPS git URL directly from github_repo.
-    let ref_name = branch
-        .base_branch
-        .strip_prefix("origin/")
-        .unwrap_or(&branch.base_branch);
     let resolved_source = Some(format!(
         "https://github.com/{}.git?ref={}",
-        resolve_branch_repo_slug(&store, &project, &branch)?,
-        ref_name
+        repo_slug, ref_name
     ));
 
     match blox::ws_start(ws_name, resolved_source.as_deref()) {
         Ok(_) => {
             // Create the feature branch inside the workspace so work happens
             // on `branch_name` rather than the detached base ref.
-            if let Err(e) = blox::ws_exec(ws_name, &["git", "checkout", "-b", &branch.branch_name])
-            {
+            if let Err(e) = run_workspace_git(
+                ws_name,
+                repo_subpath.as_deref(),
+                &["checkout", "-b", &branch.branch_name],
+            ) {
                 log::warn!(
                     "failed to create branch '{}' in workspace '{}': {e}",
                     branch.branch_name,
@@ -1316,6 +1538,16 @@ async fn poll_workspace_status(
         .workspace_name
         .as_deref()
         .ok_or("Branch is not a remote workspace branch")?;
+
+    // Secondary repo setup uses `workspace_status=Starting` as a per-branch
+    // loading state while clone/fetch/checkout runs inside an already-running
+    // shared workspace. Keep it in Starting until that setup command marks
+    // this branch as Running.
+    if branch.workspace_status == Some(store::WorkspaceStatus::Starting)
+        && resolve_branch_workspace_subpath(&store, &branch)?.is_some()
+    {
+        return Ok(store::WorkspaceStatus::Starting.as_str().to_string());
+    }
 
     let info = match blox::ws_info(ws_name) {
         Ok(info) => info,
@@ -1435,7 +1667,12 @@ async fn rename_branch(
         }
         store::BranchType::Remote => {
             if let Some(ws_name) = &branch.workspace_name {
-                if let Err(e) = blox::ws_exec(ws_name, &["git", "branch", "-m", new_name]) {
+                let repo_subpath = resolve_branch_workspace_subpath(&store, &branch)?;
+                if let Err(e) = run_workspace_git(
+                    ws_name,
+                    repo_subpath.as_deref(),
+                    &["branch", "-m", new_name],
+                ) {
                     log::warn!("Failed to rename branch in workspace '{ws_name}': {e}");
                 }
             }
@@ -1794,13 +2031,16 @@ fn get_branch_timeline(
     // Get commits from git (the source of truth for commit data)
     let mut commits = Vec::new();
     if let Some(ref ws_name) = branch.workspace_name {
+        let repo_subpath = resolve_branch_workspace_subpath(&store, &branch)?;
         // Remote branch: fetch commits via ws_exec.
         // Use merge-base to find the fork point so that only the branch's
         // own commits are shown, even after a rebase or when the base ref
         // has moved forward.
-        let range = if let Ok(mb_output) =
-            blox::ws_exec(ws_name, &["git", "merge-base", &branch.base_branch, "HEAD"])
-        {
+        let range = if let Ok(mb_output) = run_workspace_git(
+            ws_name,
+            repo_subpath.as_deref(),
+            &["merge-base", &branch.base_branch, "HEAD"],
+        ) {
             let mb = mb_output.trim().to_string();
             format!("{mb}..HEAD")
         } else {
@@ -1809,7 +2049,11 @@ fn get_branch_timeline(
             format!("{}..HEAD", &branch.base_branch)
         };
         let format_arg = "--format=%H|%h|%s|%an|%ct";
-        if let Ok(output) = blox::ws_exec(ws_name, &["git", "log", format_arg, &range]) {
+        if let Ok(output) = run_workspace_git(
+            ws_name,
+            repo_subpath.as_deref(),
+            &["log", format_arg, &range],
+        ) {
             for line in output.lines() {
                 if line.is_empty() {
                     continue;

@@ -8,7 +8,7 @@
   import { onMount } from 'svelte';
   import { ArrowLeft } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import type { Project, Branch, StoreIncompatibility } from '../../types';
+  import type { Project, Branch, StoreIncompatibility, WorkspaceStatus } from '../../types';
   import * as commands from '../../commands';
   import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
@@ -29,6 +29,7 @@
   // Data
   let projects = $state<Project[]>([]);
   let branchesByProject = $state<Map<string, Branch[]>>(new Map());
+  let repoLabelsByProject = $state<Map<string, Map<string, string>>>(new Map());
   let loading = $state(true);
   let error = $state<string | null>(null);
 
@@ -40,6 +41,7 @@
   let showNewProjectModal = $state(false);
   let showRepoPicker = $state(false);
   let repoPickerProject = $state<Project | null>(null);
+  let repoAddError = $state<string | null>(null);
 
   // Delete confirmation state
   let projectToDelete = $state<Project | null>(null);
@@ -128,13 +130,22 @@
 
       // Load branches for each project
       const branchMap = new Map<string, Branch[]>();
+      const repoLabelMap = new Map<string, Map<string, string>>();
       await Promise.all(
         projectList.map(async (project) => {
-          const branches = await commands.listBranchesForProject(project.id);
+          const [branches, repos] = await Promise.all([
+            commands.listBranchesForProject(project.id),
+            commands.listProjectRepos(project.id),
+          ]);
           branchMap.set(project.id, branches);
+          repoLabelMap.set(
+            project.id,
+            new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
+          );
         })
       );
       branchesByProject = branchMap;
+      repoLabelsByProject = repoLabelMap;
       kickOffPendingBranchSetup(branchMap);
 
       const contexts = await commands.listActionContexts();
@@ -181,8 +192,15 @@
     if (!projects.some((p) => p.id === project.id)) {
       projects = [...projects, project];
     }
-    const branches = await commands.listBranchesForProject(project.id);
+    const [branches, repos] = await Promise.all([
+      commands.listBranchesForProject(project.id),
+      commands.listProjectRepos(project.id),
+    ]);
     branchesByProject = new Map(branchesByProject).set(project.id, branches);
+    repoLabelsByProject = new Map(repoLabelsByProject).set(
+      project.id,
+      new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
+    );
     startInitialBranchSetup(project.id, branches);
     showNewProjectModal = false;
     selectProject(project.id);
@@ -226,6 +244,11 @@
   // ── Branch actions ──
 
   function handleAddRepo(project: Project) {
+    if (!canAddRepo(project)) {
+      repoAddError = addRepoHint(project);
+      return;
+    }
+    repoAddError = null;
     repoPickerProject = project;
     showRepoPicker = true;
   }
@@ -233,19 +256,69 @@
   async function handleRepoSelected(nameWithOwner: string) {
     if (!repoPickerProject) return;
     try {
+      repoAddError = null;
       await commands.addProjectRepo(repoPickerProject.id, nameWithOwner);
-      const [projectsList, branches] = await Promise.all([
+      const [projectsList, branches, repos] = await Promise.all([
         commands.listProjects(),
         commands.listBranchesForProject(repoPickerProject.id),
+        commands.listProjectRepos(repoPickerProject.id),
       ]);
       projects = projectsList;
       branchesByProject = new Map(branchesByProject).set(repoPickerProject.id, branches);
+      repoLabelsByProject = new Map(repoLabelsByProject).set(
+        repoPickerProject.id,
+        new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
+      );
       startInitialBranchSetup(repoPickerProject.id, branches);
     } catch (e) {
       console.error('Failed to add repo:', e);
+      repoAddError = e instanceof Error ? e.message : String(e);
     } finally {
       showRepoPicker = false;
       repoPickerProject = null;
+    }
+  }
+
+  function canAddRepo(project: Project): boolean {
+    if (project.location !== 'remote') return true;
+    const branches = branchesByProject.get(project.id) || [];
+    return branches.some((b) => b.branchType === 'remote' && b.workspaceStatus === 'running');
+  }
+
+  function addRepoHint(project: Project): string {
+    if (project.location !== 'remote') return '';
+    const branches = branchesByProject.get(project.id) || [];
+    if (branches.length === 0) {
+      return 'Create the initial remote branch and workspace before adding another repo.';
+    }
+    if (branches.some((b) => b.branchType === 'remote' && b.workspaceStatus === 'starting')) {
+      return 'Workspace is provisioning. Wait until it is running, then add another repo.';
+    }
+    return 'Workspace must be running before adding another repo.';
+  }
+
+  function handleWorkspaceStatusChange(
+    projectId: string,
+    branchId: string,
+    workspaceStatus: WorkspaceStatus
+  ) {
+    const branches = branchesByProject.get(projectId);
+    if (!branches) return;
+    let changed = false;
+    const nextBranches = branches.map((branch) => {
+      if (branch.id !== branchId) return branch;
+      if (branch.workspaceStatus === workspaceStatus) return branch;
+      changed = true;
+      return { ...branch, workspaceStatus };
+    });
+    if (!changed) return;
+
+    branchesByProject = new Map(branchesByProject).set(projectId, nextBranches);
+
+    // Clear stale gating errors once a remote workspace becomes ready.
+    const project = projects.find((p) => p.id === projectId);
+    if (project && canAddRepo(project)) {
+      repoAddError = null;
     }
   }
 
@@ -354,12 +427,17 @@
     try {
       if (branch.projectRepoId) {
         await commands.removeProjectRepo(branch.projectId, branch.projectRepoId);
-        const [projectsList, branches] = await Promise.all([
+        const [projectsList, branches, repos] = await Promise.all([
           commands.listProjects(),
           commands.listBranchesForProject(branch.projectId),
+          commands.listProjectRepos(branch.projectId),
         ]);
         projects = projectsList;
         branchesByProject = new Map(branchesByProject).set(branch.projectId, branches);
+        repoLabelsByProject = new Map(repoLabelsByProject).set(
+          branch.projectId,
+          new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
+        );
       } else {
         await commands.deleteBranch(branch.id);
         // Fallback for legacy branches without repo linkage
@@ -484,11 +562,17 @@
           <div class="project-title">{projectDisplayName(selectedProject)}</div>
         </div>
       {/if}
+      {#if repoAddError}
+        <div class="repo-add-error">{repoAddError}</div>
+      {/if}
       <div class="projects-list">
         {#each visibleProjects as project (project.id)}
           <ProjectSection
             {project}
             branches={branchesByProject.get(project.id) || []}
+            repoLabelsById={repoLabelsByProject.get(project.id) || new Map()}
+            canAddRepo={canAddRepo(project)}
+            addRepoHint={project.location === 'remote' ? addRepoHint(project) : null}
             {deletingBranches}
             {worktreeErrors}
             detecting={detectingProjectIds.has(project.id)}
@@ -496,6 +580,8 @@
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onRenameBranch={(branchId, branchName) =>
               handleRenameBranch(branchId, project.id, branchName)}
+            onWorkspaceStatusChange={(branchId, workspaceStatus) =>
+              handleWorkspaceStatusChange(project.id, branchId, workspaceStatus)}
             onAddRepo={() => handleAddRepo(project)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
           />
@@ -783,6 +869,18 @@
     display: flex;
     flex-direction: column;
     gap: 32px;
+  }
+
+  .repo-add-error {
+    width: 100%;
+    max-width: 800px;
+    margin: 0 auto 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--ui-danger);
+    border-radius: 8px;
+    color: var(--ui-danger);
+    background: var(--ui-danger-bg);
+    font-size: var(--size-sm);
   }
 
   .project-toolbar {

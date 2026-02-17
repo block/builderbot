@@ -17,7 +17,6 @@
   import NewProjectModal from './NewProjectModal.svelte';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import { alerts } from '../../shared/alerts.svelte';
 
@@ -216,29 +215,39 @@
     const name = projectDisplayName(projectToDelete);
     projectToDelete = null;
     deletingProjectNames = new Map(deletingProjectNames).set(id, name);
-
-    // Optimistic UI removal so the interface stays responsive while backend
-    // cleanup (worktrees/workspaces) completes.
-    projects = projects.filter((p) => p.id !== id);
-    const newMap = new Map(branchesByProject);
-    newMap.delete(id);
-    branchesByProject = newMap;
-    if (selectedProjectId === id) {
-      goHome();
-    }
-
-    commands
-      .deleteProject(id)
-      .catch(async (e) => {
-        console.error('Failed to delete project:', e);
-        // Recover from optimistic removal if backend delete fails.
-        await loadData();
+    window.dispatchEvent(
+      new CustomEvent('staged:project-delete-start', {
+        detail: { projectId: id, name },
       })
-      .finally(() => {
-        const next = new Map(deletingProjectNames);
-        next.delete(id);
-        deletingProjectNames = next;
+    );
+
+    try {
+      await commands.deleteProject(id);
+      projects = projects.filter((p) => p.id !== id);
+      const nextBranches = new Map(branchesByProject);
+      nextBranches.delete(id);
+      branchesByProject = nextBranches;
+      const nextRepoLabels = new Map(repoLabelsByProject);
+      nextRepoLabels.delete(id);
+      repoLabelsByProject = nextRepoLabels;
+    } catch (e) {
+      console.error('Failed to delete project:', e);
+      const message = e instanceof Error ? e.message : String(e);
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to delete project',
+        message,
       });
+    } finally {
+      const next = new Map(deletingProjectNames);
+      next.delete(id);
+      deletingProjectNames = next;
+      window.dispatchEvent(
+        new CustomEvent('staged:project-delete-end', {
+          detail: { projectId: id },
+        })
+      );
+    }
   }
 
   // ── Branch actions ──
@@ -338,6 +347,7 @@
 
   function kickOffPendingBranchSetup(branchMap: Map<string, Branch[]>) {
     for (const [projectId, branches] of branchMap.entries()) {
+      if (deletingProjectNames.has(projectId)) continue;
       for (const branch of branches) {
         if (pendingSetupBranches.has(branch.id)) continue;
         if (
@@ -545,14 +555,13 @@
       <div class="empty-state">
         <div class="welcome-header">
           <StagedIcon size={28} />
-          <h2>welcome to <span class="mono accent">staged</span></h2>
+          <h2>No projects yet</h2>
         </div>
         <p class="welcome-subtitle">
-          Add one of your repos as a project to get started —
+          Create a project to get started —
           <button class="kbd-btn" onclick={handleNewProject} title="New project">+</button>
           <span class="shortcut-hint">(⌘N)</span>
         </p>
-        <GitTreeAnimation />
       </div>
     {:else}
       {#if selectedProject}
@@ -572,6 +581,7 @@
             repoLabelsById={repoLabelsByProject.get(project.id) || new Map()}
             canAddRepo={canAddRepo(project)}
             addRepoHint={project.location === 'remote' ? addRepoHint(project) : null}
+            deleting={deletingProjectNames.has(project.id)}
             {deletingBranches}
             {worktreeErrors}
             detecting={detectingProjectIds.has(project.id)}
@@ -816,15 +826,6 @@
     font-weight: 500;
     color: var(--text-primary);
     margin: 0;
-  }
-
-  .welcome-header .mono {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    letter-spacing: -0.02em;
-  }
-
-  .welcome-header .accent {
-    color: var(--ui-accent);
   }
 
   .welcome-subtitle {

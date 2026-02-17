@@ -771,6 +771,20 @@ async fn delete_project(
         branches::cleanup_branch_resources_best_effort(&store, branch);
     }
 
+    // Best-effort cleanup for project-scoped local worktree roots.
+    // Worktree-level cleanup removes individual directories; this removes any
+    // leftover project container folder.
+    if let Ok(project_root) = git::project_worktree_root_for(&id) {
+        if project_root.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&project_root) {
+                log::warn!(
+                    "failed to remove project worktree root '{}': {e}",
+                    project_root.display()
+                );
+            }
+        }
+    }
+
     store.delete_project(&id).map_err(|e| e.to_string())
 }
 

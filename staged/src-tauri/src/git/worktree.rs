@@ -1,7 +1,7 @@
 //! Git worktree operations for branch-based workflow.
 //!
 //! Manages worktrees under the platform data directory
-//! (see [`crate::paths::worktrees_dir`]).
+//! (see [`crate::paths::worktrees_dir`]), including project-scoped layouts.
 
 use super::cli::{self, GitError};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,51 @@ use std::path::{Path, PathBuf};
 fn worktree_base_dir() -> Result<PathBuf, GitError> {
     crate::paths::worktrees_dir()
         .ok_or_else(|| GitError::CommandFailed("Cannot determine data directory".to_string()))
+}
+
+fn sanitize_path_segment(raw: &str, fallback: &str) -> String {
+    let safe = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if safe.is_empty() {
+        fallback.to_string()
+    } else {
+        safe
+    }
+}
+
+fn sanitize_branch_name(branch_name: &str) -> String {
+    branch_name.replace('/', "-")
+}
+
+fn ensure_worktree_parent_exists(worktree_path: &Path) -> Result<(), GitError> {
+    if let Some(parent) = worktree_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            GitError::CommandFailed(format!("Failed to create worktree directory: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+fn ensure_worktree_absent(worktree_path: &Path) -> Result<(), GitError> {
+    if worktree_path.exists() {
+        return Err(GitError::CommandFailed(format!(
+            "Worktree already exists at {}",
+            worktree_path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Compute the worktree path for a given repo and branch.
@@ -23,10 +68,31 @@ pub fn worktree_path_for(repo: &Path, branch_name: &str) -> Result<PathBuf, GitE
         .and_then(|n| n.to_str())
         .ok_or_else(|| GitError::InvalidPath(repo.display().to_string()))?;
 
-    // Sanitize branch name for filesystem (replace / with -)
-    let sanitized_branch = branch_name.replace('/', "-");
+    let sanitized_branch = sanitize_branch_name(branch_name);
 
     Ok(base.join(repo_name).join(sanitized_branch))
+}
+
+/// Compute the project-scoped worktree path used for local multi-repo projects.
+/// Format: `<worktrees_dir>/projects/<project-id>/<repo-slug>--<sanitized-branch-name>/`
+pub fn project_worktree_path_for(
+    project_id: &str,
+    repo_slug: &str,
+    branch_name: &str,
+) -> Result<PathBuf, GitError> {
+    let base = project_worktree_root_for(project_id)?;
+    let repo_segment = sanitize_path_segment(repo_slug, "repo");
+    let branch_segment = sanitize_branch_name(branch_name);
+    let worktree_name = format!("{repo_segment}--{branch_segment}");
+    Ok(base.join(worktree_name))
+}
+
+/// Compute the project-scoped root directory for all worktrees in a project.
+/// Format: `<worktrees_dir>/projects/<project-id>/`
+pub fn project_worktree_root_for(project_id: &str) -> Result<PathBuf, GitError> {
+    let base = worktree_base_dir()?;
+    let project_segment = sanitize_path_segment(project_id, "project");
+    Ok(base.join("projects").join(project_segment))
 }
 
 /// Create a new worktree with a new branch.
@@ -43,21 +109,18 @@ pub fn create_worktree(
     start_point: &str,
 ) -> Result<PathBuf, GitError> {
     let worktree_path = worktree_path_for(repo, branch_name)?;
+    create_worktree_at_path(repo, branch_name, start_point, &worktree_path)
+}
 
-    // Ensure parent directory exists
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            GitError::CommandFailed(format!("Failed to create worktree directory: {e}"))
-        })?;
-    }
-
-    // Check if worktree already exists
-    if worktree_path.exists() {
-        return Err(GitError::CommandFailed(format!(
-            "Worktree already exists at {}",
-            worktree_path.display()
-        )));
-    }
+/// Create a new worktree with a new branch at an explicit path.
+pub fn create_worktree_at_path(
+    repo: &Path,
+    branch_name: &str,
+    start_point: &str,
+    worktree_path: &Path,
+) -> Result<PathBuf, GitError> {
+    ensure_worktree_parent_exists(worktree_path)?;
+    ensure_worktree_absent(worktree_path)?;
 
     // Always branch from the remote tip on origin, not from a (potentially
     // stale) local branch.  Normalise the start point to "origin/<branch>"
@@ -90,7 +153,7 @@ pub fn create_worktree(
         ],
     )?;
 
-    Ok(worktree_path)
+    Ok(worktree_path.to_path_buf())
 }
 
 /// Create a new worktree for an existing local branch.
@@ -102,21 +165,17 @@ pub fn create_worktree_for_existing_branch(
     branch_name: &str,
 ) -> Result<PathBuf, GitError> {
     let worktree_path = worktree_path_for(repo, branch_name)?;
+    create_worktree_for_existing_branch_at_path(repo, branch_name, &worktree_path)
+}
 
-    // Ensure parent directory exists
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            GitError::CommandFailed(format!("Failed to create worktree directory: {e}"))
-        })?;
-    }
-
-    // Check if worktree already exists
-    if worktree_path.exists() {
-        return Err(GitError::CommandFailed(format!(
-            "Worktree already exists at {}",
-            worktree_path.display()
-        )));
-    }
+/// Create a new worktree for an existing local branch at an explicit path.
+pub fn create_worktree_for_existing_branch_at_path(
+    repo: &Path,
+    branch_name: &str,
+    worktree_path: &Path,
+) -> Result<PathBuf, GitError> {
+    ensure_worktree_parent_exists(worktree_path)?;
+    ensure_worktree_absent(worktree_path)?;
 
     let worktree_str = worktree_path
         .to_str()
@@ -126,7 +185,7 @@ pub fn create_worktree_for_existing_branch(
     // git worktree add <path> <branch>
     cli::run(repo, &["worktree", "add", worktree_str, branch_name])?;
 
-    Ok(worktree_path)
+    Ok(worktree_path.to_path_buf())
 }
 
 /// Remove a worktree and its associated branch.
@@ -372,6 +431,18 @@ pub fn create_worktree_from_pr(
     head_ref: &str,
     base_ref: &str,
 ) -> Result<(PathBuf, String, String), GitError> {
+    let worktree_path = worktree_path_for(repo, head_ref)?;
+    create_worktree_from_pr_at_path(repo, pr_number, head_ref, base_ref, &worktree_path)
+}
+
+/// Create a worktree from a GitHub PR at an explicit path.
+pub fn create_worktree_from_pr_at_path(
+    repo: &Path,
+    pr_number: u64,
+    head_ref: &str,
+    base_ref: &str,
+    worktree_path: &Path,
+) -> Result<(PathBuf, String, String), GitError> {
     // Use the PR's head_ref as the local branch name
     let branch_name = head_ref.to_string();
 
@@ -382,22 +453,8 @@ pub fn create_worktree_from_pr(
         )));
     }
 
-    let worktree_path = worktree_path_for(repo, &branch_name)?;
-
-    // Check if worktree already exists
-    if worktree_path.exists() {
-        return Err(GitError::CommandFailed(format!(
-            "Worktree already exists at {}",
-            worktree_path.display()
-        )));
-    }
-
-    // Ensure parent directory exists
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            GitError::CommandFailed(format!("Failed to create worktree directory: {e}"))
-        })?;
-    }
+    ensure_worktree_parent_exists(worktree_path)?;
+    ensure_worktree_absent(worktree_path)?;
 
     // Fetch the PR head ref
     let pr_ref = format!("refs/pull/{pr_number}/head");
@@ -429,7 +486,7 @@ pub fn create_worktree_from_pr(
     // The base branch for diffs should be the PR's target (e.g., "origin/main")
     let base_branch = format!("origin/{base_ref}");
 
-    Ok((worktree_path, branch_name, base_branch))
+    Ok((worktree_path.to_path_buf(), branch_name, base_branch))
 }
 
 /// Result of updating a branch from a PR.
@@ -565,5 +622,52 @@ mod tests {
         // Should sanitize slashes
         assert!(path.to_string_lossy().contains("feature-auth-flow"));
         assert!(!path.to_string_lossy().contains("feature/auth-flow"));
+    }
+
+    #[test]
+    fn test_project_worktree_path_groups_by_project_then_repo() {
+        let path =
+            project_worktree_path_for("project-123", "squareup/builderbot", "feature/auth-flow")
+                .unwrap();
+
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap();
+        let project_dir = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap();
+        let projects_root = path
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap();
+
+        assert_eq!(projects_root, "projects");
+        assert_eq!(project_dir, "project-123");
+        assert_eq!(file_name, "squareup-builderbot--feature-auth-flow");
+    }
+
+    #[test]
+    fn test_project_worktree_path_sanitizes_repo_slug() {
+        let path = project_worktree_path_for("project-123", "///", "branch").unwrap();
+
+        let file_name = path.file_name().and_then(|s| s.to_str()).unwrap();
+        assert_eq!(file_name, "repo--branch");
+    }
+
+    #[test]
+    fn test_project_worktree_root_for() {
+        let root = project_worktree_root_for("project-123").unwrap();
+
+        let project_dir = root.file_name().and_then(|s| s.to_str()).unwrap();
+        let projects_root = root
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap();
+
+        assert_eq!(projects_root, "projects");
+        assert_eq!(project_dir, "project-123");
     }
 }

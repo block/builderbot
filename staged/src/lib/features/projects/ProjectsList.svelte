@@ -19,6 +19,7 @@
   let error = $state<string | null>(null);
   let showNewProjectModal = $state(false);
   let isCommandKeyHeld = $state(false);
+  let deletingProjectNames = $state<Map<string, string>>(new Map());
 
   onMount(() => {
     loadProjects();
@@ -26,9 +27,30 @@
     const onNewProject = () => {
       showNewProjectModal = true;
     };
+    const onProjectDeleteStart = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectId?: string; name?: string }>).detail;
+      const projectId = detail?.projectId;
+      if (!projectId) return;
+      const name =
+        detail?.name ?? projects.find((project) => project.id === projectId)?.name ?? 'Project';
+      deletingProjectNames = new Map(deletingProjectNames).set(projectId, name);
+    };
+    const onProjectDeleteEnd = (event: Event) => {
+      const detail = (event as CustomEvent<{ projectId?: string }>).detail;
+      const projectId = detail?.projectId;
+      if (!projectId) return;
+      const next = new Map(deletingProjectNames);
+      next.delete(projectId);
+      deletingProjectNames = next;
+      loadProjects();
+    };
     window.addEventListener('staged:new-project', onNewProject);
+    window.addEventListener('staged:project-delete-start', onProjectDeleteStart);
+    window.addEventListener('staged:project-delete-end', onProjectDeleteEnd);
     return () => {
       window.removeEventListener('staged:new-project', onNewProject);
+      window.removeEventListener('staged:project-delete-start', onProjectDeleteStart);
+      window.removeEventListener('staged:project-delete-end', onProjectDeleteEnd);
     };
   });
 
@@ -50,6 +72,15 @@
     }
     showNewProjectModal = false;
     selectProject(project.id);
+  }
+
+  function isProjectDeleting(projectId: string): boolean {
+    return deletingProjectNames.has(projectId);
+  }
+
+  function openProject(projectId: string) {
+    if (isProjectDeleting(projectId)) return;
+    selectProject(projectId);
   }
 
   function verifyCommandKeyState(e: KeyboardEvent | MouseEvent) {
@@ -85,7 +116,7 @@
       e.preventDefault();
       const index = parseInt(e.key) - 1;
       if (index < projects.length) {
-        selectProject(projects[index].id);
+        openProject(projects[index].id);
       }
     }
   }
@@ -156,7 +187,13 @@
           </div>
         </button>
         {#each projects as project, index (project.id)}
-          <button class="project-card" onclick={() => selectProject(project.id)}>
+          <button
+            class="project-card"
+            class:deleting={isProjectDeleting(project.id)}
+            onclick={() => openProject(project.id)}
+            disabled={isProjectDeleting(project.id)}
+            title={isProjectDeleting(project.id) ? 'Project deletion in progress' : undefined}
+          >
             {#if isCommandKeyHeld && index < 9}
               <div class="keyboard-shortcut-overlay">
                 <span class="command-icon">⌘</span>
@@ -167,6 +204,9 @@
               <FolderGit2 size={16} />
               <span>{projectDisplayName(project)}</span>
             </div>
+            {#if isProjectDeleting(project.id)}
+              <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
+            {/if}
             <div class="repo">{project.githubRepo ?? 'No repo attached'}</div>
             <div class="repo">
               {project.location === 'remote' ? 'Remote workspace' : 'Local worktrees'}
@@ -339,6 +379,22 @@
     transform: translateY(-1px);
   }
 
+  .project-card:disabled {
+    cursor: not-allowed;
+    transform: none;
+  }
+
+  .project-card.deleting {
+    border-style: dashed;
+    opacity: 0.75;
+  }
+
+  .project-card.deleting:hover {
+    border-color: var(--border-muted);
+    background: var(--bg-surface);
+    transform: none;
+  }
+
   .new-project-card {
     border-style: dashed;
     color: var(--text-primary);
@@ -378,6 +434,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .deleting-pill {
+    width: fit-content;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-muted);
+    background-color: var(--bg-elevated);
+    color: var(--text-primary);
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 600;
   }
 
   .keyboard-shortcut-overlay {

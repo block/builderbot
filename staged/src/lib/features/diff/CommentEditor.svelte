@@ -17,6 +17,8 @@
     visible?: boolean;
     /** Existing comment to edit (null for new comment) */
     existingComment?: Comment | null;
+    /** Read-only mode for non-editable comments (e.g. agent comments). */
+    readOnly?: boolean;
     /** Placeholder text */
     placeholder?: string;
     /** Called when comment is submitted */
@@ -33,6 +35,7 @@
     width,
     visible = true,
     existingComment = null,
+    readOnly = false,
     placeholder = 'Add a comment...',
     onSubmit,
     onCancel,
@@ -57,7 +60,7 @@
       e.preventDefault();
       e.stopPropagation();
       onCancel();
-    } else if (e.key === 'Enter' && !e.shiftKey) {
+    } else if (e.key === 'Enter' && !e.shiftKey && !readOnly) {
       e.preventDefault();
       e.stopPropagation();
       // Get value directly from event target as fallback
@@ -93,12 +96,13 @@
     class="comment-textarea"
     {placeholder}
     value={currentValue}
+    readonly={readOnly}
     oninput={handleInput}
     onkeydown={handleKeydown}
     use:autoFocus
   ></textarea>
   <div class="comment-editor-hint">
-    <span>Enter to save · Esc to cancel</span>
+    <span>{readOnly ? 'Read-only · Esc to close' : 'Enter to save · Esc to cancel'}</span>
     {#if existingComment && onDelete}
       <button class="delete-comment-btn" onclick={handleDelete} title="Delete comment">
         <Trash2 size={12} />

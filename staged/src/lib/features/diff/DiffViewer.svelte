@@ -72,6 +72,8 @@
     diff: FileDiff | null;
     /** Comments on this file. */
     comments?: Comment[];
+    /** Request to jump to a specific comment in the current file. */
+    jumpToComment?: { id: string; token: number } | null;
     /** Bumped when syntax theme changes to trigger re-highlight. */
     syntaxThemeVersion?: number;
     /** Whether a new file is loading (show subtle indicator, keep old content). */
@@ -96,6 +98,7 @@
   let {
     diff,
     comments = [],
+    jumpToComment = null,
     syntaxThemeVersion = 0,
     loading = false,
     isReferenceFile = false,
@@ -191,7 +194,11 @@
     visible: boolean;
   } | null = $state(null);
   let editingCommentId: string | null = $state(null);
+  let activeLineComment = $state<Comment | null>(null);
+  let lineCommentReadOnly = $state(false);
   let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
+  let lastHandledJumpToken = $state<number | null>(null);
+  let lineCommentEditorRaf: number | null = null;
 
   // Markdown preview mode
   let markdownPreview = $state(false);
@@ -414,6 +421,8 @@
       commentingOnLines = null;
       lineCommentEditorStyle = null;
       editingCommentId = null;
+      activeLineComment = null;
+      lineCommentReadOnly = false;
       commentingOnRange = null;
       commentEditorStyle = null;
     }
@@ -811,14 +820,44 @@
   // Comment highlight click (from spine)
   // ==========================================================================
 
+  function focusCommentInViewer(comment: Comment) {
+    if (!afterPane) return;
+
+    scrollController.scrollToRow(comment.span.start, 'after');
+
+    const start = comment.span.start;
+    const end = Math.max(comment.span.start, comment.span.end - 1);
+
+    lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
+    commentingOnLines = { pane: 'after', start, end };
+    editingCommentId = comment.id;
+    activeLineComment = comment;
+    lineCommentReadOnly = comment.author === 'agent';
+
+    // scrollToRow updates pane transforms; defer editor positioning until next frame
+    if (lineCommentEditorRaf !== null) {
+      cancelAnimationFrame(lineCommentEditorRaf);
+    }
+    lineCommentEditorRaf = requestAnimationFrame(() => {
+      lineCommentEditorRaf = null;
+      updateLineCommentEditorPosition();
+    });
+  }
+
   function handleCommentHighlightClick(info: CommentHighlightInfo) {
-    if (!afterPane || !commentingEnabled) return;
+    if (!afterPane) return;
 
     const { span, commentId } = info;
 
-    // Agent comments are read-only — just scroll to the location, don't open editor
+    // Jump to exact comment when available.
     const comment = commentId ? findCommentById(comments, commentId) : null;
-    if (comment?.author === 'agent') {
+    if (comment) {
+      focusCommentInViewer(comment);
+      return;
+    }
+
+    // Fallback for raw span highlights without a comment id.
+    if (!commentingEnabled) {
       scrollController.scrollToRow(span.start, 'after');
       return;
     }
@@ -831,8 +870,21 @@
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
     editingCommentId = commentId;
+    activeLineComment = comment;
+    lineCommentReadOnly = false;
     updateLineCommentEditorPosition();
   }
+
+  // Jump to a comment requested by the sidebar comments list.
+  $effect(() => {
+    const request = jumpToComment;
+    if (!request || !afterPane) return;
+    if (lastHandledJumpToken === request.token) return;
+    const comment = findCommentById(currentFileComments, request.id);
+    if (!comment) return;
+    lastHandledJumpToken = request.token;
+    focusCommentInViewer(comment);
+  });
 
   // ==========================================================================
   // Range comment handling
@@ -1004,6 +1056,8 @@
     commentingOnLines = null;
     lineCommentEditorStyle = null;
     editingCommentId = null;
+    activeLineComment = null;
+    lineCommentReadOnly = false;
   }
 
   // Store the initial left position for line selection toolbar
@@ -1055,6 +1109,8 @@
     if (!selectedLineRange || !commentingEnabled) return;
     commentingOnLines = { ...selectedLineRange };
     editingCommentId = null;
+    activeLineComment = null;
+    lineCommentReadOnly = false;
     updateLineCommentEditorPosition();
   }
 
@@ -1101,6 +1157,8 @@
   function handleLineCommentCancel() {
     commentingOnLines = null;
     lineCommentEditorStyle = null;
+    activeLineComment = null;
+    lineCommentReadOnly = false;
   }
 
   // Update toolbar/editor positions on scroll
@@ -1264,6 +1322,10 @@
       document.removeEventListener('mousemove', handleSelectionDragMove);
       document.removeEventListener('mousemove', handleDividerMouseMove);
       document.removeEventListener('mouseup', handleDividerMouseUp);
+      if (lineCommentEditorRaf !== null) {
+        cancelAnimationFrame(lineCommentEditorRaf);
+        lineCommentEditorRaf = null;
+      }
       if (connectorRenderer) {
         connectorRenderer.destroy();
         connectorRenderer = null;
@@ -1749,15 +1811,16 @@
 
     <!-- Line comment editor -->
     {#if commentingOnLines && lineCommentEditorStyle}
-      {@const existingComment = editingCommentId
-        ? findCommentById(comments, editingCommentId)
-        : null}
+      {@const existingComment =
+        activeLineComment ??
+        (editingCommentId ? findCommentById(comments, editingCommentId) : null)}
       <CommentEditor
         top={lineCommentEditorStyle.top}
         left={lineCommentEditorStyle.left}
         width={lineCommentEditorStyle.width}
         visible={lineCommentEditorStyle.visible}
         {existingComment}
+        readOnly={lineCommentReadOnly}
         placeholder="Add a comment on {commentingOnLines.end -
           commentingOnLines.start +
           1} line{commentingOnLines.end !== commentingOnLines.start ? 's' : ''}..."
@@ -1770,7 +1833,7 @@
           }
         }}
         onCancel={handleLineCommentCancel}
-        onDelete={existingComment
+        onDelete={existingComment && !lineCommentReadOnly
           ? () => {
               handleCommentDelete(existingComment.id);
               clearLineSelection();

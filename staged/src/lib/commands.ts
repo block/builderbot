@@ -219,7 +219,7 @@ export function getBranchTimeline(branchId: string): Promise<BranchTimeline> {
 
 export interface ProjectAction {
   id: string;
-  projectId: string;
+  contextId: string;
   name: string;
   command: string;
   actionType: string;
@@ -271,6 +271,44 @@ export function updateProjectAction(
 
 export function deleteProjectAction(actionId: string): Promise<void> {
   return invoke('delete_project_action', { actionId });
+}
+
+export interface ActionContext {
+  id: string;
+  githubRepo: string;
+  subpath: string | null;
+  hasDetectedActions: boolean;
+  detectingActions: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function listActionContexts(): Promise<ActionContext[]> {
+  return invoke('list_action_contexts');
+}
+
+export function listRepoActions(githubRepo: string, subpath?: string): Promise<ProjectAction[]> {
+  return invoke('list_repo_actions', { githubRepo, subpath: subpath ?? null });
+}
+
+export function createRepoAction(
+  githubRepo: string,
+  subpath: string | undefined,
+  name: string,
+  command: string,
+  actionType: string,
+  sortOrder: number,
+  autoCommit: boolean
+): Promise<ProjectAction> {
+  return invoke('create_repo_action', {
+    githubRepo,
+    subpath: subpath ?? null,
+    name,
+    command,
+    actionType,
+    sortOrder,
+    autoCommit,
+  });
 }
 
 // =============================================================================

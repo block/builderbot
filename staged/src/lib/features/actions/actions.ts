@@ -18,7 +18,7 @@ export type ActionStatus = 'running' | 'completed' | 'failed' | 'stopped';
 /** A configured project action. */
 export interface ProjectAction {
   id: string;
-  projectId: string;
+  contextId: string;
   name: string;
   command: string;
   actionType: ActionType;
@@ -70,12 +70,27 @@ export interface ActionAutoCommitEvent {
   actionName: string;
 }
 
+/** Event payload for repo action detection status (header badge). */
+export interface RepoActionsDetectionEvent {
+  githubRepo: string;
+  subpath: string | null;
+  detecting: boolean;
+}
+
 /**
  * Detect available actions from a project's build files using AI.
  * Scans package.json, justfile, Makefile, etc. and suggests relevant actions.
  */
 export function detectProjectActions(projectId: string): Promise<SuggestedAction[]> {
   return invoke<SuggestedAction[]>('detect_project_actions', { projectId });
+}
+
+/** Detect available actions for a repo+subpath context. */
+export function detectRepoActions(
+  githubRepo: string,
+  subpath?: string
+): Promise<SuggestedAction[]> {
+  return invoke<SuggestedAction[]>('detect_repo_actions', { githubRepo, subpath: subpath ?? null });
 }
 
 /**
@@ -121,8 +136,8 @@ export function clearActionExecution(executionId: string): Promise<boolean> {
  * Run all prerun actions for a branch after creation.
  * Returns an array of execution IDs for the started actions.
  */
-export function runPrerunActions(branchId: string, projectId: string): Promise<string[]> {
-  return invoke<string[]>('run_prerun_actions', { branchId, projectId });
+export function runPrerunActions(branchId: string): Promise<string[]> {
+  return invoke<string[]>('run_prerun_actions', { branchId });
 }
 
 /**
@@ -157,6 +172,15 @@ export function listenToActionAutoCommit(
   callback: (event: ActionAutoCommitEvent) => void
 ): Promise<UnlistenFn> {
   return listen<ActionAutoCommitEvent>('action_auto_commit', (event) => {
+    callback(event.payload);
+  });
+}
+
+/** Listen for repo action detection start/stop updates. */
+export function listenToRepoActionsDetection(
+  callback: (event: RepoActionsDetectionEvent) => void
+): Promise<UnlistenFn> {
+  return listen<RepoActionsDetectionEvent>('repo-actions-detection', (event) => {
     callback(event.payload);
   });
 }

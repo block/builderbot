@@ -202,7 +202,7 @@
   // Set up event listeners immediately (synchronously) at module level like old codebase
   // Listen for project actions changes to refresh actions list
   function handleActionsChanged(event: CustomEvent) {
-    if (event.detail?.projectId === branch.projectId) {
+    if (!event.detail?.projectId || event.detail?.projectId === branch.projectId) {
       loadActions();
     }
   }

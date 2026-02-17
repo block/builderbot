@@ -6,7 +6,7 @@
 //! confirmation.
 //!
 //! Tables: schema_version, projects, project_repos, branches, workdirs, commits,
-//! sessions, session_messages, notes, reviews, project_actions.
+//! sessions, session_messages, notes, reviews, action_contexts, repo_actions.
 
 pub mod models;
 
@@ -60,7 +60,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -370,9 +370,21 @@ impl Store {
                 PRIMARY KEY (review_id, path)
             );
 
-            CREATE TABLE IF NOT EXISTS project_actions (
+            CREATE TABLE IF NOT EXISTS action_contexts (
+                id                      TEXT PRIMARY KEY,
+                github_repo             TEXT NOT NULL,
+                subpath                 TEXT,
+                has_detected_actions    INTEGER NOT NULL DEFAULT 0,
+                detecting_actions       INTEGER NOT NULL DEFAULT 0,
+                created_at              INTEGER NOT NULL,
+                updated_at              INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_action_contexts_repo_subpath
+                ON action_contexts(github_repo, COALESCE(subpath, ''));
+
+            CREATE TABLE IF NOT EXISTS repo_actions (
                 id              TEXT PRIMARY KEY,
-                project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                context_id      TEXT NOT NULL REFERENCES action_contexts(id) ON DELETE CASCADE,
                 name            TEXT NOT NULL,
                 command         TEXT NOT NULL,
                 action_type     TEXT NOT NULL,
@@ -381,8 +393,8 @@ impl Store {
                 created_at      INTEGER NOT NULL,
                 updated_at      INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_project_actions_project
-                ON project_actions(project_id);
+            CREATE INDEX IF NOT EXISTS idx_repo_actions_context
+                ON repo_actions(context_id);
 
             -- Session cleanup triggers: when a commit, note, or review is
             -- deleted (directly or via cascade from branch/project deletion),

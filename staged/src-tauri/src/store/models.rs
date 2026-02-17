@@ -625,18 +625,46 @@ impl Note {
 }
 
 // =============================================================================
-// Project Actions
+// Actions
 // =============================================================================
 
 /// Re-export ActionType from builderbot-actions crate as the single source of truth.
 pub use builderbot_actions::ActionType;
 
-/// A configurable project action (build, test, format, etc.).
+/// Durable action context keyed by GitHub repo + optional subpath.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProjectAction {
+pub struct ActionContext {
     pub id: String,
-    pub project_id: String,
+    pub github_repo: String,
+    pub subpath: Option<String>,
+    pub has_detected_actions: bool,
+    pub detecting_actions: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl ActionContext {
+    pub fn new(github_repo: impl Into<String>, subpath: Option<String>) -> Self {
+        let now = now_timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            github_repo: github_repo.into(),
+            subpath,
+            has_detected_actions: false,
+            detecting_actions: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+/// A configurable action (build, test, format, etc.) scoped to a repo context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoAction {
+    pub id: String,
+    pub context_id: String,
     pub name: String,
     pub command: String,
     pub action_type: ActionType,
@@ -646,9 +674,9 @@ pub struct ProjectAction {
     pub updated_at: i64,
 }
 
-impl ProjectAction {
+impl RepoAction {
     pub fn new(
-        project_id: String,
+        context_id: String,
         name: String,
         command: String,
         action_type: ActionType,
@@ -657,7 +685,7 @@ impl ProjectAction {
         let now = now_timestamp();
         Self {
             id: Uuid::new_v4().to_string(),
-            project_id,
+            context_id,
             name,
             command,
             action_type,

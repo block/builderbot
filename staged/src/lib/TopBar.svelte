@@ -5,7 +5,7 @@
   for adding new projects.
 -->
 <script lang="ts">
-  import { House, Palette, Plus } from 'lucide-svelte';
+  import { House, Palette, Plus, SlidersHorizontal } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import ThemeSelectorModal from './features/settings/ThemeSelectorModal.svelte';
   import { navigation, goHome } from './navigation.svelte';
@@ -49,6 +49,14 @@
       title="Select theme"
     >
       <Palette size={14} />
+    </button>
+
+    <button
+      class="icon-btn"
+      onclick={() => window.dispatchEvent(new CustomEvent('staged:open-actions-preferences'))}
+      title="Actions preferences (;)"
+    >
+      <SlidersHorizontal size={14} />
     </button>
 
     {#if showThemeModal}

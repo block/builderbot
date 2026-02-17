@@ -1196,7 +1196,9 @@
     if (
       target.closest('.line-selection-toolbar') ||
       target.closest('.line-comment-editor') ||
-      target.closest('.line')
+      target.closest('.line') ||
+      // Sidebar comment clicks should keep the selected comment bubble open.
+      target.closest('.comment-item')
     ) {
       return;
     }

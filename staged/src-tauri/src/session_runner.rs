@@ -42,7 +42,8 @@ use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
-use crate::store::{MessageRole, SessionStatus, Store};
+use crate::git::Span;
+use crate::store::{Comment, CommentAuthor, MessageRole, SessionStatus, Store};
 
 // =============================================================================
 // Event types
@@ -351,6 +352,35 @@ fn run_post_completion_hooks(
             }
         }
     }
+
+    // --- Review comment extraction ---
+    if let Ok(Some(review)) = store.get_review_by_session(session_id) {
+        if review.comments.is_empty() {
+            if let Ok(messages) = store.get_session_messages(session_id) {
+                let full_text: String = messages
+                    .iter()
+                    .filter(|m| m.role == MessageRole::Assistant)
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let comments = extract_review_comments(&full_text);
+                if comments.is_empty() {
+                    log::warn!("Session {session_id}: review session completed but no review-comments block found");
+                } else {
+                    log::info!(
+                        "Session {session_id}: extracted {} review comments",
+                        comments.len()
+                    );
+                    for comment in comments {
+                        if let Err(e) = store.add_comment(&review.id, &comment) {
+                            log::error!("Failed to add review comment: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Extract note content from assistant output.
@@ -394,6 +424,65 @@ fn extract_note_title(content: &str) -> (String, String) {
     } else {
         (String::new(), content.to_string())
     }
+}
+
+/// Extract review comments from assistant output.
+///
+/// Looks for ```review-comments fenced blocks and parses the JSON array inside.
+/// Each object should have `path`, `span` (with `start` and `end`), and `content`.
+fn extract_review_comments(text: &str) -> Vec<Comment> {
+    let mut comments = Vec::new();
+
+    // Find all ```review-comments blocks
+    let marker_start = "```review-comments";
+    let marker_end = "```";
+
+    let mut search_from = 0;
+    while let Some(start_pos) = text[search_from..].find(marker_start) {
+        let block_start = search_from + start_pos + marker_start.len();
+        // Skip to the next line after the opening marker
+        let json_start = match text[block_start..].find('\n') {
+            Some(pos) => block_start + pos + 1,
+            None => break,
+        };
+
+        // Find the closing ```
+        if let Some(end_pos) = text[json_start..].find(marker_end) {
+            let json_str = &text[json_start..json_start + end_pos];
+
+            // Parse the JSON array
+            if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(json_str.trim()) {
+                for item in parsed {
+                    let path = item.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    let content = item.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    let span_obj = item.get("span");
+                    let start = span_obj
+                        .and_then(|s| s.get("start"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    let end = span_obj
+                        .and_then(|s| s.get("end"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+
+                    if !path.is_empty() && !content.is_empty() {
+                        comments.push(
+                            Comment::new(path, Span::new(start, end), content)
+                                .with_author(CommentAuthor::Agent),
+                        );
+                    }
+                }
+            } else {
+                log::warn!("Failed to parse review-comments JSON block");
+            }
+
+            search_from = json_start + end_pos + marker_end.len();
+        } else {
+            break;
+        }
+    }
+
+    comments
 }
 
 fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Option<String>) {

@@ -24,6 +24,7 @@
     Trash2,
     Copy,
     MessageSquare,
+    Bot,
     CirclePlus,
     CircleMinus,
     CircleArrowUp,
@@ -406,7 +407,13 @@
           style="padding-left: 8px"
           onclick={() => diffViewer.selectFile(comment.path)}
         >
-          <span class="comment-icon"><MessageSquare size={12} /></span>
+          <span class="comment-icon" class:agent-comment={comment.author === 'agent'}>
+            {#if comment.author === 'agent'}
+              <Bot size={12} />
+            {:else}
+              <MessageSquare size={12} />
+            {/if}
+          </span>
           <span class="comment-details">
             <span class="comment-location">
               <span class="comment-file">{getFileName(comment.path)}</span>
@@ -415,13 +422,15 @@
             <span class="comment-preview">{truncateText(comment.content)}</span>
           </span>
         </button>
-        <button
-          class="comment-delete-btn"
-          onclick={(e) => handleDeleteComment(e, comment.id)}
-          title="Delete comment"
-        >
-          <Trash2 size={12} />
-        </button>
+        {#if comment.author !== 'agent'}
+          <button
+            class="comment-delete-btn"
+            onclick={(e) => handleDeleteComment(e, comment.id)}
+            title="Delete comment"
+          >
+            <Trash2 size={12} />
+          </button>
+        {/if}
       </div>
     </li>
   {/each}
@@ -1010,6 +1019,10 @@
     left: 8px;
     top: 8px;
     color: var(--text-faint);
+  }
+
+  .comment-icon.agent-comment {
+    color: var(--status-modified);
   }
 
   .comment-details {

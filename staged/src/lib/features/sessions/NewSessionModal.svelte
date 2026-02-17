@@ -14,7 +14,7 @@
     onStarted     — called with { sessionId, artifactId } on successful start
 -->
 <script lang="ts">
-  import { X, GitCommitHorizontal, FileText, GitBranch, Send } from 'lucide-svelte';
+  import { X, GitCommitHorizontal, FileText, FileSearch, GitBranch, Send } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import type { Branch, BranchSessionType } from '../../types';
   import * as commands from '../../commands';
@@ -41,6 +41,7 @@
   let textareaEl: HTMLTextAreaElement | null = $state(null);
 
   let isCommit = $derived(currentMode === 'commit');
+  let isReview = $derived(currentMode === 'review');
 
   // Seed prompt and mode from props once; caller preserves draft across open/close.
   $effect(() => {
@@ -65,16 +66,20 @@
 
   async function handleSubmit(e?: Event) {
     e?.preventDefault();
-    if (!prompt.trim() || starting) return;
+    // Review mode allows empty prompts; other modes require text
+    if (!isReview && !prompt.trim()) return;
+    if (starting) return;
 
     starting = true;
     error = null;
 
     try {
       const agents = remote ? REMOTE_AGENTS : agentState.providers;
+      const finalPrompt =
+        prompt.trim() || (isReview ? 'Review the code changes on this branch.' : '');
       const result = await commands.startBranchSession(
         branch.id,
-        prompt.trim(),
+        finalPrompt,
         currentMode,
         getPreferredAgent(agents) ?? undefined
       );
@@ -98,7 +103,7 @@
     }
 
     // Cmd+Enter to submit
-    if (e.key === 'Enter' && e.metaKey && prompt.trim() && !starting) {
+    if (e.key === 'Enter' && e.metaKey && (prompt.trim() || isReview) && !starting) {
       e.preventDefault();
       handleSubmit();
     }
@@ -130,7 +135,10 @@
   <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
     <header class="modal-header">
       <div class="header-title">
-        {#if isCommit}
+        {#if isReview}
+          <span class="header-icon review-icon"><FileSearch size={14} /></span>
+          <span>New AI review</span>
+        {:else if isCommit}
           <span class="header-icon commit-icon"><GitCommitHorizontal size={14} /></span>
           <span>New commit</span>
         {:else}
@@ -155,8 +163,12 @@
         <textarea
           bind:this={textareaEl}
           bind:value={prompt}
-          placeholder={isCommit ? 'Describe the change…' : 'Describe the note…'}
-          rows={12}
+          placeholder={isReview
+            ? 'Optional: focus the review on specific areas…'
+            : isCommit
+              ? 'Describe the change…'
+              : 'Describe the note…'}
+          rows={isReview ? 4 : 12}
           disabled={starting}
         ></textarea>
         <span class="hint">⌘ Enter to start</span>
@@ -172,7 +184,11 @@
           <button type="button" class="cancel-btn" onclick={handleClose} disabled={starting}>
             Cancel
           </button>
-          <button type="submit" class="submit-btn" disabled={starting || !prompt.trim()}>
+          <button
+            type="submit"
+            class="submit-btn"
+            disabled={starting || (!isReview && !prompt.trim())}
+          >
             {#if starting}
               <Spinner size={14} />
               Starting…
@@ -246,6 +262,11 @@
   .header-icon.commit-icon {
     background-color: var(--commit-bg);
     color: var(--commit-color);
+  }
+
+  .header-icon.review-icon {
+    background-color: var(--bg-hover);
+    color: var(--status-modified);
   }
 
   .header-icon :global(svg) {

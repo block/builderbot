@@ -296,9 +296,17 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
 
 /// Get the full commit log (with bodies) between base and HEAD.
 ///
-/// Returns a formatted string suitable for inclusion in a prompt, with
-/// commits listed oldest-first. Each entry includes SHA, author, date,
-/// and the full commit message (subject + body).
+/// Returns a formatted string with commits listed oldest-first. Each
+/// record is delimited by `\0` and contains a unix timestamp prefix
+/// separated from the display text by `\x01`:
+///
+/// ```text
+/// \0<unix_ts>\x01commit <sha>\nAuthor: …\nDate: …\n\n<message>\0…
+/// ```
+///
+/// Use [`super::parse_timestamped_log`] (in `session_commands`) to
+/// split this into `(timestamp, display_text)` pairs for timeline
+/// interleaving.
 ///
 /// Uses `merge-base` to find the actual fork point, consistent with
 /// [`get_commits_since_base`].
@@ -307,13 +315,14 @@ pub fn get_full_commit_log(worktree: &Path, base: &str) -> Result<String, GitErr
     let range = format!("{merge_base}..HEAD");
 
     // --reverse gives oldest-first ordering
+    // %x00 = record separator, %x01 = field separator, %ct = unix timestamp
     // %B is the full commit message (subject + body)
     let output = cli::run(
         worktree,
         &[
             "log",
             "--reverse",
-            "--format=commit %H%nAuthor: %an%nDate: %ci%n%n%B",
+            "--format=%x00%ct%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
             &range,
         ],
     )?;

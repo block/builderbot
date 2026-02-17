@@ -254,6 +254,7 @@ pub fn delete_session(
 pub enum BranchSessionType {
     Note,
     Commit,
+    Review,
 }
 
 /// Response from starting a branch session.
@@ -368,6 +369,25 @@ pub fn start_branch_session(
             };
             (commit.id, head_sha)
         }
+        BranchSessionType::Review => {
+            // Get the current tip SHA for the review anchor
+            let tip_sha = if is_remote {
+                blox::ws_exec(
+                    branch.workspace_name.as_deref().unwrap(),
+                    &["git", "rev-parse", "HEAD"],
+                )
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+            } else {
+                git::get_head_sha(&working_dir)
+                    .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
+            };
+
+            let review = store::Review::new(&branch_id, &tip_sha, store::ReviewScope::Branch)
+                .with_session(&session.id);
+            store.create_review(&review).map_err(|e| e.to_string())?;
+            (review.id, None)
+        }
     };
 
     // For remote branches, use the user's UI selection.
@@ -405,27 +425,27 @@ fn build_branch_context(
     store: &Arc<Store>,
     branch_id: &str,
 ) -> String {
-    let mut parts = Vec::new();
+    let mut parts = vec![context_preamble()];
+    let mut timeline: Vec<TimelineEntry> = Vec::new();
+    let mut commit_error = None;
 
-    parts.push(context_preamble());
-
-    // Full commit log from local worktree
+    // Commits from git log
     match git::get_full_commit_log(worktree, base_branch) {
         Ok(log) if !log.trim().is_empty() => {
-            parts.push(format!("## Commit History (oldest first)\n\n{log}"));
+            timeline.extend(parse_timestamped_log(&log));
         }
-        Ok(_) => {
-            parts.push("## Commit History\n\nNo commits on this branch yet.".to_string());
-        }
+        Ok(_) => {}
         Err(e) => {
             log::warn!("Failed to get commit log for branch context: {e}");
-            parts.push(format!("## Commit History\n\n(Error retrieving: {e})"));
+            commit_error = Some(format!("(Error retrieving commit log: {e})"));
         }
     }
 
-    // Notes from DB
-    append_notes_context(&mut parts, store, branch_id, false);
+    // Notes and reviews from DB
+    timeline.extend(note_timeline_entries(store, branch_id, false));
+    timeline.extend(review_timeline_entries(store, branch_id));
 
+    parts.push(render_timeline(timeline, commit_error));
     parts.join("\n\n")
 }
 
@@ -439,9 +459,8 @@ fn build_remote_branch_context(
     store: &Arc<Store>,
     branch_id: &str,
 ) -> String {
-    let mut parts = Vec::new();
-
-    parts.push(context_preamble());
+    let mut parts = vec![context_preamble()];
+    let mut timeline: Vec<TimelineEntry> = Vec::new();
 
     // Full commit log via ws_exec.
     // Use merge-base to find the fork point so that only the branch's own
@@ -461,25 +480,24 @@ fn build_remote_branch_context(
             "git",
             "log",
             "--reverse",
-            "--format=commit %H%nAuthor: %an%nDate: %ci%n%n%B",
+            "--format=%x00%ct%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
             &range,
         ],
     ) {
         Ok(log) if !log.trim().is_empty() => {
-            parts.push(format!("## Commit History (oldest first)\n\n{log}"));
+            timeline.extend(parse_timestamped_log(&log));
         }
-        Ok(_) => {
-            parts.push("## Commit History\n\nNo commits on this branch yet.".to_string());
-        }
+        Ok(_) => {}
         Err(e) => {
             log::warn!("Failed to get remote commit log via ws_exec: {e}");
-            parts.push("## Commit History\n\nNo commits on this branch yet.".to_string());
         }
     }
 
-    // Notes from DB — inline content since remote agent can't access local temp files
-    append_notes_context(&mut parts, store, branch_id, true);
+    // Notes (inlined — remote agent can't access local temp files) and reviews
+    timeline.extend(note_timeline_entries(store, branch_id, true));
+    timeline.extend(review_timeline_entries(store, branch_id));
 
+    parts.push(render_timeline(timeline, None));
     parts.join("\n\n")
 }
 
@@ -492,50 +510,157 @@ fn context_preamble() -> String {
         .to_string()
 }
 
-/// Append notes context from the DB to a parts vector.
+// =============================================================================
+// Chronological timeline helpers
+// =============================================================================
+
+/// A single entry in the branch timeline, sorted by timestamp.
+struct TimelineEntry {
+    timestamp: i64,
+    content: String,
+}
+
+/// Sort timeline entries and render them into a single section.
+fn render_timeline(mut timeline: Vec<TimelineEntry>, error: Option<String>) -> String {
+    if timeline.is_empty() {
+        let mut s = String::from("## Branch History\n\n");
+        if let Some(err) = error {
+            s.push_str(&err);
+        } else {
+            s.push_str("No activity on this branch yet.");
+        }
+        return s;
+    }
+
+    timeline.sort_by_key(|e| e.timestamp);
+
+    let mut section = String::from("## Branch History (oldest first)\n");
+    if let Some(err) = error {
+        section.push_str(&format!("\n{err}\n"));
+    }
+    for entry in &timeline {
+        section.push('\n');
+        section.push_str(&entry.content);
+        section.push('\n');
+    }
+    section
+}
+
+/// Parse a timestamped git log into timeline entries.
 ///
-/// When `is_remote` is true, note content is inlined directly into the prompt
-/// because the remote agent cannot access local temp files. For local branches,
-/// notes are written to temp files and referenced by path so the agent can read
-/// them on demand without bloating the prompt.
-fn append_notes_context(
-    parts: &mut Vec<String>,
+/// Expects the format produced by `--format=%x00%ct%x01commit %H…`:
+/// `\0<unix_ts>\x01<display_text>` per commit.
+fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
+    let mut entries = Vec::new();
+    for record in output.split('\0') {
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        if let Some((ts_str, display)) = record.split_once('\x01') {
+            if let Ok(ts) = ts_str.trim().parse::<i64>() {
+                entries.push(TimelineEntry {
+                    timestamp: ts,
+                    content: display.trim().to_string(),
+                });
+            }
+        }
+    }
+    entries
+}
+
+/// Convert notes from the DB into timeline entries.
+///
+/// When `is_remote` is true, note content is inlined directly because the
+/// remote agent cannot access local temp files. For local branches, notes
+/// are written to temp files and referenced by path.
+fn note_timeline_entries(
     store: &Arc<Store>,
     branch_id: &str,
     is_remote: bool,
-) {
-    match store.list_notes_for_branch(branch_id) {
-        Ok(notes) if !notes.is_empty() => {
-            let mut note_section = String::from("## Notes\n");
-            for note in &notes {
-                if note.content.is_empty() {
-                    continue; // skip notes still generating
-                }
-                if is_remote {
-                    // Inline the content — remote agent can't access local temp files
-                    note_section.push_str(&format!("\n### {}\n\n{}", note.title, note.content));
+) -> Vec<TimelineEntry> {
+    let notes = match store.list_notes_for_branch(branch_id) {
+        Ok(n) => n,
+        Err(e) => {
+            log::warn!("Failed to list notes for branch context: {e}");
+            return Vec::new();
+        }
+    };
+
+    let mut entries = Vec::new();
+    for note in &notes {
+        if note.content.is_empty() {
+            continue; // skip notes still generating
+        }
+        let content = if is_remote {
+            format!("### Note: {}\n\n{}", note.title, note.content)
+        } else {
+            let note_path = std::env::temp_dir().join(format!("staged-note-{}.md", note.id));
+            if let Err(e) = std::fs::write(&note_path, &note.content) {
+                log::warn!("Failed to write note to temp file: {e}");
+                continue;
+            }
+            format!("### Note: {}\n\nSee: `{}`", note.title, note_path.display())
+        };
+        entries.push(TimelineEntry {
+            timestamp: note.created_at,
+            content,
+        });
+    }
+    entries
+}
+
+/// Convert code reviews (with comments) from the DB into timeline entries.
+fn review_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEntry> {
+    let reviews = match store.list_reviews_for_branch(branch_id) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("Failed to list reviews for branch context: {e}");
+            return Vec::new();
+        }
+    };
+
+    let mut entries = Vec::new();
+    for review in &reviews {
+        if review.comments.is_empty() {
+            continue;
+        }
+        let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];
+        let mut content = format!(
+            "### Code Review of {} ({} scope)\n",
+            short_sha,
+            review.scope.as_str(),
+        );
+
+        // Group comments by file path
+        let mut by_path: std::collections::BTreeMap<&str, Vec<&crate::store::models::Comment>> =
+            std::collections::BTreeMap::new();
+        for comment in &review.comments {
+            by_path.entry(&comment.path).or_default().push(comment);
+        }
+
+        for (path, comments) in &by_path {
+            for comment in comments {
+                if comment.span.start == comment.span.end {
+                    content.push_str(&format!(
+                        "\n- **{}** (line {}): {}",
+                        path, comment.span.start, comment.content,
+                    ));
                 } else {
-                    // Write note to a temp file so the agent can read it if needed
-                    let note_path =
-                        std::env::temp_dir().join(format!("staged-note-{}.md", note.id));
-                    if let Err(e) = std::fs::write(&note_path, &note.content) {
-                        log::warn!("Failed to write note to temp file: {e}");
-                        continue;
-                    }
-                    note_section.push_str(&format!(
-                        "\n- **{}** — `{}`",
-                        note.title,
-                        note_path.display()
+                    content.push_str(&format!(
+                        "\n- **{}** (lines {}–{}): {}",
+                        path, comment.span.start, comment.span.end, comment.content,
                     ));
                 }
             }
-            parts.push(note_section);
         }
-        Ok(_) => {} // no notes, skip section
-        Err(e) => {
-            log::warn!("Failed to list notes for branch context: {e}");
-        }
+
+        entries.push(TimelineEntry {
+            timestamp: review.created_at,
+            content,
+        });
     }
+    entries
 }
 
 /// Assemble the full prompt from action tag + branch context + user prompt.
@@ -564,6 +689,33 @@ The user is requesting you make a commit based on the prompt below. Make the nec
 code changes, following any verification or formatting steps as instructed, and then \
 create a commit with a conventional commit message. This commit should describe what \
 was requested and how it was fulfilled.
+</action>"
+        }
+        BranchSessionType::Review => {
+            "\
+<action>
+The user is requesting an AI code review of the current branch.
+
+Review the code changes on this branch by running `git diff $(git merge-base origin/HEAD HEAD)..HEAD` \
+(or the appropriate base branch) and provide feedback as structured comments. \
+Focus on: correctness, potential bugs, readability, and adherence to best practices.
+
+Do NOT create any commits or modify any files.
+
+Return your review as a JSON block fenced with ```review-comments markers:
+
+```review-comments
+[
+  {
+    \"path\": \"src/foo.ts\",
+    \"span\": { \"start\": 10, \"end\": 15 },
+    \"content\": \"This function doesn't handle the null case...\"
+  }
+]
+```
+
+The `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end). \
+Only comment on changed files. Be specific and actionable.
 </action>"
         }
     };

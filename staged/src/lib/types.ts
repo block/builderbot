@@ -136,7 +136,7 @@ export interface SessionMessage {
 // Branch sessions
 // =============================================================================
 
-export type BranchSessionType = 'note' | 'commit';
+export type BranchSessionType = 'note' | 'commit' | 'review';
 
 export interface BranchSessionResponse {
   sessionId: string;
@@ -212,12 +212,16 @@ export interface DiffFilesResponse {
 // Review types
 // =============================================================================
 
+/** Who authored a comment. */
+export type CommentAuthor = 'user' | 'agent';
+
 /** A comment attached to a specific location in a file. */
 export interface Comment {
   id: string;
   path: string;
   span: Span;
   content: string;
+  author: CommentAuthor;
   createdAt: number;
 }
 

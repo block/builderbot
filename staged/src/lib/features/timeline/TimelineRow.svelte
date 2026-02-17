@@ -22,7 +22,9 @@
     | 'note'
     | 'generating-note'
     | 'failed-note'
-    | 'review';
+    | 'review'
+    | 'generating-review'
+    | 'failed-review';
 
   interface Props {
     type: TimelineItemType;
@@ -52,8 +54,15 @@
   }: Props = $props();
 
   let isNote = $derived(type === 'note' || type === 'generating-note' || type === 'failed-note');
-  let isPending = $derived(type === 'pending-commit' || type === 'generating-note');
-  let isFailed = $derived(type === 'failed-commit' || type === 'failed-note');
+  let isReview = $derived(
+    type === 'review' || type === 'generating-review' || type === 'failed-review'
+  );
+  let isPending = $derived(
+    type === 'pending-commit' || type === 'generating-note' || type === 'generating-review'
+  );
+  let isFailed = $derived(
+    type === 'failed-commit' || type === 'failed-note' || type === 'failed-review'
+  );
   let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
   let hasSession = $derived(!!sessionId);
 
@@ -90,7 +99,7 @@
       class="timeline-icon"
       class:commit-icon={type === 'commit' || type === 'pending-commit'}
       class:note-icon={type === 'note' || type === 'generating-note'}
-      class:review-icon={type === 'review'}
+      class:review-icon={type === 'review' || type === 'generating-review'}
       class:failed-icon={isFailed}
     >
       {#if isPending}
@@ -101,7 +110,7 @@
         <GitCommit size={12} />
       {:else if isNote}
         <FileText size={12} />
-      {:else if type === 'review'}
+      {:else if isReview}
         <FileSearch size={12} />
       {/if}
     </div>
@@ -242,6 +251,15 @@
 
   .timeline-row.pending .timeline-icon.note-icon :global(.spinner) {
     color: var(--note-color);
+  }
+
+  .timeline-row.pending .timeline-icon.review-icon {
+    background-color: var(--bg-elevated);
+    border-color: transparent;
+  }
+
+  .timeline-row.pending .timeline-icon.review-icon :global(.spinner) {
+    color: var(--status-modified);
   }
 
   .timeline-icon.failed-icon {

@@ -96,11 +96,12 @@
   let prStatusRefreshing = $state(false);
 
   // PR status fields (local state, updated via events)
-  let prStatusState = $state<string | null>(branch.prState);
-  let prStatusChecks = $state<string | null>(branch.prChecksStatus);
-  let prStatusReviewDecision = $state<string | null>(branch.prReviewDecision);
-  let prStatusMergeable = $state<boolean | null>(branch.prMergeable);
-  let prStatusDraft = $state<boolean | null>(branch.prDraft);
+  // Initialize to null, $effect will sync with branch prop
+  let prStatusState = $state<string | null>(null);
+  let prStatusChecks = $state<string | null>(null);
+  let prStatusReviewDecision = $state<string | null>(null);
+  let prStatusMergeable = $state<boolean | null>(null);
+  let prStatusDraft = $state<boolean | null>(null);
 
   // Sync local PR status state when branch prop changes
   $effect(() => {

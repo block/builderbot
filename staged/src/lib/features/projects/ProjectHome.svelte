@@ -8,17 +8,19 @@
   import { onMount } from 'svelte';
   import { ArrowLeft } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { Project, Branch, StoreIncompatibility, WorkspaceStatus } from '../../types';
   import * as commands from '../../commands';
   import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, selectProject } from '../../navigation.svelte';
+  import { goHome, selectProject, navigation } from '../../navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import { alerts } from '../../shared/alerts.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -81,9 +83,25 @@
       unlistenDetection = unlisten;
     });
 
+    // Listen for session status changes globally to mark projects as unread
+    let unlistenSessionStatus: UnlistenFn | null = null;
+    listen<{
+      sessionId: string;
+      status: string;
+    }>('session-status-changed', (event) => {
+      const { sessionId, status } = event.payload;
+      if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        // Handle session completion - mark project as unread if user is not viewing it
+        projectStateStore.handleSessionComplete(sessionId, navigation.selectedProjectId);
+      }
+    }).then((unlisten) => {
+      unlistenSessionStatus = unlisten;
+    });
+
     return () => {
       window.removeEventListener('staged:new-project', onNewProject);
       unlistenDetection?.();
+      unlistenSessionStatus?.();
     };
   });
 

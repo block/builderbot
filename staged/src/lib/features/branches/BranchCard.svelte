@@ -75,6 +75,7 @@
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import { alerts } from '../../shared/alerts.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
 
   interface Props {
     branch: Branch;
@@ -777,7 +778,9 @@
     showNewSession = false;
   }
 
-  function handleNewSessionStarted(_result: { sessionId: string; artifactId: string }) {
+  function handleNewSessionStarted(result: { sessionId: string; artifactId: string }) {
+    // Track the running session in the project state store
+    projectStateStore.addRunningSession(branch.projectId, result.sessionId);
     showNewSession = false;
     draftPrompt = '';
     loadTimeline();
@@ -924,6 +927,8 @@
       prStateOverride = 'creating';
       // Store the creating state globally
       prStateStore.setPrCreating(branch.id, sessionId);
+      // Track the running session in the project state store
+      projectStateStore.addRunningSession(branch.projectId, sessionId);
       // The session-status-changed listener will handle completion
     } catch (e) {
       prStateOverride = 'error';
@@ -1000,6 +1005,8 @@
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.pushBranch(branch.id, provider, force);
       pushSessionId = sessionId;
+      // Track the running session in the project state store
+      projectStateStore.addRunningSession(branch.projectId, sessionId);
       // The session-status-changed listener will handle completion
     } catch (e) {
       pushStateOverride = 'error';

@@ -5,7 +5,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { FolderGit2 } from 'lucide-svelte';
+  import { FolderGit2, Loader2 } from 'lucide-svelte';
   import type { Project } from '../../types';
   import * as commands from '../../commands';
   import { projectDisplayName } from '../../shared/utils';
@@ -13,6 +13,7 @@
   import NewProjectModal from './NewProjectModal.svelte';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
 
   let projects = $state<Project[]>([]);
   let loading = $state(true);
@@ -199,6 +200,13 @@
                 <span class="command-icon">⌘</span>
                 <span class="number">{index + 1}</span>
               </div>
+            {/if}
+            {#if projectStateStore.hasRunningSessions(project.id)}
+              <div class="status-indicator spinner">
+                <Loader2 size={14} class="spin" />
+              </div>
+            {:else if projectStateStore.isUnread(project.id)}
+              <div class="status-indicator unread-dot"></div>
             {/if}
             <div class="card-header">
               <FolderGit2 size={16} />
@@ -474,5 +482,36 @@
   .keyboard-shortcut-overlay .number {
     font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
     color: var(--ui-accent);
+  }
+
+  .status-indicator {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 5;
+  }
+
+  .status-indicator.spinner {
+    color: var(--ui-accent);
+  }
+
+  .status-indicator.spinner :global(.spin) {
+    animation: spin 1s linear infinite;
+  }
+
+  .status-indicator.unread-dot {
+    width: 8px;
+    height: 8px;
+    background-color: var(--ui-accent);
+    border-radius: 50%;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 </style>

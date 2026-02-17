@@ -41,6 +41,7 @@
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import { formatBaseBranch } from './branchCardHelpers';
   import { alerts } from '../../shared/alerts.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
 
   interface Props {
     branch: Branch;
@@ -305,7 +306,9 @@
     showNewSession = false;
   }
 
-  function handleNewSessionStarted(_result: { sessionId: string; artifactId: string }) {
+  function handleNewSessionStarted(result: { sessionId: string; artifactId: string }) {
+    // Track the running session in the project state store
+    projectStateStore.addRunningSession(branch.projectId, result.sessionId);
     showNewSession = false;
     draftPrompt = '';
     loadTimeline();

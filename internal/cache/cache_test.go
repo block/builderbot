@@ -115,6 +115,79 @@ func TestScanProjectSources_ClassifiesFiles(t *testing.T) {
 	}
 }
 
+func TestScanProjectSources_DedupsOverlappingSources(t *testing.T) {
+	tmpDir := t.TempDir()
+	projectPath := tmpDir
+
+	// Create thoughts/ structure
+	thoughtsPath := filepath.Join(projectPath, "thoughts")
+	os.MkdirAll(filepath.Join(thoughtsPath, "plans"), 0755)
+	os.WriteFile(filepath.Join(thoughtsPath, "plans", "foo.md"), []byte("# Plan"), 0644)
+	os.WriteFile(filepath.Join(thoughtsPath, "notes.md"), []byte("# Notes"), 0644)
+
+	// Also create a non-thoughts markdown file at the project root
+	os.WriteFile(filepath.Join(projectPath, "README.md"), []byte("# README"), 0644)
+
+	// Project with auto-detected thoughts/ source AND a manual "." tree source
+	project := &discovery.Project{
+		Name: "test-project",
+		Path: projectPath,
+		Sources: []discovery.FileSource{
+			{
+				Name:           "thoughts",
+				Type:           "tree",
+				SourceTypeName: "thoughts",
+				RootPath:       thoughtsPath,
+				Auto:           true,
+			},
+			{
+				Name:           ".",
+				Type:           "tree",
+				SourceTypeName: "manual",
+				RootPath:       projectPath,
+				Auto:           false,
+			},
+		},
+	}
+
+	files := scanProjectSources(project)
+
+	// Should have exactly 3 unique files (no duplicates from overlapping sources)
+	if len(files) != 3 {
+		t.Fatalf("Expected 3 files, got %d", len(files))
+	}
+
+	// Count occurrences of each FullPath
+	pathCounts := make(map[string]int)
+	pathSource := make(map[string]string)
+	for _, f := range files {
+		pathCounts[f.FullPath]++
+		if _, ok := pathSource[f.FullPath]; !ok {
+			pathSource[f.FullPath] = f.Source
+		}
+	}
+
+	// No file should appear more than once
+	for path, count := range pathCounts {
+		if count > 1 {
+			t.Errorf("File %q appears %d times, want 1", path, count)
+		}
+	}
+
+	// Both thoughts files should be owned by "thoughts" source, not "."
+	if src := pathSource["thoughts/plans/foo.md"]; src != "thoughts" {
+		t.Errorf("thoughts/plans/foo.md should be source %q, got %q", "thoughts", src)
+	}
+	if src := pathSource["thoughts/notes.md"]; src != "thoughts" {
+		t.Errorf("thoughts/notes.md should be source %q, got %q", "thoughts", src)
+	}
+
+	// README.md should still appear (owned by "." source)
+	if _, ok := pathCounts["README.md"]; !ok {
+		t.Error("README.md should be present from the '.' source")
+	}
+}
+
 func TestCache_FindFile(t *testing.T) {
 	c := New()
 	projectName := "test/project"

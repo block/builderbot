@@ -263,9 +263,13 @@ func (c *Cache) RescanWith(projects []discovery.Project) {
 	c.RefreshAllProjects()
 }
 
-// scanProjectSources scans all sources of a project for markdown files
+// scanProjectSources scans all sources of a project for markdown files.
+// Files are de-duplicated by project-relative path: if multiple sources cover
+// the same file, only the first source's entry is kept. This means auto-detected
+// sources (which come first) take priority over manual ones.
 func scanProjectSources(project *discovery.Project) []FileInfo {
 	var files []FileInfo
+	seen := make(map[string]bool) // project-relative paths already claimed
 
 	for _, source := range project.Sources {
 		if source.Type == "thoughts" || source.Type == "tree" {
@@ -279,6 +283,10 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				}
 				relToSource, _ := filepath.Rel(rootPath, path)
 				relToProject, _ := filepath.Rel(project.Path, path)
+
+				if seen[relToProject] {
+					return nil // already claimed by an earlier source
+				}
 
 				fileType := "other"
 				st := discovery.GetSourceType(source.Name)
@@ -295,6 +303,7 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					}
 				}
 
+				seen[relToProject] = true
 				files = append(files, FileInfo{
 					Project:     project.QualifiedName(),
 					Workspace:   project.WorkspaceName,
@@ -318,6 +327,10 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				}
 				relToProject, _ := filepath.Rel(project.Path, filePath)
 
+				if seen[relToProject] {
+					continue // already claimed by an earlier source
+				}
+
 				fileType := "other"
 				lower := strings.ToLower(filepath.Base(filePath))
 				if strings.Contains(lower, "research") {
@@ -326,6 +339,7 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					fileType = "plan"
 				}
 
+				seen[relToProject] = true
 				files = append(files, FileInfo{
 					Project:     project.QualifiedName(),
 					Workspace:   project.WorkspaceName,

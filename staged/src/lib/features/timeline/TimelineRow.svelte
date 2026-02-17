@@ -233,6 +233,8 @@
 
   .timeline-icon.review-icon {
     color: var(--review-color);
+    background-color: var(--review-bg);
+    border-color: transparent;
   }
 
   .timeline-row.pending .timeline-icon.commit-icon {

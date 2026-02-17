@@ -238,11 +238,45 @@ func (s *Server) routes() {
 	// Publish to Blockcell
 	s.mux.HandleFunc("/api/publish", s.handlePublish)
 	s.mux.HandleFunc("/api/publish-state", s.handlePublishState)
+	// Static assets embedded in the templates package
+	s.mux.HandleFunc("/static/", s.handleStatic)
 	// MCP (Model Context Protocol) endpoint
 	if s.mcpHandler != nil {
 		s.mux.Handle("/mcp", s.mcpHandler)
 		s.mux.Handle("/mcp/", s.mcpHandler)
 	}
+}
+
+// handleStatic serves embedded static assets (JS, CSS) from the templates package.
+func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/static/")
+	if name == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Sanitize: only allow a bare filename (no slashes, no traversal).
+	if strings.ContainsAny(name, "/\\") || name == "." || name == ".." || strings.Contains(name, "..") {
+		http.NotFound(w, r)
+		return
+	}
+
+	// In dev mode, serve from disk for live reload
+	if s.templateDir != "" {
+		http.ServeFile(w, r, filepath.Join(s.templateDir, name))
+		return
+	}
+
+	data, err := templates.FS.ReadFile(name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.HasSuffix(name, ".js") {
+		w.Header().Set("Content-Type", "application/javascript")
+	}
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Write(data)
 }
 
 // NavData provides the sidebar with workspace/project links on every page.

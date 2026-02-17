@@ -131,8 +131,15 @@ fmt:
     go fmt ./...
 
 # Run tests
-test:
+test: test-go test-js
+
+# Run Go tests
+test-go:
     go test ./...
+
+# Run JavaScript tests
+test-js:
+    node --test js/*_test.js
 
 # Tidy dependencies
 tidy:

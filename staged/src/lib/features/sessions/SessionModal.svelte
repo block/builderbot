@@ -50,6 +50,7 @@
     handleExternalLinkClick,
     resumeSession,
   } from '../../commands';
+  import { formatToolArgs, formatToolName, hasXmlBlocks } from './sessionModalHelpers';
 
   // Configure marked
   marked.setOptions({ breaks: true, gfm: true });
@@ -374,11 +375,6 @@
     return segments;
   }
 
-  /** Check if content has XML-tagged blocks. */
-  function hasXmlBlocks(content: string): boolean {
-    return /<(action|branch-history)>/.test(content);
-  }
-
   /** Track which XML blocks are expanded */
   let expandedXmlBlocks = $state<Set<string>>(new Set());
 
@@ -403,46 +399,6 @@
     if (e.target === e.currentTarget) {
       onClose();
     }
-  }
-
-  /** Parse tool call content — returns { name, args } or null */
-  function parseToolCall(content: string): { name: string; args: Record<string, unknown> } | null {
-    try {
-      const parsed = JSON.parse(content);
-      if (parsed.name) {
-        return {
-          name: parsed.name,
-          args: parsed.arguments || parsed.args || parsed.input || {},
-        };
-      }
-    } catch {
-      // not JSON
-    }
-    return null;
-  }
-
-  /** Format tool call name for display */
-  function formatToolName(content: string): string {
-    const parsed = parseToolCall(content);
-    if (parsed) return parsed.name;
-    // Fallback: use content as title
-    if (content.length > 60) return content.slice(0, 60) + '…';
-    return content;
-  }
-
-  /** Format tool call args as a compact preview */
-  function formatToolArgs(content: string): string {
-    const parsed = parseToolCall(content);
-    if (!parsed || !parsed.args) return '';
-    const entries = Object.entries(parsed.args);
-    if (entries.length === 0) return '';
-    return entries
-      .map(([key, value]) => {
-        let v = typeof value === 'string' ? value : JSON.stringify(value);
-        if (v.length > 80) v = v.slice(0, 77) + '…';
-        return `${key}: ${v}`;
-      })
-      .join(', ');
   }
 
   /** Group consecutive tool_call / tool_result messages into pairs */

@@ -56,6 +56,20 @@
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
   import { runBranchAction, type ActionStatusEvent } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
+  import {
+    extractPrNumber,
+    extractPrUrl,
+    fileNameFromPath,
+    formatBaseBranch,
+    getPrimaryActionExecution,
+    getPrimaryRunAction,
+    getActionTypeLabel,
+    getRemainingRunActions,
+    getSecondaryRunningActions,
+    groupActionsByType,
+    isPushRejectedNonFastForward,
+    isTextFile,
+  } from './branchCardHelpers';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
 
@@ -501,31 +515,17 @@
 
   // Group actions by type
   let groupedActions = $derived.by(() => {
-    const groups: Record<string, ProjectAction[]> = {
-      prerun: [],
-      run: [],
-      build: [],
-      format: [],
-      check: [],
-      test: [],
-      cleanUp: [],
-    };
-    for (const action of actions) {
-      if (groups[action.actionType]) {
-        groups[action.actionType].push(action);
-      }
-    }
-    return groups;
+    return groupActionsByType(actions);
   });
 
   // Get the primary run action (first run action)
   let primaryRunAction = $derived.by(() => {
-    return groupedActions.run[0] ?? null;
+    return getPrimaryRunAction(groupedActions);
   });
 
   // Get remaining run actions (excluding the primary one)
   let remainingRunActions = $derived.by(() => {
-    return groupedActions.run.slice(1);
+    return getRemainingRunActions(groupedActions);
   });
 
   // Actions submenu handlers
@@ -578,14 +578,12 @@
 
   // Track the primary action's execution status
   let primaryActionExecution = $derived.by(() => {
-    if (!primaryRunAction) return null;
-    return runningActions.find((a) => a.actionId === primaryRunAction.id) ?? null;
+    return getPrimaryActionExecution(runningActions, primaryRunAction?.id ?? null);
   });
 
   // Filter running actions to exclude the primary action
   let secondaryRunningActions = $derived.by(() => {
-    if (!primaryRunAction) return runningActions;
-    return runningActions.filter((a) => a.actionId !== primaryRunAction.id);
+    return getSecondaryRunningActions(runningActions, primaryRunAction?.id ?? null);
   });
 
   async function handleRunAction(action: ProjectAction) {
@@ -668,31 +666,6 @@
       default:
         return Wrench;
     }
-  }
-
-  function getActionTypeLabel(actionType: string): string {
-    switch (actionType) {
-      case 'prerun':
-        return 'Prerun';
-      case 'run':
-        return 'Run';
-      case 'build':
-        return 'Build';
-      case 'format':
-        return 'Format';
-      case 'check':
-        return 'Check';
-      case 'test':
-        return 'Test';
-      case 'cleanUp':
-        return 'Clean Up';
-      default:
-        return 'Action';
-    }
-  }
-
-  function formatBaseBranch(baseBranch: string): string {
-    return baseBranch.replace(/^origin\//, '');
   }
 
   // =========================================================================
@@ -898,29 +871,6 @@
    *  2. Fall back to any GitHub PR URL (`/pull/\d+`) found in any message
    *     role, which covers `gh pr create` output stored as a tool_result.
    */
-  function extractPrUrl(messages: { content: string; role: string }[]): string | null {
-    // Pass 1: explicit PR_URL marker (highest confidence)
-    for (const msg of messages) {
-      if (msg.role !== 'assistant' && msg.role !== 'tool_result') continue;
-      const markerMatch = msg.content.match(/PR_URL:\s*(https?:\/\/\S+)/);
-      if (markerMatch) return markerMatch[1];
-    }
-    // Pass 2: any GitHub PR URL in any message
-    for (const msg of messages) {
-      const ghMatch = msg.content.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
-      if (ghMatch) return ghMatch[0];
-    }
-    return null;
-  }
-
-  /**
-   * Extract the PR number from a GitHub PR URL.
-   */
-  function extractPrNumber(url: string): number | null {
-    const match = url.match(/\/pull\/(\d+)/);
-    return match ? parseInt(match[1], 10) : null;
-  }
-
   async function handleCreatePr() {
     if (prState === 'creating') return;
 
@@ -988,14 +938,6 @@
    * marker in the prompt instructions (user messages) which tell the agent
    * what to output on rejection.
    */
-  function isPushRejectedNonFastForward(messages: { content: string; role: string }[]): boolean {
-    return messages.some(
-      (msg) =>
-        (msg.role === 'assistant' || msg.role === 'tool_result') &&
-        msg.content.includes('PUSH_REJECTED: NON_FAST_FORWARD')
-    );
-  }
-
   async function handlePush(force = false) {
     if (pushState === 'pushing') return;
 
@@ -1137,20 +1079,6 @@
 
   /** Pending note placeholders shown in the timeline while files are being added. */
   let pendingDropNotes = $state<{ key: string; title: string }[]>([]);
-
-  /** Text-file extensions we accept for note creation. */
-  const TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.text', '.rst', '.org', '.adoc'];
-
-  function isTextFile(filePath: string): boolean {
-    const lower = filePath.toLowerCase();
-    return TEXT_EXTENSIONS.some((ext) => lower.endsWith(ext));
-  }
-
-  function fileNameFromPath(filePath: string): string {
-    const parts = filePath.split('/');
-    const name = parts[parts.length - 1] || filePath;
-    return name.replace(/\.[^.]+$/, '');
-  }
 
   function handleFileDrop(paths: string[]) {
     const textPaths = paths.filter(isTextFile);

@@ -20,7 +20,6 @@
     ChevronRight,
     ChevronDown,
     Folder,
-    Eye,
     MessageSquare,
     CirclePlus,
     CircleMinus,
@@ -29,6 +28,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import DiffViewer from './DiffViewer.svelte';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
+  import DiffReferenceSection from './DiffReferenceSection.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
   import type { Span } from '../../types';
@@ -373,50 +373,12 @@
                 </ul>
               {/if}
 
-              <!-- Reference Files section -->
-              <div class="section-header">
-                <div class="section-left"></div>
-                <div class="section-divider">
-                  <span class="divider-label">REFERENCE</span>
-                  {#if (reviewHandle?.state.referenceFiles.length ?? 0) > 0}
-                    <span class="count-capsule">{reviewHandle?.state.referenceFiles.length}</span>
-                  {/if}
-                </div>
-                <div class="section-right">
-                  <!-- TODO: wire up add reference file modal -->
-                </div>
-              </div>
-              {#if (reviewHandle?.state.referenceFiles.length ?? 0) > 0}
-                <ul class="tree-section reference-section">
-                  {#each reviewHandle!.state.referenceFiles as refFile (refFile.path)}
-                    <li class="tree-item-wrapper">
-                      <div
-                        class="tree-item file-item reference-item"
-                        class:selected={diffViewer.state.selectedFile === refFile.path}
-                        style="padding-left: 8px"
-                        role="button"
-                        tabindex="0"
-                        onclick={() => diffViewer.selectFile(refFile.path)}
-                        onkeydown={(e) => e.key === 'Enter' && diffViewer.selectFile(refFile.path)}
-                        title={refFile.path}
-                      >
-                        <span class="reference-icon"><Eye size={16} /></span>
-                        <span class="file-name truncate-start">{refFile.path}</span>
-                        <button
-                          class="remove-btn"
-                          onclick={(e) => {
-                            e.stopPropagation();
-                            handleRemoveReferenceFile(refFile.path);
-                          }}
-                          title="Remove reference file"
-                        >
-                          <X size={12} />
-                        </button>
-                      </div>
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
+              <DiffReferenceSection
+                referenceFiles={reviewHandle?.state.referenceFiles ?? []}
+                selectedFile={diffViewer.state.selectedFile}
+                onSelectFile={(path) => diffViewer.selectFile(path)}
+                onRemoveReferenceFile={handleRemoveReferenceFile}
+              />
 
               <DiffCommentsSection
                 comments={currentComments}
@@ -765,54 +727,6 @@
     flex-shrink: 0;
     margin-left: auto;
     padding-left: 4px;
-  }
-
-  /* ========================================================================
-   * Reference files section
-   * ====================================================================== */
-
-  .reference-section {
-    opacity: 0.85;
-  }
-
-  .reference-item {
-    position: relative;
-  }
-
-  .reference-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    color: var(--text-muted);
-  }
-
-  .remove-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2px;
-    background: none;
-    border: none;
-    border-radius: 3px;
-    color: var(--text-faint);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity 0.1s,
-      background-color 0.1s,
-      color 0.1s;
-    margin-left: auto;
-    flex-shrink: 0;
-  }
-
-  .reference-item:hover .remove-btn {
-    opacity: 1;
-  }
-
-  .remove-btn:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
   }
 
   /* ========================================================================

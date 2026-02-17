@@ -35,5 +35,8 @@
     "marked": "^17.0.1",
     "sanitize-html": "^2.17.0",
     "shiki": "^3.20.0"
+  },
+  "overrides": {
+    "ajv": "8.18.0"
   }
 }

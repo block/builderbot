@@ -753,61 +753,63 @@ fn test_notes() {
 }
 
 // =============================================================================
-// Project Actions
+// Repo Actions
 // =============================================================================
 
 #[test]
-fn test_project_actions() {
+fn test_repo_actions() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("test-owner/test-repo");
-    store.create_project(&project).unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
 
-    let action = ProjectAction::new(
-        project.id.clone(),
+    let action = RepoAction::new(
+        context.id.clone(),
         "Build".to_string(),
         "cargo build".to_string(),
         ActionType::Build,
         0,
     );
-    store.create_project_action(&action).unwrap();
+    store.create_repo_action(&action).unwrap();
 
-    let actions = store.list_project_actions(&project.id).unwrap();
+    let actions = store.list_repo_actions(&context.id).unwrap();
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0].name, "Build");
 
-    store.delete_project_action(&action.id).unwrap();
-    assert!(store.list_project_actions(&project.id).unwrap().is_empty());
+    store.delete_repo_action(&action.id).unwrap();
+    assert!(store.list_repo_actions(&context.id).unwrap().is_empty());
 }
 
 #[test]
 fn test_reorder_actions() {
     let store = Store::in_memory().unwrap();
-    let project = Project::new("test-owner/test-repo");
-    store.create_project(&project).unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
 
-    let a1 = ProjectAction::new(
-        project.id.clone(),
+    let a1 = RepoAction::new(
+        context.id.clone(),
         "A".to_string(),
         "a".to_string(),
         ActionType::Build,
         0,
     );
-    let a2 = ProjectAction::new(
-        project.id.clone(),
+    let a2 = RepoAction::new(
+        context.id.clone(),
         "B".to_string(),
         "b".to_string(),
         ActionType::Test,
         1,
     );
-    store.create_project_action(&a1).unwrap();
-    store.create_project_action(&a2).unwrap();
+    store.create_repo_action(&a1).unwrap();
+    store.create_repo_action(&a2).unwrap();
 
     // Reverse order
     store
-        .reorder_project_actions(&[a2.id.clone(), a1.id.clone()])
+        .reorder_repo_actions(&[a2.id.clone(), a1.id.clone()])
         .unwrap();
 
-    let actions = store.list_project_actions(&project.id).unwrap();
+    let actions = store.list_repo_actions(&context.id).unwrap();
     assert_eq!(actions[0].name, "B");
     assert_eq!(actions[1].name, "A");
 }

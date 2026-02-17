@@ -10,7 +10,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import type { Project, Branch, StoreIncompatibility } from '../../types';
   import * as commands from '../../commands';
-  import { runPrerunActions } from '../actions/actions';
+  import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome, selectProject } from '../../navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
@@ -59,7 +59,31 @@
 
     const onNewProject = () => handleNewProject();
     window.addEventListener('staged:new-project', onNewProject);
-    return () => window.removeEventListener('staged:new-project', onNewProject);
+
+    let unlistenDetection: (() => void) | null = null;
+    listenToRepoActionsDetection((event) => {
+      const matchingProjectIds = projects
+        .filter((p) => p.githubRepo === event.githubRepo && p.subpath === event.subpath)
+        .map((p) => p.id);
+      if (matchingProjectIds.length === 0) return;
+
+      const next = new Set(detectingProjectIds);
+      for (const projectId of matchingProjectIds) {
+        if (event.detecting) {
+          next.add(projectId);
+        } else {
+          next.delete(projectId);
+        }
+      }
+      detectingProjectIds = next;
+    }).then((unlisten) => {
+      unlistenDetection = unlisten;
+    });
+
+    return () => {
+      window.removeEventListener('staged:new-project', onNewProject);
+      unlistenDetection?.();
+    };
   });
 
   async function checkStoreAndLoad() {
@@ -112,6 +136,20 @@
       );
       branchesByProject = branchMap;
       kickOffPendingBranchSetup(branchMap);
+
+      const contexts = await commands.listActionContexts();
+      detectingProjectIds = new Set(
+        projectList
+          .filter((project) =>
+            contexts.some(
+              (context) =>
+                context.detectingActions &&
+                context.githubRepo === project.githubRepo &&
+                context.subpath === project.subpath
+            )
+          )
+          .map((project) => project.id)
+      );
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -148,16 +186,6 @@
     startInitialBranchSetup(project.id, branches);
     showNewProjectModal = false;
     selectProject(project.id);
-  }
-
-  function handleProjectDetecting(projectId: string, detecting: boolean) {
-    if (detecting) {
-      detectingProjectIds = new Set([...detectingProjectIds, projectId]);
-    } else {
-      const next = new Set(detectingProjectIds);
-      next.delete(projectId);
-      detectingProjectIds = next;
-    }
   }
 
   function handleDeleteProjectRequest(project: Project) {
@@ -291,7 +319,7 @@
 
       // Now that the worktree exists, run prerun actions
       setTimeout(() => {
-        runPrerunActions(branchId, projectId).catch((e) => {
+        runPrerunActions(branchId).catch((e) => {
           console.error('[ProjectHome] Failed to run prerun actions:', e);
         });
       }, 150);
@@ -489,11 +517,7 @@
 
 <!-- New project modal -->
 {#if showNewProjectModal}
-  <NewProjectModal
-    onCreated={handleProjectCreated}
-    onDetecting={handleProjectDetecting}
-    onClose={() => (showNewProjectModal = false)}
-  />
+  <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
 {/if}
 
 {#if showRepoPicker}

@@ -56,7 +56,7 @@
       {#if detecting}
         <div class="detecting-status">
           <Loader2 size={12} class="spinner" />
-          <span>Detecting actions...</span>
+          <span>Detecting actions</span>
         </div>
       {/if}
     </div>
@@ -151,15 +151,19 @@
   }
 
   .detecting-status {
+    height: 22px;
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-left: 12px;
-    padding: 4px 10px;
-    background-color: var(--bg-hover);
-    border-radius: 4px;
-    font-size: var(--size-xs);
-    color: var(--text-muted);
+    margin-left: 8px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 500;
+    line-height: 1;
+    border: 1px solid var(--border-muted);
   }
 
   .detecting-status :global(.spinner) {

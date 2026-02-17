@@ -8,15 +8,13 @@
   import type { Project } from '../../types';
   import * as commands from '../../commands';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
-  import { detectProjectActions } from '../actions/actions';
 
   interface Props {
     onCreated: (project: Project) => void;
-    onDetecting: (projectId: string, detecting: boolean) => void;
     onClose: () => void;
   }
 
-  let { onCreated, onDetecting, onClose }: Props = $props();
+  let { onCreated, onClose }: Props = $props();
 
   let name = $state('');
   let location = $state<'local' | 'remote'>('local');
@@ -43,12 +41,6 @@
         selectedRepo ?? undefined,
         normalizedSubpath
       );
-
-      if (selectedRepo) {
-        detectAndSaveActions(project.id).catch(() => {});
-        onDetecting(project.id, true);
-      }
-
       onCreated(project);
     } catch (e) {
       if (typeof e === 'string') {
@@ -59,26 +51,6 @@
         error = String(e);
       }
       saving = false;
-    }
-  }
-
-  async function detectAndSaveActions(projectId: string) {
-    try {
-      const suggested = await detectProjectActions(projectId);
-
-      for (let i = 0; i < suggested.length; i++) {
-        const action = suggested[i];
-        await commands.createProjectAction(
-          projectId,
-          action.name,
-          action.command,
-          action.actionType,
-          i,
-          action.autoCommit
-        );
-      }
-    } finally {
-      onDetecting(projectId, false);
     }
   }
 

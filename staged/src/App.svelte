@@ -14,6 +14,7 @@
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import DoctorModal from './lib/features/doctor/DoctorModal.svelte';
+  import ActionsPreferencesModal from './lib/features/settings/ActionsPreferencesModal.svelte';
   import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
@@ -22,10 +23,12 @@
 
   let showSessionLab = $state(false);
   let showDoctor = $state(false);
+  let showActionsPreferences = $state(false);
   let unlistenDoctor: UnlistenFn | undefined;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
+  let onOpenActionsPreferences: (() => void) | null = null;
 
   // Konami code: ↑↑↓↓←→←→BA
   const konamiSequence = [
@@ -54,8 +57,28 @@
     }
   }
 
+  function shouldIgnoreGlobalShortcut(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    if (target.isContentEditable) return true;
+    const tagName = target.tagName;
+    return tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT';
+  }
+
+  function handleGlobalShortcut(e: KeyboardEvent) {
+    if (shouldIgnoreGlobalShortcut(e.target)) return;
+    if (e.key === ';') {
+      e.preventDefault();
+      showActionsPreferences = true;
+    }
+  }
+
   onMount(async () => {
     document.addEventListener('keydown', handleKonamiKey);
+    document.addEventListener('keydown', handleGlobalShortcut);
+    onOpenActionsPreferences = () => {
+      showActionsPreferences = true;
+    };
+    window.addEventListener('staged:open-actions-preferences', onOpenActionsPreferences);
 
     // Listen for the Help → Health Check… menu item.
     unlistenDoctor = await listen('menu:doctor', () => {
@@ -89,6 +112,11 @@
 
   onDestroy(() => {
     document.removeEventListener('keydown', handleKonamiKey);
+    document.removeEventListener('keydown', handleGlobalShortcut);
+    if (onOpenActionsPreferences) {
+      window.removeEventListener('staged:open-actions-preferences', onOpenActionsPreferences);
+      onOpenActionsPreferences = null;
+    }
     unlistenDoctor?.();
   });
 
@@ -182,6 +210,10 @@
 
   {#if showDoctor}
     <DoctorModal onClose={() => (showDoctor = false)} />
+  {/if}
+
+  {#if showActionsPreferences}
+    <ActionsPreferencesModal onClose={() => (showActionsPreferences = false)} />
   {/if}
 {/if}
 

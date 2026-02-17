@@ -116,11 +116,7 @@
 </div>
 
 {#if showNewProjectModal}
-  <NewProjectModal
-    onCreated={handleProjectCreated}
-    onClose={() => (showNewProjectModal = false)}
-    onDetecting={() => {}}
-  />
+  <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
 {/if}
 
 <style>

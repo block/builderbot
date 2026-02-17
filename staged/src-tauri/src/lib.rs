@@ -438,6 +438,11 @@ fn create_project(
         project = project.with_subpath(sub);
     }
     store.create_project(&project).map_err(|e| e.to_string())?;
+    if let Some(repo) = project.primary_repo() {
+        store
+            .get_or_create_action_context(repo, project.subpath.as_deref())
+            .map_err(|e| e.to_string())?;
+    }
 
     if let Some(repo) = github_repo {
         let project_repo =
@@ -1458,17 +1463,34 @@ async fn rename_branch(
 }
 
 // =============================================================================
-// Project Actions commands
+// Repo Actions commands
 // =============================================================================
+
+fn get_or_create_project_action_context(
+    store: &Arc<Store>,
+    project_id: &str,
+) -> Result<store::models::ActionContext, String> {
+    let project = store
+        .get_project(project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+    let repo = project
+        .primary_repo()
+        .ok_or_else(|| "Project has no repository attached".to_string())?;
+    store
+        .get_or_create_action_context(repo, project.subpath.as_deref())
+        .map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 fn list_project_actions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
-) -> Result<Vec<store::models::ProjectAction>, String> {
+) -> Result<Vec<store::models::RepoAction>, String> {
     let store = get_store(&store)?;
+    let context = get_or_create_project_action_context(&store, &project_id)?;
     store
-        .list_project_actions(&project_id)
+        .list_repo_actions(&context.id)
         .map_err(|e| e.to_string())
 }
 
@@ -1481,15 +1503,15 @@ fn create_project_action(
     action_type: String,
     sort_order: i32,
     auto_commit: bool,
-) -> Result<store::models::ProjectAction, String> {
+) -> Result<store::models::RepoAction, String> {
     let store = get_store(&store)?;
+    let context = get_or_create_project_action_context(&store, &project_id)?;
     let parsed_type = builderbot_actions::ActionType::parse(&action_type)
         .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
-    let action =
-        store::models::ProjectAction::new(project_id, name, command, parsed_type, sort_order)
-            .with_auto_commit(auto_commit);
+    let action = store::models::RepoAction::new(context.id, name, command, parsed_type, sort_order)
+        .with_auto_commit(auto_commit);
     store
-        .create_project_action(&action)
+        .create_repo_action(&action)
         .map_err(|e| e.to_string())?;
     Ok(action)
 }
@@ -1506,13 +1528,13 @@ fn update_project_action(
 ) -> Result<(), String> {
     let store = get_store(&store)?;
     let action = store
-        .get_project_action(&action_id)
+        .get_repo_action(&action_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Action not found: {action_id}"))?;
 
-    let updated = store::models::ProjectAction {
+    let updated = store::models::RepoAction {
         id: action.id,
-        project_id: action.project_id,
+        context_id: action.context_id,
         name,
         command,
         action_type: builderbot_actions::ActionType::parse(&action_type)
@@ -1524,7 +1546,7 @@ fn update_project_action(
     };
 
     store
-        .update_project_action(&updated)
+        .update_repo_action(&updated)
         .map_err(|e| e.to_string())
 }
 
@@ -1535,8 +1557,57 @@ fn delete_project_action(
 ) -> Result<(), String> {
     let store = get_store(&store)?;
     store
-        .delete_project_action(&action_id)
+        .delete_repo_action(&action_id)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_action_contexts(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+) -> Result<Vec<store::models::ActionContext>, String> {
+    let store = get_store(&store)?;
+    store.list_action_contexts().map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn list_repo_actions(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: Option<String>,
+) -> Result<Vec<store::models::RepoAction>, String> {
+    let store = get_store(&store)?;
+    let context = store
+        .get_or_create_action_context(&github_repo, subpath.as_deref())
+        .map_err(|e| e.to_string())?;
+    store
+        .list_repo_actions(&context.id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+fn create_repo_action(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: Option<String>,
+    name: String,
+    command: String,
+    action_type: String,
+    sort_order: i32,
+    auto_commit: bool,
+) -> Result<store::models::RepoAction, String> {
+    let store = get_store(&store)?;
+    let context = store
+        .get_or_create_action_context(&github_repo, subpath.as_deref())
+        .map_err(|e| e.to_string())?;
+    let parsed_type = builderbot_actions::ActionType::parse(&action_type)
+        .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
+    let action = store::models::RepoAction::new(context.id, name, command, parsed_type, sort_order)
+        .with_auto_commit(auto_commit);
+    store
+        .create_repo_action(&action)
+        .map_err(|e| e.to_string())?;
+    Ok(action)
 }
 
 // =============================================================================
@@ -3162,6 +3233,9 @@ pub fn run() {
             create_project_action,
             update_project_action,
             delete_project_action,
+            list_action_contexts,
+            list_repo_actions,
+            create_repo_action,
             get_branch_timeline,
             create_note,
             delete_note,
@@ -3198,6 +3272,7 @@ pub fn run() {
             session_commands::start_branch_session,
             // Actions
             actions::commands::detect_project_actions,
+            actions::commands::detect_repo_actions,
             actions::commands::run_branch_action,
             actions::commands::stop_branch_action,
             actions::commands::get_running_branch_actions,

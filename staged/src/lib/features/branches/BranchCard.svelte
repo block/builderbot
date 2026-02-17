@@ -1370,7 +1370,7 @@
           onDeleteReview={handleDeleteReview}
           onNewNote={() => openNewSession('note')}
           onNewCommit={() => openNewSession('commit')}
-          onNewReview={() => openNewSession('review')}
+          onNewReview={hasCodeChanges ? () => openNewSession('review') : undefined}
           newSessionDisabled={showNewSession}
         >
           {#snippet footerActions()}

@@ -1538,10 +1538,10 @@ async fn poll_workspace_status(
     // loading state while clone/fetch/checkout runs inside an already-running
     // shared workspace. Keep it in Starting until that setup command marks
     // this branch as Running.
-    if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
-        if resolve_branch_workspace_subpath(&store, &branch)?.is_some() {
-            return Ok(store::WorkspaceStatus::Starting.as_str().to_string());
-        }
+    if branch.workspace_status == Some(store::WorkspaceStatus::Starting)
+        && resolve_branch_workspace_subpath(&store, &branch)?.is_some()
+    {
+        return Ok(store::WorkspaceStatus::Starting.as_str().to_string());
     }
 
     let info = match blox::ws_info(ws_name) {

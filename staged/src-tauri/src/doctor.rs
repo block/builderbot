@@ -270,13 +270,39 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
 /// only one agent is required overall.
 fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> DoctorCheck {
     if find_command(info.command).is_some() {
-        DoctorCheck {
-            id: info.id.to_string(),
-            label: info.label.to_string(),
-            status: CheckStatus::Pass,
-            message: "Installed".to_string(),
-            fix_url: None,
-            fix_command: None,
+        // Special handling for Goose: verify ACP subcommand is available
+        if info.id == "ai-agent-goose" {
+            match Command::new("goose").arg("acp").arg("--help").output() {
+                Ok(output) if output.status.success() => DoctorCheck {
+                    id: info.id.to_string(),
+                    label: info.label.to_string(),
+                    status: CheckStatus::Pass,
+                    message: "Installed".to_string(),
+                    fix_url: None,
+                    fix_command: None,
+                },
+                _ => {
+                    // Goose is installed but ACP subcommand is not available
+                    DoctorCheck {
+                        id: info.id.to_string(),
+                        label: info.label.to_string(),
+                        status: CheckStatus::Fail,
+                        message: "Goose ACP subcommand not available — upgrade required"
+                            .to_string(),
+                        fix_url: Some("https://github.com/block/goose".to_string()),
+                        fix_command: None,
+                    }
+                }
+            }
+        } else {
+            DoctorCheck {
+                id: info.id.to_string(),
+                label: info.label.to_string(),
+                status: CheckStatus::Pass,
+                message: "Installed".to_string(),
+                fix_url: None,
+                fix_command: None,
+            }
         }
     } else {
         DoctorCheck {

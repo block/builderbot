@@ -419,7 +419,7 @@
   }
 
   .empty-action-btn.review-action :global(svg) {
-    color: var(--status-modified);
+    color: var(--review-color);
   }
 
   .empty-action-btn.note-action:hover:not(:disabled) {
@@ -433,8 +433,8 @@
   }
 
   .empty-action-btn.review-action:hover:not(:disabled) {
-    color: var(--status-modified);
-    background-color: var(--bg-hover);
+    color: var(--review-color);
+    background-color: var(--review-bg);
   }
 
   .empty-action-btn:disabled {
@@ -482,7 +482,7 @@
   }
 
   .add-item-btn.review-btn :global(svg) {
-    color: var(--status-modified);
+    color: var(--review-color);
   }
 
   .add-item-btn.note-btn:hover:not(:disabled) {
@@ -498,9 +498,9 @@
   }
 
   .add-item-btn.review-btn:hover:not(:disabled) {
-    color: var(--status-modified);
-    border-color: var(--status-modified);
-    background-color: var(--bg-hover);
+    color: var(--review-color);
+    border-color: var(--review-color);
+    background-color: var(--review-bg);
   }
 
   .add-item-btn:disabled {

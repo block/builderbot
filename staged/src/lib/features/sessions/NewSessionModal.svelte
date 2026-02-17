@@ -265,8 +265,8 @@
   }
 
   .header-icon.review-icon {
-    background-color: var(--bg-hover);
-    color: var(--status-modified);
+    background-color: var(--review-bg);
+    color: var(--review-color);
   }
 
   .header-icon :global(svg) {

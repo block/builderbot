@@ -240,6 +240,9 @@
     .comment-body pre code { background: none; padding: 0; }
     .comment-body ul, .comment-body ol { margin: 0.3em 0; padding-left: 1.5em; }
     .comment-body blockquote { margin: 0.3em 0; padding-left: 0.8em; border-left: 3px solid var(--border-subtle); color: var(--text-muted); }
+    .comment-reply-marker { font-size: 0.75em; color: var(--text-muted); margin-bottom: 2px; cursor: pointer; }
+    .comment-reply-marker:hover { color: var(--text-secondary); text-decoration: underline; }
+    .comment-highlight { background: var(--bg-surface-hover); transition: background 0.3s; }
     .thread-status {
         display: inline-block;
         font-size: 0.7em;
@@ -691,6 +694,37 @@
         return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     }
 
+    function orderComments(comments) {
+        if (!comments || comments.length <= 1) return comments;
+        var byId = {};
+        comments.forEach(function(c) { byId[c.id] = c; });
+
+        var children = {};
+        var roots = [];
+        comments.forEach(function(c) {
+            var parent = c.inReplyTo || '';
+            if (parent && byId[parent]) {
+                (children[parent] = children[parent] || []).push(c);
+            } else {
+                roots.push(c);
+            }
+        });
+
+        var byTime = function(a, b) { return a.createdAt < b.createdAt ? -1 : 1; };
+        roots.sort(byTime);
+        Object.keys(children).forEach(function(k) { children[k].sort(byTime); });
+
+        var result = [];
+        function walk(id) {
+            (children[id] || []).forEach(function(c) {
+                result.push(c);
+                walk(c.id);
+            });
+        }
+        roots.forEach(function(c) { result.push(c); walk(c.id); });
+        return result;
+    }
+
     function renderCommentMarkdown(text) {
         if (!text) return '';
         var html = marked.parse(text, { breaks: true, gfm: true });
@@ -858,8 +892,22 @@
 
         if (line === -1) html += '<div class="orphaned-warning">Anchor text not found in document</div>';
 
-        thread.comments.forEach(function(c, i) {
-            html += '<div class="thread-comment">';
+        var ordered = orderComments(thread.comments);
+        var byId = {};
+        thread.comments.forEach(function(c) { byId[c.id] = c; });
+        ordered.forEach(function(c, i) {
+            var cid = escapeHtml(c.id);
+            html += '<div class="thread-comment" id="comment-' + cid + '">';
+            // Show "in reply to" marker when parent is not the immediately preceding comment
+            if (c.inReplyTo && byId[c.inReplyTo]) {
+                var prevId = i > 0 ? ordered[i - 1].id : '';
+                if (c.inReplyTo !== prevId) {
+                    var parentAuthor = byId[c.inReplyTo].author;
+                    html += '<div class="comment-reply-marker" onclick="event.stopPropagation(); scrollToComment(\'' +
+                        escapeHtml(c.inReplyTo) + '\')">' +
+                        'in reply to @' + escapeHtml(parentAuthor) + '</div>';
+                }
+            }
             html += '<div class="comment-header">';
             html += '<span class="comment-author">' + escapeHtml(c.author) + '</span>';
             if (c.role) html += '<span class="comment-role ' + c.role + '">' + c.role + '</span>';
@@ -868,7 +916,7 @@
             html += '<div class="comment-body">' + renderCommentMarkdown(c.body) + '</div>';
             html += '</div>';
             if (c.suggestedReplies && c.suggestedReplies.length > 0 &&
-                i === thread.comments.length - 1 &&
+                i === ordered.length - 1 &&
                 c.role === 'agent' && thread.status === 'open') {
                 html += '<div class="suggested-replies">';
                 c.suggestedReplies.forEach(function(suggestion) {
@@ -1356,6 +1404,14 @@
 
     function highlightThread(threadId) { activateThread(threadId, 'comment'); }
     function focusThread(threadId) { activateThread(threadId, 'highlight'); }
+
+    function scrollToComment(commentId) {
+        var el = document.getElementById('comment-' + commentId);
+        if (!el) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('comment-highlight');
+        setTimeout(function() { el.classList.remove('comment-highlight'); }, 1500);
+    }
 
     function activateThread(threadId, scrollTo) {
         document.querySelectorAll('.thread-card.highlighted').forEach(function(c) { c.classList.remove('highlighted'); });

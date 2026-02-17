@@ -62,6 +62,9 @@ func (s *Store) AddComment(projectName, filePath, threadID string, comment Comme
 		if fc.Threads[i].ID == threadID {
 			comment.ID = generateID()
 			comment.CreatedAt = time.Now()
+			if comment.InReplyTo == "" && len(fc.Threads[i].Comments) > 0 {
+				comment.InReplyTo = fc.Threads[i].Comments[len(fc.Threads[i].Comments)-1].ID
+			}
 			fc.Threads[i].Comments = append(fc.Threads[i].Comments, comment)
 
 			if err := s.Save(projectName, filePath, fc); err != nil {

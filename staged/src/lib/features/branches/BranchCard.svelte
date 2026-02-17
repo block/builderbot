@@ -250,8 +250,6 @@
       const { sessionId: eventSessionId, status } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         loadTimeline();
-        // Clean up running session state
-        projectStateStore.removeRunningSession(branch.projectId, eventSessionId);
         // Handle PR session completion
         if (eventSessionId === prSessionId) {
           handlePrSessionComplete(status);

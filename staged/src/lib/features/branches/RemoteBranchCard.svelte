@@ -496,11 +496,12 @@
               {#if hasCodeChanges}
                 <div class="footer-right-actions">
                   <button
-                    class="view-diff-btn"
+                    class="diff-btn"
                     onclick={() => (showBranchDiff = true)}
                     title="View diff"
                   >
-                    <FileDiff size={14} />
+                    <FileDiff size={13} />
+                    <span>Diff</span>
                   </button>
                 </div>
               {/if}
@@ -653,24 +654,33 @@
     flex-shrink: 0;
   }
 
-  .view-diff-btn {
+  .diff-btn {
     display: flex;
     align-items: center;
-    justify-content: center;
-    padding: 6px;
+    gap: 5px;
+    padding: 4px 10px;
     background: none;
-    border: none;
+    border: 1px solid var(--border-subtle);
     border-radius: 6px;
-    color: var(--text-faint);
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    font-weight: 500;
     cursor: pointer;
     transition:
-      color 0.1s,
-      background-color 0.1s;
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
+    white-space: nowrap;
   }
 
-  .view-diff-btn:hover {
+  .diff-btn:hover {
     color: var(--text-primary);
-    background-color: var(--bg-hover);
+    border-color: var(--border-muted);
+    background: var(--bg-hover);
+  }
+
+  .diff-btn :global(svg) {
+    flex-shrink: 0;
   }
 
   /* Status badge */

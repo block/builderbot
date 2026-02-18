@@ -1493,11 +1493,12 @@
                   {/if}
                 </button>
                 <button
-                  class="view-diff-btn"
+                  class="pr-btn diff-btn"
                   onclick={() => (showBranchDiff = true)}
                   title="View diff"
                 >
-                  <FileDiff size={14} />
+                  <FileDiff size={13} />
+                  <span>Diff</span>
                 </button>
               </div>
             {/if}
@@ -1687,26 +1688,6 @@
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
-  }
-
-  .view-diff-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 6px;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .view-diff-btn:hover {
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
   }
 
   /* More menu */

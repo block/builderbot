@@ -76,8 +76,9 @@
   let status = $derived<WorkspaceStatus | null>(polledStatus ?? branch.workspaceStatus);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollStartedAt: number | null = null;
+  let longProvisioning = $state(false);
   let pollInFlight = false;
-  const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+  const LONG_PROVISIONING_MS = 5 * 60 * 1000; // 5 minutes
 
   // Error state
   let error = $state<string | null>(null);
@@ -186,20 +187,14 @@
   function startPolling() {
     stopPolling();
     pollStartedAt = Date.now();
+    longProvisioning = false;
     pollTimer = setInterval(async () => {
       if (pollInFlight) {
         return;
       }
 
-      // Safety valve: stop polling after timeout to avoid infinite loops
-      // when a workspace never materializes.
-      if (pollStartedAt && Date.now() - pollStartedAt > POLL_TIMEOUT_MS) {
-        console.error('Workspace polling timed out after 5 minutes');
-        polledStatus = 'error';
-        onWorkspaceStatusChange?.('error');
-        error = 'Workspace provisioning timed out';
-        stopPolling();
-        return;
+      if (pollStartedAt && Date.now() - pollStartedAt > LONG_PROVISIONING_MS) {
+        longProvisioning = true;
       }
 
       pollInFlight = true;
@@ -208,9 +203,11 @@
         polledStatus = newStatus;
         onWorkspaceStatusChange?.(newStatus);
         if (newStatus === 'running') {
+          longProvisioning = false;
           stopPolling();
           loadTimeline();
         } else if (newStatus !== 'starting') {
+          longProvisioning = false;
           stopPolling();
         }
       } catch (e) {
@@ -268,6 +265,7 @@
     retrying = true;
     error = null;
     polledStatus = 'starting';
+    longProvisioning = false;
 
     try {
       await commands.startWorkspace(branch.id);
@@ -565,7 +563,16 @@
         <div class="status-view starting-view">
           <Spinner size={20} />
           <span class="status-text">Provisioning workspace…</span>
-          <span class="status-hint">This usually takes 30–60 seconds</span>
+          {#if longProvisioning}
+            <span class="status-hint"
+              >Still provisioning. Large repositories can take several minutes. This view updates
+              automatically when ready.</span
+            >
+          {:else}
+            <span class="status-hint"
+              >This can take a few minutes, depending on repository size.</span
+            >
+          {/if}
         </div>
       {:else if status === 'running'}
         <!-- Timeline UI (same pattern as BranchCard) -->

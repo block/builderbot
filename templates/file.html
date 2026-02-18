@@ -161,12 +161,80 @@
     .content > p:first-of-type strong ~ strong::before { content: '\A'; white-space: pre; }
     .content .chroma { background: var(--bg-code-block); }
     .content .mermaid-container {
+        position: relative;
         background: var(--bg-surface);
         border: 1px solid var(--border-card);
         border-radius: 6px;
         padding: 16px;
         overflow-x: auto;
         text-align: center;
+    }
+    .mermaid-zoom-btn {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        background: var(--bg-surface-secondary);
+        border: 1px solid var(--border-subtle);
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 0.75em;
+        color: var(--text-muted);
+        cursor: pointer;
+        opacity: 0;
+        transition: opacity 0.15s;
+        z-index: 1;
+    }
+    .content .mermaid-container:hover .mermaid-zoom-btn { opacity: 1; }
+    .mermaid-zoom-btn:hover {
+        background: var(--bg-surface-tertiary);
+        border-color: var(--border-strong);
+        color: var(--text-primary);
+    }
+
+    .mermaid-modal-overlay {
+        display: none;
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: var(--bg-modal-overlay);
+        z-index: 300;
+        justify-content: center;
+        align-items: center;
+    }
+    .mermaid-modal-overlay.open { display: flex; }
+    .mermaid-modal-close {
+        position: absolute;
+        top: 16px;
+        right: 16px;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
+        border-radius: 6px;
+        padding: 6px 12px;
+        font-size: 0.9em;
+        color: var(--text-primary);
+        cursor: pointer;
+        z-index: 301;
+    }
+    .mermaid-modal-close:hover {
+        background: var(--bg-surface-hover);
+        border-color: var(--border-strong);
+    }
+    .mermaid-modal-body {
+        width: 92vw;
+        height: 88vh;
+        overflow: auto;
+        background: var(--bg-surface);
+        border-radius: 12px;
+        padding: 32px;
+        box-shadow: var(--shadow-modal);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .mermaid-modal-body svg {
+        width: 100%;
+        height: 100%;
+        max-width: 100%;
+        max-height: 100%;
     }
 
     /* Comments panel */
@@ -590,6 +658,12 @@
                 <button class="btn-primary" id="confirmDeleteBtn" style="background:#cf222e;border-color:#cf222e;" onclick="executeDeleteFile()">Delete from disk</button>
             </div>
         </div>
+    </div>
+
+    <!-- Mermaid zoom modal -->
+    <div class="mermaid-modal-overlay" id="mermaidZoomModal" onclick="if(event.target===this)closeMermaidModal()">
+        <button class="mermaid-modal-close" onclick="closeMermaidModal()">&times; Close</button>
+        <div class="mermaid-modal-body" id="mermaidModalBody"></div>
     </div>
 {{end}}
 
@@ -1259,7 +1333,7 @@
     }
 
     document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') { hideNewThreadForm(); removeFloatingCommentBtn(); closeDeleteFileDialog(); }
+        if (e.key === 'Escape') { closeMermaidModal(); hideNewThreadForm(); removeFloatingCommentBtn(); closeDeleteFileDialog(); }
     });
 
     // --- Comment text highlighting ---
@@ -1566,6 +1640,14 @@
             mermaidDiv.className = 'mermaid';
             mermaidDiv.textContent = text;
             div.appendChild(mermaidDiv);
+            var zoomBtn = document.createElement('button');
+            zoomBtn.className = 'mermaid-zoom-btn';
+            zoomBtn.textContent = 'Expand';
+            zoomBtn.setAttribute('title', 'View full size');
+            zoomBtn.addEventListener('click', (function(src) {
+                return function(e) { e.stopPropagation(); openMermaidModal(src); };
+            })(text));
+            div.appendChild(zoomBtn);
             pre.parentNode.replaceChild(div, pre);
             containers.push(mermaidDiv);
             mermaidSources.push({ container: div, source: text, sourceLine: sourceLine });
@@ -1592,8 +1674,53 @@
         }
     }
 
+    // --- Mermaid zoom modal ---
+    var mermaidModalSource = null;
+    var mermaidRenderCounter = 0;
+
+    function openMermaidModal(source) {
+        mermaidModalSource = source;
+        var modal = document.getElementById('mermaidZoomModal');
+        var body = document.getElementById('mermaidModalBody');
+        modal.classList.add('open');
+        renderMermaidInModal(source, body);
+    }
+
+    function closeMermaidModal() {
+        mermaidModalSource = null;
+        var modal = document.getElementById('mermaidZoomModal');
+        modal.classList.remove('open');
+        document.getElementById('mermaidModalBody').innerHTML = '';
+    }
+
+    function renderMermaidInModal(source, container) {
+        mermaidRenderCounter++;
+        var id = 'mermaid-modal-render-' + mermaidRenderCounter;
+        mermaid.render(id, source)
+            .then(function(result) {
+                container.innerHTML = result.svg;
+                var svg = container.querySelector('svg');
+                if (svg) {
+                    svg.removeAttribute('width');
+                    svg.removeAttribute('height');
+                    svg.style.width = '100%';
+                    svg.style.height = '100%';
+                }
+            })
+            .catch(function(err) {
+                container.innerHTML = '<p style="color:var(--accent-danger)">Failed to render diagram</p>';
+                console.error('Mermaid modal render error:', err);
+            });
+    }
+
     // Listen for theme changes
-    document.addEventListener('themechange', reRenderMermaidForTheme);
+    document.addEventListener('themechange', function() {
+        reRenderMermaidForTheme();
+        if (mermaidModalSource) {
+            mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
+            renderMermaidInModal(mermaidModalSource, document.getElementById('mermaidModalBody'));
+        }
+    });
 
     // --- Event delegation for thread actions ---
     document.getElementById('comments-panel').addEventListener('click', function(e) {

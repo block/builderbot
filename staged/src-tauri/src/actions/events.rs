@@ -5,7 +5,10 @@
 use async_trait::async_trait;
 use builderbot_actions::{ExecutionEvent, ExecutionListener};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
+
+use super::registry::ActionRegistry;
 
 /// Event emitted when action output is produced
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,15 +39,23 @@ pub struct TauriExecutionListener {
     branch_id: String,
     action_id: String,
     action_name: String,
+    registry: Arc<ActionRegistry>,
 }
 
 impl TauriExecutionListener {
-    pub fn new(app: AppHandle, branch_id: String, action_id: String, action_name: String) -> Self {
+    pub fn new(
+        app: AppHandle,
+        branch_id: String,
+        action_id: String,
+        action_name: String,
+        registry: Arc<ActionRegistry>,
+    ) -> Self {
         Self {
             app,
             branch_id,
             action_id,
             action_name,
+            registry,
         }
     }
 }
@@ -62,6 +73,15 @@ impl ExecutionListener for TauriExecutionListener {
                     execution_id,
                     self.action_name,
                     self.branch_id
+                );
+
+                // Register the running action
+                self.registry.register(
+                    execution_id.clone(),
+                    self.branch_id.clone(),
+                    self.action_id.clone(),
+                    self.action_name.clone(),
+                    started_at,
                 );
 
                 // We emit running status immediately
@@ -138,6 +158,11 @@ impl ExecutionListener for TauriExecutionListener {
                     status_str,
                     exit_code
                 );
+
+                // Unregister completed/failed/stopped actions from the registry
+                if status_str != "running" {
+                    self.registry.unregister(&execution_id);
+                }
 
                 let result = self.app.emit(
                     "action_status",

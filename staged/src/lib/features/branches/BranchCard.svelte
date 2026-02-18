@@ -57,7 +57,11 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
-  import { runBranchAction, type ActionStatusEvent } from '../actions/actions';
+  import {
+    runBranchAction,
+    getRunningBranchActions,
+    type ActionStatusEvent,
+  } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
   import {
     extractPrNumber,
@@ -531,6 +535,7 @@
 
   onMount(() => {
     loadActions();
+    loadRunningActions();
     getAvailableOpeners().then((apps) => (openerApps = apps));
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
@@ -600,6 +605,34 @@
     } catch (e) {
       console.error('Failed to load actions:', e);
       actions = [];
+    }
+  }
+
+  async function loadRunningActions() {
+    try {
+      // Restore running actions that were started before component mounted
+      const running = await getRunningBranchActions(branch.id);
+      console.info('[BranchCard] Restored running actions from registry:', {
+        branchId: branch.id,
+        count: running.length,
+        actions: running,
+      });
+
+      // Add each running action to state
+      for (const info of running) {
+        const existingIndex = runningActions.findIndex((a) => a.executionId === info.executionId);
+        if (existingIndex === -1) {
+          runningActions.push({
+            executionId: info.executionId,
+            actionId: info.actionId,
+            actionName: info.actionName,
+            status: 'running',
+            startedAt: info.startedAt,
+          });
+        }
+      }
+    } catch (e) {
+      console.error('[BranchCard] Failed to load running actions:', e);
     }
   }
 

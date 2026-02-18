@@ -11,6 +11,7 @@ use crate::store::Store;
 
 use super::ai_provider::AcpAiProvider;
 use super::events::TauriExecutionListener;
+use super::registry::{ActionRegistry, RunningActionInfo};
 
 /// Helper to get store from Mutex<Option<Arc<Store>>>
 fn get_store(store: &State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
@@ -192,6 +193,7 @@ pub async fn run_branch_action(
     app: AppHandle,
     store: State<'_, Mutex<Option<Arc<Store>>>>,
     executor: State<'_, Arc<ActionExecutor>>,
+    registry: State<'_, Arc<ActionRegistry>>,
 ) -> Result<String, String> {
     log::info!(
         "[run_branch_action] Starting action execution request - branch_id: {}, action_id: {}",
@@ -256,6 +258,7 @@ pub async fn run_branch_action(
         branch_id.clone(),
         action_id.clone(),
         action.name.clone(),
+        registry.inner().clone(),
     ));
 
     // Create metadata
@@ -311,11 +314,29 @@ pub fn stop_branch_action(
 /// Get all currently running actions for a branch
 #[tauri::command]
 pub fn get_running_branch_actions(
-    _branch_id: String,
+    branch_id: String,
     executor: State<'_, Arc<ActionExecutor>>,
-) -> Result<Vec<String>, String> {
-    // Return list of running execution IDs
-    Ok(executor.get_running_ids())
+    registry: State<'_, Arc<ActionRegistry>>,
+) -> Result<Vec<RunningActionInfo>, String> {
+    // Get running actions from registry for this branch
+    let running_actions = registry.get_running_for_branch(&branch_id);
+
+    // Filter to only actions that are still actually running in the executor
+    let executor_ids: std::collections::HashSet<String> =
+        executor.get_running_ids().into_iter().collect();
+
+    let active_actions: Vec<RunningActionInfo> = running_actions
+        .into_iter()
+        .filter(|info| executor_ids.contains(&info.execution_id))
+        .collect();
+
+    log::info!(
+        "[get_running_branch_actions] Found {} running actions for branch {}",
+        active_actions.len(),
+        branch_id
+    );
+
+    Ok(active_actions)
 }
 
 /// Get buffered output for an action execution
@@ -343,6 +364,7 @@ pub async fn run_prerun_actions(
     app: AppHandle,
     store: State<'_, Mutex<Option<Arc<Store>>>>,
     executor: State<'_, Arc<ActionExecutor>>,
+    registry: State<'_, Arc<ActionRegistry>>,
 ) -> Result<Vec<String>, String> {
     let store = get_store(&store)?;
 
@@ -457,6 +479,7 @@ pub async fn run_prerun_actions(
             branch_id.clone(),
             action.id.clone(),
             action.name.clone(),
+            registry.inner().clone(),
         ));
 
         let metadata = ActionMetadata {

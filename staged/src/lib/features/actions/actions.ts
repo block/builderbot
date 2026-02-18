@@ -77,6 +77,15 @@ export interface RepoActionsDetectionEvent {
   detecting: boolean;
 }
 
+/** Information about a running action. */
+export interface RunningActionInfo {
+  executionId: string;
+  branchId: string;
+  actionId: string;
+  actionName: string;
+  startedAt: number;
+}
+
 /**
  * Detect available actions from a project's build files using AI.
  * Scans package.json, justfile, Makefile, etc. and suggests relevant actions.
@@ -110,10 +119,10 @@ export function stopBranchAction(executionId: string): Promise<void> {
 
 /**
  * Get all currently running actions for a branch.
- * Returns an array of execution IDs.
+ * Returns an array of running action info with execution IDs, action details, and timestamps.
  */
-export function getRunningBranchActions(branchId: string): Promise<string[]> {
-  return invoke<string[]>('get_running_branch_actions', { branchId });
+export function getRunningBranchActions(branchId: string): Promise<RunningActionInfo[]> {
+  return invoke<RunningActionInfo[]>('get_running_branch_actions', { branchId });
 }
 
 /**

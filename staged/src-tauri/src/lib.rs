@@ -2511,6 +2511,7 @@ pub fn run() {
             app.manage(store_slot);
             app.manage(Arc::new(session_runner::SessionRegistry::new()));
             app.manage(Arc::new(actions::ActionExecutor::new()));
+            app.manage(Arc::new(actions::ActionRegistry::new()));
             app.manage(DbState {
                 db_path,
                 needs_reset: Mutex::new(reset_info),

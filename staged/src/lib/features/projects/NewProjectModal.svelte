@@ -458,8 +458,6 @@
     color: var(--text-muted);
   }
 
-<<<<<<< HEAD
-=======
   .keyboard-shortcut {
     display: flex;
     align-items: center;
@@ -482,7 +480,6 @@
     font-weight: 500;
   }
 
->>>>>>> 3bb77d6 (feat: add keyboard shortcuts and return key support to new project dialog)
   .error-message {
     color: var(--ui-danger);
     font-size: var(--size-xs);

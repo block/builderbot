@@ -20,12 +20,14 @@
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
   import { navigation } from './lib/navigation.svelte';
+  import { projectStateStore } from './lib/stores/projectState.svelte';
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
   let showDoctor = $state(false);
   let showActionsPreferences = $state(false);
   let unlistenDoctor: UnlistenFn | undefined;
+  let unlistenSessionStatus: UnlistenFn | undefined;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
@@ -86,6 +88,25 @@
       showDoctor = true;
     });
 
+    // Listen for session status changes globally to handle spinner cleanup
+    // This must be at the App level so it works regardless of which view the user is on
+    unlistenSessionStatus = await listen<{
+      sessionId: string;
+      status: string;
+    }>('session-status-changed', (event) => {
+      const { sessionId, status } = event.payload;
+      console.info('[App] session-status-changed event:', {
+        sessionId,
+        status,
+        currentProjectId: navigation.selectedProjectId,
+      });
+      if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        console.info('[App] session completed, calling handleSessionComplete');
+        // Handle session completion - mark project as unread if user is not viewing it
+        projectStateStore.handleSessionComplete(sessionId, navigation.selectedProjectId);
+      }
+    });
+
     const t0 = performance.now();
     try {
       await initPreferences();
@@ -119,6 +140,7 @@
       onOpenActionsPreferences = null;
     }
     unlistenDoctor?.();
+    unlistenSessionStatus?.();
   });
 
   async function handleResetStore() {

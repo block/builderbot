@@ -8,7 +8,6 @@
   import { onMount } from 'svelte';
   import { ArrowLeft } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { Project, Branch, StoreIncompatibility, WorkspaceStatus } from '../../types';
   import * as commands from '../../commands';
   import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
@@ -57,32 +56,14 @@
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
 
-  onMount(async () => {
+  onMount(() => {
     checkStoreAndLoad();
 
     const onNewProject = () => handleNewProject();
     window.addEventListener('staged:new-project', onNewProject);
 
-    // Listen for session status changes globally to mark projects as unread
-    // Use await to ensure listener is registered before sessions can complete
-    const unlistenSessionStatus = await listen<{
-      sessionId: string;
-      status: string;
-    }>('session-status-changed', (event) => {
-      const { sessionId, status } = event.payload;
-      console.info('[ProjectHome] session-status-changed event:', {
-        sessionId,
-        status,
-        currentProjectId: navigation.selectedProjectId,
-      });
-      if (status === 'completed' || status === 'error' || status === 'cancelled') {
-        console.info('[ProjectHome] session completed, calling handleSessionComplete');
-        // Handle session completion - mark project as unread if user is not viewing it
-        projectStateStore.handleSessionComplete(sessionId, navigation.selectedProjectId);
-      }
-    });
-
-    const unlistenDetection = await listenToRepoActionsDetection((event) => {
+    let unlistenDetection: (() => void) | undefined;
+    listenToRepoActionsDetection((event) => {
       const matchingProjectIds = projects
         .filter((p) => p.githubRepo === event.githubRepo && p.subpath === event.subpath)
         .map((p) => p.id);
@@ -97,12 +78,13 @@
         }
       }
       detectingProjectIds = next;
+    }).then((unlisten) => {
+      unlistenDetection = unlisten;
     });
 
     return () => {
       window.removeEventListener('staged:new-project', onNewProject);
-      unlistenDetection();
-      unlistenSessionStatus();
+      unlistenDetection?.();
     };
   });
 

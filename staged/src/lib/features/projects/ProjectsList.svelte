@@ -6,9 +6,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { FolderGit2 } from 'lucide-svelte';
-  import type { Project } from '../../types';
+  import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
-  import { projectDisplayName } from '../../shared/utils';
+  import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
   import { selectProject } from '../../navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
@@ -18,6 +18,7 @@
   import Spinner from '../../shared/Spinner.svelte';
 
   let projects = $state<Project[]>([]);
+  let projectBranches = $state<Map<string, Branch[]>>(new Map());
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showNewProjectModal = $state(false);
@@ -69,6 +70,20 @@
         loadedProjects.map((project) => [project.id, project.githubRepo ? 1 : 0] as const)
       );
       void hydrateRepoCounts(loadedProjects);
+      // Load branches for each project to calculate PR status
+      const branchesMap = new Map<string, Branch[]>();
+      await Promise.all(
+        loadedProjects.map(async (project) => {
+          try {
+            const branches = await commands.listBranchesForProject(project.id);
+            branchesMap.set(project.id, branches);
+          } catch (e) {
+            console.error(`Failed to load branches for project ${project.id}:`, e);
+            branchesMap.set(project.id, []);
+          }
+        })
+      );
+      projectBranches = branchesMap;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -110,6 +125,13 @@
   function openProject(projectId: string) {
     if (isProjectDeleting(projectId)) return;
     selectProject(projectId);
+  }
+
+  function getProjectPrStatus(
+    projectId: string
+  ): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
+    const branches = projectBranches.get(projectId) || [];
+    return aggregateProjectPrStatus(branches);
   }
 
   function verifyCommandKeyState(e: KeyboardEvent | MouseEvent) {
@@ -227,6 +249,7 @@
           </button>
           {#each projects as project, index (project.id)}
             {@const status = getProjectStatus(project.id, deletingProjectNames)}
+            {@const prStatus = getProjectPrStatus(project.id)}
             <button
               class="project-card"
               class:deleting={status.kind === 'deleting'}
@@ -248,7 +271,7 @@
                 <div class="status-indicator unread-dot"></div>
               {/if}
               <div class="card-header">
-                <FolderGit2 size={16} />
+                <FolderGit2 size={16} class={prStatus ? `pr-status-${prStatus}` : ''} />
                 <span>{projectDisplayName(project)}</span>
               </div>
               {#if status.kind === 'deleting'}
@@ -527,5 +550,26 @@
     height: 8px;
     background-color: var(--ui-accent);
     border-radius: 50%;
+  }
+
+  /* PR status colors for project icon */
+  .card-header :global(.pr-status-success) {
+    color: var(--ui-success);
+  }
+
+  .card-header :global(.pr-status-warning) {
+    color: var(--ui-warning);
+  }
+
+  .card-header :global(.pr-status-error) {
+    color: var(--ui-danger);
+  }
+
+  .card-header :global(.pr-status-pending) {
+    color: var(--ui-accent);
+  }
+
+  .card-header :global(.pr-status-neutral) {
+    color: var(--text-muted);
   }
 </style>

@@ -11,33 +11,30 @@ export function projectDisplayName(p: Project): string {
 
 /**
  * Aggregate PR status indicator across all branches in a project.
- * Returns the "least complete" status:
- * - 'error' (checks failing, conflicts, closed PRs)
- * - 'warning' (changes requested)
- * - 'pending' (checks pending)
- * - 'success' (merged, approved, checks passed)
- * - 'neutral' (draft, no PR)
- * - null (no branches with PRs)
+ * Returns the most concerning PR state:
+ * - 'merged': All PRs are merged
+ * - 'open': PRs are open (default state)
+ * - 'closed': PRs are closed without merging
+ * - 'conflict': PRs have merge conflicts
+ * - null: No branches with PRs
  *
- * Priority order (least complete first):
+ * Priority order (most concerning first):
  * 1. No PR exists (null)
- * 2. Error states (closed, failing checks, conflicts)
- * 3. Warning states (changes requested)
- * 4. Pending states (checks pending)
- * 5. Success states (merged, approved, checks passed)
- * 6. Neutral states (draft)
+ * 2. Conflict (merge conflicts)
+ * 3. Closed (closed without merging)
+ * 4. Open (open PRs)
+ * 5. Merged (merged PRs)
  */
 export function aggregateProjectPrStatus(
   branches: Branch[]
-): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
+): 'merged' | 'open' | 'closed' | 'conflict' | null {
   if (branches.length === 0) return null;
 
   let hasNoPr = false;
-  let hasError = false;
-  let hasWarning = false;
-  let hasPending = false;
-  let hasSuccess = false;
-  let hasNeutral = false;
+  let hasConflict = false;
+  let hasClosed = false;
+  let hasOpen = false;
+  let hasMerged = false;
 
   for (const branch of branches) {
     // No PR is the least complete state
@@ -46,58 +43,36 @@ export function aggregateProjectPrStatus(
       continue;
     }
 
-    const { prState, prChecksStatus, prReviewDecision, prMergeable, prDraft } = branch;
+    const { prState, prMergeable } = branch;
 
-    // A merged PR is terminal success; mergeability is no longer relevant.
+    // Check for merged state
     if (prState === 'MERGED') {
-      hasSuccess = true;
+      hasMerged = true;
       continue;
     }
 
-    // Check for error states
-    if (prState === 'CLOSED' || prChecksStatus === 'FAILURE' || prMergeable === false) {
-      hasError = true;
+    // Check for conflict state
+    if (prMergeable === false) {
+      hasConflict = true;
       continue;
     }
 
-    // Check for draft (neutral)
-    if (prDraft) {
-      hasNeutral = true;
+    // Check for closed state
+    if (prState === 'CLOSED') {
+      hasClosed = true;
       continue;
     }
 
-    // Check for warning states
-    if (prReviewDecision === 'CHANGES_REQUESTED') {
-      hasWarning = true;
-      continue;
-    }
-
-    // Check for pending states
-    if (prChecksStatus === 'PENDING') {
-      hasPending = true;
-      continue;
-    }
-
-    // Check for success states
-    if (
-      prChecksStatus === 'SUCCESS' ||
-      (prReviewDecision === 'APPROVED' && (prMergeable === true || prMergeable === null))
-    ) {
-      hasSuccess = true;
-      continue;
-    }
-
-    // Default to neutral for other cases
-    hasNeutral = true;
+    // Default to open for other cases
+    hasOpen = true;
   }
 
-  // Return the least complete status
+  // Return the most concerning status
   if (hasNoPr) return null;
-  if (hasError) return 'error';
-  if (hasWarning) return 'warning';
-  if (hasPending) return 'pending';
-  if (hasSuccess) return 'success';
-  if (hasNeutral) return 'neutral';
+  if (hasConflict) return 'conflict';
+  if (hasClosed) return 'closed';
+  if (hasOpen) return 'open';
+  if (hasMerged) return 'merged';
 
   return null;
 }

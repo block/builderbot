@@ -5,7 +5,12 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, GitBranch } from 'lucide-svelte';
+  import {
+    GitPullRequest,
+    GitPullRequestClosed,
+    GitPullRequestDraft,
+    GitBranch,
+  } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
   import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
@@ -209,6 +214,7 @@
     {error}
     {deletingProjectNames}
     {repoCountsByProject}
+    {projectBranches}
     showAllProjectsRow={true}
   />
 
@@ -498,6 +504,14 @@
 
   .card-header :global(svg) {
     flex-shrink: 0;
+  }
+
+  .card-header :global(svg.pr-status-merged) {
+    stroke: var(--ui-success);
+  }
+
+  .card-header :global(svg.pr-status-conflict) {
+    stroke: var(--ui-danger);
   }
 
   .repo {

@@ -1,20 +1,20 @@
 {{define "title"}}Recent Files - Birdseye{{end}}
 
 {{define "pagestyle"}}
-    h1 { color: #333; font-weight: 600; }
-    .subtitle { color: #888; margin-bottom: 20px; }
+    h1 { color: var(--text-primary); font-weight: 600; }
+    .subtitle { color: var(--text-subtle); margin-bottom: 20px; }
     .file {
         padding: 12px 16px;
-        background: #fff;
+        background: var(--bg-surface);
         margin-bottom: 8px;
         border-radius: 6px;
         display: flex;
         justify-content: space-between;
         align-items: center;
-        border: 1px solid #e8e8e8;
+        border: 1px solid var(--border-card);
         transition: border-color 0.15s;
     }
-    .file:hover { border-color: #ccc; }
+    .file:hover { border-color: var(--border-strong); }
     .file-info { min-width: 0; }
     .file-name {
         display: flex;
@@ -25,7 +25,7 @@
         overflow: hidden;
         text-overflow: ellipsis;
     }
-    .file-project { color: #888; font-size: 0.85em; }
+    .file-project { color: var(--text-subtle); font-size: 0.85em; }
     .file-meta {
         display: flex;
         align-items: center;
@@ -34,7 +34,7 @@
         margin-left: 16px;
     }
     .file-time {
-        color: #888;
+        color: var(--text-subtle);
         font-size: 0.85em;
     }
     .activity-label {
@@ -43,11 +43,11 @@
         border-radius: 10px;
         font-weight: 500;
     }
-    .activity-viewed { background: #f0f0f0; color: #666; }
-    .activity-modified { background: #e8f0fe; color: #1a73e8; }
-    .activity-created { background: #e6f4ea; color: #137333; }
-    .activity-comment { background: #f3e8fd; color: #7b1fa2; }
-    .activity-published { background: #fef3e0; color: #e65100; }
+    .activity-viewed { background: var(--activity-viewed-bg); color: var(--activity-viewed-color); }
+    .activity-modified { background: var(--activity-modified-bg); color: var(--activity-modified-color); }
+    .activity-created { background: var(--activity-created-bg); color: var(--activity-created-color); }
+    .activity-comment { background: var(--activity-comment-bg); color: var(--activity-comment-color); }
+    .activity-published { background: var(--activity-published-bg); color: var(--activity-published-color); }
 {{end}}
 
 {{define "content"}}

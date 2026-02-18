@@ -1,17 +1,17 @@
 {{define "title"}}In Review - Birdseye{{end}}
 
 {{define "pagestyle"}}
-    .empty { color: #888; font-style: italic; }
+    .empty { color: var(--text-subtle); font-style: italic; }
 
     /* Source sections */
     .source-section {
         margin-bottom: 16px;
-        border: 1px solid #e8e8e8;
+        border: 1px solid var(--border-card);
         border-radius: 6px;
-        background: #fff;
+        background: var(--bg-surface);
         transition: border-color 0.15s;
     }
-    .source-section:hover { border-color: #ccc; }
+    .source-section:hover { border-color: var(--border-strong); }
     .source-header {
         display: flex;
         align-items: center;
@@ -39,11 +39,11 @@
         flex-wrap: wrap;
     }
     .source-breadcrumb a {
-        color: #666;
+        color: var(--text-muted);
         text-decoration: none;
     }
-    .source-breadcrumb a:hover { color: #0066cc; text-decoration: underline; }
-    .source-breadcrumb .breadcrumb-sep { color: #ccc; }
+    .source-breadcrumb a:hover { color: var(--link-color); text-decoration: underline; }
+    .source-breadcrumb .breadcrumb-sep { color: var(--border-strong); }
     .source-breadcrumb .breadcrumb-source { text-transform: uppercase; }
 
     /* Typing indicator */
@@ -51,7 +51,7 @@
         display: inline-flex;
         align-items: center;
         gap: 4px;
-        color: #2da44e;
+        color: var(--accent-success);
         font-size: 0.75em;
         font-weight: 500;
         flex-shrink: 0;
@@ -60,7 +60,7 @@
         display: inline-block;
         width: 6px;
         height: 6px;
-        background: #2da44e;
+        background: var(--accent-success);
         border-radius: 50%;
         flex-shrink: 0;
     }
@@ -80,17 +80,17 @@
         margin-bottom: 0;
         border: none;
         border-radius: 0;
-        border-top: 1px solid #f0f0f0;
+        border-top: 1px solid var(--border-divider);
         background: transparent;
     }
     .source-section .file:hover {
-        border-color: #f0f0f0;
-        background: #eff0f1;
+        border-color: var(--border-divider);
+        background: var(--bg-surface-hover);
     }
     .source-section .file:last-child { border-radius: 0 0 6px 6px; }
 
     .file-age {
-        color: #888;
+        color: var(--text-subtle);
         font-size: 0.85em;
         white-space: nowrap;
     }
@@ -98,25 +98,25 @@
     /* File three-dot menu */
     .file-dots {
         background: none;
-        border: 1px solid #ddd;
+        border: 1px solid var(--border-subtle);
         border-radius: 4px;
         padding: 4px 6px;
         font-size: 0.85em;
-        color: #999;
+        color: var(--text-faint);
         cursor: pointer;
         line-height: 1;
     }
-    .file-dots:hover { color: #333; border-color: #ccc; }
+    .file-dots:hover { color: var(--text-primary); border-color: var(--border-strong); }
     .file-menu-wrap { position: relative; }
     .file-menu {
         display: none;
         position: absolute;
         right: 0;
         top: calc(100% + 4px);
-        background: #fff;
-        border: 1px solid #ddd;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
         border-radius: 6px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        box-shadow: var(--shadow-menu);
         z-index: 100;
         min-width: 200px;
         padding: 4px 0;
@@ -130,16 +130,16 @@
         border: none;
         background: none;
         font-size: 0.85em;
-        color: #333;
+        color: var(--text-primary);
         cursor: pointer;
     }
-    .file-menu button:hover { background: #f5f5f5; }
+    .file-menu button:hover { background: var(--bg-surface-tertiary); }
     .file-menu .menu-divider {
-        border-top: 1px solid #eee;
+        border-top: 1px solid var(--border-divider);
         margin: 4px 0;
     }
-    .file-menu .menu-danger { color: #cf222e; }
-    .file-menu .menu-danger:hover { background: #fff5f5; }
+    .file-menu .menu-danger { color: var(--accent-danger); }
+    .file-menu .menu-danger:hover { background: var(--accent-danger-light); }
 {{end}}
 
 {{define "content"}}

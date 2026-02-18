@@ -294,7 +294,7 @@
         border-radius: 3px;
         transition: width 0.3s ease;
     }
-    .agent-status .context-bar-fill.warning { background: #d29922; }
+    .agent-status .context-bar-fill.warning { background: var(--accent-warning); }
     .agent-status .context-bar-fill.critical { background: var(--accent-danger); }
     .agent-status .context-label {
         font-size: 0.85em;
@@ -400,7 +400,7 @@
     <div class="modal-overlay" id="addSourceModal">
         <div class="modal">
             <h3>Add to project</h3>
-            <p style="color:#666;font-size:0.9em;margin:0 0 12px 0">Path relative to project root &mdash; a directory (e.g., <code>docs</code>) or a markdown file (e.g., <code>README.md</code>)</p>
+            <p style="color:var(--text-muted);font-size:0.9em;margin:0 0 12px 0">Path relative to project root &mdash; a directory (e.g., <code>docs</code>) or a markdown file (e.g., <code>README.md</code>)</p>
             <input type="text" class="modal-input" id="sourcePathInput" placeholder="docs or path/to/file.md">
             <div class="modal-error" id="sourceModalError"></div>
             <div class="modal-actions">
@@ -414,10 +414,10 @@
     <div class="modal-overlay" id="deleteFileModal">
         <div class="modal">
             <h3>Delete file?</h3>
-            <p style="color:#666;font-size:0.9em;margin:0">This will permanently delete <strong id="deleteFileName"></strong> from the filesystem. This cannot be undone.</p>
+            <p style="color:var(--text-muted);font-size:0.9em;margin:0">This will permanently delete <strong id="deleteFileName"></strong> from the filesystem. This cannot be undone.</p>
             <div class="modal-actions">
                 <button class="btn-cancel" onclick="closeDeleteFileDialog()">Cancel</button>
-                <button class="btn-primary" id="confirmDeleteBtn" style="background:#cf222e;border-color:#cf222e;" onclick="executeDeleteFile()">Delete from disk</button>
+                <button class="btn-primary" id="confirmDeleteBtn" style="background:var(--accent-danger);border-color:var(--accent-danger);" onclick="executeDeleteFile()">Delete from disk</button>
             </div>
         </div>
     </div>
@@ -1068,7 +1068,7 @@
 
         var html = '<div class="source-section in-review-section" id="source-In Review">';
         html += '<div class="source-header">';
-        html += '<span class="source-badge" style="color:#0969da;background:#ddf4ff">Review</span>';
+        html += '<span class="source-badge" style="color:var(--file-type-research-color);background:var(--file-type-research-bg)">Review</span>';
         html += '<span class="source-header-label">In Review</span>';
         if (hasAgent) {
             html += '<span class="file-typing" style="margin-left:auto">' +
@@ -1113,7 +1113,7 @@
         var link = document.createElement('a');
         link.href = '#source-In Review';
         link.className = 'sidebar-review-link';
-        link.innerHTML = '<span class="sidebar-source-tag" style="color:#0969da;background:#ddf4ff">Review</span>In Review';
+        link.innerHTML = '<span class="sidebar-source-tag" style="color:var(--file-type-research-color);background:var(--file-type-research-bg)">Review</span>In Review';
         nav.insertBefore(link, nav.firstChild);
     }
 

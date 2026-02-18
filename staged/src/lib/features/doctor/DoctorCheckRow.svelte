@@ -120,9 +120,8 @@
   .check-message {
     font-size: var(--size-xs);
     color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: break-word;
+    word-wrap: break-word;
   }
 
   .fix-error {

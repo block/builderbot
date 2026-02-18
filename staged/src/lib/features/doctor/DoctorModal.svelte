@@ -173,6 +173,8 @@
     font-size: var(--size-sm);
     color: var(--text-muted);
     line-height: 1.4;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
   }
 
   .modal-body {
@@ -207,8 +209,8 @@
   }
 
   .checks-list {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
     gap: 6px;
   }
 

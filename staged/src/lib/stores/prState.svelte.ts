@@ -96,6 +96,19 @@ class PrStateStore {
   getSessionId(branchId: string): string | null {
     return this.states.get(branchId)?.sessionId ?? null;
   }
+
+  /**
+   * Find the branch ID associated with a session ID
+   * Used by the global session listener to update PR state when sessions complete
+   */
+  getBranchIdForSession(sessionId: string): string | null {
+    for (const [branchId, state] of this.states.entries()) {
+      if (state.sessionId === sessionId && state.state === 'creating') {
+        return branchId;
+      }
+    }
+    return null;
+  }
 }
 
 export const prStateStore = new PrStateStore();

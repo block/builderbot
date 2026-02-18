@@ -21,6 +21,8 @@
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
   import { navigation } from './lib/navigation.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
+  import { prStateStore } from './lib/stores/prState.svelte';
+  import { extractPrUrl, extractPrNumber } from './lib/features/branches/branchCardHelpers';
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
@@ -93,7 +95,7 @@
     unlistenSessionStatus = await listen<{
       sessionId: string;
       status: string;
-    }>('session-status-changed', (event) => {
+    }>('session-status-changed', async (event) => {
       const { sessionId, status } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         // Handle session completion - mark project as unread if user is not viewing it
@@ -111,6 +113,41 @@
         // Always remove the running session from its project
         if (sessionProjectId) {
           projectStateStore.removeRunningSession(sessionProjectId, sessionId);
+        }
+
+        // Check if this is a PR creation session and update the PR state
+        const branchId = prStateStore.getBranchIdForSession(sessionId);
+        if (branchId) {
+          if (status === 'completed') {
+            try {
+              // Fetch session messages to find the PR URL
+              const messages = await commands.getSessionMessages(sessionId);
+              const foundUrl = extractPrUrl(messages);
+
+              if (foundUrl) {
+                const prNumber = extractPrNumber(foundUrl);
+                if (prNumber) {
+                  // Save PR number to storage
+                  await commands.updateBranchPr(branchId, prNumber);
+                }
+                prStateStore.setPrCreated(branchId, foundUrl);
+              } else {
+                // Session completed but we couldn't find a PR URL
+                prStateStore.setPrError(
+                  branchId,
+                  'PR session completed but no PR URL was found in the output.'
+                );
+              }
+            } catch (e) {
+              prStateStore.setPrError(branchId, e instanceof Error ? e.message : String(e));
+            }
+          } else {
+            // Session errored or was cancelled
+            prStateStore.setPrError(
+              branchId,
+              `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
+            );
+          }
         }
       }
     });

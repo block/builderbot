@@ -381,18 +381,17 @@
     transition:
       border-color 0.15s ease,
       background-color 0.15s ease,
-      transform 0.15s ease;
+      box-shadow 0.15s ease;
   }
 
   .project-card:hover {
     border-color: var(--border-emphasis);
     background-color: var(--bg-hover);
-    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   }
 
   .project-card:disabled {
     cursor: not-allowed;
-    transform: none;
   }
 
   .project-card.deleting {
@@ -403,7 +402,7 @@
   .project-card.deleting:hover {
     border-color: var(--border-muted);
     background: var(--bg-surface);
-    transform: none;
+    box-shadow: none;
   }
 
   .new-project-card {

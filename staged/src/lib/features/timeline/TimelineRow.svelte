@@ -31,6 +31,7 @@
     title: string;
     meta?: string;
     secondaryMeta?: string;
+    deleting?: boolean;
     isLast?: boolean;
     sessionId?: string;
     onItemClick?: () => void;
@@ -45,6 +46,7 @@
     title,
     meta,
     secondaryMeta,
+    deleting = false,
     isLast = false,
     sessionId,
     onItemClick,
@@ -58,13 +60,16 @@
     type === 'review' || type === 'generating-review' || type === 'failed-review'
   );
   let isPending = $derived(
-    type === 'pending-commit' || type === 'generating-note' || type === 'generating-review'
+    deleting ||
+      type === 'pending-commit' ||
+      type === 'generating-note' ||
+      type === 'generating-review'
   );
   let isFailed = $derived(
-    type === 'failed-commit' || type === 'failed-note' || type === 'failed-review'
+    !deleting && (type === 'failed-commit' || type === 'failed-note' || type === 'failed-review')
   );
   let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
-  let hasSession = $derived(!!sessionId);
+  let hasSession = $derived(!!sessionId && !deleting);
 
   function handleRowClick() {
     if (isClickable) {

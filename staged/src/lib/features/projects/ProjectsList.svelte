@@ -437,6 +437,7 @@
     color: var(--text-primary);
     font-size: var(--size-sm);
     font-weight: 600;
+    padding-right: 24px;
   }
 
   .repo {

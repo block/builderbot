@@ -1820,8 +1820,8 @@ pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
 
             if let Ok(file) = serde_json::from_str::<FileContent>(&json) {
                 use base64::Engine;
-                if let Ok(decoded) = base64::engine::general_purpose::STANDARD
-                    .decode(&file.content.replace('\n', ""))
+                if let Ok(decoded) =
+                    base64::engine::general_purpose::STANDARD.decode(file.content.replace('\n', ""))
                 {
                     if let Ok(content) = String::from_utf8(decoded) {
                         let module_count =

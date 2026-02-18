@@ -173,6 +173,8 @@
     font-size: var(--size-sm);
     color: var(--text-muted);
     line-height: 1.4;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
   }
 
   .modal-body {

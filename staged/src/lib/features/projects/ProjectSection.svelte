@@ -18,6 +18,7 @@
     canAddRepo?: boolean;
     addRepoHint?: string | null;
     deleting?: boolean;
+    safeToDelete?: boolean;
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
     detecting?: boolean;
@@ -36,6 +37,7 @@
     canAddRepo = true,
     addRepoHint = null,
     deleting = false,
+    safeToDelete = false,
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
     detecting = false,
@@ -83,7 +85,12 @@
       {/if}
     </div>
     {#if !deleting}
-      <button class="remove-button" onclick={() => onDeleteProject?.()} title="Remove project">
+      <button
+        class="remove-button"
+        class:safe-delete={safeToDelete}
+        onclick={() => onDeleteProject?.()}
+        title="Remove project"
+      >
         <Trash2 size={14} />
         Remove Project
       </button>
@@ -181,6 +188,17 @@
     background-color: var(--bg-danger-hover);
     border-color: var(--border-danger);
     color: var(--text-danger);
+  }
+
+  .remove-button.safe-delete {
+    background-color: var(--bg-danger-hover);
+    border-color: var(--border-danger);
+    color: var(--text-danger);
+  }
+
+  .remove-button.safe-delete:hover {
+    background-color: var(--ui-danger);
+    color: white;
   }
 
   .detecting-status {

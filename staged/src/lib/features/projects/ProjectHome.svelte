@@ -251,6 +251,52 @@
     )
   );
 
+  // Track which projects are safe to delete (for button styling)
+  let safeToDeleteProjects = $state<Set<string>>(new Set());
+
+  // Update safe-to-delete status when branches change
+  $effect(() => {
+    const updateSafeStatus = async () => {
+      const nextSafe = new Set<string>();
+
+      for (const project of projects) {
+        const branches = branchesByProject.get(project.id) || [];
+        const repoCount = repoCountsByProject.get(project.id) || 0;
+
+        // If no repos, safe to delete
+        if (repoCount === 0) {
+          nextSafe.add(project.id);
+          continue;
+        }
+
+        // Check if all branches have merged PRs and no unpushed changes
+        if (branches.length > 0) {
+          const allSafe = await Promise.all(
+            branches.map(async (branch) => {
+              const isMerged = branch.prState === 'MERGED';
+              if (!isMerged) return false;
+
+              try {
+                const hasUnpushed = await commands.hasUnpushedCommits(branch.id);
+                return !hasUnpushed;
+              } catch (e) {
+                return false;
+              }
+            })
+          );
+
+          if (allSafe.every((safe) => safe)) {
+            nextSafe.add(project.id);
+          }
+        }
+      }
+
+      safeToDeleteProjects = nextSafe;
+    };
+
+    updateSafeStatus();
+  });
+
   $effect(() => {
     if (!loading && selectedProjectId && projects.length > 0 && !selectedProject) {
       goHome();
@@ -281,8 +327,45 @@
     selectProject(project.id);
   }
 
-  function handleDeleteProjectRequest(project: Project) {
-    projectToDelete = project;
+  async function handleDeleteProjectRequest(project: Project) {
+    const branches = branchesByProject.get(project.id) || [];
+    const repoCount = repoCountsByProject.get(project.id) || 0;
+
+    // If no repos, safe to delete without confirmation
+    if (repoCount === 0) {
+      projectToDelete = project;
+      // Immediately confirm since it's safe
+      await confirmDeleteProject();
+      return;
+    }
+
+    // Check if all branches have merged PRs and no unpushed changes
+    const allSafe = await Promise.all(
+      branches.map(async (branch) => {
+        const isMerged = branch.prState === 'MERGED';
+        if (!isMerged) return false;
+
+        // Check for unpushed commits
+        try {
+          const hasUnpushed = await commands.hasUnpushedCommits(branch.id);
+          return !hasUnpushed;
+        } catch (e) {
+          console.error('Failed to check unpushed commits:', e);
+          return false;
+        }
+      })
+    );
+
+    const isSafeToDelete = branches.length > 0 && allSafe.every((safe) => safe);
+
+    if (isSafeToDelete) {
+      // Safe to delete without confirmation
+      projectToDelete = project;
+      await confirmDeleteProject();
+    } else {
+      // Show confirmation dialog
+      projectToDelete = project;
+    }
   }
 
   async function confirmDeleteProject() {
@@ -691,6 +774,7 @@
             canAddRepo={canAddRepo(project)}
             addRepoHint={project.location === 'remote' ? addRepoHint(project) : null}
             deleting={deletingProjectNames.has(project.id)}
+            safeToDelete={safeToDeleteProjects.has(project.id)}
             {deletingBranches}
             {worktreeErrors}
             detecting={detectingProjectIds.has(project.id)}
@@ -738,7 +822,7 @@
 {#if projectToDelete}
   <ConfirmDialog
     title="Remove Project"
-    message={`Remove "${projectDisplayName(projectToDelete)}" from Staged? This won't delete the repository.`}
+    message={`Remove "${projectDisplayName(projectToDelete)}" from Staged? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
     confirmLabel="Remove"
     danger={true}
     onConfirm={confirmDeleteProject}

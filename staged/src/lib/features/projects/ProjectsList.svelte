@@ -5,13 +5,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import {
-    GitMerge,
-    GitPullRequest,
-    GitPullRequestClosed,
-    GitPullRequestDraft,
-    GitBranch,
-  } from 'lucide-svelte';
+  import { GitPullRequest, GitPullRequestClosed, GitBranch } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
   import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
@@ -133,9 +127,7 @@
     selectProject(projectId);
   }
 
-  function getProjectPrStatus(
-    projectId: string
-  ): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
+  function getProjectPrStatus(projectId: string): 'merged' | 'open' | 'closed' | 'conflict' | null {
     const branches = projectBranches.get(projectId) || [];
     return aggregateProjectPrStatus(branches);
   }
@@ -277,16 +269,14 @@
                 <div class="status-indicator unread-dot"></div>
               {/if}
               <div class="card-header">
-                {#if prStatus === 'success'}
-                  <GitMerge size={16} class="pr-status-success" />
-                {:else if prStatus === 'warning'}
-                  <GitPullRequest size={16} class="pr-status-warning" />
-                {:else if prStatus === 'error'}
-                  <GitPullRequestClosed size={16} class="pr-status-error" />
-                {:else if prStatus === 'pending'}
-                  <GitPullRequestDraft size={16} class="pr-status-pending" />
-                {:else if prStatus === 'neutral'}
-                  <GitPullRequestDraft size={16} class="pr-status-neutral" />
+                {#if prStatus === 'merged'}
+                  <GitPullRequest size={16} class="pr-status-merged" />
+                {:else if prStatus === 'open'}
+                  <GitPullRequest size={16} />
+                {:else if prStatus === 'closed'}
+                  <GitPullRequestClosed size={16} />
+                {:else if prStatus === 'conflict'}
+                  <GitPullRequestClosed size={16} class="pr-status-conflict" />
                 {:else}
                   <GitBranch size={16} />
                 {/if}
@@ -571,23 +561,11 @@
   }
 
   /* PR status colors for project icon */
-  .card-header :global(.pr-status-success) {
+  .card-header :global(.pr-status-merged) {
     color: var(--ui-success);
   }
 
-  .card-header :global(.pr-status-warning) {
-    color: var(--ui-warning);
-  }
-
-  .card-header :global(.pr-status-error) {
+  .card-header :global(.pr-status-conflict) {
     color: var(--ui-danger);
-  }
-
-  .card-header :global(.pr-status-pending) {
-    color: var(--ui-accent);
-  }
-
-  .card-header :global(.pr-status-neutral) {
-    color: var(--text-muted);
   }
 </style>

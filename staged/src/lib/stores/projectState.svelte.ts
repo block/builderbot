@@ -48,7 +48,14 @@ class ProjectStateStore {
    */
   hasRunningSessions(projectId: string): boolean {
     const state = this.states.get(projectId);
-    return state ? state.runningSessions.size > 0 : false;
+    const hasRunning = state ? state.runningSessions.size > 0 : false;
+    console.info('[projectState] hasRunningSessions check:', {
+      projectId,
+      hasRunning,
+      count: state?.runningSessions.size ?? 0,
+      sessionIds: state ? Array.from(state.runningSessions) : [],
+    });
+    return hasRunning;
   }
 
   /**
@@ -72,8 +79,14 @@ class ProjectStateStore {
    * Add a running session to a project
    */
   addRunningSession(projectId: string, sessionId: string): void {
+    console.info('[projectState] addRunningSession:', { projectId, sessionId });
     const state = this.getOrCreateState(projectId);
     state.runningSessions.add(sessionId);
+    console.info('[projectState] running sessions for project:', {
+      projectId,
+      count: state.runningSessions.size,
+      sessionIds: Array.from(state.runningSessions),
+    });
     // Track the session-to-project mapping
     this.sessionToProject.set(sessionId, projectId);
   }
@@ -82,9 +95,17 @@ class ProjectStateStore {
    * Remove a running session from a project
    */
   removeRunningSession(projectId: string, sessionId: string): void {
+    console.info('[projectState] removeRunningSession:', { projectId, sessionId });
     const state = this.states.get(projectId);
     if (state) {
       state.runningSessions.delete(sessionId);
+      console.info('[projectState] running sessions after removal:', {
+        projectId,
+        count: state.runningSessions.size,
+        sessionIds: Array.from(state.runningSessions),
+      });
+    } else {
+      console.warn('[projectState] no state found for project:', projectId);
     }
     // Clean up the session-to-project mapping
     this.sessionToProject.delete(sessionId);
@@ -103,15 +124,23 @@ class ProjectStateStore {
    * @param currentProjectId The project the user is currently viewing (or null if on projects list)
    */
   handleSessionComplete(sessionId: string, currentProjectId: string | null): void {
+    console.info('[projectState] handleSessionComplete:', { sessionId, currentProjectId });
     const projectId = this.sessionToProject.get(sessionId);
-    if (!projectId) return;
+    if (!projectId) {
+      console.warn('[projectState] session not found in mapping:', sessionId);
+      return;
+    }
+    console.info('[projectState] found project for session:', { sessionId, projectId });
 
     // Remove the session from the project
     this.removeRunningSession(projectId, sessionId);
 
     // Mark as unread if user is not viewing this project
     if (currentProjectId !== projectId) {
+      console.info('[projectState] marking project as unread:', projectId);
       this.markAsUnread(projectId);
+    } else {
+      console.info('[projectState] not marking as unread (user is viewing this project)');
     }
   }
 

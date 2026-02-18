@@ -90,7 +90,13 @@
       status: string;
     }>('session-status-changed', (event) => {
       const { sessionId, status } = event.payload;
+      console.info('[ProjectHome] session-status-changed event:', {
+        sessionId,
+        status,
+        currentProjectId: navigation.selectedProjectId,
+      });
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        console.info('[ProjectHome] session completed, calling handleSessionComplete');
         // Handle session completion - mark project as unread if user is not viewing it
         projectStateStore.handleSessionComplete(sessionId, navigation.selectedProjectId);
       }

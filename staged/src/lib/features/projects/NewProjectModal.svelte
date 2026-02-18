@@ -111,7 +111,7 @@
           bind:value={name}
           id="project-name"
           type="text"
-          placeholder="e.g., Billing Platform"
+          placeholder="e.g., Add dark mode, Fix login bug"
           disabled={saving}
           autocomplete="off"
           use:focus

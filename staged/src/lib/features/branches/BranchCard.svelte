@@ -741,8 +741,9 @@
 
   /** Get the status indicator color for the PR button */
   function getPrStatusIndicator(): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
-    // Push/PR creation states
-    if (pushState === 'pushing' || prState === 'creating') return 'pending';
+    // Push/PR creation states - no indicator during creation (spinner is enough)
+    if (prState === 'creating') return null;
+    if (pushState === 'pushing') return 'pending';
     if (pushState === 'error' || prState === 'error') return 'error';
 
     if (!branch.prNumber) return null;

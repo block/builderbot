@@ -85,6 +85,16 @@
   let timeline = $state<BranchTimelineData | null>(null);
   let timelineLoading = $state(true);
   let timelineError = $state<string | null>(null);
+  let pendingTimelineItems = $state<
+    {
+      key: string;
+      type: 'pending-commit' | 'generating-note' | 'generating-review';
+      title: string;
+      secondaryMeta: string;
+      sessionId?: string;
+    }[]
+  >([]);
+  let deletingTimelineItems = $state<{ type: 'commit' | 'note' | 'review'; id: string }[]>([]);
 
   // New session modal state
   let showNewSession = $state(false);
@@ -283,18 +293,45 @@
     }>('session-status-changed', (event) => {
       const { sessionId: eventSessionId, status } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        pendingTimelineItems = pendingTimelineItems.filter(
+          (item) => item.sessionId !== eventSessionId
+        );
         loadTimeline();
       }
     });
   }
 
   async function loadTimeline() {
-    timelineLoading = true;
-    timelineError = null;
+    // Match BranchCard behavior: only block with loading/error when we have
+    // no timeline yet. Background refreshes keep existing items visible.
+    const isInitialLoad = !timeline;
+    if (isInitialLoad) {
+      timelineLoading = true;
+      timelineError = null;
+    }
     try {
       timeline = await commands.getBranchTimeline(branch.id);
+      timelineError = null;
+      // Drop optimistic placeholders once their real timeline entries exist.
+      const seenSessionIds = new Set<string>();
+      for (const commit of timeline.commits) {
+        if (commit.sessionId) seenSessionIds.add(commit.sessionId);
+      }
+      for (const note of timeline.notes) {
+        if (note.sessionId) seenSessionIds.add(note.sessionId);
+      }
+      for (const review of timeline.reviews) {
+        if (review.sessionId) seenSessionIds.add(review.sessionId);
+      }
+      pendingTimelineItems = pendingTimelineItems.filter(
+        (item) => !(item.sessionId && seenSessionIds.has(item.sessionId))
+      );
     } catch (e) {
-      timelineError = e instanceof Error ? e.message : String(e);
+      if (isInitialLoad) {
+        timelineError = e instanceof Error ? e.message : String(e);
+      } else {
+        console.error('Failed to refresh timeline:', e);
+      }
     } finally {
       timelineLoading = false;
     }
@@ -318,6 +355,28 @@
   function handleNewSessionStarted(result: { sessionId: string; artifactId: string }) {
     // Track the running session in the project state store
     projectStateStore.addRunningSession(branch.projectId, result.sessionId);
+    const pendingType =
+      newSessionMode === 'commit'
+        ? 'pending-commit'
+        : newSessionMode === 'review'
+          ? 'generating-review'
+          : 'generating-note';
+    const pendingTitle =
+      newSessionMode === 'commit'
+        ? 'Preparing commit...'
+        : newSessionMode === 'review'
+          ? 'Preparing AI review...'
+          : 'Preparing note...';
+    pendingTimelineItems = [
+      ...pendingTimelineItems,
+      {
+        key: `session-${result.sessionId}`,
+        type: pendingType,
+        title: pendingTitle,
+        secondaryMeta: 'starting...',
+        sessionId: result.sessionId,
+      },
+    ];
     showNewSession = false;
     draftPrompt = '';
     loadTimeline();
@@ -343,6 +402,18 @@
     commitDiffSha = sha;
   }
 
+  function markItemDeleting(type: 'commit' | 'note' | 'review', id: string) {
+    if (!deletingTimelineItems.some((item) => item.type === type && item.id === id)) {
+      deletingTimelineItems = [...deletingTimelineItems, { type, id }];
+    }
+  }
+
+  function clearItemDeleting(type: 'commit' | 'note' | 'review', id: string) {
+    deletingTimelineItems = deletingTimelineItems.filter(
+      (item) => item.type !== type || item.id !== id
+    );
+  }
+
   function handleDeleteNote(noteId: string, sessionId?: string) {
     confirmDelete = {
       title: 'Delete Note',
@@ -351,6 +422,7 @@
         (sessionId ? ' The linked session will also be deleted.' : ''),
       onConfirm: async () => {
         confirmDelete = null;
+        markItemDeleting('note', noteId);
         try {
           if (sessionId) {
             try {
@@ -360,16 +432,19 @@
             }
           }
           await commands.deleteNote(noteId, !!sessionId);
-          loadTimeline();
+          await loadTimeline();
         } catch (e) {
           console.error('Failed to delete note:', e);
           notifyError('Failed to delete note', e);
+        } finally {
+          clearItemDeleting('note', noteId);
         }
       },
     };
   }
 
   async function handleDeletePendingCommit(commitId: string, sessionId?: string) {
+    markItemDeleting('commit', commitId);
     try {
       if (sessionId) {
         try {
@@ -379,10 +454,12 @@
         }
       }
       await commands.deletePendingCommit(commitId, !!sessionId);
-      loadTimeline();
+      await loadTimeline();
     } catch (e) {
       console.error('Failed to delete pending commit:', e);
       notifyError('Failed to delete pending commit', e);
+    } finally {
+      clearItemDeleting('commit', commitId);
     }
   }
 
@@ -394,6 +471,7 @@
         (sessionId ? ' The linked session will also be deleted.' : ''),
       onConfirm: async () => {
         confirmDelete = null;
+        markItemDeleting('review', reviewId);
         try {
           if (sessionId) {
             try {
@@ -403,10 +481,12 @@
             }
           }
           await commands.deleteReview(reviewId, !!sessionId);
-          loadTimeline();
+          await loadTimeline();
         } catch (e) {
           console.error('Failed to delete review:', e);
           notifyError('Failed to delete review', e);
+        } finally {
+          clearItemDeleting('review', reviewId);
         }
       },
     };
@@ -480,18 +560,20 @@
         </div>
       {:else if status === 'running'}
         <!-- Timeline UI (same pattern as BranchCard) -->
-        {#if timelineLoading}
+        {#if timelineLoading && !timeline}
           <div class="loading">
             <Spinner size={14} />
             <span>Loading...</span>
           </div>
-        {:else if timelineError}
+        {:else if timelineError && !timeline}
           <div class="timeline-error">
             <span>{timelineError}</span>
           </div>
         {:else if timeline}
           <BranchTimeline
             {timeline}
+            pendingItems={pendingTimelineItems}
+            deletingItems={deletingTimelineItems}
             onSessionClick={handleTimelineSessionClick}
             onCommitClick={handleCommitClick}
             onNoteClick={handleNoteClick}

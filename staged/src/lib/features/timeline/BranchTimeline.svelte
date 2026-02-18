@@ -16,6 +16,16 @@
     timeline: BranchTimelineData;
     /** Placeholder items for notes being created from drag-and-drop. */
     pendingDropNotes?: { key: string; title: string }[];
+    /** Placeholder items for newly started sessions before timeline persistence catches up. */
+    pendingItems?: {
+      key: string;
+      type: 'pending-commit' | 'generating-note' | 'generating-review';
+      title: string;
+      secondaryMeta?: string;
+      sessionId?: string;
+    }[];
+    /** Existing timeline rows currently being deleted (rendered in-place as deleting). */
+    deletingItems?: { type: 'commit' | 'note' | 'review'; id: string }[];
     onSessionClick?: (sessionId: string) => void;
     onCommitClick?: (sha: string) => void;
     onNoteClick?: (noteId: string, title: string, content: string) => void;
@@ -34,6 +44,8 @@
   let {
     timeline,
     pendingDropNotes = [],
+    pendingItems = [],
+    deletingItems = [],
     onSessionClick,
     onCommitClick,
     onNoteClick,
@@ -64,6 +76,7 @@
     title: string;
     meta?: string;
     secondaryMeta?: string;
+    deleting?: boolean;
     timestamp: number;
     sessionId?: string;
     commitSha?: string;
@@ -84,11 +97,21 @@
   // Merge commits, notes, and reviews into a single sorted list
   let items = $derived.by(() => {
     const all: DisplayItem[] = [];
+    const deletingCommitIds = new Set(
+      deletingItems.filter((item) => item.type === 'commit').map((item) => item.id)
+    );
+    const deletingNoteIds = new Set(
+      deletingItems.filter((item) => item.type === 'note').map((item) => item.id)
+    );
+    const deletingReviewIds = new Set(
+      deletingItems.filter((item) => item.type === 'review').map((item) => item.id)
+    );
 
     for (const commit of timeline.commits) {
       const isPending = !commit.sha;
       const isRunning = commit.sessionStatus === 'running';
       const isFailed = isPending && !isRunning && !!commit.sessionId;
+      const isDeleting = !!commit.id && deletingCommitIds.has(commit.id);
 
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
@@ -108,18 +131,21 @@
         key: commit.sha || `pending-${commit.sessionId || commit.timestamp}`,
         type,
         title: stripXmlTags(commit.subject),
-        meta: secondaryMeta,
+        meta: isDeleting ? 'Deleting...' : secondaryMeta,
         secondaryMeta: commit.shortSha || undefined,
+        deleting: isDeleting,
         timestamp: commit.timestamp,
         sessionId: commit.sessionId ?? undefined,
         commitSha: commit.sha || undefined,
         commitId: commit.id ?? undefined,
+        deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
       });
     }
 
     for (const note of timeline.notes) {
       const isRunning = note.sessionStatus === 'running';
       const isFailed = !isRunning && !!note.sessionId && !note.content?.trim();
+      const isDeleting = deletingNoteIds.has(note.id);
 
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
@@ -139,19 +165,22 @@
         key: `note-${note.id}`,
         type,
         title: stripXmlTags(note.title),
-        secondaryMeta,
+        secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
+        deleting: isDeleting,
         // Note timestamps are in milliseconds, convert to seconds for sorting
         timestamp: Math.floor(note.createdAt / 1000),
         sessionId: note.sessionId ?? undefined,
         noteId: note.id,
         noteTitle: stripXmlTags(note.title),
         noteContent: note.content,
+        deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
       });
     }
 
     for (const review of timeline.reviews) {
       const isRunning = review.sessionStatus === 'running';
       const isFailed = !isRunning && !!review.sessionId && review.commentCount === 0;
+      const isDeleting = deletingReviewIds.has(review.id);
 
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
@@ -172,10 +201,12 @@
         type,
         title: `Code Review (${review.scope})`,
         meta: review.commentCount > 0 ? `${review.commentCount} comments` : undefined,
-        secondaryMeta,
+        secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
+        deleting: isDeleting,
         timestamp: Math.floor(review.createdAt / 1000),
         sessionId: review.sessionId ?? undefined,
         reviewId: review.id,
+        deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
       });
     }
 
@@ -266,9 +297,9 @@
   }
 </script>
 
-{#if items.length === 0 && !onNewNote && !onNewCommit && !onNewReview && pendingDropNotes.length === 0}
+{#if items.length === 0 && !onNewNote && !onNewCommit && !onNewReview && pendingDropNotes.length === 0 && pendingItems.length === 0}
   <p class="no-items">No commits or notes yet</p>
-{:else if items.length === 0}
+{:else if items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0}
   <!-- Empty state: large action buttons -->
   <div class="empty-state">
     {#if onNewNote}
@@ -311,6 +342,7 @@
         title={item.title}
         meta={item.meta}
         secondaryMeta={item.secondaryMeta}
+        deleting={item.deleting}
         isLast={index === items.length - 1 &&
           !onNewNote &&
           !onNewCommit &&
@@ -327,7 +359,19 @@
         type="generating-note"
         title={drop.title}
         secondaryMeta="adding..."
-        isLast={index === pendingDropNotes.length - 1 && !onNewNote && !onNewCommit}
+        isLast={index === pendingDropNotes.length - 1 &&
+          pendingItems.length === 0 &&
+          !onNewNote &&
+          !onNewCommit}
+      />
+    {/each}
+    {#each pendingItems as item, index (item.key)}
+      <TimelineRow
+        type={item.type}
+        title={item.title}
+        secondaryMeta={item.secondaryMeta}
+        sessionId={item.sessionId}
+        isLast={index === pendingItems.length - 1 && !onNewNote && !onNewCommit}
       />
     {/each}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}

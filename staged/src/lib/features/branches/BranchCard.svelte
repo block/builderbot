@@ -1844,6 +1844,7 @@
   .primary-action-container {
     display: flex;
     align-items: center;
+    overflow: hidden;
   }
 
   .primary-action-button {
@@ -1895,6 +1896,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
+    overflow: hidden;
   }
 
   .running-action-container.fading {
@@ -1916,6 +1918,7 @@
     color: var(--text-primary);
     font-size: var(--size-xs);
     cursor: pointer;
+    white-space: nowrap;
     transition:
       background-color 0.15s ease,
       border-color 0.15s ease;

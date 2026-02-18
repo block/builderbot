@@ -1245,6 +1245,13 @@
         secondaryLabel={formatBaseBranch(branch.baseBranch)}
       />
       <div class="header-actions">
+        <!-- Fake action for spinner testing -->
+        <div class="running-action-container">
+          <button class="running-action-button" title="Fake action for testing spinner">
+            <Spinner size={12} />
+            Test Action
+          </button>
+        </div>
         <!-- Running actions (excluding primary action) -->
         {#each secondaryRunningActions as execution (execution.executionId)}
           <div class="running-action-container" class:fading={execution.fading}>

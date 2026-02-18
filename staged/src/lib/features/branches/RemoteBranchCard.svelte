@@ -569,7 +569,9 @@
               automatically when ready.</span
             >
           {:else}
-            <span class="status-hint">This usually takes 30–60 seconds</span>
+            <span class="status-hint"
+              >This can take a few minutes, depending on repository size.</span
+            >
           {/if}
         </div>
       {:else if status === 'running'}

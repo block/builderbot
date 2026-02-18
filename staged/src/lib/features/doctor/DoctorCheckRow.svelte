@@ -158,6 +158,40 @@
     cursor: not-allowed;
   }
 
+  .fix-error {
+    font-size: var(--size-xs);
+    color: var(--color-danger, #f85149);
+  }
+
+  .fix-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    padding: 4px 8px;
+    background: none;
+    border: 1px solid var(--border-primary, rgba(255, 255, 255, 0.1));
+    color: var(--text-muted);
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: var(--size-xs);
+    transition:
+      color 0.1s,
+      background 0.1s,
+      border-color 0.1s;
+  }
+
+  .fix-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+    border-color: var(--border-hover, rgba(255, 255, 255, 0.2));
+  }
+
+  .fix-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   .install-btn {
     display: flex;
     align-items: center;

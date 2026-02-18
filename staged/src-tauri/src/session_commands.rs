@@ -564,6 +564,8 @@ fn format_repo_label(repo_slug: &str, subpath: Option<&str>) -> String {
     } else {
         repo_slug.to_string()
     }
+    }
+    entries
 }
 
 fn build_project_context(

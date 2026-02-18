@@ -601,7 +601,6 @@
     sessionId={openSessionId}
     onClose={() => {
       openSessionId = null;
-      loadTimeline();
     }}
   />
 {/if}

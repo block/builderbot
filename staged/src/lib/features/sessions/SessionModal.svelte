@@ -74,6 +74,9 @@
   let messagesEl: HTMLDivElement;
   let inputEl: HTMLTextAreaElement;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let pollInFlight = false;
+  let closed = false;
+  let dismissing = $state(false);
 
   let inputText = $state('');
   let messageQueue = $state<string[]>([]);
@@ -97,6 +100,7 @@
   });
 
   onDestroy(() => {
+    closed = true;
     stopPolling();
   });
 
@@ -106,10 +110,12 @@
 
   /** Initial full load. */
   async function loadSession() {
+    if (closed) return;
     loading = true;
     error = null;
     try {
       const [s, msgs] = await Promise.all([getSession(sessionId), getSessionMessages(sessionId)]);
+      if (closed) return;
       if (!s) {
         error = 'Session not found';
         return;
@@ -126,15 +132,18 @@
 
   /** Incremental poll — re-fetch last message (may have grown) + any new ones. */
   async function poll() {
-    if (!session) return;
+    if (!session || closed || pollInFlight) return;
+    pollInFlight = true;
     try {
       // Fetch session status
       const s = await getSession(sessionId);
+      if (closed) return;
       if (s) session = s;
 
       // Incremental message fetch
       if (messages.length === 0) {
         const msgs = await getSessionMessages(sessionId);
+        if (closed) return;
         if (msgs.length > 0) {
           messages = msgs;
           scrollToBottomIfNear();
@@ -142,6 +151,7 @@
       } else {
         const lastId = messages[messages.length - 1].id;
         const updated = await getSessionMessagesSince(sessionId, lastId);
+        if (closed) return;
         if (updated.length > 0) {
           const prev = messages.slice(0, -1);
           messages = [...prev, ...updated];
@@ -158,6 +168,8 @@
       }
     } catch {
       // Silently ignore poll errors
+    } finally {
+      pollInFlight = false;
     }
   }
 
@@ -171,6 +183,7 @@
       clearInterval(pollTimer);
       pollTimer = null;
     }
+    pollInFlight = false;
   }
 
   // =========================================================================
@@ -390,15 +403,25 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
-      onClose();
+      requestClose();
       e.preventDefault();
     }
   }
 
   function handleBackdropClick(e: MouseEvent) {
     if (e.target === e.currentTarget) {
-      onClose();
+      requestClose();
     }
+  }
+
+  function requestClose() {
+    if (closed) return;
+    closed = true;
+    dismissing = true;
+    stopPolling();
+    requestAnimationFrame(() => {
+      onClose();
+    });
   }
 
   /** Group consecutive tool_call / tool_result messages into pairs */
@@ -461,11 +484,12 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="modal-backdrop"
+  class:dismissing
   role="dialog"
   aria-modal="true"
   tabindex="-1"
   onclick={handleBackdropClick}
-  onkeydown={(e) => e.key === 'Escape' && onClose()}
+  onkeydown={(e) => e.key === 'Escape' && requestClose()}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
@@ -480,7 +504,7 @@
         </span>
       </div>
       <div class="header-actions">
-        <button class="close-btn" onclick={onClose} title="Close (Esc)">
+        <button class="close-btn" onclick={requestClose} title="Close (Esc)">
           <X size={16} />
         </button>
       </div>
@@ -747,6 +771,11 @@
     align-items: center;
     justify-content: center;
     z-index: 1000;
+  }
+
+  .modal-backdrop.dismissing {
+    opacity: 0;
+    pointer-events: none;
   }
 
   .modal {

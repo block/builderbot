@@ -286,7 +286,7 @@
                 {:else if prStatus === 'conflict'}
                   <GitPullRequestClosed size={16} class="pr-status-conflict" />
                 {:else}
-                  <GitPullRequestDraft size={16} />
+                  <GitPullRequestDraft size={16} class="pr-status-draft" />
                 {/if}
                 <span>{projectDisplayName(project)}</span>
               </div>
@@ -512,6 +512,10 @@
 
   .card-header :global(svg.pr-status-conflict) {
     stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.pr-status-draft) {
+    stroke: var(--text-faint);
   }
 
   .repo {

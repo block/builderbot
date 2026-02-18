@@ -752,6 +752,9 @@
 
     if (!branch.prNumber) return null;
 
+    // No indicator when showing "Push changes" button (PR exists but has unpushed commits)
+    if (prState === 'created' && hasUnpushed && pushState === 'idle') return null;
+
     // PR exists - check status
     if (prStatusState === 'MERGED') return null; // No indicator for merged PRs
     if (prStatusState === 'CLOSED') return 'neutral';

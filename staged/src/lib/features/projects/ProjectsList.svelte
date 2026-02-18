@@ -5,7 +5,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { GitPullRequest, GitPullRequestClosed, GitBranch } from 'lucide-svelte';
+  import { GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, GitBranch } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
   import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
@@ -127,7 +127,9 @@
     selectProject(projectId);
   }
 
-  function getProjectPrStatus(projectId: string): 'merged' | 'open' | 'closed' | 'conflict' | null {
+  function getProjectPrStatus(
+    projectId: string
+  ): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
     const branches = projectBranches.get(projectId) || [];
     return aggregateProjectPrStatus(branches);
   }
@@ -494,6 +496,10 @@
     padding-right: 24px;
   }
 
+  .card-header :global(svg) {
+    flex-shrink: 0;
+  }
+
   .repo {
     color: var(--text-muted);
     font-size: var(--size-xs);
@@ -558,14 +564,5 @@
     height: 8px;
     background-color: var(--ui-accent);
     border-radius: 50%;
-  }
-
-  /* PR status colors for project icon */
-  .card-header :global(svg.pr-status-merged) {
-    stroke: var(--ui-success);
-  }
-
-  .card-header :global(svg.pr-status-conflict) {
-    stroke: var(--ui-danger);
   }
 </style>

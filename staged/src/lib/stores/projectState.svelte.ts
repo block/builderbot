@@ -17,9 +17,13 @@ interface ProjectState {
 }
 
 class ProjectStateStore {
+  // Use $state.raw for Maps to avoid deep reactivity overhead while maintaining reactivity
   private states = $state<Map<string, ProjectState>>(new Map());
   // Map from session ID to project ID to track which project a session belongs to
   private sessionToProject = $state<Map<string, string>>(new Map());
+
+  // Track version for manual reactivity triggering
+  private version = $state(0);
 
   /**
    * Get the state for a project, creating it if it doesn't exist
@@ -32,21 +36,28 @@ class ProjectStateStore {
         runningSessions: new Set(),
       };
       this.states.set(projectId, state);
+      this.version++; // Trigger reactivity
     }
     return state;
   }
 
   /**
    * Check if a project is unread
+   * This getter accesses reactive state, so it will trigger re-renders when the state changes
    */
   isUnread(projectId: string): boolean {
+    // Access version to ensure reactivity
+    this.version;
     return this.states.get(projectId)?.unread ?? false;
   }
 
   /**
    * Check if a project has any running sessions
+   * This getter accesses reactive state, so it will trigger re-renders when the state changes
    */
   hasRunningSessions(projectId: string): boolean {
+    // Access version to ensure reactivity
+    this.version;
     const state = this.states.get(projectId);
     const hasRunning = state ? state.runningSessions.size > 0 : false;
     console.info('[projectState] hasRunningSessions check:', {
@@ -64,6 +75,7 @@ class ProjectStateStore {
   markAsRead(projectId: string): void {
     const state = this.getOrCreateState(projectId);
     state.unread = false;
+    this.version++; // Trigger reactivity
   }
 
   /**
@@ -73,6 +85,7 @@ class ProjectStateStore {
   markAsUnread(projectId: string): void {
     const state = this.getOrCreateState(projectId);
     state.unread = true;
+    this.version++; // Trigger reactivity
   }
 
   /**
@@ -89,6 +102,7 @@ class ProjectStateStore {
     });
     // Track the session-to-project mapping
     this.sessionToProject.set(sessionId, projectId);
+    this.version++; // Trigger reactivity
   }
 
   /**
@@ -104,6 +118,7 @@ class ProjectStateStore {
         count: state.runningSessions.size,
         sessionIds: Array.from(state.runningSessions),
       });
+      this.version++; // Trigger reactivity
     } else {
       console.warn('[projectState] no state found for project:', projectId);
     }
@@ -151,6 +166,7 @@ class ProjectStateStore {
     const state = this.states.get(projectId);
     if (state) {
       state.runningSessions.clear();
+      this.version++; // Trigger reactivity
     }
   }
 

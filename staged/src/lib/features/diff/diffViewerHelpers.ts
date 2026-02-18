@@ -30,6 +30,7 @@ export interface LineCommentEditorLayout {
   left: number;
   width: number;
   visible: boolean;
+  position: CommentPosition;
 }
 
 export interface LineSelectionToolbarLayout {
@@ -239,19 +240,25 @@ export function buildLineCommentEditorLayout(
   viewerRect: DOMRect,
   paneRect: DOMRect,
   anchorLineRect: DOMRect,
+  position: CommentPosition,
   editorHeight = 120,
   paneHorizontalPadding = 12
 ): LineCommentEditorLayout {
-  const top = anchorLineRect.bottom - viewerRect.top;
+  const top =
+    position === 'below'
+      ? anchorLineRect.bottom - viewerRect.top
+      : anchorLineRect.top - viewerRect.top - editorHeight;
   const paneContentTop = paneRect.top - viewerRect.top;
   const paneContentBottom = paneRect.bottom - viewerRect.top;
-  const visible = top + editorHeight > paneContentTop && top < paneContentBottom;
+  const editorBottom = top + editorHeight;
+  const visible = editorBottom > paneContentTop && top < paneContentBottom;
 
   return {
     top,
     left: paneRect.left - viewerRect.left + paneHorizontalPadding,
     width: paneRect.width - paneHorizontalPadding * 2,
     visible,
+    position,
   };
 }
 

@@ -5,9 +5,9 @@
 
   interface Props {
     comments: Comment[];
-    selectedFile: string | null;
+    selectedCommentId: string | null;
     copiedFeedback: boolean;
-    onSelectFile: (path: string) => void;
+    onSelectComment: (comment: Comment) => void;
     onCopyAll: () => void;
     onDeleteAll: () => void;
     onDeleteComment: (commentId: string) => void;
@@ -15,9 +15,9 @@
 
   let {
     comments,
-    selectedFile,
+    selectedCommentId,
     copiedFeedback,
-    onSelectFile,
+    onSelectComment,
     onCopyAll,
     onDeleteAll,
     onDeleteComment,
@@ -64,9 +64,9 @@
         <div class="comment-item-container">
           <button
             class="tree-item comment-item"
-            class:selected={selectedFile === comment.path}
+            class:selected={selectedCommentId === comment.id}
             style="padding-left: 8px"
-            onclick={() => onSelectFile(comment.path)}
+            onclick={() => onSelectComment(comment)}
           >
             <span class="comment-icon" class:agent-comment={comment.author === 'agent'}>
               {#if comment.author === 'agent'}

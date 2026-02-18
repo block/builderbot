@@ -21,7 +21,7 @@
   import DiffReferenceSection from './DiffReferenceSection.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
-  import type { Span } from '../../types';
+  import type { Comment, Span } from '../../types';
   import {
     buildFileEntries,
     buildTree,
@@ -82,6 +82,9 @@
   // Sidebar state
   let collapsedDirs = $state(new Set<string>());
   let copiedFeedback = $state(false);
+  let selectedCommentId = $state<string | null>(null);
+  let jumpToComment = $state<{ id: string; token: number } | null>(null);
+  let commentJumpToken = 0;
 
   // ==========================================================================
   // Derived
@@ -108,6 +111,7 @@
   // ==========================================================================
 
   function selectFile(file: FileEntry) {
+    selectedCommentId = null;
     diffViewer.selectFile(file.path);
   }
 
@@ -161,6 +165,13 @@
     await reviewHandle?.removeReferenceFile(path);
   }
 
+  async function handleSelectComment(comment: Comment) {
+    selectedCommentId = comment.id;
+    await diffViewer.selectFile(comment.path);
+    commentJumpToken += 1;
+    jumpToComment = { id: comment.id, token: commentJumpToken };
+  }
+
   // ==========================================================================
   // Comment callbacks (wired to review state)
   // ==========================================================================
@@ -208,6 +219,7 @@
         <DiffViewer
           diff={currentDiff}
           comments={readonly ? [] : currentComments}
+          {jumpToComment}
           loading={diffViewer.state.loadingFile !== null}
           {beforeLabel}
           {afterLabel}
@@ -252,15 +264,18 @@
               <DiffReferenceSection
                 referenceFiles={reviewHandle?.state.referenceFiles ?? []}
                 selectedFile={diffViewer.state.selectedFile}
-                onSelectFile={(path) => diffViewer.selectFile(path)}
+                onSelectFile={(path) => {
+                  selectedCommentId = null;
+                  diffViewer.selectFile(path);
+                }}
                 onRemoveReferenceFile={handleRemoveReferenceFile}
               />
 
               <DiffCommentsSection
                 comments={currentComments}
-                selectedFile={diffViewer.state.selectedFile}
+                {selectedCommentId}
                 {copiedFeedback}
-                onSelectFile={(path) => diffViewer.selectFile(path)}
+                onSelectComment={handleSelectComment}
                 onCopyAll={handleCopyComments}
                 onDeleteAll={handleDeleteAllComments}
                 onDeleteComment={handleDeleteComment}

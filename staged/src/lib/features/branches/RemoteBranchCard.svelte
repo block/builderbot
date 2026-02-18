@@ -20,6 +20,7 @@
     CirclePause,
     Copy,
     Pencil,
+    FileDiff,
   } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Spinner from '../../shared/Spinner.svelte';
@@ -32,11 +33,13 @@
   import * as commands from '../../commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
   import DropdownMenu, { type MenuItem } from '../../shared/DropdownMenu.svelte';
+  import DiffModal from '../diff/DiffModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
+  import { formatBaseBranch } from './branchCardHelpers';
   import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
@@ -92,12 +95,19 @@
   // Note modal
   let openNote = $state<{ title: string; content: string } | null>(null);
 
+  // Branch diff modal
+  let showBranchDiff = $state(false);
+  let commitDiffSha = $state<string | null>(null);
+
   // Confirm delete dialog
   let confirmDelete = $state<{
     title: string;
     message: string;
     onConfirm: () => void;
   } | null>(null);
+
+  /** True when the branch has at least one finalized commit (code changes vs base). */
+  let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
 
   // Listen for session completion to refresh timeline
   let unlistenStatus: UnlistenFn | null = null;
@@ -313,6 +323,14 @@
     openNote = { title, content };
   }
 
+  function handleReviewClick(_reviewId: string) {
+    showBranchDiff = true;
+  }
+
+  function handleCommitClick(sha: string) {
+    commitDiffSha = sha;
+  }
+
   function handleDeleteNote(noteId: string, sessionId?: string) {
     confirmDelete = {
       title: 'Delete Note',
@@ -354,6 +372,32 @@
       console.error('Failed to delete pending commit:', e);
       notifyError('Failed to delete pending commit', e);
     }
+  }
+
+  function handleDeleteReview(reviewId: string, sessionId?: string) {
+    confirmDelete = {
+      title: 'Delete Review',
+      message:
+        'Are you sure you want to delete this review and all its comments?' +
+        (sessionId ? ' The linked session will also be deleted.' : ''),
+      onConfirm: async () => {
+        confirmDelete = null;
+        try {
+          if (sessionId) {
+            try {
+              await commands.cancelSession(sessionId);
+            } catch {
+              // Session may already be finished
+            }
+          }
+          await commands.deleteReview(reviewId, !!sessionId);
+          loadTimeline();
+        } catch (e) {
+          console.error('Failed to delete review:', e);
+          notifyError('Failed to delete review', e);
+        }
+      },
+    };
   }
 
   // =========================================================================
@@ -437,13 +481,32 @@
           <BranchTimeline
             {timeline}
             onSessionClick={handleTimelineSessionClick}
+            onCommitClick={handleCommitClick}
             onNoteClick={handleNoteClick}
+            onReviewClick={handleReviewClick}
             onDeletePendingCommit={handleDeletePendingCommit}
             onDeleteNote={handleDeleteNote}
+            onDeleteReview={handleDeleteReview}
             onNewNote={() => openNewSession('note')}
             onNewCommit={() => openNewSession('commit')}
+            onNewReview={hasCodeChanges ? () => openNewSession('review') : undefined}
             newSessionDisabled={showNewSession}
-          />
+          >
+            {#snippet footerActions()}
+              {#if hasCodeChanges}
+                <div class="footer-right-actions">
+                  <button
+                    class="diff-btn"
+                    onclick={() => (showBranchDiff = true)}
+                    title="View diff"
+                  >
+                    <FileDiff size={13} />
+                    <span>Diff</span>
+                  </button>
+                </div>
+              {/if}
+            {/snippet}
+          </BranchTimeline>
         {/if}
       {:else if status === 'stopped'}
         <div class="status-view stopped-view">
@@ -490,6 +553,34 @@
     remote
     onClose={handleNewSessionClose}
     onStarted={handleNewSessionStarted}
+  />
+{/if}
+
+{#if showBranchDiff}
+  <DiffModal
+    branchId={branch.id}
+    scope="branch"
+    beforeLabel={formatBaseBranch(branch.baseBranch)}
+    afterLabel={branch.branchName}
+    onClose={() => {
+      showBranchDiff = false;
+      loadTimeline();
+    }}
+  />
+{/if}
+
+{#if commitDiffSha}
+  <DiffModal
+    branchId={branch.id}
+    commitSha={commitDiffSha}
+    scope="commit"
+    beforeLabel="parent"
+    afterLabel={commitDiffSha.slice(0, 7)}
+    readonly
+    onClose={() => {
+      commitDiffSha = null;
+      loadTimeline();
+    }}
   />
 {/if}
 
@@ -563,6 +654,35 @@
     flex-shrink: 0;
   }
 
+  .diff-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    background: none;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
+    white-space: nowrap;
+  }
+
+  .diff-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-muted);
+    background: var(--bg-hover);
+  }
+
+  .diff-btn :global(svg) {
+    flex-shrink: 0;
+  }
+
   /* Status badge */
   .status-badge {
     display: flex;
@@ -615,6 +735,12 @@
   .timeline-error {
     color: var(--ui-danger);
     font-size: var(--size-sm);
+  }
+
+  .footer-right-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
   }
 
   /* Status views (starting, stopped, error) */

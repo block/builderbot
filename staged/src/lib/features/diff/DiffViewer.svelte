@@ -72,6 +72,8 @@
     diff: FileDiff | null;
     /** Comments on this file. */
     comments?: Comment[];
+    /** Request to jump to a specific comment in the current file. */
+    jumpToComment?: { id: string; token: number } | null;
     /** Bumped when syntax theme changes to trigger re-highlight. */
     syntaxThemeVersion?: number;
     /** Whether a new file is loading (show subtle indicator, keep old content). */
@@ -96,6 +98,7 @@
   let {
     diff,
     comments = [],
+    jumpToComment = null,
     syntaxThemeVersion = 0,
     loading = false,
     isReferenceFile = false,
@@ -190,8 +193,13 @@
     width: number;
     visible: boolean;
   } | null = $state(null);
+  let lineCommentPositionPreference: 'above' | 'below' = 'below';
   let editingCommentId: string | null = $state(null);
+  let activeLineComment = $state<Comment | null>(null);
+  let lineCommentReadOnly = $state(false);
   let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
+  let lastHandledJumpToken = $state<number | null>(null);
+  let lineCommentEditorRaf: number | null = null;
 
   // Markdown preview mode
   let markdownPreview = $state(false);
@@ -413,7 +421,10 @@
       lineSelection = null;
       commentingOnLines = null;
       lineCommentEditorStyle = null;
+      lineCommentPositionPreference = 'below';
       editingCommentId = null;
+      activeLineComment = null;
+      lineCommentReadOnly = false;
       commentingOnRange = null;
       commentEditorStyle = null;
     }
@@ -627,6 +638,18 @@
     );
   }
 
+  function resolveDisplayRangeFromSpan(span: Span): { start: number; end: number } | null {
+    if (afterLines.length === 0) return null;
+
+    const maxLineIndex = afterLines.length - 1;
+    const clampLine = (line: number) => Math.max(0, Math.min(maxLineIndex, line));
+
+    const start = clampLine(span.start);
+    const end = clampLine(Math.max(span.start, span.end - 1));
+
+    return { start, end };
+  }
+
   // ==========================================================================
   // Scroll handlers (custom scroll via wheel events)
   // ==========================================================================
@@ -811,28 +834,74 @@
   // Comment highlight click (from spine)
   // ==========================================================================
 
-  function handleCommentHighlightClick(info: CommentHighlightInfo) {
-    if (!afterPane || !commentingEnabled) return;
+  function focusCommentInViewer(comment: Comment) {
+    if (!afterPane) return;
 
-    const { span, commentId } = info;
+    const displayRange = resolveDisplayRangeFromSpan(comment.span);
+    if (!displayRange) return;
+    const { start, end } = displayRange;
 
-    // Agent comments are read-only — just scroll to the location, don't open editor
-    const comment = commentId ? findCommentById(comments, commentId) : null;
-    if (comment?.author === 'agent') {
-      scrollController.scrollToRow(span.start, 'after');
-      return;
-    }
-
-    scrollController.scrollToRow(span.start, 'after');
-
-    const start = span.start;
-    const end = Math.max(span.start, span.end - 1);
+    scrollController.scrollToRow(start, 'after');
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
+    lineCommentPositionPreference = decideLineCommentPosition();
+    editingCommentId = comment.id;
+    activeLineComment = comment;
+    lineCommentReadOnly = comment.author === 'agent';
+
+    // scrollToRow updates pane transforms; defer editor positioning until next frame
+    if (lineCommentEditorRaf !== null) {
+      cancelAnimationFrame(lineCommentEditorRaf);
+    }
+    lineCommentEditorRaf = requestAnimationFrame(() => {
+      lineCommentEditorRaf = null;
+      updateLineCommentEditorPosition();
+    });
+  }
+
+  function handleCommentHighlightClick(info: CommentHighlightInfo) {
+    if (!afterPane) return;
+
+    const { span, commentId } = info;
+    const displayRange = resolveDisplayRangeFromSpan(span);
+    if (!displayRange) return;
+    const { start, end } = displayRange;
+
+    // Jump to exact comment when available.
+    const comment = commentId ? findCommentById(comments, commentId) : null;
+    if (comment) {
+      focusCommentInViewer(comment);
+      return;
+    }
+
+    // Fallback for raw span highlights without a comment id.
+    if (!commentingEnabled) {
+      scrollController.scrollToRow(start, 'after');
+      return;
+    }
+
+    scrollController.scrollToRow(start, 'after');
+
+    lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
+    commentingOnLines = { pane: 'after', start, end };
+    lineCommentPositionPreference = decideLineCommentPosition();
     editingCommentId = commentId;
+    activeLineComment = comment;
+    lineCommentReadOnly = false;
     updateLineCommentEditorPosition();
   }
+
+  // Jump to a comment requested by the sidebar comments list.
+  $effect(() => {
+    const request = jumpToComment;
+    if (!request || !afterPane) return;
+    if (lastHandledJumpToken === request.token) return;
+    const comment = findCommentById(currentFileComments, request.id);
+    if (!comment) return;
+    lastHandledJumpToken = request.token;
+    focusCommentInViewer(comment);
+  });
 
   // ==========================================================================
   // Range comment handling
@@ -1003,7 +1072,10 @@
     isSelecting = false;
     commentingOnLines = null;
     lineCommentEditorStyle = null;
+    lineCommentPositionPreference = 'below';
     editingCommentId = null;
+    activeLineComment = null;
+    lineCommentReadOnly = false;
   }
 
   // Store the initial left position for line selection toolbar
@@ -1054,8 +1126,33 @@
   function handleStartLineComment() {
     if (!selectedLineRange || !commentingEnabled) return;
     commentingOnLines = { ...selectedLineRange };
+    lineCommentPositionPreference = decideLineCommentPosition();
     editingCommentId = null;
+    activeLineComment = null;
+    lineCommentReadOnly = false;
     updateLineCommentEditorPosition();
+  }
+
+  function decideLineCommentPosition(): 'above' | 'below' {
+    if (!commentingOnLines || !diffViewerEl) return 'below';
+
+    const pane = commentingOnLines.pane === 'before' ? beforePane : afterPane;
+    if (!pane) return 'below';
+
+    const lines = pane.querySelectorAll('.line');
+    const firstLineEl = lines[commentingOnLines.start] as HTMLElement | null;
+    const lastLineEl = lines[commentingOnLines.end] as HTMLElement | null;
+    if (!firstLineEl || !lastLineEl) return 'below';
+
+    const paneRect = pane.getBoundingClientRect();
+    const firstLineRect = firstLineEl.getBoundingClientRect();
+    const lastLineRect = lastLineEl.getBoundingClientRect();
+    const editorHeight = 120;
+
+    const spaceBelow = paneRect.bottom - lastLineRect.bottom;
+    const spaceAbove = firstLineRect.top - paneRect.top;
+
+    return decideCommentPositionBySpace(spaceBelow, spaceAbove, editorHeight);
   }
 
   function updateLineCommentEditorPosition() {
@@ -1072,17 +1169,29 @@
 
     const viewerRect = diffViewerEl.getBoundingClientRect();
     const paneRect = pane.getBoundingClientRect();
+    const editorHeight = 120;
+    let anchorLineEl: HTMLElement | null;
 
-    const lastLineEl = pane.querySelectorAll('.line')[commentingOnLines.end] as HTMLElement | null;
-    if (!lastLineEl) {
-      lineCommentEditorStyle = null;
-      return;
+    if (lineCommentPositionPreference === 'below') {
+      anchorLineEl = pane.querySelectorAll('.line')[commentingOnLines.end] as HTMLElement | null;
+      if (!anchorLineEl) {
+        lineCommentEditorStyle = null;
+        return;
+      }
+    } else {
+      anchorLineEl = pane.querySelectorAll('.line')[commentingOnLines.start] as HTMLElement | null;
+      if (!anchorLineEl) {
+        lineCommentEditorStyle = null;
+        return;
+      }
     }
 
     lineCommentEditorStyle = buildLineCommentEditorLayout(
       viewerRect,
       paneRect,
-      lastLineEl.getBoundingClientRect()
+      anchorLineEl.getBoundingClientRect(),
+      lineCommentPositionPreference,
+      editorHeight
     );
   }
 
@@ -1101,6 +1210,8 @@
   function handleLineCommentCancel() {
     commentingOnLines = null;
     lineCommentEditorStyle = null;
+    activeLineComment = null;
+    lineCommentReadOnly = false;
   }
 
   // Update toolbar/editor positions on scroll
@@ -1138,7 +1249,9 @@
     if (
       target.closest('.line-selection-toolbar') ||
       target.closest('.line-comment-editor') ||
-      target.closest('.line')
+      target.closest('.line') ||
+      // Sidebar comment clicks should keep the selected comment bubble open.
+      target.closest('.comment-item')
     ) {
       return;
     }
@@ -1264,6 +1377,10 @@
       document.removeEventListener('mousemove', handleSelectionDragMove);
       document.removeEventListener('mousemove', handleDividerMouseMove);
       document.removeEventListener('mouseup', handleDividerMouseUp);
+      if (lineCommentEditorRaf !== null) {
+        cancelAnimationFrame(lineCommentEditorRaf);
+        lineCommentEditorRaf = null;
+      }
       if (connectorRenderer) {
         connectorRenderer.destroy();
         connectorRenderer = null;
@@ -1749,15 +1866,16 @@
 
     <!-- Line comment editor -->
     {#if commentingOnLines && lineCommentEditorStyle}
-      {@const existingComment = editingCommentId
-        ? findCommentById(comments, editingCommentId)
-        : null}
+      {@const existingComment =
+        activeLineComment ??
+        (editingCommentId ? findCommentById(comments, editingCommentId) : null)}
       <CommentEditor
         top={lineCommentEditorStyle.top}
         left={lineCommentEditorStyle.left}
         width={lineCommentEditorStyle.width}
         visible={lineCommentEditorStyle.visible}
         {existingComment}
+        readOnly={lineCommentReadOnly}
         placeholder="Add a comment on {commentingOnLines.end -
           commentingOnLines.start +
           1} line{commentingOnLines.end !== commentingOnLines.start ? 's' : ''}..."
@@ -1770,7 +1888,7 @@
           }
         }}
         onCancel={handleLineCommentCancel}
-        onDelete={existingComment
+        onDelete={existingComment && !lineCommentReadOnly
           ? () => {
               handleCommentDelete(existingComment.id);
               clearLineSelection();

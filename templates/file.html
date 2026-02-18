@@ -485,21 +485,28 @@
         color: var(--text-inverted);
     }
 
-    /* Floating comment button */
-    .comment-btn-float {
+    /* Floating selection toolbar */
+    .selection-toolbar {
         position: absolute;
+        z-index: 50;
+        display: flex;
+        flex-direction: column;
+        border-radius: 4px;
+        overflow: hidden;
+        box-shadow: var(--shadow-menu);
+    }
+    .selection-toolbar button {
         background: var(--accent-primary);
         color: var(--text-inverted);
         border: none;
-        border-radius: 4px;
-        padding: 4px 10px;
+        padding: 6px 10px;
         font-size: 0.8em;
         cursor: pointer;
-        z-index: 50;
-        box-shadow: var(--shadow-menu);
         white-space: nowrap;
+        text-align: left;
     }
-    .comment-btn-float:hover { background: var(--accent-primary-hover); }
+    .selection-toolbar button:hover { background: var(--accent-primary-hover); }
+    .selection-toolbar button + button { border-top: 1px solid rgba(255,255,255,0.15); }
 
     /* New thread form */
     .new-thread-form {
@@ -1112,38 +1119,115 @@
     }
     function toggleResolved() { renderThreads(threads || [], anchorLines || {}); }
 
+    // --- Shared utility: find source line from DOM node ---
+    function findSourceLine(node) {
+        var contentEl = document.getElementById('content');
+        var el = node.nodeType === 3 ? node.parentElement : node;
+        while (el && el !== contentEl) {
+            if (el.hasAttribute && el.hasAttribute('data-source-line')) {
+                return parseInt(el.getAttribute('data-source-line'), 10);
+            }
+            el = el.parentElement;
+        }
+        return -1;
+    }
+
+    // --- Copy selection as markdown ---
+    function getSelectionMarkdown() {
+        var sel = window.getSelection();
+        if (!sel || sel.isCollapsed || !sel.toString().trim()) return null;
+
+        var contentEl = document.getElementById('content');
+        if (!contentEl.contains(sel.anchorNode) || !contentEl.contains(sel.focusNode)) return null;
+
+        var range = sel.getRangeAt(0);
+        var startLine = findSourceLine(range.startContainer);
+        var endLine = findSourceLine(range.endContainer);
+
+        if (startLine < 1 && endLine < 1) return null;
+        if (startLine < 1) startLine = endLine;
+        if (endLine < 1) endLine = startLine;
+        if (startLine > endLine) { var tmp = startLine; startLine = endLine; endLine = tmp; }
+
+        // Find end of last block by looking at the next data-source-line element
+        var allSourceLines = [];
+        contentEl.querySelectorAll('[data-source-line]').forEach(function(el) {
+            allSourceLines.push(parseInt(el.getAttribute('data-source-line'), 10));
+        });
+        allSourceLines.sort(function(a, b) { return a - b; });
+
+        var lines = rawMarkdown.split('\n');
+        var endOfRegion = lines.length;
+        for (var i = 0; i < allSourceLines.length; i++) {
+            if (allSourceLines[i] > endLine) {
+                endOfRegion = allSourceLines[i] - 1;
+                break;
+            }
+        }
+
+        var extracted = lines.slice(startLine - 1, endOfRegion);
+        while (extracted.length > 0 && extracted[extracted.length - 1].trim() === '') {
+            extracted.pop();
+        }
+
+        return extracted.length > 0 ? extracted.join('\n') : null;
+    }
+
     // --- Text selection and comment creation ---
     var pendingAnchor = null;
 
-    function removeFloatingCommentBtn() {
-        var existing = document.querySelector('.comment-btn-float');
+    function removeSelectionToolbar() {
+        var existing = document.querySelector('.selection-toolbar');
         if (existing) existing.remove();
     }
+    // Keep old name as alias for any other callers
+    var removeFloatingCommentBtn = removeSelectionToolbar;
 
     document.getElementById('content').addEventListener('mouseup', function(e) {
         setTimeout(function() {
             var sel = window.getSelection();
-            if (!sel || sel.isCollapsed || !sel.toString().trim()) { removeFloatingCommentBtn(); return; }
+            if (!sel || sel.isCollapsed || !sel.toString().trim()) { removeSelectionToolbar(); return; }
             var contentEl = document.getElementById('content');
             if (!contentEl.contains(sel.anchorNode) || !contentEl.contains(sel.focusNode)) return;
             var selectedText = sel.toString().trim();
             if (!selectedText) return;
-            removeFloatingCommentBtn();
+            removeSelectionToolbar();
             var range = sel.getRangeAt(0);
             var rect = range.getBoundingClientRect();
             var contentRect = contentEl.getBoundingClientRect();
-            var btn = document.createElement('button');
-            btn.className = 'comment-btn-float';
-            btn.textContent = 'Comment';
-            btn.style.top = (rect.bottom - contentRect.top + 4) + 'px';
-            btn.style.left = (rect.right - contentRect.left) + 'px';
-            btn.addEventListener('mousedown', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
-            btn.addEventListener('click', function(ev) {
+
+            var toolbar = document.createElement('div');
+            toolbar.className = 'selection-toolbar';
+            toolbar.style.top = (rect.bottom - contentRect.top + 4) + 'px';
+            toolbar.addEventListener('mousedown', function(ev) { ev.preventDefault(); ev.stopPropagation(); });
+
+            var commentBtn = document.createElement('button');
+            commentBtn.textContent = 'Comment';
+            commentBtn.addEventListener('click', function(ev) {
                 ev.stopPropagation();
                 captureSelectionAndShowForm(sel, selectedText);
-                removeFloatingCommentBtn();
+                removeSelectionToolbar();
             });
-            contentEl.appendChild(btn);
+            toolbar.appendChild(commentBtn);
+
+            var copyBtn = document.createElement('button');
+            copyBtn.textContent = 'Copy markdown';
+            copyBtn.addEventListener('click', function(ev) {
+                ev.stopPropagation();
+                var md = getSelectionMarkdown();
+                if (md) {
+                    navigator.clipboard.writeText(md);
+                }
+                removeSelectionToolbar();
+                window.getSelection().removeAllRanges();
+            });
+            toolbar.appendChild(copyBtn);
+
+            // Append, then clamp horizontal position to stay within content
+            contentEl.appendChild(toolbar);
+            var left = rect.right - contentRect.left;
+            var maxLeft = contentRect.width - toolbar.offsetWidth;
+            toolbar.style.left = Math.max(0, Math.min(left, maxLeft)) + 'px';
         }, 10);
     });
 
@@ -1202,17 +1286,6 @@
         var contentEl = document.getElementById('content');
         var startNode = sel.anchorNode;
         var endNode = sel.focusNode;
-
-        function findSourceLine(node) {
-            var el = node.nodeType === 3 ? node.parentElement : node;
-            while (el && el !== contentEl) {
-                if (el.hasAttribute && el.hasAttribute('data-source-line')) {
-                    return parseInt(el.getAttribute('data-source-line'), 10);
-                }
-                el = el.parentElement;
-            }
-            return -1;
-        }
 
         var startLine = findSourceLine(startNode);
         var endLine = findSourceLine(endNode);

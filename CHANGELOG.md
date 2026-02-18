@@ -2,6 +2,7 @@
 
 ## Feb 18, 2026
 
+- **Copy selection as markdown** — Select text in a document and click "Copy markdown" to copy the raw markdown source for your selection to the clipboard
 - **Expand images to fullscreen** — Hover over any image or Mermaid diagram to reveal an "Expand" button that opens a near-fullscreen modal (thanks again @jstiefel! — [PR #33](https://github.com/squareup/personal-loganj-birdseye/pull/33), [PR #34](https://github.com/squareup/personal-loganj-birdseye/pull/34))
 
 ## Feb 17, 2026

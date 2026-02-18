@@ -20,41 +20,49 @@
   const IconComponent = $derived(icons[icon]);
 </script>
 
-<div class="spinner-container {className}">
-  <div class="spinner-inner">
-    <IconComponent {size} />
+<div class="spinner-container {className}" style="width: {size}px; height: {size}px;">
+  <div class="spinner-positioner">
+    <div class="spinner-rotator">
+      <IconComponent {size} />
+    </div>
   </div>
 </div>
 
 <style>
   .spinner-container {
     flex-shrink: 0;
-    display: inline-flex;
+    position: relative;
+  }
+
+  .spinner-positioner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 100%;
+    height: 100%;
+    display: flex;
     align-items: center;
     justify-content: center;
   }
 
-  .spinner-inner {
+  .spinner-rotator {
     animation: spin 1s linear infinite;
-    display: inline-flex;
+    display: flex;
     align-items: center;
     justify-content: center;
-    transform-origin: center center;
-    will-change: transform;
   }
 
-  .spinner-inner :global(svg) {
+  .spinner-rotator :global(svg) {
     display: block;
   }
 
-  :global {
-    @keyframes spin {
-      from {
-        transform: rotate(0deg);
-      }
-      to {
-        transform: rotate(360deg);
-      }
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
     }
   }
 </style>

@@ -562,10 +562,10 @@
 
   /* PR status colors for project icon */
   .card-header :global(svg.pr-status-merged) {
-    color: var(--ui-success);
+    stroke: var(--ui-success);
   }
 
   .card-header :global(svg.pr-status-conflict) {
-    color: var(--ui-danger);
+    stroke: var(--ui-danger);
   }
 </style>

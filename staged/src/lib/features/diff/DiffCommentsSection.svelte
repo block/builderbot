@@ -83,18 +83,16 @@
               <span class="comment-preview">{truncateText(comment.content)}</span>
             </span>
           </button>
-          {#if comment.author !== 'agent'}
-            <button
-              class="comment-delete-btn"
-              onclick={(e) => {
-                e.stopPropagation();
-                onDeleteComment(comment.id);
-              }}
-              title="Delete comment"
-            >
-              <Trash2 size={12} />
-            </button>
-          {/if}
+          <button
+            class="comment-delete-btn"
+            onclick={(e) => {
+              e.stopPropagation();
+              onDeleteComment(comment.id);
+            }}
+            title="Delete comment"
+          >
+            <Trash2 size={12} />
+          </button>
         </div>
       </li>
     {/each}

@@ -440,6 +440,10 @@
     padding-right: 24px;
   }
 
+  .card-header :global(svg) {
+    flex-shrink: 0;
+  }
+
   .repo {
     color: var(--text-muted);
     font-size: var(--size-xs);

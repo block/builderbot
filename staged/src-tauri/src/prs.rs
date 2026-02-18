@@ -81,12 +81,16 @@ pub fn create_pr(
         .strip_prefix("origin/")
         .unwrap_or(&branch.base_branch);
 
+    // Use origin/{base_branch} in git commands to ensure we're comparing against the remote
+    // branch, not the local tracking branch. Local branches can be stale if not kept in sync,
+    // which causes incorrect PR diffs that include already-merged commits. Remote-tracking
+    // refs are always up-to-date after fetch.
     let prompt = format!(
         r#"<action>
 Create a pull request for the current branch.
 
 Steps:
-1. First, look at the diff between the current branch and when it branched off of the base branch `{base_branch}` to understand all changes. Use `git log --oneline {base_branch}..HEAD` and `git diff {base_branch}...HEAD --stat` to see what changed.
+1. First, look at the diff between the current branch and when it branched off of the base branch `{base_branch}` to understand all changes. Use `git log --oneline origin/{base_branch}..HEAD` and `git diff origin/{base_branch}...HEAD --stat` to see what changed.
 2. Push the current branch to the remote: `git push -u origin {branch_name}`
 3. Create a PR using the GitHub CLI: `gh pr create --base {base_branch} --fill-first`
    - The title MUST use conventional commit style (e.g., "feat: add user authentication", "fix: resolve null pointer in parser", "refactor: extract validation logic")

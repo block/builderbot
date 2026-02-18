@@ -212,7 +212,7 @@
               <div class="status-indicator unread-dot"></div>
             {/if}
             <div class="card-header">
-              <FolderGit2 size={16} />
+              <FolderGit2 size={16} width={16} height={16} />
               <span>{projectDisplayName(project)}</span>
             </div>
             {#if isProjectDeleting(project.id)}

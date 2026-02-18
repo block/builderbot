@@ -54,6 +54,17 @@ fn resolve_branch_repo_slug(
     project.primary_repo().map(|s| s.to_string())
 }
 
+async fn run_blox_blocking<T, F>(op: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, blox::BloxError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(op)
+        .await
+        .map_err(|e| format!("blox task failed: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
 // =============================================================================
 // Provider discovery
 // =============================================================================
@@ -288,7 +299,7 @@ pub struct BranchSessionResponse {
 /// `blox acp` instead of a local agent binary. Branch context and commit
 /// detection are skipped since there is no local worktree.
 #[tauri::command(rename_all = "camelCase")]
-pub fn start_branch_session(
+pub async fn start_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     app_handle: tauri::AppHandle,
@@ -320,12 +331,20 @@ pub fn start_branch_session(
         let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
             .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
-        let ctx = build_remote_branch_context(
-            branch.workspace_name.as_deref().unwrap(),
-            &branch.base_branch,
-            &store,
-            &branch_id,
-        );
+        let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let base_branch = branch.base_branch.clone();
+        let store_for_context = Arc::clone(&store);
+        let branch_id_for_context = branch_id.clone();
+        let ctx = tauri::async_runtime::spawn_blocking(move || {
+            build_remote_branch_context(
+                &workspace_name,
+                &base_branch,
+                &store_for_context,
+                &branch_id_for_context,
+            )
+        })
+        .await
+        .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
         (fallback_dir, ctx)
     } else {
         let workdir = store
@@ -364,10 +383,12 @@ pub fn start_branch_session(
             store.create_commit(&commit).map_err(|e| e.to_string())?;
             // For remote branches, get HEAD via ws_exec; for local, use git directly.
             let head_sha = if is_remote {
-                match blox::ws_exec(
-                    branch.workspace_name.as_deref().unwrap(),
-                    &["git", "rev-parse", "HEAD"],
-                ) {
+                let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+                match run_blox_blocking(move || {
+                    blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
+                })
+                .await
+                {
                     Ok(sha) => Some(sha.trim().to_string()),
                     Err(e) => {
                         log::warn!("Failed to get remote HEAD SHA via ws_exec: {e}");
@@ -385,10 +406,11 @@ pub fn start_branch_session(
         BranchSessionType::Review => {
             // Get the current tip SHA for the review anchor
             let tip_sha = if is_remote {
-                blox::ws_exec(
-                    branch.workspace_name.as_deref().unwrap(),
-                    &["git", "rev-parse", "HEAD"],
-                )
+                let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+                run_blox_blocking(move || {
+                    blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
+                })
+                .await
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "unknown".to_string())
             } else {

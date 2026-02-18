@@ -577,7 +577,7 @@ fn list_recent_repos(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn add_project_repo(
+async fn add_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     github_repo: String,
@@ -626,7 +626,13 @@ fn add_project_repo(
     }
     if project.location == store::ProjectLocation::Remote {
         let ws_name = branches::resolve_project_workspace_name(&store, &project, None)?;
-        let ws_info = blox::ws_info(&ws_name).map_err(|e| {
+        let ws_info = tauri::async_runtime::spawn_blocking({
+            let ws_name = ws_name.clone();
+            move || blox::ws_info(&ws_name)
+        })
+        .await
+        .map_err(|e| format!("Failed to query workspace '{ws_name}': {e}"))?
+        .map_err(|e| {
             format!("Workspace '{ws_name}' must be running before adding another repo: {e}")
         })?;
         let ws_status = ws_info
@@ -1182,27 +1188,21 @@ fn delete_commit(
     Ok(())
 }
 
-#[tauri::command]
-fn get_branch_timeline(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
-) -> Result<BranchTimeline, String> {
-    let store = get_store(&store)?;
-
+fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTimeline, String> {
     // Get the branch and its workdir for git operations
     let branch = store
-        .get_branch(&branch_id)
+        .get_branch(branch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
     let workdir = store
-        .get_workdir_for_branch(&branch_id)
+        .get_workdir_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
 
     // Get commits from git (the source of truth for commit data)
     let mut commits = Vec::new();
     if let Some(ref ws_name) = branch.workspace_name {
-        let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
+        let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
         // Remote branch: fetch commits via ws_exec.
         // Use merge-base to find the fork point so that only the branch's
         // own commits are shown, even after a rebase or when the base ref
@@ -1232,7 +1232,7 @@ fn get_branch_timeline(
                 let parts: Vec<&str> = line.splitn(5, '|').collect();
                 if parts.len() >= 5 {
                     let sha = parts[0].to_string();
-                    let our_commit = store.get_commit_by_sha(&branch_id, &sha).unwrap_or(None);
+                    let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
                     let (session_id, session_status) = store.resolve_session_status(
                         our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
                     );
@@ -1259,7 +1259,7 @@ fn get_branch_timeline(
 
             // For each git commit, look up our metadata (session linkage)
             for gc in git_commits {
-                let our_commit = store.get_commit_by_sha(&branch_id, &gc.sha).unwrap_or(None);
+                let our_commit = store.get_commit_by_sha(branch_id, &gc.sha).unwrap_or(None);
                 let (session_id, session_status) = store.resolve_session_status(
                     our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
                 );
@@ -1280,7 +1280,7 @@ fn get_branch_timeline(
 
     // Also include pending commits (sha = None, i.e. session in progress)
     let db_commits = store
-        .list_commits_for_branch(&branch_id)
+        .list_commits_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
     for dc in db_commits {
         if dc.sha.is_none() {
@@ -1311,7 +1311,7 @@ fn get_branch_timeline(
 
     // Get notes
     let db_notes = store
-        .list_notes_for_branch(&branch_id)
+        .list_notes_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
     let notes: Vec<NoteTimelineItem> = db_notes
         .into_iter()
@@ -1332,7 +1332,7 @@ fn get_branch_timeline(
 
     // Get reviews
     let db_reviews = store
-        .list_reviews_for_branch(&branch_id)
+        .list_reviews_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
     let reviews: Vec<ReviewTimelineItem> = db_reviews
         .into_iter()
@@ -1358,6 +1358,18 @@ fn get_branch_timeline(
         notes,
         reviews,
     })
+}
+
+#[tauri::command]
+async fn get_branch_timeline(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<BranchTimeline, String> {
+    let store = get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || build_branch_timeline(&store, &branch_id))
+        .await
+        .map_err(|e| format!("Timeline task failed: {e}"))?
 }
 
 // =============================================================================
@@ -2104,8 +2116,11 @@ fn read_text_file(file_path: String) -> Result<String, String> {
 /// The frontend can call this before starting a workspace to give
 /// an immediate, actionable error instead of a mysterious hang.
 #[tauri::command]
-fn check_blox_auth() -> Result<(), String> {
-    blox::check_auth().map_err(|e| e.to_string())
+async fn check_blox_auth() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(blox::check_auth)
+        .await
+        .map_err(|e| format!("Failed to run blox auth check: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 // =============================================================================

@@ -75,6 +75,7 @@
   let status = $derived<WorkspaceStatus | null>(polledStatus ?? branch.workspaceStatus);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollStartedAt: number | null = null;
+  let pollInFlight = false;
   const POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
   // Error state
@@ -175,6 +176,10 @@
     stopPolling();
     pollStartedAt = Date.now();
     pollTimer = setInterval(async () => {
+      if (pollInFlight) {
+        return;
+      }
+
       // Safety valve: stop polling after timeout to avoid infinite loops
       // when a workspace never materializes.
       if (pollStartedAt && Date.now() - pollStartedAt > POLL_TIMEOUT_MS) {
@@ -186,6 +191,7 @@
         return;
       }
 
+      pollInFlight = true;
       try {
         const newStatus = (await commands.pollWorkspaceStatus(branch.id)) as WorkspaceStatus;
         polledStatus = newStatus;
@@ -222,6 +228,8 @@
           error = msg;
           stopPolling();
         }
+      } finally {
+        pollInFlight = false;
       }
     }, 3000);
   }
@@ -240,6 +248,7 @@
       clearInterval(pollTimer);
       pollTimer = null;
     }
+    pollInFlight = false;
   }
 
   let retrying = $state(false);
@@ -592,7 +601,6 @@
     sessionId={openSessionId}
     onClose={() => {
       openSessionId = null;
-      loadTimeline();
     }}
   />
 {/if}

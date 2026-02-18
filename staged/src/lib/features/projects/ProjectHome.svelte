@@ -33,6 +33,7 @@
   let repoLabelsByProject = $state<Map<string, Map<string, string>>>(new Map());
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let loadGeneration = 0;
 
   // Store health — if non-null the DB needs a reset before we can proceed
   let storeIncompat = $state<StoreIncompatibility | null>(null);
@@ -52,6 +53,11 @@
   // Worktree setup errors — maps branch ID → error message
   let worktreeErrors = $state<Map<string, string>>(new Map());
   let pendingSetupBranches = $state<Set<string>>(new Set());
+  let queuedSetupBranches = $state<Set<string>>(new Set());
+  let activeSetupCount = 0;
+  const MAX_SETUP_CONCURRENCY = 1;
+  const setupTaskQueue: Array<{ branchId: string; run: () => Promise<void> }> = [];
+  let kickoffTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
@@ -85,6 +91,10 @@
     return () => {
       window.removeEventListener('staged:new-project', onNewProject);
       unlistenDetection?.();
+      if (kickoffTimer) {
+        clearTimeout(kickoffTimer);
+        kickoffTimer = null;
+      }
     };
   });
 
@@ -122,49 +132,71 @@
   }
 
   async function loadData() {
-    loading = true;
+    const generation = ++loadGeneration;
+    if (projects.length === 0) {
+      loading = true;
+    }
     error = null;
     try {
       const projectList = await commands.listProjects();
+      if (generation !== loadGeneration) return;
       projects = projectList;
+      loading = false;
 
-      // Load branches for each project
+      // Seed maps so project sections can render immediately.
       const branchMap = new Map<string, Branch[]>();
       const repoLabelMap = new Map<string, Map<string, string>>();
-      await Promise.all(
-        projectList.map(async (project) => {
-          const [branches, repos] = await Promise.all([
-            commands.listBranchesForProject(project.id),
-            commands.listProjectRepos(project.id),
-          ]);
-          branchMap.set(project.id, branches);
-          repoLabelMap.set(
-            project.id,
-            new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
-          );
-        })
-      );
+      for (const project of projectList) {
+        branchMap.set(project.id, branchesByProject.get(project.id) || []);
+        repoLabelMap.set(project.id, repoLabelsByProject.get(project.id) || new Map());
+      }
       branchesByProject = branchMap;
       repoLabelsByProject = repoLabelMap;
-      kickOffPendingBranchSetup(branchMap);
 
-      const contexts = await commands.listActionContexts();
-      detectingProjectIds = new Set(
-        projectList
-          .filter((project) =>
-            contexts.some(
-              (context) =>
-                context.detectingActions &&
-                context.githubRepo === project.githubRepo &&
-                context.subpath === project.subpath
-            )
-          )
-          .map((project) => project.id)
+      await Promise.all(
+        projectList.map(async (project) => {
+          try {
+            const [branches, repos] = await Promise.all([
+              commands.listBranchesForProject(project.id),
+              commands.listProjectRepos(project.id),
+            ]);
+            if (generation !== loadGeneration) return;
+            branchesByProject = new Map(branchesByProject).set(project.id, branches);
+            repoLabelsByProject = new Map(repoLabelsByProject).set(
+              project.id,
+              new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
+            );
+          } catch (e) {
+            console.error(`[ProjectHome] Failed to hydrate project '${project.id}':`, e);
+          }
+        })
       );
+
+      try {
+        const contexts = await commands.listActionContexts();
+        if (generation !== loadGeneration) return;
+        detectingProjectIds = new Set(
+          projectList
+            .filter((project) =>
+              contexts.some(
+                (context) =>
+                  context.detectingActions &&
+                  context.githubRepo === project.githubRepo &&
+                  context.subpath === project.subpath
+              )
+            )
+            .map((project) => project.id)
+        );
+      } catch (e) {
+        console.error('[ProjectHome] Failed to load action contexts:', e);
+      }
     } catch (e) {
+      if (generation !== loadGeneration) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (generation === loadGeneration) {
+        loading = false;
+      }
     }
   }
 
@@ -336,13 +368,66 @@
 
   function startInitialBranchSetup(projectId: string, branches: Branch[]) {
     for (const branch of branches) {
-      if (branch.branchType === 'local' && !branch.worktreePath) {
-        setupBranchWorktree(branch.id, projectId).catch(() => {});
-      } else if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
-        commands.startWorkspace(branch.id).catch((e) => {
-          console.error('[ProjectHome] Failed to start workspace:', e);
+      enqueueBranchSetup(projectId, branch);
+    }
+  }
+
+  function pumpSetupQueue() {
+    while (activeSetupCount < MAX_SETUP_CONCURRENCY && setupTaskQueue.length > 0) {
+      const task = setupTaskQueue.shift();
+      if (!task) break;
+
+      activeSetupCount += 1;
+      task
+        .run()
+        .catch((e) => {
+          console.error('[ProjectHome] Branch setup task failed:', e);
+        })
+        .finally(() => {
+          activeSetupCount = Math.max(0, activeSetupCount - 1);
+          const nextQueued = new Set(queuedSetupBranches);
+          nextQueued.delete(task.branchId);
+          queuedSetupBranches = nextQueued;
+          pumpSetupQueue();
         });
-      }
+    }
+  }
+
+  function enqueueBranchSetup(projectId: string, branch: Branch) {
+    const branchId = branch.id;
+    if (pendingSetupBranches.has(branchId) || queuedSetupBranches.has(branchId)) return;
+
+    if (branch.branchType === 'local') {
+      if (branch.worktreePath || worktreeErrors.has(branchId)) return;
+      queuedSetupBranches = new Set([...queuedSetupBranches, branchId]);
+      setupTaskQueue.push({
+        branchId,
+        run: async () => {
+          await setupBranchWorktree(branchId, projectId);
+        },
+      });
+      pumpSetupQueue();
+      return;
+    }
+
+    if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
+      queuedSetupBranches = new Set([...queuedSetupBranches, branchId]);
+      setupTaskQueue.push({
+        branchId,
+        run: async () => {
+          pendingSetupBranches = new Set([...pendingSetupBranches, branchId]);
+          try {
+            await commands.startWorkspace(branchId);
+          } catch (e) {
+            console.error('[ProjectHome] Failed to start workspace:', e);
+          } finally {
+            const next = new Set(pendingSetupBranches);
+            next.delete(branchId);
+            pendingSetupBranches = next;
+          }
+        },
+      });
+      pumpSetupQueue();
     }
   }
 
@@ -350,28 +435,7 @@
     for (const [projectId, branches] of branchMap.entries()) {
       if (deletingProjectNames.has(projectId)) continue;
       for (const branch of branches) {
-        if (pendingSetupBranches.has(branch.id)) continue;
-        if (
-          branch.branchType === 'local' &&
-          !branch.worktreePath &&
-          !worktreeErrors.has(branch.id)
-        ) {
-          setupBranchWorktree(branch.id, projectId).catch(() => {});
-          continue;
-        }
-        if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
-          pendingSetupBranches = new Set([...pendingSetupBranches, branch.id]);
-          commands
-            .startWorkspace(branch.id)
-            .catch((e) => {
-              console.error('[ProjectHome] Failed to start workspace:', e);
-            })
-            .finally(() => {
-              const next = new Set(pendingSetupBranches);
-              next.delete(branch.id);
-              pendingSetupBranches = next;
-            });
-        }
+        enqueueBranchSetup(projectId, branch);
       }
     }
   }
@@ -380,7 +444,11 @@
     // Ensure pending setup starts even when we navigated to a project page
     // after creation and only loaded persisted branch records.
     if (!loading) {
-      kickOffPendingBranchSetup(branchesByProject);
+      if (kickoffTimer) clearTimeout(kickoffTimer);
+      kickoffTimer = setTimeout(() => {
+        kickoffTimer = null;
+        kickOffPendingBranchSetup(branchesByProject);
+      }, 50);
     }
   });
 
@@ -500,11 +568,7 @@
 
 <div class="project-home">
   <div class="content">
-    {#if loading}
-      <div class="loading-state">
-        <p>Loading...</p>
-      </div>
-    {:else if storeIncompat && storeIncompat.kind === 'needs_reset'}
+    {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
       <div class="update-state">
         <div class="update-card">
           <div class="update-header">
@@ -552,7 +616,7 @@
       <div class="error-state">
         <p>{error}</p>
       </div>
-    {:else if !hasContent}
+    {:else if !loading && !hasContent}
       <div class="empty-state">
         <div class="welcome-header">
           <StagedIcon size={28} />
@@ -681,7 +745,6 @@
     font-size: var(--size-sm);
   }
 
-  .loading-state,
   .error-state {
     display: flex;
     align-items: center;

@@ -25,7 +25,7 @@ use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::types::{blox_acp_command, find_command};
+use crate::types::blox_acp_command;
 
 // =============================================================================
 // Public traits and types
@@ -128,21 +128,12 @@ impl AcpDriver {
 
     /// Create a driver that proxies through `sq blox acp <workspace>`.
     pub fn for_workspace(workspace_name: &str, agent_id: Option<&str>) -> Result<Self, String> {
-        let binary_path = find_command("sq").ok_or_else(|| {
+        let binary_path = blox_cli::find_sq_binary().ok_or_else(|| {
             "Could not find `sq` binary. Install it and ensure it's on your PATH.".to_string()
         })?;
 
-        let mut args = vec![
-            "blox".to_string(),
-            "acp".to_string(),
-            workspace_name.to_string(),
-        ];
-
-        if let Some(id) = agent_id {
-            if let Some(cmd) = blox_acp_command(id) {
-                args.push(format!("--command={cmd}"));
-            }
-        }
+        let command = agent_id.and_then(blox_acp_command);
+        let args = blox_cli::acp_proxy_args(workspace_name, command.as_deref());
 
         Ok(Self {
             binary_path,

@@ -18,7 +18,11 @@ struct NoOpStore;
 
 #[async_trait]
 impl crate::driver::Store for NoOpStore {
-    fn set_agent_session_id(&self, _session_id: &str, _agent_session_id: &str) -> Result<(), String> {
+    fn set_agent_session_id(
+        &self,
+        _session_id: &str,
+        _agent_session_id: &str,
+    ) -> Result<(), String> {
         // No-op: simple prompting doesn't persist sessions
         Ok(())
     }
@@ -240,11 +244,7 @@ impl AgentDriver for SimpleDriverWrapper {
 /// # Returns
 ///
 /// The agent's text response
-pub async fn run_acp_prompt(
-    agent: &AcpAgent,
-    working_dir: &Path,
-    prompt: &str,
-) -> Result<String> {
+pub async fn run_acp_prompt(agent: &AcpAgent, working_dir: &Path, prompt: &str) -> Result<String> {
     let working_dir = working_dir.to_path_buf();
     let prompt = prompt.to_string();
     let driver = SimpleDriverWrapper::from_agent(agent);

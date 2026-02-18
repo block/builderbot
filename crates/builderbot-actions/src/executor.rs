@@ -319,9 +319,9 @@ impl ActionExecutor {
         metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
     ) -> Result<String> {
-        let (execution_id, _completion_rx) =
-            self.execute_inner(command, working_dir, metadata, listener)
-                .await?;
+        let (execution_id, _completion_rx) = self
+            .execute_inner(command, working_dir, metadata, listener)
+            .await?;
         Ok(execution_id)
     }
 
@@ -336,9 +336,9 @@ impl ActionExecutor {
         metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
     ) -> Result<String> {
-        let (execution_id, completion_rx) =
-            self.execute_inner(command, working_dir, metadata, listener)
-                .await?;
+        let (execution_id, completion_rx) = self
+            .execute_inner(command, working_dir, metadata, listener)
+            .await?;
 
         // Wait for the background thread to signal completion
         let _ = completion_rx.await;

@@ -185,9 +185,9 @@
   }
 
   .remove-button:hover {
-    background-color: var(--bg-danger-hover);
+    background-color: transparent;
     border-color: var(--ui-danger);
-    color: var(--text-danger);
+    color: var(--ui-danger);
   }
 
   .remove-button.safe-delete {

@@ -1,5 +1,12 @@
 # Changelog
 
+## Feb 11, 2026
+
+- **In Review** — New global In Review page shows all files with open comments, and project pages surface files with active threads at the top, making it easier to track what you're working on
+- **Suggested replies** — Agents can offer clickable reply options, so you can respond with one tap instead of typing "yes" or "do it" all the time
+- **Agent presence improvements** — Agent busy indicators are more accurate and persistent, and agents always reply when they've finished work on a thread
+- **Fix: hide actions during reply** — Reply/Resolve buttons hide while composing a reply
+
 ## Feb 10, 2026
 
 - **[RP1](https://rp1.run) support** — Auto-detects `.rp1` trees and organizes files by type (features, issues, context, quick builds) with grouped display and badges

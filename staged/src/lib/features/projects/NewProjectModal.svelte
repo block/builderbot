@@ -110,6 +110,7 @@
           placeholder="e.g., Billing Platform"
           disabled={saving}
           autocomplete="off"
+          autofocus
         />
       </div>
 

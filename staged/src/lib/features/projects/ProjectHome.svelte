@@ -12,14 +12,14 @@
   import * as commands from '../../commands';
   import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, selectProject, navigation } from '../../navigation.svelte';
+  import { goHome, selectProject } from '../../navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
+  import ProjectsSidebar from './ProjectsSidebar.svelte';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import { alerts } from '../../shared/alerts.svelte';
-  import { projectStateStore } from '../../stores/projectState.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -206,6 +206,15 @@
   let hasContent = $derived(visibleProjects.length > 0);
   let selectedProject = $derived(
     selectedProjectId ? projects.find((project) => project.id === selectedProjectId) || null : null
+  );
+  let repoCountsByProject = $derived(
+    new Map(
+      projects.map((project) => {
+        const knownCount = repoLabelsByProject.get(project.id)?.size ?? 0;
+        const fallbackCount = project.githubRepo ? 1 : 0;
+        return [project.id, knownCount > 0 ? knownCount : fallbackCount] as const;
+      })
+    )
   );
 
   $effect(() => {
@@ -567,7 +576,16 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="project-home">
-  <div class="content">
+  <ProjectsSidebar
+    {projects}
+    {loading}
+    {error}
+    {deletingProjectNames}
+    {repoCountsByProject}
+    showAllProjectsRow={true}
+  />
+
+  <div class="main-panel">
     {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
       <div class="update-state">
         <div class="update-card">
@@ -716,15 +734,18 @@
 
 <style>
   .project-home {
-    display: flex;
-    flex-direction: column;
     flex: 1;
+    min-width: 0;
     min-height: 0;
+    display: flex;
     background-color: var(--bg-chrome);
+    overflow: hidden;
   }
 
-  .content {
+  .main-panel {
     flex: 1;
+    min-width: 0;
+    min-height: 0;
     overflow: auto;
     padding: 12px 24px 24px;
     display: flex;

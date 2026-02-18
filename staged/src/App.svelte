@@ -272,6 +272,7 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+    border-top: 1px solid var(--border-muted);
   }
 
   .reset-shell {

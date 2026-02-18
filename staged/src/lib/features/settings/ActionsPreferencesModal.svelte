@@ -230,6 +230,14 @@
     }
   }
 
+  let sortedContexts = $derived.by(() => {
+    return [...contexts].sort((a, b) => {
+      const aDisplay = a.subpath ? `${a.githubRepo}/${a.subpath}` : a.githubRepo;
+      const bDisplay = b.subpath ? `${b.githubRepo}/${b.subpath}` : b.githubRepo;
+      return aDisplay.localeCompare(bDisplay);
+    });
+  });
+
   let groupedActions = $derived.by(() => {
     const groups: Record<string, ProjectAction[]> = {
       prerun: [],
@@ -291,7 +299,7 @@
           <div class="empty-side">No repo contexts yet</div>
         {:else}
           <div class="context-list">
-            {#each contexts as context (context.id)}
+            {#each sortedContexts as context (context.id)}
               <button
                 class="context-item"
                 class:selected={context.id === selectedContextId}

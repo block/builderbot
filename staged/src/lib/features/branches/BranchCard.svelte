@@ -76,6 +76,7 @@
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import { alerts } from '../../shared/alerts.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
+  import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
 
   interface Props {
     branch: Branch;
@@ -785,6 +786,8 @@
       notifyError('Session Error', 'Failed to start session: no session ID returned');
       return;
     }
+    // Register session in the unified registry
+    sessionRegistry.register(result.sessionId, branch.projectId, 'other', branch.id);
     projectStateStore.addRunningSession(branch.projectId, result.sessionId);
     showNewSession = false;
     draftPrompt = '';
@@ -930,6 +933,8 @@
       const sessionId = await commands.createPr(branch.id, provider);
       prSessionId = sessionId;
       prStateOverride = 'creating';
+      // Register session in the unified registry
+      sessionRegistry.register(sessionId, branch.projectId, 'pr', branch.id);
       // Store the creating state globally
       prStateStore.setPrCreating(branch.id, sessionId);
       // Track the running session in the project state store
@@ -1010,6 +1015,8 @@
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.pushBranch(branch.id, provider, force);
       pushSessionId = sessionId;
+      // Register session in the unified registry
+      sessionRegistry.register(sessionId, branch.projectId, 'push', branch.id);
       // Track the running session in the project state store
       projectStateStore.addRunningSession(branch.projectId, sessionId);
       // The session-status-changed listener will handle completion

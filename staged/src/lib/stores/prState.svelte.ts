@@ -5,7 +5,11 @@
  * Note: The Map is wrapped in $state, and direct mutations (.set(), .delete())
  * trigger reactivity in Svelte 5. Cleanup is performed to prevent memory leaks
  * by removing stale states when branches are deleted or PRs are completed.
+ *
+ * Session lookups are now delegated to the unified sessionRegistry
  */
+
+import { sessionRegistry } from './sessionRegistry.svelte';
 
 export type PrState = 'idle' | 'creating' | 'error' | 'created';
 
@@ -100,14 +104,34 @@ class PrStateStore {
   /**
    * Find the branch ID associated with a session ID
    * Used by the global session listener to update PR state when sessions complete
+   * Delegates to the unified session registry, but only returns branch if this is a PR session
    */
   getBranchIdForSession(sessionId: string): string | null {
-    for (const [branchId, state] of this.states.entries()) {
-      if (state.sessionId === sessionId && state.state === 'creating') {
-        return branchId;
-      }
+    const branchId = sessionRegistry.getBranchId(sessionId);
+    if (!branchId) {
+      return null;
     }
+
+    // Only return the branch ID if we have a 'creating' state for it
+    // This ensures we're only tracking PR sessions, not other branch-related sessions
+    const state = this.states.get(branchId);
+    if (state?.sessionId === sessionId && state.state === 'creating') {
+      return branchId;
+    }
+
     return null;
+  }
+
+  /**
+   * Clear session tracking for a branch (symmetric cleanup)
+   * Called after PR creation completes to remove the session association
+   */
+  clearSessionTracking(branchId: string): void {
+    const state = this.states.get(branchId);
+    if (state?.sessionId) {
+      sessionRegistry.unregister(state.sessionId);
+      state.sessionId = null;
+    }
   }
 }
 

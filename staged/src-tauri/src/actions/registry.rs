@@ -50,25 +50,13 @@ impl ActionRegistry {
         };
 
         let mut running = self.running.lock().unwrap();
-        running.insert(execution_id.clone(), info);
-
-        log::info!(
-            "[ActionRegistry] Registered running action - execution_id: {}, total_running: {}",
-            execution_id,
-            running.len()
-        );
+        running.insert(execution_id, info);
     }
 
     /// Unregister a completed action
     pub fn unregister(&self, execution_id: &str) {
         let mut running = self.running.lock().unwrap();
-        if running.remove(execution_id).is_some() {
-            log::info!(
-                "[ActionRegistry] Unregistered action - execution_id: {}, remaining_running: {}",
-                execution_id,
-                running.len()
-            );
-        }
+        running.remove(execution_id);
     }
 
     /// Get all running actions for a specific branch

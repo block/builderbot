@@ -5,7 +5,13 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { CircleCheck, CircleAlert, CircleX, Clock, Circle, FolderGit2 } from 'lucide-svelte';
+  import {
+    GitMerge,
+    GitPullRequest,
+    GitPullRequestClosed,
+    GitPullRequestDraft,
+    GitBranch,
+  } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
   import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
@@ -272,17 +278,17 @@
               {/if}
               <div class="card-header">
                 {#if prStatus === 'success'}
-                  <CircleCheck size={16} class="pr-status-success" />
+                  <GitMerge size={16} class="pr-status-success" />
                 {:else if prStatus === 'warning'}
-                  <CircleAlert size={16} class="pr-status-warning" />
+                  <GitPullRequest size={16} class="pr-status-warning" />
                 {:else if prStatus === 'error'}
-                  <CircleX size={16} class="pr-status-error" />
+                  <GitPullRequestClosed size={16} class="pr-status-error" />
                 {:else if prStatus === 'pending'}
-                  <Clock size={16} class="pr-status-pending" />
+                  <GitPullRequestDraft size={16} class="pr-status-pending" />
                 {:else if prStatus === 'neutral'}
-                  <Circle size={16} class="pr-status-neutral" />
+                  <GitPullRequestDraft size={16} class="pr-status-neutral" />
                 {:else}
-                  <FolderGit2 size={16} />
+                  <GitBranch size={16} />
                 {/if}
                 <span>{projectDisplayName(project)}</span>
               </div>

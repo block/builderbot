@@ -361,8 +361,14 @@ pub async fn start_branch_session(
         (worktree_path, ctx)
     };
 
-    // Build the full prompt with action tag + context
-    let full_prompt = build_full_prompt(&prompt, &branch_context, &session_type);
+    // Build the full prompt with action instructions + project information + branch context.
+    let project_information = build_project_context(&store, &project, &branch);
+    let full_prompt = build_full_prompt(
+        &prompt,
+        &project_information,
+        &branch_context,
+        &session_type,
+    );
 
     // Create the session
     let mut session = store::Session::new_running(&full_prompt, &working_dir);
@@ -545,6 +551,115 @@ fn context_preamble() -> String {
         .to_string()
 }
 
+fn normalize_subpath(subpath: Option<&str>) -> Option<String> {
+    subpath
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn format_repo_label(repo_slug: &str, subpath: Option<&str>) -> String {
+    if let Some(subpath) = normalize_subpath(subpath) {
+        format!("{repo_slug} (subpath: {subpath})")
+    } else {
+        repo_slug.to_string()
+    }
+}
+
+fn build_project_context(
+    store: &Arc<Store>,
+    project: &store::Project,
+    branch: &store::Branch,
+) -> String {
+    let repos = match store.list_project_repos(&project.id) {
+        Ok(repos) => repos,
+        Err(e) => {
+            log::warn!("Failed to list project repos for prompt context: {e}");
+            Vec::new()
+        }
+    };
+
+    let current_repo_key = if let Some(repo_id) = branch.project_repo_id.as_deref() {
+        repos
+            .iter()
+            .find(|repo| repo.id == repo_id)
+            .map(|repo| {
+                (
+                    repo.github_repo.clone(),
+                    normalize_subpath(repo.subpath.as_deref()),
+                )
+            })
+            .or_else(|| {
+                store
+                    .get_project_repo(repo_id)
+                    .ok()
+                    .flatten()
+                    .map(|repo| (repo.github_repo, normalize_subpath(repo.subpath.as_deref())))
+            })
+    } else {
+        resolve_branch_repo_slug(store, project, branch)
+            .map(|repo| (repo, normalize_subpath(project.subpath.as_deref())))
+    };
+
+    let current_repo_label = current_repo_key
+        .as_ref()
+        .map(|(repo, subpath)| format_repo_label(repo, subpath.as_deref()));
+
+    let related_repo_labels = repos
+        .iter()
+        .filter_map(|repo| {
+            let repo_key = (
+                repo.github_repo.as_str(),
+                normalize_subpath(repo.subpath.as_deref()),
+            );
+            if let Some((current_repo, current_subpath)) = &current_repo_key {
+                if repo_key.0 == current_repo && repo_key.1 == *current_subpath {
+                    return None;
+                }
+            }
+            Some(format_repo_label(
+                &repo.github_repo,
+                repo.subpath.as_deref(),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    let project_name = project.name.trim();
+    let project_name = if project_name.is_empty() {
+        "Unnamed Project"
+    } else {
+        project_name
+    };
+
+    let mut lines = vec![format!("You are working in project \"{project_name}\".")];
+
+    if let Some(current_repo_label) = current_repo_label {
+        lines.push(format!(
+            "This branch is attached to repository `{current_repo_label}`."
+        ));
+    } else {
+        lines.push(
+            "This branch is attached to a repository in this project (repo metadata unavailable)."
+                .to_string(),
+        );
+    }
+
+    if related_repo_labels.is_empty() {
+        lines
+            .push("No additional repositories are currently attached to this project.".to_string());
+    } else {
+        lines.push("Additional repositories in this project:".to_string());
+        for repo_label in related_repo_labels {
+            lines.push(format!("- `{repo_label}`"));
+        }
+    }
+
+    lines.push(
+        "You may inspect related repositories for context when relevant. Unless the user explicitly asks for cross-repo changes, only modify files and create commits in this branch's repository.".to_string(),
+    );
+    lines.join("\n")
+}
+
 // =============================================================================
 // Chronological timeline helpers
 // =============================================================================
@@ -698,38 +813,31 @@ fn review_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineE
     entries
 }
 
-/// Assemble the full prompt from action tag + branch context + user prompt.
+/// Assemble the full prompt from action instructions + branch context + user prompt.
 fn build_full_prompt(
     user_prompt: &str,
+    project_information: &str,
     branch_context: &str,
     session_type: &BranchSessionType,
 ) -> String {
-    let action_tag = match session_type {
+    let action_instructions = match session_type {
         BranchSessionType::Note => {
-            "\
-<action>
-The user is requesting a note. Generate a note based on their prompt below.
+            "The user is requesting a note. Generate a note based on their prompt below.
 
 You may use any tools needed to research and gather information, but do NOT create \
 any commits.
 
 To return the note, include a horizontal rule (---) followed by the note content. \
-Begin the note with a markdown H1 heading as the title.
-</action>"
+Begin the note with a markdown H1 heading as the title."
         }
         BranchSessionType::Commit => {
-            "\
-<action>
-The user is requesting you make a commit based on the prompt below. Make the necessary \
+            "The user is requesting you make a commit based on the prompt below. Make the necessary \
 code changes, following any verification or formatting steps as instructed, and then \
 create a commit with a conventional commit message. This commit should describe what \
-was requested and how it was fulfilled.
-</action>"
+was requested and how it was fulfilled."
         }
         BranchSessionType::Review => {
-            "\
-<action>
-The user is requesting an AI code review of the current branch.
+            "The user is requesting an AI code review of the current branch.
 
 Review the code changes on this branch by running `git diff $(git merge-base origin/HEAD HEAD)..HEAD` \
 (or the appropriate base branch) and provide feedback as structured comments. \
@@ -750,10 +858,13 @@ Return your review as a JSON block fenced with ```review-comments markers:
 ```
 
 The `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end). \
-Only comment on changed files. Be specific and actionable.
-</action>"
+Only comment on changed files. Be specific and actionable."
         }
     };
+
+    let action_tag = format!(
+        "<action>\n{action_instructions}\n\nProject information:\n{project_information}\n</action>"
+    );
 
     format!(
         "{action_tag}\n\n\

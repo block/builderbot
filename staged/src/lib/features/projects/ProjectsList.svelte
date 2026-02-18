@@ -5,7 +5,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { FolderGit2 } from 'lucide-svelte';
+  import { CircleCheck, CircleAlert, CircleX, Clock, Circle, FolderGit2 } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
   import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
@@ -271,7 +271,19 @@
                 <div class="status-indicator unread-dot"></div>
               {/if}
               <div class="card-header">
-                <FolderGit2 size={16} class={prStatus ? `pr-status-${prStatus}` : ''} />
+                {#if prStatus === 'success'}
+                  <CircleCheck size={16} class="pr-status-success" />
+                {:else if prStatus === 'warning'}
+                  <CircleAlert size={16} class="pr-status-warning" />
+                {:else if prStatus === 'error'}
+                  <CircleX size={16} class="pr-status-error" />
+                {:else if prStatus === 'pending'}
+                  <Clock size={16} class="pr-status-pending" />
+                {:else if prStatus === 'neutral'}
+                  <Circle size={16} class="pr-status-neutral" />
+                {:else}
+                  <FolderGit2 size={16} />
+                {/if}
                 <span>{projectDisplayName(project)}</span>
               </div>
               {#if status.kind === 'deleting'}

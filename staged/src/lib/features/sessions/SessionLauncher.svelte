@@ -19,6 +19,7 @@
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { alerts } from '../../shared/alerts.svelte';
+  import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
 
   interface Props {
     onClose: () => void;
@@ -88,6 +89,10 @@
         workingDir,
         getPreferredAgent(agentState.providers) ?? undefined
       );
+      // Register the session in the unified registry
+      // Note: SessionLauncher creates standalone sessions not tied to any project/branch
+      // We use a placeholder projectId since the registry requires it
+      sessionRegistry.register(s.id, 'standalone', 'other');
       sessions = [...sessions, s];
       prompt = '';
     } catch (e) {

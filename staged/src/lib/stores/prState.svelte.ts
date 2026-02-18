@@ -5,7 +5,11 @@
  * Note: The Map is wrapped in $state, and direct mutations (.set(), .delete())
  * trigger reactivity in Svelte 5. Cleanup is performed to prevent memory leaks
  * by removing stale states when branches are deleted or PRs are completed.
+ *
+ * Session lookups are now delegated to the unified sessionRegistry
  */
+
+import { sessionRegistry } from './sessionRegistry.svelte';
 
 export type PrState = 'idle' | 'creating' | 'error' | 'created';
 
@@ -19,6 +23,7 @@ interface BranchPrState {
 
 const MAX_STORE_SIZE = 100; // Maximum number of branch states to keep
 const STATE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const CLEANUP_THRESHOLD = 0.8; // Run cleanup when store is 80% full
 
 class PrStateStore {
   private states = $state<Map<string, BranchPrState>>(new Map());
@@ -28,7 +33,10 @@ class PrStateStore {
   }
 
   setPrCreating(branchId: string, sessionId: string): void {
-    this.cleanup();
+    // Only cleanup when approaching size limit to avoid O(n) cost on every operation
+    if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
+      this.cleanup();
+    }
     this.states.set(branchId, {
       state: 'creating',
       sessionId,
@@ -39,7 +47,9 @@ class PrStateStore {
   }
 
   setPrCreated(branchId: string, url: string | null = null): void {
-    this.cleanup();
+    if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
+      this.cleanup();
+    }
     this.states.set(branchId, {
       state: 'created',
       sessionId: null,
@@ -50,7 +60,9 @@ class PrStateStore {
   }
 
   setPrError(branchId: string, error: string): void {
-    this.cleanup();
+    if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
+      this.cleanup();
+    }
     const existing = this.states.get(branchId);
     this.states.set(branchId, {
       state: 'error',
@@ -95,6 +107,41 @@ class PrStateStore {
 
   getSessionId(branchId: string): string | null {
     return this.states.get(branchId)?.sessionId ?? null;
+  }
+
+  /**
+   * Find the branch ID associated with a session ID
+   * Used by the global session listener to update PR state when sessions complete
+   * Delegates to the unified session registry, but only returns branch if this is a PR session
+   */
+  getBranchIdForSession(sessionId: string): string | null {
+    const branchId = sessionRegistry.getBranchId(sessionId);
+    if (!branchId) {
+      return null;
+    }
+
+    // Only return the branch ID if we have a 'creating' state for it
+    // This ensures we're only tracking PR sessions, not other branch-related sessions
+    const state = this.states.get(branchId);
+    if (state?.sessionId === sessionId && state.state === 'creating') {
+      return branchId;
+    }
+
+    return null;
+  }
+
+  /**
+   * Clear session tracking for a branch
+   * Called after PR creation completes to remove the session association
+   * Note: Does NOT unregister from sessionRegistry - that's handled centrally in App.svelte
+   */
+  clearSessionTracking(branchId: string): void {
+    const state = this.states.get(branchId);
+    if (state?.sessionId) {
+      // Clear the session ID reference, but leave the final state (created/error)
+      // This maintains the PR outcome while removing the transient session reference
+      state.sessionId = null;
+    }
   }
 }
 

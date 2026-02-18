@@ -21,6 +21,9 @@
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
   import { navigation } from './lib/navigation.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
+  import { prStateStore } from './lib/stores/prState.svelte';
+  import { sessionRegistry } from './lib/stores/sessionRegistry.svelte';
+  import { extractPrUrl, extractPrNumber } from './lib/features/branches/branchCardHelpers';
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
@@ -90,15 +93,22 @@
 
     // Listen for session status changes globally to handle spinner cleanup
     // This must be at the App level so it works regardless of which view the user is on
+    //
+    // Session completion handler updates TWO independent state stores:
+    // 1. projectState: Aggregate view of all sessions in a project (for project tiles)
+    // 2. prState: Branch-specific PR creation workflow state (for PR buttons)
+    //
+    // Session lookups are delegated to the unified sessionRegistry for consistency
     unlistenSessionStatus = await listen<{
       sessionId: string;
       status: string;
-    }>('session-status-changed', (event) => {
+    }>('session-status-changed', async (event) => {
       const { sessionId, status } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
-        // Handle session completion - mark project as unread if user is not viewing it
-        // Get the project ID from the session mapping (captured when session started)
-        const sessionProjectId = projectStateStore.getProjectForSession(sessionId);
+        // Get session metadata from the unified registry
+        const sessionProjectId = sessionRegistry.getProjectId(sessionId);
+        const sessionType = sessionRegistry.getType(sessionId);
+        const branchId = sessionRegistry.getBranchId(sessionId);
         const currentProjectId = navigation.selectedProjectId;
 
         // Mark project as unread if:
@@ -112,6 +122,53 @@
         if (sessionProjectId) {
           projectStateStore.removeRunningSession(sessionProjectId, sessionId);
         }
+
+        // Handle PR-specific completion logic
+        if (sessionType === 'pr' && branchId) {
+          if (status === 'completed') {
+            try {
+              // Fetch session messages to find the PR URL
+              const messages = await commands.getSessionMessages(sessionId);
+              const foundUrl = extractPrUrl(messages);
+
+              if (foundUrl) {
+                const prNumber = extractPrNumber(foundUrl);
+                if (prNumber) {
+                  try {
+                    // Save PR number to storage (separate try-catch to handle storage failures)
+                    await commands.updateBranchPr(branchId, prNumber);
+                  } catch (storageError) {
+                    // If storage fails, we still have the PR URL from the session
+                    // Log the error but don't fail the PR creation - the PR exists on GitHub
+                    console.error('Failed to persist PR number to storage:', storageError);
+                  }
+                }
+                // Set state to created regardless of storage success - the PR was created
+                prStateStore.setPrCreated(branchId, foundUrl);
+              } else {
+                // Session completed but we couldn't find a PR URL
+                prStateStore.setPrError(
+                  branchId,
+                  'PR session completed but no PR URL was found in the output.'
+                );
+              }
+            } catch (e) {
+              // Failed to get session messages or extract PR URL
+              prStateStore.setPrError(branchId, e instanceof Error ? e.message : String(e));
+            }
+          } else {
+            // Session errored or was cancelled
+            prStateStore.setPrError(
+              branchId,
+              `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
+            );
+          }
+          // Clear PR state's session tracking (does NOT unregister from registry)
+          prStateStore.clearSessionTracking(branchId);
+        }
+
+        // Clean up the session from the unified registry (single point of cleanup)
+        sessionRegistry.unregister(sessionId);
       }
     });
 

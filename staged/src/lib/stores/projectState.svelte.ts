@@ -9,7 +9,11 @@
  * - The user navigates to that project
  *
  * Running sessions are tracked to show spinners on project cards
+ *
+ * Note: Session-to-project lookups are now delegated to the unified sessionRegistry
  */
+
+import { sessionRegistry } from './sessionRegistry.svelte';
 
 interface ProjectState {
   unread: boolean;
@@ -19,8 +23,6 @@ interface ProjectState {
 class ProjectStateStore {
   // Use $state for Maps to track reactivity via version increments
   private states = $state<Map<string, ProjectState>>(new Map());
-  // Map from session ID to project ID to track which project a session belongs to
-  private sessionToProject = $state<Map<string, string>>(new Map());
 
   // Track version for manual reactivity triggering
   private version = $state(0);
@@ -96,13 +98,13 @@ class ProjectStateStore {
 
   /**
    * Add a running session to a project
+   * Note: Session registration is now handled by sessionRegistry,
+   * this method only updates the project-level running session set
    */
   addRunningSession(projectId: string, sessionId: string): void {
     const state = this.getOrCreateState(projectId);
     const wasAlreadyAdded = state.runningSessions.has(sessionId);
     state.runningSessions.add(sessionId);
-    // Track the session-to-project mapping
-    this.sessionToProject.set(sessionId, projectId);
     // Only increment version if this is a new session to avoid unnecessary re-renders
     if (!wasAlreadyAdded) {
       this.version++;
@@ -118,15 +120,14 @@ class ProjectStateStore {
       state.runningSessions.delete(sessionId);
       this.version++; // Trigger reactivity
     }
-    // Clean up the session-to-project mapping
-    this.sessionToProject.delete(sessionId);
   }
 
   /**
    * Get the project ID for a session
+   * Delegates to the unified session registry
    */
   getProjectForSession(sessionId: string): string | null {
-    return this.sessionToProject.get(sessionId) ?? null;
+    return sessionRegistry.getProjectId(sessionId);
   }
 
   /**
@@ -135,10 +136,10 @@ class ProjectStateStore {
    * @param currentProjectId The project the user is currently viewing (or null if on projects list)
    */
   handleSessionComplete(sessionId: string, currentProjectId: string | null): void {
-    const projectId = this.sessionToProject.get(sessionId);
+    const projectId = sessionRegistry.getProjectId(sessionId);
     if (!projectId) {
-      // Sessions not in sessionToProject are expected - these are sessions that were started
-      // before the store was initialized or in other edge cases. We simply skip handling them.
+      // Sessions not in registry are expected - these are sessions that were started
+      // before the registry was initialized or in other edge cases. We simply skip handling them.
       return;
     }
 

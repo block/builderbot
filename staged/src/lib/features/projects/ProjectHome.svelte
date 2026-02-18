@@ -6,7 +6,6 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { ArrowLeft } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import type { Project, Branch, StoreIncompatibility, WorkspaceStatus } from '../../types';
   import * as commands from '../../commands';
@@ -647,15 +646,6 @@
         </p>
       </div>
     {:else}
-      {#if selectedProject}
-        <div class="project-toolbar">
-          <button class="back-button" onclick={goHome} title="Back to projects list">
-            <ArrowLeft size={14} />
-            Projects
-          </button>
-          <div class="project-title">{projectDisplayName(selectedProject)}</div>
-        </div>
-      {/if}
       <div class="projects-list">
         {#each visibleProjects as project (project.id)}
           <ProjectSection
@@ -954,40 +944,5 @@
     display: flex;
     flex-direction: column;
     gap: 32px;
-  }
-
-  .project-toolbar {
-    width: 100%;
-    max-width: 800px;
-    margin: 0 auto 16px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .back-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-muted);
-    padding: 6px 10px;
-    font-size: var(--size-xs);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .back-button:hover {
-    color: var(--text-primary);
-    border-color: var(--border-emphasis);
-    background-color: var(--bg-hover);
-  }
-
-  .project-title {
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-weight: 600;
   }
 </style>

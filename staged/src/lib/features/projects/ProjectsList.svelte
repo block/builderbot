@@ -192,13 +192,6 @@
 
   <div class="main-panel">
     <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>
-      {#if !loading && !error && projects.length > 0}
-        <div class="header">
-          <h1>Projects</h1>
-          <span class="count">{projects.length}</span>
-        </div>
-      {/if}
-
       {#if loading}
         <div class="state">Loading projects…</div>
       {:else if error}
@@ -279,6 +272,7 @@
 
 <style>
   .projects-list-page {
+    --sidebar-title-offset: 42px;
     flex: 1;
     min-height: 0;
     display: flex;
@@ -298,7 +292,7 @@
   .content {
     flex: 1;
     overflow: auto;
-    padding: 20px 24px 24px;
+    padding: var(--sidebar-title-offset) 24px 24px;
     max-width: 900px;
     width: 100%;
     margin: 0 auto;
@@ -310,30 +304,6 @@
 
   .content.empty-layout {
     max-width: none;
-  }
-
-  .header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 18px;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: var(--size-2xl);
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
-  }
-
-  .count {
-    font-family: 'SF Mono', 'Menlo', monospace;
-    font-size: var(--size-xs);
-    color: var(--text-muted);
-    border: 1px solid var(--border-muted);
-    border-radius: 999px;
-    padding: 2px 8px;
   }
 
   .state {

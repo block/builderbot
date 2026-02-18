@@ -18,6 +18,7 @@
     GitCommitHorizontal,
     GitPullRequestCreateArrow,
     GitPullRequestArrow,
+    GitMerge,
     Trash2,
     FileDiff,
     FileText,
@@ -740,14 +741,15 @@
 
   /** Get the status indicator color for the PR button */
   function getPrStatusIndicator(): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
-    // Push/PR creation states
-    if (pushState === 'pushing' || prState === 'creating') return 'pending';
+    // Push/PR creation states - no indicator during creation (spinner is enough)
+    if (prState === 'creating') return null;
+    if (pushState === 'pushing') return 'pending';
     if (pushState === 'error' || prState === 'error') return 'error';
 
     if (!branch.prNumber) return null;
 
     // PR exists - check status
-    if (prStatusState === 'MERGED') return 'success';
+    if (prStatusState === 'MERGED') return null; // No indicator for merged PRs
     if (prStatusState === 'CLOSED') return 'neutral';
     if (prStatusDraft) return 'neutral';
 
@@ -1454,6 +1456,7 @@
                   class:error={prState === 'error' || pushState === 'error'}
                   class:created={prState === 'created' && pushState !== 'error'}
                   class:pushing={pushState === 'pushing'}
+                  class:merged={prState === 'created' && prStatusState === 'MERGED'}
                   onclick={handlePrButtonClick}
                   disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
                   title={pushState === 'pushing'
@@ -1478,6 +1481,8 @@
                     <Spinner size={13} />
                   {:else if prState === 'error'}
                     <AlertCircle size={13} />
+                  {:else if prState === 'created' && prStatusState === 'MERGED'}
+                    <GitMerge size={13} />
                   {:else if prState === 'created' && hasUnpushed}
                     <GitPullRequestCreateArrow size={13} />
                   {:else if prState === 'created'}
@@ -2049,10 +2054,22 @@
     background: var(--bg-hover);
   }
 
+  .pr-btn.created :global(svg) {
+    color: var(--text-muted);
+  }
+
+  .pr-btn.created:hover :global(svg) {
+    color: var(--text-primary);
+  }
+
   .pr-btn.pushing {
     color: var(--text-muted);
     border-color: var(--border-muted);
     cursor: default;
+  }
+
+  .pr-btn.merged :global(svg) {
+    color: var(--status-added);
   }
 
   .pr-btn :global(svg) {

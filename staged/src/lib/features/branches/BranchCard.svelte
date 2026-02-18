@@ -19,6 +19,7 @@
     GitCommitHorizontal,
     GitPullRequestCreateArrow,
     GitPullRequestArrow,
+    GitPullRequestDraft,
     GitMerge,
     Trash2,
     FileDiff,
@@ -1502,7 +1503,7 @@
                   {:else if prState === 'created' && prStatusState === 'MERGED'}
                     <GitMerge size={13} />
                   {:else if prState === 'created' && hasUnpushed}
-                    <GitPullRequestCreateArrow size={13} />
+                    <GitPullRequestDraft size={13} />
                   {:else if prState === 'created'}
                     <GitPullRequestArrow size={13} />
                   {:else}

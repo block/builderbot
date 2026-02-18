@@ -6,6 +6,7 @@
     Plus,
     GitPullRequest,
     GitPullRequestClosed,
+    GitPullRequestDraft,
     GitBranch,
   } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
@@ -173,7 +174,7 @@
                   {:else if prStatus === 'conflict'}
                     <GitPullRequestClosed size={14} class="pr-status-conflict" />
                   {:else}
-                    <GitBranch size={14} />
+                    <GitPullRequestDraft size={14} />
                   {/if}
                   <div class="row-text">
                     <span class="project-name">{projectDisplayName(project)}</span>

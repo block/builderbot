@@ -286,7 +286,7 @@
                 {:else if prStatus === 'conflict'}
                   <GitPullRequestClosed size={16} class="pr-status-conflict" />
                 {:else}
-                  <GitBranch size={16} />
+                  <GitPullRequestDraft size={16} />
                 {/if}
                 <span>{projectDisplayName(project)}</span>
               </div>

@@ -561,11 +561,11 @@
   }
 
   /* PR status colors for project icon */
-  .card-header :global(.pr-status-merged) {
+  .card-header :global(svg.pr-status-merged) {
     color: var(--ui-success);
   }
 
-  .card-header :global(.pr-status-conflict) {
+  .card-header :global(svg.pr-status-conflict) {
     color: var(--ui-danger);
   }
 </style>

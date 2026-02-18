@@ -21,16 +21,22 @@
 </script>
 
 <div class="spinner-container {className}">
-  <IconComponent {size} />
+  <div class="spinner-inner">
+    <IconComponent {size} />
+  </div>
 </div>
 
 <style>
   .spinner-container {
-    animation: spin 1s linear infinite;
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+  }
+
+  .spinner-inner {
+    animation: spin 1s linear infinite;
+    display: inline-flex;
     transform-origin: center center;
     will-change: transform;
   }

@@ -7,14 +7,14 @@
         gap: 16px;
     }
     .project {
-        background: #fff;
+        background: var(--bg-surface);
         border-radius: 8px;
         padding: 16px 20px;
-        border: 1px solid #e8e8e8;
+        border: 1px solid var(--border-card);
         transition: border-color 0.15s, box-shadow 0.15s;
     }
     .project:hover {
-        border-color: #ccc;
+        border-color: var(--border-strong);
         box-shadow: 0 2px 8px rgba(0,0,0,0.04);
     }
     .project.deemphasized { opacity: 0.5; }
@@ -35,20 +35,20 @@
         border: none;
         padding: 2px 6px;
         font-size: 1.2em;
-        color: #999;
+        color: var(--text-faint);
         cursor: pointer;
         line-height: 1;
     }
-    .dropdown-dots:hover { color: #333; }
+    .dropdown-dots:hover { color: var(--text-primary); }
     .project-menu {
         display: none;
         position: absolute;
         right: 0;
         top: calc(100% + 4px);
-        background: #fff;
-        border: 1px solid #ddd;
+        background: var(--bg-surface);
+        border: 1px solid var(--border-subtle);
         border-radius: 6px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        box-shadow: var(--shadow-menu);
         z-index: 100;
         min-width: 140px;
         padding: 4px 0;
@@ -62,22 +62,22 @@
         background: none;
         cursor: pointer;
         font-size: 0.85em;
-        color: #333;
+        color: var(--text-primary);
         text-align: left;
     }
-    .project-menu button:hover { background: #f5f5f5; }
-    .project-menu button.danger { color: #cf222e; }
-    .project-menu button.danger:hover { background: #fff5f5; }
-    .project-menu button.muted { color: #888; }
+    .project-menu button:hover { background: var(--bg-surface-tertiary); }
+    .project-menu button.danger { color: var(--accent-danger); }
+    .project-menu button.danger:hover { background: var(--accent-danger-light); }
+    .project-menu button.muted { color: var(--text-subtle); }
 
-    .project-meta { font-size: 0.8em; color: #888; margin-bottom: 8px; }
-    .branch { color: #2da44e; }
-    .dirty { color: #cf222e; }
-    .project-age { font-size: 0.8em; color: #999; }
+    .project-meta { font-size: 0.8em; color: var(--text-subtle); margin-bottom: 8px; }
+    .branch { color: var(--accent-success); }
+    .dirty { color: var(--accent-danger); }
+    .project-age { font-size: 0.8em; color: var(--text-faint); }
     .project.deleting { opacity: 0.5; pointer-events: none; }
     .deleting-badge {
         font-size: 0.75em;
-        color: #cf222e;
+        color: var(--accent-danger);
         font-weight: 500;
         margin-left: 8px;
     }
@@ -85,7 +85,7 @@
         display: inline-block;
         width: 8px;
         height: 8px;
-        background: #2da44e;
+        background: var(--accent-success);
         border-radius: 50%;
         margin-left: 8px;
         vertical-align: middle;
@@ -93,17 +93,17 @@
         animation: pulse 2s infinite;
     }
     @keyframes pulse {
-        0% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0.4); }
-        70% { box-shadow: 0 0 0 6px rgba(45, 164, 78, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(45, 164, 78, 0); }
+        0% { box-shadow: 0 0 0 0 var(--accent-success-light); }
+        70% { box-shadow: 0 0 0 6px transparent; }
+        100% { box-shadow: 0 0 0 0 transparent; }
     }
     .review-count {
         font-size: 0.75em;
         font-weight: 500;
         padding: 2px 6px;
         border-radius: 3px;
-        background: #ddf4ff;
-        color: #0969da;
+        background: var(--file-type-research-bg);
+        color: var(--file-type-research-color);
         margin-left: 8px;
         vertical-align: middle;
     }
@@ -120,14 +120,14 @@
     .modal-info {
         margin: 12px 0;
         padding: 12px;
-        background: #f6f8fa;
+        background: var(--bg-surface-secondary);
         border-radius: 6px;
         font-size: 0.9em;
         line-height: 1.8;
     }
-    .modal-info .warning { color: #b45309; }
-    .btn-delete { background: #cf222e; border: 1px solid #cf222e; color: #fff; }
-    .btn-delete:hover { background: #a40e26; }
+    .modal-info .warning { color: var(--accent-warning); }
+    .btn-delete { background: var(--accent-danger); border: 1px solid var(--accent-danger); color: var(--text-inverted); }
+    .btn-delete:hover { background: var(--accent-danger-hover); }
     .btn-delete:disabled { opacity: 0.6; cursor: default; }
 
 {{end}}
@@ -202,7 +202,7 @@
     <div class="modal-overlay" id="deleteModal">
         <div class="modal">
             <h3>Delete <span id="deleteProjectName"></span>?</h3>
-            <p style="color:#666;font-size:0.9em;margin:0 0 8px 0">This will permanently delete the entire project directory.</p>
+            <p style="color:var(--text-muted);font-size:0.9em;margin:0 0 8px 0">This will permanently delete the entire project directory.</p>
             <div id="deleteInfo" class="modal-info" style="display:none"></div>
             <div class="modal-actions">
                 <button class="btn-cancel" onclick="closeDeleteDialog()">Cancel</button>
@@ -238,7 +238,7 @@
         var dd = btn.closest('.project-dropdown');
         dd.classList.remove('open');
         var toggle = dd.querySelector('.dropdown-dots');
-        toggle.style.color = '#1a7f37';
+        toggle.style.color = 'var(--copied-color)';
         setTimeout(function() { toggle.style.color = ''; }, 1500);
     }
 

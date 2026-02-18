@@ -355,6 +355,7 @@
     [data-theme="dark"] .comment-highlight, [data-theme="dark"] .pending-highlight {
         background: #5c4a00;
         border-bottom-color: #a38600;
+        color: #e0e0e0;
     }
     .comment-highlight:hover { background: #ffe066; }
     [data-theme="dark"] .comment-highlight:hover { background: #6b5700; }
@@ -373,6 +374,7 @@
         background: #6b5700;
         border-bottom-color: #a38600;
         box-shadow: 0 0 0 2px rgba(163, 134, 0, 0.4);
+        color: #e0e0e0;
     }
     .no-comments {
         color: var(--text-faint);
@@ -425,7 +427,7 @@
         color: var(--text-muted);
         cursor: default;
     }
-    .agent-context-label.warning { color: #d29922; }
+    .agent-context-label.warning { color: var(--accent-warning); }
     .agent-context-label.critical { color: var(--accent-danger); }
     @keyframes review-pulse {
         0% { box-shadow: 0 0 0 0 var(--accent-primary-light); }
@@ -667,10 +669,10 @@
     <div class="modal-overlay" id="deleteFileModal">
         <div class="modal">
             <h3>Delete file?</h3>
-            <p style="color:#666;font-size:0.9em;margin:0">This will permanently delete <strong>{{.Page.FileName}}</strong> from the filesystem. This cannot be undone.</p>
+            <p style="color:var(--text-muted);font-size:0.9em;margin:0">This will permanently delete <strong>{{.Page.FileName}}</strong> from the filesystem. This cannot be undone.</p>
             <div class="modal-actions">
                 <button class="btn-cancel" onclick="closeDeleteFileDialog()">Cancel</button>
-                <button class="btn-primary" id="confirmDeleteBtn" style="background:#cf222e;border-color:#cf222e;" onclick="executeDeleteFile()">Delete from disk</button>
+                <button class="btn-primary" id="confirmDeleteBtn" style="background:var(--accent-danger);border-color:var(--accent-danger);" onclick="executeDeleteFile()">Delete from disk</button>
             </div>
         </div>
     </div>

@@ -112,10 +112,25 @@
             --file-type-report-bg: #eceff1;
             --file-type-report-color: #37474f;
 
+            /* Warning accent */
+            --accent-warning: #d29922;
+
             /* Selection/copied states */
             --copied-bg: #dafbe1;
             --copied-border: #1a7f37;
             --copied-color: #1a7f37;
+
+            /* Activity labels */
+            --activity-viewed-bg: #f0f0f0;
+            --activity-viewed-color: #666;
+            --activity-modified-bg: #e8f0fe;
+            --activity-modified-color: #1a73e8;
+            --activity-created-bg: #e6f4ea;
+            --activity-created-color: #137333;
+            --activity-comment-bg: #f3e8fd;
+            --activity-comment-color: #7b1fa2;
+            --activity-published-bg: #fef3e0;
+            --activity-published-color: #e65100;
         }
 
         /* CSS Variables - Dark Theme */
@@ -212,10 +227,25 @@
             --file-type-report-bg: #2a2d30;
             --file-type-report-color: #94a3b8;
 
+            /* Warning accent */
+            --accent-warning: #e3b341;
+
             /* Selection/copied states */
             --copied-bg: #1e3d2e;
             --copied-border: #3fb950;
             --copied-color: #3fb950;
+
+            /* Activity labels */
+            --activity-viewed-bg: #333;
+            --activity-viewed-color: #a0a0a0;
+            --activity-modified-bg: #1e3a5f;
+            --activity-modified-color: #58a6ff;
+            --activity-created-bg: #1e3d2e;
+            --activity-created-color: #3fb950;
+            --activity-comment-bg: #2d1f3d;
+            --activity-comment-color: #e879f9;
+            --activity-published-bg: #3d2a1a;
+            --activity-published-color: #fb923c;
         }
 
         * { box-sizing: border-box; }
@@ -772,7 +802,7 @@
     <div class="modal-overlay" id="removeModal">
         <div class="modal">
             <h3>Remove <span id="removeItemName"></span>?</h3>
-            <p style="color:#666;font-size:0.9em;margin:0">This will remove it from Birdseye. No data will be deleted.</p>
+            <p style="color:var(--text-muted);font-size:0.9em;margin:0">This will remove it from Birdseye. No data will be deleted.</p>
             <div class="modal-actions">
                 <button class="btn-cancel" onclick="closeRemoveDialog()">Cancel</button>
                 <button class="btn-primary" id="confirmRemoveBtn" onclick="confirmRemove()">Remove</button>
@@ -1212,8 +1242,8 @@
 
         function showPublishToast(url) {
             var banner = document.createElement('div');
-            banner.style.cssText = 'position:fixed;top:16px;right:16px;background:#dafbe1;border:1px solid #a3d9a5;border-radius:8px;padding:12px 16px;font-size:0.85em;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.1);max-width:400px;';
-            banner.innerHTML = '<strong>Published!</strong> <a href="' + escapeHtml(url) + '" target="_blank" style="color:#0066cc;word-break:break-all;">' + escapeHtml(url) + '</a>';
+            banner.style.cssText = 'position:fixed;top:16px;right:16px;background:var(--copied-bg);border:1px solid var(--copied-border);border-radius:8px;padding:12px 16px;font-size:0.85em;z-index:1000;box-shadow:var(--shadow-menu);max-width:400px;color:var(--text-primary);';
+            banner.innerHTML = '<strong>Published!</strong> <a href="' + escapeHtml(url) + '" target="_blank" style="color:var(--link-color);word-break:break-all;">' + escapeHtml(url) + '</a>';
             document.body.appendChild(banner);
             setTimeout(function() { banner.remove(); }, 8000);
         }

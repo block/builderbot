@@ -13,6 +13,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { untrack } from 'svelte';
+  import { slide, fade } from 'svelte/transition';
   import {
     GitBranch,
     GitCommitHorizontal,
@@ -1267,7 +1268,12 @@
       <div class="header-actions">
         <!-- Running actions (excluding primary action) -->
         {#each secondaryRunningActions as execution (execution.executionId)}
-          <div class="running-action-container" class:fading={execution.fading}>
+          <div
+            class="running-action-container"
+            class:fading={execution.fading}
+            in:slide={{ duration: 300, axis: 'x' }}
+            out:slide={{ duration: 300, axis: 'x' }}
+          >
             <button
               class="running-action-button"
               class:completed={execution.status === 'completed'}
@@ -1290,7 +1296,11 @@
         {/each}
         <!-- Primary run action button -->
         {#if primaryRunAction && branch.branchType === 'local'}
-          <div class="primary-action-container">
+          <div
+            class="primary-action-container"
+            in:slide={{ duration: 300, axis: 'x' }}
+            out:slide={{ duration: 300, axis: 'x' }}
+          >
             <button
               class="primary-action-button"
               class:running={primaryActionExecution?.status === 'running'}
@@ -1834,6 +1844,7 @@
   .primary-action-container {
     display: flex;
     align-items: center;
+    overflow: hidden;
   }
 
   .primary-action-button {
@@ -1885,15 +1896,15 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    opacity: 1;
-    transition:
-      opacity 0.3s ease,
-      transform 0.3s ease;
+    overflow: hidden;
   }
 
   .running-action-container.fading {
     opacity: 0;
     transform: scale(0.95);
+    transition:
+      opacity 0.3s ease,
+      transform 0.3s ease;
   }
 
   .running-action-button {
@@ -1907,6 +1918,7 @@
     color: var(--text-primary);
     font-size: var(--size-xs);
     cursor: pointer;
+    white-space: nowrap;
     transition:
       background-color 0.15s ease,
       border-color 0.15s ease;

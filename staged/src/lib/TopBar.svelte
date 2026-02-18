@@ -5,11 +5,21 @@
   for adding new projects.
 -->
 <script lang="ts">
-  import { Palette, Plus, SlidersHorizontal } from 'lucide-svelte';
+  import { onMount } from 'svelte';
+  import { Palette, PanelLeftClose, PanelLeftOpen, Plus, SlidersHorizontal } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import ThemeSelectorModal from './features/settings/ThemeSelectorModal.svelte';
+  import {
+    hydrateProjectsSidebarState,
+    projectsSidebarState,
+    setProjectsSidebarCollapsed,
+  } from './features/projects/projectsSidebarState.svelte';
 
   let showThemeModal = $state(false);
+
+  onMount(() => {
+    void hydrateProjectsSidebarState();
+  });
 
   function startDrag(e: PointerEvent) {
     if (e.button !== 0) return;
@@ -20,11 +30,28 @@
       getCurrentWindow().startDragging();
     }
   }
+
+  function toggleProjectsSidebar() {
+    setProjectsSidebarCollapsed(!projectsSidebarState.collapsed);
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="top-bar" onpointerdown={startDrag}>
   <div class="traffic-light-spacer"></div>
+  <div class="left-actions">
+    <button
+      class="icon-btn"
+      onclick={toggleProjectsSidebar}
+      title={projectsSidebarState.collapsed ? 'Show projects sidebar' : 'Hide projects sidebar'}
+    >
+      {#if projectsSidebarState.collapsed}
+        <PanelLeftOpen size={14} />
+      {:else}
+        <PanelLeftClose size={14} />
+      {/if}
+    </button>
+  </div>
   <div class="drag-spacer"></div>
 
   <div class="top-bar-actions">
@@ -78,6 +105,11 @@
     flex: 1;
     align-self: stretch;
     min-width: 20px;
+  }
+
+  .left-actions {
+    display: flex;
+    align-items: center;
   }
 
   .top-bar-actions {

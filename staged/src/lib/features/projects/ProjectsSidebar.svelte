@@ -1,10 +1,19 @@
 <script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
   import { FolderGit2, House, Plus } from 'lucide-svelte';
   import type { Project } from '../../types';
   import { goHome, navigation, selectProject } from '../../navigation.svelte';
   import { projectDisplayName } from '../../shared/utils';
   import Spinner from '../../shared/Spinner.svelte';
   import { getProjectStatus } from './projectStatus';
+  import {
+    hydrateProjectsSidebarState,
+    projectsSidebarState,
+    setProjectsSidebarWidth,
+    SIDEBAR_DEFAULT_WIDTH,
+    SIDEBAR_MAX_WIDTH,
+    SIDEBAR_MIN_WIDTH,
+  } from './projectsSidebarState.svelte';
 
   interface Props {
     projects: Project[];
@@ -37,97 +46,171 @@
   function repoCountForProject(project: Project): number {
     return repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0);
   }
+
+  let resizing = $state(false);
+  let resizeStartX = 0;
+  let resizeStartWidth = SIDEBAR_DEFAULT_WIDTH;
+
+  onMount(() => {
+    void hydrateProjectsSidebarState();
+  });
+
+  onDestroy(() => {
+    stopResize();
+  });
+
+  function startResize(e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    resizing = true;
+    resizeStartX = e.clientX;
+    resizeStartWidth = projectsSidebarState.width;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', handleResizeMove);
+    window.addEventListener('pointerup', stopResize);
+  }
+
+  function handleResizeMove(e: PointerEvent) {
+    if (!resizing) return;
+    const deltaX = e.clientX - resizeStartX;
+    setProjectsSidebarWidth(resizeStartWidth + deltaX, false);
+  }
+
+  function stopResize() {
+    if (!resizing) return;
+    resizing = false;
+    setProjectsSidebarWidth(projectsSidebarState.width, true);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    window.removeEventListener('pointermove', handleResizeMove);
+    window.removeEventListener('pointerup', stopResize);
+  }
+
+  function handleResizeHandleKeydown(e: KeyboardEvent) {
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      setProjectsSidebarWidth(projectsSidebarState.width - 16);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      setProjectsSidebarWidth(projectsSidebarState.width + 16);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      setProjectsSidebarWidth(SIDEBAR_MIN_WIDTH);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      setProjectsSidebarWidth(SIDEBAR_MAX_WIDTH);
+    }
+  }
 </script>
 
-<aside class="projects-sidebar">
-  <div class="sidebar-header">
-    <div class="title-row">
-      <h2>Projects</h2>
-      <span class="count">{projects.length}</span>
+{#if !projectsSidebarState.collapsed}
+  <aside class="projects-sidebar" class:resizing style={`width: ${projectsSidebarState.width}px;`}>
+    <div class="sidebar-header">
+      <div class="title-row">
+        <h2>Projects</h2>
+        <span class="count">{projects.length}</span>
+      </div>
     </div>
-  </div>
 
-  <div class="sidebar-body">
-    {#if loading}
-      <div class="state">Loading projects…</div>
-    {:else if error}
-      <div class="state error">{error}</div>
-    {:else}
-      <div class="projects-list">
-        {#if showAllProjectsRow}
-          <button
-            class="project-row all-projects-row"
-            class:active={navigation.selectedProjectId === null}
-            onclick={goHome}
-            title="Show all projects"
-          >
-            <div class="row-main">
-              <House size={14} />
-              <span class="project-name">All Projects</span>
-            </div>
-          </button>
-        {/if}
-
-        {#if projects.length === 0}
-          <div class="state">No projects yet.</div>
-        {:else}
-          {#each projects as project (project.id)}
-            {@const status = getProjectStatus(project.id, deletingProjectNames)}
-            {@const repoCount = repoCountForProject(project)}
+    <div class="sidebar-body">
+      {#if loading}
+        <div class="state">Loading projects…</div>
+      {:else if error}
+        <div class="state error">{error}</div>
+      {:else}
+        <div class="projects-list">
+          {#if showAllProjectsRow}
             <button
-              class="project-row"
-              class:active={navigation.selectedProjectId === project.id}
-              class:deleting={status.kind === 'deleting'}
-              onclick={() => openProject(project.id)}
-              disabled={status.kind === 'deleting'}
-              title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
+              class="project-row all-projects-row"
+              class:active={navigation.selectedProjectId === null}
+              onclick={goHome}
+              title="Show all projects"
             >
               <div class="row-main">
-                <FolderGit2 size={14} />
-                <div class="row-text">
-                  <span class="project-name">{projectDisplayName(project)}</span>
-                  <div class="row-meta">
-                    <span class="repo-count">{repoCount} {repoCount === 1 ? 'repo' : 'repos'}</span>
-                  </div>
-                </div>
-              </div>
-              <div class="row-status">
-                {#if status.kind === 'running'}
-                  <span class="status-running">
-                    <Spinner size={12} />
-                    <span class="running-count">{status.runningCount}</span>
-                  </span>
-                {:else if status.kind === 'unread'}
-                  <span class="status-unread-dot" aria-label="Unread updates"></span>
-                {:else if status.kind === 'deleting'}
-                  <span class="status-deleting">Deleting…</span>
-                {/if}
+                <House size={14} />
+                <span class="project-name">All Projects</span>
               </div>
             </button>
-          {/each}
-        {/if}
-        <button
-          class="new-project-button list-new-project-button"
-          onclick={openNewProject}
-          title="New project (⌘N)"
-        >
-          <Plus size={14} />
-          New project
-        </button>
-      </div>
-    {/if}
-  </div>
-</aside>
+          {/if}
+
+          {#if projects.length === 0}
+            <div class="state">No projects yet.</div>
+          {:else}
+            {#each projects as project (project.id)}
+              {@const status = getProjectStatus(project.id, deletingProjectNames)}
+              {@const repoCount = repoCountForProject(project)}
+              <button
+                class="project-row"
+                class:active={navigation.selectedProjectId === project.id}
+                class:deleting={status.kind === 'deleting'}
+                onclick={() => openProject(project.id)}
+                disabled={status.kind === 'deleting'}
+                title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
+              >
+                <div class="row-main">
+                  <FolderGit2 size={14} />
+                  <div class="row-text">
+                    <span class="project-name">{projectDisplayName(project)}</span>
+                    <div class="row-meta">
+                      <span class="repo-count"
+                        >{repoCount} {repoCount === 1 ? 'repo' : 'repos'}</span
+                      >
+                    </div>
+                  </div>
+                </div>
+                <div class="row-status">
+                  {#if status.kind === 'running'}
+                    <span class="status-running">
+                      <Spinner size={12} />
+                      <span class="running-count">{status.runningCount}</span>
+                    </span>
+                  {:else if status.kind === 'unread'}
+                    <span class="status-unread-dot" aria-label="Unread updates"></span>
+                  {:else if status.kind === 'deleting'}
+                    <span class="status-deleting">Deleting…</span>
+                  {/if}
+                </div>
+              </button>
+            {/each}
+          {/if}
+          <button
+            class="new-project-button list-new-project-button"
+            onclick={openNewProject}
+            title="New project (⌘N)"
+          >
+            <Plus size={14} />
+            New project
+          </button>
+        </div>
+      {/if}
+    </div>
+
+    <button
+      type="button"
+      class="resize-handle"
+      class:active={resizing}
+      aria-label="Resize projects sidebar"
+      onpointerdown={startResize}
+      onkeydown={handleResizeHandleKeydown}
+    ></button>
+  </aside>
+{/if}
 
 <style>
   .projects-sidebar {
-    width: 280px;
+    position: relative;
     flex-shrink: 0;
     border-right: 1px solid var(--border-muted);
     background-color: var(--bg-surface);
     display: flex;
     flex-direction: column;
     min-height: 0;
+    transition: width 0.14s ease;
+  }
+
+  .projects-sidebar.resizing {
+    transition: none;
   }
 
   .sidebar-header {
@@ -332,5 +415,35 @@
 
   .state.error {
     color: var(--ui-danger);
+  }
+
+  .resize-handle {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 5;
+    border: none;
+    background: transparent;
+    padding: 0;
+  }
+
+  .resize-handle::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 2px;
+    width: 2px;
+    background-color: transparent;
+    transition: background-color 0.15s ease;
+  }
+
+  .resize-handle:hover::after,
+  .resize-handle:focus-visible::after,
+  .resize-handle.active::after {
+    background-color: var(--border-emphasis);
   }
 </style>

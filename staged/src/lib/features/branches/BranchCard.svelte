@@ -976,6 +976,10 @@
             // Save PR number to storage
             await commands.updateBranchPr(branch.id, prNumber);
             branch.prNumber = prNumber;
+            // Immediately fetch PR status after creation
+            commands
+              .refreshPrStatus(branch.id)
+              .catch((e) => console.error('Failed to fetch initial PR status:', e));
           }
           prStateStore.setPrCreated(branch.id, foundUrl);
         } else {

@@ -1811,8 +1811,9 @@ pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
                 GitError::CommandFailed("Invalid UTF-8 in MODULES.yaml".to_string())
             })?;
 
-            // Count occurrences of "---" which separate module definitions
-            let module_count = content.matches("---").count() as u32;
+            // Count lines that are exactly "---" (module separators in YAML)
+            // Each module definition is separated by a standalone "---" line
+            let module_count = content.lines().filter(|line| line.trim() == "---").count() as u32;
             log::info!(
                 "Found {} module separators in MODULES.yaml for {}",
                 module_count,

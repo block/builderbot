@@ -18,6 +18,7 @@
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
+  import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import { alerts } from '../../shared/alerts.svelte';
 
@@ -763,6 +764,7 @@
           <button class="kbd-btn" onclick={handleNewProject} title="New project">+</button>
           <span class="shortcut-hint">(⌘N)</span>
         </p>
+        <GitTreeAnimation />
       </div>
     {:else}
       <div class="projects-list">
@@ -1054,6 +1056,10 @@
   .welcome-subtitle .shortcut-hint {
     color: var(--text-faint);
     font-size: var(--size-xs);
+  }
+
+  .empty-state :global(.animation-wrapper) {
+    width: min(1400px, calc(100vw - 48px));
   }
 
   /* Projects list */

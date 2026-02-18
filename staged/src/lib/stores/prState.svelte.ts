@@ -23,6 +23,7 @@ interface BranchPrState {
 
 const MAX_STORE_SIZE = 100; // Maximum number of branch states to keep
 const STATE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const CLEANUP_THRESHOLD = 0.8; // Run cleanup when store is 80% full
 
 class PrStateStore {
   private states = $state<Map<string, BranchPrState>>(new Map());
@@ -32,7 +33,10 @@ class PrStateStore {
   }
 
   setPrCreating(branchId: string, sessionId: string): void {
-    this.cleanup();
+    // Only cleanup when approaching size limit to avoid O(n) cost on every operation
+    if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
+      this.cleanup();
+    }
     this.states.set(branchId, {
       state: 'creating',
       sessionId,
@@ -43,7 +47,9 @@ class PrStateStore {
   }
 
   setPrCreated(branchId: string, url: string | null = null): void {
-    this.cleanup();
+    if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
+      this.cleanup();
+    }
     this.states.set(branchId, {
       state: 'created',
       sessionId: null,
@@ -54,7 +60,9 @@ class PrStateStore {
   }
 
   setPrError(branchId: string, error: string): void {
-    this.cleanup();
+    if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
+      this.cleanup();
+    }
     const existing = this.states.get(branchId);
     this.states.set(branchId, {
       state: 'error',
@@ -123,13 +131,15 @@ class PrStateStore {
   }
 
   /**
-   * Clear session tracking for a branch (symmetric cleanup)
+   * Clear session tracking for a branch
    * Called after PR creation completes to remove the session association
+   * Note: Does NOT unregister from sessionRegistry - that's handled centrally in App.svelte
    */
   clearSessionTracking(branchId: string): void {
     const state = this.states.get(branchId);
     if (state?.sessionId) {
-      sessionRegistry.unregister(state.sessionId);
+      // Clear the session ID reference, but leave the final state (created/error)
+      // This maintains the PR outcome while removing the transient session reference
       state.sessionId = null;
     }
   }

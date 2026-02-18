@@ -134,9 +134,16 @@
               if (foundUrl) {
                 const prNumber = extractPrNumber(foundUrl);
                 if (prNumber) {
-                  // Save PR number to storage
-                  await commands.updateBranchPr(branchId, prNumber);
+                  try {
+                    // Save PR number to storage (separate try-catch to handle storage failures)
+                    await commands.updateBranchPr(branchId, prNumber);
+                  } catch (storageError) {
+                    // If storage fails, we still have the PR URL from the session
+                    // Log the error but don't fail the PR creation - the PR exists on GitHub
+                    console.error('Failed to persist PR number to storage:', storageError);
+                  }
                 }
+                // Set state to created regardless of storage success - the PR was created
                 prStateStore.setPrCreated(branchId, foundUrl);
               } else {
                 // Session completed but we couldn't find a PR URL
@@ -146,6 +153,7 @@
                 );
               }
             } catch (e) {
+              // Failed to get session messages or extract PR URL
               prStateStore.setPrError(branchId, e instanceof Error ? e.message : String(e));
             }
           } else {
@@ -155,11 +163,11 @@
               `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
             );
           }
-          // Symmetric cleanup: unregister the session after handling PR completion
+          // Clear PR state's session tracking (does NOT unregister from registry)
           prStateStore.clearSessionTracking(branchId);
         }
 
-        // Clean up the session from the unified registry
+        // Clean up the session from the unified registry (single point of cleanup)
         sessionRegistry.unregister(sessionId);
       }
     });

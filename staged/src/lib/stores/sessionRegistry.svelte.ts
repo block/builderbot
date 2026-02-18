@@ -29,6 +29,7 @@ interface SessionMetadata {
 
 const MAX_REGISTRY_SIZE = 200; // Maximum number of sessions to track
 const SESSION_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours - keep longer than prState TTL
+const CLEANUP_THRESHOLD = 0.8; // Run cleanup when registry is 80% full
 
 class SessionRegistry {
   // Map from session ID to session metadata
@@ -41,7 +42,10 @@ class SessionRegistry {
    * Register a new session with its metadata
    */
   register(sessionId: string, projectId: string, type: SessionType, branchId?: string): void {
-    this.cleanup();
+    // Only cleanup when we're approaching the size limit to avoid O(n) cost on every registration
+    if (this.sessions.size >= MAX_REGISTRY_SIZE * CLEANUP_THRESHOLD) {
+      this.cleanup();
+    }
 
     this.sessions.set(sessionId, {
       sessionId,

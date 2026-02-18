@@ -28,6 +28,7 @@
     Branch,
     BranchTimeline as BranchTimelineData,
     BranchSessionType,
+    WorkspaceInfo,
     WorkspaceStatus,
   } from '../../types';
   import * as commands from '../../commands';
@@ -78,6 +79,8 @@
   let pollStartedAt: number | null = null;
   let longProvisioning = $state(false);
   let pollInFlight = false;
+  let workspaceUrl = $state<string | null>(null);
+  let workspaceInfoRequestId = 0;
   const LONG_PROVISIONING_MS = 5 * 60 * 1000; // 5 minutes
 
   // Error state
@@ -175,6 +178,7 @@
     }
     if (status === 'running') {
       loadTimeline();
+      loadWorkspaceUrl();
     }
     listenForStatusChanges();
   });
@@ -206,9 +210,11 @@
           longProvisioning = false;
           stopPolling();
           loadTimeline();
+          loadWorkspaceUrl();
         } else if (newStatus !== 'starting') {
           longProvisioning = false;
           stopPolling();
+          workspaceUrl = null;
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -266,6 +272,7 @@
     error = null;
     polledStatus = 'starting';
     longProvisioning = false;
+    workspaceUrl = null;
 
     try {
       await commands.startWorkspace(branch.id);
@@ -503,6 +510,65 @@
   // Display helpers
   // =========================================================================
 
+  function extractWorkspaceBaseUrl(rawUri: string): string | null {
+    try {
+      const uri = new URL(rawUri);
+      const segments = uri.pathname.split('/').filter(Boolean);
+      const userSegmentIndex = segments.findIndex((segment) => segment.startsWith('@'));
+      if (userSegmentIndex === -1 || userSegmentIndex + 1 >= segments.length) {
+        return null;
+      }
+      return `${uri.origin}/${segments[userSegmentIndex]}/${segments[userSegmentIndex + 1]}`;
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveWorkspaceUrl(info: WorkspaceInfo): string | null {
+    const uris = info['uris'];
+    if (!Array.isArray(uris)) {
+      return null;
+    }
+
+    for (const uri of uris) {
+      if (typeof uri !== 'string') {
+        continue;
+      }
+      const workspaceBaseUrl = extractWorkspaceBaseUrl(uri);
+      if (workspaceBaseUrl) {
+        return workspaceBaseUrl;
+      }
+    }
+
+    return null;
+  }
+
+  async function loadWorkspaceUrl() {
+    const requestId = ++workspaceInfoRequestId;
+    try {
+      const info = await commands.getWorkspaceInfo(branch.id);
+      if (requestId !== workspaceInfoRequestId) {
+        return;
+      }
+      workspaceUrl = resolveWorkspaceUrl(info);
+    } catch (e) {
+      if (requestId !== workspaceInfoRequestId) {
+        return;
+      }
+      workspaceUrl = null;
+      console.debug('Failed to resolve workspace URL:', e);
+    }
+  }
+
+  function handleStatusBadgeClick() {
+    if (status !== 'running' || !workspaceUrl) {
+      return;
+    }
+    commands.openUrl(workspaceUrl).catch((e) => {
+      console.error('Failed to open workspace URL:', e);
+    });
+  }
+
   function statusLabel(s: WorkspaceStatus | null): string {
     switch (s) {
       case 'starting':
@@ -535,24 +601,36 @@
         secondaryLabel={branch.workspaceName}
       />
       <div class="header-actions">
-        <div
-          class="status-badge"
-          class:starting={status === 'starting'}
-          class:running={status === 'running'}
-          class:stopped={status === 'stopped'}
-          class:error={status === 'error'}
-        >
-          {#if status === 'starting'}
-            <Spinner size={12} />
-          {:else if status === 'running'}
+        {#if status === 'running' && workspaceUrl}
+          <button
+            class="status-badge running clickable"
+            onclick={handleStatusBadgeClick}
+            type="button"
+            title="Open workspace in browser"
+          >
             <CircleCheck size={12} />
-          {:else if status === 'stopped'}
-            <CirclePause size={12} />
-          {:else if status === 'error'}
-            <AlertCircle size={12} />
-          {/if}
-          <span>{statusLabel(status)}</span>
-        </div>
+            <span>{statusLabel(status)}</span>
+          </button>
+        {:else}
+          <div
+            class="status-badge"
+            class:starting={status === 'starting'}
+            class:running={status === 'running'}
+            class:stopped={status === 'stopped'}
+            class:error={status === 'error'}
+          >
+            {#if status === 'starting'}
+              <Spinner size={12} />
+            {:else if status === 'running'}
+              <CircleCheck size={12} />
+            {:else if status === 'stopped'}
+              <CirclePause size={12} />
+            {:else if status === 'error'}
+              <AlertCircle size={12} />
+            {/if}
+            <span>{statusLabel(status)}</span>
+          </div>
+        {/if}
         <DropdownMenu items={menuItems} />
       </div>
     </div>
@@ -802,6 +880,18 @@
     font-size: var(--size-xs);
     font-weight: 500;
     white-space: nowrap;
+  }
+
+  .status-badge.clickable {
+    appearance: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+  }
+
+  .status-badge.clickable:focus-visible {
+    outline: 2px solid var(--border-emphasis);
+    outline-offset: 2px;
   }
 
   .status-badge.starting {

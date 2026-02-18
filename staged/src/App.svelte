@@ -110,6 +110,9 @@
         const sessionType = sessionRegistry.getType(sessionId);
         const branchId = sessionRegistry.getBranchId(sessionId);
         const currentProjectId = navigation.selectedProjectId;
+        if (!sessionProjectId && !sessionType && !branchId) {
+          console.warn('Received completion event for unknown session ID', { sessionId, status });
+        }
 
         // Mark project as unread if:
         // 1. We know which project the session belonged to AND

@@ -20,14 +20,17 @@
   const IconComponent = $derived(icons[icon]);
 </script>
 
-<IconComponent {size} class="spinner {className}" />
+<div class="spinner-container {className}">
+  <IconComponent {size} />
+</div>
 
 <style>
-  :global(.spinner) {
+  .spinner-container {
     animation: spin 1s linear infinite;
     flex-shrink: 0;
-    /* Prevent wobbling by ensuring the icon is centered and uses transform-origin */
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     transform-origin: center center;
     will-change: transform;
   }

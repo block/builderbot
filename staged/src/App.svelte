@@ -20,12 +20,14 @@
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
   import { navigation } from './lib/navigation.svelte';
+  import { projectStateStore } from './lib/stores/projectState.svelte';
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
   let showDoctor = $state(false);
   let showActionsPreferences = $state(false);
   let unlistenDoctor: UnlistenFn | undefined;
+  let unlistenSessionStatus: UnlistenFn | undefined;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
@@ -86,6 +88,33 @@
       showDoctor = true;
     });
 
+    // Listen for session status changes globally to handle spinner cleanup
+    // This must be at the App level so it works regardless of which view the user is on
+    unlistenSessionStatus = await listen<{
+      sessionId: string;
+      status: string;
+    }>('session-status-changed', (event) => {
+      const { sessionId, status } = event.payload;
+      if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        // Handle session completion - mark project as unread if user is not viewing it
+        // Get the project ID from the session mapping (captured when session started)
+        const sessionProjectId = projectStateStore.getProjectForSession(sessionId);
+        const currentProjectId = navigation.selectedProjectId;
+
+        // Mark project as unread if:
+        // 1. We know which project the session belonged to AND
+        // 2. The user is currently viewing a different project
+        if (sessionProjectId && currentProjectId !== sessionProjectId) {
+          projectStateStore.markAsUnread(sessionProjectId);
+        }
+
+        // Always remove the running session from its project
+        if (sessionProjectId) {
+          projectStateStore.removeRunningSession(sessionProjectId, sessionId);
+        }
+      }
+    });
+
     const t0 = performance.now();
     try {
       await initPreferences();
@@ -119,6 +148,7 @@
       onOpenActionsPreferences = null;
     }
     unlistenDoctor?.();
+    unlistenSessionStatus?.();
   });
 
   async function handleResetStore() {

@@ -12,13 +12,14 @@
   import * as commands from '../../commands';
   import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, selectProject } from '../../navigation.svelte';
+  import { goHome, selectProject, navigation } from '../../navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import { alerts } from '../../shared/alerts.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -61,7 +62,7 @@
     const onNewProject = () => handleNewProject();
     window.addEventListener('staged:new-project', onNewProject);
 
-    let unlistenDetection: (() => void) | null = null;
+    let unlistenDetection: (() => void) | undefined;
     listenToRepoActionsDetection((event) => {
       const matchingProjectIds = projects
         .filter((p) => p.githubRepo === event.githubRepo && p.subpath === event.subpath)

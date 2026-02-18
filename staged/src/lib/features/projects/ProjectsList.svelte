@@ -13,6 +13,8 @@
   import NewProjectModal from './NewProjectModal.svelte';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
+  import Spinner from '../../shared/Spinner.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
 
   let projects = $state<Project[]>([]);
   let loading = $state(true);
@@ -187,6 +189,8 @@
           </div>
         </button>
         {#each projects as project, index (project.id)}
+          {@const hasRunning = projectStateStore.hasRunningSessions(project.id)}
+          {@const isUnread = projectStateStore.isUnread(project.id)}
           <button
             class="project-card"
             class:deleting={isProjectDeleting(project.id)}
@@ -199,6 +203,13 @@
                 <span class="command-icon">⌘</span>
                 <span class="number">{index + 1}</span>
               </div>
+            {/if}
+            {#if hasRunning}
+              <div class="status-indicator spinner">
+                <Spinner size={14} />
+              </div>
+            {:else if isUnread}
+              <div class="status-indicator unread-dot"></div>
             {/if}
             <div class="card-header">
               <FolderGit2 size={16} />
@@ -474,5 +485,23 @@
   .keyboard-shortcut-overlay .number {
     font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
     color: var(--ui-accent);
+  }
+
+  .status-indicator {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 5;
+  }
+
+  .status-indicator.spinner {
+    color: var(--ui-accent);
+  }
+
+  .status-indicator.unread-dot {
+    width: 8px;
+    height: 8px;
+    background-color: var(--ui-accent);
+    border-radius: 50%;
   }
 </style>

@@ -214,8 +214,54 @@ export function pollWorkspaceStatus(branchId: string): Promise<string> {
 // Timeline
 // =============================================================================
 
+type TimelineJob = {
+  branchId: string;
+  resolve: (timeline: BranchTimeline) => void;
+  reject: (error: unknown) => void;
+};
+
+const TIMELINE_MAX_CONCURRENCY = 1;
+const timelineQueue: TimelineJob[] = [];
+const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
+let activeTimelineJobs = 0;
+
+function pumpTimelineQueue() {
+  while (activeTimelineJobs < TIMELINE_MAX_CONCURRENCY && timelineQueue.length > 0) {
+    const job = timelineQueue.shift();
+    if (!job) break;
+
+    activeTimelineJobs += 1;
+    invoke<BranchTimeline>('get_branch_timeline', { branchId: job.branchId })
+      .then((timeline) => {
+        job.resolve(timeline);
+      })
+      .catch((error) => {
+        job.reject(error);
+      })
+      .finally(() => {
+        activeTimelineJobs = Math.max(0, activeTimelineJobs - 1);
+        pumpTimelineQueue();
+      });
+  }
+}
+
 export function getBranchTimeline(branchId: string): Promise<BranchTimeline> {
-  return invoke('get_branch_timeline', { branchId });
+  const existing = inFlightTimelines.get(branchId);
+  if (existing) {
+    return existing;
+  }
+
+  const request = new Promise<BranchTimeline>((resolve, reject) => {
+    timelineQueue.push({ branchId, resolve, reject });
+    pumpTimelineQueue();
+  }).finally(() => {
+    if (inFlightTimelines.get(branchId) === request) {
+      inFlightTimelines.delete(branchId);
+    }
+  });
+
+  inFlightTimelines.set(branchId, request);
+  return request;
 }
 
 // =============================================================================

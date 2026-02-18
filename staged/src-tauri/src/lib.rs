@@ -1188,13 +1188,7 @@ fn delete_commit(
     Ok(())
 }
 
-#[tauri::command]
-fn get_branch_timeline(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
-) -> Result<BranchTimeline, String> {
-    let store = get_store(&store)?;
-
+fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTimeline, String> {
     // Get the branch and its workdir for git operations
     let branch = store
         .get_branch(&branch_id)
@@ -1364,6 +1358,18 @@ fn get_branch_timeline(
         notes,
         reviews,
     })
+}
+
+#[tauri::command]
+async fn get_branch_timeline(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<BranchTimeline, String> {
+    let store = get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || build_branch_timeline(&store, &branch_id))
+        .await
+        .map_err(|e| format!("Timeline task failed: {e}"))?
 }
 
 // =============================================================================

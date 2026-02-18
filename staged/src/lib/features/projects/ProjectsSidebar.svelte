@@ -163,7 +163,6 @@
                   {#if status.kind === 'running'}
                     <span class="status-running">
                       <Spinner size={12} />
-                      <span class="running-count">{status.runningCount}</span>
                     </span>
                   {:else if status.kind === 'unread'}
                     <span class="status-unread-dot" aria-label="Unread updates"></span>
@@ -379,19 +378,7 @@
   .status-running {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
     color: var(--ui-accent);
-  }
-
-  .running-count {
-    font-family: 'SF Mono', 'Menlo', monospace;
-    font-size: calc(var(--size-xs) - 1px);
-    border: 1px solid var(--border-muted);
-    border-radius: 999px;
-    padding: 0 5px;
-    color: var(--text-primary);
-    background-color: var(--bg-primary);
-    line-height: 1.35;
   }
 
   .status-unread-dot {

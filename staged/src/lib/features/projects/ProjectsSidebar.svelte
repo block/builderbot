@@ -1,9 +1,17 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { FolderGit2, House, Plus } from 'lucide-svelte';
-  import type { Project } from '../../types';
+  import {
+    FolderGit2,
+    House,
+    Plus,
+    GitPullRequest,
+    GitPullRequestClosed,
+    GitPullRequestDraft,
+    GitBranch,
+  } from 'lucide-svelte';
+  import type { Project, Branch } from '../../types';
   import { goHome, navigation, selectProject } from '../../navigation.svelte';
-  import { projectDisplayName } from '../../shared/utils';
+  import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
   import Spinner from '../../shared/Spinner.svelte';
   import { getProjectStatus } from './projectStatus';
   import {
@@ -22,6 +30,7 @@
     deletingProjectNames?: Map<string, string>;
     repoCountsByProject?: Map<string, number>;
     showAllProjectsRow?: boolean;
+    projectBranches?: Map<string, Branch[]>;
   }
 
   let {
@@ -31,6 +40,7 @@
     deletingProjectNames = new Map(),
     repoCountsByProject = new Map(),
     showAllProjectsRow = true,
+    projectBranches = new Map(),
   }: Props = $props();
 
   function openProject(projectId: string) {
@@ -45,6 +55,11 @@
 
   function repoCountForProject(project: Project): number {
     return repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0);
+  }
+
+  function getProjectPrStatus(projectId: string): 'merged' | 'open' | 'closed' | 'conflict' | null {
+    const branches = projectBranches.get(projectId) || [];
+    return aggregateProjectPrStatus(branches);
   }
 
   let resizing = $state(false);
@@ -140,6 +155,7 @@
             {#each projects as project (project.id)}
               {@const status = getProjectStatus(project.id, deletingProjectNames)}
               {@const repoCount = repoCountForProject(project)}
+              {@const prStatus = getProjectPrStatus(project.id)}
               <button
                 class="project-row"
                 class:active={navigation.selectedProjectId === project.id}
@@ -149,7 +165,17 @@
                 title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
               >
                 <div class="row-main">
-                  <FolderGit2 size={14} />
+                  {#if prStatus === 'merged'}
+                    <GitPullRequest size={14} class="pr-status-merged" />
+                  {:else if prStatus === 'open'}
+                    <GitPullRequest size={14} />
+                  {:else if prStatus === 'closed'}
+                    <GitPullRequestClosed size={14} />
+                  {:else if prStatus === 'conflict'}
+                    <GitPullRequestClosed size={14} class="pr-status-conflict" />
+                  {:else}
+                    <GitPullRequestDraft size={14} class="pr-status-draft" />
+                  {/if}
                   <div class="row-text">
                     <span class="project-name">{projectDisplayName(project)}</span>
                     <div class="row-meta">
@@ -335,6 +361,22 @@
     gap: 8px;
     flex: 1;
     min-width: 0;
+  }
+
+  .row-main :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .row-main :global(svg.pr-status-merged) {
+    stroke: var(--ui-success);
+  }
+
+  .row-main :global(svg.pr-status-conflict) {
+    stroke: var(--ui-danger);
+  }
+
+  .row-main :global(svg.pr-status-draft) {
+    stroke: var(--text-faint);
   }
 
   .row-text {

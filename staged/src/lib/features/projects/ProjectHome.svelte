@@ -581,6 +581,7 @@
     {error}
     {deletingProjectNames}
     {repoCountsByProject}
+    projectBranches={branchesByProject}
     showAllProjectsRow={true}
   />
 

@@ -5,10 +5,15 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { FolderGit2 } from 'lucide-svelte';
-  import type { Project } from '../../types';
+  import {
+    GitPullRequest,
+    GitPullRequestClosed,
+    GitPullRequestDraft,
+    GitBranch,
+  } from 'lucide-svelte';
+  import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
-  import { projectDisplayName } from '../../shared/utils';
+  import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
   import { selectProject } from '../../navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
@@ -18,6 +23,7 @@
   import Spinner from '../../shared/Spinner.svelte';
 
   let projects = $state<Project[]>([]);
+  let projectBranches = $state<Map<string, Branch[]>>(new Map());
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showNewProjectModal = $state(false);
@@ -69,6 +75,20 @@
         loadedProjects.map((project) => [project.id, project.githubRepo ? 1 : 0] as const)
       );
       void hydrateRepoCounts(loadedProjects);
+      // Load branches for each project to calculate PR status
+      const branchesMap = new Map<string, Branch[]>();
+      await Promise.all(
+        loadedProjects.map(async (project) => {
+          try {
+            const branches = await commands.listBranchesForProject(project.id);
+            branchesMap.set(project.id, branches);
+          } catch (e) {
+            console.error(`Failed to load branches for project ${project.id}:`, e);
+            branchesMap.set(project.id, []);
+          }
+        })
+      );
+      projectBranches = branchesMap;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -110,6 +130,13 @@
   function openProject(projectId: string) {
     if (isProjectDeleting(projectId)) return;
     selectProject(projectId);
+  }
+
+  function getProjectPrStatus(
+    projectId: string
+  ): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
+    const branches = projectBranches.get(projectId) || [];
+    return aggregateProjectPrStatus(branches);
   }
 
   function verifyCommandKeyState(e: KeyboardEvent | MouseEvent) {
@@ -187,6 +214,7 @@
     {error}
     {deletingProjectNames}
     {repoCountsByProject}
+    {projectBranches}
     showAllProjectsRow={true}
   />
 
@@ -227,6 +255,7 @@
           </button>
           {#each projects as project, index (project.id)}
             {@const status = getProjectStatus(project.id, deletingProjectNames)}
+            {@const prStatus = getProjectPrStatus(project.id)}
             <button
               class="project-card"
               class:deleting={status.kind === 'deleting'}
@@ -248,7 +277,17 @@
                 <div class="status-indicator unread-dot"></div>
               {/if}
               <div class="card-header">
-                <FolderGit2 size={16} />
+                {#if prStatus === 'merged'}
+                  <GitPullRequest size={16} class="pr-status-merged" />
+                {:else if prStatus === 'open'}
+                  <GitPullRequest size={16} />
+                {:else if prStatus === 'closed'}
+                  <GitPullRequestClosed size={16} />
+                {:else if prStatus === 'conflict'}
+                  <GitPullRequestClosed size={16} class="pr-status-conflict" />
+                {:else}
+                  <GitPullRequestDraft size={16} class="pr-status-draft" />
+                {/if}
                 <span>{projectDisplayName(project)}</span>
               </div>
               {#if status.kind === 'deleting'}
@@ -461,6 +500,22 @@
     font-size: var(--size-sm);
     font-weight: 600;
     padding-right: 24px;
+  }
+
+  .card-header :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .card-header :global(svg.pr-status-merged) {
+    stroke: var(--ui-success);
+  }
+
+  .card-header :global(svg.pr-status-conflict) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.pr-status-draft) {
+    stroke: var(--text-faint);
   }
 
   .repo {

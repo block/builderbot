@@ -1774,76 +1774,140 @@ pub async fn update_pull_request(
 // Monorepo Detection
 // =============================================================================
 
-/// Check if a repository is likely a monorepo by counting modules in MODULES.yaml.
-/// Returns the module count if MODULES.yaml exists, or 0 if it doesn't.
-/// A threshold of 20+ modules is considered a monorepo.
-pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
-    log::info!("Checking monorepo modules for repo: {}", github_repo);
-    let endpoint = format!("repos/{github_repo}/contents/MODULES.yaml");
-    log::info!("Fetching MODULES.yaml from endpoint: {}", endpoint);
-
+/// Check if a file exists in a repository via GitHub API.
+/// Returns true if the file exists, false if it returns 404.
+fn check_file_exists(github_repo: &str, path: &str) -> Result<bool, GitError> {
+    let endpoint = format!("repos/{github_repo}/contents/{path}");
     let output = run_gh_global(&["api", &endpoint]);
 
     match output {
+        Ok(_) => Ok(true),
+        Err(e) => {
+            let error_msg = e.to_string();
+            if error_msg.contains("Not Found") || error_msg.contains("HTTP 404") {
+                Ok(false)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Check if a repository is likely a monorepo by checking for monorepo indicators.
+/// Returns a score representing the likelihood (0 = not a monorepo, higher = more likely).
+/// A score of 20+ is considered a monorepo.
+///
+/// Detection strategies:
+/// 1. Count modules in MODULES.yaml (Block's Owner Owl system)
+/// 2. Check for monorepo tool configuration files (nx.json, pnpm-workspace.yaml, etc.)
+/// 3. Check for "monorepo" in repository description
+pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
+    log::info!("Checking monorepo indicators for repo: {}", github_repo);
+    let mut score = 0u32;
+
+    // Strategy 1: Check MODULES.yaml and count module separators
+    let modules_endpoint = format!("repos/{github_repo}/contents/MODULES.yaml");
+    log::info!("Checking for MODULES.yaml at: {}", modules_endpoint);
+
+    let modules_result = run_gh_global(&["api", &modules_endpoint]);
+    match modules_result {
         Ok(json) => {
-            log::info!("Successfully fetched MODULES.yaml for {}", github_repo);
+            log::info!("Found MODULES.yaml for {}", github_repo);
             #[derive(Debug, Deserialize)]
             struct FileContent {
                 content: String,
             }
 
-            let file: FileContent = serde_json::from_str(&json).map_err(|e| {
-                log::info!("Failed to parse JSON response for {}: {}", github_repo, e);
-                GitError::CommandFailed(e.to_string())
-            })?;
-
-            // Decode base64 content
-            use base64::Engine;
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(&file.content.replace('\n', ""))
-                .map_err(|e| {
-                    log::info!("Failed to decode base64 content for {}: {}", github_repo, e);
-                    GitError::CommandFailed(format!("Failed to decode base64: {e}"))
-                })?;
-
-            let content = String::from_utf8(decoded).map_err(|_| {
-                log::info!("Invalid UTF-8 in MODULES.yaml for {}", github_repo);
-                GitError::CommandFailed("Invalid UTF-8 in MODULES.yaml".to_string())
-            })?;
-
-            // Count lines that are exactly "---" (module separators in YAML)
-            // Each module definition is separated by a standalone "---" line
-            let module_count = content.lines().filter(|line| line.trim() == "---").count() as u32;
-            log::info!(
-                "Found {} module separators in MODULES.yaml for {}",
-                module_count,
-                github_repo
-            );
-            Ok(module_count)
+            if let Ok(file) = serde_json::from_str::<FileContent>(&json) {
+                use base64::Engine;
+                if let Ok(decoded) = base64::engine::general_purpose::STANDARD
+                    .decode(&file.content.replace('\n', ""))
+                {
+                    if let Ok(content) = String::from_utf8(decoded) {
+                        let module_count =
+                            content.lines().filter(|line| line.trim() == "---").count() as u32;
+                        log::info!(
+                            "Found {} module separators in MODULES.yaml for {}",
+                            module_count,
+                            github_repo
+                        );
+                        score += module_count;
+                    }
+                }
+            }
         }
         Err(e) => {
-            // Check if it's a "Not Found" error (file doesn't exist)
             let error_msg = e.to_string();
-            log::info!(
-                "Error fetching MODULES.yaml for {}: {}",
-                github_repo,
-                error_msg
-            );
-
             if error_msg.contains("Not Found") || error_msg.contains("HTTP 404") {
-                // File doesn't exist - not a monorepo
-                log::info!(
-                    "MODULES.yaml not found for {} - treating as non-monorepo",
-                    github_repo
-                );
-                Ok(0)
+                log::info!("MODULES.yaml not found for {}", github_repo);
             } else {
-                // Other error - propagate it
-                log::info!("Propagating error for {}: {}", github_repo, error_msg);
-                Err(e)
+                log::info!(
+                    "Error checking MODULES.yaml for {}: {}",
+                    github_repo,
+                    error_msg
+                );
+                return Err(e);
             }
         }
     }
+
+    // Strategy 2: Check for other monorepo indicator files
+    // Each indicator file gives a score of 30 (above the 20 threshold)
+    let indicator_files = [
+        ("nx.json", "Nx monorepo tool"),
+        ("pnpm-workspace.yaml", "PNPM workspace"),
+        ("lerna.json", "Lerna monorepo tool"),
+        ("MODULE.bazel", "Bazel monorepo"),
+    ];
+
+    for (file, description) in &indicator_files {
+        match check_file_exists(github_repo, file) {
+            Ok(true) => {
+                log::info!("Found {} ({}) for {}", file, description, github_repo);
+                score += 30;
+                break; // One indicator file is enough
+            }
+            Ok(false) => {
+                log::info!("No {} found for {}", file, github_repo);
+            }
+            Err(e) => {
+                log::info!("Error checking {} for {}: {}", file, github_repo, e);
+                return Err(e);
+            }
+        }
+    }
+
+    // Strategy 3: Check repository description for "monorepo"
+    let repo_endpoint = format!("repos/{github_repo}");
+    log::info!("Checking repository description at: {}", repo_endpoint);
+
+    match run_gh_global(&["api", &repo_endpoint]) {
+        Ok(json) => {
+            #[derive(Debug, Deserialize)]
+            struct RepoInfo {
+                description: Option<String>,
+            }
+
+            if let Ok(repo_info) = serde_json::from_str::<RepoInfo>(&json) {
+                if let Some(desc) = repo_info.description {
+                    if desc.to_lowercase().contains("monorepo") {
+                        log::info!(
+                            "Repository description contains 'monorepo' for {}",
+                            github_repo
+                        );
+                        score += 30;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            log::info!("Error fetching repo description for {}: {}", github_repo, e);
+            // Don't propagate this error - description check is optional
+        }
+    }
+
+    log::info!("Final monorepo score for {}: {}", github_repo, score);
+    Ok(score)
 }
 
 // =============================================================================

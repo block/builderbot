@@ -1888,7 +1888,7 @@
           }
         }}
         onCancel={handleLineCommentCancel}
-        onDelete={existingComment && !lineCommentReadOnly
+        onDelete={existingComment
           ? () => {
               handleCommentDelete(existingComment.id);
               clearLineSelection();

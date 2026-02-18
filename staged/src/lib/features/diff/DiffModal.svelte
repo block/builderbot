@@ -19,6 +19,7 @@
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
+  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
   import type { Comment, Span } from '../../types';
@@ -86,6 +87,10 @@
   let jumpToComment = $state<{ id: string; token: number } | null>(null);
   let commentJumpToken = 0;
 
+  // Confirmation dialog state
+  let commentToDelete = $state<string | null>(null);
+  let showDeleteAllConfirm = $state(false);
+
   // ==========================================================================
   // Derived
   // ==========================================================================
@@ -135,12 +140,24 @@
     return path.split('/').pop() || path;
   }
 
-  async function handleDeleteComment(commentId: string) {
-    await reviewHandle?.deleteComment(commentId);
+  function handleDeleteComment(commentId: string) {
+    commentToDelete = commentId;
   }
 
-  async function handleDeleteAllComments() {
+  async function confirmDeleteComment() {
+    if (commentToDelete) {
+      await reviewHandle?.deleteComment(commentToDelete);
+      commentToDelete = null;
+    }
+  }
+
+  function handleDeleteAllComments() {
+    showDeleteAllConfirm = true;
+  }
+
+  async function confirmDeleteAllComments() {
     await reviewHandle?.deleteAllComments();
+    showDeleteAllConfirm = false;
   }
 
   async function handleCopyComments() {
@@ -287,6 +304,30 @@
     </div>
   </div>
 </div>
+
+<!-- Delete comment confirmation -->
+{#if commentToDelete}
+  <ConfirmDialog
+    title="Delete Comment"
+    message="Are you sure you want to delete this comment?"
+    confirmLabel="Delete"
+    danger={true}
+    onConfirm={confirmDeleteComment}
+    onCancel={() => (commentToDelete = null)}
+  />
+{/if}
+
+<!-- Delete all comments confirmation -->
+{#if showDeleteAllConfirm}
+  <ConfirmDialog
+    title="Delete All Comments"
+    message="Are you sure you want to delete all comments? This action cannot be undone."
+    confirmLabel="Delete All"
+    danger={true}
+    onConfirm={confirmDeleteAllComments}
+    onCancel={() => (showDeleteAllConfirm = false)}
+  />
+{/if}
 
 <style>
   /* ========================================================================

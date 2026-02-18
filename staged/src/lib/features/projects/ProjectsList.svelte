@@ -132,9 +132,7 @@
     selectProject(projectId);
   }
 
-  function getProjectPrStatus(
-    projectId: string
-  ): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
+  function getProjectPrStatus(projectId: string): 'merged' | 'open' | 'closed' | 'conflict' | null {
     const branches = projectBranches.get(projectId) || [];
     return aggregateProjectPrStatus(branches);
   }

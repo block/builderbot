@@ -4,7 +4,7 @@
   A project can be created with or without a repository.
 -->
 <script lang="ts">
-  import { X, GitBranch, Plus } from 'lucide-svelte';
+  import { X, GitBranch, Plus, Command } from 'lucide-svelte';
   import type { Project, RecentRepo } from '../../types';
   import * as commands from '../../commands';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
@@ -75,6 +75,20 @@
     } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       handleCreate();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      handleCreate();
+    } else if (recentRepos.length > 0 && !selectedRepo) {
+      // Handle keyboard shortcuts for recent repos (1-9)
+      const num = parseInt(e.key);
+      if (num >= 1 && num <= recentRepos.length) {
+        e.preventDefault();
+        const recent = recentRepos[num - 1];
+        selectedRepo = recent.githubRepo;
+        if (recent.subpath) {
+          subpath = recent.subpath;
+        }
+      }
     }
   }
 
@@ -163,7 +177,7 @@
           </button>
           {#if recentRepos.length > 0}
             <div class="recent-repos-section">
-              {#each recentRepos as recent}
+              {#each recentRepos as recent, i}
                 <button
                   class="recent-repo-item"
                   onclick={() => {
@@ -180,6 +194,10 @@
                           >/{recent.subpath}</span
                         >{/if}
                     </span>
+                  </div>
+                  <div class="keyboard-shortcut">
+                    <Command size={12} class="command-icon" />
+                    <span class="shortcut-number">{i + 1}</span>
                   </div>
                 </button>
               {/each}
@@ -438,6 +456,28 @@
   .recent-repo-subpath {
     font-size: var(--size-sm);
     color: var(--text-muted);
+  }
+
+  .keyboard-shortcut {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 6px;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    flex-shrink: 0;
+  }
+
+  :global(.command-icon) {
+    color: var(--text-muted);
+  }
+
+  .shortcut-number {
+    font-size: var(--size-xs);
+    font-weight: 500;
   }
 
   .error-message {

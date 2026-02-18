@@ -81,6 +81,10 @@ pub fn create_pr(
         .strip_prefix("origin/")
         .unwrap_or(&branch.base_branch);
 
+    // Use origin/{base_branch} in git commands to ensure we're comparing against the remote
+    // branch, not the local tracking branch. Local branches can be stale if not kept in sync,
+    // which causes incorrect PR diffs that include already-merged commits. Remote-tracking
+    // refs are always up-to-date after fetch.
     let prompt = format!(
         r#"<action>
 Create a pull request for the current branch.

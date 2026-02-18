@@ -57,35 +57,15 @@
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
 
-  onMount(() => {
+  onMount(async () => {
     checkStoreAndLoad();
 
     const onNewProject = () => handleNewProject();
     window.addEventListener('staged:new-project', onNewProject);
 
-    let unlistenDetection: (() => void) | null = null;
-    listenToRepoActionsDetection((event) => {
-      const matchingProjectIds = projects
-        .filter((p) => p.githubRepo === event.githubRepo && p.subpath === event.subpath)
-        .map((p) => p.id);
-      if (matchingProjectIds.length === 0) return;
-
-      const next = new Set(detectingProjectIds);
-      for (const projectId of matchingProjectIds) {
-        if (event.detecting) {
-          next.add(projectId);
-        } else {
-          next.delete(projectId);
-        }
-      }
-      detectingProjectIds = next;
-    }).then((unlisten) => {
-      unlistenDetection = unlisten;
-    });
-
     // Listen for session status changes globally to mark projects as unread
-    let unlistenSessionStatus: UnlistenFn | null = null;
-    listen<{
+    // Use await to ensure listener is registered before sessions can complete
+    const unlistenSessionStatus = await listen<{
       sessionId: string;
       status: string;
     }>('session-status-changed', (event) => {
@@ -100,14 +80,29 @@
         // Handle session completion - mark project as unread if user is not viewing it
         projectStateStore.handleSessionComplete(sessionId, navigation.selectedProjectId);
       }
-    }).then((unlisten) => {
-      unlistenSessionStatus = unlisten;
+    });
+
+    const unlistenDetection = await listenToRepoActionsDetection((event) => {
+      const matchingProjectIds = projects
+        .filter((p) => p.githubRepo === event.githubRepo && p.subpath === event.subpath)
+        .map((p) => p.id);
+      if (matchingProjectIds.length === 0) return;
+
+      const next = new Set(detectingProjectIds);
+      for (const projectId of matchingProjectIds) {
+        if (event.detecting) {
+          next.add(projectId);
+        } else {
+          next.delete(projectId);
+        }
+      }
+      detectingProjectIds = next;
     });
 
     return () => {
       window.removeEventListener('staged:new-project', onNewProject);
-      unlistenDetection?.();
-      unlistenSessionStatus?.();
+      unlistenDetection();
+      unlistenSessionStatus();
     };
   });
 

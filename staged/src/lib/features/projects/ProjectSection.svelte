@@ -4,12 +4,13 @@
   Shows the project name, repo controls, and all branch cards for this project.
 -->
 <script lang="ts">
-  import { Folder, Trash2, Plus, Loader2 } from 'lucide-svelte';
+  import { Folder, Trash2, Plus } from 'lucide-svelte';
   import type { Project, Branch, WorkspaceStatus } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import BranchCard from '../branches/BranchCard.svelte';
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import DropdownMenu, { type MenuItem } from '../../shared/DropdownMenu.svelte';
+  import Spinner from '../../shared/Spinner.svelte';
 
   interface Props {
     project: Project;
@@ -80,13 +81,13 @@
       <span class="project-name">{projectDisplayName(project)}</span>
       {#if deleting}
         <div class="deleting-status" role="status" aria-live="polite">
-          <Loader2 size={12} class="spinner" />
+          <Spinner size={12} />
           <span>Deleting…</span>
         </div>
       {/if}
       {#if detecting}
         <div class="detecting-status">
-          <Loader2 size={12} class="spinner" />
+          <Spinner size={12} />
           <span>Detecting actions</span>
         </div>
       {/if}

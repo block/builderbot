@@ -15,16 +15,20 @@ export const navigation = $state({
 /** Navigate to a specific project's detail view. */
 export function selectProject(projectId: string): void {
   navigation.selectedProjectId = projectId;
-  // Mark the project as read when navigating to it
-  projectStateStore.markAsRead(projectId);
+  // Mark the project as read when navigating to it, but only if it's not already read
+  if (projectStateStore.isUnread(projectId)) {
+    projectStateStore.markAsRead(projectId);
+  }
 }
 
 /** Navigate to a project and scroll to a specific branch card. */
 export function selectProjectAndBranch(projectId: string, branchId: string): void {
   const alreadyOnProject = navigation.selectedProjectId === projectId;
   navigation.selectedProjectId = projectId;
-  // Mark the project as read when navigating to it
-  projectStateStore.markAsRead(projectId);
+  // Mark the project as read when navigating to it, but only if it's not already read
+  if (projectStateStore.isUnread(projectId)) {
+    projectStateStore.markAsRead(projectId);
+  }
   if (alreadyOnProject) {
     // Already mounted, scroll immediately.
     window.dispatchEvent(new CustomEvent('staged:scroll-to-branch', { detail: { branchId } }));

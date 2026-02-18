@@ -307,11 +307,6 @@
   }
 
   function handleNewSessionStarted(result: { sessionId: string; artifactId: string }) {
-    console.info('[RemoteBranchCard] new session started:', {
-      sessionId: result.sessionId,
-      projectId: branch.projectId,
-      branchId: branch.id,
-    });
     // Track the running session in the project state store
     projectStateStore.addRunningSession(branch.projectId, result.sessionId);
     showNewSession = false;

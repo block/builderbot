@@ -97,7 +97,21 @@
       const { sessionId, status } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         // Handle session completion - mark project as unread if user is not viewing it
-        projectStateStore.handleSessionComplete(sessionId, navigation.selectedProjectId);
+        // Get the project ID from the session mapping (captured when session started)
+        const sessionProjectId = projectStateStore.getProjectForSession(sessionId);
+        const currentProjectId = navigation.selectedProjectId;
+
+        // Mark project as unread if:
+        // 1. We know which project the session belonged to AND
+        // 2. The user is currently viewing a different project
+        if (sessionProjectId && currentProjectId !== sessionProjectId) {
+          projectStateStore.markAsUnread(sessionProjectId);
+        }
+
+        // Always remove the running session from its project
+        if (sessionProjectId) {
+          projectStateStore.removeRunningSession(sessionProjectId, sessionId);
+        }
       }
     });
 

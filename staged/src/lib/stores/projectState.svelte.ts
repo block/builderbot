@@ -17,7 +17,7 @@ interface ProjectState {
 }
 
 class ProjectStateStore {
-  // Use $state.raw for Maps to avoid deep reactivity overhead while maintaining reactivity
+  // Use $state for Maps to track reactivity via version increments
   private states = $state<Map<string, ProjectState>>(new Map());
   // Map from session ID to project ID to track which project a session belongs to
   private sessionToProject = $state<Map<string, string>>(new Map());
@@ -26,10 +26,19 @@ class ProjectStateStore {
   private version = $state(0);
 
   /**
+   * Get the state for a project without creating it
+   * Used by query methods to avoid side effects
+   */
+  private getState(projectId: string): ProjectState | undefined {
+    return this.states.get(projectId);
+  }
+
+  /**
    * Get the state for a project, creating it if it doesn't exist
+   * Only used by mutation methods that intentionally create state
    */
   private getOrCreateState(projectId: string): ProjectState {
-    let state = this.states.get(projectId);
+    let state = this.getState(projectId);
     if (!state) {
       state = {
         unread: false,
@@ -43,22 +52,26 @@ class ProjectStateStore {
 
   /**
    * Check if a project is unread
+   * Returns false for projects that don't exist yet (no side effects)
    * This getter accesses reactive state, so it will trigger re-renders when the state changes
    */
   isUnread(projectId: string): boolean {
-    // Access version to ensure reactivity
+    // Intentionally access version to establish a reactive dependency that will cause re-renders
+    // when version changes (which happens whenever the project state is modified)
     this.version;
-    return this.states.get(projectId)?.unread ?? false;
+    return this.getState(projectId)?.unread ?? false;
   }
 
   /**
    * Check if a project has any running sessions
+   * Returns false for projects that don't exist yet (no side effects)
    * This getter accesses reactive state, so it will trigger re-renders when the state changes
    */
   hasRunningSessions(projectId: string): boolean {
-    // Access version to ensure reactivity
+    // Intentionally access version to establish a reactive dependency that will cause re-renders
+    // when version changes (which happens whenever the project state is modified)
     this.version;
-    const state = this.states.get(projectId);
+    const state = this.getState(projectId);
     return state ? state.runningSessions.size > 0 : false;
   }
 
@@ -86,10 +99,14 @@ class ProjectStateStore {
    */
   addRunningSession(projectId: string, sessionId: string): void {
     const state = this.getOrCreateState(projectId);
+    const wasAlreadyAdded = state.runningSessions.has(sessionId);
     state.runningSessions.add(sessionId);
     // Track the session-to-project mapping
     this.sessionToProject.set(sessionId, projectId);
-    this.version++; // Trigger reactivity
+    // Only increment version if this is a new session to avoid unnecessary re-renders
+    if (!wasAlreadyAdded) {
+      this.version++;
+    }
   }
 
   /**
@@ -120,6 +137,8 @@ class ProjectStateStore {
   handleSessionComplete(sessionId: string, currentProjectId: string | null): void {
     const projectId = this.sessionToProject.get(sessionId);
     if (!projectId) {
+      // Sessions not in sessionToProject are expected - these are sessions that were started
+      // before the store was initialized or in other edge cases. We simply skip handling them.
       return;
     }
 

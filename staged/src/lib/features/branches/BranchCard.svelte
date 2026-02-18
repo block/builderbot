@@ -779,11 +779,6 @@
   }
 
   function handleNewSessionStarted(result: { sessionId: string; artifactId: string }) {
-    console.info('[BranchCard] new session started:', {
-      sessionId: result.sessionId,
-      projectId: branch.projectId,
-      branchId: branch.id,
-    });
     // Track the running session in the project state store
     projectStateStore.addRunningSession(branch.projectId, result.sessionId);
     showNewSession = false;
@@ -930,11 +925,6 @@
       const sessionId = await commands.createPr(branch.id, provider);
       prSessionId = sessionId;
       prStateOverride = 'creating';
-      console.info('[BranchCard] PR creation session started:', {
-        sessionId,
-        projectId: branch.projectId,
-        branchId: branch.id,
-      });
       // Store the creating state globally
       prStateStore.setPrCreating(branch.id, sessionId);
       // Track the running session in the project state store
@@ -1015,11 +1005,6 @@
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.pushBranch(branch.id, provider, force);
       pushSessionId = sessionId;
-      console.info('[BranchCard] push session started:', {
-        sessionId,
-        projectId: branch.projectId,
-        branchId: branch.id,
-      });
       // Track the running session in the project state store
       projectStateStore.addRunningSession(branch.projectId, sessionId);
       // The session-status-changed listener will handle completion

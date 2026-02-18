@@ -189,6 +189,8 @@
           </div>
         </button>
         {#each projects as project, index (project.id)}
+          {@const hasRunning = projectStateStore.hasRunningSessions(project.id)}
+          {@const isUnread = projectStateStore.isUnread(project.id)}
           <button
             class="project-card"
             class:deleting={isProjectDeleting(project.id)}
@@ -202,11 +204,11 @@
                 <span class="number">{index + 1}</span>
               </div>
             {/if}
-            {#if projectStateStore.hasRunningSessions(project.id)}
+            {#if hasRunning}
               <div class="status-indicator spinner">
                 <Spinner size={14} />
               </div>
-            {:else if projectStateStore.isUnread(project.id)}
+            {:else if isUnread}
               <div class="status-indicator unread-dot"></div>
             {/if}
             <div class="card-header">

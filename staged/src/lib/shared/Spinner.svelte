@@ -23,7 +23,7 @@
 <div class="spinner-container {className}" style="width: {size}px; height: {size}px;">
   <div class="spinner-positioner">
     <div class="spinner-rotator">
-      <IconComponent {size} />
+      <IconComponent width={size} height={size} />
     </div>
   </div>
 </div>

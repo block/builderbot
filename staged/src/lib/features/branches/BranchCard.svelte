@@ -57,7 +57,11 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
-  import { runBranchAction, type ActionStatusEvent } from '../actions/actions';
+  import {
+    runBranchAction,
+    getRunningBranchActions,
+    type ActionStatusEvent,
+  } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
   import {
     extractPrNumber,
@@ -270,8 +274,20 @@
     listen<ActionStatusEvent>('action_status', (event) => {
       const payload = event.payload;
 
+      console.info('[BranchCard] Received action_status event:', {
+        branchId: payload.branchId,
+        thisBranchId: branchId,
+        executionId: payload.executionId,
+        actionId: payload.actionId,
+        actionName: payload.actionName,
+        status: payload.status,
+        exitCode: payload.exitCode,
+        currentRunningActions: runningActions.length,
+      });
+
       // Only process events for this branch
       if (payload.branchId !== branchId) {
+        console.info('[BranchCard] Ignoring action_status event for different branch');
         return;
       }
 
@@ -279,6 +295,11 @@
 
       if (payload.status === 'running') {
         if (existingIndex === -1) {
+          console.info('[BranchCard] Adding new running action to state:', {
+            executionId: payload.executionId,
+            actionId: payload.actionId,
+            actionName: payload.actionName,
+          });
           runningActions.push({
             executionId: payload.executionId,
             actionId: payload.actionId,
@@ -286,10 +307,18 @@
             status: 'running',
             startedAt: payload.startedAt ?? Date.now(),
           });
+        } else {
+          console.info('[BranchCard] Running action already exists in state');
         }
       } else {
         // Action completed/failed/stopped - update status
         if (existingIndex !== -1) {
+          console.info('[BranchCard] Updating action status:', {
+            executionId: payload.executionId,
+            oldStatus: runningActions[existingIndex].status,
+            newStatus: payload.status,
+            exitCode: payload.exitCode,
+          });
           runningActions[existingIndex].status = payload.status as any;
           runningActions[existingIndex].exitCode = payload.exitCode;
           runningActions[existingIndex].completedAt = payload.completedAt;
@@ -299,6 +328,13 @@
             const action = runningActions[existingIndex];
             const isPrimaryAction = primaryRunAction && action.actionId === primaryRunAction.id;
 
+            console.info('[BranchCard] Scheduling removal of completed action:', {
+              executionId: payload.executionId,
+              isPrimaryAction,
+              displayTimeout: isPrimaryAction ? 1000 : 2000,
+              fadeTimeout: isPrimaryAction ? 0 : 300,
+            });
+
             setTimeout(
               () => {
                 const foundAction = runningActions.find(
@@ -306,11 +342,19 @@
                 );
                 if (foundAction && !isPrimaryAction) {
                   // Secondary actions fade out
+                  console.info(
+                    '[BranchCard] Starting fade for secondary action:',
+                    payload.executionId
+                  );
                   foundAction.fading = true;
                 }
                 // Remove after animation completes (or immediately for primary)
                 setTimeout(
                   () => {
+                    console.info('[BranchCard] Removing action from state:', {
+                      executionId: payload.executionId,
+                      remainingActions: runningActions.length - 1,
+                    });
                     runningActions = runningActions.filter(
                       (a) => a.executionId !== payload.executionId
                     );
@@ -321,6 +365,12 @@
               isPrimaryAction ? 1000 : 2000
             ); // Shorter display time for primary action
           }
+        } else {
+          console.info('[BranchCard] Received status update for unknown action:', {
+            executionId: payload.executionId,
+            status: payload.status,
+            exitCode: payload.exitCode,
+          });
         }
       }
     }).then((unlisten) => {
@@ -485,6 +535,7 @@
 
   onMount(() => {
     loadActions();
+    loadRunningActions();
     getAvailableOpeners().then((apps) => (openerApps = apps));
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
@@ -557,6 +608,34 @@
     }
   }
 
+  async function loadRunningActions() {
+    try {
+      // Restore running actions that were started before component mounted
+      const running = await getRunningBranchActions(branch.id);
+      console.info('[BranchCard] Restored running actions from registry:', {
+        branchId: branch.id,
+        count: running.length,
+        actions: running,
+      });
+
+      // Add each running action to state
+      for (const info of running) {
+        const existingIndex = runningActions.findIndex((a) => a.executionId === info.executionId);
+        if (existingIndex === -1) {
+          runningActions.push({
+            executionId: info.executionId,
+            actionId: info.actionId,
+            actionName: info.actionName,
+            status: 'running',
+            startedAt: info.startedAt,
+          });
+        }
+      }
+    } catch (e) {
+      console.error('[BranchCard] Failed to load running actions:', e);
+    }
+  }
+
   // Group actions by type
   let groupedActions = $derived.by(() => {
     return groupActionsByType(actions);
@@ -622,7 +701,23 @@
 
   // Track the primary action's execution status
   let primaryActionExecution = $derived.by(() => {
-    return getPrimaryActionExecution(runningActions, primaryRunAction?.id ?? null);
+    const execution = getPrimaryActionExecution(runningActions, primaryRunAction?.id ?? null);
+    console.info('[BranchCard] Primary action execution state updated:', {
+      hasPrimaryAction: !!primaryRunAction,
+      primaryActionId: primaryRunAction?.id,
+      primaryActionName: primaryRunAction?.name,
+      hasExecution: !!execution,
+      executionId: execution?.executionId,
+      executionStatus: execution?.status,
+      totalRunningActions: runningActions.length,
+      runningActionsDetails: runningActions.map((a) => ({
+        executionId: a.executionId,
+        actionId: a.actionId,
+        actionName: a.actionName,
+        status: a.status,
+      })),
+    });
+    return execution;
   });
 
   // Filter running actions to exclude the primary action
@@ -633,11 +728,22 @@
   async function handleRunAction(action: ProjectAction) {
     showMoreMenu = false;
 
+    console.info('[BranchCard] handleRunAction called:', {
+      actionId: action.id,
+      actionName: action.name,
+      branchId: branch.id,
+      currentRunningActions: runningActions.length,
+    });
+
     // Check if this action is already running
     const existingExecution = runningActions.find((a) => a.actionId === action.id);
 
     if (existingExecution) {
       // Action already running, open modal to view output
+      console.info('[BranchCard] Action already running, opening output modal:', {
+        executionId: existingExecution.executionId,
+        actionName: action.name,
+      });
       actionOutputModal = {
         executionId: existingExecution.executionId,
         actionName: action.name,
@@ -647,11 +753,25 @@
 
     // Start the action silently (don't open modal)
     try {
+      console.info('[BranchCard] Starting new action execution:', {
+        branchId: branch.id,
+        actionId: action.id,
+        actionName: action.name,
+      });
       const executionId = await runBranchAction(branch.id, action.id);
+      console.info('[BranchCard] Action execution started successfully:', {
+        executionId,
+        actionId: action.id,
+        actionName: action.name,
+      });
       // The running action will be added via the event listener
       // Don't auto-show output modal - user can click to view
     } catch (e) {
-      console.error('Failed to run action:', e);
+      console.error('[BranchCard] Failed to run action:', {
+        actionId: action.id,
+        actionName: action.name,
+        error: e,
+      });
       notifyError(`Failed to run action "${action.name}"`, e);
     }
   }

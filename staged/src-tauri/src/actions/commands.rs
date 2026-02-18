@@ -11,6 +11,7 @@ use crate::store::Store;
 
 use super::ai_provider::AcpAiProvider;
 use super::events::TauriExecutionListener;
+use super::registry::{ActionRegistry, RunningActionInfo};
 
 /// Helper to get store from Mutex<Option<Arc<Store>>>
 fn get_store(store: &State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
@@ -192,7 +193,14 @@ pub async fn run_branch_action(
     app: AppHandle,
     store: State<'_, Mutex<Option<Arc<Store>>>>,
     executor: State<'_, Arc<ActionExecutor>>,
+    registry: State<'_, Arc<ActionRegistry>>,
 ) -> Result<String, String> {
+    log::info!(
+        "[run_branch_action] Starting action execution request - branch_id: {}, action_id: {}",
+        branch_id,
+        action_id
+    );
+
     let store = get_store(&store)?;
 
     // Get the action
@@ -200,6 +208,12 @@ pub async fn run_branch_action(
         .get_repo_action(&action_id)
         .map_err(|e| format!("Failed to get action: {e}"))?
         .ok_or_else(|| "Action not found".to_string())?;
+
+    log::info!(
+        "[run_branch_action] Found action - name: {}, command: {}",
+        action.name,
+        action.command
+    );
 
     // Get the branch and its project (for repo context + subpath)
     let branch = store
@@ -233,12 +247,18 @@ pub async fn run_branch_action(
         workdir.path
     };
 
+    log::info!(
+        "[run_branch_action] Resolved working directory: {}",
+        working_dir
+    );
+
     // Create event listener
     let listener = Arc::new(TauriExecutionListener::new(
         app,
         branch_id.clone(),
         action_id.clone(),
         action.name.clone(),
+        registry.inner().clone(),
     ));
 
     // Create metadata
@@ -249,10 +269,35 @@ pub async fn run_branch_action(
     };
 
     // Execute the action
-    executor
+    log::info!(
+        "[run_branch_action] Calling executor.execute - action: {}, working_dir: {}",
+        action.name,
+        working_dir
+    );
+
+    let result = executor
         .execute(action.command, working_dir, metadata, listener)
         .await
-        .map_err(|e| format!("Failed to execute action: {e}"))
+        .map_err(|e| format!("Failed to execute action: {e}"));
+
+    match &result {
+        Ok(execution_id) => {
+            log::info!(
+                "[run_branch_action] Action execution started successfully - execution_id: {}, action: {}",
+                execution_id,
+                action.name
+            );
+        }
+        Err(e) => {
+            log::error!(
+                "[run_branch_action] Action execution failed - action: {}, error: {}",
+                action.name,
+                e
+            );
+        }
+    }
+
+    result
 }
 
 /// Stop a running action
@@ -269,11 +314,29 @@ pub fn stop_branch_action(
 /// Get all currently running actions for a branch
 #[tauri::command]
 pub fn get_running_branch_actions(
-    _branch_id: String,
+    branch_id: String,
     executor: State<'_, Arc<ActionExecutor>>,
-) -> Result<Vec<String>, String> {
-    // Return list of running execution IDs
-    Ok(executor.get_running_ids())
+    registry: State<'_, Arc<ActionRegistry>>,
+) -> Result<Vec<RunningActionInfo>, String> {
+    // Get running actions from registry for this branch
+    let running_actions = registry.get_running_for_branch(&branch_id);
+
+    // Filter to only actions that are still actually running in the executor
+    let executor_ids: std::collections::HashSet<String> =
+        executor.get_running_ids().into_iter().collect();
+
+    let active_actions: Vec<RunningActionInfo> = running_actions
+        .into_iter()
+        .filter(|info| executor_ids.contains(&info.execution_id))
+        .collect();
+
+    log::info!(
+        "[get_running_branch_actions] Found {} running actions for branch {}",
+        active_actions.len(),
+        branch_id
+    );
+
+    Ok(active_actions)
 }
 
 /// Get buffered output for an action execution
@@ -301,6 +364,7 @@ pub async fn run_prerun_actions(
     app: AppHandle,
     store: State<'_, Mutex<Option<Arc<Store>>>>,
     executor: State<'_, Arc<ActionExecutor>>,
+    registry: State<'_, Arc<ActionRegistry>>,
 ) -> Result<Vec<String>, String> {
     let store = get_store(&store)?;
 
@@ -415,6 +479,7 @@ pub async fn run_prerun_actions(
             branch_id.clone(),
             action.id.clone(),
             action.name.clone(),
+            registry.inner().clone(),
         ));
 
         let metadata = ActionMetadata {

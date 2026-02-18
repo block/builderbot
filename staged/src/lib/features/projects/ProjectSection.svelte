@@ -9,7 +9,6 @@
   import { projectDisplayName } from '../../shared/utils';
   import BranchCard from '../branches/BranchCard.svelte';
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
-  import DropdownMenu, { type MenuItem } from '../../shared/DropdownMenu.svelte';
   import Spinner from '../../shared/Spinner.svelte';
 
   interface Props {
@@ -63,21 +62,12 @@
     if (!branch.projectRepoId) return project.githubRepo;
     return repoLabelsById.get(branch.projectRepoId) ?? project.githubRepo;
   }
-
-  const projectMenuItems: MenuItem[] = [
-    { label: 'Remove Project', icon: Trash2, danger: true, action: () => onDeleteProject?.() },
-  ];
 </script>
 
 <div class="project-section">
   <div class="project-header" class:deleting>
     <div class="project-info">
-      <div class="project-icon-slot">
-        <span class="folder-icon"><Folder size={14} /></span>
-        {#if !deleting}
-          <span class="menu-icon"><DropdownMenu items={projectMenuItems} align="left" /></span>
-        {/if}
-      </div>
+      <span class="folder-icon"><Folder size={14} /></span>
       <span class="project-name">{projectDisplayName(project)}</span>
       {#if deleting}
         <div class="deleting-status" role="status" aria-live="polite">
@@ -92,6 +82,12 @@
         </div>
       {/if}
     </div>
+    {#if !deleting}
+      <button class="remove-button" onclick={() => onDeleteProject?.()} title="Remove project">
+        <Trash2 size={14} />
+        Remove Project
+      </button>
+    {/if}
   </div>
   <div class="branches-list" class:deleting>
     <button
@@ -141,6 +137,7 @@
   .project-header {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     padding: 0 4px;
   }
 
@@ -150,40 +147,11 @@
     gap: 8px;
   }
 
-  .project-icon-slot {
-    position: relative;
-    width: 28px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-  }
-
   .folder-icon {
     display: flex;
     align-items: center;
     justify-content: center;
     color: var(--text-faint);
-    transition: opacity 0.15s ease;
-  }
-
-  .menu-icon {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    opacity: 0;
-    transition: opacity 0.15s ease;
-  }
-
-  .project-header:not(.deleting):hover .folder-icon {
-    opacity: 0;
-  }
-
-  .project-header:not(.deleting):hover .menu-icon {
-    opacity: 1;
   }
 
   .project-name {
@@ -191,6 +159,28 @@
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;
+  }
+
+  .remove-button {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .remove-button:hover {
+    background-color: var(--bg-danger-hover);
+    border-color: var(--border-danger);
+    color: var(--text-danger);
   }
 
   .detecting-status {

@@ -230,6 +230,14 @@
     }
   }
 
+  let sortedContexts = $derived.by(() => {
+    return [...contexts].sort((a, b) => {
+      const aDisplay = a.subpath ? `${a.githubRepo}/${a.subpath}` : a.githubRepo;
+      const bDisplay = b.subpath ? `${b.githubRepo}/${b.subpath}` : b.githubRepo;
+      return aDisplay.localeCompare(bDisplay);
+    });
+  });
+
   let groupedActions = $derived.by(() => {
     const groups: Record<string, ProjectAction[]> = {
       prerun: [],
@@ -284,20 +292,22 @@
 
     <div class="modal-body">
       <aside class="sidebar">
-        <div class="sidebar-title">Repo + Subpath</div>
+        <div class="sidebar-title">Repos</div>
         {#if loadingContexts}
           <div class="loading-side"><Spinner size={14} /> Loading...</div>
         {:else if contexts.length === 0}
           <div class="empty-side">No repo contexts yet</div>
         {:else}
           <div class="context-list">
-            {#each contexts as context (context.id)}
+            {#each sortedContexts as context (context.id)}
               <button
                 class="context-item"
                 class:selected={context.id === selectedContextId}
                 onclick={() => (selectedContextId = context.id)}
               >
-                {contextLabel(context)}
+                <span class="context-repo">{context.githubRepo}</span>{#if context.subpath}<span
+                    class="context-subpath">/{context.subpath}</span
+                  >{/if}
               </button>
             {/each}
           </div>
@@ -510,6 +520,14 @@
   .context-item.selected {
     background: var(--bg-primary);
     border-color: var(--border-muted);
+  }
+
+  .context-repo {
+    color: var(--text-primary);
+  }
+
+  .context-subpath {
+    color: var(--text-muted);
   }
 
   .loading-side,

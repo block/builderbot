@@ -126,10 +126,10 @@
       {#if meta || secondaryMeta}
         <div class="timeline-meta">
           {#if meta}
-            <span class="meta-item meta-sha">{meta}</span>
+            <span class="meta-item">{meta}</span>
           {/if}
           {#if secondaryMeta}
-            <span class="meta-item" class:failed-meta={isFailed}>{secondaryMeta}</span>
+            <span class="meta-item meta-sha" class:failed-meta={isFailed}>{secondaryMeta}</span>
           {/if}
         </div>
       {/if}
@@ -301,7 +301,7 @@
 
   .timeline-meta {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 8px;
     margin-top: 3px;
   }

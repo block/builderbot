@@ -193,6 +193,7 @@
     width: number;
     visible: boolean;
   } | null = $state(null);
+  let lineCommentPositionPreference: 'above' | 'below' = 'below';
   let editingCommentId: string | null = $state(null);
   let activeLineComment = $state<Comment | null>(null);
   let lineCommentReadOnly = $state(false);
@@ -420,6 +421,7 @@
       lineSelection = null;
       commentingOnLines = null;
       lineCommentEditorStyle = null;
+      lineCommentPositionPreference = 'below';
       editingCommentId = null;
       activeLineComment = null;
       lineCommentReadOnly = false;
@@ -636,6 +638,18 @@
     );
   }
 
+  function resolveDisplayRangeFromSpan(span: Span): { start: number; end: number } | null {
+    if (afterLines.length === 0) return null;
+
+    const maxLineIndex = afterLines.length - 1;
+    const clampLine = (line: number) => Math.max(0, Math.min(maxLineIndex, line));
+
+    const start = clampLine(span.start);
+    const end = clampLine(Math.max(span.start, span.end - 1));
+
+    return { start, end };
+  }
+
   // ==========================================================================
   // Scroll handlers (custom scroll via wheel events)
   // ==========================================================================
@@ -823,13 +837,15 @@
   function focusCommentInViewer(comment: Comment) {
     if (!afterPane) return;
 
-    scrollController.scrollToRow(comment.span.start, 'after');
+    const displayRange = resolveDisplayRangeFromSpan(comment.span);
+    if (!displayRange) return;
+    const { start, end } = displayRange;
 
-    const start = comment.span.start;
-    const end = Math.max(comment.span.start, comment.span.end - 1);
+    scrollController.scrollToRow(start, 'after');
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
+    lineCommentPositionPreference = decideLineCommentPosition();
     editingCommentId = comment.id;
     activeLineComment = comment;
     lineCommentReadOnly = comment.author === 'agent';
@@ -848,6 +864,9 @@
     if (!afterPane) return;
 
     const { span, commentId } = info;
+    const displayRange = resolveDisplayRangeFromSpan(span);
+    if (!displayRange) return;
+    const { start, end } = displayRange;
 
     // Jump to exact comment when available.
     const comment = commentId ? findCommentById(comments, commentId) : null;
@@ -858,17 +877,15 @@
 
     // Fallback for raw span highlights without a comment id.
     if (!commentingEnabled) {
-      scrollController.scrollToRow(span.start, 'after');
+      scrollController.scrollToRow(start, 'after');
       return;
     }
 
-    scrollController.scrollToRow(span.start, 'after');
-
-    const start = span.start;
-    const end = Math.max(span.start, span.end - 1);
+    scrollController.scrollToRow(start, 'after');
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
+    lineCommentPositionPreference = decideLineCommentPosition();
     editingCommentId = commentId;
     activeLineComment = comment;
     lineCommentReadOnly = false;
@@ -1055,6 +1072,7 @@
     isSelecting = false;
     commentingOnLines = null;
     lineCommentEditorStyle = null;
+    lineCommentPositionPreference = 'below';
     editingCommentId = null;
     activeLineComment = null;
     lineCommentReadOnly = false;
@@ -1108,10 +1126,33 @@
   function handleStartLineComment() {
     if (!selectedLineRange || !commentingEnabled) return;
     commentingOnLines = { ...selectedLineRange };
+    lineCommentPositionPreference = decideLineCommentPosition();
     editingCommentId = null;
     activeLineComment = null;
     lineCommentReadOnly = false;
     updateLineCommentEditorPosition();
+  }
+
+  function decideLineCommentPosition(): 'above' | 'below' {
+    if (!commentingOnLines || !diffViewerEl) return 'below';
+
+    const pane = commentingOnLines.pane === 'before' ? beforePane : afterPane;
+    if (!pane) return 'below';
+
+    const lines = pane.querySelectorAll('.line');
+    const firstLineEl = lines[commentingOnLines.start] as HTMLElement | null;
+    const lastLineEl = lines[commentingOnLines.end] as HTMLElement | null;
+    if (!firstLineEl || !lastLineEl) return 'below';
+
+    const paneRect = pane.getBoundingClientRect();
+    const firstLineRect = firstLineEl.getBoundingClientRect();
+    const lastLineRect = lastLineEl.getBoundingClientRect();
+    const editorHeight = 120;
+
+    const spaceBelow = paneRect.bottom - lastLineRect.bottom;
+    const spaceAbove = firstLineRect.top - paneRect.top;
+
+    return decideCommentPositionBySpace(spaceBelow, spaceAbove, editorHeight);
   }
 
   function updateLineCommentEditorPosition() {
@@ -1128,17 +1169,29 @@
 
     const viewerRect = diffViewerEl.getBoundingClientRect();
     const paneRect = pane.getBoundingClientRect();
+    const editorHeight = 120;
+    let anchorLineEl: HTMLElement | null;
 
-    const lastLineEl = pane.querySelectorAll('.line')[commentingOnLines.end] as HTMLElement | null;
-    if (!lastLineEl) {
-      lineCommentEditorStyle = null;
-      return;
+    if (lineCommentPositionPreference === 'below') {
+      anchorLineEl = pane.querySelectorAll('.line')[commentingOnLines.end] as HTMLElement | null;
+      if (!anchorLineEl) {
+        lineCommentEditorStyle = null;
+        return;
+      }
+    } else {
+      anchorLineEl = pane.querySelectorAll('.line')[commentingOnLines.start] as HTMLElement | null;
+      if (!anchorLineEl) {
+        lineCommentEditorStyle = null;
+        return;
+      }
     }
 
     lineCommentEditorStyle = buildLineCommentEditorLayout(
       viewerRect,
       paneRect,
-      lastLineEl.getBoundingClientRect()
+      anchorLineEl.getBoundingClientRect(),
+      lineCommentPositionPreference,
+      editorHeight
     );
   }
 

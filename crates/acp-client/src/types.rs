@@ -1,7 +1,7 @@
 //! Agent types, discovery, and metadata.
 
-use std::path::{Path, PathBuf};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 
 // =============================================================================
 // Known agents — the registry of ACP-compatible providers

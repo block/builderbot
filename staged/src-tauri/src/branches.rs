@@ -153,6 +153,47 @@ pub(crate) fn run_workspace_git(
     blox::ws_exec(workspace_name, &borrowed)
 }
 
+async fn run_blox_blocking<T, F>(op: F) -> Result<T, blox::BloxError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, blox::BloxError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(op)
+        .await
+        .map_err(|e| blox::BloxError::CommandFailed(format!("blox task failed: {e}")))?
+}
+
+async fn ws_exec_async(workspace_name: &str, args: &[&str]) -> Result<String, blox::BloxError> {
+    let ws_name = workspace_name.to_string();
+    let owned_args = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+    run_blox_blocking(move || {
+        let borrowed = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
+        blox::ws_exec(&ws_name, &borrowed)
+    })
+    .await
+}
+
+async fn run_workspace_git_async(
+    workspace_name: &str,
+    repo_subpath: Option<&str>,
+    git_args: &[&str],
+) -> Result<String, blox::BloxError> {
+    let ws_name = workspace_name.to_string();
+    let subpath = repo_subpath.map(|s| s.to_string());
+    let owned_args = git_args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+    run_blox_blocking(move || {
+        let borrowed_args = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
+        run_workspace_git(&ws_name, subpath.as_deref(), &borrowed_args)
+    })
+    .await
+}
+
 fn workspace_home_dir(workspace_name: &str) -> Result<String, blox::BloxError> {
     let out = blox::ws_exec(workspace_name, &["sh", "-lc", "cd ~ && pwd"])?;
     let home = out.trim();
@@ -649,7 +690,7 @@ pub async fn start_workspace(
     // Pre-flight: verify the user is authenticated with Blox before starting
     // a workspace. Without this check, `blox ws start` can hang or fail
     // opaquely, leaving the frontend spinning for minutes (issue #99).
-    if let Err(e) = blox::check_auth() {
+    if let Err(e) = run_blox_blocking(blox::check_auth).await {
         store
             .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
             .ok();
@@ -660,24 +701,29 @@ pub async fn start_workspace(
     if let Some(repo_subpath) = repo_subpath.as_deref() {
         let repo_path = resolve_workspace_repo_path(ws_name, repo_subpath)
             .map_err(|e| format!("Failed to resolve workspace repo path '{repo_subpath}': {e}"))?;
-        if let Ok(info) = blox::ws_info(ws_name) {
+        if let Ok(info) = run_blox_blocking({
+            let ws_name = ws_name.to_string();
+            move || blox::ws_info(&ws_name)
+        })
+        .await
+        {
             let ws_status = info
                 .status
                 .as_deref()
                 .map(|s| s.to_ascii_lowercase())
                 .unwrap_or_default();
             if ws_status == "running" {
-                match blox::ws_exec(ws_name, &["test", "-d", &format!("{repo_path}/.git")]) {
+                match ws_exec_async(ws_name, &["test", "-d", &format!("{repo_path}/.git")]).await {
                     Ok(_) => {}
                     Err(blox::BloxError::CommandFailed(_)) => {
                         let repo_url = format!("https://github.com/{repo_slug}.git");
-                        blox::ws_exec(ws_name, &["git", "clone", &repo_url, &repo_path]).map_err(
-                            |e| {
+                        ws_exec_async(ws_name, &["git", "clone", &repo_url, &repo_path])
+                            .await
+                            .map_err(|e| {
                                 format!(
                                     "Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}"
                                 )
-                            },
-                        )?;
+                            })?;
                     }
                     Err(e) => {
                         return Err(format!(
@@ -685,17 +731,19 @@ pub async fn start_workspace(
                         ));
                     }
                 }
-                run_workspace_git(ws_name, Some(repo_subpath), &["fetch", "origin", &ref_name])
+                run_workspace_git_async(ws_name, Some(repo_subpath), &["fetch", "origin", &ref_name])
+                    .await
                     .map_err(|e| {
                         format!(
                             "Failed to fetch base branch '{ref_name}' for '{repo_slug}' in workspace '{ws_name}': {e}"
                         )
                     })?;
-                run_workspace_git(
+                run_workspace_git_async(
                     ws_name,
                     Some(repo_subpath),
                     &["checkout", "-B", &branch.branch_name, &format!("origin/{ref_name}")],
                 )
+                .await
                 .map_err(|e| {
                     format!(
                         "Failed to create branch '{}' for '{repo_slug}' in workspace '{ws_name}': {e}",
@@ -716,15 +764,23 @@ pub async fn start_workspace(
         repo_slug, ref_name
     ));
 
-    match blox::ws_start(ws_name, resolved_source.as_deref()) {
+    match run_blox_blocking({
+        let ws_name = ws_name.to_string();
+        let source = resolved_source.clone();
+        move || blox::ws_start(&ws_name, source.as_deref())
+    })
+    .await
+    {
         Ok(_) => {
             // Create the feature branch inside the workspace so work happens
             // on `branch_name` rather than the detached base ref.
-            if let Err(e) = run_workspace_git(
+            if let Err(e) = run_workspace_git_async(
                 ws_name,
                 repo_subpath.as_deref(),
                 &["checkout", "-b", &branch.branch_name],
-            ) {
+            )
+            .await
+            {
                 log::warn!(
                     "failed to create branch '{}' in workspace '{}': {e}",
                     branch.branch_name,
@@ -773,7 +829,9 @@ pub async fn get_workspace_info(
         .workspace_name
         .ok_or("Branch is not a remote workspace branch")?;
 
-    blox::ws_info(&ws_name).map_err(|e| e.to_string())
+    run_blox_blocking(move || blox::ws_info(&ws_name))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Poll a remote branch's workspace status, update the DB, and return the new status.
@@ -809,7 +867,12 @@ pub async fn poll_workspace_status(
         return Ok(store::WorkspaceStatus::Starting.as_str().to_string());
     }
 
-    let info = match blox::ws_info(ws_name) {
+    let info = match run_blox_blocking({
+        let ws_name = ws_name.to_string();
+        move || blox::ws_info(&ws_name)
+    })
+    .await
+    {
         Ok(info) => info,
         Err(blox::BloxError::NotAuthenticated) => {
             // Auth errors are definitive — stop polling and surface the error.
@@ -879,7 +942,13 @@ pub async fn delete_branch(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-    cleanup_branch_resources(&store, &branch)?;
+    tauri::async_runtime::spawn_blocking({
+        let store = Arc::clone(&store);
+        let branch = branch.clone();
+        move || cleanup_branch_resources(&store, &branch)
+    })
+    .await
+    .map_err(|e| format!("Failed to clean up branch resources: {e}"))??;
 
     // Delete the branch record (cascades to commits, notes, reviews)
     store.delete_branch(&branch_id).map_err(|e| e.to_string())
@@ -928,11 +997,13 @@ pub async fn rename_branch(
         store::BranchType::Remote => {
             if let Some(ws_name) = &branch.workspace_name {
                 let repo_subpath = resolve_branch_workspace_subpath(&store, &branch)?;
-                if let Err(e) = run_workspace_git(
+                if let Err(e) = run_workspace_git_async(
                     ws_name,
                     repo_subpath.as_deref(),
                     &["branch", "-m", new_name],
-                ) {
+                )
+                .await
+                {
                     log::warn!("Failed to rename branch in workspace '{ws_name}': {e}");
                 }
             }

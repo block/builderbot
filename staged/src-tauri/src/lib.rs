@@ -577,7 +577,7 @@ fn list_recent_repos(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn add_project_repo(
+async fn add_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     github_repo: String,
@@ -626,7 +626,13 @@ fn add_project_repo(
     }
     if project.location == store::ProjectLocation::Remote {
         let ws_name = branches::resolve_project_workspace_name(&store, &project, None)?;
-        let ws_info = blox::ws_info(&ws_name).map_err(|e| {
+        let ws_info = tauri::async_runtime::spawn_blocking({
+            let ws_name = ws_name.clone();
+            move || blox::ws_info(&ws_name)
+        })
+        .await
+        .map_err(|e| format!("Failed to query workspace '{ws_name}': {e}"))?
+        .map_err(|e| {
             format!("Workspace '{ws_name}' must be running before adding another repo: {e}")
         })?;
         let ws_status = ws_info
@@ -2104,8 +2110,11 @@ fn read_text_file(file_path: String) -> Result<String, String> {
 /// The frontend can call this before starting a workspace to give
 /// an immediate, actionable error instead of a mysterious hang.
 #[tauri::command]
-fn check_blox_auth() -> Result<(), String> {
-    blox::check_auth().map_err(|e| e.to_string())
+async fn check_blox_auth() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(blox::check_auth)
+        .await
+        .map_err(|e| format!("Failed to run blox auth check: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 // =============================================================================

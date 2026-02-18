@@ -55,6 +55,7 @@ agent-client-protocol = "0.9"
 # Actions framework
 builderbot-actions = { path = "../../crates/builderbot-actions" }
 acp-client = { path = "../../crates/acp-client" }
+blox-cli = { path = "../../crates/blox-cli" }
 which = "7.0"
 
 # MCP Bridge for automation/testing (debug only)

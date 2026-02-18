@@ -1805,9 +1805,16 @@ pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
             let module_count = content.matches("---").count() as u32;
             Ok(module_count)
         }
-        Err(_) => {
-            // File doesn't exist - not a monorepo
-            Ok(0)
+        Err(e) => {
+            // Check if it's a "Not Found" error (file doesn't exist)
+            let error_msg = e.to_string();
+            if error_msg.contains("Not Found") || error_msg.contains("HTTP 404") {
+                // File doesn't exist - not a monorepo
+                Ok(0)
+            } else {
+                // Other error - propagate it
+                Err(e)
+            }
         }
     }
 }

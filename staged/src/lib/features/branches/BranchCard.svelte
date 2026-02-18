@@ -1728,7 +1728,15 @@
     border-radius: 6px;
     color: var(--text-faint);
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .more-button :global(svg) {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
   }
 
   .more-button:hover {
@@ -1848,7 +1856,9 @@
     border-radius: 50%;
     color: var(--text-base);
     cursor: pointer;
-    transition: all 0.15s ease;
+    transition:
+      background 0.15s ease,
+      color 0.15s ease;
   }
 
   .primary-action-button:hover {
@@ -1928,6 +1938,8 @@
   }
 
   .running-action-button :global(svg) {
+    width: 14px;
+    height: 14px;
     flex-shrink: 0;
   }
 
@@ -2073,6 +2085,8 @@
   }
 
   .pr-btn :global(svg) {
+    width: 14px;
+    height: 14px;
     flex-shrink: 0;
   }
 

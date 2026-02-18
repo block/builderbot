@@ -1778,41 +1778,67 @@ pub async fn update_pull_request(
 /// Returns the module count if MODULES.yaml exists, or 0 if it doesn't.
 /// A threshold of 20+ modules is considered a monorepo.
 pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
+    log::info!("Checking monorepo modules for repo: {}", github_repo);
     let endpoint = format!("repos/{github_repo}/contents/MODULES.yaml");
+    log::info!("Fetching MODULES.yaml from endpoint: {}", endpoint);
+
     let output = run_gh_global(&["api", &endpoint]);
 
     match output {
         Ok(json) => {
+            log::info!("Successfully fetched MODULES.yaml for {}", github_repo);
             #[derive(Debug, Deserialize)]
             struct FileContent {
                 content: String,
             }
 
-            let file: FileContent =
-                serde_json::from_str(&json).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+            let file: FileContent = serde_json::from_str(&json).map_err(|e| {
+                log::info!("Failed to parse JSON response for {}: {}", github_repo, e);
+                GitError::CommandFailed(e.to_string())
+            })?;
 
             // Decode base64 content
             use base64::Engine;
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(&file.content.replace('\n', ""))
-                .map_err(|e| GitError::CommandFailed(format!("Failed to decode base64: {e}")))?;
+                .map_err(|e| {
+                    log::info!("Failed to decode base64 content for {}: {}", github_repo, e);
+                    GitError::CommandFailed(format!("Failed to decode base64: {e}"))
+                })?;
 
             let content = String::from_utf8(decoded).map_err(|_| {
+                log::info!("Invalid UTF-8 in MODULES.yaml for {}", github_repo);
                 GitError::CommandFailed("Invalid UTF-8 in MODULES.yaml".to_string())
             })?;
 
             // Count occurrences of "---" which separate module definitions
             let module_count = content.matches("---").count() as u32;
+            log::info!(
+                "Found {} module separators in MODULES.yaml for {}",
+                module_count,
+                github_repo
+            );
             Ok(module_count)
         }
         Err(e) => {
             // Check if it's a "Not Found" error (file doesn't exist)
             let error_msg = e.to_string();
+            log::info!(
+                "Error fetching MODULES.yaml for {}: {}",
+                github_repo,
+                error_msg
+            );
+
             if error_msg.contains("Not Found") || error_msg.contains("HTTP 404") {
                 // File doesn't exist - not a monorepo
+                log::info!(
+                    "MODULES.yaml not found for {} - treating as non-monorepo",
+                    github_repo
+                );
                 Ok(0)
             } else {
                 // Other error - propagate it
+                log::info!("Propagating error for {}: {}", github_repo, error_msg);
                 Err(e)
             }
         }

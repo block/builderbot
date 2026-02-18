@@ -26,6 +26,10 @@
   let showRepoPicker = $state(false);
   let recentRepos = $state<RecentRepo[]>([]);
 
+  function focus(node: HTMLElement) {
+    node.focus();
+  }
+
   onMount(async () => {
     try {
       recentRepos = await commands.listRecentRepos(3);
@@ -110,7 +114,7 @@
           placeholder="e.g., Billing Platform"
           disabled={saving}
           autocomplete="off"
-          autofocus
+          use:focus
         />
       </div>
 

@@ -7,6 +7,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { Project, Branch, StoreIncompatibility, WorkspaceStatus } from '../../types';
   import * as commands from '../../commands';
   import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
@@ -87,9 +88,43 @@
       unlistenDetection = unlisten;
     });
 
+    // Listen for PR status changes to update branch state
+    let unlistenPrStatus: UnlistenFn | undefined;
+    listen<{
+      branchId: string;
+      prState: string;
+      prChecksStatus: string;
+      prReviewDecision: string | null;
+      prMergeable: boolean;
+      prDraft: boolean;
+    }>('pr-status-changed', (event) => {
+      const payload = event.payload;
+      // Find the project that contains this branch and update it
+      for (const [projectId, branches] of branchesByProject.entries()) {
+        const branchIndex = branches.findIndex((b) => b.id === payload.branchId);
+        if (branchIndex !== -1) {
+          // Update the branch with new PR status
+          const updatedBranches = [...branches];
+          updatedBranches[branchIndex] = {
+            ...updatedBranches[branchIndex],
+            prState: payload.prState,
+            prChecksStatus: payload.prChecksStatus,
+            prReviewDecision: payload.prReviewDecision,
+            prMergeable: payload.prMergeable,
+            prDraft: payload.prDraft,
+          };
+          branchesByProject = new Map(branchesByProject).set(projectId, updatedBranches);
+          break;
+        }
+      }
+    }).then((unlisten) => {
+      unlistenPrStatus = unlisten;
+    });
+
     return () => {
       window.removeEventListener('staged:new-project', onNewProject);
       unlistenDetection?.();
+      unlistenPrStatus?.();
       if (kickoffTimer) {
         clearTimeout(kickoffTimer);
         kickoffTimer = null;

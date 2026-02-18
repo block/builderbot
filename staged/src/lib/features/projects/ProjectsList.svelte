@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import {
     GitPullRequest,
     GitPullRequestClosed,
@@ -58,10 +59,45 @@
     window.addEventListener('staged:new-project', onNewProject);
     window.addEventListener('staged:project-delete-start', onProjectDeleteStart);
     window.addEventListener('staged:project-delete-end', onProjectDeleteEnd);
+
+    // Listen for PR status changes to update branch state
+    let unlistenPrStatus: UnlistenFn | undefined;
+    listen<{
+      branchId: string;
+      prState: string;
+      prChecksStatus: string;
+      prReviewDecision: string | null;
+      prMergeable: boolean;
+      prDraft: boolean;
+    }>('pr-status-changed', (event) => {
+      const payload = event.payload;
+      // Find the project that contains this branch
+      for (const [projectId, branches] of projectBranches.entries()) {
+        const branchIndex = branches.findIndex((b) => b.id === payload.branchId);
+        if (branchIndex !== -1) {
+          // Update the branch with new PR status
+          const updatedBranches = [...branches];
+          updatedBranches[branchIndex] = {
+            ...updatedBranches[branchIndex],
+            prState: payload.prState,
+            prChecksStatus: payload.prChecksStatus,
+            prReviewDecision: payload.prReviewDecision,
+            prMergeable: payload.prMergeable,
+            prDraft: payload.prDraft,
+          };
+          projectBranches = new Map(projectBranches).set(projectId, updatedBranches);
+          break;
+        }
+      }
+    }).then((unlisten) => {
+      unlistenPrStatus = unlisten;
+    });
+
     return () => {
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:project-delete-start', onProjectDeleteStart);
       window.removeEventListener('staged:project-delete-end', onProjectDeleteEnd);
+      unlistenPrStatus?.();
     };
   });
 

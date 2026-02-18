@@ -1,7 +1,4 @@
 <script lang="ts">
-  import { Loader2, RefreshCw } from 'lucide-svelte';
-  import type { ComponentType } from 'svelte';
-
   let {
     size = 16,
     icon = 'loader' as 'loader' | 'refresh',
@@ -11,35 +8,78 @@
     icon?: 'loader' | 'refresh';
     class?: string;
   } = $props();
-
-  const icons: Record<'loader' | 'refresh', ComponentType> = {
-    loader: Loader2,
-    refresh: RefreshCw,
-  };
-
-  const IconComponent = $derived(icons[icon]);
 </script>
 
-<IconComponent {size} class="spinner {className}" />
+<div class="spinner {className}" aria-hidden="true">
+  {#if icon === 'loader'}
+    <svg
+      class="spinner-svg"
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <g>
+        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+        <animateTransform
+          attributeName="transform"
+          attributeType="XML"
+          type="rotate"
+          from="0 12 12"
+          to="360 12 12"
+          dur="1s"
+          repeatCount="indefinite"
+        />
+      </g>
+    </svg>
+  {:else}
+    <svg
+      class="spinner-svg"
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <g>
+        <path d="M21 12a9 9 0 1 1-9 9 9 9 0 0 1 9-9Z" />
+        <path d="M21 12v0" />
+        <animateTransform
+          attributeName="transform"
+          attributeType="XML"
+          type="rotate"
+          from="0 12 12"
+          to="360 12 12"
+          dur="1s"
+          repeatCount="indefinite"
+        />
+      </g>
+    </svg>
+  {/if}
+</div>
 
 <style>
-  :global(.spinner) {
-    animation: spin 1s linear infinite;
-    flex-shrink: 0;
-    /* Prevent wobbling by ensuring the icon is centered and uses transform-origin */
-    display: inline-block;
-    transform-origin: center center;
-    will-change: transform;
+  .spinner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
   }
 
-  :global {
-    @keyframes spin {
-      from {
-        transform: rotate(0deg);
-      }
-      to {
-        transform: rotate(360deg);
-      }
-    }
+  .spinner-svg {
+    display: block;
+    overflow: visible;
+    transform-box: view-box;
+    transform-origin: 50% 50%;
+    backface-visibility: hidden;
   }
 </style>

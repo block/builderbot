@@ -2080,9 +2080,4 @@
       opacity: 0.5;
     }
   }
-
-  :global(.spinner) {
-    animation: spin 1s linear infinite;
-    flex-shrink: 0;
-  }
 </style>

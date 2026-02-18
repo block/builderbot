@@ -532,12 +532,13 @@
     // Only show the loading spinner on the initial load. Subsequent refreshes
     // keep the existing timeline visible to avoid a jarring flash/re-render
     // that was causing UI freezes after drag-and-drop note creation.
-    if (!timeline) {
+    const isInitialLoad = !timeline;
+    if (isInitialLoad) {
       loading = true;
     }
     error = null;
     try {
-      timeline = await commands.getBranchTimeline(branch.id);
+      timeline = await commands.getBranchTimeline(branch.id, { force: !isInitialLoad });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

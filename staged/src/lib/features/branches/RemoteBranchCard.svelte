@@ -310,7 +310,7 @@
       timelineError = null;
     }
     try {
-      timeline = await commands.getBranchTimeline(branch.id);
+      timeline = await commands.getBranchTimeline(branch.id, { force: !isInitialLoad });
       timelineError = null;
       // Drop optimistic placeholders once their real timeline entries exist.
       const seenSessionIds = new Set<string>();

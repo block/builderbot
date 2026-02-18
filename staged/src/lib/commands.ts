@@ -221,7 +221,9 @@ type TimelineJob = {
 };
 
 const TIMELINE_MAX_CONCURRENCY = 1;
+const TIMELINE_CACHE_MAX_AGE_MS = 30_000;
 const timelineQueue: TimelineJob[] = [];
+const timelineCache = new Map<string, { timeline: BranchTimeline; fetchedAt: number }>();
 const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
 let activeTimelineJobs = 0;
 
@@ -233,6 +235,7 @@ function pumpTimelineQueue() {
     activeTimelineJobs += 1;
     invoke<BranchTimeline>('get_branch_timeline', { branchId: job.branchId })
       .then((timeline) => {
+        timelineCache.set(job.branchId, { timeline, fetchedAt: Date.now() });
         job.resolve(timeline);
       })
       .catch((error) => {
@@ -245,7 +248,25 @@ function pumpTimelineQueue() {
   }
 }
 
-export function getBranchTimeline(branchId: string): Promise<BranchTimeline> {
+export function invalidateBranchTimeline(branchId: string): void {
+  timelineCache.delete(branchId);
+}
+
+interface GetBranchTimelineOptions {
+  force?: boolean;
+}
+
+export function getBranchTimeline(
+  branchId: string,
+  { force = false }: GetBranchTimelineOptions = {}
+): Promise<BranchTimeline> {
+  if (!force) {
+    const cached = timelineCache.get(branchId);
+    if (cached && Date.now() - cached.fetchedAt <= TIMELINE_CACHE_MAX_AGE_MS) {
+      return Promise.resolve(cached.timeline);
+    }
+  }
+
   const existing = inFlightTimelines.get(branchId);
   if (existing) {
     return existing;

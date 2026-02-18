@@ -195,12 +195,6 @@ pub async fn run_branch_action(
     executor: State<'_, Arc<ActionExecutor>>,
     registry: State<'_, Arc<ActionRegistry>>,
 ) -> Result<String, String> {
-    log::info!(
-        "[run_branch_action] Starting action execution request - branch_id: {}, action_id: {}",
-        branch_id,
-        action_id
-    );
-
     let store = get_store(&store)?;
 
     // Get the action
@@ -208,12 +202,6 @@ pub async fn run_branch_action(
         .get_repo_action(&action_id)
         .map_err(|e| format!("Failed to get action: {e}"))?
         .ok_or_else(|| "Action not found".to_string())?;
-
-    log::info!(
-        "[run_branch_action] Found action - name: {}, command: {}",
-        action.name,
-        action.command
-    );
 
     // Get the branch and its project (for repo context + subpath)
     let branch = store
@@ -247,11 +235,6 @@ pub async fn run_branch_action(
         workdir.path
     };
 
-    log::info!(
-        "[run_branch_action] Resolved working directory: {}",
-        working_dir
-    );
-
     // Create event listener
     let listener = Arc::new(TauriExecutionListener::new(
         app,
@@ -269,35 +252,10 @@ pub async fn run_branch_action(
     };
 
     // Execute the action
-    log::info!(
-        "[run_branch_action] Calling executor.execute - action: {}, working_dir: {}",
-        action.name,
-        working_dir
-    );
-
-    let result = executor
+    executor
         .execute(action.command, working_dir, metadata, listener)
         .await
-        .map_err(|e| format!("Failed to execute action: {e}"));
-
-    match &result {
-        Ok(execution_id) => {
-            log::info!(
-                "[run_branch_action] Action execution started successfully - execution_id: {}, action: {}",
-                execution_id,
-                action.name
-            );
-        }
-        Err(e) => {
-            log::error!(
-                "[run_branch_action] Action execution failed - action: {}, error: {}",
-                action.name,
-                e
-            );
-        }
-    }
-
-    result
+        .map_err(|e| format!("Failed to execute action: {e}"))
 }
 
 /// Stop a running action
@@ -329,12 +287,6 @@ pub fn get_running_branch_actions(
         .into_iter()
         .filter(|info| executor_ids.contains(&info.execution_id))
         .collect();
-
-    log::info!(
-        "[get_running_branch_actions] Found {} running actions for branch {}",
-        active_actions.len(),
-        branch_id
-    );
 
     Ok(active_actions)
 }

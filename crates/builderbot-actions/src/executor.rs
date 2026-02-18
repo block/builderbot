@@ -69,13 +69,6 @@ impl ActionExecutor {
         let execution_id = uuid::Uuid::new_v4().to_string();
         let (completion_tx, completion_rx) = oneshot::channel();
 
-        log::info!(
-            "[ActionExecutor] Starting execution - execution_id: {}, action: {}, working_dir: {}",
-            execution_id,
-            metadata.action_name,
-            working_dir
-        );
-
         // Determine which shell to use
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
 
@@ -137,19 +130,9 @@ impl ActionExecutor {
                     output_buffer: output_buffer.clone(),
                 },
             );
-            log::info!(
-                "[ActionExecutor] Registered running action - execution_id: {}, pid: {}, total_running: {}",
-                execution_id,
-                child_pid,
-                running.len()
-            );
         }
 
         // Emit initial started event
-        log::info!(
-            "[ActionExecutor] Emitting Started event - execution_id: {}",
-            execution_id
-        );
         listener
             .on_event(ExecutionEvent::Started {
                 execution_id: execution_id.clone(),
@@ -270,12 +253,6 @@ impl ActionExecutor {
             let exit_code = exit_status.as_ref().ok().and_then(|s| s.code());
             let completed_at = now_timestamp();
 
-            log::info!(
-                "[ActionExecutor] Action process completed - execution_id: {}, exit_code: {:?}",
-                exec_id,
-                exit_code
-            );
-
             // Move output buffer to completed actions map and remove from running
             {
                 let mut running = running_clone.lock().unwrap();
@@ -283,16 +260,6 @@ impl ActionExecutor {
                     let output = state.output_buffer.lock().unwrap().clone();
                     let mut completed = completed_clone.lock().unwrap();
                     completed.insert(exec_id.clone(), output);
-                    log::info!(
-                        "[ActionExecutor] Moved action to completed - execution_id: {}, remaining_running: {}",
-                        exec_id,
-                        running.len()
-                    );
-                } else {
-                    log::warn!(
-                        "[ActionExecutor] Action not found in running map - execution_id: {}",
-                        exec_id
-                    );
                 }
             }
 
@@ -304,13 +271,6 @@ impl ActionExecutor {
             } else {
                 ActionStatus::Failed
             };
-
-            log::info!(
-                "[ActionExecutor] Emitting StatusChanged event - execution_id: {}, status: {:?}, exit_code: {:?}",
-                exec_id,
-                status,
-                exit_code
-            );
 
             tokio::runtime::Handle::try_current()
                 .unwrap_or_else(|_| tokio::runtime::Runtime::new().unwrap().handle().clone())

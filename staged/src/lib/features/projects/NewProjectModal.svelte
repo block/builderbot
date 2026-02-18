@@ -25,6 +25,8 @@
   let error = $state<string | null>(null);
   let showRepoPicker = $state(false);
   let recentRepos = $state<RecentRepo[]>([]);
+  let isMonorepo = $state(false);
+  let checkingMonorepo = $state(false);
 
   function focus(node: HTMLElement) {
     node.focus();
@@ -35,6 +37,41 @@
       recentRepos = await commands.listRecentRepos(3);
     } catch (e) {
       // Fail silently - recent repos are optional
+    }
+  });
+
+  async function checkIfMonorepo(repo: string) {
+    if (!repo) {
+      console.info('[NewProjectModal] No repo provided, setting isMonorepo to false');
+      isMonorepo = false;
+      return;
+    }
+
+    console.info('[NewProjectModal] Checking if repo is monorepo:', repo);
+    checkingMonorepo = true;
+    try {
+      const moduleCount = await commands.checkMonorepoModules(repo);
+      console.info('[NewProjectModal] Module count for', repo, ':', moduleCount);
+      isMonorepo = moduleCount >= 20;
+      console.info('[NewProjectModal] Is monorepo (>= 20 modules):', isMonorepo);
+    } catch (e) {
+      // If check fails, assume not a monorepo
+      console.info('[NewProjectModal] Error checking monorepo status for', repo, ':', e);
+      isMonorepo = false;
+    } finally {
+      checkingMonorepo = false;
+      console.info('[NewProjectModal] Final monorepo status for', repo, ':', isMonorepo);
+    }
+  }
+
+  // Check for monorepo when repo is selected
+  $effect(() => {
+    console.info('[NewProjectModal] $effect triggered - selectedRepo:', selectedRepo);
+    if (selectedRepo) {
+      checkIfMonorepo(selectedRepo);
+    } else {
+      console.info('[NewProjectModal] No repo selected, setting isMonorepo to false');
+      isMonorepo = false;
     }
   });
 
@@ -156,7 +193,7 @@
 
       <div class="form-group">
         <label for="project-repo-select"
-          >Repository <span class="optional-label">(optional)</span></label
+          >Repository <span class="field-badge optional">Optional</span></label
         >
         {#if selectedRepo}
           <div class="repo-info">
@@ -208,7 +245,11 @@
 
       {#if selectedRepo}
         <div class="form-group">
-          <label for="project-subpath">Subpath <span class="optional-label">(optional)</span></label
+          <label for="project-subpath"
+            >Subpath
+            <span class="field-badge {isMonorepo ? 'recommended' : 'optional'}"
+              >{isMonorepo ? 'Recommended' : 'Optional'}</span
+            ></label
           >
           <input
             bind:value={subpath}
@@ -332,8 +373,25 @@
     color: var(--text-muted);
   }
 
-  .optional-label {
+  .field-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .field-badge.optional {
+    background-color: var(--bg-hover);
     color: var(--text-faint);
+  }
+
+  .field-badge.recommended {
+    background-color: var(--ui-accent);
+    color: var(--bg-deepest);
   }
 
   .type-toggle {

@@ -568,11 +568,7 @@
 
 <div class="project-home">
   <div class="content">
-    {#if loading && projects.length === 0}
-      <div class="loading-state">
-        <p>Loading...</p>
-      </div>
-    {:else if storeIncompat && storeIncompat.kind === 'needs_reset'}
+    {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
       <div class="update-state">
         <div class="update-card">
           <div class="update-header">
@@ -620,7 +616,7 @@
       <div class="error-state">
         <p>{error}</p>
       </div>
-    {:else if !hasContent}
+    {:else if !loading && !hasContent}
       <div class="empty-state">
         <div class="welcome-header">
           <StagedIcon size={28} />
@@ -749,7 +745,6 @@
     font-size: var(--size-sm);
   }
 
-  .loading-state,
   .error-state {
     display: flex;
     align-items: center;

@@ -42,6 +42,7 @@
   import { formatBaseBranch } from './branchCardHelpers';
   import { alerts } from '../../shared/alerts.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
+  import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
 
   interface Props {
     branch: Branch;
@@ -353,6 +354,14 @@
   }
 
   function handleNewSessionStarted(result: { sessionId: string; artifactId: string }) {
+    if (!result?.sessionId) {
+      console.error('Failed to start session: missing sessionId in result', result);
+      notifyError('Session Error', 'Failed to start session: no session ID returned');
+      return;
+    }
+    // Register session in the unified registry so global completion handling can
+    // clear running/unread indicators for remote projects.
+    sessionRegistry.register(result.sessionId, branch.projectId, 'other', branch.id);
     // Track the running session in the project state store
     projectStateStore.addRunningSession(branch.projectId, result.sessionId);
     const pendingType =

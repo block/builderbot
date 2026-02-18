@@ -5,7 +5,6 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { fade, scale } from 'svelte/transition';
   import { FolderGit2 } from 'lucide-svelte';
   import type { Project } from '../../types';
   import * as commands from '../../commands';
@@ -206,18 +205,11 @@
               </div>
             {/if}
             {#if hasRunning}
-              <div
-                class="status-indicator spinner"
-                transition:scale={{ duration: 200, start: 0.5 }}
-              >
+              <div class="status-indicator spinner">
                 <Spinner size={14} />
               </div>
             {:else if isUnread}
-              <div
-                class="status-indicator unread-dot"
-                in:scale={{ duration: 200, delay: 100, start: 0.5 }}
-                out:scale={{ duration: 150, start: 0.5 }}
-              ></div>
+              <div class="status-indicator unread-dot"></div>
             {/if}
             <div class="card-header">
               <FolderGit2 size={16} />

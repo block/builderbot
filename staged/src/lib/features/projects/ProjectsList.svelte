@@ -11,10 +11,11 @@
   import { projectDisplayName } from '../../shared/utils';
   import { selectProject } from '../../navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
+  import ProjectsSidebar from './ProjectsSidebar.svelte';
+  import { getProjectStatus } from './projectStatus';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import Spinner from '../../shared/Spinner.svelte';
-  import { projectStateStore } from '../../stores/projectState.svelte';
 
   let projects = $state<Project[]>([]);
   let loading = $state(true);
@@ -22,6 +23,8 @@
   let showNewProjectModal = $state(false);
   let isCommandKeyHeld = $state(false);
   let deletingProjectNames = $state<Map<string, string>>(new Map());
+  let repoCountsByProject = $state<Map<string, number>>(new Map());
+  let repoCountLoadGeneration = 0;
 
   onMount(() => {
     loadProjects();
@@ -60,7 +63,12 @@
     loading = true;
     error = null;
     try {
-      projects = await commands.listProjects();
+      const loadedProjects = await commands.listProjects();
+      projects = loadedProjects;
+      repoCountsByProject = new Map(
+        loadedProjects.map((project) => [project.id, project.githubRepo ? 1 : 0] as const)
+      );
+      void hydrateRepoCounts(loadedProjects);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -68,10 +76,29 @@
     }
   }
 
+  async function hydrateRepoCounts(projectList: Project[]) {
+    const generation = ++repoCountLoadGeneration;
+    const counts = await Promise.all(
+      projectList.map(async (project) => {
+        try {
+          const repos = await commands.listProjectRepos(project.id);
+          return [project.id, repos.length] as const;
+        } catch (e) {
+          console.error(`[ProjectsList] Failed to load repo count for project '${project.id}':`, e);
+          return [project.id, project.githubRepo ? 1 : 0] as const;
+        }
+      })
+    );
+    if (generation !== repoCountLoadGeneration) return;
+    repoCountsByProject = new Map(counts);
+  }
+
   function handleProjectCreated(project: Project) {
     if (!projects.some((p) => p.id === project.id)) {
       projects = [...projects, project];
     }
+    repoCountsByProject = new Map(repoCountsByProject).set(project.id, project.githubRepo ? 1 : 0);
+    void hydrateRepoCounts(projects);
     showNewProjectModal = false;
     selectProject(project.id);
   }
@@ -154,78 +181,88 @@
 />
 
 <div class="projects-list-page">
-  <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>
-    {#if !loading && !error && projects.length > 0}
-      <div class="header">
-        <h1>Projects</h1>
-        <span class="count">{projects.length}</span>
-      </div>
-    {/if}
+  <ProjectsSidebar
+    {projects}
+    {loading}
+    {error}
+    {deletingProjectNames}
+    {repoCountsByProject}
+    showAllProjectsRow={true}
+  />
 
-    {#if loading}
-      <div class="state">Loading projects…</div>
-    {:else if error}
-      <div class="state error">{error}</div>
-    {:else if projects.length === 0}
-      <div class="empty-state">
-        <div class="welcome-header">
-          <StagedIcon size={28} />
-          <h2>welcome to <span class="mono accent">staged</span></h2>
-        </div>
-        <p class="welcome-subtitle">
-          Create your first project to get started
-          <button class="kbd-btn" onclick={() => (showNewProjectModal = true)} title="New project">
-            +
-          </button>
-          <span class="shortcut-hint">(⌘N)</span>
-        </p>
-        <GitTreeAnimation />
-      </div>
-    {:else}
-      <div class="projects-grid">
-        <button class="project-card new-project-card" onclick={() => (showNewProjectModal = true)}>
-          <div class="new-project-content">
-            <span class="new-project-label">+ New project</span>
+  <div class="main-panel">
+    <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>
+      {#if loading}
+        <div class="state">Loading projects…</div>
+      {:else if error}
+        <div class="state error">{error}</div>
+      {:else if projects.length === 0}
+        <div class="empty-state">
+          <div class="welcome-header">
+            <StagedIcon size={28} />
+            <h2>welcome to <span class="mono accent">staged</span></h2>
           </div>
-        </button>
-        {#each projects as project, index (project.id)}
-          {@const hasRunning = projectStateStore.hasRunningSessions(project.id)}
-          {@const isUnread = projectStateStore.isUnread(project.id)}
+          <p class="welcome-subtitle">
+            Create your first project to get started
+            <button
+              class="kbd-btn"
+              onclick={() => (showNewProjectModal = true)}
+              title="New project"
+            >
+              +
+            </button>
+            <span class="shortcut-hint">(⌘N)</span>
+          </p>
+          <GitTreeAnimation />
+        </div>
+      {:else}
+        <div class="projects-grid">
           <button
-            class="project-card"
-            class:deleting={isProjectDeleting(project.id)}
-            onclick={() => openProject(project.id)}
-            disabled={isProjectDeleting(project.id)}
-            title={isProjectDeleting(project.id) ? 'Project deletion in progress' : undefined}
+            class="project-card new-project-card"
+            onclick={() => (showNewProjectModal = true)}
           >
-            {#if isCommandKeyHeld && index < 9}
-              <div class="keyboard-shortcut-overlay">
-                <span class="command-icon">⌘</span>
-                <span class="number">{index + 1}</span>
-              </div>
-            {/if}
-            {#if hasRunning}
-              <div class="status-indicator spinner">
-                <Spinner size={14} />
-              </div>
-            {:else if isUnread}
-              <div class="status-indicator unread-dot"></div>
-            {/if}
-            <div class="card-header">
-              <FolderGit2 size={16} />
-              <span>{projectDisplayName(project)}</span>
-            </div>
-            {#if isProjectDeleting(project.id)}
-              <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
-            {/if}
-            <div class="repo">{project.githubRepo ?? 'No repo attached'}</div>
-            <div class="repo">
-              {project.location === 'remote' ? 'Remote workspace' : 'Local worktrees'}
+            <div class="new-project-content">
+              <span class="new-project-label">+ New project</span>
             </div>
           </button>
-        {/each}
-      </div>
-    {/if}
+          {#each projects as project, index (project.id)}
+            {@const status = getProjectStatus(project.id, deletingProjectNames)}
+            <button
+              class="project-card"
+              class:deleting={status.kind === 'deleting'}
+              onclick={() => openProject(project.id)}
+              disabled={status.kind === 'deleting'}
+              title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
+            >
+              {#if isCommandKeyHeld && index < 9}
+                <div class="keyboard-shortcut-overlay">
+                  <span class="command-icon">⌘</span>
+                  <span class="number">{index + 1}</span>
+                </div>
+              {/if}
+              {#if status.kind === 'running'}
+                <div class="status-indicator spinner">
+                  <Spinner size={14} />
+                </div>
+              {:else if status.kind === 'unread'}
+                <div class="status-indicator unread-dot"></div>
+              {/if}
+              <div class="card-header">
+                <FolderGit2 size={16} />
+                <span>{projectDisplayName(project)}</span>
+              </div>
+              {#if status.kind === 'deleting'}
+                <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
+              {/if}
+              <div class="repo">{project.githubRepo ?? 'No repo attached'}</div>
+              <div class="repo">
+                {project.location === 'remote' ? 'Remote workspace' : 'Local worktrees'}
+              </div>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
   </div>
 </div>
 
@@ -235,17 +272,27 @@
 
 <style>
   .projects-list-page {
+    --sidebar-title-offset: 42px;
     flex: 1;
     min-height: 0;
     display: flex;
-    flex-direction: column;
+    min-width: 0;
     background-color: var(--bg-chrome);
+    overflow: hidden;
+  }
+
+  .main-panel {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
 
   .content {
     flex: 1;
     overflow: auto;
-    padding: 20px 24px 24px;
+    padding: var(--sidebar-title-offset) 24px 24px;
     max-width: 900px;
     width: 100%;
     margin: 0 auto;
@@ -257,30 +304,6 @@
 
   .content.empty-layout {
     max-width: none;
-  }
-
-  .header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 18px;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: var(--size-2xl);
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: -0.02em;
-  }
-
-  .count {
-    font-family: 'SF Mono', 'Menlo', monospace;
-    font-size: var(--size-xs);
-    color: var(--text-muted);
-    border: 1px solid var(--border-muted);
-    border-radius: 999px;
-    padding: 2px 8px;
   }
 
   .state {

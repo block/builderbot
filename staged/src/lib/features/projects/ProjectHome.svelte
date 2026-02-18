@@ -6,20 +6,19 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { ArrowLeft } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import type { Project, Branch, StoreIncompatibility, WorkspaceStatus } from '../../types';
   import * as commands from '../../commands';
   import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, selectProject, navigation } from '../../navigation.svelte';
+  import { goHome, selectProject } from '../../navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
+  import ProjectsSidebar from './ProjectsSidebar.svelte';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import { alerts } from '../../shared/alerts.svelte';
-  import { projectStateStore } from '../../stores/projectState.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -206,6 +205,15 @@
   let hasContent = $derived(visibleProjects.length > 0);
   let selectedProject = $derived(
     selectedProjectId ? projects.find((project) => project.id === selectedProjectId) || null : null
+  );
+  let repoCountsByProject = $derived(
+    new Map(
+      projects.map((project) => {
+        const knownCount = repoLabelsByProject.get(project.id)?.size ?? 0;
+        const fallbackCount = project.githubRepo ? 1 : 0;
+        return [project.id, knownCount > 0 ? knownCount : fallbackCount] as const;
+      })
+    )
   );
 
   $effect(() => {
@@ -567,7 +575,16 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="project-home">
-  <div class="content">
+  <ProjectsSidebar
+    {projects}
+    {loading}
+    {error}
+    {deletingProjectNames}
+    {repoCountsByProject}
+    showAllProjectsRow={true}
+  />
+
+  <div class="main-panel">
     {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
       <div class="update-state">
         <div class="update-card">
@@ -629,15 +646,6 @@
         </p>
       </div>
     {:else}
-      {#if selectedProject}
-        <div class="project-toolbar">
-          <button class="back-button" onclick={goHome} title="Back to projects list">
-            <ArrowLeft size={14} />
-            Projects
-          </button>
-          <div class="project-title">{projectDisplayName(selectedProject)}</div>
-        </div>
-      {/if}
       <div class="projects-list">
         {#each visibleProjects as project (project.id)}
           <ProjectSection
@@ -716,15 +724,18 @@
 
 <style>
   .project-home {
-    display: flex;
-    flex-direction: column;
     flex: 1;
+    min-width: 0;
     min-height: 0;
+    display: flex;
     background-color: var(--bg-chrome);
+    overflow: hidden;
   }
 
-  .content {
+  .main-panel {
     flex: 1;
+    min-width: 0;
+    min-height: 0;
     overflow: auto;
     padding: 12px 24px 24px;
     display: flex;
@@ -933,40 +944,5 @@
     display: flex;
     flex-direction: column;
     gap: 32px;
-  }
-
-  .project-toolbar {
-    width: 100%;
-    max-width: 800px;
-    margin: 0 auto 16px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .back-button {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-muted);
-    padding: 6px 10px;
-    font-size: var(--size-xs);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .back-button:hover {
-    color: var(--text-primary);
-    border-color: var(--border-emphasis);
-    background-color: var(--bg-hover);
-  }
-
-  .project-title {
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-weight: 600;
   }
 </style>

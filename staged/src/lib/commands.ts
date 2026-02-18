@@ -131,6 +131,12 @@ export function searchGithubRepos(query: string, owner?: string): Promise<GitHub
   return invoke('search_github_repos', { query, owner: owner ?? null });
 }
 
+/** Check if a repository is likely a monorepo by counting modules in MODULES.yaml.
+ *  Returns the module count (0 if file doesn't exist). */
+export function checkMonorepoModules(githubRepo: string): Promise<number> {
+  return invoke('check_monorepo_modules', { githubRepo });
+}
+
 // =============================================================================
 // Branches
 // =============================================================================

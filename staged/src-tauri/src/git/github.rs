@@ -1771,6 +1771,48 @@ pub async fn update_pull_request(
 }
 
 // =============================================================================
+// Monorepo Detection
+// =============================================================================
+
+/// Check if a repository is likely a monorepo by counting modules in MODULES.yaml.
+/// Returns the module count if MODULES.yaml exists, or 0 if it doesn't.
+/// A threshold of 20+ modules is considered a monorepo.
+pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
+    let endpoint = format!("repos/{github_repo}/contents/MODULES.yaml");
+    let output = run_gh_global(&["api", &endpoint]);
+
+    match output {
+        Ok(json) => {
+            #[derive(Debug, Deserialize)]
+            struct FileContent {
+                content: String,
+            }
+
+            let file: FileContent =
+                serde_json::from_str(&json).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+            // Decode base64 content
+            use base64::Engine;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&file.content.replace('\n', ""))
+                .map_err(|e| GitError::CommandFailed(format!("Failed to decode base64: {e}")))?;
+
+            let content = String::from_utf8(decoded).map_err(|_| {
+                GitError::CommandFailed("Invalid UTF-8 in MODULES.yaml".to_string())
+            })?;
+
+            // Count occurrences of "---" which separate module definitions
+            let module_count = content.matches("---").count() as u32;
+            Ok(module_count)
+        }
+        Err(_) => {
+            // File doesn't exist - not a monorepo
+            Ok(0)
+        }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 

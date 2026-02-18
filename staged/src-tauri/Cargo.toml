@@ -28,6 +28,7 @@ git2 = "0.19"
 thiserror = "2.0"
 anyhow = "1.0"
 libc = "0.2"
+base64 = "0.22"
 
 # File watching
 notify = "8.0"

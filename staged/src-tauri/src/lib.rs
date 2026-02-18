@@ -843,6 +843,13 @@ async fn search_github_repos(
     git::search_github_repos(&query, owner.as_deref()).map_err(|e| e.to_string())
 }
 
+/// Check if a repository is likely a monorepo by counting modules in MODULES.yaml.
+/// Returns the module count (0 if file doesn't exist).
+#[tauri::command]
+async fn check_monorepo_modules(github_repo: String) -> Result<u32, String> {
+    git::check_monorepo_modules(&github_repo).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn delete_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -2539,6 +2546,7 @@ pub fn run() {
             list_user_repos,
             get_github_repo,
             search_github_repos,
+            check_monorepo_modules,
             branches::list_branches_for_project,
             branches::create_branch,
             branches::setup_worktree,

@@ -488,6 +488,12 @@
     // Window focus tracking for smart polling
     handleFocus = () => {
       isWindowFocused = true;
+      // Immediately refresh PR status when app becomes active
+      if (branch.prNumber && !prStatusRefreshing) {
+        commands
+          .refreshPrStatus(branch.id)
+          .catch((e) => console.error('Failed to refresh PR status on focus:', e));
+      }
     };
     handleBlur = () => {
       isWindowFocused = false;

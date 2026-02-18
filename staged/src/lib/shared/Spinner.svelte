@@ -37,8 +37,14 @@
   .spinner-inner {
     animation: spin 1s linear infinite;
     display: inline-flex;
+    align-items: center;
+    justify-content: center;
     transform-origin: center center;
     will-change: transform;
+  }
+
+  .spinner-inner :global(svg) {
+    display: block;
   }
 
   :global {

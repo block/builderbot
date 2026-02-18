@@ -118,9 +118,13 @@
     display: flex;
     flex-direction: column;
     background-color: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
     border-radius: 8px;
+    box-shadow: var(--shadow-elevated);
     overflow: hidden;
-    transition: opacity 0.15s ease;
+    transition:
+      opacity 0.15s ease,
+      box-shadow 0.15s ease;
   }
 
   .comment-editor-hidden {

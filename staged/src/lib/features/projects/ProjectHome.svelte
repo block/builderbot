@@ -18,8 +18,7 @@
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
-  import StagedIcon from '../../shared/StagedIcon.svelte';
+  import SplashScreen from './SplashScreen.svelte';
   import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
@@ -704,7 +703,7 @@
     showAllProjectsRow={true}
   />
 
-  <div class="main-panel">
+  <div class="main-panel" class:no-pad={!loading && !hasContent}>
     {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
       <div class="update-state">
         <div class="update-card">
@@ -754,18 +753,7 @@
         <p>{error}</p>
       </div>
     {:else if !loading && !hasContent}
-      <div class="empty-state">
-        <div class="welcome-header">
-          <StagedIcon size={28} />
-          <h2>No projects yet</h2>
-        </div>
-        <p class="welcome-subtitle">
-          Create a project to get started —
-          <button class="kbd-btn" onclick={handleNewProject} title="New project">+</button>
-          <span class="shortcut-hint">(⌘N)</span>
-        </p>
-        <GitTreeAnimation />
-      </div>
+      <SplashScreen onCreateProject={handleNewProject} />
     {:else}
       <div class="projects-list">
         {#each visibleProjects as project (project.id)}
@@ -862,6 +850,10 @@
     padding: 12px 24px 24px;
     display: flex;
     flex-direction: column;
+  }
+
+  .main-panel.no-pad {
+    padding: 0;
   }
 
   .delete-toast {
@@ -1000,66 +992,6 @@
   .reset-button:disabled {
     opacity: 0.6;
     cursor: not-allowed;
-  }
-
-  /* Empty state */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    gap: 20px;
-  }
-
-  .welcome-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .welcome-header h2 {
-    font-size: var(--size-xl);
-    font-weight: 500;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
-  .welcome-subtitle {
-    margin: 0;
-    font-size: var(--size-sm);
-    color: var(--text-muted);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .welcome-subtitle .kbd-btn {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    font-size: var(--size-xs);
-    padding: 1px 5px;
-    background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-radius: 4px;
-    color: var(--ui-accent);
-    cursor: pointer;
-    transition:
-      background-color 0.15s ease,
-      border-color 0.15s ease;
-  }
-
-  .welcome-subtitle .kbd-btn:hover {
-    background-color: var(--bg-hover);
-    border-color: var(--ui-accent);
-  }
-
-  .welcome-subtitle .shortcut-hint {
-    color: var(--text-faint);
-    font-size: var(--size-xs);
-  }
-
-  .empty-state :global(.animation-wrapper) {
-    width: min(1400px, calc(100vw - 48px));
   }
 
   /* Projects list */

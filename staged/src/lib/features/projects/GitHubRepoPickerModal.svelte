@@ -282,9 +282,6 @@
         spellcheck="false"
         oninput={handleInput}
       />
-      {#if isSearching}
-        <Spinner size={14} />
-      {/if}
     </div>
 
     <div class="repo-list">

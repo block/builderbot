@@ -247,7 +247,7 @@
   onkeydown={handleKeydown}
   onfocusout={handleFocusOut}
 >
-  <div class="search-input">
+  <div class="search-input" onclick={() => inputEl?.focus()}>
     <Search size={14} class="search-icon" />
     <input
       bind:this={inputEl}

@@ -14,6 +14,7 @@
   import { goHome, navigation, selectProject } from '../../navigation.svelte';
   import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
   import Spinner from '../../shared/Spinner.svelte';
+  import StagedIcon from '../../shared/StagedIcon.svelte';
   import { getProjectStatus } from './projectStatus';
   import {
     hydrateProjectsSidebarState,
@@ -154,8 +155,10 @@
   >
     <div class="sidebar-header">
       <div class="title-row">
-        <h2>Projects</h2>
-        <span class="count">{projects.length}</span>
+        <span class="brand-logo">
+          <StagedIcon size={26} />
+          <span class="brand-text">staged</span>
+        </span>
       </div>
     </div>
 
@@ -281,22 +284,18 @@
     gap: 8px;
   }
 
-  h2 {
-    margin: 0;
-    font-size: var(--size-sm);
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: 0.01em;
-    text-transform: uppercase;
+  .brand-logo {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
-  .count {
-    font-family: 'SF Mono', 'Menlo', monospace;
-    font-size: calc(var(--size-xs) - 1px);
-    color: var(--text-muted);
-    border: 1px solid var(--border-muted);
-    border-radius: 999px;
-    padding: 1px 7px;
+  .brand-text {
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: var(--size-lg);
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
   }
 
   .plus-icon {

@@ -34,7 +34,6 @@
     Check,
     ChevronRight,
     ChevronDown,
-    Wrench,
     Zap,
     GitBranch,
   } from 'lucide-svelte';
@@ -756,16 +755,11 @@
                       class:tool-header-expandable={!!pair.result}
                       onclick={() => pair.result && toggleTool(pair.call.id)}
                     >
-                      <span class="tool-chevron">
-                        {#if pair.result}
-                          {#if isExpanded}
-                            <ChevronDown size={12} />
-                          {:else}
-                            <ChevronRight size={12} />
-                          {/if}
-                        {/if}
-                      </span>
-                      <Wrench size={12} class="tool-icon" />
+                      <span
+                        class="tool-caret"
+                        class:tool-caret-expanded={isExpanded}
+                        class:tool-caret-hidden={!pair.result}>›</span
+                      >
                       <span class="tool-name">{toolName}</span>
                       {#if toolArgs}
                         <span class="tool-args-preview">{toolArgs}</span>
@@ -1189,23 +1183,19 @@
   .tool-group {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding-left: 2px;
+    gap: 2px;
   }
 
   .tool-card {
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    overflow: hidden;
-    background: var(--bg-primary);
+    overflow: visible;
   }
 
   .tool-header {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
     width: 100%;
-    padding: 6px 8px;
+    padding: 2px 0;
     background: none;
     color: var(--text-muted);
     font-size: var(--size-xs);
@@ -1217,28 +1207,32 @@
     cursor: pointer;
   }
 
-  .tool-header-expandable:hover {
-    background: var(--bg-hover);
+  .tool-header-expandable:hover .tool-name {
+    text-decoration: underline;
   }
 
-  .tool-chevron {
-    display: flex;
-    align-items: center;
-    width: 12px;
+  .tool-caret {
+    display: inline-block;
     flex-shrink: 0;
+    width: 8px;
+    margin-left: -8px;
+    font-size: var(--size-xs);
     color: var(--text-faint);
+    transition: transform 0.15s ease;
+    line-height: 1;
   }
 
-  .tool-header :global(.tool-icon) {
-    flex-shrink: 0;
-    color: var(--text-faint);
+  .tool-caret-expanded {
+    transform: rotate(90deg);
+  }
+
+  .tool-caret-hidden {
+    visibility: hidden;
   }
 
   .tool-name {
-    font-weight: 500;
-    color: var(--text-primary);
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: calc(var(--size-xs) * 0.95);
+    color: var(--text-muted);
+    font-size: var(--size-xs);
     flex-shrink: 0;
   }
 
@@ -1249,8 +1243,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--text-faint);
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: calc(var(--size-xs) * 0.9);
+    font-size: var(--size-xs);
   }
 
   .tool-copy {
@@ -1266,8 +1259,7 @@
 
   .tool-output {
     position: relative;
-    border-top: 1px solid var(--border-subtle);
-    padding: 8px 10px;
+    padding: 4px 0 4px 14px;
     max-height: 200px;
     overflow-y: auto;
   }

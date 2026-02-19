@@ -42,35 +42,27 @@
 
   async function checkIfMonorepo(repo: string) {
     if (!repo) {
-      console.info('[NewProjectModal] No repo provided, setting isMonorepo to false');
       isMonorepo = false;
       return;
     }
 
-    console.info('[NewProjectModal] Checking if repo is monorepo:', repo);
     checkingMonorepo = true;
     try {
       const moduleCount = await commands.checkMonorepoModules(repo);
-      console.info('[NewProjectModal] Module count for', repo, ':', moduleCount);
       isMonorepo = moduleCount >= 20;
-      console.info('[NewProjectModal] Is monorepo (>= 20 modules):', isMonorepo);
     } catch (e) {
       // If check fails, assume not a monorepo
-      console.info('[NewProjectModal] Error checking monorepo status for', repo, ':', e);
       isMonorepo = false;
     } finally {
       checkingMonorepo = false;
-      console.info('[NewProjectModal] Final monorepo status for', repo, ':', isMonorepo);
     }
   }
 
   // Check for monorepo when repo is selected
   $effect(() => {
-    console.info('[NewProjectModal] $effect triggered - selectedRepo:', selectedRepo);
     if (selectedRepo) {
       checkIfMonorepo(selectedRepo);
     } else {
-      console.info('[NewProjectModal] No repo selected, setting isMonorepo to false');
       isMonorepo = false;
     }
   });

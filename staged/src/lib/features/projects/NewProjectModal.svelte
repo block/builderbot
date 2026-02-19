@@ -409,7 +409,7 @@
 
   input {
     border: 1px solid var(--border-muted);
-    background: var(--bg-deepest);
+    background: var(--bg-primary);
     color: var(--text-primary);
     border-radius: 8px;
     padding: 9px 10px;

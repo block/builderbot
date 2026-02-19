@@ -11,6 +11,7 @@
   import BranchCard from '../branches/BranchCard.svelte';
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import GitHubRepoPicker from './GitHubRepoPicker.svelte';
 
   interface Props {
     project: Project;
@@ -23,11 +24,12 @@
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
     detecting?: boolean;
+    excludeRepos?: Set<string>;
     onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void;
     onWorkspaceStatusChange?: (branchId: string, status: WorkspaceStatus) => void;
-    onAddRepo?: () => void;
+    onRepoSelected?: (nameWithOwner: string, subpath?: string) => void;
     onRetryWorktree?: (branchId: string) => void;
   }
 
@@ -42,15 +44,15 @@
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
     detecting = false,
+    excludeRepos,
     onDeleteProject,
     onDeleteBranch,
     onRenameBranch,
     onWorkspaceStatusChange,
-    onAddRepo,
+    onRepoSelected,
     onRetryWorktree,
   }: Props = $props();
 
-  /** Branches sorted by most recently created first. */
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
   let addRepoDisabled = $derived(deleting || !canAddRepo);
   let addRepoTitle = $derived(
@@ -60,6 +62,35 @@
         ? addRepoHint
         : 'Add repository to project'
   );
+
+  let dropdownOpen = $state(false);
+  let wrapperRef: HTMLDivElement | undefined = $state();
+
+  function toggleDropdown() {
+    dropdownOpen = !dropdownOpen;
+  }
+
+  function closeDropdown() {
+    dropdownOpen = false;
+  }
+
+  function handleRepoSelected(nameWithOwner: string, subpath?: string) {
+    dropdownOpen = false;
+    onRepoSelected?.(nameWithOwner, subpath);
+  }
+
+  $effect(() => {
+    if (!dropdownOpen) return;
+
+    function onPointerDown(e: PointerEvent) {
+      if (wrapperRef && !wrapperRef.contains(e.target as Node)) {
+        dropdownOpen = false;
+      }
+    }
+
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  });
 
   function repoLabelForBranch(branch: Branch): string | null {
     if (!branch.projectRepoId) return project.githubRepo;
@@ -89,15 +120,27 @@
     </div>
     {#if !deleting}
       <div class="header-actions">
-        <button
-          class="header-action-button"
-          onclick={() => onAddRepo?.()}
-          disabled={addRepoDisabled}
-          title={addRepoTitle}
-        >
-          <span class="action-icon"><Plus size={12} /></span>
-          Add Repo
-        </button>
+        <div class="add-repo-wrapper" bind:this={wrapperRef}>
+          <button
+            class="header-action-button"
+            onclick={toggleDropdown}
+            disabled={addRepoDisabled}
+            title={addRepoTitle}
+          >
+            <span class="action-icon"><Plus size={12} /></span>
+            Add Repo
+          </button>
+          {#if dropdownOpen}
+            <div class="repo-picker-dropdown">
+              <GitHubRepoPicker
+                onSelect={handleRepoSelected}
+                onBack={closeDropdown}
+                {excludeRepos}
+                showHeader={false}
+              />
+            </div>
+          {/if}
+        </div>
         <button
           class="header-action-button danger"
           class:safe-delete={safeToDelete}
@@ -300,5 +343,30 @@
   .branches-list.deleting {
     opacity: 0.65;
     pointer-events: none;
+  }
+
+  .add-repo-wrapper {
+    position: relative;
+  }
+
+  .repo-picker-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    width: 420px;
+    max-height: min(60vh, 420px);
+    background-color: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 12px;
+    box-shadow: var(--shadow-elevated);
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .repo-picker-dropdown :global(.repo-picker) {
+    min-height: 0;
+    flex: 1;
   }
 </style>

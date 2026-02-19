@@ -16,7 +16,6 @@
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
-  import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import SplashScreen from './SplashScreen.svelte';
   import { alerts } from '../../shared/alerts.svelte';
@@ -42,8 +41,6 @@
 
   // Modal state
   let showNewProjectModal = $state(false);
-  let showRepoPicker = $state(false);
-  let repoPickerProject = $state<Project | null>(null);
 
   // Delete confirmation state
   let projectToDelete = $state<Project | null>(null);
@@ -414,35 +411,21 @@
 
   // ── Branch actions ──
 
-  function handleAddRepo(project: Project) {
-    if (!canAddRepo(project)) {
-      alerts.show({
-        tone: 'warning',
-        title: 'Unable to add repository',
-        message: addRepoHint(project),
-      });
-      return;
-    }
-    repoPickerProject = project;
-    showRepoPicker = true;
-  }
-
-  async function handleRepoSelected(nameWithOwner: string, subpath?: string) {
-    if (!repoPickerProject) return;
+  async function handleRepoSelected(projectId: string, nameWithOwner: string, subpath?: string) {
     try {
-      await commands.addProjectRepo(repoPickerProject.id, nameWithOwner, undefined, subpath);
+      await commands.addProjectRepo(projectId, nameWithOwner, undefined, subpath);
       const [projectsList, branches, repos] = await Promise.all([
         commands.listProjects(),
-        commands.listBranchesForProject(repoPickerProject.id),
-        commands.listProjectRepos(repoPickerProject.id),
+        commands.listBranchesForProject(projectId),
+        commands.listProjectRepos(projectId),
       ]);
       projects = projectsList;
-      branchesByProject = new Map(branchesByProject).set(repoPickerProject.id, branches);
+      branchesByProject = new Map(branchesByProject).set(projectId, branches);
       repoLabelsByProject = new Map(repoLabelsByProject).set(
-        repoPickerProject.id,
+        projectId,
         new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
       );
-      startInitialBranchSetup(repoPickerProject.id, branches);
+      startInitialBranchSetup(projectId, branches);
     } catch (e) {
       console.error('Failed to add repo:', e);
       const message = e instanceof Error ? e.message : String(e);
@@ -452,9 +435,6 @@
         message,
         durationMs: 0,
       });
-    } finally {
-      showRepoPicker = false;
-      repoPickerProject = null;
     }
   }
 
@@ -781,7 +761,9 @@
               handleRenameBranch(branchId, project.id, branchName)}
             onWorkspaceStatusChange={(branchId, workspaceStatus) =>
               handleWorkspaceStatusChange(project.id, branchId, workspaceStatus)}
-            onAddRepo={() => handleAddRepo(project)}
+            excludeRepos={new Set(repoLabelsByProject.get(project.id)?.values())}
+            onRepoSelected={(nameWithOwner, subpath) =>
+              handleRepoSelected(project.id, nameWithOwner, subpath)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
           />
         {/each}
@@ -803,19 +785,6 @@
 <!-- New project modal (only when projects exist; splash screen handles inline form otherwise) -->
 {#if showNewProjectModal && hasContent}
   <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
-{/if}
-
-{#if showRepoPicker}
-  <GitHubRepoPickerModal
-    onSelect={handleRepoSelected}
-    onClose={() => {
-      showRepoPicker = false;
-      repoPickerProject = null;
-    }}
-    excludeRepos={repoPickerProject
-      ? new Set(repoLabelsByProject.get(repoPickerProject.id)?.values())
-      : undefined}
-  />
 {/if}
 
 <!-- Delete project confirmation -->

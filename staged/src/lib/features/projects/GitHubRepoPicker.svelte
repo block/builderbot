@@ -16,9 +16,10 @@
     onSelect: (nameWithOwner: string, subpath?: string) => void;
     onBack: () => void;
     excludeRepos?: Set<string>;
+    showHeader?: boolean;
   }
 
-  let { onSelect, onBack, excludeRepos = new Set() }: Props = $props();
+  let { onSelect, onBack, excludeRepos = new Set(), showHeader = true }: Props = $props();
 
   let recentRepos = $state<RecentRepo[]>([]);
   let repos = $state<GitHubRepo[]>([]);
@@ -102,6 +103,7 @@
   }
 
   onMount(async () => {
+    searchInputEl?.focus();
     try {
       recentRepos = await commands.listRecentRepos(10);
       repos = await commands.listUserRepos(30);
@@ -109,7 +111,6 @@
       error = typeof e === 'string' ? e : String(e);
     } finally {
       loading = false;
-      searchInputEl?.focus();
     }
   });
 
@@ -191,13 +192,15 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="repo-picker" onkeydown={handleKeydown}>
-  <div class="picker-header">
-    <button class="back-button" onclick={onBack}>
-      <ArrowLeft size={16} />
-    </button>
-    <h2>Select Repository</h2>
-  </div>
+<div class="repo-picker" class:no-header={!showHeader} onkeydown={handleKeydown}>
+  {#if showHeader}
+    <div class="picker-header">
+      <button class="back-button" onclick={onBack}>
+        <ArrowLeft size={16} />
+      </button>
+      <h2>Select Repository</h2>
+    </div>
+  {/if}
 
   <div class="search-bar">
     <Search size={14} class="search-icon" />
@@ -241,14 +244,12 @@
     {#if loading}
       <div class="loading-state">
         <Spinner size={20} />
-        <span>Loading repositories...</span>
       </div>
     {:else if error}
       <div class="error-state">{error}</div>
     {:else if isSearching}
       <div class="loading-state">
         <Spinner size={20} />
-        <span>Searching...</span>
       </div>
     {:else if displayItems.length === 0 && filteredRecentRepos.length === 0}
       <div class="empty-state">
@@ -295,6 +296,10 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+  }
+
+  .repo-picker.no-header .search-bar {
+    margin-top: 10px;
   }
 
   .picker-header {

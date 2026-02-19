@@ -385,6 +385,7 @@
     try {
       await commands.deleteProject(id);
       projects = projects.filter((p) => p.id !== id);
+      setHasProjects(projects.length > 0);
       const nextBranches = new Map(branchesByProject);
       nextBranches.delete(id);
       branchesByProject = nextBranches;

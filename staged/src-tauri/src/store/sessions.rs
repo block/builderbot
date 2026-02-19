@@ -9,8 +9,8 @@ impl Store {
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at, owner_pid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 session.id,
                 session.prompt,
@@ -21,6 +21,7 @@ impl Store {
                 session.error_message,
                 session.created_at,
                 session.updated_at,
+                session.owner_pid,
             ],
         )?;
         Ok(())
@@ -29,7 +30,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at, owner_pid
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -95,22 +96,23 @@ impl Store {
     pub fn transition_to_running(&self, id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
-            "UPDATE sessions SET status = 'running', error_message = NULL, updated_at = ?1
-             WHERE id = ?2 AND status != 'running'",
-            params![now_timestamp(), id],
+            "UPDATE sessions SET status = 'running', error_message = NULL, updated_at = ?1, owner_pid = ?2
+             WHERE id = ?3 AND status != 'running'",
+            params![now_timestamp(), std::process::id(), id],
         )?;
         Ok(rows > 0)
     }
 
-    /// Mark all running sessions as cancelled (used on app startup to clean
-    /// up sessions that were interrupted by the previous app close).
-    pub fn cancel_orphaned_sessions(&self) -> Result<u64, StoreError> {
+    pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let count = conn.execute(
-            "UPDATE sessions SET status = 'cancelled', updated_at = ?1 WHERE status = 'running'",
-            params![now_timestamp()],
+        let mut stmt = conn.prepare(
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at, owner_pid
+             FROM sessions WHERE status = 'running'",
         )?;
-        Ok(count as u64)
+        let sessions = stmt
+            .query_map([], Self::row_to_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
     }
 
     /// Store the ACP session ID returned by the agent after `new_session`.
@@ -142,6 +144,7 @@ impl Store {
             error_message: row.get(6)?,
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
+            owner_pid: row.get(9)?,
         })
     }
 }

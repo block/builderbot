@@ -167,7 +167,7 @@
         processQueue();
       }
     } catch {
-      // Silently ignore poll errors
+      // Polling errors are expected during shutdown — silently ignore
     } finally {
       pollInFlight = false;
     }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { quintIn } from 'svelte/easing';
+  import { fade } from 'svelte/transition';
   import {
     FolderGit2,
     House,
@@ -59,7 +60,9 @@
     return repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0);
   }
 
-  function getProjectPrStatus(projectId: string): 'merged' | 'open' | 'closed' | 'conflict' | null {
+  function getProjectPrStatus(
+    projectId: string
+  ): 'merged' | 'open' | 'closed' | 'checks_failing' | 'conflict' | null {
     const branches = projectBranches.get(projectId) || [];
     return aggregateProjectPrStatus(branches);
   }
@@ -201,6 +204,8 @@
                 <div class="row-main">
                   {#if prStatus === 'merged'}
                     <GitPullRequest size={14} class="pr-status-merged" />
+                  {:else if prStatus === 'checks_failing'}
+                    <GitPullRequest size={14} class="pr-status-checks-failing" />
                   {:else if prStatus === 'open'}
                     <GitPullRequest size={14} />
                   {:else if prStatus === 'closed'}
@@ -221,13 +226,26 @@
                 </div>
                 <div class="row-status">
                   {#if status.kind === 'running'}
-                    <span class="status-running">
+                    <span
+                      class="status-running"
+                      in:fade={{ duration: 300, delay: 150 }}
+                      out:fade={{ duration: 150 }}
+                    >
                       <Spinner size={12} />
                     </span>
                   {:else if status.kind === 'unread'}
-                    <span class="status-unread-dot" aria-label="Unread updates"></span>
+                    <span
+                      class="status-unread-dot"
+                      aria-label="Unread updates"
+                      in:fade={{ duration: 300, delay: 150 }}
+                      out:fade={{ duration: 150 }}
+                    ></span>
                   {:else if status.kind === 'deleting'}
-                    <span class="status-deleting">Deleting…</span>
+                    <span
+                      class="status-deleting"
+                      in:fade={{ duration: 300, delay: 150 }}
+                      out:fade={{ duration: 150 }}>Deleting…</span
+                    >
                   {/if}
                 </div>
               </button>
@@ -415,6 +433,10 @@
   }
 
   .row-main :global(svg.pr-status-conflict) {
+    stroke: var(--ui-danger);
+  }
+
+  .row-main :global(svg.pr-status-checks-failing) {
     stroke: var(--ui-danger);
   }
 

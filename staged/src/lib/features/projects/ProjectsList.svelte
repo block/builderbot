@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { fade } from 'svelte/transition';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Plus } from 'lucide-svelte';
   import type { Project, ProjectRepo, Branch } from '../../types';
@@ -169,7 +170,9 @@
     selectProject(projectId);
   }
 
-  function getProjectPrStatus(projectId: string): 'merged' | 'open' | 'closed' | 'conflict' | null {
+  function getProjectPrStatus(
+    projectId: string
+  ): 'merged' | 'open' | 'closed' | 'checks_failing' | 'conflict' | null {
     const branches = projectBranches.get(projectId) || [];
     return aggregateProjectPrStatus(branches);
   }
@@ -293,15 +296,25 @@
                   </div>
                 {/if}
                 {#if status.kind === 'running'}
-                  <div class="status-indicator spinner">
+                  <div
+                    class="status-indicator spinner"
+                    in:fade={{ duration: 300, delay: 150 }}
+                    out:fade={{ duration: 150 }}
+                  >
                     <Spinner size={14} />
                   </div>
                 {:else if status.kind === 'unread'}
-                  <div class="status-indicator unread-dot"></div>
+                  <div
+                    class="status-indicator unread-dot"
+                    in:fade={{ duration: 300, delay: 150 }}
+                    out:fade={{ duration: 150 }}
+                  ></div>
                 {/if}
                 <div class="card-header">
                   {#if prStatus === 'merged'}
                     <GitPullRequest size={16} class="pr-status-merged" />
+                  {:else if prStatus === 'checks_failing'}
+                    <GitPullRequest size={16} class="pr-status-checks-failing" />
                   {:else if prStatus === 'open'}
                     <GitPullRequest size={16} />
                   {:else if prStatus === 'closed'}
@@ -491,6 +504,10 @@
   }
 
   .card-header :global(svg.pr-status-conflict) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.pr-status-checks-failing) {
     stroke: var(--ui-danger);
   }
 

@@ -15,23 +15,26 @@ export function projectDisplayName(p: Project): string {
  * - 'merged': All PRs are merged
  * - 'open': PRs are open (default state)
  * - 'closed': PRs are closed without merging
+ * - 'checks_failing': PRs have failing CI checks
  * - 'conflict': PRs have merge conflicts
  * - null: No branches with PRs
  *
  * Priority order (most concerning first):
  * 1. No PR exists (null)
  * 2. Conflict (merge conflicts)
- * 3. Closed (closed without merging)
- * 4. Open (open PRs)
- * 5. Merged (merged PRs)
+ * 3. Checks failing (CI failures)
+ * 4. Closed (closed without merging)
+ * 5. Open (open PRs)
+ * 6. Merged (merged PRs)
  */
 export function aggregateProjectPrStatus(
   branches: Branch[]
-): 'merged' | 'open' | 'closed' | 'conflict' | null {
+): 'merged' | 'open' | 'closed' | 'checks_failing' | 'conflict' | null {
   if (branches.length === 0) return null;
 
   let hasNoPr = false;
   let hasConflict = false;
+  let hasChecksFailing = false;
   let hasClosed = false;
   let hasOpen = false;
   let hasMerged = false;
@@ -43,7 +46,7 @@ export function aggregateProjectPrStatus(
       continue;
     }
 
-    const { prState, prMergeable } = branch;
+    const { prState, prMergeable, prChecksStatus } = branch;
 
     // Check for merged state
     if (prState === 'MERGED') {
@@ -63,6 +66,12 @@ export function aggregateProjectPrStatus(
       continue;
     }
 
+    // Check for failing CI checks on open PRs
+    if (prChecksStatus === 'FAILURE') {
+      hasChecksFailing = true;
+      continue;
+    }
+
     // Default to open for other cases
     hasOpen = true;
   }
@@ -70,6 +79,7 @@ export function aggregateProjectPrStatus(
   // Return the most concerning status
   if (hasNoPr) return null;
   if (hasConflict) return 'conflict';
+  if (hasChecksFailing) return 'checks_failing';
   if (hasClosed) return 'closed';
   if (hasOpen) return 'open';
   if (hasMerged) return 'merged';

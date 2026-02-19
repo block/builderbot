@@ -51,6 +51,7 @@ pub fn create_pr(
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
+    draft: Option<bool>,
 ) -> Result<String, String> {
     let store = get_store(&store)?;
 
@@ -85,14 +86,22 @@ pub fn create_pr(
     // branch, not the local tracking branch. Local branches can be stale if not kept in sync,
     // which causes incorrect PR diffs that include already-merged commits. Remote-tracking
     // refs are always up-to-date after fetch.
+    let is_draft = draft.unwrap_or(false);
+    let draft_flag = if is_draft { " --draft" } else { "" };
+    let pr_type = if is_draft {
+        "draft pull request"
+    } else {
+        "pull request"
+    };
+
     let prompt = format!(
         r#"<action>
-Create a pull request for the current branch.
+Create a {pr_type} for the current branch.
 
 Steps:
 1. First, look at the diff between the current branch and when it branched off of the base branch `{base_branch}` to understand all changes. Use `git log --oneline origin/{base_branch}..HEAD` and `git diff origin/{base_branch}...HEAD --stat` to see what changed.
 2. Push the current branch to the remote: `git push -u origin {branch_name}`
-3. Create a PR using the GitHub CLI: `gh pr create --base {base_branch} --fill-first`
+3. Create a PR using the GitHub CLI: `gh pr create --base {base_branch} --fill-first{draft_flag}`
    - The title MUST use conventional commit style (e.g., "feat: add user authentication", "fix: resolve null pointer in parser", "refactor: extract validation logic")
    - Choose the most appropriate conventional commit type (feat, fix, refactor, docs, style, test, chore, perf, ci, build) based on the actual changes
    - The body should be a concise summary of the changes
@@ -102,8 +111,10 @@ PR_URL: https://github.com/...
 
 This is critical - the application parses this to link the PR.
 </action>"#,
+        pr_type = pr_type,
         base_branch = base_branch,
         branch_name = branch.branch_name,
+        draft_flag = draft_flag,
     );
 
     let mut session = store::Session::new_running(&prompt, &working_dir);

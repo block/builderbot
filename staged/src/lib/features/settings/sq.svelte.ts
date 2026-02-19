@@ -1,9 +1,8 @@
 /**
  * sq CLI availability cache.
  *
- * Checked once at app startup and cached here so that components
- * (e.g. NewBranchModal) can read the result synchronously without
- * introducing a per-open delay.
+ * Checked once at app startup and cached here so components can
+ * read the result synchronously without introducing a per-open delay.
  */
 
 import { isSqAvailable } from '../../commands';

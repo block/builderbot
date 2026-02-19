@@ -27,22 +27,13 @@ tauri-plugin-log = "2.8.0"
 git2 = "0.19"
 thiserror = "2.0"
 anyhow = "1.0"
-libc = "0.2"
 base64 = "0.22"
 
-# File watching
-notify = "8.0"
-notify-debouncer-full = "0.5"
-ignore = "0.4"
-
-# Syntax highlighting
-syntect = "5.2"
 tauri-plugin-dialog = "2.6.0"
 
 # Review storage
 rusqlite = { version = "0.38", features = ["bundled"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-window-state = "2.4.1"
@@ -50,17 +41,12 @@ reqwest = { version = "0.13.1", features = ["json"] }
 tokio = { version = "1.49.0", features = ["sync", "process", "io-util", "macros", "rt-multi-thread"] }
 tauri-plugin-opener = "2"
 
-# Agent Client Protocol (ACP) for AI integration
-agent-client-protocol = "0.9"
-
 # Actions framework
 builderbot-actions = { path = "../../crates/builderbot-actions" }
 acp-client = { path = "../../crates/acp-client" }
 blox-cli = { path = "../../crates/blox-cli" }
 which = "7.0"
 
-# MCP Bridge for automation/testing (debug only)
-tauri-plugin-mcp-bridge = "0.8.1"
 async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"

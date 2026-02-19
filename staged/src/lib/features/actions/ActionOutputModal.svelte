@@ -193,6 +193,10 @@
           if (event.exitCode !== undefined) {
             exitCode = event.exitCode;
           }
+          // Reset stopping flag once the backend confirms a terminal state
+          if (status !== 'running') {
+            stopping = false;
+          }
         }
       });
     } catch (e: any) {
@@ -220,11 +224,11 @@
     stopping = true;
     try {
       await stopBranchAction(executionId);
-      status = 'stopped';
+      // Don't set status here — the backend will emit a 'stopped' status
+      // event once the process actually exits, which our listener handles.
     } catch (e: any) {
       error = e?.message || 'Failed to stop action';
       console.error('Failed to stop action:', e);
-    } finally {
       stopping = false;
     }
   }
@@ -342,10 +346,10 @@
         {/if}
       </div>
       <div class="header-actions">
-        {#if isRunning && !stopping}
-          <button class="stop-btn" onclick={handleStop} title="Stop action">
+        {#if isRunning}
+          <button class="stop-btn" onclick={handleStop} disabled={stopping} title="Stop action">
             <CircleStop size={14} />
-            <span>Stop</span>
+            <span>{stopping ? 'Stopping…' : 'Stop'}</span>
           </button>
         {/if}
         {#if status === 'failed' && onRemove}
@@ -497,9 +501,14 @@
     transition: all 0.15s;
   }
 
-  .stop-btn:hover {
+  .stop-btn:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.15);
     border-color: rgba(239, 68, 68, 0.3);
+  }
+
+  .stop-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .remove-btn {

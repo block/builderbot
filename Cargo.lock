@@ -259,7 +259,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "libc",
- "log",
  "serde",
  "serde_json",
  "tokio",

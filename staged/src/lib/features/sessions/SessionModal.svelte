@@ -435,29 +435,6 @@
     | { type: 'assistant'; message: SessionMessage }
     | { type: 'tools'; pairs: ToolPair[] };
 
-  function normalizeToolCallContent(content: string): string {
-    return content.trim().replace(/\s+/g, ' ');
-  }
-
-  /**
-   * Some providers stream tool-call titles as repeated partial updates
-   * (same content or a strict prefix growth) before a single tool_result.
-   * Collapse those consecutive updates into one visible tool card.
-   */
-  function isLikelyStreamingToolCallDuplicate(
-    previous: SessionMessage,
-    next: SessionMessage
-  ): boolean {
-    if (previous.role !== 'tool_call' || next.role !== 'tool_call') return false;
-    const prev = normalizeToolCallContent(previous.content);
-    const curr = normalizeToolCallContent(next.content);
-    if (!prev || !curr) return false;
-    if (prev === curr) return true;
-    const shortest = Math.min(prev.length, curr.length);
-    if (shortest < 24) return false;
-    return prev.startsWith(curr) || curr.startsWith(prev);
-  }
-
   let grouped = $derived.by(() => {
     const groups: MessageGroup[] = [];
     let i = 0;
@@ -477,17 +454,8 @@
           (messages[i].role === 'tool_call' || messages[i].role === 'tool_result')
         ) {
           if (messages[i].role === 'tool_call') {
-            let call = messages[i];
+            const call = messages[i];
             i++;
-            while (
-              i < messages.length &&
-              messages[i].role === 'tool_call' &&
-              isLikelyStreamingToolCallDuplicate(call, messages[i])
-            ) {
-              // Keep only the most complete/latest streamed title.
-              call = messages[i];
-              i++;
-            }
             // Check if next message is the matching result
             let result: SessionMessage | null = null;
             if (i < messages.length && messages[i].role === 'tool_result') {

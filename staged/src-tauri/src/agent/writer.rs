@@ -39,6 +39,11 @@ pub struct MessageWriter {
     last_flush_at: Mutex<Instant>,
     /// Maps external tool-call IDs → DB row IDs.
     tool_call_rows: Mutex<HashMap<String, i64>>,
+    /// DB row id of the currently streaming tool result.
+    ///
+    /// ACP can send multiple content updates for one tool call; we update
+    /// the same row instead of inserting duplicates.
+    current_tool_result_msg_id: Mutex<Option<i64>>,
 }
 
 impl MessageWriter {
@@ -50,6 +55,7 @@ impl MessageWriter {
             current_text: Mutex::new(String::new()),
             last_flush_at: Mutex::new(Instant::now()),
             tool_call_rows: Mutex::new(HashMap::new()),
+            current_tool_result_msg_id: Mutex::new(None),
         }
     }
 
@@ -87,6 +93,14 @@ impl MessageWriter {
     /// to maintain correct message ordering.
     pub async fn record_tool_call(&self, tool_call_id: &str, title: &str) {
         self.finalize().await;
+        *self.current_tool_result_msg_id.lock().await = None;
+
+        // Some providers may resend ToolCall for the same ID while streaming.
+        // Treat those as updates to the existing row.
+        if let Some(&row_id) = self.tool_call_rows.lock().await.get(tool_call_id) {
+            let _ = self.store.update_message_content(row_id, title);
+            return;
+        }
 
         match self
             .store
@@ -112,9 +126,19 @@ impl MessageWriter {
 
     /// Record the result/output of a tool call.
     pub async fn record_tool_result(&self, content: &str) {
-        let _ = self
+        let mut current_result_id = self.current_tool_result_msg_id.lock().await;
+        if let Some(id) = *current_result_id {
+            let _ = self.store.update_message_content(id, content);
+            return;
+        }
+
+        match self
             .store
-            .add_session_message(&self.session_id, MessageRole::ToolResult, content);
+            .add_session_message(&self.session_id, MessageRole::ToolResult, content)
+        {
+            Ok(id) => *current_result_id = Some(id),
+            Err(e) => log::error!("Failed to insert tool_result message: {e}"),
+        }
     }
 
     // =====================================================================
@@ -179,5 +203,54 @@ impl acp_client::MessageWriter for MessageWriter {
 
     async fn record_tool_result(&self, content: &str) {
         self.record_tool_result(content).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use super::MessageWriter;
+    use crate::store::{MessageRole, Session, Store};
+
+    fn setup_writer() -> (Arc<Store>, String, MessageWriter) {
+        let store = Arc::new(Store::in_memory().expect("in-memory store"));
+        let session = Session::new_running("test prompt", Path::new("."));
+        store.create_session(&session).expect("create session");
+        let writer = MessageWriter::new(session.id.clone(), Arc::clone(&store));
+        (store, session.id, writer)
+    }
+
+    #[tokio::test]
+    async fn record_tool_result_updates_existing_row_for_streaming_updates() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.record_tool_call("tc-1", "Run echo hello").await;
+        writer.record_tool_result("first chunk").await;
+        writer.record_tool_result("second chunk").await;
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::ToolCall);
+        assert_eq!(messages[1].role, MessageRole::ToolResult);
+        assert_eq!(messages[1].content, "second chunk");
+    }
+
+    #[tokio::test]
+    async fn record_tool_call_same_id_updates_instead_of_inserting() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.record_tool_call("tc-dup", "Run first title").await;
+        writer.record_tool_call("tc-dup", "Run updated title").await;
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, MessageRole::ToolCall);
+        assert_eq!(messages[0].content, "Run updated title");
     }
 }

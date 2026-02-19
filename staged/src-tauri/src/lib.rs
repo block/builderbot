@@ -2226,17 +2226,23 @@ pub fn run() {
             let compat = store::check_db_compatibility(&db_path)
                 .map_err(|e| format!("Cannot check database: {e}"))?;
 
+            // Create registry early so it can be passed to reconnect_orphaned_sessions.
+            let registry = Arc::new(session_runner::SessionRegistry::new());
+
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
                     let s =
                         Store::new(&db_path).map_err(|e| format!("Failed to open store: {e}"))?;
-                    // Cancel any sessions that were running when the app last closed
-                    match s.cancel_orphaned_sessions() {
-                        Ok(0) => {}
-                        Ok(n) => log::info!("Cancelled {n} orphaned session(s) from previous run"),
-                        Err(e) => log::warn!("Failed to cancel orphaned sessions: {e}"),
-                    }
-                    (Mutex::new(Some(Arc::new(s))), None)
+                    let store_arc = Arc::new(s);
+                    // Attempt ACP reconnection for running sessions instead of
+                    // silently cancelling them. Sessions with no agent_id (never
+                    // reached ACP) are still cancelled.
+                    session_runner::reconnect_orphaned_sessions(
+                        Arc::clone(&store_arc),
+                        app.handle().clone(),
+                        Arc::clone(&registry),
+                    );
+                    (Mutex::new(Some(store_arc)), None)
                 }
                 store::DbCompatibility::NeedsReset { db_app_version } => {
                     let info = StoreIncompatibility {
@@ -2267,7 +2273,7 @@ pub fn run() {
             };
 
             app.manage(store_slot);
-            app.manage(Arc::new(session_runner::SessionRegistry::new()));
+            app.manage(registry);
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
             app.manage(DbState {

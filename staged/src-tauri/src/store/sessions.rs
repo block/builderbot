@@ -102,6 +102,18 @@ impl Store {
         Ok(rows > 0)
     }
 
+    pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at
+             FROM sessions WHERE status = 'running'",
+        )?;
+        let sessions = stmt
+            .query_map([], Self::row_to_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
     /// Mark all running sessions as cancelled (used on app startup to clean
     /// up sessions that were interrupted by the previous app close).
     pub fn cancel_orphaned_sessions(&self) -> Result<u64, StoreError> {

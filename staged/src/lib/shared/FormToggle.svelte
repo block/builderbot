@@ -1,7 +1,7 @@
 <script lang="ts" generics="T extends string">
   interface Props {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    options: { value: T; label: string; icon?: any }[];
+    options: { value: T; label: string; description?: string; icon?: any }[];
     value: T;
     disabled?: boolean;
   }
@@ -17,13 +17,17 @@
       {disabled}
       onclick={() => (value = option.value)}
     >
-      <span class="radio-indicator"></span>
       {#if option.icon}
         <span class="toggle-icon">
-          <option.icon size={18} />
+          <option.icon size={22} />
         </span>
       {/if}
-      <span class="toggle-label">{option.label}</span>
+      <span class="toggle-text">
+        <span class="toggle-label">{option.label}</span>
+        {#if option.description}
+          <span class="toggle-desc">{option.description}</span>
+        {/if}
+      </span>
     </button>
   {/each}
 </div>
@@ -31,29 +35,25 @@
 <style>
   .toggle-group {
     display: flex;
+    flex-direction: column;
     gap: 8px;
   }
 
   .toggle-card {
-    flex: 1;
-    position: relative;
     display: flex;
-    flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 6px;
-    min-height: 56px;
+    gap: 12px;
     border: 1.5px solid var(--border-muted);
     border-radius: 10px;
     background: transparent;
     color: var(--text-muted);
-    padding: 14px 12px;
+    padding: 14px 16px;
     font-family: inherit;
     cursor: pointer;
+    text-align: left;
     transition:
       border-color 0.2s ease,
-      color 0.2s ease,
-      background-color 0.2s ease;
+      color 0.2s ease;
   }
 
   .toggle-card:hover {
@@ -71,29 +71,9 @@
     cursor: not-allowed;
   }
 
-  .radio-indicator {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    border: 1.5px solid var(--border-muted);
-    background: transparent;
-    transition:
-      border-color 0.2s ease,
-      background-color 0.2s ease,
-      box-shadow 0.2s ease;
-  }
-
-  .toggle-card.active .radio-indicator {
-    border-color: var(--ui-accent);
-    background: var(--ui-accent);
-    box-shadow: inset 0 0 0 2.5px var(--bg-primary);
-  }
-
   .toggle-icon {
     display: flex;
+    flex-shrink: 0;
     color: var(--text-faint);
     transition: color 0.2s ease;
   }
@@ -102,8 +82,25 @@
     color: var(--ui-accent);
   }
 
+  .toggle-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
   .toggle-label {
     font-size: var(--size-sm);
     font-weight: 500;
+  }
+
+  .toggle-desc {
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+    font-weight: 400;
+  }
+
+  .toggle-card.active .toggle-desc {
+    color: var(--text-muted);
   }
 </style>

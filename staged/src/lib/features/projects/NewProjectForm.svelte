@@ -133,8 +133,13 @@
     <FormToggle
       bind:value={location}
       options={[
-        { value: 'local', label: 'Local', icon: Monitor },
-        { value: 'remote', label: 'Remote', icon: Cloud },
+        {
+          value: 'local',
+          label: 'Local',
+          description: 'Run agents on your machine',
+          icon: Monitor,
+        },
+        { value: 'remote', label: 'Remote', description: 'Run agents in the cloud', icon: Cloud },
       ]}
       disabled={saving}
     />

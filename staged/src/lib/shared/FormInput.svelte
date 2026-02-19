@@ -17,13 +17,13 @@
 
 <style>
   .form-input {
-    min-height: 36px;
-    border: 1px solid var(--border-muted);
-    background: var(--bg-primary);
+    min-height: 42px;
+    border: 1.5px solid var(--border-muted);
+    background: transparent;
     color: var(--text-primary);
-    border-radius: 8px;
-    padding: 8px 12px;
-    font-size: var(--size-sm);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: var(--size-md);
     font-family: inherit;
     outline: none;
     transition: border-color 0.15s ease;

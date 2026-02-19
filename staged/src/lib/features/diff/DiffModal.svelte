@@ -237,6 +237,8 @@
     }
     // Hold A to reveal AI annotations
     if (event.key === 'a' || event.key === 'A') {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
+        return;
       if (!event.repeat) {
         annotationsRevealed = true;
       }
@@ -245,6 +247,8 @@
 
   function handleKeyup(event: KeyboardEvent) {
     if (event.key === 'a' || event.key === 'A') {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
+        return;
       annotationsRevealed = false;
     }
   }

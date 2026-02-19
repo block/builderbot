@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { cubicOut } from 'svelte/easing';
   import {
     FolderGit2,
     House,
@@ -102,6 +103,14 @@
     window.removeEventListener('pointerup', stopResize);
   }
 
+  function slideIn(_node: HTMLElement) {
+    return {
+      duration: 350,
+      easing: cubicOut,
+      css: (t: number) => `transform: translateX(${(t - 1) * 100}%)`,
+    };
+  }
+
   function handleResizeHandleKeydown(e: KeyboardEvent) {
     if (e.key === 'ArrowLeft') {
       e.preventDefault();
@@ -120,7 +129,12 @@
 </script>
 
 {#if !projectsSidebarState.collapsed && projectsSidebarState.hasProjects}
-  <aside class="projects-sidebar" class:resizing style={`width: ${projectsSidebarState.width}px;`}>
+  <aside
+    class="projects-sidebar"
+    class:resizing
+    style={`width: ${projectsSidebarState.width}px;`}
+    in:slideIn
+  >
     <div class="sidebar-header">
       <div class="title-row">
         <h2>Projects</h2>

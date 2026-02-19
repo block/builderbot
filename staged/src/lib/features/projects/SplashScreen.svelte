@@ -77,10 +77,18 @@
       <StagedIcon size={52} />
     </div>
     <h2 class="splash-heading">
-      <span class="phrase-rotator" class:transitioning>
-        {phrases[currentIndex]}
+      <span class="tagline-collapse" class:collapsed={showForm}>
+        <span class="tagline-inner">
+          <span class="phrase-rotator" class:transitioning>
+            {phrases[currentIndex]}
+          </span>
+        </span>
       </span>
-      <br />beautifully <span class="mono accent">staged</span>
+      <span class="staged-line">
+        <span class="beautifully-text" class:collapsed={showForm}>beautifully</span><span
+          class="mono accent">staged</span
+        >
+      </span>
     </h2>
 
     {#if showForm}
@@ -179,6 +187,47 @@
 
   .splash-heading .accent {
     color: var(--ui-accent);
+  }
+
+  .tagline-collapse {
+    display: grid;
+    grid-template-rows: 1fr;
+    transition: grid-template-rows 0.4s ease;
+  }
+
+  .tagline-collapse.collapsed {
+    grid-template-rows: 0fr;
+  }
+
+  .tagline-inner {
+    overflow: hidden;
+    transition: opacity 0.3s ease;
+  }
+
+  .tagline-collapse.collapsed .tagline-inner {
+    opacity: 0;
+  }
+
+  .staged-line {
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 6px;
+  }
+
+  .beautifully-text {
+    display: inline-block;
+    max-width: 200px;
+    overflow: hidden;
+    white-space: nowrap;
+    transition:
+      max-width 0.4s ease,
+      opacity 0.3s ease;
+  }
+
+  .beautifully-text.collapsed {
+    max-width: 0;
+    opacity: 0;
   }
 
   .phrase-rotator {

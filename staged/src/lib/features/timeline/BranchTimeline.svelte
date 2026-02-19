@@ -329,7 +329,7 @@
         disabled={disableNewSessionActions}
       >
         <FileSearch size={18} />
-        <span>New Code Review</span>
+        <span>New code review</span>
       </button>
     {/if}
   </div>
@@ -404,10 +404,10 @@
               class="add-item-btn review-btn"
               onclick={onNewReview}
               disabled={disableNewSessionActions}
-              title="New Code Review"
+              title="New code review"
             >
               <FileSearch size={13} />
-              <span>New Code Review</span>
+              <span>New code review</span>
             </button>
           {/if}
         </div>

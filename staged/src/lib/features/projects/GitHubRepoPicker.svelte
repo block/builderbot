@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { ArrowLeft, Search, Lock, Globe, Clock } from 'lucide-svelte';
+  import { ArrowLeft, Search, Lock, Globe, Clock, Plus } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import * as commands from '../../commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
@@ -203,7 +203,7 @@
       bind:this={searchInputEl}
       bind:value={query}
       type="text"
-      placeholder="Search repos or paste owner/repo..."
+      placeholder="Search or paste a repository..."
       autocomplete="off"
       autocorrect="off"
       spellcheck="false"
@@ -228,6 +228,9 @@
                   >/{recent.subpath}</span
                 >{/if}
             </span>
+          </div>
+          <div class="repo-action">
+            <Plus size={14} />
           </div>
         </button>
       {/each}
@@ -275,6 +278,9 @@
                 <span class="repo-description">{repo.description}</span>
               {/if}
             </div>
+            <div class="repo-action">
+              <Plus size={14} />
+            </div>
           </button>
         {/if}
       {/each}
@@ -293,8 +299,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border-subtle);
+    padding: 8px 10px;
   }
 
   .picker-header h2 {
@@ -328,8 +333,11 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 16px;
-    border-bottom: 1px solid var(--border-subtle);
+    margin: 0 10px 4px;
+    padding: 10px 14px;
+    border: 1px solid var(--border-muted);
+    border-radius: 10px;
+    background: var(--bg-primary);
   }
 
   :global(.search-icon) {
@@ -344,7 +352,7 @@
     outline: none;
     font-size: var(--size-sm);
     color: var(--text-primary);
-    padding: 6px 0;
+    padding: 0;
   }
 
   .search-bar input::placeholder {
@@ -356,8 +364,8 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 8px 0;
+    gap: 2px;
+    padding: 4px 10px 10px;
   }
 
   .loading-state,
@@ -379,7 +387,7 @@
 
   .repo-item {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 12px;
     width: 100%;
     padding: 12px 14px;
@@ -388,10 +396,7 @@
     border-radius: 10px;
     text-align: left;
     cursor: pointer;
-    transition:
-      border-color 0.15s ease,
-      background-color 0.1s ease,
-      color 0.15s ease;
+    transition: background-color 0.15s ease;
   }
 
   .repo-item:hover,
@@ -401,9 +406,9 @@
   }
 
   .repo-icon {
-    padding-top: 2px;
     color: var(--text-muted);
     flex-shrink: 0;
+    display: flex;
   }
 
   .recent-icon {
@@ -416,17 +421,20 @@
     flex-direction: column;
     gap: 2px;
     min-width: 0;
+    text-align: left;
   }
 
   .repo-name {
     font-size: var(--size-sm);
     font-weight: 500;
     color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .repo-subpath {
-    font-size: var(--size-sm);
-    font-weight: 500;
+    font-weight: 400;
     color: var(--text-muted);
   }
 
@@ -436,5 +444,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .repo-action {
+    color: var(--text-faint);
+    flex-shrink: 0;
+    display: flex;
+    transition: color 0.15s ease;
+  }
+
+  .repo-item:hover .repo-action,
+  .repo-item:focus .repo-action {
+    color: var(--text-muted);
   }
 </style>

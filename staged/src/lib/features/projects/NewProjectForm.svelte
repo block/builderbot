@@ -225,7 +225,7 @@
                 class="select-repo-button"
                 onclick={() => (showRepoPicker = true)}
               >
-                Select repository
+                Search or paste a repository
               </FormButton>
               {#if recentRepos.length > 0}
                 <div class="recent-repos-section">

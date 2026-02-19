@@ -399,7 +399,7 @@
     border: none;
     border-radius: 8px;
     background-color: var(--bg-elevated);
-    color: var(--text-muted);
+    color: var(--text-primary);
     font-size: var(--size-sm);
     font-weight: 600;
     cursor: pointer;

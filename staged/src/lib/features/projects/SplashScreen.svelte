@@ -281,8 +281,11 @@
     from {
       clip-path: inset(-8px -8px 100% -8px);
     }
-    to {
+    99% {
       clip-path: inset(-8px);
+    }
+    to {
+      clip-path: none;
     }
   }
 

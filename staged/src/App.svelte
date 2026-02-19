@@ -19,7 +19,7 @@
   import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
-  import { navigation } from './lib/navigation.svelte';
+  import { navigation, initNavigation } from './lib/navigation.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { prStateStore } from './lib/stores/prState.svelte';
   import { sessionRegistry } from './lib/stores/sessionRegistry.svelte';
@@ -183,6 +183,13 @@
       preferences.loaded = true;
     }
     console.debug(`[Staged] preferences ready in ${Math.round(performance.now() - t0)}ms`);
+
+    // Restore the last viewed project (persistent store is now ready).
+    try {
+      await initNavigation();
+    } catch (e) {
+      console.error('Failed to restore last viewed project:', e);
+    }
 
     try {
       storeIncompat = await commands.getStoreStatus();

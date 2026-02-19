@@ -1,0 +1,317 @@
+<!--
+  NewProjectForm.svelte - Reusable project creation form
+
+  Contains the form fields, state, and logic for creating a new project.
+  Used inside NewProjectModal (as a dialog) and SplashScreen (inline).
+-->
+<script lang="ts">
+  import { GitBranch, Monitor, Cloud, X } from 'lucide-svelte';
+  import type { Project } from '../../types';
+  import * as commands from '../../commands';
+  import FormInput from '../../shared/FormInput.svelte';
+  import FormButton from '../../shared/FormButton.svelte';
+  import FormToggle from '../../shared/FormToggle.svelte';
+  import RepoSearchInput from './RepoSearchInput.svelte';
+
+  interface Props {
+    onCreated: (project: Project) => void;
+    onCancel?: () => void;
+    name?: string;
+    location?: 'local' | 'remote';
+    selectedRepo?: string | null;
+    subpath?: string;
+  }
+
+  let {
+    onCreated,
+    onCancel,
+    name = $bindable(''),
+    location = $bindable('local'),
+    selectedRepo = $bindable(null),
+    subpath = $bindable(''),
+  }: Props = $props();
+
+  let saving = $state(false);
+  let error = $state<string | null>(null);
+  let isMonorepo = $state(false);
+  let checkingMonorepo = $state(false);
+
+  async function checkIfMonorepo(repo: string) {
+    if (!repo) {
+      isMonorepo = false;
+      return;
+    }
+
+    checkingMonorepo = true;
+    try {
+      const moduleCount = await commands.checkMonorepoModules(repo);
+      isMonorepo = moduleCount >= 20;
+    } catch (e) {
+      isMonorepo = false;
+    } finally {
+      checkingMonorepo = false;
+    }
+  }
+
+  $effect(() => {
+    if (selectedRepo) {
+      checkIfMonorepo(selectedRepo);
+    } else {
+      isMonorepo = false;
+    }
+  });
+
+  async function handleCreate() {
+    if (!name.trim() || saving) return;
+
+    saving = true;
+    error = null;
+
+    try {
+      const normalizedSubpath = selectedRepo
+        ? subpath.trim().replace(/^\/+|\/+$/g, '') || undefined
+        : undefined;
+
+      const project = await commands.createProject(
+        name.trim(),
+        location,
+        selectedRepo ?? undefined,
+        normalizedSubpath
+      );
+      onCreated(project);
+    } catch (e) {
+      if (typeof e === 'string') {
+        error = e;
+      } else if (e instanceof Error) {
+        error = e.message;
+      } else {
+        error = String(e);
+      }
+      saving = false;
+    }
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      const target = e.target as HTMLElement;
+      if (target.closest('.repo-search-wrapper')) return;
+      e.preventDefault();
+      handleCreate();
+    }
+  }
+
+  function handleRepoSelected(nameWithOwner: string, selectedSubpath?: string) {
+    selectedRepo = nameWithOwner;
+    if (selectedSubpath) {
+      subpath = selectedSubpath;
+    }
+  }
+</script>
+
+<svelte:window onkeydown={handleKeydown} />
+
+<div class="new-project-form">
+  <div class="form-group">
+    <label for="project-name">Name</label>
+    <FormInput
+      bind:value={name}
+      id="project-name"
+      placeholder="e.g., Add dark mode, Fix login bug"
+      disabled={saving}
+      autocomplete="off"
+      autocorrect="off"
+      autocapitalize="off"
+      spellcheck={false}
+      autofocus
+    />
+  </div>
+
+  <div class="form-group">
+    <div class="field-label">Location</div>
+    <FormToggle
+      bind:value={location}
+      options={[
+        {
+          value: 'local',
+          label: 'Local',
+          description: 'Run agents on your machine',
+          icon: Monitor,
+        },
+        {
+          value: 'remote',
+          label: 'Remote',
+          description: 'Run agents in the cloud',
+          icon: Cloud,
+        },
+      ]}
+      disabled={saving}
+    />
+  </div>
+
+  <div class="form-group">
+    <label for="project-repo-select">Repository</label>
+    {#if selectedRepo}
+      <div class="repo-info">
+        <GitBranch size={14} class="repo-info-icon" />
+        <div class="repo-details">
+          <span class="repo-name">{selectedRepo}</span>
+        </div>
+        <button class="clear-button" onclick={() => (selectedRepo = null)}>
+          <X size={14} />
+        </button>
+      </div>
+    {:else}
+      <RepoSearchInput onSelect={handleRepoSelected} disabled={saving} />
+    {/if}
+  </div>
+
+  {#if selectedRepo}
+    <div class="form-group">
+      <label for="project-subpath"
+        >Subpath
+        <span class="field-badge {isMonorepo ? 'recommended' : 'optional'}"
+          >{isMonorepo ? 'Recommended' : 'Optional'}</span
+        ></label
+      >
+      <FormInput
+        bind:value={subpath}
+        id="project-subpath"
+        placeholder="e.g., packages/frontend"
+        disabled={saving}
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck={false}
+      />
+    </div>
+  {/if}
+
+  {#if error}
+    <div class="error-message">{error}</div>
+  {/if}
+
+  <div class="actions">
+    {#if onCancel}
+      <FormButton onclick={onCancel} disabled={saving}>Cancel</FormButton>
+    {/if}
+    <FormButton
+      variant="primary"
+      class={!onCancel ? 'full-width-btn' : ''}
+      onclick={handleCreate}
+      disabled={saving || !name.trim()}
+    >
+      {saving ? 'Creating...' : 'Create Project'}
+    </FormButton>
+  </div>
+</div>
+
+<style>
+  .new-project-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  label {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+  }
+
+  .field-label {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+  }
+
+  .field-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .field-badge.optional {
+    background-color: var(--bg-hover);
+    color: var(--text-faint);
+  }
+
+  .field-badge.recommended {
+    background-color: var(--ui-accent);
+    color: var(--bg-deepest);
+  }
+
+  .repo-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 42px;
+    padding: 10px 8px 10px 14px;
+    background: var(--text-primary);
+    color: var(--bg-deepest);
+    border: 1.5px solid var(--text-primary);
+    border-radius: 10px;
+  }
+
+  .repo-info :global(.repo-info-icon) {
+    color: var(--bg-deepest);
+  }
+
+  .repo-details {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .repo-name {
+    font-size: var(--size-sm);
+    color: var(--bg-deepest);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .clear-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--bg-chrome);
+    cursor: pointer;
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .clear-button:hover {
+    color: var(--bg-deepest);
+    background: rgba(0, 0, 0, 0.1);
+  }
+
+  .error-message {
+    color: var(--ui-danger);
+    font-size: var(--size-xs);
+  }
+
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  :global(.full-width-btn) {
+    width: 100%;
+  }
+</style>

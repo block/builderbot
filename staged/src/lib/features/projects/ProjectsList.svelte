@@ -7,22 +7,17 @@
   import { onMount } from 'svelte';
   import { fade } from 'svelte/transition';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import {
-    GitPullRequest,
-    GitPullRequestClosed,
-    GitPullRequestDraft,
-    GitBranch,
-  } from 'lucide-svelte';
-  import type { Project, Branch } from '../../types';
+  import { GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Plus } from 'lucide-svelte';
+  import type { Project, ProjectRepo, Branch } from '../../types';
   import * as commands from '../../commands';
   import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
   import { selectProject } from '../../navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import { getProjectStatus } from './projectStatus';
-  import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
-  import StagedIcon from '../../shared/StagedIcon.svelte';
+  import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import { setHasProjects } from './projectsSidebarState.svelte';
 
   let projects = $state<Project[]>([]);
   let projectBranches = $state<Map<string, Branch[]>>(new Map());
@@ -31,8 +26,17 @@
   let showNewProjectModal = $state(false);
   let isCommandKeyHeld = $state(false);
   let deletingProjectNames = $state<Map<string, string>>(new Map());
-  let repoCountsByProject = $state<Map<string, number>>(new Map());
-  let repoCountLoadGeneration = 0;
+  let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
+  let repoLoadGeneration = 0;
+
+  let repoCountsByProject = $derived(
+    new Map(
+      projects.map((p) => {
+        const repos = reposByProject.get(p.id);
+        return [p.id, repos ? repos.length : p.githubRepo ? 1 : 0] as const;
+      })
+    )
+  );
 
   onMount(() => {
     loadProjects();
@@ -108,10 +112,8 @@
     try {
       const loadedProjects = await commands.listProjects();
       projects = loadedProjects;
-      repoCountsByProject = new Map(
-        loadedProjects.map((project) => [project.id, project.githubRepo ? 1 : 0] as const)
-      );
-      void hydrateRepoCounts(loadedProjects);
+      setHasProjects(loadedProjects.length > 0);
+      void hydrateRepos(loadedProjects);
       // Load branches for each project to calculate PR status
       const branchesMap = new Map<string, Branch[]>();
       await Promise.all(
@@ -133,29 +135,28 @@
     }
   }
 
-  async function hydrateRepoCounts(projectList: Project[]) {
-    const generation = ++repoCountLoadGeneration;
-    const counts = await Promise.all(
+  async function hydrateRepos(projectList: Project[]) {
+    const generation = ++repoLoadGeneration;
+    const entries = await Promise.all(
       projectList.map(async (project) => {
         try {
           const repos = await commands.listProjectRepos(project.id);
-          return [project.id, repos.length] as const;
+          return [project.id, repos] as const;
         } catch (e) {
-          console.error(`[ProjectsList] Failed to load repo count for project '${project.id}':`, e);
-          return [project.id, project.githubRepo ? 1 : 0] as const;
+          console.error(`[ProjectsList] Failed to load repos for project '${project.id}':`, e);
+          return [project.id, [] as ProjectRepo[]] as const;
         }
       })
     );
-    if (generation !== repoCountLoadGeneration) return;
-    repoCountsByProject = new Map(counts);
+    if (generation !== repoLoadGeneration) return;
+    reposByProject = new Map(entries);
   }
 
   function handleProjectCreated(project: Project) {
     if (!projects.some((p) => p.id === project.id)) {
       projects = [...projects, project];
     }
-    repoCountsByProject = new Map(repoCountsByProject).set(project.id, project.githubRepo ? 1 : 0);
-    void hydrateRepoCounts(projects);
+    void hydrateRepos(projects);
     showNewProjectModal = false;
     selectProject(project.id);
   }
@@ -262,89 +263,82 @@
       {:else if error}
         <div class="state error">{error}</div>
       {:else if projects.length === 0}
-        <div class="empty-state">
-          <div class="welcome-header">
-            <StagedIcon size={28} />
-            <h2>welcome to <span class="mono accent">staged</span></h2>
-          </div>
-          <p class="welcome-subtitle">
-            Create your first project to get started
-            <button
-              class="kbd-btn"
-              onclick={() => (showNewProjectModal = true)}
-              title="New project"
-            >
-              +
-            </button>
-            <span class="shortcut-hint">(⌘N)</span>
-          </p>
-          <GitTreeAnimation />
-        </div>
+        <SplashScreen
+          onCreated={handleProjectCreated}
+          requestOpen={showNewProjectModal && projects.length === 0}
+          onFormOpenChange={(open) => (showNewProjectModal = open)}
+        />
       {:else}
-        <div class="projects-grid">
-          <button
-            class="project-card new-project-card"
-            onclick={() => (showNewProjectModal = true)}
-          >
-            <div class="new-project-content">
-              <span class="new-project-label">+ New project</span>
-            </div>
+        <div class="title-row">
+          <h1>Projects</h1>
+          <button class="new-project-btn" onclick={() => (showNewProjectModal = true)}>
+            <Plus size={14} />
+            New project
           </button>
+        </div>
+        <div class="projects-grid">
           {#each projects as project, index (project.id)}
             {@const status = getProjectStatus(project.id, deletingProjectNames)}
             {@const prStatus = getProjectPrStatus(project.id)}
-            <button
-              class="project-card"
-              class:deleting={status.kind === 'deleting'}
-              onclick={() => openProject(project.id)}
-              disabled={status.kind === 'deleting'}
-              title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
-            >
-              {#if isCommandKeyHeld && index < 9}
-                <div class="keyboard-shortcut-overlay">
-                  <span class="command-icon">⌘</span>
-                  <span class="number">{index + 1}</span>
-                </div>
-              {/if}
-              {#if status.kind === 'running'}
-                <div
-                  class="status-indicator spinner"
-                  in:fade={{ duration: 300, delay: 150 }}
-                  out:fade={{ duration: 150 }}
-                >
-                  <Spinner size={14} />
-                </div>
-              {:else if status.kind === 'unread'}
-                <div
-                  class="status-indicator unread-dot"
-                  in:fade={{ duration: 300, delay: 150 }}
-                  out:fade={{ duration: 150 }}
-                ></div>
-              {/if}
-              <div class="card-header">
-                {#if prStatus === 'merged'}
-                  <GitPullRequest size={16} class="pr-status-merged" />
-                {:else if prStatus === 'checks_failing'}
-                  <GitPullRequest size={16} class="pr-status-checks-failing" />
-                {:else if prStatus === 'open'}
-                  <GitPullRequest size={16} />
-                {:else if prStatus === 'closed'}
-                  <GitPullRequestClosed size={16} />
-                {:else if prStatus === 'conflict'}
-                  <GitPullRequestClosed size={16} class="pr-status-conflict" />
-                {:else}
-                  <GitPullRequestDraft size={16} class="pr-status-draft" />
+            {@const repos = reposByProject.get(project.id) ?? []}
+            <div class="project-card-wrapper">
+              <button
+                class="project-card"
+                class:deleting={status.kind === 'deleting'}
+                onclick={() => openProject(project.id)}
+                disabled={status.kind === 'deleting'}
+                title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
+              >
+                {#if isCommandKeyHeld && index < 9}
+                  <div class="keyboard-shortcut-overlay">
+                    <span class="command-icon">⌘</span>
+                    <span class="number">{index + 1}</span>
+                  </div>
                 {/if}
-                <span>{projectDisplayName(project)}</span>
-              </div>
-              {#if status.kind === 'deleting'}
-                <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
-              {/if}
-              <div class="repo">{project.githubRepo ?? 'No repo attached'}</div>
-              <div class="repo">
+                {#if status.kind === 'running'}
+                  <div
+                    class="status-indicator spinner"
+                    in:fade={{ duration: 300, delay: 150 }}
+                    out:fade={{ duration: 150 }}
+                  >
+                    <Spinner size={14} />
+                  </div>
+                {:else if status.kind === 'unread'}
+                  <div
+                    class="status-indicator unread-dot"
+                    in:fade={{ duration: 300, delay: 150 }}
+                    out:fade={{ duration: 150 }}
+                  ></div>
+                {/if}
+                <div class="card-header">
+                  {#if prStatus === 'merged'}
+                    <GitPullRequest size={16} class="pr-status-merged" />
+                  {:else if prStatus === 'checks_failing'}
+                    <GitPullRequest size={16} class="pr-status-checks-failing" />
+                  {:else if prStatus === 'open'}
+                    <GitPullRequest size={16} />
+                  {:else if prStatus === 'closed'}
+                    <GitPullRequestClosed size={16} />
+                  {:else if prStatus === 'conflict'}
+                    <GitPullRequestClosed size={16} class="pr-status-conflict" />
+                  {:else}
+                    <GitPullRequestDraft size={16} class="pr-status-draft" />
+                  {/if}
+                  <span>{projectDisplayName(project)}</span>
+                </div>
+                {#if status.kind === 'deleting'}
+                  <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
+                {/if}
+                <div class="repo">
+                  {repos.length > 0
+                    ? repos.map((r) => r.githubRepo).join(', ')
+                    : (project.githubRepo ?? 'No repo attached')}
+                </div>
+              </button>
+              <div class="card-location">
                 {project.location === 'remote' ? 'Remote workspace' : 'Local worktrees'}
               </div>
-            </button>
+            </div>
           {/each}
         </div>
       {/if}
@@ -352,7 +346,7 @@
   </div>
 </div>
 
-{#if showNewProjectModal}
+{#if showNewProjectModal && projects.length > 0}
   <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
 {/if}
 
@@ -390,6 +384,7 @@
 
   .content.empty-layout {
     max-width: none;
+    padding: 0;
   }
 
   .state {
@@ -401,78 +396,61 @@
     color: var(--ui-danger);
   }
 
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    gap: 20px;
-  }
-
-  .welcome-header {
+  .title-row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    justify-content: space-between;
+    margin-bottom: 16px;
   }
 
-  .welcome-header h2 {
+  .title-row h1 {
+    margin: 0;
     font-size: var(--size-xl);
-    font-weight: 500;
+    font-weight: 700;
     color: var(--text-primary);
-    margin: 0;
   }
 
-  .welcome-header .mono {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    letter-spacing: -0.02em;
-  }
-
-  .welcome-header .accent {
-    color: var(--ui-accent);
-  }
-
-  .welcome-subtitle {
-    margin: 0;
-    font-size: var(--size-sm);
-    color: var(--text-muted);
+  .new-project-btn {
     display: flex;
     align-items: center;
     gap: 6px;
-  }
-
-  .welcome-subtitle .kbd-btn {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    font-size: var(--size-xs);
-    padding: 1px 5px;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 8px;
     background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-radius: 4px;
-    color: var(--ui-accent);
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-weight: 600;
     cursor: pointer;
-    transition:
-      background-color 0.15s ease,
-      border-color 0.15s ease;
+    transition: all 0.15s ease;
   }
 
-  .welcome-subtitle .kbd-btn:hover {
+  .new-project-btn:hover {
+    color: var(--text-primary);
     background-color: var(--bg-hover);
-    border-color: var(--ui-accent);
-  }
-
-  .welcome-subtitle .shortcut-hint {
-    color: var(--text-faint);
-    font-size: var(--size-xs);
-  }
-
-  .empty-state :global(.animation-wrapper) {
-    width: min(1400px, calc(100vw - 48px));
   }
 
   .projects-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    grid-auto-rows: 1fr;
     gap: 12px;
+  }
+
+  .project-card-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .project-card-wrapper .project-card {
+    flex: 1;
+  }
+
+  .card-location {
+    color: var(--text-faint);
+    font-size: var(--size-xs);
+    padding: 0 4px;
   }
 
   .project-card {
@@ -481,62 +459,30 @@
     flex-direction: column;
     gap: 8px;
     text-align: left;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-muted);
+    background: var(--bg-elevated);
+    border: none;
     border-radius: 10px;
-    padding: 14px;
+    padding: 16px;
+    min-height: 120px;
     color: inherit;
     cursor: pointer;
-    transition:
-      border-color 0.15s ease,
-      background-color 0.15s ease,
-      transform 0.15s ease;
+    transition: background-color 0.15s ease;
   }
 
   .project-card:hover {
-    border-color: var(--border-emphasis);
     background-color: var(--bg-hover);
-    transform: translateY(-1px);
   }
 
   .project-card:disabled {
     cursor: not-allowed;
-    transform: none;
   }
 
   .project-card.deleting {
-    border-style: dashed;
     opacity: 0.75;
   }
 
   .project-card.deleting:hover {
-    border-color: var(--border-muted);
-    background: var(--bg-surface);
-    transform: none;
-  }
-
-  .new-project-card {
-    border-style: dashed;
-    color: var(--text-primary);
-    align-items: center;
-    justify-content: center;
-  }
-
-  .new-project-content {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 10px;
-  }
-
-  .new-project-label {
-    font-size: var(--size-sm);
-    font-weight: 600;
-    color: var(--ui-accent);
-  }
-
-  .new-project-card:hover {
-    border-color: var(--ui-accent);
-    background-color: var(--bg-elevated);
+    background: var(--bg-elevated);
   }
 
   .card-header {
@@ -544,7 +490,7 @@
     align-items: center;
     gap: 8px;
     color: var(--text-primary);
-    font-size: var(--size-sm);
+    font-size: var(--size-lg);
     font-weight: 600;
     padding-right: 24px;
   }
@@ -566,15 +512,18 @@
   }
 
   .card-header :global(svg.pr-status-draft) {
-    stroke: var(--text-faint);
+    stroke: var(--text-muted);
   }
 
   .repo {
-    color: var(--text-muted);
-    font-size: var(--size-xs);
+    margin-top: auto;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .deleting-pill {

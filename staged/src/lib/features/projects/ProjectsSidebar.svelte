@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { quintIn } from 'svelte/easing';
   import { fade } from 'svelte/transition';
   import {
     FolderGit2,
@@ -14,6 +15,7 @@
   import { goHome, navigation, selectProject } from '../../navigation.svelte';
   import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
   import Spinner from '../../shared/Spinner.svelte';
+  import StagedIcon from '../../shared/StagedIcon.svelte';
   import { getProjectStatus } from './projectStatus';
   import {
     hydrateProjectsSidebarState,
@@ -105,6 +107,30 @@
     window.removeEventListener('pointerup', stopResize);
   }
 
+  function spring(t: number): number {
+    const decay = 12;
+    const frequency = 2;
+    return 1 - Math.exp(-decay * t) * Math.cos(frequency * Math.PI * t);
+  }
+
+  function slideOpen(_node: HTMLElement) {
+    const w = projectsSidebarState.width;
+    return {
+      duration: 550,
+      easing: spring,
+      css: (t: number) => `margin-left: ${(t - 1) * w}px`,
+    };
+  }
+
+  function slideClose(_node: HTMLElement) {
+    const w = projectsSidebarState.width;
+    return {
+      duration: 350,
+      easing: quintIn,
+      css: (t: number) => `margin-left: ${(t - 1) * w}px`,
+    };
+  }
+
   function handleResizeHandleKeydown(e: KeyboardEvent) {
     if (e.key === 'ArrowLeft') {
       e.preventDefault();
@@ -122,12 +148,20 @@
   }
 </script>
 
-{#if !projectsSidebarState.collapsed}
-  <aside class="projects-sidebar" class:resizing style={`width: ${projectsSidebarState.width}px;`}>
+{#if !projectsSidebarState.collapsed && projectsSidebarState.hasProjects}
+  <aside
+    class="projects-sidebar"
+    class:resizing
+    style={`width: ${projectsSidebarState.width}px;`}
+    in:slideOpen
+    out:slideClose
+  >
     <div class="sidebar-header">
       <div class="title-row">
-        <h2>Projects</h2>
-        <span class="count">{projects.length}</span>
+        <span class="brand-logo">
+          <StagedIcon size={26} />
+          <span class="brand-text">staged</span>
+        </span>
       </div>
     </div>
 
@@ -222,7 +256,7 @@
             onclick={openNewProject}
             title="New project (⌘N)"
           >
-            <Plus size={14} />
+            <span class="plus-icon"><Plus size={12} /></span>
             New project
           </button>
         </div>
@@ -244,7 +278,7 @@
   .projects-sidebar {
     position: relative;
     flex-shrink: 0;
-    border-right: 1px solid var(--border-muted);
+    border-right: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
     background-color: var(--bg-surface);
     display: flex;
     flex-direction: column;
@@ -258,7 +292,6 @@
 
   .sidebar-header {
     padding: 14px 12px 10px;
-    border-bottom: 1px solid var(--border-muted);
     display: flex;
     flex-direction: column;
   }
@@ -269,45 +302,55 @@
     gap: 8px;
   }
 
-  h2 {
-    margin: 0;
-    font-size: var(--size-sm);
-    font-weight: 700;
-    color: var(--text-primary);
-    letter-spacing: 0.01em;
-    text-transform: uppercase;
+  .brand-logo {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
-  .count {
-    font-family: 'SF Mono', 'Menlo', monospace;
-    font-size: calc(var(--size-xs) - 1px);
-    color: var(--text-muted);
-    border: 1px solid var(--border-muted);
-    border-radius: 999px;
-    padding: 1px 7px;
+  .brand-text {
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: var(--size-lg);
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.02em;
+  }
+
+  .plus-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: none;
+    border-radius: 50%;
+    background-color: var(--border-muted);
+    flex-shrink: 0;
   }
 
   .new-project-button {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 8px;
+    gap: 10px;
     width: 100%;
-    border: 1px dashed var(--border-muted);
+    border: none;
     border-radius: 8px;
     background-color: transparent;
-    color: var(--text-muted);
+    color: var(--text-primary);
     padding: 8px 10px;
-    font-size: var(--size-xs);
-    font-weight: 600;
+    font-size: var(--size-sm);
+    font-weight: 500;
     cursor: pointer;
     transition: all 0.15s ease;
   }
 
   .new-project-button:hover {
-    border-color: var(--ui-accent);
     color: var(--text-primary);
-    background-color: var(--bg-hover);
+    background-color: var(--ui-selection);
+  }
+
+  .new-project-button:hover .plus-icon {
+    background-color: var(--border-emphasis);
   }
 
   .new-project-button:focus-visible,
@@ -329,20 +372,16 @@
     padding: 10px 8px;
   }
 
-  .list-new-project-button {
-    margin-top: 8px;
-  }
-
   .project-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
     width: 100%;
-    border: 1px solid transparent;
+    border: none;
     border-radius: 8px;
     background-color: transparent;
-    color: var(--text-muted);
+    color: var(--text-primary);
     cursor: pointer;
     padding: 8px 10px;
     text-align: left;
@@ -351,38 +390,42 @@
 
   .project-row:hover {
     color: var(--text-primary);
-    background-color: var(--bg-hover);
-    border-color: var(--border-muted);
+    background-color: var(--ui-selection);
   }
 
   .project-row.active {
     color: var(--text-primary);
-    background-color: var(--bg-elevated);
-    border-color: var(--border-emphasis);
+    background-color: var(--bg-hover);
+  }
+
+  .project-row.active .row-meta,
+  .project-row.active .repo-count,
+  .project-row.active :global(svg) {
+    color: var(--text-primary);
+    stroke: var(--text-primary);
   }
 
   .project-row.deleting {
     opacity: 0.7;
-    border-style: dashed;
     cursor: not-allowed;
   }
 
   .project-row:disabled:hover {
     color: var(--text-muted);
     background-color: transparent;
-    border-color: transparent;
   }
 
   .row-main {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
+    gap: 10px;
     flex: 1;
     min-width: 0;
   }
 
   .row-main :global(svg) {
     flex-shrink: 0;
+    width: 16px;
   }
 
   .row-main :global(svg.pr-status-merged) {

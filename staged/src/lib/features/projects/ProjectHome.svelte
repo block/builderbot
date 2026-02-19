@@ -16,11 +16,10 @@
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
-  import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
-  import StagedIcon from '../../shared/StagedIcon.svelte';
+  import SplashScreen from './SplashScreen.svelte';
   import { alerts } from '../../shared/alerts.svelte';
+  import { setHasProjects } from './projectsSidebarState.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -42,8 +41,6 @@
 
   // Modal state
   let showNewProjectModal = $state(false);
-  let showRepoPicker = $state(false);
-  let repoPickerProject = $state<Project | null>(null);
 
   // Delete confirmation state
   let projectToDelete = $state<Project | null>(null);
@@ -176,6 +173,7 @@
       const projectList = await commands.listProjects();
       if (generation !== loadGeneration) return;
       projects = projectList;
+      setHasProjects(projectList.length > 0);
       loading = false;
 
       // Seed maps so project sections can render immediately.
@@ -384,6 +382,7 @@
     try {
       await commands.deleteProject(id);
       projects = projects.filter((p) => p.id !== id);
+      setHasProjects(projects.length > 0);
       const nextBranches = new Map(branchesByProject);
       nextBranches.delete(id);
       branchesByProject = nextBranches;
@@ -412,35 +411,21 @@
 
   // ── Branch actions ──
 
-  function handleAddRepo(project: Project) {
-    if (!canAddRepo(project)) {
-      alerts.show({
-        tone: 'warning',
-        title: 'Unable to add repository',
-        message: addRepoHint(project),
-      });
-      return;
-    }
-    repoPickerProject = project;
-    showRepoPicker = true;
-  }
-
-  async function handleRepoSelected(nameWithOwner: string, subpath?: string) {
-    if (!repoPickerProject) return;
+  async function handleRepoSelected(projectId: string, nameWithOwner: string, subpath?: string) {
     try {
-      await commands.addProjectRepo(repoPickerProject.id, nameWithOwner, undefined, subpath);
+      await commands.addProjectRepo(projectId, nameWithOwner, undefined, subpath);
       const [projectsList, branches, repos] = await Promise.all([
         commands.listProjects(),
-        commands.listBranchesForProject(repoPickerProject.id),
-        commands.listProjectRepos(repoPickerProject.id),
+        commands.listBranchesForProject(projectId),
+        commands.listProjectRepos(projectId),
       ]);
       projects = projectsList;
-      branchesByProject = new Map(branchesByProject).set(repoPickerProject.id, branches);
+      branchesByProject = new Map(branchesByProject).set(projectId, branches);
       repoLabelsByProject = new Map(repoLabelsByProject).set(
-        repoPickerProject.id,
+        projectId,
         new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
       );
-      startInitialBranchSetup(repoPickerProject.id, branches);
+      startInitialBranchSetup(projectId, branches);
     } catch (e) {
       console.error('Failed to add repo:', e);
       const message = e instanceof Error ? e.message : String(e);
@@ -450,9 +435,6 @@
         message,
         durationMs: 0,
       });
-    } finally {
-      showRepoPicker = false;
-      repoPickerProject = null;
     }
   }
 
@@ -704,7 +686,7 @@
     showAllProjectsRow={true}
   />
 
-  <div class="main-panel">
+  <div class="main-panel" class:no-pad={!loading && !hasContent}>
     {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
       <div class="update-state">
         <div class="update-card">
@@ -754,18 +736,11 @@
         <p>{error}</p>
       </div>
     {:else if !loading && !hasContent}
-      <div class="empty-state">
-        <div class="welcome-header">
-          <StagedIcon size={28} />
-          <h2>No projects yet</h2>
-        </div>
-        <p class="welcome-subtitle">
-          Create a project to get started —
-          <button class="kbd-btn" onclick={handleNewProject} title="New project">+</button>
-          <span class="shortcut-hint">(⌘N)</span>
-        </p>
-        <GitTreeAnimation />
-      </div>
+      <SplashScreen
+        onCreated={handleProjectCreated}
+        requestOpen={showNewProjectModal && !hasContent}
+        onFormOpenChange={(open) => (showNewProjectModal = open)}
+      />
     {:else}
       <div class="projects-list">
         {#each visibleProjects as project (project.id)}
@@ -786,7 +761,9 @@
               handleRenameBranch(branchId, project.id, branchName)}
             onWorkspaceStatusChange={(branchId, workspaceStatus) =>
               handleWorkspaceStatusChange(project.id, branchId, workspaceStatus)}
-            onAddRepo={() => handleAddRepo(project)}
+            excludeRepos={new Set(repoLabelsByProject.get(project.id)?.values())}
+            onRepoSelected={(nameWithOwner, subpath) =>
+              handleRepoSelected(project.id, nameWithOwner, subpath)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
           />
         {/each}
@@ -805,19 +782,9 @@
   </div>
 {/if}
 
-<!-- New project modal -->
-{#if showNewProjectModal}
+<!-- New project modal (only when projects exist; splash screen handles inline form otherwise) -->
+{#if showNewProjectModal && hasContent}
   <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
-{/if}
-
-{#if showRepoPicker}
-  <GitHubRepoPickerModal
-    onSelect={handleRepoSelected}
-    onClose={() => {
-      showRepoPicker = false;
-      repoPickerProject = null;
-    }}
-  />
 {/if}
 
 <!-- Delete project confirmation -->
@@ -859,9 +826,12 @@
     min-width: 0;
     min-height: 0;
     overflow: auto;
-    padding: 12px 24px 24px;
     display: flex;
     flex-direction: column;
+  }
+
+  .main-panel.no-pad {
+    padding: 0;
   }
 
   .delete-toast {
@@ -1002,71 +972,13 @@
     cursor: not-allowed;
   }
 
-  /* Empty state */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    gap: 20px;
-  }
-
-  .welcome-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .welcome-header h2 {
-    font-size: var(--size-xl);
-    font-weight: 500;
-    color: var(--text-primary);
-    margin: 0;
-  }
-
-  .welcome-subtitle {
-    margin: 0;
-    font-size: var(--size-sm);
-    color: var(--text-muted);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .welcome-subtitle .kbd-btn {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    font-size: var(--size-xs);
-    padding: 1px 5px;
-    background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-radius: 4px;
-    color: var(--ui-accent);
-    cursor: pointer;
-    transition:
-      background-color 0.15s ease,
-      border-color 0.15s ease;
-  }
-
-  .welcome-subtitle .kbd-btn:hover {
-    background-color: var(--bg-hover);
-    border-color: var(--ui-accent);
-  }
-
-  .welcome-subtitle .shortcut-hint {
-    color: var(--text-faint);
-    font-size: var(--size-xs);
-  }
-
-  .empty-state :global(.animation-wrapper) {
-    width: min(1400px, calc(100vw - 48px));
-  }
-
   /* Projects list */
   .projects-list {
     width: 100%;
-    max-width: 800px;
+    max-width: 900px;
     margin: 0 auto;
+    padding: 42px 24px 24px;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 32px;

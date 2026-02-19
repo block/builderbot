@@ -4,12 +4,14 @@
   Shows the project name, repo controls, and all branch cards for this project.
 -->
 <script lang="ts">
-  import { Folder, Trash2, Plus } from 'lucide-svelte';
+  import { ChevronLeft, Trash2, Plus } from 'lucide-svelte';
   import type { Project, Branch, WorkspaceStatus } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
+  import { goHome } from '../../navigation.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import GitHubRepoPicker from './GitHubRepoPicker.svelte';
 
   interface Props {
     project: Project;
@@ -22,11 +24,12 @@
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
     detecting?: boolean;
+    excludeRepos?: Set<string>;
     onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void;
     onWorkspaceStatusChange?: (branchId: string, status: WorkspaceStatus) => void;
-    onAddRepo?: () => void;
+    onRepoSelected?: (nameWithOwner: string, subpath?: string) => void;
     onRetryWorktree?: (branchId: string) => void;
   }
 
@@ -41,15 +44,15 @@
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
     detecting = false,
+    excludeRepos,
     onDeleteProject,
     onDeleteBranch,
     onRenameBranch,
     onWorkspaceStatusChange,
-    onAddRepo,
+    onRepoSelected,
     onRetryWorktree,
   }: Props = $props();
 
-  /** Branches sorted by most recently created first. */
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
   let addRepoDisabled = $derived(deleting || !canAddRepo);
   let addRepoTitle = $derived(
@@ -60,6 +63,35 @@
         : 'Add repository to project'
   );
 
+  let dropdownOpen = $state(false);
+  let wrapperRef: HTMLDivElement | undefined = $state();
+
+  function toggleDropdown() {
+    dropdownOpen = !dropdownOpen;
+  }
+
+  function closeDropdown() {
+    dropdownOpen = false;
+  }
+
+  function handleRepoSelected(nameWithOwner: string, subpath?: string) {
+    dropdownOpen = false;
+    onRepoSelected?.(nameWithOwner, subpath);
+  }
+
+  $effect(() => {
+    if (!dropdownOpen) return;
+
+    function onPointerDown(e: PointerEvent) {
+      if (wrapperRef && !wrapperRef.contains(e.target as Node)) {
+        dropdownOpen = false;
+      }
+    }
+
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  });
+
   function repoLabelForBranch(branch: Branch): string | null {
     if (!branch.projectRepoId) return project.githubRepo;
     return repoLabelsById.get(branch.projectRepoId) ?? project.githubRepo;
@@ -69,8 +101,12 @@
 <div class="project-section">
   <div class="project-header" class:deleting>
     <div class="project-info">
-      <span class="folder-icon"><Folder size={14} /></span>
-      <span class="project-name">{projectDisplayName(project)}</span>
+      <button class="back-button" onclick={goHome} title="Back to projects">
+        <ChevronLeft size={16} />
+      </button>
+      <span class="project-name" title={projectDisplayName(project)}
+        >{projectDisplayName(project)}</span
+      >
       {#if deleting}
         <div class="deleting-status" role="status" aria-live="polite">
           <Spinner size={12} />
@@ -85,30 +121,41 @@
       {/if}
     </div>
     {#if !deleting}
-      <button
-        class="remove-button"
-        class:safe-delete={safeToDelete}
-        onclick={() => onDeleteProject?.()}
-        title="Remove project"
-      >
-        <Trash2 size={14} />
-        Remove Project
-      </button>
+      <div class="header-actions">
+        <div class="add-repo-wrapper" bind:this={wrapperRef}>
+          <button
+            class="header-action-button"
+            onclick={toggleDropdown}
+            disabled={addRepoDisabled}
+            title={addRepoTitle}
+          >
+            <span class="action-icon"><Plus size={12} /></span>
+            Add Repo
+          </button>
+          {#if dropdownOpen}
+            <div class="repo-picker-dropdown">
+              <GitHubRepoPicker
+                onSelect={handleRepoSelected}
+                onBack={closeDropdown}
+                {excludeRepos}
+                showHeader={false}
+              />
+            </div>
+          {/if}
+        </div>
+        <button
+          class="header-action-button danger"
+          class:safe-delete={safeToDelete}
+          onclick={() => onDeleteProject?.()}
+          title="Remove project"
+        >
+          <span class="trash-icon"><Trash2 size={14} /></span>
+          Remove Project
+        </button>
+      </div>
     {/if}
   </div>
   <div class="branches-list" class:deleting>
-    <button
-      class="manage-repos-button"
-      onclick={() => onAddRepo?.()}
-      disabled={addRepoDisabled}
-      title={addRepoTitle}
-    >
-      <Plus size={16} />
-      Add Repo
-    </button>
-    {#if !deleting && !canAddRepo && addRepoHint}
-      <div class="repo-hint">{addRepoHint}</div>
-    {/if}
     {#each sortedBranches as branch (branch.id)}
       {#if branch.branchType === 'remote'}
         <RemoteBranchCard
@@ -152,13 +199,29 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+    flex: 1;
   }
 
-  .folder-icon {
+  .back-button {
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text-faint);
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background-color: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+  }
+
+  .back-button:hover {
+    color: var(--text-primary);
+    background-color: var(--ui-selection);
   }
 
   .project-name {
@@ -166,17 +229,27 @@
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .remove-button {
+  .header-actions {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
+    gap: 4px;
+  }
+
+  .header-action-button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
     background-color: transparent;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    color: var(--text-muted);
+    border: none;
+    border-radius: 8px;
+    color: var(--text-primary);
     font-size: var(--size-sm);
     font-weight: 500;
     cursor: pointer;
@@ -184,21 +257,57 @@
     white-space: nowrap;
   }
 
-  .remove-button:hover {
+  .header-action-button:hover {
+    color: var(--text-primary);
+    background-color: var(--ui-selection);
+  }
+
+  .header-action-button:hover .action-icon {
+    background-color: var(--border-emphasis);
+  }
+
+  .header-action-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .header-action-button:disabled:hover {
+    color: var(--text-muted);
     background-color: transparent;
-    border-color: var(--ui-danger);
+  }
+
+  .header-action-button:disabled:hover .action-icon {
+    background-color: var(--border-muted);
+  }
+
+  .action-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background-color: var(--border-muted);
+    flex-shrink: 0;
+  }
+
+  .trash-icon {
+    display: flex;
+    align-items: center;
+    color: var(--text-muted);
+    transition: color 0.15s ease;
+  }
+
+  .header-action-button.danger:hover {
     color: var(--ui-danger);
   }
 
-  .remove-button.safe-delete {
-    border-color: var(--ui-danger);
+  .header-action-button.danger:hover .trash-icon {
     color: var(--ui-danger);
   }
 
-  .remove-button.safe-delete:hover {
-    background-color: var(--ui-danger);
-    border-color: var(--ui-danger);
-    color: white;
+  .header-action-button.safe-delete {
+    color: var(--ui-danger);
   }
 
   .detecting-status {
@@ -244,39 +353,28 @@
     pointer-events: none;
   }
 
-  .manage-repos-button {
+  .add-repo-wrapper {
+    position: relative;
+  }
+
+  .repo-picker-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    width: 420px;
+    max-height: min(60vh, 420px);
+    background-color: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 12px;
+    box-shadow: var(--shadow-elevated);
+    z-index: 100;
     display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px 20px;
-    background-color: transparent;
-    border: 1px dashed var(--border-muted);
-    border-radius: 8px;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
+    flex-direction: column;
+    overflow: hidden;
   }
 
-  .manage-repos-button:hover {
-    border-color: var(--border-emphasis);
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
-  }
-
-  .manage-repos-button:disabled {
-    cursor: not-allowed;
-    opacity: 0.6;
-    border-color: var(--border-muted);
-    color: var(--text-muted);
-    background-color: transparent;
-  }
-
-  .repo-hint {
-    margin-top: -4px;
-    padding: 0 4px;
-    font-size: var(--size-xs);
-    color: var(--text-muted);
+  .repo-picker-dropdown :global(.repo-picker) {
+    min-height: 0;
+    flex: 1;
   }
 </style>

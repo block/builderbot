@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { GitBranch } from 'lucide-svelte';
+
   interface Props {
     branchName: string;
     repoLabel?: string | null;
@@ -9,19 +11,23 @@
 </script>
 
 <div class="header-left">
-  <span class="branch-name">{branchName}</span>
-  {#if repoLabel || secondaryLabel}
+  {#if repoLabel}
+    <span class="repo-name" title={repoLabel}>{repoLabel}</span>
     <div class="header-meta">
-      {#if repoLabel}
-        <span class="repo-name" title={repoLabel}>{repoLabel}</span>
-      {/if}
-      {#if repoLabel && secondaryLabel}
-        <span class="meta-separator" aria-hidden="true">•</span>
-      {/if}
+      <span class="branch-name">{branchName}</span>
       {#if secondaryLabel}
+        <span class="meta-separator" aria-hidden="true">&middot;</span>
+        <GitBranch size={12} />
         <span class="base-branch-name" title={secondaryLabel}>{secondaryLabel}</span>
       {/if}
     </div>
+  {:else}
+    <span class="repo-name">{branchName}</span>
+    {#if secondaryLabel}
+      <div class="header-meta">
+        <span class="base-branch-name" title={secondaryLabel}>{secondaryLabel}</span>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -34,7 +40,7 @@
     flex: 1;
   }
 
-  .branch-name {
+  .repo-name {
     display: block;
     font-size: var(--size-md);
     font-weight: 600;
@@ -48,21 +54,28 @@
   .header-meta {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     min-width: 0;
+    overflow: hidden;
     font-size: var(--size-xs);
   }
 
-  .base-branch-name {
+  .header-meta :global(svg) {
+    flex-shrink: 0;
     color: var(--text-faint);
+  }
+
+  .branch-name {
+    max-width: 200px;
+    color: var(--text-muted);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .repo-name {
-    color: var(--text-muted);
+  .base-branch-name {
+    color: var(--text-faint);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;

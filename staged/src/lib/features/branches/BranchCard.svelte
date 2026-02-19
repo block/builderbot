@@ -1289,7 +1289,6 @@
     </div>
   {:else if branch.branchType === 'local' && !branch.worktreePath}
     <div class="card-header">
-      <GitBranch size={14} class="branch-icon header-icon" />
       <BranchCardHeaderInfo
         branchName={branch.branchName}
         {repoLabel}
@@ -1321,7 +1320,6 @@
     </div>
   {:else}
     <div class="card-header">
-      <GitBranch size={14} class="branch-icon header-icon" />
       <BranchCardHeaderInfo
         branchName={branch.branchName}
         {repoLabel}
@@ -1772,12 +1770,8 @@
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
+    min-width: 0;
     border-bottom: 1px solid var(--border-subtle);
-  }
-
-  :global(.header-icon) {
-    flex-shrink: 0;
-    align-self: center;
   }
 
   .header-actions {

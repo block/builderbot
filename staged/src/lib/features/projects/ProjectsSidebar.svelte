@@ -160,7 +160,7 @@
       <div class="title-row">
         <span class="brand-logo">
           <StagedIcon size={26} />
-          <span class="brand-text">staged</span>
+          <span class="brand-text">Staged</span>
         </span>
       </div>
     </div>

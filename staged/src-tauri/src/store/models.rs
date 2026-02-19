@@ -836,14 +836,56 @@ impl CommentAuthor {
     }
 }
 
+/// The type/severity of a review comment.
+///
+/// AI-generated comments include a type so the frontend can decide how to
+/// display them: `information` comments become hold-A annotations while
+/// other types render as normal inline comments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentType {
+    /// Informational note — rendered as an annotation overlay.
+    Information,
+    /// Suggestion for improvement.
+    Suggestion,
+    /// Warning about a potential issue.
+    Warning,
+    /// Bug or correctness issue.
+    Issue,
+}
+
+impl CommentType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Information => "information",
+            Self::Suggestion => "suggestion",
+            Self::Warning => "warning",
+            Self::Issue => "issue",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "information" => Some(Self::Information),
+            "suggestion" => Some(Self::Suggestion),
+            "warning" => Some(Self::Warning),
+            "issue" => Some(Self::Issue),
+            _ => None,
+        }
+    }
+}
+
 /// A comment attached to a specific location in a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Comment {
     pub id: String,
     pub path: String,
     pub span: Span,
     pub content: String,
     pub author: CommentAuthor,
+    /// The type/severity of this comment. `None` for user-authored comments.
+    pub comment_type: Option<CommentType>,
     pub created_at: i64,
 }
 
@@ -855,12 +897,18 @@ impl Comment {
             span,
             content: content.into(),
             author: CommentAuthor::User,
+            comment_type: None,
             created_at: now_timestamp(),
         }
     }
 
     pub fn with_author(mut self, author: CommentAuthor) -> Self {
         self.author = author;
+        self
+    }
+
+    pub fn with_comment_type(mut self, comment_type: CommentType) -> Self {
+        self.comment_type = Some(comment_type);
         self
     }
 }

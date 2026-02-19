@@ -22,7 +22,7 @@
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
-  import type { Comment, Span } from '../../types';
+  import type { Comment, SmartDiffAnnotation, Span } from '../../types';
   import {
     buildFileEntries,
     buildTree,
@@ -91,12 +91,31 @@
   let commentToDelete = $state<string | null>(null);
   let showDeleteAllConfirm = $state(false);
 
+  // Annotation reveal state (hold A to reveal)
+  let annotationsRevealed = $state(false);
+
   // ==========================================================================
   // Derived
   // ==========================================================================
 
   let currentDiff = $derived(diffViewer.getCurrentDiff());
-  let currentComments = $derived(reviewHandle?.state.comments ?? []);
+  let allComments = $derived(reviewHandle?.state.comments ?? []);
+
+  // Split AI "information" comments into annotations; everything else stays as comments
+  let currentComments = $derived(allComments.filter((c) => c.commentType !== 'information'));
+
+  /** Convert "information" comments to SmartDiffAnnotation for the overlay system. */
+  let currentAnnotations = $derived<SmartDiffAnnotation[]>(
+    allComments
+      .filter((c) => c.commentType === 'information')
+      .map((c) => ({
+        id: c.id,
+        file_path: c.path,
+        after_span: { start: c.span.start, end: c.span.end },
+        content: c.content,
+        category: 'explanation' as const,
+      }))
+  );
 
   let fileEntries = $derived(
     buildFileEntries(
@@ -214,12 +233,33 @@
       event.preventDefault();
       event.stopPropagation();
       onClose();
+      return;
+    }
+    // Hold A to reveal AI annotations
+    if (event.key === 'a' || event.key === 'A') {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
+        return;
+      if (!event.repeat) {
+        annotationsRevealed = true;
+      }
+    }
+  }
+
+  function handleKeyup(event: KeyboardEvent) {
+    if (event.key === 'a' || event.key === 'A') {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
+        return;
+      annotationsRevealed = false;
     }
   }
 
   onMount(() => {
     document.addEventListener('keydown', handleKeydown);
-    return () => document.removeEventListener('keydown', handleKeydown);
+    document.addEventListener('keyup', handleKeyup);
+    return () => {
+      document.removeEventListener('keydown', handleKeydown);
+      document.removeEventListener('keyup', handleKeyup);
+    };
   });
 </script>
 
@@ -240,6 +280,8 @@
           loading={diffViewer.state.loadingFile !== null}
           {beforeLabel}
           {afterLabel}
+          annotations={currentAnnotations}
+          {annotationsRevealed}
           onAddComment={readonly ? undefined : handleAddComment}
           onUpdateComment={readonly ? undefined : handleUpdateComment}
           onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}

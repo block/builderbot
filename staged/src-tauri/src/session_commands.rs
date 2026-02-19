@@ -840,10 +840,42 @@ was requested and how it was fulfilled."
             "The user is requesting an AI code review of the current branch.
 
 Review the code changes on this branch by running `git diff $(git merge-base origin/HEAD HEAD)..HEAD` \
-(or the appropriate base branch) and provide feedback as structured comments. \
-Focus on: correctness, potential bugs, readability, and adherence to best practices.
+(or the appropriate base branch) and provide feedback as structured comments.
 
 Do NOT create any commits or modify any files.
+
+## Review philosophy
+
+Your comments should tell the story of the change — focus on the \"why\", potential issues, \
+and non-obvious implications. Do NOT exhaustively document every line or restate what the code \
+obviously does. It's fine to have no comments for trivial or self-explanatory files. \
+Aim for quality over quantity: a few insightful comments are better than many shallow ones.
+
+## Comment types
+
+Each comment MUST include a `type` field. Choose the type carefully:
+
+- `\"information\"` — Contextual explanation, \"why\" behind a change, or architectural observation. \
+Use this for comments that help a reader understand the change but don't require action. \
+These are shown as subtle hold-to-reveal annotations, not inline comments. \
+Examples: explaining a non-obvious design decision, noting how a change fits into the broader architecture, \
+describing what the old code was doing and why it changed.
+
+- `\"suggestion\"` — A recommended improvement that isn't strictly necessary. \
+The code works but could be better. \
+Examples: a more idiomatic approach, better naming, a simplification.
+
+- `\"warning\"` — A potential issue or concern that deserves attention. \
+Not a definite bug, but something that could cause problems. \
+Examples: missing edge case handling, potential performance issue, fragile assumption.
+
+- `\"issue\"` — A bug or correctness problem that should be fixed. \
+Examples: off-by-one error, null pointer risk, logic error, security vulnerability.
+
+Most comments in a typical review should be `\"information\"` or `\"suggestion\"`. \
+Reserve `\"warning\"` and `\"issue\"` for genuine concerns.
+
+## Output format
 
 Return your review as a JSON block fenced with ```review-comments markers:
 
@@ -852,13 +884,22 @@ Return your review as a JSON block fenced with ```review-comments markers:
   {
     \"path\": \"src/foo.ts\",
     \"span\": { \"start\": 10, \"end\": 15 },
-    \"content\": \"This function doesn't handle the null case...\"
+    \"type\": \"information\",
+    \"content\": \"This refactors the error handling from panicking to returning Results, which aligns with the broader error-handling migration across the codebase.\"
+  },
+  {
+    \"path\": \"src/bar.rs\",
+    \"span\": { \"start\": 42, \"end\": 45 },
+    \"type\": \"warning\",
+    \"content\": \"This unwrap() could panic if the connection pool is exhausted under load.\"
   }
 ]
 ```
 
-The `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end). \
-Only comment on changed files. Be specific and actionable."
+Rules:
+- `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end).
+- Only comment on changed files.
+- Be specific and actionable — reference the actual code, not generic advice."
         }
     };
 

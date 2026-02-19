@@ -43,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
 use crate::git::Span;
-use crate::store::{Comment, CommentAuthor, MessageRole, SessionStatus, Store};
+use crate::store::{Comment, CommentAuthor, CommentType, MessageRole, SessionStatus, Store};
 
 // =============================================================================
 // Event types
@@ -512,6 +512,7 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
                 for item in parsed {
                     let path = item.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     let content = item.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    let comment_type_str = item.get("type").and_then(|v| v.as_str());
                     let span_obj = item.get("span");
                     let start = span_obj
                         .and_then(|s| s.get("start"))
@@ -523,10 +524,12 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
                         .unwrap_or(0) as u32;
 
                     if !path.is_empty() && !content.is_empty() {
-                        comments.push(
-                            Comment::new(path, Span::new(start, end), content)
-                                .with_author(CommentAuthor::Agent),
-                        );
+                        let mut comment = Comment::new(path, Span::new(start, end), content)
+                            .with_author(CommentAuthor::Agent);
+                        if let Some(ct) = comment_type_str.and_then(CommentType::parse) {
+                            comment = comment.with_comment_type(ct);
+                        }
+                        comments.push(comment);
                     }
                 }
             } else {
@@ -756,6 +759,55 @@ Second batch:
         assert!(
             comments.is_empty(),
             "should skip entries with empty path or content"
+        );
+    }
+
+    #[test]
+    fn extract_comment_types() {
+        let text = r#"```review-comments
+[
+  {
+    "path": "src/main.rs",
+    "span": { "start": 1, "end": 5 },
+    "content": "FYI: this is informational.",
+    "type": "information"
+  },
+  {
+    "path": "src/main.rs",
+    "span": { "start": 10, "end": 12 },
+    "content": "Consider renaming this variable.",
+    "type": "suggestion"
+  },
+  {
+    "path": "src/lib.rs",
+    "span": { "start": 20, "end": 25 },
+    "content": "This could panic at runtime.",
+    "type": "warning"
+  },
+  {
+    "path": "src/lib.rs",
+    "span": { "start": 30, "end": 35 },
+    "content": "Off-by-one error here.",
+    "type": "issue"
+  },
+  {
+    "path": "src/lib.rs",
+    "span": { "start": 40, "end": 45 },
+    "content": "No type field at all."
+  }
+]
+```"#;
+
+        let comments = extract_review_comments(text);
+        assert_eq!(comments.len(), 5);
+
+        assert_eq!(comments[0].comment_type, Some(CommentType::Information));
+        assert_eq!(comments[1].comment_type, Some(CommentType::Suggestion));
+        assert_eq!(comments[2].comment_type, Some(CommentType::Warning));
+        assert_eq!(comments[3].comment_type, Some(CommentType::Issue));
+        assert_eq!(
+            comments[4].comment_type, None,
+            "missing type field should result in None"
         );
     }
 

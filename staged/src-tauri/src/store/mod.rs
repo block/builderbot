@@ -61,7 +61,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -355,14 +355,15 @@ impl Store {
             );
 
             CREATE TABLE IF NOT EXISTS comments (
-                id          TEXT PRIMARY KEY,
-                review_id   TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
-                path        TEXT NOT NULL,
-                span_start  INTEGER NOT NULL,
-                span_end    INTEGER NOT NULL,
-                content     TEXT NOT NULL,
-                author      TEXT NOT NULL DEFAULT 'user',
-                created_at  INTEGER NOT NULL
+                id            TEXT PRIMARY KEY,
+                review_id     TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+                path          TEXT NOT NULL,
+                span_start    INTEGER NOT NULL,
+                span_end      INTEGER NOT NULL,
+                content       TEXT NOT NULL,
+                author        TEXT NOT NULL DEFAULT 'user',
+                comment_type  TEXT,
+                created_at    INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_comments_review ON comments(review_id);
 

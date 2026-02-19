@@ -262,6 +262,9 @@ export interface DiffFilesResponse {
 /** Who authored a comment. */
 export type CommentAuthor = 'user' | 'agent';
 
+/** The type/severity of a review comment. */
+export type CommentType = 'information' | 'suggestion' | 'warning' | 'issue';
+
 /** A comment attached to a specific location in a file. */
 export interface Comment {
   id: string;
@@ -269,6 +272,8 @@ export interface Comment {
   span: Span;
   content: string;
   author: CommentAuthor;
+  /** The type/severity of this comment. Null for user-authored comments. */
+  commentType: CommentType | null;
   createdAt: number;
 }
 

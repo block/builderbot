@@ -61,7 +61,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

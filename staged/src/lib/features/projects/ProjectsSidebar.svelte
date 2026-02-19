@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { fade } from 'svelte/transition';
   import {
     FolderGit2,
     House,
@@ -191,13 +192,26 @@
                 </div>
                 <div class="row-status">
                   {#if status.kind === 'running'}
-                    <span class="status-running">
+                    <span
+                      class="status-running"
+                      in:fade={{ duration: 300, delay: 150 }}
+                      out:fade={{ duration: 150 }}
+                    >
                       <Spinner size={12} />
                     </span>
                   {:else if status.kind === 'unread'}
-                    <span class="status-unread-dot" aria-label="Unread updates"></span>
+                    <span
+                      class="status-unread-dot"
+                      aria-label="Unread updates"
+                      in:fade={{ duration: 300, delay: 150 }}
+                      out:fade={{ duration: 150 }}
+                    ></span>
                   {:else if status.kind === 'deleting'}
-                    <span class="status-deleting">Deleting…</span>
+                    <span
+                      class="status-deleting"
+                      in:fade={{ duration: 300, delay: 150 }}
+                      out:fade={{ duration: 150 }}>Deleting…</span
+                    >
                   {/if}
                 </div>
               </button>

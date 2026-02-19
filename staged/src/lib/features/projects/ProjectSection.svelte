@@ -85,30 +85,29 @@
       {/if}
     </div>
     {#if !deleting}
-      <button
-        class="remove-button"
-        class:safe-delete={safeToDelete}
-        onclick={() => onDeleteProject?.()}
-        title="Remove project"
-      >
-        <Trash2 size={14} />
-        Remove Project
-      </button>
+      <div class="header-actions">
+        <button
+          class="header-action-button"
+          onclick={() => onAddRepo?.()}
+          disabled={addRepoDisabled}
+          title={addRepoTitle}
+        >
+          <span class="action-icon"><Plus size={12} /></span>
+          Add Repo
+        </button>
+        <button
+          class="header-action-button danger"
+          class:safe-delete={safeToDelete}
+          onclick={() => onDeleteProject?.()}
+          title="Remove project"
+        >
+          <span class="trash-icon"><Trash2 size={14} /></span>
+          Remove Project
+        </button>
+      </div>
     {/if}
   </div>
   <div class="branches-list" class:deleting>
-    <button
-      class="manage-repos-button"
-      onclick={() => onAddRepo?.()}
-      disabled={addRepoDisabled}
-      title={addRepoTitle}
-    >
-      <Plus size={16} />
-      Add Repo
-    </button>
-    {#if !deleting && !canAddRepo && addRepoHint}
-      <div class="repo-hint">{addRepoHint}</div>
-    {/if}
     {#each sortedBranches as branch (branch.id)}
       {#if branch.branchType === 'remote'}
         <RemoteBranchCard
@@ -168,15 +167,21 @@
     letter-spacing: -0.01em;
   }
 
-  .remove-button {
+  .header-actions {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
+    gap: 4px;
+  }
+
+  .header-action-button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
     background-color: transparent;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    color: var(--text-muted);
+    border: none;
+    border-radius: 8px;
+    color: var(--text-primary);
     font-size: var(--size-sm);
     font-weight: 500;
     cursor: pointer;
@@ -184,21 +189,57 @@
     white-space: nowrap;
   }
 
-  .remove-button:hover {
+  .header-action-button:hover {
+    color: var(--text-primary);
+    background-color: var(--ui-selection);
+  }
+
+  .header-action-button:hover .action-icon {
+    background-color: var(--border-emphasis);
+  }
+
+  .header-action-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .header-action-button:disabled:hover {
+    color: var(--text-muted);
     background-color: transparent;
-    border-color: var(--ui-danger);
+  }
+
+  .header-action-button:disabled:hover .action-icon {
+    background-color: var(--border-muted);
+  }
+
+  .action-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background-color: var(--border-muted);
+    flex-shrink: 0;
+  }
+
+  .trash-icon {
+    display: flex;
+    align-items: center;
+    color: var(--text-muted);
+    transition: color 0.15s ease;
+  }
+
+  .header-action-button.danger:hover {
     color: var(--ui-danger);
   }
 
-  .remove-button.safe-delete {
-    border-color: var(--ui-danger);
+  .header-action-button.danger:hover .trash-icon {
     color: var(--ui-danger);
   }
 
-  .remove-button.safe-delete:hover {
-    background-color: var(--ui-danger);
-    border-color: var(--ui-danger);
-    color: white;
+  .header-action-button.safe-delete {
+    color: var(--ui-danger);
   }
 
   .detecting-status {
@@ -242,41 +283,5 @@
   .branches-list.deleting {
     opacity: 0.65;
     pointer-events: none;
-  }
-
-  .manage-repos-button {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px 20px;
-    background-color: transparent;
-    border: 1px dashed var(--border-muted);
-    border-radius: 8px;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .manage-repos-button:hover {
-    border-color: var(--border-emphasis);
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
-  }
-
-  .manage-repos-button:disabled {
-    cursor: not-allowed;
-    opacity: 0.6;
-    border-color: var(--border-muted);
-    color: var(--text-muted);
-    background-color: transparent;
-  }
-
-  .repo-hint {
-    margin-top: -4px;
-    padding: 0 4px;
-    font-size: var(--size-xs);
-    color: var(--text-muted);
   }
 </style>

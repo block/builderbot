@@ -23,18 +23,26 @@
     minBranchLength: 2,
     maxBranchLength: 6,
     workOnBranchProbability: 0.6,
+    eventPulseDurationMs: 1600,
+    eventGlowRadius: 8,
   };
 
   const SCROLL_SPEED_PER_MS = CONFIG.commitSpacing / CONFIG.commitInterval;
 
   let strokeColor = 'rgba(128, 128, 128, 0.6)';
   let bgColor = '#1a1a1a';
+  let branchEventColor = '#60a5fa';
+  let mergeEventColor = '#22c55e';
+
+  type CommitEventType = 'normal' | 'branch' | 'merge';
 
   interface Commit {
     id: number;
     lane: number;
     x: number;
     appearProgress: number;
+    eventType: CommitEventType;
+    eventPulse: number;
     parentId: number | null;
     mergeParentId: number | null;
     mergeParentLane: number | null;
@@ -69,6 +77,14 @@
     const style = getComputedStyle(document.documentElement);
     strokeColor = style.getPropertyValue('--text-muted').trim() || '#6b7280';
     bgColor = style.getPropertyValue('--bg-chrome').trim() || '#1a1a1a';
+    branchEventColor =
+      style.getPropertyValue('--review-color').trim() ||
+      style.getPropertyValue('--branch-color').trim() ||
+      '#a78bfa';
+    mergeEventColor =
+      style.getPropertyValue('--commit-color').trim() ||
+      style.getPropertyValue('--review-color').trim() ||
+      '#3fb950';
   }
 
   function getActiveBranches(): Branch[] {
@@ -130,6 +146,7 @@
       mergeParentId?: number | null;
       branchFromId?: number | null;
       branchFromLane?: number | null;
+      eventType?: CommitEventType;
     } = {}
   ): Commit {
     let mergeParentLane: number | null = null;
@@ -143,6 +160,8 @@
       lane,
       x: nextCommitX,
       appearProgress: 0,
+      eventType: opts.eventType ?? 'normal',
+      eventPulse: opts.eventType && opts.eventType !== 'normal' ? 1 : 0,
       parentId,
       mergeParentId: opts.mergeParentId ?? null,
       mergeParentLane,
@@ -185,6 +204,7 @@
     addCommit(newLane, null, {
       branchFromId: source.headCommitId,
       branchFromLane: source.lane,
+      eventType: 'branch',
     });
 
     return true;
@@ -194,7 +214,10 @@
     const parent = getBranchByLane(branch.parentBranchLane);
     if (!parent?.active || branch.headCommitId === null) return false;
 
-    addCommit(parent.lane, parent.headCommitId, { mergeParentId: branch.headCommitId });
+    addCommit(parent.lane, parent.headCommitId, {
+      mergeParentId: branch.headCommitId,
+      eventType: 'merge',
+    });
 
     branch.active = false;
     branch.headCommitId = null;
@@ -304,18 +327,34 @@
     ctx.stroke();
   }
 
-  function draw(ctx: CanvasRenderingContext2D, width: number, height: number) {
+  function drawConnection(
+    ctx: CanvasRenderingContext2D,
+    fromX: number,
+    fromY: number,
+    toX: number,
+    toY: number,
+    progress: number,
+    color: string,
+    alpha: number
+  ) {
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = alpha;
+    drawCurve(ctx, fromX, fromY, toX, toY, progress);
+  }
+
+  function draw(ctx: CanvasRenderingContext2D, width: number, height: number, dt: number) {
     ctx.clearRect(0, 0, width, height);
 
     for (const c of commits) {
       if (c.appearProgress < 1) c.appearProgress = Math.min(1, c.appearProgress + 0.08);
+      if (c.eventPulse > 0) {
+        c.eventPulse = Math.max(0, c.eventPulse - dt / CONFIG.eventPulseDurationMs);
+      }
     }
 
     // Draw connections
-    ctx.strokeStyle = strokeColor;
     ctx.lineWidth = CONFIG.lineWidth;
     ctx.lineCap = 'round';
-    ctx.globalAlpha = 0.5;
 
     for (const c of commits) {
       const cx = c.x - scrollOffset;
@@ -334,7 +373,7 @@
               ? parent.x - scrollOffset
               : -CONFIG.commitSpacing;
         const py = parent ? getLaneY(parent.lane, height) : cy;
-        drawCurve(ctx, px, py, cx, cy, progress);
+        drawConnection(ctx, px, py, cx, cy, progress, strokeColor, 0.5);
       }
 
       // Merge parent connection
@@ -346,7 +385,16 @@
             : mp
               ? mp.x - scrollOffset
               : -CONFIG.commitSpacing;
-        drawCurve(ctx, mpx, getLaneY(c.mergeParentLane, height), cx, cy, progress);
+        drawConnection(
+          ctx,
+          mpx,
+          getLaneY(c.mergeParentLane, height),
+          cx,
+          cy,
+          progress,
+          strokeColor,
+          0.5
+        );
       }
 
       // Branch-from connection
@@ -358,7 +406,16 @@
             : bf
               ? bf.x - scrollOffset
               : -CONFIG.commitSpacing;
-        drawCurve(ctx, bfx, getLaneY(c.branchFromLane, height), cx, cy, progress);
+        drawConnection(
+          ctx,
+          bfx,
+          getLaneY(c.branchFromLane, height),
+          cx,
+          cy,
+          progress,
+          strokeColor,
+          0.5
+        );
       }
     }
 
@@ -372,6 +429,27 @@
       if (c.appearProgress === 0) continue;
 
       const radius = CONFIG.circleRadius * c.appearProgress;
+      const isBranchEvent = c.eventType === 'branch';
+      const isMergeEvent = c.eventType === 'merge';
+      const eventColor = isBranchEvent
+        ? branchEventColor
+        : isMergeEvent
+          ? mergeEventColor
+          : strokeColor;
+
+      if ((isBranchEvent || isMergeEvent) && c.eventPulse > 0) {
+        ctx.globalAlpha = c.eventPulse * 0.3;
+        ctx.fillStyle = eventColor;
+        ctx.beginPath();
+        ctx.arc(
+          sx,
+          sy,
+          radius + CONFIG.eventGlowRadius * c.eventPulse * c.appearProgress,
+          0,
+          Math.PI * 2
+        );
+        ctx.fill();
+      }
 
       // Fill at full opacity so lines behind are fully covered
       ctx.globalAlpha = 1;
@@ -381,8 +459,9 @@
       ctx.fill();
 
       // Stroke at reduced opacity for soft appearance
-      ctx.globalAlpha = c.appearProgress * 0.8;
-      ctx.strokeStyle = strokeColor;
+      const strokeAlpha = isBranchEvent || isMergeEvent ? c.appearProgress : c.appearProgress * 0.8;
+      ctx.globalAlpha = strokeAlpha;
+      ctx.strokeStyle = eventColor;
       ctx.stroke();
     }
 
@@ -443,7 +522,7 @@
       }
 
       pruneOldCommits();
-      draw(ctx, rect.width, rect.height);
+      draw(ctx, rect.width, rect.height, dt);
       animationId = requestAnimationFrame(animate);
     }
 

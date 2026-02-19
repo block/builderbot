@@ -338,8 +338,14 @@
                 {/if}
                 <div class="repo">
                   {repos.length > 0
-                    ? repos.map((r) => r.githubRepo).join(', ')
-                    : (project.githubRepo ?? 'No repo attached')}
+                    ? repos
+                        .map((r) => (r.subpath ? `${r.githubRepo}/${r.subpath}` : r.githubRepo))
+                        .join(', ')
+                    : project.githubRepo
+                      ? project.subpath
+                        ? `${project.githubRepo}/${project.subpath}`
+                        : project.githubRepo
+                      : 'No repo attached'}
                 </div>
               </button>
               <div class="card-location">

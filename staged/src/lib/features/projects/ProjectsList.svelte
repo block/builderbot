@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { fade } from 'svelte/transition';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import {
     GitPullRequest,
@@ -304,11 +305,19 @@
                 </div>
               {/if}
               {#if status.kind === 'running'}
-                <div class="status-indicator spinner">
+                <div
+                  class="status-indicator spinner"
+                  in:fade={{ duration: 300, delay: 150 }}
+                  out:fade={{ duration: 150 }}
+                >
                   <Spinner size={14} />
                 </div>
               {:else if status.kind === 'unread'}
-                <div class="status-indicator unread-dot"></div>
+                <div
+                  class="status-indicator unread-dot"
+                  in:fade={{ duration: 300, delay: 150 }}
+                  out:fade={{ duration: 150 }}
+                ></div>
               {/if}
               <div class="card-header">
                 {#if prStatus === 'merged'}

@@ -8,6 +8,9 @@
   import { GitBranch, Plus, Command } from 'lucide-svelte';
   import type { Project, RecentRepo } from '../../types';
   import * as commands from '../../commands';
+  import FormInput from '../../shared/FormInput.svelte';
+  import FormButton from '../../shared/FormButton.svelte';
+  import FormToggle from '../../shared/FormToggle.svelte';
   import GitHubRepoPickerModal from './GitHubRepoPickerModal.svelte';
   import { onMount } from 'svelte';
 
@@ -28,10 +31,6 @@
   let recentRepos = $state<RecentRepo[]>([]);
   let isMonorepo = $state(false);
   let checkingMonorepo = $state(false);
-
-  function focus(node: HTMLElement) {
-    node.focus();
-  }
 
   onMount(async () => {
     try {
@@ -122,37 +121,26 @@
 <div class="new-project-form">
   <div class="form-group">
     <label for="project-name">Name</label>
-    <input
+    <FormInput
       bind:value={name}
       id="project-name"
-      type="text"
       placeholder="e.g., Add dark mode, Fix login bug"
       disabled={saving}
       autocomplete="off"
-      use:focus
+      autofocus
     />
   </div>
 
   <div class="form-group">
     <div class="field-label">Location</div>
-    <div class="type-toggle">
-      <button
-        class="toggle-option"
-        class:active={location === 'local'}
-        onclick={() => (location = 'local')}
-        disabled={saving}
-      >
-        Local
-      </button>
-      <button
-        class="toggle-option"
-        class:active={location === 'remote'}
-        onclick={() => (location = 'remote')}
-        disabled={saving}
-      >
-        Remote
-      </button>
-    </div>
+    <FormToggle
+      bind:value={location}
+      options={[
+        { value: 'local', label: 'Local' },
+        { value: 'remote', label: 'Remote' },
+      ]}
+      disabled={saving}
+    />
   </div>
 
   <div class="form-group">
@@ -169,13 +157,9 @@
         <button class="change-button" onclick={() => (selectedRepo = null)}>Clear</button>
       </div>
     {:else}
-      <button
-        id="project-repo-select"
-        class="select-repo-button"
-        onclick={() => (showRepoPicker = true)}
-      >
+      <FormButton class="select-repo-button" onclick={() => (showRepoPicker = true)}>
         Select repository
-      </button>
+      </FormButton>
       {#if recentRepos.length > 0}
         <div class="recent-repos-section">
           {#each recentRepos as recent, i}
@@ -215,16 +199,15 @@
           >{isMonorepo ? 'Recommended' : 'Optional'}</span
         ></label
       >
-      <input
+      <FormInput
         bind:value={subpath}
         id="project-subpath"
-        type="text"
         placeholder="e.g., packages/frontend"
         disabled={saving}
         autocomplete="off"
         autocorrect="off"
         autocapitalize="off"
-        spellcheck="false"
+        spellcheck={false}
       />
     </div>
   {/if}
@@ -233,13 +216,18 @@
     <div class="error-message">{error}</div>
   {/if}
 
-  <div class="actions" class:full-width={!onCancel}>
+  <div class="actions">
     {#if onCancel}
-      <button class="cancel-button" onclick={onCancel} disabled={saving}>Cancel</button>
+      <FormButton onclick={onCancel} disabled={saving}>Cancel</FormButton>
     {/if}
-    <button class="create-button" onclick={handleCreate} disabled={saving || !name.trim()}>
+    <FormButton
+      variant="primary"
+      class={!onCancel ? 'full-width-btn' : ''}
+      onclick={handleCreate}
+      disabled={saving || !name.trim()}
+    >
       {saving ? 'Creating...' : 'Create Project'}
-    </button>
+    </FormButton>
   </div>
 </div>
 
@@ -300,46 +288,17 @@
     color: var(--bg-deepest);
   }
 
-  .type-toggle {
-    display: flex;
-    gap: 6px;
-  }
-
-  .toggle-option {
-    flex: 1;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-muted);
-    padding: 8px 10px;
-    cursor: pointer;
-  }
-
-  .toggle-option.active {
-    border-color: var(--ui-accent);
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
-  }
-
-  input {
-    border: 1px solid var(--border-muted);
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    border-radius: 8px;
-    padding: 9px 10px;
-    font-size: var(--size-sm);
-    outline: none;
-  }
-
-  input:focus {
-    border-color: var(--ui-accent);
+  :global(.select-repo-button) {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .repo-info {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 12px;
+    min-height: 36px;
+    padding: 8px 12px;
     background-color: var(--bg-hover);
     border-radius: 8px;
   }
@@ -357,8 +316,7 @@
     white-space: nowrap;
   }
 
-  .change-button,
-  .select-repo-button {
+  .change-button {
     border: 1px solid var(--border-muted);
     border-radius: 7px;
     background: transparent;
@@ -367,8 +325,7 @@
     cursor: pointer;
   }
 
-  .change-button:hover,
-  .select-repo-button:hover {
+  .change-button:hover {
     color: var(--text-primary);
     border-color: var(--border-emphasis);
     background: var(--bg-hover);
@@ -385,7 +342,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px;
+    min-height: 36px;
+    padding: 8px 12px;
     background: var(--bg-primary);
     border: 1px solid var(--border-muted);
     border-left: 2px solid var(--ui-accent);
@@ -455,30 +413,7 @@
     gap: 8px;
   }
 
-  .actions.full-width .create-button {
+  :global(.full-width-btn) {
     width: 100%;
-  }
-
-  .cancel-button,
-  .create-button {
-    border-radius: 8px;
-    padding: 8px 12px;
-    border: 1px solid var(--border-muted);
-    background: transparent;
-    color: var(--text-primary);
-    cursor: pointer;
-  }
-
-  .create-button {
-    background: var(--ui-accent);
-    border-color: var(--ui-accent);
-    color: var(--bg-deepest);
-    font-weight: 600;
-  }
-
-  .create-button:disabled,
-  .cancel-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
   }
 </style>

@@ -696,13 +696,24 @@ fn get_or_create_project_action_context(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn list_project_actions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
+    project_repo_id: Option<String>,
 ) -> Result<Vec<store::models::RepoAction>, String> {
     let store = get_store(&store)?;
-    let context = get_or_create_project_action_context(&store, &project_id)?;
+    let context = if let Some(repo_id) = project_repo_id {
+        let repo = store
+            .get_project_repo(&repo_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project repo not found: {repo_id}"))?;
+        store
+            .get_or_create_action_context(&repo.github_repo, repo.subpath.as_deref())
+            .map_err(|e| e.to_string())?
+    } else {
+        get_or_create_project_action_context(&store, &project_id)?
+    };
     store
         .list_repo_actions(&context.id)
         .map_err(|e| e.to_string())

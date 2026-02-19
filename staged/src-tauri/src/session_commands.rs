@@ -353,7 +353,19 @@ pub async fn start_branch_session(
             .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
         let mut worktree_path = PathBuf::from(&workdir.path);
-        if let Some(ref subpath) = project.subpath {
+        // Use the project_repo's subpath when the branch is attached to a specific
+        // repo (e.g. a secondary repo with no subpath), rather than always falling
+        // back to the project-level subpath which may belong to a different repo.
+        let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
+            store
+                .get_project_repo(repo_id)
+                .ok()
+                .flatten()
+                .and_then(|repo| repo.subpath)
+        } else {
+            project.subpath.clone()
+        };
+        if let Some(ref subpath) = effective_subpath {
             worktree_path = worktree_path.join(subpath);
         }
 

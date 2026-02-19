@@ -53,7 +53,8 @@
     text-align: left;
     transition:
       border-color 0.2s ease,
-      color 0.2s ease;
+      color 0.2s ease,
+      background-color 0.2s ease;
   }
 
   .toggle-card:hover {
@@ -62,8 +63,9 @@
   }
 
   .toggle-card.active {
-    border-color: var(--ui-accent);
-    color: var(--text-primary);
+    border-color: var(--text-primary);
+    background: var(--text-primary);
+    color: var(--bg-deepest);
   }
 
   .toggle-card:disabled {
@@ -79,7 +81,7 @@
   }
 
   .toggle-card.active .toggle-icon {
-    color: var(--ui-accent);
+    color: var(--bg-deepest);
   }
 
   .toggle-text {
@@ -101,6 +103,6 @@
   }
 
   .toggle-card.active .toggle-desc {
-    color: var(--text-muted);
+    color: var(--bg-chrome);
   }
 </style>

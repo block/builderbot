@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { quintOut } from 'svelte/easing';
+  import { quintIn } from 'svelte/easing';
   import {
     FolderGit2,
     House,
@@ -103,11 +103,26 @@
     window.removeEventListener('pointerup', stopResize);
   }
 
-  function slide(_node: HTMLElement) {
+  function spring(t: number): number {
+    const decay = 12;
+    const frequency = 2;
+    return 1 - Math.exp(-decay * t) * Math.cos(frequency * Math.PI * t);
+  }
+
+  function slideOpen(_node: HTMLElement) {
     const w = projectsSidebarState.width;
     return {
-      duration: 300,
-      easing: quintOut,
+      duration: 550,
+      easing: spring,
+      css: (t: number) => `margin-left: ${(t - 1) * w}px`,
+    };
+  }
+
+  function slideClose(_node: HTMLElement) {
+    const w = projectsSidebarState.width;
+    return {
+      duration: 350,
+      easing: quintIn,
       css: (t: number) => `margin-left: ${(t - 1) * w}px`,
     };
   }
@@ -134,7 +149,8 @@
     class="projects-sidebar"
     class:resizing
     style={`width: ${projectsSidebarState.width}px;`}
-    transition:slide
+    in:slideOpen
+    out:slideClose
   >
     <div class="sidebar-header">
       <div class="title-row">

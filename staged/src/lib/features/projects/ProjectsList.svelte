@@ -436,7 +436,7 @@
 
   .card-location {
     color: var(--text-faint);
-    font-size: calc(var(--size-xs) - 1px);
+    font-size: var(--size-xs);
     padding: 0 4px;
   }
 
@@ -446,38 +446,30 @@
     flex-direction: column;
     gap: 8px;
     text-align: left;
-    background: var(--bg-surface);
-    border: 1px solid var(--border-muted);
+    background: var(--bg-elevated);
+    border: none;
     border-radius: 10px;
-    padding: 14px;
+    padding: 16px;
+    min-height: 120px;
     color: inherit;
     cursor: pointer;
-    transition:
-      border-color 0.15s ease,
-      background-color 0.15s ease,
-      transform 0.15s ease;
+    transition: background-color 0.15s ease;
   }
 
   .project-card:hover {
-    border-color: var(--border-emphasis);
     background-color: var(--bg-hover);
-    transform: translateY(-1px);
   }
 
   .project-card:disabled {
     cursor: not-allowed;
-    transform: none;
   }
 
   .project-card.deleting {
-    border-style: dashed;
     opacity: 0.75;
   }
 
   .project-card.deleting:hover {
-    border-color: var(--border-muted);
-    background: var(--bg-surface);
-    transform: none;
+    background: var(--bg-elevated);
   }
 
   .card-header {
@@ -485,7 +477,7 @@
     align-items: center;
     gap: 8px;
     color: var(--text-primary);
-    font-size: var(--size-sm);
+    font-size: var(--size-lg);
     font-weight: 600;
     padding-right: 24px;
   }
@@ -503,13 +495,13 @@
   }
 
   .card-header :global(svg.pr-status-draft) {
-    stroke: var(--text-faint);
+    stroke: var(--text-muted);
   }
 
   .repo {
     margin-top: auto;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
+    color: var(--text-primary);
+    font-size: var(--size-sm);
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;

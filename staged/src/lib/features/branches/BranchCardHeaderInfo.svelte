@@ -56,6 +56,7 @@
     align-items: center;
     gap: 5px;
     min-width: 0;
+    overflow: hidden;
     font-size: var(--size-xs);
   }
 
@@ -65,6 +66,7 @@
   }
 
   .branch-name {
+    max-width: 200px;
     color: var(--text-muted);
     min-width: 0;
     overflow: hidden;

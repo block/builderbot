@@ -104,7 +104,9 @@
       <button class="back-button" onclick={goHome} title="Back to projects">
         <ChevronLeft size={16} />
       </button>
-      <span class="project-name">{projectDisplayName(project)}</span>
+      <span class="project-name" title={projectDisplayName(project)}
+        >{projectDisplayName(project)}</span
+      >
       {#if deleting}
         <div class="deleting-status" role="status" aria-live="polite">
           <Spinner size={12} />
@@ -197,6 +199,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+    flex: 1;
   }
 
   .back-button {
@@ -225,6 +229,10 @@
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .header-actions {

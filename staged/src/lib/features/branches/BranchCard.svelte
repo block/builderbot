@@ -1750,6 +1750,8 @@
     align-items: center;
     gap: 12px;
     padding: 12px 16px;
+    min-width: 0;
+    overflow: hidden;
     border-bottom: 1px solid var(--border-subtle);
   }
 

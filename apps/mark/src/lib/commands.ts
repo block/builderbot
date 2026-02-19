@@ -160,13 +160,12 @@ export function deleteProjectNote(noteId: string): Promise<void> {
 export function startProjectSession(
   projectId: string,
   prompt: string,
-  createNote: boolean = false,
   provider?: string
 ): Promise<import('./types').ProjectSessionResponse> {
   return invoke('start_project_session', {
     projectId,
     prompt,
-    createNote,
+    createNote: true,
     provider: provider ?? null,
   });
 }

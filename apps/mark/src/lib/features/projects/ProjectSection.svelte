@@ -7,7 +7,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { ChevronLeft, Trash2, Plus, Send, FileText, X, Loader2 } from 'lucide-svelte';
+  import { ChevronLeft, Trash2, Plus, Send, FileText, X } from 'lucide-svelte';
   import type { Project, Branch, WorkspaceStatus, ProjectNote } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome } from '../../navigation.svelte';
@@ -110,21 +110,21 @@
 
   // ── Project session input ──────────────────────────────────────────────
   let promptText = $state('');
-  let sessionRunning = $state(false);
-  let activeSessionId = $state<string | null>(null);
+  /** Session IDs for running project sessions (all produce notes). */
+  let activeSessionIds = $state<Set<string>>(new Set());
 
   async function handleSubmitPrompt() {
     const text = promptText.trim();
-    if (!text || sessionRunning) return;
+    if (!text) return;
 
-    sessionRunning = true;
     promptText = '';
     try {
       const response = await commands.startProjectSession(project.id, text);
-      activeSessionId = response.sessionId;
+      activeSessionIds = new Set([...activeSessionIds, response.sessionId]);
+      // Reload notes immediately so the stub appears as "Generating note…"
+      await loadProjectNotes();
     } catch (e) {
       console.error('[ProjectSection] Failed to start project session:', e);
-      sessionRunning = false;
     }
   }
 
@@ -168,9 +168,9 @@
       .sort((a, b) => b.createdAt - a.createdAt)
   );
 
-  /** Check if there's a generating note (empty content, has session). */
-  let generatingNote = $derived(
-    projectNotes.find((n) => n.sessionId && !n.title.trim() && !n.content.trim())
+  /** Notes currently being generated (empty content, has session). */
+  let generatingNotes = $derived(
+    projectNotes.filter((n) => n.sessionId && !n.title.trim() && !n.content.trim())
   );
 
   function formatRelativeTime(timestampMs: number): string {
@@ -195,10 +195,11 @@
 
     let unlistenSession: (() => void) | undefined;
     listen<{ sessionId: string; status: string }>('session-status-changed', (event) => {
-      if (event.payload.sessionId === activeSessionId) {
+      if (activeSessionIds.has(event.payload.sessionId)) {
         if (event.payload.status === 'completed' || event.payload.status === 'failed') {
-          sessionRunning = false;
-          activeSessionId = null;
+          const next = new Set(activeSessionIds);
+          next.delete(event.payload.sessionId);
+          activeSessionIds = next;
           // Refresh notes after session completes
           loadProjectNotes();
         }
@@ -273,45 +274,40 @@
 
   <!-- Project session prompt -->
   <div class="project-prompt-section">
-    <div class="prompt-input-wrapper" class:running={sessionRunning}>
+    <div class="prompt-input-wrapper">
       <textarea
         class="prompt-input"
-        placeholder={sessionRunning ? 'Session running…' : 'Ask about this project…'}
+        placeholder="Ask about this project…"
         bind:value={promptText}
         onkeydown={handleKeydown}
-        disabled={sessionRunning}
         rows={1}
       ></textarea>
       <button
         class="send-button"
         onclick={handleSubmitPrompt}
-        disabled={sessionRunning || !promptText.trim()}
-        title={sessionRunning ? 'Session in progress' : 'Start project session'}
+        disabled={!promptText.trim()}
+        title="Start project session"
       >
-        {#if sessionRunning}
-          <Loader2 size={14} class="spinning" />
-        {:else}
-          <Send size={14} />
-        {/if}
+        <Send size={14} />
       </button>
     </div>
   </div>
 
   <!-- Project notes -->
-  {#if generatingNote || displayNotes.length > 0}
+  {#if generatingNotes.length > 0 || displayNotes.length > 0}
     <div class="project-notes">
       <div class="notes-header">
         <FileText size={13} />
         <span>Project Notes</span>
       </div>
-      {#if generatingNote}
+      {#each generatingNotes as _note (_note.id)}
         <div class="note-card generating">
           <div class="note-card-header">
             <span class="note-title">Generating note…</span>
             <Spinner size={12} />
           </div>
         </div>
-      {/if}
+      {/each}
       {#each displayNotes as note (note.id)}
         <div class="note-card" class:deleting={deletingNoteIds.has(note.id)}>
           <div class="note-card-header">
@@ -550,11 +546,6 @@
     border-color: var(--border-emphasis);
   }
 
-  .prompt-input-wrapper.running {
-    opacity: 0.7;
-    border-color: var(--ui-accent);
-  }
-
   .prompt-input {
     flex: 1;
     border: none;
@@ -595,19 +586,6 @@
   .send-button:disabled {
     opacity: 0.3;
     cursor: not-allowed;
-  }
-
-  .send-button :global(.spinning) {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
   }
 
   /* ── Project notes ───────────────────────────────────────────────────── */

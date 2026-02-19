@@ -60,6 +60,7 @@
   import {
     runBranchAction,
     getRunningBranchActions,
+    clearActionExecution,
     type ActionStatusEvent,
   } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
@@ -310,33 +311,35 @@
           runningActions[existingIndex].exitCode = payload.exitCode;
           runningActions[existingIndex].completedAt = payload.completedAt;
 
-          // Auto-remove successful completions (with fade for secondary, instant for primary)
-          if (payload.status === 'completed') {
-            const action = runningActions[existingIndex];
-            const isPrimaryAction = primaryRunAction && action.actionId === primaryRunAction.id;
+          // Auto-remove terminal states after a delay
+          const action = runningActions[existingIndex];
+          const isPrimaryAction = primaryRunAction && action.actionId === primaryRunAction.id;
 
+          // Determine delay based on status: completed shows briefly, stopped/failed show longer
+          let displayTime: number;
+          if (payload.status === 'completed') {
+            displayTime = isPrimaryAction ? 1000 : 2000;
+          } else {
+            // stopped/failed: show status briefly then clean up so rerun works cleanly
+            displayTime = isPrimaryAction ? 2000 : 3000;
+          }
+
+          setTimeout(() => {
+            const foundAction = runningActions.find((a) => a.executionId === payload.executionId);
+            if (foundAction && !isPrimaryAction) {
+              // Secondary actions fade out
+              foundAction.fading = true;
+            }
+            // Remove after animation completes (or immediately for primary)
             setTimeout(
               () => {
-                const foundAction = runningActions.find(
-                  (a) => a.executionId === payload.executionId
+                runningActions = runningActions.filter(
+                  (a) => a.executionId !== payload.executionId
                 );
-                if (foundAction && !isPrimaryAction) {
-                  // Secondary actions fade out
-                  foundAction.fading = true;
-                }
-                // Remove after animation completes (or immediately for primary)
-                setTimeout(
-                  () => {
-                    runningActions = runningActions.filter(
-                      (a) => a.executionId !== payload.executionId
-                    );
-                  },
-                  isPrimaryAction ? 0 : 300
-                ); // Match CSS transition duration for secondary
               },
-              isPrimaryAction ? 1000 : 2000
-            ); // Shorter display time for primary action
-          }
+              isPrimaryAction ? 0 : 300
+            ); // Match CSS transition duration for secondary
+          }, displayTime);
         }
       }
     }).then((unlisten) => {
@@ -680,17 +683,31 @@
   async function handleRunAction(action: ProjectAction) {
     showMoreMenu = false;
 
-    // Check if this action is already running
-    const existingExecution = runningActions.find((a) => a.actionId === action.id);
+    // Check if this action is currently running
+    const existingExecution = runningActions.find(
+      (a) => a.actionId === action.id && a.status === 'running'
+    );
 
     if (existingExecution) {
-      // Action already running, open modal to view output
+      // Action is actively running, open modal to view output
       actionOutputModal = {
         executionId: existingExecution.executionId,
         actionName: action.name,
       };
       return;
     }
+
+    // Remove any stale (stopped/failed/completed) entries for this action
+    // before starting a new run, and clean up their backend buffers
+    const staleExecutions = runningActions.filter(
+      (a) => a.actionId === action.id && a.status !== 'running'
+    );
+    for (const stale of staleExecutions) {
+      clearActionExecution(stale.executionId).catch(() => {});
+    }
+    runningActions = runningActions.filter(
+      (a) => !(a.actionId === action.id && a.status !== 'running')
+    );
 
     // Start the action silently (don't open modal)
     try {
@@ -1367,7 +1384,7 @@
               class:completed={primaryActionExecution?.status === 'completed'}
               class:failed={primaryActionExecution?.status === 'failed'}
               onclick={() =>
-                primaryActionExecution
+                primaryActionExecution?.status === 'running'
                   ? handleShowActionOutput(primaryActionExecution)
                   : handleRunAction(primaryRunAction)}
               title={primaryRunAction.name}

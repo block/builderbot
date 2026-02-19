@@ -6,7 +6,7 @@
 //! confirmation.
 //!
 //! Tables: schema_version, projects, project_repos, branches, workdirs, commits,
-//! sessions, session_messages, notes, reviews, action_contexts, repo_actions.
+//! sessions, session_messages, notes, project_notes, reviews, action_contexts, repo_actions.
 
 pub mod models;
 
@@ -15,6 +15,7 @@ mod branches;
 mod commits;
 mod messages;
 mod notes;
+mod project_notes;
 mod project_repos;
 mod projects;
 mod recent_repos;
@@ -61,7 +62,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -247,6 +248,7 @@ impl Store {
                 branch_name TEXT NOT NULL,
                 subpath     TEXT,
                 is_primary  INTEGER NOT NULL DEFAULT 0,
+                reason      TEXT,
                 created_at  INTEGER NOT NULL,
                 updated_at  INTEGER NOT NULL
             );
@@ -337,6 +339,17 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_notes_branch ON notes(branch_id);
 
+            CREATE TABLE IF NOT EXISTS project_notes (
+                id              TEXT PRIMARY KEY,
+                project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                session_id      TEXT,
+                title           TEXT NOT NULL,
+                content         TEXT NOT NULL,
+                created_at      INTEGER NOT NULL,
+                updated_at      INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_notes_project ON project_notes(project_id);
+
             CREATE TABLE IF NOT EXISTS reviews (
                 id              TEXT PRIMARY KEY,
                 branch_id       TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
@@ -410,11 +423,11 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_recent_repos_last_used
                 ON recent_repos(last_used_at DESC);
 
-            -- Session cleanup triggers: when a commit, note, or review is
-            -- deleted (directly or via cascade from branch/project deletion),
-            -- delete the referenced session if no other row still points at
-            -- it. Only non-running sessions are cleaned up — a running
-            -- session may legitimately have no artifacts yet.
+            -- Session cleanup triggers: when a commit, note, project note, or
+            -- review is deleted (directly or via cascade from branch/project
+            -- deletion), delete the referenced session if no other row still
+            -- points at it. Only non-running sessions are cleaned up — a
+            -- running session may legitimately have no artifacts yet.
             CREATE TRIGGER IF NOT EXISTS trg_cleanup_session_after_commit_delete
             AFTER DELETE ON commits
             WHEN OLD.session_id IS NOT NULL
@@ -422,9 +435,10 @@ impl Store {
                 DELETE FROM sessions
                 WHERE id = OLD.session_id
                   AND status != 'running'
-                  AND NOT EXISTS (SELECT 1 FROM commits  WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM notes    WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM reviews  WHERE session_id = OLD.session_id);
+                  AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id);
             END;
 
             CREATE TRIGGER IF NOT EXISTS trg_cleanup_session_after_note_delete
@@ -434,9 +448,10 @@ impl Store {
                 DELETE FROM sessions
                 WHERE id = OLD.session_id
                   AND status != 'running'
-                  AND NOT EXISTS (SELECT 1 FROM commits  WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM notes    WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM reviews  WHERE session_id = OLD.session_id);
+                  AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id);
             END;
 
             CREATE TRIGGER IF NOT EXISTS trg_cleanup_session_after_review_delete
@@ -446,9 +461,23 @@ impl Store {
                 DELETE FROM sessions
                 WHERE id = OLD.session_id
                   AND status != 'running'
-                  AND NOT EXISTS (SELECT 1 FROM commits  WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM notes    WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM reviews  WHERE session_id = OLD.session_id);
+                  AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_cleanup_session_after_project_note_delete
+            AFTER DELETE ON project_notes
+            WHEN OLD.session_id IS NOT NULL
+            BEGIN
+                DELETE FROM sessions
+                WHERE id = OLD.session_id
+                  AND status != 'running'
+                  AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id);
             END;
             ",
         )?;

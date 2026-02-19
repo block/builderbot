@@ -131,6 +131,7 @@ pub struct ProjectRepo {
     pub branch_name: String,
     pub subpath: Option<String>,
     pub is_primary: bool,
+    pub reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -150,6 +151,7 @@ impl ProjectRepo {
             branch_name: branch_name.to_string(),
             subpath,
             is_primary: false,
+            reason: None,
             created_at: now,
             updated_at: now,
         }
@@ -614,6 +616,47 @@ impl Note {
         Self {
             id: Uuid::new_v4().to_string(),
             branch_id: branch_id.to_string(),
+            session_id: None,
+            title: title.to_string(),
+            content: content.to_string(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn with_session(mut self, session_id: &str) -> Self {
+        self.session_id = Some(session_id.to_string());
+        self
+    }
+}
+
+// =============================================================================
+// Project Notes
+// =============================================================================
+
+/// A note scoped to a project (not a specific branch).
+///
+/// Project notes capture cross-cutting context, research, or decisions
+/// that apply to the project as a whole. They are injected into every
+/// branch session's context so the agent has project-level awareness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectNote {
+    pub id: String,
+    pub project_id: String,
+    pub session_id: Option<String>,
+    pub title: String,
+    pub content: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl ProjectNote {
+    pub fn new(project_id: &str, title: &str, content: &str) -> Self {
+        let now = now_timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            project_id: project_id.to_string(),
             session_id: None,
             title: title.to_string(),
             content: content.to_string(),

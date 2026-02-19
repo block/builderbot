@@ -138,6 +138,40 @@ export function checkMonorepoModules(githubRepo: string): Promise<number> {
 }
 
 // =============================================================================
+// Project notes & sessions
+// =============================================================================
+
+export function listProjectNotes(projectId: string): Promise<import('./types').ProjectNote[]> {
+  return invoke('list_project_notes', { projectId });
+}
+
+export function createProjectNote(
+  projectId: string,
+  title: string,
+  content: string
+): Promise<import('./types').ProjectNote> {
+  return invoke('create_project_note', { projectId, title, content });
+}
+
+export function deleteProjectNote(noteId: string): Promise<void> {
+  return invoke('delete_project_note', { noteId });
+}
+
+export function startProjectSession(
+  projectId: string,
+  prompt: string,
+  createNote: boolean = false,
+  provider?: string
+): Promise<import('./types').ProjectSessionResponse> {
+  return invoke('start_project_session', {
+    projectId,
+    prompt,
+    createNote,
+    provider: provider ?? null,
+  });
+}
+
+// =============================================================================
 // Branches
 // =============================================================================
 

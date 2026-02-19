@@ -863,6 +863,45 @@ fn delete_note(
     Ok(())
 }
 
+// =============================================================================
+// Project note commands
+// =============================================================================
+
+#[tauri::command]
+fn create_project_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    title: String,
+    content: String,
+) -> Result<store::ProjectNote, String> {
+    let store = get_store(&store)?;
+    let note = store::ProjectNote::new(&project_id, &title, &content);
+    store
+        .create_project_note(&note)
+        .map_err(|e| e.to_string())?;
+    Ok(note)
+}
+
+#[tauri::command]
+fn list_project_notes(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+) -> Result<Vec<store::ProjectNote>, String> {
+    get_store(&store)?
+        .list_project_notes(&project_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_project_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    note_id: String,
+) -> Result<(), String> {
+    get_store(&store)?
+        .delete_project_note(&note_id)
+        .map_err(|e| e.to_string())
+}
+
 /// Delete a review and all its comments, optionally deleting its linked session.
 #[tauri::command(rename_all = "camelCase")]
 fn delete_review(
@@ -2338,6 +2377,9 @@ pub fn run() {
             get_branch_timeline,
             create_note,
             delete_note,
+            create_project_note,
+            list_project_notes,
+            delete_project_note,
             delete_review,
             delete_commit,
             delete_pending_commit,
@@ -2369,6 +2411,7 @@ pub fn run() {
             session_commands::cancel_session,
             session_commands::delete_session,
             session_commands::start_branch_session,
+            session_commands::start_project_session,
             // Actions
             actions::commands::detect_repo_actions,
             actions::commands::run_branch_action,

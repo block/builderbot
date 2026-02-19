@@ -154,6 +154,25 @@ export interface Issue {
 }
 
 // =============================================================================
+// Project notes & sessions
+// =============================================================================
+
+export interface ProjectNote {
+  id: string;
+  projectId: string;
+  sessionId: string | null;
+  title: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProjectSessionResponse {
+  sessionId: string;
+  noteId: string | null;
+}
+
+// =============================================================================
 // Sessions
 // =============================================================================
 

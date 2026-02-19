@@ -408,6 +408,47 @@ fn run_post_completion_hooks(
         }
     }
 
+    // --- Project note extraction ---
+    if let Ok(Some(empty_note)) = store.get_empty_project_note_by_session(session_id) {
+        if let Ok(messages) = store.get_session_messages(session_id) {
+            let full_text: String = messages
+                .iter()
+                .filter(|m| m.role == MessageRole::Assistant)
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if let Some(note_content) = extract_note_content(&full_text) {
+                let (title, body) = extract_note_title(&note_content);
+                let final_title = if title.is_empty() {
+                    store
+                        .get_session(session_id)
+                        .ok()
+                        .flatten()
+                        .map(|s| {
+                            let t: String = s.prompt.chars().take(80).collect();
+                            if s.prompt.len() > 80 {
+                                format!("{t}…")
+                            } else {
+                                t
+                            }
+                        })
+                        .unwrap_or_else(|| "Untitled Note".to_string())
+                } else {
+                    title
+                };
+                log::info!("Session {session_id}: extracted project note \"{final_title}\"");
+                if let Err(e) =
+                    store.update_project_note_title_and_content(&empty_note.id, &final_title, &body)
+                {
+                    log::error!("Failed to update project note content: {e}");
+                }
+            } else {
+                log::warn!("Session {session_id}: project note session completed but no --- found in assistant output");
+            }
+        }
+    }
+
     // --- Review comment extraction ---
     if let Ok(Some(review)) = store.get_review_by_session(session_id) {
         if review.comments.is_empty() {

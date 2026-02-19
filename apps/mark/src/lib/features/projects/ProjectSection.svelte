@@ -1,13 +1,17 @@
 <!--
-  ProjectSection.svelte - A project header + list of branch cards
+  ProjectSection.svelte - A project header + session input + notes + branch cards
 
-  Shows the project name, repo controls, and all branch cards for this project.
+  Shows the project name, a prompt input for project-level sessions,
+  project notes, repo controls, and all branch cards for this project.
 -->
 <script lang="ts">
-  import { ChevronLeft, Trash2, Plus } from 'lucide-svelte';
-  import type { Project, Branch, WorkspaceStatus } from '../../types';
+  import { onMount } from 'svelte';
+  import { listen } from '@tauri-apps/api/event';
+  import { ChevronLeft, Trash2, Plus, Send, FileText, X, Loader2 } from 'lucide-svelte';
+  import type { Project, Branch, WorkspaceStatus, ProjectNote } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome } from '../../navigation.svelte';
+  import * as commands from '../../commands';
   import BranchCard from '../branches/BranchCard.svelte';
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
@@ -103,6 +107,110 @@
     if (!branch.projectRepoId) return fallback;
     return repoLabelsById.get(branch.projectRepoId) ?? fallback;
   }
+
+  // ── Project session input ──────────────────────────────────────────────
+  let promptText = $state('');
+  let sessionRunning = $state(false);
+  let activeSessionId = $state<string | null>(null);
+
+  async function handleSubmitPrompt() {
+    const text = promptText.trim();
+    if (!text || sessionRunning) return;
+
+    sessionRunning = true;
+    promptText = '';
+    try {
+      const response = await commands.startProjectSession(project.id, text);
+      activeSessionId = response.sessionId;
+    } catch (e) {
+      console.error('[ProjectSection] Failed to start project session:', e);
+      sessionRunning = false;
+    }
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmitPrompt();
+    }
+  }
+
+  // ── Project notes ──────────────────────────────────────────────────────
+  let projectNotes = $state<ProjectNote[]>([]);
+  let deletingNoteIds = $state<Set<string>>(new Set());
+
+  async function loadProjectNotes() {
+    try {
+      projectNotes = await commands.listProjectNotes(project.id);
+    } catch (e) {
+      console.error('[ProjectSection] Failed to load project notes:', e);
+    }
+  }
+
+  async function handleDeleteNote(noteId: string) {
+    deletingNoteIds = new Set([...deletingNoteIds, noteId]);
+    try {
+      await commands.deleteProjectNote(noteId);
+      projectNotes = projectNotes.filter((n) => n.id !== noteId);
+    } catch (e) {
+      console.error('[ProjectSection] Failed to delete project note:', e);
+    } finally {
+      const next = new Set(deletingNoteIds);
+      next.delete(noteId);
+      deletingNoteIds = next;
+    }
+  }
+
+  /** Notes sorted newest first, excluding empty ones (in-progress). */
+  let displayNotes = $derived(
+    [...projectNotes]
+      .filter((n) => n.title.trim() || n.content.trim())
+      .sort((a, b) => b.createdAt - a.createdAt)
+  );
+
+  /** Check if there's a generating note (empty content, has session). */
+  let generatingNote = $derived(
+    projectNotes.find((n) => n.sessionId && !n.title.trim() && !n.content.trim())
+  );
+
+  function formatRelativeTime(timestampMs: number): string {
+    const date = new Date(timestampMs);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString();
+  }
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────
+
+  onMount(() => {
+    loadProjectNotes();
+
+    let unlistenSession: (() => void) | undefined;
+    listen<{ sessionId: string; status: string }>('session-status-changed', (event) => {
+      if (event.payload.sessionId === activeSessionId) {
+        if (event.payload.status === 'completed' || event.payload.status === 'failed') {
+          sessionRunning = false;
+          activeSessionId = null;
+          // Refresh notes after session completes
+          loadProjectNotes();
+        }
+      }
+    }).then((unlisten) => {
+      unlistenSession = unlisten;
+    });
+
+    return () => {
+      unlistenSession?.();
+    };
+  });
 </script>
 
 <div class="project-section">
@@ -162,6 +270,72 @@
       </div>
     {/if}
   </div>
+
+  <!-- Project session prompt -->
+  <div class="project-prompt-section">
+    <div class="prompt-input-wrapper" class:running={sessionRunning}>
+      <textarea
+        class="prompt-input"
+        placeholder={sessionRunning ? 'Session running…' : 'Ask about this project…'}
+        bind:value={promptText}
+        onkeydown={handleKeydown}
+        disabled={sessionRunning}
+        rows={1}
+      ></textarea>
+      <button
+        class="send-button"
+        onclick={handleSubmitPrompt}
+        disabled={sessionRunning || !promptText.trim()}
+        title={sessionRunning ? 'Session in progress' : 'Start project session'}
+      >
+        {#if sessionRunning}
+          <Loader2 size={14} class="spinning" />
+        {:else}
+          <Send size={14} />
+        {/if}
+      </button>
+    </div>
+  </div>
+
+  <!-- Project notes -->
+  {#if generatingNote || displayNotes.length > 0}
+    <div class="project-notes">
+      <div class="notes-header">
+        <FileText size={13} />
+        <span>Project Notes</span>
+      </div>
+      {#if generatingNote}
+        <div class="note-card generating">
+          <div class="note-card-header">
+            <span class="note-title">Generating note…</span>
+            <Spinner size={12} />
+          </div>
+        </div>
+      {/if}
+      {#each displayNotes as note (note.id)}
+        <div class="note-card" class:deleting={deletingNoteIds.has(note.id)}>
+          <div class="note-card-header">
+            <span class="note-title">{note.title || 'Untitled note'}</span>
+            <div class="note-actions">
+              <span class="note-time">{formatRelativeTime(note.createdAt)}</span>
+              <button
+                class="note-delete-btn"
+                onclick={() => handleDeleteNote(note.id)}
+                disabled={deletingNoteIds.has(note.id)}
+                title="Delete note"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          </div>
+          {#if note.content}
+            <div class="note-content">{note.content}</div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   <div class="branches-list" class:deleting>
     {#each sortedBranches as branch (branch.id)}
       {#if branch.branchType === 'remote'}
@@ -354,6 +528,206 @@
     line-height: 1;
     border: 1px solid var(--border-muted);
   }
+
+  /* ── Project prompt ──────────────────────────────────────────────────── */
+
+  .project-prompt-section {
+    padding: 0 4px;
+  }
+
+  .prompt-input-wrapper {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-muted);
+    border-radius: 10px;
+    background-color: var(--bg-primary);
+    transition: border-color 0.15s ease;
+  }
+
+  .prompt-input-wrapper:focus-within {
+    border-color: var(--border-emphasis);
+  }
+
+  .prompt-input-wrapper.running {
+    opacity: 0.7;
+    border-color: var(--ui-accent);
+  }
+
+  .prompt-input {
+    flex: 1;
+    border: none;
+    background: none;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-family: inherit;
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+    min-height: 20px;
+    max-height: 120px;
+  }
+
+  .prompt-input::placeholder {
+    color: var(--text-faint);
+  }
+
+  .send-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: none;
+    border-radius: 6px;
+    background-color: var(--ui-accent);
+    color: var(--bg-deepest);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+  }
+
+  .send-button:hover:not(:disabled) {
+    background-color: var(--ui-accent-hover);
+  }
+
+  .send-button:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .send-button :global(.spinning) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* ── Project notes ───────────────────────────────────────────────────── */
+
+  .project-notes {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 4px;
+  }
+
+  .notes-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .note-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 14px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background-color: var(--bg-primary);
+    transition: all 0.15s ease;
+  }
+
+  .note-card:hover {
+    border-color: var(--border-muted);
+  }
+
+  .note-card.generating {
+    opacity: 0.7;
+    border-color: var(--note-color, var(--ui-accent));
+    border-style: dashed;
+  }
+
+  .note-card.deleting {
+    opacity: 0.4;
+    pointer-events: none;
+  }
+
+  .note-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .note-title {
+    font-size: var(--size-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .note-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .note-time {
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+
+  .note-delete-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border: none;
+    border-radius: 4px;
+    background: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    opacity: 0;
+    transition: all 0.15s ease;
+  }
+
+  .note-card:hover .note-delete-btn {
+    opacity: 1;
+  }
+
+  .note-delete-btn:hover {
+    color: var(--ui-danger);
+    background-color: var(--bg-hover);
+  }
+
+  .note-delete-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.3;
+  }
+
+  .note-content {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+  }
+
+  /* ── Branches list ───────────────────────────────────────────────────── */
 
   .branches-list {
     display: flex;

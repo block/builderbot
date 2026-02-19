@@ -5,7 +5,7 @@
   Used inside NewProjectModal (as a dialog) and SplashScreen (inline).
 -->
 <script lang="ts">
-  import { GitBranch, Monitor, Cloud } from 'lucide-svelte';
+  import { GitBranch, Monitor, Cloud, X } from 'lucide-svelte';
   import type { Project } from '../../types';
   import * as commands from '../../commands';
   import FormInput from '../../shared/FormInput.svelte';
@@ -149,8 +149,9 @@
         <div class="repo-details">
           <span class="repo-name">{selectedRepo}</span>
         </div>
-        <button class="change-button" onclick={() => (selectedRepo = null)}>Change</button>
-        <button class="change-button" onclick={() => (selectedRepo = null)}>Clear</button>
+        <button class="clear-button" onclick={() => (selectedRepo = null)}>
+          <X size={14} />
+        </button>
       </div>
     {:else}
       <RepoSearchInput onSelect={handleRepoSelected} disabled={saving} />
@@ -246,7 +247,7 @@
     align-items: center;
     gap: 10px;
     min-height: 42px;
-    padding: 10px 14px;
+    padding: 10px 8px 10px 14px;
     background: var(--text-primary);
     color: var(--bg-deepest);
     border: 1.5px solid var(--text-primary);
@@ -270,21 +271,26 @@
     white-space: nowrap;
   }
 
-  .change-button {
-    border: 1px solid var(--bg-chrome);
-    border-radius: 7px;
+  .clear-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
     background: transparent;
     color: var(--bg-chrome);
-    padding: 6px 10px;
     cursor: pointer;
     transition:
-      border-color 0.15s ease,
+      background-color 0.15s ease,
       color 0.15s ease;
   }
 
-  .change-button:hover {
+  .clear-button:hover {
     color: var(--bg-deepest);
-    border-color: var(--bg-deepest);
+    background: rgba(0, 0, 0, 0.1);
   }
 
   .error-message {

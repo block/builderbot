@@ -11,6 +11,7 @@
     GitPullRequestClosed,
     GitPullRequestDraft,
     GitBranch,
+    Plus,
   } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import * as commands from '../../commands';
@@ -266,15 +267,14 @@
           onFormOpenChange={(open) => (showNewProjectModal = open)}
         />
       {:else}
-        <div class="projects-grid">
-          <button
-            class="project-card new-project-card"
-            onclick={() => (showNewProjectModal = true)}
-          >
-            <div class="new-project-content">
-              <span class="new-project-label">+ New project</span>
-            </div>
+        <div class="title-row">
+          <h1>Projects</h1>
+          <button class="new-project-btn" onclick={() => (showNewProjectModal = true)}>
+            <Plus size={14} />
+            New project
           </button>
+        </div>
+        <div class="projects-grid">
           {#each projects as project, index (project.id)}
             {@const status = getProjectStatus(project.id, deletingProjectNames)}
             {@const prStatus = getProjectPrStatus(project.id)}
@@ -377,6 +377,40 @@
     color: var(--ui-danger);
   }
 
+  .title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+
+  .title-row h1 {
+    margin: 0;
+    font-size: var(--size-xl);
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .new-project-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 8px;
+    background-color: var(--bg-elevated);
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .new-project-btn:hover {
+    color: var(--text-primary);
+    background-color: var(--bg-hover);
+  }
+
   .projects-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -421,30 +455,6 @@
     border-color: var(--border-muted);
     background: var(--bg-surface);
     transform: none;
-  }
-
-  .new-project-card {
-    border-style: dashed;
-    color: var(--text-primary);
-    align-items: center;
-    justify-content: center;
-  }
-
-  .new-project-content {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 10px;
-  }
-
-  .new-project-label {
-    font-size: var(--size-sm);
-    font-weight: 600;
-    color: var(--ui-accent);
-  }
-
-  .new-project-card:hover {
-    border-color: var(--ui-accent);
-    background-color: var(--bg-elevated);
   }
 
   .card-header {

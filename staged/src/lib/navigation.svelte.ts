@@ -4,17 +4,59 @@
  * Controls which view is shown in the main content area:
  * - `selectedProjectId === null` → ProjectsList (landing page)
  * - `selectedProjectId === <id>` → ProjectHome filtered to that project
+ *
+ * The last viewed project is persisted so the user returns to it on relaunch.
  */
 
+import { getStoreValue, setStoreValue } from './shared/persistentStore';
+import * as commands from './commands';
 import { projectStateStore } from './stores/projectState.svelte';
+
+const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
 export const navigation = $state({
   selectedProjectId: null as string | null,
 });
 
+/**
+ * Persist the current navigation target.
+ * Saves `null` for the home screen or the project ID.
+ */
+function persistLastProject(projectId: string | null): void {
+  setStoreValue(LAST_PROJECT_STORE_KEY, projectId);
+}
+
+/**
+ * Restore the last viewed project on app launch.
+ *
+ * Must be called after `initPersistentStore()` (which is done inside
+ * `initPreferences()`). If the stored project no longer exists the
+ * user is sent to the home screen instead.
+ */
+export async function initNavigation(): Promise<void> {
+  const lastProjectId = await getStoreValue<string | null>(LAST_PROJECT_STORE_KEY);
+  if (!lastProjectId) return;
+
+  // Validate the project still exists before navigating to it
+  try {
+    const projects = await commands.listProjects();
+    const exists = projects.some((p) => p.id === lastProjectId);
+    if (exists) {
+      navigation.selectedProjectId = lastProjectId;
+    } else {
+      // Project was deleted — clear the stale value
+      await setStoreValue(LAST_PROJECT_STORE_KEY, null);
+    }
+  } catch {
+    // If we can't list projects (e.g. store error), stay on home
+    console.warn('[Navigation] Could not verify last project, falling back to home');
+  }
+}
+
 /** Navigate to a specific project's detail view. */
 export function selectProject(projectId: string): void {
   navigation.selectedProjectId = projectId;
+  persistLastProject(projectId);
   // Mark the project as read when navigating to it, but only if it's not already read
   if (projectStateStore.isUnread(projectId)) {
     projectStateStore.markAsRead(projectId);
@@ -25,6 +67,7 @@ export function selectProject(projectId: string): void {
 export function selectProjectAndBranch(projectId: string, branchId: string): void {
   const alreadyOnProject = navigation.selectedProjectId === projectId;
   navigation.selectedProjectId = projectId;
+  persistLastProject(projectId);
   // Mark the project as read when navigating to it, but only if it's not already read
   if (projectStateStore.isUnread(projectId)) {
     projectStateStore.markAsRead(projectId);
@@ -43,4 +86,5 @@ export function selectProjectAndBranch(projectId: string, branchId: string): voi
 /** Navigate back to the projects list (landing page). */
 export function goHome(): void {
   navigation.selectedProjectId = null;
+  persistLastProject(null);
 }

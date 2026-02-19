@@ -75,12 +75,12 @@
 
   .form-btn.secondary {
     background: var(--bg-primary);
-    border-color: var(--border-muted);
-    color: var(--text-muted);
+    border-color: transparent;
+    color: var(--text-primary);
   }
 
   .form-btn.secondary:hover {
-    border-color: var(--border-emphasis);
+    background: var(--bg-hover);
     color: var(--text-primary);
   }
 

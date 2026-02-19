@@ -178,6 +178,9 @@
             placeholder="e.g., Add dark mode, Fix login bug"
             disabled={saving}
             autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck={false}
             autofocus
           />
         </div>
@@ -216,41 +219,42 @@
               <button class="change-button" onclick={() => (selectedRepo = null)}>Clear</button>
             </div>
           {:else}
-            <FormButton
-              variant="secondary"
-              class="select-repo-button"
-              onclick={() => (showRepoPicker = true)}
-            >
-              <Plus size={14} />
-              Select repository
-            </FormButton>
-            {#if recentRepos.length > 0}
-              <div class="recent-repos-section">
-                {#each recentRepos as recent, i}
-                  <FormButton
-                    variant="ghost"
-                    class="recent-repo-btn"
-                    onclick={() => {
-                      selectedRepo = recent.githubRepo;
-                      if (recent.subpath) {
-                        subpath = recent.subpath;
-                      }
-                    }}
-                  >
-                    <GitBranch size={12} />
-                    <span class="recent-repo-name">
-                      {recent.githubRepo}{#if recent.subpath}<span class="recent-repo-subpath"
-                          >/{recent.subpath}</span
-                        >{/if}
-                    </span>
-                    <span class="keyboard-shortcut">
-                      <Command size={10} />
-                      {i + 1}
-                    </span>
-                  </FormButton>
-                {/each}
-              </div>
-            {/if}
+            <div class="repo-picker-wrapper">
+              <FormButton
+                variant="secondary"
+                class="select-repo-button"
+                onclick={() => (showRepoPicker = true)}
+              >
+                Select repository
+              </FormButton>
+              {#if recentRepos.length > 0}
+                <div class="recent-repos-section">
+                  {#each recentRepos as recent, i}
+                    <FormButton
+                      variant="ghost"
+                      class="recent-repo-btn"
+                      onclick={() => {
+                        selectedRepo = recent.githubRepo;
+                        if (recent.subpath) {
+                          subpath = recent.subpath;
+                        }
+                      }}
+                    >
+                      <GitBranch size={12} />
+                      <span class="recent-repo-name">
+                        {recent.githubRepo}{#if recent.subpath}<span class="recent-repo-subpath"
+                            >/{recent.subpath}</span
+                          >{/if}
+                      </span>
+                      <span class="keyboard-shortcut">
+                        <Command size={10} />
+                        {i + 1}
+                      </span>
+                    </FormButton>
+                  {/each}
+                </div>
+              {/if}
+            </div>
           {/if}
         </div>
 
@@ -374,6 +378,10 @@
     color: var(--bg-deepest);
   }
 
+  .repo-picker-wrapper {
+    overflow: hidden;
+  }
+
   :global(.select-repo-button) {
     width: 100%;
     justify-content: flex-start;
@@ -428,9 +436,9 @@
   .recent-repos-section {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding: 0 8px;
-    margin-top: 4px;
+    gap: 3px;
+    padding: 0 4px;
+    margin-top: 2px;
   }
 
   :global(.recent-repo-btn) {

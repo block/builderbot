@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { cubicOut } from 'svelte/easing';
+  import { quintOut } from 'svelte/easing';
   import {
     FolderGit2,
     House,
@@ -103,11 +103,12 @@
     window.removeEventListener('pointerup', stopResize);
   }
 
-  function slideIn(_node: HTMLElement) {
+  function slide(_node: HTMLElement) {
+    const w = projectsSidebarState.width;
     return {
-      duration: 350,
-      easing: cubicOut,
-      css: (t: number) => `transform: translateX(${(t - 1) * 100}%)`,
+      duration: 300,
+      easing: quintOut,
+      css: (t: number) => `margin-left: ${(t - 1) * w}px`,
     };
   }
 
@@ -133,7 +134,7 @@
     class="projects-sidebar"
     class:resizing
     style={`width: ${projectsSidebarState.width}px;`}
-    in:slideIn
+    transition:slide
   >
     <div class="sidebar-header">
       <div class="title-row">

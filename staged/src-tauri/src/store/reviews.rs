@@ -4,7 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::git::Span;
 
-use super::models::{Comment, Review, ReviewScope};
+use super::models::{Comment, CommentType, Review, ReviewScope};
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
@@ -163,8 +163,8 @@ impl Store {
     pub fn add_comment(&self, review_id: &str, comment: &Comment) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO comments (id, review_id, path, span_start, span_end, content, author, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO comments (id, review_id, path, span_start, span_end, content, author, comment_type, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 comment.id,
                 review_id,
@@ -173,6 +173,7 @@ impl Store {
                 comment.span.end,
                 comment.content,
                 comment.author.as_str(),
+                comment.comment_type.as_ref().map(|ct| ct.as_str()),
                 comment.created_at,
             ],
         )?;
@@ -306,12 +307,13 @@ impl Store {
 
         // Load comments
         let mut stmt = conn.prepare(
-            "SELECT id, path, span_start, span_end, content, author, created_at
+            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at
              FROM comments WHERE review_id = ?1 ORDER BY created_at ASC",
         )?;
         review.comments = stmt
             .query_map(params![&review.id], |row| {
                 let author_str: String = row.get(5)?;
+                let comment_type_str: Option<String> = row.get(6)?;
                 Ok(Comment {
                     id: row.get(0)?,
                     path: row.get(1)?,
@@ -319,7 +321,8 @@ impl Store {
                     content: row.get(4)?,
                     author: super::models::CommentAuthor::parse(&author_str)
                         .unwrap_or(super::models::CommentAuthor::User),
-                    created_at: row.get(6)?,
+                    comment_type: comment_type_str.as_deref().and_then(CommentType::parse),
+                    created_at: row.get(7)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

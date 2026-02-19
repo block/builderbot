@@ -852,10 +852,17 @@ Return your review as a JSON block fenced with ```review-comments markers:
   {
     \"path\": \"src/foo.ts\",
     \"span\": { \"start\": 10, \"end\": 15 },
+    \"type\": \"suggestion\",
     \"content\": \"This function doesn't handle the null case...\"
   }
 ]
 ```
+
+Each comment must include a `type` field with one of these values:
+- `\"information\"` — contextual explanation or observation (shown as a subtle annotation)
+- `\"suggestion\"` — a recommended improvement
+- `\"warning\"` — a potential issue or concern
+- `\"issue\"` — a bug or correctness problem
 
 The `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end). \
 Only comment on changed files. Be specific and actionable."

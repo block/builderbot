@@ -355,14 +355,15 @@ impl Store {
             );
 
             CREATE TABLE IF NOT EXISTS comments (
-                id          TEXT PRIMARY KEY,
-                review_id   TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
-                path        TEXT NOT NULL,
-                span_start  INTEGER NOT NULL,
-                span_end    INTEGER NOT NULL,
-                content     TEXT NOT NULL,
-                author      TEXT NOT NULL DEFAULT 'user',
-                created_at  INTEGER NOT NULL
+                id            TEXT PRIMARY KEY,
+                review_id     TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+                path          TEXT NOT NULL,
+                span_start    INTEGER NOT NULL,
+                span_end      INTEGER NOT NULL,
+                content       TEXT NOT NULL,
+                author        TEXT NOT NULL DEFAULT 'user',
+                comment_type  TEXT,
+                created_at    INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_comments_review ON comments(review_id);
 

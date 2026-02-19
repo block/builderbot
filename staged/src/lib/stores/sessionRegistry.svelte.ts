@@ -47,10 +47,6 @@ class SessionRegistry {
       this.cleanup();
     }
 
-    console.info(
-      `[sessionRegistry] register: session=${sessionId} project=${projectId} branch=${branchId ?? 'none'} type=${type} (size: ${this.sessions.size + 1})`
-    );
-
     this.sessions.set(sessionId, {
       sessionId,
       projectId,
@@ -133,16 +129,6 @@ class SessionRegistry {
    * Unregister a session (called when session completes or is cleaned up)
    */
   unregister(sessionId: string): void {
-    const meta = this.sessions.get(sessionId);
-    if (meta) {
-      console.info(
-        `[sessionRegistry] unregister: session=${sessionId} type=${meta.type} project=${meta.projectId} branch=${meta.branchId ?? 'none'} (size: ${this.sessions.size - 1})`
-      );
-    } else {
-      console.info(
-        `[sessionRegistry] unregister: session=${sessionId} NOT FOUND in registry (size: ${this.sessions.size})`
-      );
-    }
     this.sessions.delete(sessionId);
     this.version++;
   }

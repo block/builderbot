@@ -156,15 +156,6 @@ impl AgentDriver for AcpDriver {
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
     ) -> Result<(), String> {
-        log::info!(
-            "ACP driver run: session={session_id} agent={} binary={} remote={} resuming={} working_dir={}",
-            self.agent_label,
-            self.binary_path.display(),
-            self.is_remote,
-            agent_session_id.is_some(),
-            working_dir.display(),
-        );
-
         let mut child = Command::new(&self.binary_path)
             .args(&self.acp_args)
             .current_dir(working_dir)
@@ -173,12 +164,7 @@ impl AgentDriver for AcpDriver {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| {
-                log::info!("ACP driver spawn FAILED: session={session_id} error={e}");
-                format!("Failed to spawn {}: {e}", self.agent_label)
-            })?;
-
-        log::info!("ACP driver process spawned: session={session_id} pid={:?}", child.id());
+            .map_err(|e| format!("Failed to spawn {}: {e}", self.agent_label))?;
 
         let stdin = child
             .stdin
@@ -196,7 +182,6 @@ impl AgentDriver for AcpDriver {
         let handler = Arc::new(AcpNotificationHandler::new(Arc::clone(writer), is_resuming));
         let handler_for_conn = Arc::clone(&handler);
 
-        let sid_for_io = session_id.to_string();
         let (connection, io_future) =
             ClientSideConnection::new(handler_for_conn, stdin_compat, stdout_compat, |fut| {
                 tokio::task::spawn_local(fut);
@@ -204,7 +189,7 @@ impl AgentDriver for AcpDriver {
 
         tokio::task::spawn_local(async move {
             if let Err(e) = io_future.await {
-                log::error!("ACP IO error: session={sid_for_io} error={e:?}");
+                log::error!("ACP IO error: {e:?}");
             }
         });
 
@@ -214,11 +199,9 @@ impl AgentDriver for AcpDriver {
             working_dir.to_path_buf()
         };
 
-        log::info!("ACP driver starting protocol: session={session_id}");
-
         let protocol_result = tokio::select! {
             _ = cancel_token.cancelled() => {
-                log::info!("ACP driver session cancelled: session={session_id}");
+                log::info!("Session {session_id} cancelled");
                 writer.finalize().await;
                 return Ok(());
             }
@@ -228,14 +211,8 @@ impl AgentDriver for AcpDriver {
             ) => result,
         };
 
-        match &protocol_result {
-            Ok(()) => log::info!("ACP driver protocol completed OK: session={session_id}"),
-            Err(e) => log::info!("ACP driver protocol FAILED: session={session_id} error={e}"),
-        }
-
         writer.finalize().await;
         let _ = child.kill().await;
-        log::info!("ACP driver child process killed: session={session_id}");
 
         protocol_result
     }
@@ -333,8 +310,6 @@ async fn run_acp_protocol(
     acp_session_id: Option<&str>,
     handler: &Arc<AcpNotificationHandler>,
 ) -> Result<(), String> {
-    log::info!("ACP protocol setup: session={our_session_id} acp_session={acp_session_id:?}");
-
     let agent_session_id = setup_acp_session(
         connection,
         working_dir,
@@ -344,7 +319,6 @@ async fn run_acp_protocol(
     )
     .await?;
 
-    log::info!("ACP protocol session ready: session={our_session_id} agent_session={agent_session_id}");
     handler.set_live();
 
     let prompt_request = PromptRequest::new(
@@ -352,16 +326,11 @@ async fn run_acp_protocol(
         vec![AcpContentBlock::Text(TextContent::new(prompt))],
     );
 
-    log::info!("ACP protocol sending prompt: session={our_session_id} prompt_len={}", prompt.len());
     connection
         .prompt(prompt_request)
         .await
-        .map_err(|e| {
-            log::info!("ACP protocol prompt FAILED: session={our_session_id} error={e:?}");
-            format!("Prompt failed: {e:?}")
-        })?;
+        .map_err(|e| format!("Prompt failed: {e:?}"))?;
 
-    log::info!("ACP protocol prompt completed: session={our_session_id}");
     Ok(())
 }
 
@@ -375,54 +344,40 @@ async fn setup_acp_session(
     let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_info(client_info);
 
-    log::info!("ACP init: session={our_session_id} sending initialize request");
     let init_response = connection
         .initialize(init_request)
         .await
-        .map_err(|e| {
-            log::info!("ACP init FAILED: session={our_session_id} error={e:?}");
-            format!("ACP init failed: {e:?}")
-        })?;
-    log::info!("ACP init OK: session={our_session_id} load_session_supported={}", init_response.agent_capabilities.load_session);
+        .map_err(|e| format!("ACP init failed: {e:?}"))?;
 
     match acp_session_id {
         Some(existing_id) => {
             if !init_response.agent_capabilities.load_session {
-                log::info!("ACP resume FAILED: session={our_session_id} agent does not support load_session");
                 return Err(
                     "Agent does not support load_session — cannot resume conversation".to_string(),
                 );
             }
 
             log::info!(
-                "ACP resuming session: session={our_session_id} acp_session={existing_id}"
+                "Resuming ACP session {existing_id} via load_session for session {our_session_id}"
             );
+
             connection
                 .load_session(LoadSessionRequest::new(
                     existing_id.to_string(),
                     working_dir.to_path_buf(),
                 ))
                 .await
-                .map_err(|e| {
-                    log::info!("ACP load_session FAILED: session={our_session_id} acp_session={existing_id} error={e:?}");
-                    format!("Failed to load ACP session: {e:?}")
-                })?;
+                .map_err(|e| format!("Failed to load ACP session: {e:?}"))?;
 
-            log::info!("ACP session resumed: session={our_session_id} acp_session={existing_id}");
             Ok(existing_id.to_string())
         }
         None => {
-            log::info!("ACP creating new session: session={our_session_id}");
             let session_response = connection
                 .new_session(NewSessionRequest::new(working_dir.to_path_buf()))
                 .await
-                .map_err(|e| {
-                    log::info!("ACP new_session FAILED: session={our_session_id} error={e:?}");
-                    format!("Failed to create ACP session: {e:?}")
-                })?;
+                .map_err(|e| format!("Failed to create ACP session: {e:?}"))?;
 
             let new_id = session_response.session_id.to_string();
-            log::info!("ACP new session created: session={our_session_id} acp_session={new_id}");
             store
                 .set_agent_session_id(our_session_id, &new_id)
                 .map_err(|e| format!("Failed to save agent session ID: {e}"))?;

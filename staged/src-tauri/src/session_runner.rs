@@ -88,11 +88,6 @@ impl SessionRegistry {
         let token = CancellationToken::new();
         let mut running = self.running.lock().unwrap();
         running.insert(session_id.to_string(), token.clone());
-        log::info!(
-            "[SessionRegistry] registered session {} (active count: {})",
-            session_id,
-            running.len()
-        );
         token
     }
 
@@ -101,25 +96,15 @@ impl SessionRegistry {
     fn deregister(&self, session_id: &str) {
         let mut running = self.running.lock().unwrap();
         running.remove(session_id);
-        log::info!(
-            "[SessionRegistry] deregistered session {} (active count: {})",
-            session_id,
-            running.len()
-        );
     }
 
     /// Cancel a running session. Returns true if the session was found and
     /// signalled, false if it wasn't running (already finished or unknown).
     pub fn cancel(&self, session_id: &str) -> bool {
         if let Some(token) = self.running.lock().unwrap().get(session_id) {
-            log::info!("[SessionRegistry] cancelling session {}", session_id);
             token.cancel();
             true
         } else {
-            log::info!(
-                "[SessionRegistry] cancel called for session {} but it was not running",
-                session_id
-            );
             false
         }
     }
@@ -166,13 +151,6 @@ pub fn start_session(
     app_handle: AppHandle,
     registry: Arc<SessionRegistry>,
 ) -> Result<(), String> {
-    log::info!(
-        "[session_runner] start_session called for session={} provider={:?} workspace={:?}",
-        config.session_id,
-        config.provider,
-        config.workspace_name,
-    );
-
     // Create the driver eagerly so we fail fast if the agent isn't found.
     let driver = if let Some(ref ws_name) = config.workspace_name {
         AcpDriver::for_workspace(ws_name, config.provider.as_deref())?
@@ -182,11 +160,6 @@ pub fn start_session(
             None => AcpDriver::first_available()?,
         }
     };
-
-    log::info!(
-        "[session_runner] ACP driver created for session={}",
-        config.session_id,
-    );
 
     // Persist the user message right away so it's visible immediately.
     store
@@ -201,11 +174,6 @@ pub fn start_session(
     let store_for_status = Arc::clone(&store);
 
     std::thread::spawn(move || {
-        log::info!(
-            "[session_runner] background thread started for session={}",
-            session_id_for_status,
-        );
-
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -222,11 +190,6 @@ pub fn start_session(
             let store_trait: Arc<dyn acp_client::Store> = store;
             let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
 
-            log::info!(
-                "[session_runner] invoking ACP driver.run for session={}",
-                config.session_id,
-            );
-
             driver
                 .run(
                     &config.session_id,
@@ -239,13 +202,6 @@ pub fn start_session(
                 )
                 .await
         });
-
-        log::info!(
-            "[session_runner] ACP driver.run returned for session={} success={} cancelled={}",
-            session_id_for_status,
-            result.is_ok(),
-            cancel_token.is_cancelled(),
-        );
 
         // Always deregister, regardless of outcome.
         registry.deregister(&session_id_for_status);
@@ -291,14 +247,6 @@ pub fn start_session(
             .transition_from_running(&session_id_for_status, status_enum, error_msg.as_deref())
             .unwrap_or(false);
 
-        log::info!(
-            "[session_runner] session={} final_status={} transitioned={} (emitting event: {})",
-            session_id_for_status,
-            new_status,
-            transitioned,
-            transitioned,
-        );
-
         if transitioned {
             emit_status(&app_handle, &session_id_for_status, new_status, error_msg);
         }
@@ -331,48 +279,16 @@ pub fn cancel_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
 
     for session in sessions {
         let should_cancel = match session.owner_pid {
-            None => {
-                log::info!(
-                    "[session_runner] session={} has no owner_pid (pre-migration), cancelling",
-                    session.id
-                );
-                true
-            }
-            Some(pid) if pid == std::process::id() => {
-                log::warn!(
-                    "[session_runner] session={} owned by current pid={}, skipping",
-                    session.id,
-                    pid
-                );
-                false
-            }
-            Some(pid) if !is_process_alive(pid) => {
-                log::info!(
-                    "[session_runner] session={} owner pid={} is dead, cancelling",
-                    session.id,
-                    pid
-                );
-                true
-            }
-            Some(pid) => {
-                log::info!(
-                    "[session_runner] session={} owner pid={} is alive, leaving",
-                    session.id,
-                    pid
-                );
-                false
-            }
+            None => true,
+            Some(pid) if pid == std::process::id() => false,
+            Some(pid) if !is_process_alive(pid) => true,
+            Some(_pid) => false,
         };
 
         if should_cancel {
             let transitioned = store
                 .transition_from_running(&session.id, SessionStatus::Cancelled, None)
                 .unwrap_or(false);
-            log::info!(
-                "[session_runner] session={} cancelled transitioned={}",
-                session.id,
-                transitioned
-            );
             if transitioned {
                 emit_status(&app_handle, &session.id, "cancelled", None);
             }
@@ -625,12 +541,6 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
 }
 
 fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Option<String>) {
-    log::info!(
-        "[session_runner] emitting session-status-changed event: session={} status={} has_error={}",
-        session_id,
-        status,
-        error.is_some(),
-    );
     let event = SessionStatusEvent {
         session_id: session_id.to_string(),
         status: status.to_string(),

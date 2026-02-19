@@ -33,7 +33,6 @@ class PrStateStore {
   }
 
   setPrCreating(branchId: string, sessionId: string): void {
-    console.info(`[session:prState] setPrCreating: branch=${branchId} session=${sessionId}`);
     // Only cleanup when approaching size limit to avoid O(n) cost on every operation
     if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
       this.cleanup();
@@ -48,7 +47,6 @@ class PrStateStore {
   }
 
   setPrCreated(branchId: string, url: string | null = null): void {
-    console.info(`[session:prState] setPrCreated: branch=${branchId} url=${url}`);
     if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
       this.cleanup();
     }
@@ -62,7 +60,6 @@ class PrStateStore {
   }
 
   setPrError(branchId: string, error: string): void {
-    console.info(`[session:prState] setPrError: branch=${branchId} error=${error}`);
     if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
       this.cleanup();
     }
@@ -77,7 +74,6 @@ class PrStateStore {
   }
 
   clearPrState(branchId: string): void {
-    console.info(`[session:prState] clearPrState: branch=${branchId}`);
     this.states.delete(branchId);
   }
 

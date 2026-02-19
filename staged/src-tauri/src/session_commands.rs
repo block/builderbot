@@ -93,22 +93,9 @@ pub fn get_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
 ) -> Result<Option<store::Session>, String> {
-    let result = get_store(&store)?
+    get_store(&store)?
         .get_session(&session_id)
-        .map_err(|e| e.to_string())?;
-    if let Some(ref s) = result {
-        log::info!(
-            "[session_cmd] get_session: session={} status={:?}",
-            session_id,
-            s.status,
-        );
-    } else {
-        log::info!(
-            "[session_cmd] get_session: session={} NOT FOUND",
-            session_id,
-        );
-    }
-    Ok(result)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -150,11 +137,6 @@ pub fn start_session(
     working_dir: String,
     provider: Option<String>,
 ) -> Result<store::Session, String> {
-    log::info!(
-        "[session_cmd] start_session: provider={:?} working_dir={}",
-        provider,
-        working_dir,
-    );
     let store = get_store(&store)?;
     let working_dir = PathBuf::from(working_dir);
     let mut session = store::Session::new_running(&prompt, &working_dir);
@@ -162,10 +144,6 @@ pub fn start_session(
         session = session.with_provider(p);
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
-    log::info!(
-        "[session_cmd] start_session: created session={}",
-        session.id,
-    );
 
     session_runner::start_session(
         SessionConfig {
@@ -202,11 +180,6 @@ pub fn resume_session(
     session_id: String,
     prompt: String,
 ) -> Result<(), String> {
-    log::info!(
-        "[session_cmd] resume_session: session={} prompt_len={}",
-        session_id,
-        prompt.len(),
-    );
     let store = get_store(&store)?;
 
     let session = store
@@ -224,17 +197,8 @@ pub fn resume_session(
         .transition_to_running(&session_id)
         .map_err(|e| e.to_string())?;
     if !transitioned {
-        log::info!(
-            "[session_cmd] resume_session: session={} already running, rejecting",
-            session_id,
-        );
         return Err("Session is already running".to_string());
     }
-
-    log::info!(
-        "[session_cmd] resume_session: session={} transitioned to running, spawning agent",
-        session_id,
-    );
 
     let _ = app_handle.emit(
         "session-status-changed",
@@ -270,20 +234,11 @@ pub fn cancel_session(
     app_handle: tauri::AppHandle,
     session_id: String,
 ) -> Result<(), String> {
-    log::info!("[session_cmd] cancel_session: session={}", session_id);
     let was_running = registry.cancel(&session_id);
     if !was_running {
-        log::info!(
-            "[session_cmd] cancel_session: session={} not in registry, checking DB status",
-            session_id,
-        );
         let store = get_store(&store)?;
         if let Ok(Some(session)) = store.get_session(&session_id) {
             if session.status == store::SessionStatus::Running {
-                log::info!(
-                    "[session_cmd] cancel_session: session={} was running in DB but not in registry, force-cancelling",
-                    session_id,
-                );
                 let _ =
                     store.update_session_status(&session_id, store::SessionStatus::Cancelled, None);
                 let _ = app_handle.emit(
@@ -293,12 +248,6 @@ pub fn cancel_session(
                         status: "cancelled".to_string(),
                         error_message: None,
                     },
-                );
-            } else {
-                log::info!(
-                    "[session_cmd] cancel_session: session={} DB status={:?}, no action needed",
-                    session_id,
-                    session.status,
                 );
             }
         }
@@ -312,7 +261,6 @@ pub fn delete_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
 ) -> Result<(), String> {
-    log::info!("[session_cmd] delete_session: session={}", session_id);
     registry.cancel(&session_id);
 
     get_store(&store)?
@@ -360,12 +308,6 @@ pub async fn start_branch_session(
     session_type: BranchSessionType,
     provider: Option<String>,
 ) -> Result<BranchSessionResponse, String> {
-    log::info!(
-        "[session_cmd] start_branch_session: branch={} type={:?} provider={:?}",
-        branch_id,
-        session_type,
-        provider,
-    );
     let store = get_store(&store)?;
 
     // Resolve branch → project
@@ -491,15 +433,6 @@ pub async fn start_branch_session(
 
     // For remote branches, use the user's UI selection.
     let effective_provider = provider;
-
-    log::info!(
-        "[session_cmd] start_branch_session: created session={} artifact={} type={:?} branch={} is_remote={}",
-        session.id,
-        artifact_id,
-        session_type,
-        branch_id,
-        is_remote,
-    );
 
     session_runner::start_session(
         SessionConfig {

@@ -257,7 +257,7 @@
   .projects-sidebar {
     position: relative;
     flex-shrink: 0;
-    border-right: 1px solid var(--border-muted);
+    border-right: 1px solid var(--border-subtle);
     background-color: var(--bg-surface);
     display: flex;
     flex-direction: column;
@@ -271,7 +271,6 @@
 
   .sidebar-header {
     padding: 14px 12px 10px;
-    border-bottom: 1px solid var(--border-muted);
     display: flex;
     flex-direction: column;
   }
@@ -369,9 +368,9 @@
   }
 
   .project-row.active {
-    color: var(--text-primary);
-    background-color: var(--bg-elevated);
-    border-color: var(--border-emphasis);
+    color: var(--bg-primary);
+    background-color: var(--text-primary);
+    border-color: transparent;
   }
 
   .project-row.deleting {

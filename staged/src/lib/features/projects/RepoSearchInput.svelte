@@ -298,7 +298,6 @@
       {#if loading}
         <div class="loading-state">
           <Spinner size={16} />
-          <span>Loading repositories...</span>
         </div>
       {:else if error}
         <div class="error-state">{error}</div>
@@ -361,7 +360,7 @@
     padding: 10px 14px;
     border: 1.5px solid var(--border-muted);
     border-radius: 10px;
-    background: var(--bg-elevated);
+    background: transparent;
     transition: border-color 0.15s ease;
   }
 
@@ -370,7 +369,7 @@
   }
 
   :global(.search-icon) {
-    color: var(--text-muted);
+    color: var(--text-faint);
     flex-shrink: 0;
   }
 
@@ -379,14 +378,14 @@
     background: transparent;
     border: none;
     outline: none;
-    font-size: var(--size-sm);
+    font-size: var(--size-md);
     color: var(--text-primary);
     padding: 0;
     font-family: inherit;
   }
 
   .search-input input::placeholder {
-    color: var(--text-muted);
+    color: var(--text-faint);
   }
 
   .search-input input:disabled {

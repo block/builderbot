@@ -115,6 +115,18 @@
   }
 
   // =========================================================================
+  // Shift-key tracking (for draft PR creation)
+  // =========================================================================
+  let shiftHeld = $state(false);
+
+  function handleShiftDown(e: KeyboardEvent) {
+    if (e.key === 'Shift') shiftHeld = true;
+  }
+  function handleShiftUp(e: KeyboardEvent) {
+    if (e.key === 'Shift') shiftHeld = false;
+  }
+
+  // =========================================================================
   // PR button state
   // =========================================================================
   let prStateOverride = $state<PrState | null>(null);
@@ -494,6 +506,10 @@
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
 
+    // Shift-key tracking for draft PR creation
+    window.addEventListener('keydown', handleShiftDown);
+    window.addEventListener('keyup', handleShiftUp);
+
     // Window focus tracking for smart polling
     handleFocus = () => {
       isWindowFocused = true;
@@ -533,6 +549,9 @@
     // Clean up window focus listeners
     if (handleFocus) window.removeEventListener('focus', handleFocus);
     if (handleBlur) window.removeEventListener('blur', handleBlur);
+    // Clean up shift-key listeners
+    window.removeEventListener('keydown', handleShiftDown);
+    window.removeEventListener('keyup', handleShiftUp);
   });
   async function loadTimeline() {
     // Only show the loading spinner on the initial load. Subsequent refreshes
@@ -960,7 +979,7 @@
    *  2. Fall back to any GitHub PR URL (`/pull/\d+`) found in any message
    *     role, which covers `gh pr create` output stored as a tool_result.
    */
-  async function handleCreatePr() {
+  async function handleCreatePr(draft = false) {
     if (prState === 'creating') return;
 
     prStateOverride = 'creating';
@@ -972,7 +991,7 @@
       const remote = branch.branchType === 'remote';
       const agents = remote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
-      const sessionId = await commands.createPr(branch.id, provider);
+      const sessionId = await commands.createPr(branch.id, provider, draft);
       prSessionId = sessionId;
       prStateOverride = 'creating';
       // Register session in the unified registry
@@ -1161,7 +1180,7 @@
       // Show error dialog
       showPrErrorDialog = true;
     } else if (prState === 'idle') {
-      handleCreatePr();
+      handleCreatePr(shiftHeld);
     } else if (prState === 'creating' && prSessionId) {
       // While creating, open the session chat so user can watch progress
       openSessionId = prSessionId;
@@ -1171,7 +1190,7 @@
   function handlePrErrorRetry() {
     showPrErrorDialog = false;
     prStateStore.clearPrState(branch.id);
-    handleCreatePr();
+    handleCreatePr(shiftHeld);
   }
 
   function handlePrErrorClose() {
@@ -1525,7 +1544,9 @@
                             ? 'PR creation failed — click for details'
                             : prState === 'creating'
                               ? 'Creating PR… (click to view)'
-                              : 'Create PR'}
+                              : shiftHeld
+                                ? 'Create draft PR (⇧ held)'
+                                : 'Create PR'}
                 >
                   {#if pushState === 'pushing'}
                     <Spinner size={13} />
@@ -1562,7 +1583,7 @@
                     {:else if prState === 'error'}
                       PR failed
                     {:else}
-                      Create PR
+                      {shiftHeld ? 'Create draft PR' : 'Create PR'}
                     {/if}
                   </span>
                   {#if prStatusIndicator}

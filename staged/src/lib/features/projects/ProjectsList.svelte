@@ -6,14 +6,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import {
-    GitPullRequest,
-    GitPullRequestClosed,
-    GitPullRequestDraft,
-    GitBranch,
-    Plus,
-  } from 'lucide-svelte';
-  import type { Project, Branch } from '../../types';
+  import { GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Plus } from 'lucide-svelte';
+  import type { Project, ProjectRepo, Branch } from '../../types';
   import * as commands from '../../commands';
   import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
   import { selectProject } from '../../navigation.svelte';
@@ -31,8 +25,17 @@
   let showNewProjectModal = $state(false);
   let isCommandKeyHeld = $state(false);
   let deletingProjectNames = $state<Map<string, string>>(new Map());
-  let repoCountsByProject = $state<Map<string, number>>(new Map());
-  let repoCountLoadGeneration = 0;
+  let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
+  let repoLoadGeneration = 0;
+
+  let repoCountsByProject = $derived(
+    new Map(
+      projects.map((p) => {
+        const repos = reposByProject.get(p.id);
+        return [p.id, repos ? repos.length : p.githubRepo ? 1 : 0] as const;
+      })
+    )
+  );
 
   onMount(() => {
     loadProjects();
@@ -109,10 +112,7 @@
       const loadedProjects = await commands.listProjects();
       projects = loadedProjects;
       setHasProjects(loadedProjects.length > 0);
-      repoCountsByProject = new Map(
-        loadedProjects.map((project) => [project.id, project.githubRepo ? 1 : 0] as const)
-      );
-      void hydrateRepoCounts(loadedProjects);
+      void hydrateRepos(loadedProjects);
       // Load branches for each project to calculate PR status
       const branchesMap = new Map<string, Branch[]>();
       await Promise.all(
@@ -134,29 +134,28 @@
     }
   }
 
-  async function hydrateRepoCounts(projectList: Project[]) {
-    const generation = ++repoCountLoadGeneration;
-    const counts = await Promise.all(
+  async function hydrateRepos(projectList: Project[]) {
+    const generation = ++repoLoadGeneration;
+    const entries = await Promise.all(
       projectList.map(async (project) => {
         try {
           const repos = await commands.listProjectRepos(project.id);
-          return [project.id, repos.length] as const;
+          return [project.id, repos] as const;
         } catch (e) {
-          console.error(`[ProjectsList] Failed to load repo count for project '${project.id}':`, e);
-          return [project.id, project.githubRepo ? 1 : 0] as const;
+          console.error(`[ProjectsList] Failed to load repos for project '${project.id}':`, e);
+          return [project.id, [] as ProjectRepo[]] as const;
         }
       })
     );
-    if (generation !== repoCountLoadGeneration) return;
-    repoCountsByProject = new Map(counts);
+    if (generation !== repoLoadGeneration) return;
+    reposByProject = new Map(entries);
   }
 
   function handleProjectCreated(project: Project) {
     if (!projects.some((p) => p.id === project.id)) {
       projects = [...projects, project];
     }
-    repoCountsByProject = new Map(repoCountsByProject).set(project.id, project.githubRepo ? 1 : 0);
-    void hydrateRepoCounts(projects);
+    void hydrateRepos(projects);
     showNewProjectModal = false;
     selectProject(project.id);
   }
@@ -278,48 +277,55 @@
           {#each projects as project, index (project.id)}
             {@const status = getProjectStatus(project.id, deletingProjectNames)}
             {@const prStatus = getProjectPrStatus(project.id)}
-            <button
-              class="project-card"
-              class:deleting={status.kind === 'deleting'}
-              onclick={() => openProject(project.id)}
-              disabled={status.kind === 'deleting'}
-              title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
-            >
-              {#if isCommandKeyHeld && index < 9}
-                <div class="keyboard-shortcut-overlay">
-                  <span class="command-icon">⌘</span>
-                  <span class="number">{index + 1}</span>
-                </div>
-              {/if}
-              {#if status.kind === 'running'}
-                <div class="status-indicator spinner">
-                  <Spinner size={14} />
-                </div>
-              {:else if status.kind === 'unread'}
-                <div class="status-indicator unread-dot"></div>
-              {/if}
-              <div class="card-header">
-                {#if prStatus === 'merged'}
-                  <GitPullRequest size={16} class="pr-status-merged" />
-                {:else if prStatus === 'open'}
-                  <GitPullRequest size={16} />
-                {:else if prStatus === 'closed'}
-                  <GitPullRequestClosed size={16} />
-                {:else if prStatus === 'conflict'}
-                  <GitPullRequestClosed size={16} class="pr-status-conflict" />
-                {:else}
-                  <GitPullRequestDraft size={16} class="pr-status-draft" />
+            {@const repos = reposByProject.get(project.id) ?? []}
+            <div class="project-card-wrapper">
+              <button
+                class="project-card"
+                class:deleting={status.kind === 'deleting'}
+                onclick={() => openProject(project.id)}
+                disabled={status.kind === 'deleting'}
+                title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
+              >
+                {#if isCommandKeyHeld && index < 9}
+                  <div class="keyboard-shortcut-overlay">
+                    <span class="command-icon">⌘</span>
+                    <span class="number">{index + 1}</span>
+                  </div>
                 {/if}
-                <span>{projectDisplayName(project)}</span>
-              </div>
-              {#if status.kind === 'deleting'}
-                <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
-              {/if}
-              <div class="repo">{project.githubRepo ?? 'No repo attached'}</div>
-              <div class="repo">
+                {#if status.kind === 'running'}
+                  <div class="status-indicator spinner">
+                    <Spinner size={14} />
+                  </div>
+                {:else if status.kind === 'unread'}
+                  <div class="status-indicator unread-dot"></div>
+                {/if}
+                <div class="card-header">
+                  {#if prStatus === 'merged'}
+                    <GitPullRequest size={16} class="pr-status-merged" />
+                  {:else if prStatus === 'open'}
+                    <GitPullRequest size={16} />
+                  {:else if prStatus === 'closed'}
+                    <GitPullRequestClosed size={16} />
+                  {:else if prStatus === 'conflict'}
+                    <GitPullRequestClosed size={16} class="pr-status-conflict" />
+                  {:else}
+                    <GitPullRequestDraft size={16} class="pr-status-draft" />
+                  {/if}
+                  <span>{projectDisplayName(project)}</span>
+                </div>
+                {#if status.kind === 'deleting'}
+                  <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
+                {/if}
+                <div class="repo">
+                  {repos.length > 0
+                    ? repos.map((r) => r.githubRepo).join(', ')
+                    : (project.githubRepo ?? 'No repo attached')}
+                </div>
+              </button>
+              <div class="card-location">
                 {project.location === 'remote' ? 'Remote workspace' : 'Local worktrees'}
               </div>
-            </button>
+            </div>
           {/each}
         </div>
       {/if}
@@ -414,7 +420,24 @@
   .projects-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    grid-auto-rows: 1fr;
     gap: 12px;
+  }
+
+  .project-card-wrapper {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .project-card-wrapper .project-card {
+    flex: 1;
+  }
+
+  .card-location {
+    color: var(--text-faint);
+    font-size: calc(var(--size-xs) - 1px);
+    padding: 0 4px;
   }
 
   .project-card {
@@ -484,11 +507,14 @@
   }
 
   .repo {
+    margin-top: auto;
     color: var(--text-muted);
     font-size: var(--size-xs);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .deleting-pill {

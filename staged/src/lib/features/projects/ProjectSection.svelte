@@ -308,6 +308,11 @@
 
   .header-action-button.safe-delete {
     color: var(--ui-danger);
+    border: 1px solid var(--ui-danger);
+  }
+
+  .header-action-button.safe-delete .trash-icon {
+    color: var(--ui-danger);
   }
 
   .detecting-status {

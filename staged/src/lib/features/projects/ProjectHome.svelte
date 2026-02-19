@@ -262,9 +262,9 @@
         const branches = branchesByProject.get(project.id) || [];
         const repoCount = repoCountsByProject.get(project.id) || 0;
 
-        // If no repos, safe to delete
+        // Don't show red styling for projects with no repos — there's nothing
+        // to call attention to when no repositories have been added yet.
         if (repoCount === 0) {
-          nextSafe.add(project.id);
           continue;
         }
 

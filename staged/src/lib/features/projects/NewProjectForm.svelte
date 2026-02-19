@@ -250,6 +250,7 @@
                         <Command size={10} />
                         {i + 1}
                       </span>
+                      <Plus size={12} />
                     </FormButton>
                   {/each}
                 </div>
@@ -468,10 +469,10 @@
     align-items: center;
     gap: 2px;
     padding: 2px 5px;
-    background: var(--bg-chrome);
-    border: 1px solid var(--border-muted);
+    background: var(--bg-primary);
+    border: none;
     border-radius: 4px;
-    color: var(--text-faint);
+    color: var(--text-muted);
     font-size: var(--size-xs);
     flex-shrink: 0;
     line-height: 1;

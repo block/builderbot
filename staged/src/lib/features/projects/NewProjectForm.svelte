@@ -428,12 +428,18 @@
   .recent-repos-section {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 4px;
+    padding: 0 8px;
+    margin-top: 4px;
   }
 
   :global(.recent-repo-btn) {
     width: 100%;
     justify-content: flex-start;
+    min-height: 28px !important;
+    padding: 4px 8px !important;
+    font-size: var(--size-xs) !important;
+    border-radius: 6px !important;
   }
 
   .recent-repo-name {

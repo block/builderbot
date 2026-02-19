@@ -328,7 +328,7 @@
 
   .new-project-button:hover {
     color: var(--text-primary);
-    background-color: var(--bg-hover);
+    background-color: var(--ui-selection);
   }
 
   .new-project-button:hover .plus-icon {
@@ -372,14 +372,14 @@
 
   .project-row:hover {
     color: var(--text-primary);
-    background-color: var(--bg-hover);
-    border-color: var(--border-muted);
+    background-color: var(--ui-selection);
+    border-color: var(--border-subtle);
   }
 
   .project-row.active {
-    color: var(--bg-primary);
-    background-color: var(--text-primary);
-    border-color: transparent;
+    color: var(--text-primary);
+    background-color: var(--bg-hover);
+    border-color: var(--border-muted);
   }
 
   .project-row.deleting {

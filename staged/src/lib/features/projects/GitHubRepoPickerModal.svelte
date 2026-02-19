@@ -11,9 +11,10 @@
   interface Props {
     onSelect: (nameWithOwner: string, subpath?: string) => void;
     onClose: () => void;
+    excludeRepos?: Set<string>;
   }
 
-  let { onSelect, onClose }: Props = $props();
+  let { onSelect, onClose, excludeRepos }: Props = $props();
 
   function handleBackdropClick(event: MouseEvent) {
     if (event.target === event.currentTarget) {
@@ -32,7 +33,7 @@
   onkeydown={(e) => e.key === 'Escape' && onClose()}
 >
   <div class="modal">
-    <GitHubRepoPicker {onSelect} onBack={onClose} />
+    <GitHubRepoPicker {onSelect} onBack={onClose} {excludeRepos} />
   </div>
 </div>
 

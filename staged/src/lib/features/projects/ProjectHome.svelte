@@ -812,6 +812,9 @@
       showRepoPicker = false;
       repoPickerProject = null;
     }}
+    excludeRepos={repoPickerProject
+      ? new Set(repoLabelsByProject.get(repoPickerProject.id)?.values())
+      : undefined}
   />
 {/if}
 

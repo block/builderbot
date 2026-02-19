@@ -7,8 +7,6 @@
   the form slides in below the headline.
 -->
 <script lang="ts">
-  import { slide } from 'svelte/transition';
-  import { quintOut } from 'svelte/easing';
   import type { Project } from '../../types';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
@@ -72,8 +70,8 @@
   <div class="splash-glow glow-a"></div>
   <div class="splash-glow glow-b"></div>
 
-  <div class="splash-center">
-    <div class="icon-frame">
+  <div class="splash-center" class:form-open={showForm}>
+    <div class="icon-frame" class:collapsed={showForm}>
       <StagedIcon size={52} />
     </div>
     <h2 class="splash-heading">
@@ -92,7 +90,7 @@
     </h2>
 
     {#if showForm}
-      <div class="inline-form" transition:slide={{ duration: 280, easing: quintOut }}>
+      <div class="inline-form">
         <NewProjectForm {onCreated} onCancel={closeForm} />
       </div>
     {/if}
@@ -154,6 +152,11 @@
     justify-content: center;
     gap: 28px;
     z-index: 1;
+    transition: gap 0.4s ease;
+  }
+
+  .splash-center.form-open {
+    gap: 4px;
   }
 
   .icon-frame {
@@ -168,6 +171,21 @@
     box-shadow:
       0 8px 32px rgba(0, 0, 0, 0.2),
       0 0 0 1px var(--border-subtle);
+    transform-origin: bottom center;
+    transition:
+      margin 0.4s ease,
+      background-color 0.4s ease,
+      border-color 0.4s ease,
+      box-shadow 0.4s ease,
+      transform 0.4s ease;
+  }
+
+  .icon-frame.collapsed {
+    margin-top: -50px;
+    background: transparent;
+    border-color: transparent;
+    box-shadow: none;
+    transform: scale(0.6);
   }
 
   .splash-heading {
@@ -250,6 +268,16 @@
   .inline-form {
     width: 400px;
     max-width: 90vw;
+    animation: reveal-form 0.35s ease both;
+  }
+
+  @keyframes reveal-form {
+    from {
+      clip-path: inset(-8px -8px 100% -8px);
+    }
+    to {
+      clip-path: inset(-8px);
+    }
   }
 
   .splash-actions {

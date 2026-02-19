@@ -472,7 +472,7 @@ async fn add_project_repo(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn remove_project_repo(
+async fn remove_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
     project_repo_id: String,
@@ -488,8 +488,23 @@ fn remove_project_repo(
         .into_iter()
         .filter(|b| b.project_repo_id.as_deref() == Some(project_repo_id.as_str()))
         .collect::<Vec<_>>();
-    for branch in branches {
-        branches::cleanup_branch_resources(&store, &branch)?;
+
+    // Run heavy cleanup (worktree removal, remote workspace deletion) off the
+    // main thread so the UI stays responsive for large repos.
+    tauri::async_runtime::spawn_blocking({
+        let store = Arc::clone(&store);
+        let branches = branches.clone();
+        move || -> Result<(), String> {
+            for branch in &branches {
+                branches::cleanup_branch_resources(&store, branch)?;
+            }
+            Ok(())
+        }
+    })
+    .await
+    .map_err(|e| format!("Failed to clean up branch resources: {e}"))??;
+
+    for branch in &branches {
         store.delete_branch(&branch.id).map_err(|e| e.to_string())?;
     }
     store
@@ -628,23 +643,35 @@ async fn delete_project(
     let branches = store
         .list_branches_for_project(&id)
         .map_err(|e| e.to_string())?;
-    for branch in &branches {
-        branches::cleanup_branch_resources_best_effort(&store, branch);
-    }
 
-    // Best-effort cleanup for project-scoped local worktree roots.
-    // Worktree-level cleanup removes individual directories; this removes any
-    // leftover project container folder.
-    if let Ok(project_root) = git::project_worktree_root_for(&id) {
-        if project_root.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&project_root) {
-                log::warn!(
-                    "failed to remove project worktree root '{}': {e}",
-                    project_root.display()
-                );
+    // Run heavy cleanup (worktree removal, remote workspace deletion, directory
+    // cleanup) off the main thread so the UI stays responsive for large repos.
+    tauri::async_runtime::spawn_blocking({
+        let store = Arc::clone(&store);
+        let id = id.clone();
+        let branches = branches.clone();
+        move || {
+            for branch in &branches {
+                branches::cleanup_branch_resources_best_effort(&store, branch);
+            }
+
+            // Best-effort cleanup for project-scoped local worktree roots.
+            // Worktree-level cleanup removes individual directories; this removes any
+            // leftover project container folder.
+            if let Ok(project_root) = git::project_worktree_root_for(&id) {
+                if project_root.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&project_root) {
+                        log::warn!(
+                            "failed to remove project worktree root '{}': {e}",
+                            project_root.display()
+                        );
+                    }
+                }
             }
         }
-    }
+    })
+    .await
+    .map_err(|e| format!("Failed to clean up project resources: {e}"))?;
 
     store.delete_project(&id).map_err(|e| e.to_string())
 }

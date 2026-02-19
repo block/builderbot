@@ -490,7 +490,6 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
 
     // Find all ```review-comments blocks
     let marker_start = "```review-comments";
-    let marker_end = "```";
 
     let mut search_from = 0;
     while let Some(start_pos) = text[search_from..].find(marker_start) {
@@ -501,8 +500,11 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
             None => break,
         };
 
-        // Find the closing ```
-        if let Some(end_pos) = text[json_start..].find(marker_end) {
+        // Find the closing ``` — must be on its own line (start of line),
+        // not an embedded code fence inside JSON string values like ```rust.
+        // We look for "\n```" where the ``` is followed by EOF, newline, or
+        // only whitespace (not an info-string like "rust" or "sql").
+        if let Some(end_pos) = find_closing_fence(&text[json_start..]) {
             let json_str = &text[json_start..json_start + end_pos];
 
             // Parse the JSON array
@@ -531,13 +533,51 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
                 log::warn!("Failed to parse review-comments JSON block");
             }
 
-            search_from = json_start + end_pos + marker_end.len();
+            search_from = json_start + end_pos + 3; // skip past the closing ```
         } else {
             break;
         }
     }
 
     comments
+}
+
+/// Find the closing ``` fence for a code block.
+///
+/// A closing fence must appear at the start of a line (after a newline) and
+/// must consist of exactly ``` followed by EOF, a newline, or only whitespace.
+/// This distinguishes it from opening fences like ```rust or ``` embedded
+/// within JSON string values (where the ``` appears mid-line after `\n` escape
+/// sequences in the JSON, not actual newlines in the text).
+fn find_closing_fence(text: &str) -> Option<usize> {
+    let fence = "```";
+    let mut pos = 0;
+    while pos < text.len() {
+        let remaining = &text[pos..];
+        let candidate = remaining.find(fence)?;
+        let abs = pos + candidate;
+
+        // Must be at column 0: either start of text or preceded by '\n'
+        let at_line_start = abs == 0 || text.as_bytes()[abs - 1] == b'\n';
+        if at_line_start {
+            // Check what follows the ```: must be EOF, newline, or whitespace-only to EOL
+            let after = &text[abs + fence.len()..];
+            let is_closing = if after.is_empty() {
+                true
+            } else {
+                match after.find('\n') {
+                    Some(nl) => after[..nl].trim().is_empty(),
+                    None => after.trim().is_empty(),
+                }
+            };
+            if is_closing {
+                return Some(abs);
+            }
+        }
+
+        pos = abs + fence.len();
+    }
+    None
 }
 
 fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Option<String>) {
@@ -548,5 +588,205 @@ fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Op
     };
     if let Err(e) = app_handle.emit("session-status-changed", &event) {
         log::warn!("Failed to emit session-status-changed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── find_closing_fence ──────────────────────────────────────────────
+
+    #[test]
+    fn closing_fence_simple() {
+        let text = "some json\n```\n";
+        assert_eq!(find_closing_fence(text), Some(10));
+    }
+
+    #[test]
+    fn closing_fence_at_eof_without_newline() {
+        let text = "some json\n```";
+        assert_eq!(find_closing_fence(text), Some(10));
+    }
+
+    #[test]
+    fn closing_fence_skips_opening_fences() {
+        // ```rust is an opening fence (has info-string), should be skipped
+        let text = "before\n```rust\ncode\n```\nafter";
+        assert_eq!(find_closing_fence(text), Some(20));
+    }
+
+    #[test]
+    fn closing_fence_skips_mid_line_backticks() {
+        // ``` appearing mid-line (not at column 0) should be skipped
+        let text = "some text ``` not a fence\n```\n";
+        assert_eq!(find_closing_fence(text), Some(26));
+    }
+
+    #[test]
+    fn closing_fence_none_when_missing() {
+        let text = "no closing fence here\n```rust\ncode";
+        assert_eq!(find_closing_fence(text), None);
+    }
+
+    #[test]
+    fn closing_fence_with_trailing_whitespace() {
+        let text = "json\n```  \nmore";
+        assert_eq!(find_closing_fence(text), Some(5));
+    }
+
+    // ── extract_review_comments ─────────────────────────────────────────
+
+    #[test]
+    fn extract_simple_comments() {
+        let text = r#"Here is my review:
+
+```review-comments
+[
+  {
+    "path": "src/main.rs",
+    "span": { "start": 10, "end": 15 },
+    "content": "This function is missing error handling."
+  }
+]
+```
+
+That's all!"#;
+
+        let comments = extract_review_comments(text);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].path, "src/main.rs");
+        assert_eq!(comments[0].span.start, 10);
+        assert_eq!(comments[0].span.end, 15);
+        assert_eq!(
+            comments[0].content,
+            "This function is missing error handling."
+        );
+    }
+
+    #[test]
+    fn extract_comments_with_embedded_code_blocks() {
+        // This is the exact bug scenario: JSON content contains markdown
+        // code blocks with triple backticks. The old parser would match the
+        // first ``` inside the JSON string, truncating the JSON.
+        let text = r#"Review:
+
+```review-comments
+[
+  {
+    "path": "src/store/models.rs",
+    "span": { "start": 82, "end": 91 },
+    "content": "Consider implementing `FromStr`:\n```rust\nimpl FromStr for Status {\n    type Err = Error;\n    fn from_str(s: &str) -> Result<Self, Self::Err> {\n        match s {\n            \"ready\" => Ok(Self::Ready),\n            _ => Err(Error::InvalidStatus(s.to_string())),\n        }\n    }\n}\n```\nThis would be more idiomatic."
+  },
+  {
+    "path": "src/store/pool.rs",
+    "span": { "start": 10, "end": 25 },
+    "content": "Missing validation for worktree path."
+  }
+]
+```
+
+Done."#;
+
+        let comments = extract_review_comments(text);
+        assert_eq!(comments.len(), 2, "should parse both comments");
+        assert_eq!(comments[0].path, "src/store/models.rs");
+        assert!(comments[0].content.contains("FromStr"));
+        assert_eq!(comments[1].path, "src/store/pool.rs");
+    }
+
+    #[test]
+    fn extract_multiple_review_blocks() {
+        let text = r#"First batch:
+
+```review-comments
+[
+  {
+    "path": "a.rs",
+    "span": { "start": 1, "end": 2 },
+    "content": "Issue A"
+  }
+]
+```
+
+Second batch:
+
+```review-comments
+[
+  {
+    "path": "b.rs",
+    "span": { "start": 3, "end": 4 },
+    "content": "Issue B"
+  }
+]
+```
+"#;
+
+        let comments = extract_review_comments(text);
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].path, "a.rs");
+        assert_eq!(comments[1].path, "b.rs");
+    }
+
+    #[test]
+    fn extract_no_review_block() {
+        let text = "Just a normal message with no review comments.";
+        let comments = extract_review_comments(text);
+        assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn extract_skips_empty_path_or_content() {
+        let text = r#"```review-comments
+[
+  {
+    "path": "",
+    "span": { "start": 0, "end": 0 },
+    "content": "Has content but no path"
+  },
+  {
+    "path": "file.rs",
+    "span": { "start": 0, "end": 0 },
+    "content": ""
+  }
+]
+```"#;
+
+        let comments = extract_review_comments(text);
+        assert!(
+            comments.is_empty(),
+            "should skip entries with empty path or content"
+        );
+    }
+
+    // ── extract_note_content ────────────────────────────────────────────
+
+    #[test]
+    fn note_content_after_hr() {
+        let text = "Preamble\n---\n# My Note\nBody here.";
+        let content = extract_note_content(text);
+        assert_eq!(content, Some("# My Note\nBody here.".to_string()));
+    }
+
+    #[test]
+    fn note_content_none_without_hr() {
+        let text = "Just some text without a horizontal rule.";
+        assert_eq!(extract_note_content(text), None);
+    }
+
+    // ── extract_note_title ──────────────────────────────────────────────
+
+    #[test]
+    fn note_title_from_h1() {
+        let (title, body) = extract_note_title("# My Title\nBody text.");
+        assert_eq!(title, "My Title");
+        assert_eq!(body, "Body text.");
+    }
+
+    #[test]
+    fn note_title_empty_when_no_h1() {
+        let (title, body) = extract_note_title("No heading here.\nJust text.");
+        assert!(title.is_empty());
+        assert_eq!(body, "No heading here.\nJust text.");
     }
 }

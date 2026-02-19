@@ -162,13 +162,16 @@
     if (searchTimer) clearTimeout(searchTimer);
 
     if (!trimmed) {
+      isSearching = false;
       selectedIndex = 0;
       return;
     }
 
-    searchTimer = setTimeout(async () => {
-      isSearching = true;
+    // Set searching immediately so the UI shows a loading state
+    // during the debounce delay (before the setTimeout fires)
+    isSearching = true;
 
+    searchTimer = setTimeout(async () => {
       try {
         // If it looks like exact owner/repo, try direct fetch first
         if (isOwnerRepoFormat(trimmed)) {
@@ -314,6 +317,11 @@
         </div>
       {:else if error}
         <div class="error-state">{error}</div>
+      {:else if isSearching}
+        <div class="loading-state">
+          <Spinner size={20} />
+          <span>Searching...</span>
+        </div>
       {:else if displayItems.length === 0 && filteredRecentRepos.length === 0}
         <div class="empty-state">
           {#if query.trim()}

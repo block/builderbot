@@ -677,9 +677,10 @@ export function listIssues(githubRepo: string): Promise<Issue[]> {
 // =============================================================================
 
 /** Kick off an agent session to push the branch and create a PR via `gh`.
- *  Returns the session ID so the frontend can track progress. */
-export function createPr(branchId: string, provider?: string): Promise<string> {
-  return invoke('create_pr', { branchId, provider: provider ?? null });
+ *  Returns the session ID so the frontend can track progress.
+ *  When `draft` is true the PR is created with `--draft`. */
+export function createPr(branchId: string, provider?: string, draft?: boolean): Promise<string> {
+  return invoke('create_pr', { branchId, provider: provider ?? null, draft: draft ?? null });
 }
 
 /** Build the GitHub PR URL from the repo's origin remote and a PR number. */

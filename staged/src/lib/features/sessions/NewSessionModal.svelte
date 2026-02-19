@@ -141,7 +141,7 @@
       <div class="header-title">
         {#if isReview}
           <span class="header-icon review-icon"><FileSearch size={14} /></span>
-          <span>New AI review</span>
+          <span>New Code Review</span>
         {:else if isCommit}
           <span class="header-icon commit-icon"><GitCommitVertical size={14} /></span>
           <span>New commit</span>

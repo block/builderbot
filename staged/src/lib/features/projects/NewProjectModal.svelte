@@ -409,7 +409,7 @@
 
   input {
     border: 1px solid var(--border-muted);
-    background: var(--bg-deepest);
+    background: var(--bg-primary);
     color: var(--text-primary);
     border-radius: 8px;
     padding: 9px 10px;
@@ -472,7 +472,7 @@
     align-items: center;
     gap: 8px;
     padding: 8px 10px;
-    background: var(--bg-deepest);
+    background: var(--bg-primary);
     border: 1px solid var(--border-muted);
     border-left: 2px solid var(--ui-accent);
     border-radius: 7px;

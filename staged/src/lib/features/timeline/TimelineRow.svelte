@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import {
-    GitCommit,
+    GitCommitVertical,
     FileText,
     FileSearch,
     MessageSquare,
@@ -112,7 +112,7 @@
       {:else if isFailed}
         <AlertTriangle size={12} />
       {:else if type === 'commit'}
-        <GitCommit size={12} />
+        <GitCommitVertical size={12} />
       {:else if isNote}
         <FileText size={12} />
       {:else if isReview}

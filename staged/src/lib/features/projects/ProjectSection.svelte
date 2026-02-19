@@ -93,8 +93,11 @@
   });
 
   function repoLabelForBranch(branch: Branch): string | null {
-    if (!branch.projectRepoId) return project.githubRepo;
-    return repoLabelsById.get(branch.projectRepoId) ?? project.githubRepo;
+    const fallback = project.subpath
+      ? `${project.githubRepo}/${project.subpath}`
+      : project.githubRepo;
+    if (!branch.projectRepoId) return fallback;
+    return repoLabelsById.get(branch.projectRepoId) ?? fallback;
   }
 </script>
 

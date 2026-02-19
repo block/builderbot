@@ -197,7 +197,15 @@
             branchesByProject = new Map(branchesByProject).set(project.id, branches);
             repoLabelsByProject = new Map(repoLabelsByProject).set(
               project.id,
-              new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
+              new Map(
+                repos.map(
+                  (repo) =>
+                    [
+                      repo.id,
+                      repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo,
+                    ] as const
+                )
+              )
             );
           } catch (e) {
             console.error(`[ProjectHome] Failed to hydrate project '${project.id}':`, e);
@@ -319,7 +327,15 @@
     branchesByProject = new Map(branchesByProject).set(project.id, branches);
     repoLabelsByProject = new Map(repoLabelsByProject).set(
       project.id,
-      new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
+      new Map(
+        repos.map(
+          (repo) =>
+            [
+              repo.id,
+              repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo,
+            ] as const
+        )
+      )
     );
     startInitialBranchSetup(project.id, branches);
     showNewProjectModal = false;
@@ -423,7 +439,15 @@
       branchesByProject = new Map(branchesByProject).set(projectId, branches);
       repoLabelsByProject = new Map(repoLabelsByProject).set(
         projectId,
-        new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
+        new Map(
+          repos.map(
+            (repo) =>
+              [
+                repo.id,
+                repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo,
+              ] as const
+          )
+        )
       );
       startInitialBranchSetup(projectId, branches);
     } catch (e) {
@@ -626,7 +650,15 @@
         branchesByProject = new Map(branchesByProject).set(branch.projectId, branches);
         repoLabelsByProject = new Map(repoLabelsByProject).set(
           branch.projectId,
-          new Map(repos.map((repo) => [repo.id, repo.githubRepo] as const))
+          new Map(
+            repos.map(
+              (repo) =>
+                [
+                  repo.id,
+                  repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo,
+                ] as const
+            )
+          )
         );
       } else {
         await commands.deleteBranch(branch.id);

@@ -2,7 +2,7 @@
   import type { Snippet } from 'svelte';
 
   interface Props {
-    variant?: 'default' | 'primary' | 'ghost';
+    variant?: 'default' | 'primary' | 'secondary' | 'ghost';
     disabled?: boolean;
     onclick?: (e: MouseEvent) => void;
     class?: string;
@@ -21,6 +21,7 @@
 <button
   class="form-btn {className}"
   class:primary={variant === 'primary'}
+  class:secondary={variant === 'secondary'}
   class:ghost={variant === 'ghost'}
   {disabled}
   {onclick}
@@ -70,6 +71,17 @@
   .form-btn.primary:hover:not(:disabled) {
     background: var(--ui-accent-hover);
     border-color: var(--ui-accent-hover);
+  }
+
+  .form-btn.secondary {
+    background: var(--bg-primary);
+    border-color: var(--border-muted);
+    color: var(--text-muted);
+  }
+
+  .form-btn.secondary:hover {
+    border-color: var(--border-emphasis);
+    color: var(--text-primary);
   }
 
   .form-btn.ghost {

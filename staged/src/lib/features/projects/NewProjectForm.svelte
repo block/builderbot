@@ -5,7 +5,7 @@
   Used inside NewProjectModal (as a dialog) and SplashScreen (inline).
 -->
 <script lang="ts">
-  import { GitBranch, Plus, Monitor, Cloud } from 'lucide-svelte';
+  import { GitBranch, Plus, Monitor, Cloud, Command } from 'lucide-svelte';
   import type { Project, RecentRepo } from '../../types';
   import * as commands from '../../commands';
   import FormInput from '../../shared/FormInput.svelte';
@@ -99,6 +99,16 @@
     if (e.key === 'Enter') {
       e.preventDefault();
       handleCreate();
+    } else if (recentRepos.length > 0 && !selectedRepo) {
+      const num = parseInt(e.key);
+      if (num >= 1 && num <= recentRepos.length) {
+        e.preventDefault();
+        const recent = recentRepos[num - 1];
+        selectedRepo = recent.githubRepo;
+        if (recent.subpath) {
+          subpath = recent.subpath;
+        }
+      }
     }
   }
 </script>
@@ -143,7 +153,7 @@
       </div>
     {:else}
       <FormButton
-        variant="ghost"
+        variant="secondary"
         class="select-repo-button"
         onclick={() => (showRepoPicker = true)}
       >
@@ -152,9 +162,10 @@
       </FormButton>
       {#if recentRepos.length > 0}
         <div class="recent-repos-section">
-          {#each recentRepos as recent}
-            <button
-              class="recent-repo-pill"
+          {#each recentRepos as recent, i}
+            <FormButton
+              variant="ghost"
+              class="recent-repo-btn"
               onclick={() => {
                 selectedRepo = recent.githubRepo;
                 if (recent.subpath) {
@@ -162,11 +173,17 @@
                 }
               }}
             >
-              <GitBranch size={11} />
-              {recent.githubRepo}{#if recent.subpath}<span class="recent-repo-subpath"
-                  >/{recent.subpath}</span
-                >{/if}
-            </button>
+              <GitBranch size={12} />
+              <span class="recent-repo-name">
+                {recent.githubRepo}{#if recent.subpath}<span class="recent-repo-subpath"
+                    >/{recent.subpath}</span
+                  >{/if}
+              </span>
+              <span class="keyboard-shortcut">
+                <Command size={10} />
+                {i + 1}
+              </span>
+            </FormButton>
           {/each}
         </div>
       {/if}
@@ -315,36 +332,40 @@
 
   .recent-repos-section {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
     gap: 6px;
-    margin-top: 4px;
   }
 
-  .recent-repo-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 10px;
-    background: var(--bg-hover);
-    border: none;
-    border-radius: 999px;
-    cursor: pointer;
-    font-size: var(--size-xs);
-    font-family: inherit;
-    color: var(--text-muted);
+  :global(.recent-repo-btn) {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .recent-repo-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
-    transition:
-      background-color 0.15s ease,
-      color 0.15s ease;
-  }
-
-  .recent-repo-pill:hover {
-    background: var(--border-muted);
-    color: var(--text-primary);
+    text-align: left;
   }
 
   .recent-repo-subpath {
     color: var(--text-faint);
+  }
+
+  .keyboard-shortcut {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 5px;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 4px;
+    color: var(--text-faint);
+    font-size: var(--size-xs);
+    flex-shrink: 0;
+    line-height: 1;
   }
 
   .error-message {

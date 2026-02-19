@@ -25,7 +25,6 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let query = $state('');
-  let selectedIndex = $state(0);
   let searchInputEl: HTMLInputElement | null = $state(null);
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let isSearching = $state(false);
@@ -132,7 +131,6 @@
 
     if (!trimmed) {
       isSearching = false;
-      selectedIndex = 0;
       return;
     }
 
@@ -146,7 +144,6 @@
             const result = await commands.getGithubRepo(owner, repo);
             if (result) {
               directFetchRepo = result;
-              selectedIndex = 0;
             }
           } catch {
             // Direct fetch failed, continue to search
@@ -167,43 +164,27 @@
       }
 
       isSearching = false;
-      selectedIndex = 0;
     }, 300);
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    const totalItems = filteredRecentRepos.length + displayItems.length;
-
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      selectedIndex = Math.min(selectedIndex + 1, totalItems - 1);
-      scrollSelectedIntoView();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      selectedIndex = Math.max(selectedIndex - 1, 0);
-      scrollSelectedIntoView();
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      if (selectedIndex < filteredRecentRepos.length) {
-        const recent = filteredRecentRepos[selectedIndex];
-        onSelect(recent.githubRepo, recent.subpath ?? undefined);
-      } else {
-        const adjustedIndex = selectedIndex - filteredRecentRepos.length;
-        const item = displayItems[adjustedIndex];
-        if (item && item.type === 'repo') {
-          const repo = item.data as GitHubRepo;
-          onSelect(repo.nameWithOwner);
-        }
-      }
-    } else if (e.key === 'Escape') {
+    if (e.key === 'Escape') {
       e.preventDefault();
       onBack();
-    }
-  }
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const items = Array.from(document.querySelectorAll<HTMLElement>('.repo-picker .repo-item'));
+      if (items.length === 0) return;
 
-  function scrollSelectedIntoView() {
-    const el = document.querySelector('.repo-picker .repo-item.selected');
-    el?.scrollIntoView({ block: 'nearest' });
+      const current = document.activeElement as HTMLElement | null;
+      const idx = current ? items.indexOf(current) : -1;
+      const next =
+        e.key === 'ArrowDown'
+          ? items[Math.min(idx + 1, items.length - 1)]
+          : items[Math.max(idx - 1, 0)];
+      next?.focus();
+      next?.scrollIntoView({ block: 'nearest' });
+    }
   }
 </script>
 
@@ -232,12 +213,11 @@
 
   <div class="repo-list">
     {#if filteredRecentRepos.length > 0}
-      {#each filteredRecentRepos as recent, i}
+      {#each filteredRecentRepos as recent}
         <button
           class="repo-item recent"
-          class:selected={i === selectedIndex}
+          tabindex="-1"
           onclick={() => onSelect(recent.githubRepo, recent.subpath ?? undefined)}
-          onmouseenter={() => (selectedIndex = i)}
         >
           <div class="repo-icon recent-icon">
             <Clock size={14} />
@@ -278,16 +258,10 @@
         {/if}
       </div>
     {:else}
-      {#each displayItems as item, i}
-        {@const actualIndex = i + filteredRecentRepos.length}
+      {#each displayItems as item}
         {#if item.type === 'repo'}
           {@const repo = item.data as GitHubRepo}
-          <button
-            class="repo-item"
-            class:selected={actualIndex === selectedIndex}
-            onclick={() => onSelect(repo.nameWithOwner)}
-            onmouseenter={() => (selectedIndex = actualIndex)}
-          >
+          <button class="repo-item" tabindex="-1" onclick={() => onSelect(repo.nameWithOwner)}>
             <div class="repo-icon">
               {#if repo.isPrivate}
                 <Lock size={14} />
@@ -380,7 +354,10 @@
   .repo-list {
     flex: 1;
     overflow-y: auto;
-    padding: 4px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 0;
   }
 
   .loading-state,
@@ -403,19 +380,24 @@
   .repo-item {
     display: flex;
     align-items: flex-start;
-    gap: 10px;
+    gap: 12px;
     width: 100%;
-    padding: 8px 16px;
+    padding: 12px 14px;
     background: none;
     border: none;
+    border-radius: 10px;
     text-align: left;
     cursor: pointer;
-    transition: background-color 0.1s;
+    transition:
+      border-color 0.15s ease,
+      background-color 0.1s ease,
+      color 0.15s ease;
   }
 
   .repo-item:hover,
-  .repo-item.selected {
+  .repo-item:focus {
     background-color: var(--bg-hover);
+    outline: none;
   }
 
   .repo-icon {
@@ -426,10 +408,6 @@
 
   .recent-icon {
     color: var(--ui-accent);
-  }
-
-  .repo-item.recent {
-    border-left: 2px solid var(--ui-accent);
   }
 
   .repo-info {

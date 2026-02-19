@@ -276,7 +276,7 @@
             <button class="splash-pill" onclick={() => (showNewProjectModal = true)}>
               Create your first project
             </button>
-            <span class="splash-hint">or press <kbd>⌘N</kbd> anytime</span>
+            <span class="splash-hint">or press <kbd>⌘ N</kbd> anytime</span>
           </div>
 
           <div class="splash-tree">
@@ -484,7 +484,7 @@
   .splash-pill {
     padding: 12px 36px;
     border-radius: 999px;
-    border: 1px solid var(--border-muted);
+    border: 1px solid transparent;
     background: var(--bg-elevated);
     color: var(--text-primary);
     font-size: var(--size-sm);
@@ -498,7 +498,7 @@
 
   .splash-pill:hover {
     background: var(--bg-hover);
-    border-color: var(--ui-accent);
+    border-color: var(--border-muted);
     transform: translateY(-1px);
   }
 

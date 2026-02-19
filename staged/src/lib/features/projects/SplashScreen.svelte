@@ -7,6 +7,7 @@
   the form slides in below the headline.
 -->
 <script lang="ts">
+  import { X } from 'lucide-svelte';
   import type { Project } from '../../types';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
@@ -91,7 +92,7 @@
 
     {#if showForm}
       <div class="inline-form">
-        <NewProjectForm {onCreated} onCancel={closeForm} />
+        <NewProjectForm {onCreated} />
       </div>
     {/if}
   </div>
@@ -101,11 +102,16 @@
       <button class="splash-pill" onclick={openForm}> Create your first project </button>
       <span class="splash-hint">or press <kbd>⌘ N</kbd> anytime</span>
     </div>
+    <div class="splash-tree">
+      <GitTreeAnimation />
+    </div>
+  {:else}
+    <div class="splash-close">
+      <button class="close-circle" onclick={closeForm}>
+        <X size={18} />
+      </button>
+    </div>
   {/if}
-
-  <div class="splash-tree">
-    <GitTreeAnimation />
-  </div>
 </div>
 
 <style>
@@ -340,5 +346,33 @@
 
   .splash-tree :global(.animation-wrapper) {
     width: 100%;
+  }
+
+  .splash-close {
+    padding-bottom: 32px;
+    z-index: 1;
+  }
+
+  .close-circle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid var(--border-muted);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition:
+      border-color 0.15s ease,
+      color 0.15s ease,
+      background-color 0.15s ease;
+  }
+
+  .close-circle:hover {
+    border-color: var(--border-emphasis);
+    color: var(--text-primary);
+    background-color: var(--bg-hover);
   }
 </style>

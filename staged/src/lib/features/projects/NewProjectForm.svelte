@@ -233,7 +233,7 @@
     <div class="error-message">{error}</div>
   {/if}
 
-  <div class="actions">
+  <div class="actions" class:full-width={!onCancel}>
     {#if onCancel}
       <button class="cancel-button" onclick={onCancel} disabled={saving}>Cancel</button>
     {/if}
@@ -453,6 +453,10 @@
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+  }
+
+  .actions.full-width .create-button {
+    width: 100%;
   }
 
   .cancel-button,

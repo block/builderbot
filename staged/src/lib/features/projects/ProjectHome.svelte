@@ -854,7 +854,6 @@
     min-width: 0;
     min-height: 0;
     overflow: auto;
-    padding: 12px 24px 24px;
     display: flex;
     flex-direction: column;
   }
@@ -1004,8 +1003,10 @@
   /* Projects list */
   .projects-list {
     width: 100%;
-    max-width: 800px;
+    max-width: 900px;
     margin: 0 auto;
+    padding: 42px 24px 24px;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 32px;

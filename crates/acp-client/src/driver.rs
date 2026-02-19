@@ -360,6 +360,7 @@ async fn setup_acp_session(
             log::info!(
                 "Resuming ACP session {existing_id} via load_session for session {our_session_id}"
             );
+
             connection
                 .load_session(LoadSessionRequest::new(
                     existing_id.to_string(),

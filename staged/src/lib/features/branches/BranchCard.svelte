@@ -843,7 +843,6 @@
   function handleNewSessionStarted(result: { sessionId: string; artifactId: string }) {
     // Track the running session in the project state store
     if (!result || !result.sessionId) {
-      console.error('Failed to start session: missing sessionId in result', result);
       notifyError('Session Error', 'Failed to start session: no session ID returned');
       return;
     }

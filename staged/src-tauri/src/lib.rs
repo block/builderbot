@@ -2230,13 +2230,14 @@ pub fn run() {
                 store::DbCompatibility::Ok => {
                     let s =
                         Store::new(&db_path).map_err(|e| format!("Failed to open store: {e}"))?;
-                    // Cancel any sessions that were running when the app last closed
-                    match s.cancel_orphaned_sessions() {
-                        Ok(0) => {}
-                        Ok(n) => log::info!("Cancelled {n} orphaned session(s) from previous run"),
-                        Err(e) => log::warn!("Failed to cancel orphaned sessions: {e}"),
-                    }
-                    (Mutex::new(Some(Arc::new(s))), None)
+                    let store_arc = Arc::new(s);
+                    // Cancel sessions whose owner process is dead; leave sessions
+                    // owned by other live staged instances untouched.
+                    session_runner::cancel_dead_sessions(
+                        Arc::clone(&store_arc),
+                        app.handle().clone(),
+                    );
+                    (Mutex::new(Some(store_arc)), None)
                 }
                 store::DbCompatibility::NeedsReset { db_app_version } => {
                     let info = StoreIncompatibility {

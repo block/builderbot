@@ -86,17 +86,16 @@ impl SessionRegistry {
     /// Register a new session and return a `CancellationToken` for it.
     fn register(&self, session_id: &str) -> CancellationToken {
         let token = CancellationToken::new();
-        self.running
-            .lock()
-            .unwrap()
-            .insert(session_id.to_string(), token.clone());
+        let mut running = self.running.lock().unwrap();
+        running.insert(session_id.to_string(), token.clone());
         token
     }
 
     /// Remove a session from the registry (called by the background thread
     /// on exit, regardless of success/failure/cancellation).
     fn deregister(&self, session_id: &str) {
-        self.running.lock().unwrap().remove(session_id);
+        let mut running = self.running.lock().unwrap();
+        running.remove(session_id);
     }
 
     /// Cancel a running session. Returns true if the session was found and
@@ -254,6 +253,62 @@ pub fn start_session(
     });
 
     Ok(())
+}
+
+// =============================================================================
+// Orphaned session cleanup
+// =============================================================================
+
+/// On startup, cancel any sessions whose owner process is no longer alive.
+///
+/// Each session records the PID of the staged process that started it
+/// (`owner_pid`). On startup we check each running session:
+/// - `owner_pid` is our own PID → shouldn't happen at startup, skip.
+/// - `owner_pid` belongs to a live process → another staged instance owns
+///   it; leave it alone.
+/// - `owner_pid` is dead (or NULL for pre-migration rows) → cancel and emit
+///   `session-status-changed` so the frontend learns the outcome.
+pub fn cancel_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
+    let sessions = match store.get_running_sessions() {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("[session_runner] Failed to query running sessions: {e}");
+            return;
+        }
+    };
+
+    for session in sessions {
+        let should_cancel = match session.owner_pid {
+            None => true,
+            Some(pid) if pid == std::process::id() => false,
+            Some(pid) if !is_process_alive(pid) => true,
+            Some(_pid) => false,
+        };
+
+        if should_cancel {
+            let transitioned = store
+                .transition_from_running(&session.id, SessionStatus::Cancelled, None)
+                .unwrap_or(false);
+            if transitioned {
+                emit_status(&app_handle, &session.id, "cancelled", None);
+            }
+        }
+    }
+}
+
+/// Check whether a process is alive by sending signal 0 via the `kill` command.
+///
+/// `kill -0 pid` succeeds (exit 0) if the process exists and we have permission
+/// to signal it. It also exits 0 on some systems when the process exists but we
+/// lack permission (EPERM). A non-zero exit means the process is gone (ESRCH).
+fn is_process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // =============================================================================

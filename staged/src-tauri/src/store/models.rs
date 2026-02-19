@@ -451,6 +451,9 @@ pub struct Session {
     pub error_message: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// PID of the staged process that owns this session while it is running.
+    /// Used on startup to detect sessions orphaned by a dead process.
+    pub owner_pid: Option<u32>,
 }
 
 impl Session {
@@ -466,6 +469,7 @@ impl Session {
             error_message: None,
             created_at: now,
             updated_at: now,
+            owner_pid: Some(std::process::id()),
         }
     }
 

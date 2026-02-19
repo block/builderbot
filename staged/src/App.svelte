@@ -104,14 +104,23 @@
       status: string;
     }>('session-status-changed', async (event) => {
       const { sessionId, status } = event.payload;
+      console.info(
+        `[session:app] received session-status-changed: session=${sessionId} status=${status}`
+      );
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         // Get session metadata from the unified registry
         const sessionProjectId = sessionRegistry.getProjectId(sessionId);
         const sessionType = sessionRegistry.getType(sessionId);
         const branchId = sessionRegistry.getBranchId(sessionId);
         const currentProjectId = navigation.selectedProjectId;
+        console.info(
+          `[session:app] session terminal: session=${sessionId} status=${status} type=${sessionType} branchId=${branchId} projectId=${sessionProjectId} currentProjectId=${currentProjectId}`
+        );
         if (!sessionProjectId && !sessionType && !branchId) {
-          console.warn('Received completion event for unknown session ID', { sessionId, status });
+          console.warn('[session:app] completion event for UNKNOWN session ID — not in registry', {
+            sessionId,
+            status,
+          });
         }
 
         // Mark project as unread if:

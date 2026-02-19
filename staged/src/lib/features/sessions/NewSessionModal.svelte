@@ -76,14 +76,23 @@
       const agents = remote ? REMOTE_AGENTS : agentState.providers;
       const finalPrompt =
         prompt.trim() || (isReview ? 'Review the code changes on this branch.' : '');
+      console.info(
+        `[session:new] starting branch session: branch=${branch.id} mode=${currentMode} remote=${remote}`
+      );
       const result = await commands.startBranchSession(
         branch.id,
         finalPrompt,
         currentMode,
         getPreferredAgent(agents) ?? undefined
       );
+      console.info(
+        `[session:new] session created: session=${result.sessionId} artifact=${result.artifactId} branch=${branch.id} mode=${currentMode}`
+      );
       onStarted({ sessionId: result.sessionId, artifactId: result.artifactId });
     } catch (e) {
+      console.info(
+        `[session:new] session creation FAILED: branch=${branch.id} mode=${currentMode} error=${e}`
+      );
       alerts.show({
         tone: 'error',
         title: 'Unable to start session',

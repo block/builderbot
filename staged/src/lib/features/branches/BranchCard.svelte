@@ -256,14 +256,23 @@
       status: string;
     }>('session-status-changed', (event) => {
       const { sessionId: eventSessionId, status } = event.payload;
+      console.info(
+        `[session:branch] status-changed event: session=${eventSessionId} status=${status} branch=${branchId}`
+      );
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         loadTimeline();
         // Handle PR session completion
         if (eventSessionId === prSessionId) {
+          console.info(
+            `[session:branch] matched PR session: session=${eventSessionId} status=${status} branch=${branchId}`
+          );
           handlePrSessionComplete(status);
         }
         // Handle push session completion
         if (eventSessionId === pushSessionId) {
+          console.info(
+            `[session:branch] matched push session: session=${eventSessionId} status=${status} branch=${branchId}`
+          );
           handlePushSessionComplete(status);
         }
       }
@@ -365,14 +374,21 @@
     if (prState !== 'creating' || !prSessionId) return;
 
     const sid = prSessionId;
+    console.info(`[session:branch] starting PR fallback poll: session=${sid} branch=${branch.id}`);
     const interval = setInterval(async () => {
       try {
         const session = await commands.getSession(sid);
         if (session && session.status !== 'running') {
+          console.info(
+            `[session:branch] PR fallback poll detected completion: session=${sid} status=${session.status} branch=${branch.id}`
+          );
           handlePrSessionComplete(session.status);
         }
-      } catch {
+      } catch (e) {
         // Session may have been deleted — clear the creating state
+        console.info(
+          `[session:branch] PR fallback poll lost session: session=${sid} branch=${branch.id} error=${e}`
+        );
         prStateOverride = 'error';
         prError = 'Lost track of PR creation session.';
         prSessionId = null;
@@ -387,13 +403,22 @@
     if (pushState !== 'pushing' || !pushSessionId) return;
 
     const sid = pushSessionId;
+    console.info(
+      `[session:branch] starting push fallback poll: session=${sid} branch=${branch.id}`
+    );
     const interval = setInterval(async () => {
       try {
         const session = await commands.getSession(sid);
         if (session && session.status !== 'running') {
+          console.info(
+            `[session:branch] push fallback poll detected completion: session=${sid} status=${session.status} branch=${branch.id}`
+          );
           handlePushSessionComplete(session.status);
         }
-      } catch {
+      } catch (e) {
+        console.info(
+          `[session:branch] push fallback poll lost session: session=${sid} branch=${branch.id} error=${e}`
+        );
         pushStateOverride = 'error';
         pushError = 'Lost track of push session.';
         pushSessionId = null;
@@ -824,10 +849,16 @@
   function handleNewSessionStarted(result: { sessionId: string; artifactId: string }) {
     // Track the running session in the project state store
     if (!result || !result.sessionId) {
-      console.error('Failed to start session: missing sessionId in result', result);
+      console.error(
+        '[session:branch] handleNewSessionStarted: missing sessionId in result',
+        result
+      );
       notifyError('Session Error', 'Failed to start session: no session ID returned');
       return;
     }
+    console.info(
+      `[session:branch] new session started: session=${result.sessionId} artifact=${result.artifactId} branch=${branch.id}`
+    );
     // Register session in the unified registry
     sessionRegistry.register(result.sessionId, branch.projectId, 'other', branch.id);
     projectStateStore.addRunningSession(branch.projectId, result.sessionId);
@@ -963,6 +994,7 @@
   async function handleCreatePr() {
     if (prState === 'creating') return;
 
+    console.info(`[session:branch] handleCreatePr: starting PR creation for branch=${branch.id}`);
     prStateOverride = 'creating';
     prError = null;
     prUrl = null;
@@ -973,6 +1005,9 @@
       const agents = remote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.createPr(branch.id, provider);
+      console.info(
+        `[session:branch] handleCreatePr: backend returned session=${sessionId} branch=${branch.id}`
+      );
       prSessionId = sessionId;
       prStateOverride = 'creating';
       // Register session in the unified registry
@@ -983,6 +1018,7 @@
       projectStateStore.addRunningSession(branch.projectId, sessionId);
       // The session-status-changed listener will handle completion
     } catch (e) {
+      console.info(`[session:branch] handleCreatePr: FAILED branch=${branch.id} error=${e}`);
       prStateOverride = 'error';
       prError = e instanceof Error ? e.message : String(e);
       prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
@@ -990,6 +1026,9 @@
   }
 
   async function handlePrSessionComplete(status: string) {
+    console.info(
+      `[session:branch] handlePrSessionComplete: status=${status} prSessionId=${prSessionId} branch=${branch.id}`
+    );
     if (status === 'completed' && prSessionId) {
       try {
         // Fetch session messages to find the PR URL
@@ -997,6 +1036,9 @@
         const foundUrl = extractPrUrl(messages);
 
         if (foundUrl) {
+          console.info(
+            `[session:branch] PR URL found: url=${foundUrl} session=${prSessionId} branch=${branch.id}`
+          );
           prUrl = foundUrl;
           prStateOverride = 'created';
           const prNumber = extractPrNumber(foundUrl);
@@ -1012,6 +1054,9 @@
           prStateStore.setPrCreated(branch.id, foundUrl);
         } else {
           // Session completed but we couldn't find a PR URL
+          console.info(
+            `[session:branch] PR session completed but NO URL found: session=${prSessionId} branch=${branch.id}`
+          );
           prStateOverride = 'error';
           prError = 'PR session completed but no PR URL was found in the output.';
           prStateStore.setPrError(
@@ -1020,12 +1065,18 @@
           );
         }
       } catch (e) {
+        console.info(
+          `[session:branch] PR session complete handler error: session=${prSessionId} branch=${branch.id} error=${e}`
+        );
         prStateOverride = 'error';
         prError = e instanceof Error ? e.message : String(e);
         prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
       }
     } else {
       // Session errored or was cancelled
+      console.info(
+        `[session:branch] PR session non-success: status=${status} session=${prSessionId} branch=${branch.id}`
+      );
       prStateOverride = 'error';
       prError = `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
       prStateStore.setPrError(
@@ -1052,6 +1103,9 @@
   async function handlePush(force = false) {
     if (pushState === 'pushing') return;
 
+    console.info(
+      `[session:branch] handlePush: starting push for branch=${branch.id} force=${force}`
+    );
     pushStateOverride = 'pushing';
     pushError = null;
 
@@ -1060,6 +1114,9 @@
       const agents = remote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.pushBranch(branch.id, provider, force);
+      console.info(
+        `[session:branch] handlePush: backend returned session=${sessionId} branch=${branch.id}`
+      );
       pushSessionId = sessionId;
       // Register session in the unified registry
       sessionRegistry.register(sessionId, branch.projectId, 'push', branch.id);
@@ -1067,12 +1124,16 @@
       projectStateStore.addRunningSession(branch.projectId, sessionId);
       // The session-status-changed listener will handle completion
     } catch (e) {
+      console.info(`[session:branch] handlePush: FAILED branch=${branch.id} error=${e}`);
       pushStateOverride = 'error';
       pushError = e instanceof Error ? e.message : String(e);
     }
   }
 
   async function handlePushSessionComplete(status: string) {
+    console.info(
+      `[session:branch] handlePushSessionComplete: status=${status} pushSessionId=${pushSessionId} branch=${branch.id}`
+    );
     if (status === 'completed' && pushSessionId) {
       // Check session messages for the non-fast-forward rejection marker
       try {
@@ -1080,6 +1141,9 @@
         if (isPushRejectedNonFastForward(messages)) {
           // The agent stopped because the remote would lose commits.
           // Go to error state — clicking the button will open the force push dialog.
+          console.info(
+            `[session:branch] push rejected (non-fast-forward): session=${pushSessionId} branch=${branch.id}`
+          );
           pushStateOverride = 'error';
           pushRejectedNonFastForward = true;
           pushError = null;
@@ -1090,6 +1154,9 @@
         // If we can't read messages, treat as success (push likely worked)
       }
 
+      console.info(
+        `[session:branch] push completed successfully: session=${pushSessionId} branch=${branch.id}`
+      );
       pushStateOverride = 'done';
       hasUnpushed = false;
       // Reset to idle after a brief moment so the button returns to "View PR"
@@ -1097,6 +1164,9 @@
         pushStateOverride = null;
       }, 1_500);
     } else {
+      console.info(
+        `[session:branch] push session non-success: status=${status} session=${pushSessionId} branch=${branch.id}`
+      );
       pushStateOverride = 'error';
       pushError = `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
     }

@@ -91,15 +91,22 @@
   // =========================================================================
 
   onMount(async () => {
+    console.info(`[session:modal] mounted: session=${sessionId}`);
     await loadSession();
     if (session?.status === 'running') {
+      console.info(`[session:modal] session is running, starting poll: session=${sessionId}`);
       startPolling();
+    } else {
+      console.info(
+        `[session:modal] session not running on mount: session=${sessionId} status=${session?.status}`
+      );
     }
     // Focus input on open
     tick().then(() => inputEl?.focus());
   });
 
   onDestroy(() => {
+    console.info(`[session:modal] destroyed: session=${sessionId} wasPolling=${!!pollTimer}`);
     closed = true;
     stopPolling();
   });
@@ -163,11 +170,14 @@
 
       // Stop polling when session is done; process queued messages
       if (s && s.status !== 'running') {
+        console.info(
+          `[session:modal] poll detected session done: session=${sessionId} status=${s.status}`
+        );
         stopPolling();
         processQueue();
       }
-    } catch {
-      // Silently ignore poll errors
+    } catch (e) {
+      console.info(`[session:modal] poll error (suppressed): session=${sessionId} error=${e}`);
     } finally {
       pollInFlight = false;
     }
@@ -175,11 +185,13 @@
 
   function startPolling() {
     if (pollTimer) return;
+    console.info(`[session:modal] startPolling: session=${sessionId}`);
     pollTimer = setInterval(poll, 500);
   }
 
   function stopPolling() {
     if (pollTimer) {
+      console.info(`[session:modal] stopPolling: session=${sessionId}`);
       clearInterval(pollTimer);
       pollTimer = null;
     }

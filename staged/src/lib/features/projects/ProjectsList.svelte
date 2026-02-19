@@ -258,7 +258,11 @@
       {:else if error}
         <div class="state error">{error}</div>
       {:else if projects.length === 0}
-        <SplashScreen onCreateProject={() => (showNewProjectModal = true)} />
+        <SplashScreen
+          onCreated={handleProjectCreated}
+          requestOpen={showNewProjectModal && projects.length === 0}
+          onFormOpenChange={(open) => (showNewProjectModal = open)}
+        />
       {:else}
         <div class="projects-grid">
           <button
@@ -321,7 +325,7 @@
   </div>
 </div>
 
-{#if showNewProjectModal}
+{#if showNewProjectModal && projects.length > 0}
   <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
 {/if}
 

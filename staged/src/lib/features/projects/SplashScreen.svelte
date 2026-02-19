@@ -2,13 +2,27 @@
   SplashScreen.svelte - Welcome screen shown when no projects exist
 
   Displays branded icon, rotating tagline, gradient background, and
-  a call-to-action to create the first project.
+  a call-to-action to create the first project. When the user clicks
+  "Create your first project" (or the parent signals via requestOpen),
+  the form slides in below the headline.
 -->
 <script lang="ts">
+  import { slide } from 'svelte/transition';
+  import { quintOut } from 'svelte/easing';
+  import type { Project } from '../../types';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
+  import NewProjectForm from './NewProjectForm.svelte';
 
-  let { onCreateProject }: { onCreateProject: () => void } = $props();
+  interface Props {
+    onCreated: (project: Project) => void;
+    requestOpen?: boolean;
+    onFormOpenChange?: (open: boolean) => void;
+  }
+
+  let { onCreated, requestOpen = false, onFormOpenChange }: Props = $props();
+
+  let showForm = $state(false);
 
   const phrases = [
     'AI coding sessions,',
@@ -26,6 +40,7 @@
   let transitioning = $state(false);
 
   $effect(() => {
+    if (showForm) return;
     const id = setInterval(() => {
       transitioning = true;
       setTimeout(() => {
@@ -35,6 +50,22 @@
     }, 5000);
     return () => clearInterval(id);
   });
+
+  $effect(() => {
+    if (requestOpen && !showForm) {
+      showForm = true;
+    }
+  });
+
+  function openForm() {
+    showForm = true;
+    onFormOpenChange?.(true);
+  }
+
+  function closeForm() {
+    showForm = false;
+    onFormOpenChange?.(false);
+  }
 </script>
 
 <div class="splash">
@@ -51,12 +82,20 @@
       </span>
       <br />beautifully <span class="mono accent">staged</span>
     </h2>
+
+    {#if showForm}
+      <div class="inline-form" transition:slide={{ duration: 280, easing: quintOut }}>
+        <NewProjectForm {onCreated} onCancel={closeForm} />
+      </div>
+    {/if}
   </div>
 
-  <div class="splash-actions">
-    <button class="splash-pill" onclick={onCreateProject}> Create your first project </button>
-    <span class="splash-hint">or press <kbd>⌘ N</kbd> anytime</span>
-  </div>
+  {#if !showForm}
+    <div class="splash-actions">
+      <button class="splash-pill" onclick={openForm}> Create your first project </button>
+      <span class="splash-hint">or press <kbd>⌘ N</kbd> anytime</span>
+    </div>
+  {/if}
 
   <div class="splash-tree">
     <GitTreeAnimation />
@@ -157,6 +196,11 @@
     opacity: 0;
     transform: translateY(-8px);
     filter: blur(4px);
+  }
+
+  .inline-form {
+    width: 400px;
+    max-width: 90vw;
   }
 
   .splash-actions {

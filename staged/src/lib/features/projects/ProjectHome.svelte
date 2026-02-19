@@ -753,7 +753,11 @@
         <p>{error}</p>
       </div>
     {:else if !loading && !hasContent}
-      <SplashScreen onCreateProject={handleNewProject} />
+      <SplashScreen
+        onCreated={handleProjectCreated}
+        requestOpen={showNewProjectModal && !hasContent}
+        onFormOpenChange={(open) => (showNewProjectModal = open)}
+      />
     {:else}
       <div class="projects-list">
         {#each visibleProjects as project (project.id)}
@@ -793,8 +797,8 @@
   </div>
 {/if}
 
-<!-- New project modal -->
-{#if showNewProjectModal}
+<!-- New project modal (only when projects exist; splash screen handles inline form otherwise) -->
+{#if showNewProjectModal && hasContent}
   <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
 {/if}
 

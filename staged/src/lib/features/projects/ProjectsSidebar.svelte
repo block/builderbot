@@ -4,7 +4,7 @@
   import {
     FolderGit2,
     House,
-    Plus,
+    CirclePlus,
     GitPullRequest,
     GitPullRequestClosed,
     GitPullRequestDraft,
@@ -235,7 +235,7 @@
             onclick={openNewProject}
             title="New project (⌘N)"
           >
-            <Plus size={14} />
+            <CirclePlus size={16} />
             New project
           </button>
         </div>
@@ -302,22 +302,20 @@
   .new-project-button {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 8px;
+    gap: 10px;
     width: 100%;
-    border: 1px dashed var(--border-muted);
+    border: none;
     border-radius: 8px;
     background-color: transparent;
     color: var(--text-muted);
     padding: 8px 10px;
-    font-size: var(--size-xs);
-    font-weight: 600;
+    font-size: var(--size-sm);
+    font-weight: 500;
     cursor: pointer;
     transition: all 0.15s ease;
   }
 
   .new-project-button:hover {
-    border-color: var(--ui-accent);
     color: var(--text-primary);
     background-color: var(--bg-hover);
   }

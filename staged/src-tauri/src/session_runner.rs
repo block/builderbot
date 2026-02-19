@@ -554,10 +554,7 @@ fn find_closing_fence(text: &str) -> Option<usize> {
     let mut pos = 0;
     while pos < text.len() {
         let remaining = &text[pos..];
-        let candidate = match remaining.find(fence) {
-            Some(offset) => offset,
-            None => return None,
-        };
+        let candidate = remaining.find(fence)?;
         let abs = pos + candidate;
 
         // Must be at column 0: either start of text or preceded by '\n'

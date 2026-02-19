@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import { FileText, GitCommitHorizontal, FileSearch } from 'lucide-svelte';
+  import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
   import type { BranchTimeline as BranchTimelineData } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType } from './TimelineRow.svelte';
@@ -318,7 +318,7 @@
         onclick={onNewCommit}
         disabled={disableNewSessionActions}
       >
-        <GitCommitHorizontal size={18} />
+        <GitCommitVertical size={18} />
         <span>New commit</span>
       </button>
     {/if}
@@ -395,7 +395,7 @@
               disabled={disableNewSessionActions}
               title="New commit"
             >
-              <GitCommitHorizontal size={13} />
+              <GitCommitVertical size={13} />
               <span>New commit</span>
             </button>
           {/if}

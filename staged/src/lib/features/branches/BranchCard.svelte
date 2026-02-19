@@ -16,7 +16,7 @@
   import { slide, fade } from 'svelte/transition';
   import {
     GitBranch,
-    GitCommitHorizontal,
+    GitCommitVertical,
     GitPullRequestCreateArrow,
     GitPullRequestArrow,
     GitPullRequestDraft,

@@ -307,26 +307,11 @@ export interface ProjectAction {
   updatedAt: number;
 }
 
-export function listProjectActions(projectId: string): Promise<ProjectAction[]> {
-  return invoke('list_project_actions', { projectId });
-}
-
-export function createProjectAction(
+export function listProjectActions(
   projectId: string,
-  name: string,
-  command: string,
-  actionType: string,
-  sortOrder: number,
-  autoCommit: boolean
-): Promise<ProjectAction> {
-  return invoke('create_project_action', {
-    projectId,
-    name,
-    command,
-    actionType,
-    sortOrder,
-    autoCommit,
-  });
+  projectRepoId?: string | null
+): Promise<ProjectAction[]> {
+  return invoke('list_project_actions', { projectId, projectRepoId: projectRepoId ?? null });
 }
 
 export function updateProjectAction(

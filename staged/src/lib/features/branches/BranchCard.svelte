@@ -577,7 +577,7 @@
   async function loadActions() {
     try {
       // Load actions for this branch's project
-      actions = await commands.listProjectActions(branch.projectId);
+      actions = await commands.listProjectActions(branch.projectId, branch.projectRepoId);
     } catch (e) {
       console.error('Failed to load actions:', e);
       actions = [];

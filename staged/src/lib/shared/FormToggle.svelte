@@ -1,6 +1,7 @@
 <script lang="ts" generics="T extends string">
   interface Props {
-    options: { value: T; label: string }[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    options: { value: T; label: string; icon?: any }[];
     value: T;
     disabled?: boolean;
   }
@@ -17,6 +18,11 @@
       onclick={() => (value = option.value)}
     >
       <span class="radio-indicator"></span>
+      {#if option.icon}
+        <span class="toggle-icon">
+          <option.icon size={18} />
+        </span>
+      {/if}
       <span class="toggle-label">{option.label}</span>
     </button>
   {/each}
@@ -32,8 +38,10 @@
     flex: 1;
     position: relative;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 6px;
     min-height: 56px;
     border: 1.5px solid var(--border-muted);
     border-radius: 10px;
@@ -82,6 +90,16 @@
     border-color: var(--ui-accent);
     background: var(--ui-accent);
     box-shadow: inset 0 0 0 2.5px var(--bg-primary);
+  }
+
+  .toggle-icon {
+    display: flex;
+    color: var(--text-faint);
+    transition: color 0.2s ease;
+  }
+
+  .toggle-card.active .toggle-icon {
+    color: var(--ui-accent);
   }
 
   .toggle-label {

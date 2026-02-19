@@ -2,7 +2,7 @@
   import type { Snippet } from 'svelte';
 
   interface Props {
-    variant?: 'default' | 'primary';
+    variant?: 'default' | 'primary' | 'ghost';
     disabled?: boolean;
     onclick?: (e: MouseEvent) => void;
     class?: string;
@@ -18,7 +18,13 @@
   }: Props = $props();
 </script>
 
-<button class="form-btn {className}" class:primary={variant === 'primary'} {disabled} {onclick}>
+<button
+  class="form-btn {className}"
+  class:primary={variant === 'primary'}
+  class:ghost={variant === 'ghost'}
+  {disabled}
+  {onclick}
+>
   {@render children()}
 </button>
 
@@ -27,6 +33,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    gap: 6px;
     min-height: 36px;
     border: 1px solid var(--border-muted);
     border-radius: 8px;
@@ -63,5 +70,16 @@
   .form-btn.primary:hover:not(:disabled) {
     background: var(--ui-accent-hover);
     border-color: var(--ui-accent-hover);
+  }
+
+  .form-btn.ghost {
+    border-color: transparent;
+    color: var(--text-muted);
+  }
+
+  .form-btn.ghost:hover {
+    border-color: transparent;
+    background: var(--bg-hover);
+    color: var(--text-primary);
   }
 </style>

@@ -5,7 +5,7 @@
   Used inside NewProjectModal (as a dialog) and SplashScreen (inline).
 -->
 <script lang="ts">
-  import { GitBranch, Plus, Command } from 'lucide-svelte';
+  import { GitBranch, Plus, Monitor, Cloud } from 'lucide-svelte';
   import type { Project, RecentRepo } from '../../types';
   import * as commands from '../../commands';
   import FormInput from '../../shared/FormInput.svelte';
@@ -96,22 +96,9 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    if (e.key === 'Enter') {
       e.preventDefault();
       handleCreate();
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      handleCreate();
-    } else if (recentRepos.length > 0 && !selectedRepo) {
-      const num = parseInt(e.key);
-      if (num >= 1 && num <= recentRepos.length) {
-        e.preventDefault();
-        const recent = recentRepos[num - 1];
-        selectedRepo = recent.githubRepo;
-        if (recent.subpath) {
-          subpath = recent.subpath;
-        }
-      }
     }
   }
 </script>
@@ -136,17 +123,15 @@
     <FormToggle
       bind:value={location}
       options={[
-        { value: 'local', label: 'Local' },
-        { value: 'remote', label: 'Remote' },
+        { value: 'local', label: 'Local', icon: Monitor },
+        { value: 'remote', label: 'Remote', icon: Cloud },
       ]}
       disabled={saving}
     />
   </div>
 
   <div class="form-group">
-    <label for="project-repo-select"
-      >Repository <span class="field-badge optional">Optional</span></label
-    >
+    <label for="project-repo-select">Repository</label>
     {#if selectedRepo}
       <div class="repo-info">
         <GitBranch size={14} class="repo-info-icon" />
@@ -157,14 +142,19 @@
         <button class="change-button" onclick={() => (selectedRepo = null)}>Clear</button>
       </div>
     {:else}
-      <FormButton class="select-repo-button" onclick={() => (showRepoPicker = true)}>
+      <FormButton
+        variant="ghost"
+        class="select-repo-button"
+        onclick={() => (showRepoPicker = true)}
+      >
+        <Plus size={14} />
         Select repository
       </FormButton>
       {#if recentRepos.length > 0}
         <div class="recent-repos-section">
-          {#each recentRepos as recent, i}
+          {#each recentRepos as recent}
             <button
-              class="recent-repo-item"
+              class="recent-repo-pill"
               onclick={() => {
                 selectedRepo = recent.githubRepo;
                 if (recent.subpath) {
@@ -172,18 +162,10 @@
                 }
               }}
             >
-              <Plus size={14} class="recent-icon" />
-              <div class="recent-repo-info">
-                <span class="recent-repo-name">
-                  {recent.githubRepo}{#if recent.subpath}<span class="recent-repo-subpath"
-                      >/{recent.subpath}</span
-                    >{/if}
-                </span>
-              </div>
-              <div class="keyboard-shortcut">
-                <Command size={12} class="command-icon" />
-                <span class="shortcut-number">{i + 1}</span>
-              </div>
+              <GitBranch size={11} />
+              {recent.githubRepo}{#if recent.subpath}<span class="recent-repo-subpath"
+                  >/{recent.subpath}</span
+                >{/if}
             </button>
           {/each}
         </div>
@@ -333,73 +315,36 @@
 
   .recent-repos-section {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-top: 8px;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
   }
 
-  .recent-repo-item {
-    display: flex;
+  .recent-repo-pill {
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
-    min-height: 36px;
-    padding: 8px 12px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-muted);
-    border-left: 2px solid var(--ui-accent);
-    border-radius: 7px;
-    cursor: pointer;
-    text-align: left;
-  }
-
-  .recent-repo-item:hover {
+    gap: 4px;
+    padding: 4px 10px;
     background: var(--bg-hover);
-    border-color: var(--border-emphasis);
-  }
-
-  :global(.recent-icon) {
-    color: var(--ui-accent);
-    flex-shrink: 0;
-  }
-
-  .recent-repo-info {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .recent-repo-name {
-    font-size: var(--size-sm);
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    font-size: var(--size-xs);
+    font-family: inherit;
+    color: var(--text-muted);
     white-space: nowrap;
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .recent-repo-pill:hover {
+    background: var(--border-muted);
+    color: var(--text-primary);
   }
 
   .recent-repo-subpath {
-    font-size: var(--size-sm);
-    color: var(--text-muted);
-  }
-
-  .keyboard-shortcut {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding: 2px 6px;
-    background: var(--bg-chrome);
-    border: 1px solid var(--border-muted);
-    border-radius: 4px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    flex-shrink: 0;
-  }
-
-  :global(.command-icon) {
-    color: var(--text-muted);
-  }
-
-  .shortcut-number {
-    font-size: var(--size-xs);
-    font-weight: 500;
+    color: var(--text-faint);
   }
 
   .error-message {

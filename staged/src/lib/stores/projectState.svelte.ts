@@ -13,7 +13,7 @@
  * Note: Session-to-project lookups are now delegated to the unified sessionRegistry
  */
 
-import { sessionRegistry } from './sessionRegistry.svelte';
+import { sessionRegistry, type SessionType } from './sessionRegistry.svelte';
 
 interface ProjectState {
   unread: boolean;
@@ -169,6 +169,26 @@ class ProjectStateStore {
   getRunningSessionCount(projectId: string): number {
     const state = this.states.get(projectId);
     return state ? state.runningSessions.size : 0;
+  }
+
+  /**
+   * Get the session types of all running sessions for a project.
+   * Returns an array of SessionType values (one per running session).
+   * Delegates type lookups to the unified session registry.
+   */
+  getRunningSessionTypes(projectId: string): SessionType[] {
+    // Access version to establish reactive dependency
+    this.version;
+    const state = this.getState(projectId);
+    if (!state) return [];
+    const types: SessionType[] = [];
+    for (const sessionId of state.runningSessions) {
+      const type = sessionRegistry.getType(sessionId);
+      if (type) {
+        types.push(type);
+      }
+    }
+    return types;
   }
 }
 

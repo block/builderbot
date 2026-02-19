@@ -13,7 +13,12 @@
   } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
   import { goHome, navigation, selectProject } from '../../navigation.svelte';
-  import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
+  import {
+    projectDisplayName,
+    aggregateProjectPrStatus,
+    projectSubtitle,
+  } from '../../shared/utils';
+  import { projectStateStore } from '../../stores/projectState.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import { getProjectStatus } from './projectStatus';
@@ -193,6 +198,7 @@
               {@const status = getProjectStatus(project.id, deletingProjectNames)}
               {@const repoCount = repoCountForProject(project)}
               {@const prStatus = getProjectPrStatus(project.id)}
+              {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
               <button
                 class="project-row"
                 class:active={navigation.selectedProjectId === project.id}
@@ -218,9 +224,7 @@
                   <div class="row-text">
                     <span class="project-name">{projectDisplayName(project)}</span>
                     <div class="row-meta">
-                      <span class="repo-count"
-                        >{repoCount} {repoCount === 1 ? 'repo' : 'repos'}</span
-                      >
+                      <span class="repo-count">{projectSubtitle(repoCount, sessionTypes)}</span>
                     </div>
                   </div>
                 </div>

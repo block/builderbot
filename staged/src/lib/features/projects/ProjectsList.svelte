@@ -10,7 +10,12 @@
   import { GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Plus } from 'lucide-svelte';
   import type { Project, ProjectRepo, Branch } from '../../types';
   import * as commands from '../../commands';
-  import { projectDisplayName, aggregateProjectPrStatus } from '../../shared/utils';
+  import {
+    projectDisplayName,
+    aggregateProjectPrStatus,
+    projectSubtitle,
+  } from '../../shared/utils';
+  import { projectStateStore } from '../../stores/projectState.svelte';
   import { selectProject } from '../../navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
@@ -281,6 +286,8 @@
             {@const status = getProjectStatus(project.id, deletingProjectNames)}
             {@const prStatus = getProjectPrStatus(project.id)}
             {@const repos = reposByProject.get(project.id) ?? []}
+            {@const repoCount = repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0)}
+            {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
             <div class="project-card-wrapper">
               <button
                 class="project-card"
@@ -336,7 +343,7 @@
                 </div>
               </button>
               <div class="card-location">
-                {project.location === 'remote' ? 'Remote workspace' : 'Local worktrees'}
+                {projectSubtitle(repoCount, sessionTypes)}
               </div>
             </div>
           {/each}

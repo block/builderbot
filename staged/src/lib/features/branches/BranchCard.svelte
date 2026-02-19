@@ -863,8 +863,8 @@
       notifyError('Session Error', 'Failed to start session: no session ID returned');
       return;
     }
-    // Register session in the unified registry
-    sessionRegistry.register(result.sessionId, branch.projectId, 'other', branch.id);
+    // Register session in the unified registry with the actual session type
+    sessionRegistry.register(result.sessionId, branch.projectId, newSessionMode, branch.id);
     projectStateStore.addRunningSession(branch.projectId, result.sessionId);
     showNewSession = false;
     draftPrompt = '';

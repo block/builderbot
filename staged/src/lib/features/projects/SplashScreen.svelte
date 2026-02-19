@@ -12,7 +12,6 @@
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import NewProjectForm from './NewProjectForm.svelte';
-  import blockLogoRaw from '../../assets/block-lockup_white.svg?raw';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -95,11 +94,6 @@
         >
       </span>
     </h2>
-
-    <span class="built-by" class:collapsed={showForm}>
-      built at
-      <span class="block-logo">{@html blockLogoRaw}</span>
-    </span>
 
     {#if showForm}
       <div class="inline-form">
@@ -228,36 +222,6 @@
 
   .splash-heading .accent {
     color: var(--ui-accent);
-  }
-
-  .built-by {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 12px;
-    color: var(--text-muted);
-    letter-spacing: 0.02em;
-    opacity: 0.85;
-    margin-top: -16px;
-    transition:
-      opacity 0.3s ease,
-      margin-top 0.3s ease;
-  }
-
-  .built-by.collapsed {
-    opacity: 0;
-    margin-top: -24px;
-    pointer-events: none;
-  }
-
-  .block-logo {
-    display: flex;
-  }
-
-  .block-logo :global(svg) {
-    height: 0.75em;
-    width: auto;
-    fill: currentColor;
   }
 
   .tagline-collapse {

@@ -2226,21 +2226,16 @@ pub fn run() {
             let compat = store::check_db_compatibility(&db_path)
                 .map_err(|e| format!("Cannot check database: {e}"))?;
 
-            // Create registry early so it can be passed to reconnect_orphaned_sessions.
-            let registry = Arc::new(session_runner::SessionRegistry::new());
-
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
                     let s =
                         Store::new(&db_path).map_err(|e| format!("Failed to open store: {e}"))?;
                     let store_arc = Arc::new(s);
-                    // Attempt ACP reconnection for running sessions instead of
-                    // silently cancelling them. Sessions with no agent_id (never
-                    // reached ACP) are still cancelled.
-                    session_runner::reconnect_orphaned_sessions(
+                    // Cancel sessions whose owner process is dead; leave sessions
+                    // owned by other live staged instances untouched.
+                    session_runner::cancel_dead_sessions(
                         Arc::clone(&store_arc),
                         app.handle().clone(),
-                        Arc::clone(&registry),
                     );
                     (Mutex::new(Some(store_arc)), None)
                 }
@@ -2273,7 +2268,7 @@ pub fn run() {
             };
 
             app.manage(store_slot);
-            app.manage(registry);
+            app.manage(Arc::new(session_runner::SessionRegistry::new()));
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
             app.manage(DbState {

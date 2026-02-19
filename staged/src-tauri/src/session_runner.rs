@@ -308,182 +308,89 @@ pub fn start_session(
 }
 
 // =============================================================================
-// Orphaned session reconnection
+// Orphaned session cleanup
 // =============================================================================
 
-/// Attempt ACP reconnection for every session that was `running` at startup.
+/// On startup, cancel any sessions whose owner process is no longer alive.
 ///
-/// For each running session:
-/// - If it has no `agent_id`, it never got an ACP session, so cancel it.
-/// - Otherwise, call `reconnect_session` to hand it off to the driver via
-///   `load_session`. If reconnection fails, cancel the session.
-///
-/// Called from `lib.rs` during app setup, replacing `cancel_orphaned_sessions`.
-pub fn reconnect_orphaned_sessions(
-    store: Arc<Store>,
-    app_handle: AppHandle,
-    registry: Arc<SessionRegistry>,
-) {
+/// Each session records the PID of the staged process that started it
+/// (`owner_pid`). On startup we check each running session:
+/// - `owner_pid` is our own PID → shouldn't happen at startup, skip.
+/// - `owner_pid` belongs to a live process → another staged instance owns
+///   it; leave it alone.
+/// - `owner_pid` is dead (or NULL for pre-migration rows) → cancel and emit
+///   `session-status-changed` so the frontend learns the outcome.
+pub fn cancel_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
     let sessions = match store.get_running_sessions() {
         Ok(s) => s,
         Err(e) => {
-            log::warn!("[session_runner] Failed to query running sessions for reconnect: {e}");
+            log::warn!("[session_runner] Failed to query running sessions: {e}");
             return;
         }
     };
 
-    if sessions.is_empty() {
-        return;
-    }
-
-    log::info!(
-        "[session_runner] Attempting to reconnect {} orphaned session(s)",
-        sessions.len()
-    );
-
     for session in sessions {
-        if session.agent_id.is_none() {
-            log::info!(
-                "[session_runner] session={} has no ACP session ID, cancelling",
-                session.id
-            );
-            let _ = store.transition_from_running(&session.id, SessionStatus::Cancelled, None);
-            continue;
-        }
+        let should_cancel = match session.owner_pid {
+            None => {
+                log::info!(
+                    "[session_runner] session={} has no owner_pid (pre-migration), cancelling",
+                    session.id
+                );
+                true
+            }
+            Some(pid) if pid == std::process::id() => {
+                log::warn!(
+                    "[session_runner] session={} owned by current pid={}, skipping",
+                    session.id,
+                    pid
+                );
+                false
+            }
+            Some(pid) if !is_process_alive(pid) => {
+                log::info!(
+                    "[session_runner] session={} owner pid={} is dead, cancelling",
+                    session.id,
+                    pid
+                );
+                true
+            }
+            Some(pid) => {
+                log::info!(
+                    "[session_runner] session={} owner pid={} is alive, leaving",
+                    session.id,
+                    pid
+                );
+                false
+            }
+        };
 
-        log::info!("[session_runner] Reconnecting session={}", session.id);
-        if let Err(e) = reconnect_session(
-            session.clone(),
-            Arc::clone(&store),
-            app_handle.clone(),
-            Arc::clone(&registry),
-        ) {
-            log::warn!(
-                "[session_runner] Failed to reconnect session={}: {e}, cancelling",
-                session.id
+        if should_cancel {
+            let transitioned = store
+                .transition_from_running(&session.id, SessionStatus::Cancelled, None)
+                .unwrap_or(false);
+            log::info!(
+                "[session_runner] session={} cancelled transitioned={}",
+                session.id,
+                transitioned
             );
-            let _ = store.transition_from_running(&session.id, SessionStatus::Cancelled, Some(&e));
+            if transitioned {
+                emit_status(&app_handle, &session.id, "cancelled", None);
+            }
         }
     }
 }
 
-/// Reconnect to an in-flight ACP session that was orphaned by a previous
-/// app instance.
+/// Check whether a process is alive by sending signal 0.
 ///
-/// Mirrors `start_session` with two differences:
-/// - Does **not** persist the user message (already stored from the first run).
-/// - Passes `session.agent_id` so the driver calls `load_session` instead of
-///   `new_session`, resuming the existing agent conversation.
-fn reconnect_session(
-    session: crate::store::Session,
-    store: Arc<Store>,
-    app_handle: AppHandle,
-    registry: Arc<SessionRegistry>,
-) -> Result<(), String> {
-    let working_dir = PathBuf::from(&session.working_dir);
-
-    let driver = match &session.provider {
-        Some(id) => AcpDriver::new(id)?,
-        None => AcpDriver::first_available()?,
-    };
-
-    log::info!(
-        "[session_runner] ACP driver created for reconnect session={}",
-        session.id
-    );
-
-    // Use current HEAD as pre_head_sha so post-completion commit detection
-    // can detect any commit the agent makes during the reconnected run.
-    let pre_head_sha = crate::git::get_head_sha(&working_dir).ok();
-
-    let cancel_token = registry.register(&session.id);
-
-    let session_id_for_status = session.id.clone();
-    let store_for_status = Arc::clone(&store);
-
-    std::thread::spawn(move || {
-        log::info!(
-            "[session_runner] background thread started for reconnect session={}",
-            session_id_for_status,
-        );
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create runtime for session reconnect");
-
-        let local = tokio::task::LocalSet::new();
-        let result = local.block_on(&rt, async {
-            let writer = Arc::new(MessageWriter::new(session.id.clone(), Arc::clone(&store)));
-            let store_trait: Arc<dyn acp_client::Store> = store;
-            let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
-
-            log::info!(
-                "[session_runner] invoking ACP driver.run for reconnect session={}",
-                session.id,
-            );
-
-            driver
-                .run(
-                    &session.id,
-                    &session.prompt,
-                    &working_dir,
-                    &store_trait,
-                    &writer_trait,
-                    &cancel_token,
-                    session.agent_id.as_deref(),
-                )
-                .await
-        });
-
-        log::info!(
-            "[session_runner] ACP driver.run returned for reconnect session={} success={} cancelled={}",
-            session_id_for_status,
-            result.is_ok(),
-            cancel_token.is_cancelled(),
-        );
-
-        registry.deregister(&session_id_for_status);
-
-        let (new_status, error_msg) = match result {
-            Ok(()) if cancel_token.is_cancelled() => ("cancelled", None),
-            Ok(()) => ("completed", None),
-            Err(ref e) if cancel_token.is_cancelled() => {
-                log::info!("Session {session_id_for_status} reconnect cancelled (teardown: {e})");
-                ("cancelled", None)
-            }
-            Err(ref e) => {
-                log::error!("Session {session_id_for_status} reconnect failed: {e}");
-                ("error", Some(e.clone()))
-            }
-        };
-
-        if new_status == "completed" {
-            run_post_completion_hooks(
-                &session_id_for_status,
-                &working_dir,
-                pre_head_sha.as_deref(),
-                None, // workspace_name not stored — local sessions only
-                &store_for_status,
-            );
-        }
-
-        let status_enum = SessionStatus::parse(new_status).unwrap();
-        let transitioned = store_for_status
-            .transition_from_running(&session_id_for_status, status_enum, error_msg.as_deref())
-            .unwrap_or(false);
-
-        log::info!(
-            "[session_runner] session={} reconnect final_status={} transitioned={} (emitting event: {})",
-            session_id_for_status, new_status, transitioned, transitioned,
-        );
-
-        if transitioned {
-            emit_status(&app_handle, &session_id_for_status, new_status, error_msg);
-        }
-    });
-
-    Ok(())
+/// `kill(pid, 0)` succeeds if the process exists and we have permission to
+/// signal it. On EPERM the process exists but we lack permission — treat as
+/// alive. Any other error (ESRCH) means the process is gone.
+fn is_process_alive(pid: u32) -> bool {
+    let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if ret == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 // =============================================================================

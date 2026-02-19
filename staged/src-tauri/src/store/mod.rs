@@ -61,7 +61,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -300,7 +300,8 @@ impl Store {
                 agent_id        TEXT,
                 error_message   TEXT,
                 created_at      INTEGER NOT NULL,
-                updated_at      INTEGER NOT NULL
+                updated_at      INTEGER NOT NULL,
+                owner_pid       INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS commits (

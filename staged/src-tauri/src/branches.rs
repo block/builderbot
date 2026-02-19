@@ -499,13 +499,33 @@ pub async fn setup_worktree(
         )
         .map_err(|e| e.to_string())?
     } else {
-        git::create_worktree_at_path(
+        match git::create_worktree_at_path(
             &repo_path,
             &branch.branch_name,
             &branch.base_branch,
             &desired_worktree_path,
-        )
-        .map_err(|e| e.to_string())?
+        ) {
+            Ok(path) => path,
+            Err(create_err) => {
+                // Handle races/stale refs where the branch appears between our
+                // pre-check and `git worktree add -b ...`.
+                if git::branch_exists(&repo_path, &branch.branch_name).map_err(|e| e.to_string())? {
+                    log::warn!(
+                        "Branch '{}' already exists after create attempt; retrying with existing branch in repo '{}'",
+                        branch.branch_name,
+                        repo_slug
+                    );
+                    git::create_worktree_for_existing_branch_at_path(
+                        &repo_path,
+                        &branch.branch_name,
+                        &desired_worktree_path,
+                    )
+                    .map_err(|e| e.to_string())?
+                } else {
+                    return Err(create_err.to_string());
+                }
+            }
+        }
     };
 
     let worktree_str = worktree_path

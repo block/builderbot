@@ -199,7 +199,7 @@
       all.push({
         key: `review-${review.id}`,
         type,
-        title: `Code Review (${review.scope})`,
+        title: `Code Review`,
         meta: review.commentCount > 0 ? `${review.commentCount} comments` : undefined,
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
@@ -329,7 +329,7 @@
         disabled={disableNewSessionActions}
       >
         <FileSearch size={18} />
-        <span>New AI review</span>
+        <span>New code review</span>
       </button>
     {/if}
   </div>
@@ -404,10 +404,10 @@
               class="add-item-btn review-btn"
               onclick={onNewReview}
               disabled={disableNewSessionActions}
-              title="New AI review"
+              title="New code review"
             >
               <FileSearch size={13} />
-              <span>New AI review</span>
+              <span>New code review</span>
             </button>
           {/if}
         </div>

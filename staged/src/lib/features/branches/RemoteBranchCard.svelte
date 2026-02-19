@@ -379,7 +379,7 @@
       newSessionMode === 'commit'
         ? 'Preparing commit...'
         : newSessionMode === 'review'
-          ? 'Preparing AI review...'
+          ? 'Preparing code review...'
           : 'Preparing note...';
     pendingTimelineItems = [
       ...pendingTimelineItems,

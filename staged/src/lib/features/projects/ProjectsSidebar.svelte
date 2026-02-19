@@ -4,7 +4,7 @@
   import {
     FolderGit2,
     House,
-    CirclePlus,
+    Plus,
     GitPullRequest,
     GitPullRequestClosed,
     GitPullRequestDraft,
@@ -235,7 +235,7 @@
             onclick={openNewProject}
             title="New project (⌘N)"
           >
-            <CirclePlus size={16} />
+            <span class="plus-icon"><Plus size={12} /></span>
             New project
           </button>
         </div>
@@ -299,6 +299,18 @@
     padding: 1px 7px;
   }
 
+  .plus-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: none;
+    border-radius: 50%;
+    background-color: var(--border-muted);
+    flex-shrink: 0;
+  }
+
   .new-project-button {
     display: flex;
     align-items: center;
@@ -320,6 +332,10 @@
     background-color: var(--bg-hover);
   }
 
+  .new-project-button:hover .plus-icon {
+    background-color: var(--border-emphasis);
+  }
+
   .new-project-button:focus-visible,
   .project-row:focus-visible {
     outline: 2px solid var(--ui-accent);
@@ -337,10 +353,6 @@
     flex-direction: column;
     gap: 4px;
     padding: 10px 8px;
-  }
-
-  .list-new-project-button {
-    margin-top: 8px;
   }
 
   .project-row {
@@ -386,13 +398,14 @@
   .row-main {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
+    gap: 10px;
     flex: 1;
     min-width: 0;
   }
 
   .row-main :global(svg) {
     flex-shrink: 0;
+    width: 16px;
   }
 
   .row-main :global(svg.pr-status-merged) {

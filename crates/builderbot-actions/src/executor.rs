@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -40,6 +40,9 @@ struct RunningActionState {
 pub struct ActionExecutor {
     running: Arc<Mutex<HashMap<String, RunningActionState>>>,
     completed: Arc<Mutex<HashMap<String, Vec<OutputChunk>>>>,
+    /// Tracks execution IDs that have been explicitly stopped by the user.
+    /// The completion thread checks this to emit `Stopped` instead of `Failed`.
+    stopped: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Default for ActionExecutor {
@@ -54,6 +57,7 @@ impl ActionExecutor {
         Self {
             running: Arc::new(Mutex::new(HashMap::new())),
             completed: Arc::new(Mutex::new(HashMap::new())),
+            stopped: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -82,8 +86,8 @@ impl ActionExecutor {
         // 2. Login shell loads the full environment
         // 3. -s flag forces shell to read commands from stdin (critical for non-TTY context)
         // 4. Stdin commands execute AFTER shell initialization and hook activation
-        let mut child = Command::new(&shell)
-            .current_dir(&working_dir) // Start in target directory to trigger directory hooks
+        let mut cmd = Command::new(&shell);
+        cmd.current_dir(&working_dir) // Start in target directory to trigger directory hooks
             .env_clear() // Clear all inherited environment variables
             .env("HOME", std::env::var("HOME").unwrap_or_default()) // Preserve HOME for shell profile loading
             .env("USER", std::env::var("USER").unwrap_or_default()) // Preserve USER for shell profile loading
@@ -93,9 +97,27 @@ impl ActionExecutor {
             .arg("-s") // Force shell to read commands from stdin (required for non-TTY)
             .stdin(Stdio::piped()) // Pipe stdin to send commands after initialization
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Failed to spawn action process")?;
+            .stderr(Stdio::piped());
+
+        // Create a new process group so we can kill the shell AND all its children.
+        // Without this, SIGTERM only reaches the shell process, leaving child
+        // processes (e.g. `npm run build`, `cargo build`) running as orphans.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: `setsid()` is an async-signal-safe function that creates a new
+            // session and process group. It is safe to call in a pre_exec hook.
+            unsafe {
+                cmd.pre_exec(|| {
+                    // Create a new session (and process group) for this child.
+                    // All processes spawned by the shell will inherit this group.
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+
+        let mut child = cmd.spawn().context("Failed to spawn action process")?;
 
         let child_pid = child.id();
 
@@ -243,6 +265,7 @@ impl ActionExecutor {
         let exec_id = execution_id.clone();
         let running_clone = self.running.clone();
         let completed_clone = self.completed.clone();
+        let stopped_clone = self.stopped.clone();
         let working_dir_clone = working_dir.clone();
         let auto_commit = metadata.auto_commit;
         let action_name = metadata.action_name.clone();
@@ -252,6 +275,12 @@ impl ActionExecutor {
             let exit_status = child.wait();
             let exit_code = exit_status.as_ref().ok().and_then(|s| s.code());
             let completed_at = now_timestamp();
+
+            // Check whether this execution was explicitly stopped by the user
+            let was_stopped = {
+                let mut stopped = stopped_clone.lock().unwrap();
+                stopped.remove(&exec_id)
+            };
 
             // Move output buffer to completed actions map and remove from running
             {
@@ -265,8 +294,13 @@ impl ActionExecutor {
 
             let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
 
-            // Emit completion status
-            let status = if success {
+            // Determine the correct status:
+            // - If explicitly stopped by the user → Stopped
+            // - If exited successfully → Completed
+            // - Otherwise → Failed
+            let status = if was_stopped {
+                ActionStatus::Stopped
+            } else if success {
                 ActionStatus::Completed
             } else {
                 ActionStatus::Failed
@@ -286,7 +320,7 @@ impl ActionExecutor {
                         .await;
 
                     // If auto_commit is enabled and action succeeded, commit changes
-                    if auto_commit && success {
+                    if auto_commit && success && !was_stopped {
                         if let Err(e) = auto_commit_if_changes(&working_dir_clone, &action_name) {
                             eprintln!("Failed to auto-commit changes: {}", e);
                         } else {
@@ -346,49 +380,68 @@ impl ActionExecutor {
         Ok(execution_id)
     }
 
-    /// Stop a running action by execution ID
+    /// Stop a running action by execution ID.
+    ///
+    /// Marks the execution as stopped and sends SIGTERM to the entire process
+    /// group. The completion thread will see the stopped flag and emit a
+    /// `Stopped` status event once the process actually exits.
     pub fn stop(&self, execution_id: &str) -> Result<()> {
-        let state = {
-            let mut running = self.running.lock().unwrap();
-            running.remove(execution_id)
+        // Mark as stopped BEFORE sending the signal so the completion thread
+        // knows this was an intentional stop (not a crash/failure).
+        {
+            let mut stopped = self.stopped.lock().unwrap();
+            stopped.insert(execution_id.to_string());
+        }
+
+        // Read the PID but do NOT remove from the running map. The completion
+        // thread needs the entry to move the output buffer to the completed map
+        // and to emit the proper StatusChanged event.
+        let pid = {
+            let running = self.running.lock().unwrap();
+            running.get(execution_id).and_then(|state| state.child_pid)
         };
 
-        if let Some(state) = state {
-            if let Some(pid) = state.child_pid {
-                #[cfg(unix)]
-                {
-                    // SAFETY: This unsafe block calls libc::kill to terminate a child process.
-                    //
-                    // Safety considerations:
-                    // 1. PID validity: The PID comes from `std::process::Child::id()` which was
-                    //    stored when we spawned the process. While the process may have already
-                    //    terminated, calling kill() on a non-existent PID is safe (returns ESRCH).
-                    // 2. PID reuse: On Unix systems, PIDs can be reused after process termination.
-                    //    However, the window for reuse is typically small, and we only call this
-                    //    immediately after removing the process from our tracking map. The risk of
-                    //    terminating an unrelated process is minimal in practice.
-                    // 3. Signal delivery: SIGTERM is a graceful termination signal that allows
-                    //    processes to clean up. This is safer than SIGKILL.
-                    // 4. Error handling: We intentionally ignore the return value because:
-                    //    - If the process already exited, kill() fails with ESRCH (acceptable)
-                    //    - If we lack permissions, we can't do anything about it
-                    //    - The process is already removed from our tracking, so we've done our part
-                    //
-                    // Alternative considered: Using a higher-level library like `sysinfo` or maintaining
-                    // a handle to the Child. However, this adds complexity and dependencies without
-                    // significantly improving safety for this use case.
-                    unsafe {
-                        libc::kill(pid as i32, libc::SIGTERM);
-                    }
+        if let Some(pid) = pid {
+            #[cfg(unix)]
+            {
+                // Send SIGTERM to the entire process group (negative PID).
+                //
+                // Because we used `setsid()` in pre_exec, the shell and all its
+                // children share a process group whose PGID equals the shell's PID.
+                // Sending the signal to `-pid` reaches every process in the group,
+                // ensuring child processes (npm, cargo, etc.) are also terminated.
+                //
+                // SAFETY: Calling `libc::kill` with a negative PID targets a process
+                // group. The PID came from `Child::id()` at spawn time. If the group
+                // no longer exists, kill() returns ESRCH which we safely ignore.
+                // After SIGTERM, we spawn a background thread that waits briefly and
+                // escalates to SIGKILL if the group is still alive.
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGTERM);
                 }
 
-                #[cfg(windows)]
-                {
-                    // Use taskkill on Windows for graceful termination
-                    let _ = Command::new("taskkill")
-                        .args(["/PID", &pid.to_string(), "/F"])
-                        .status();
-                }
+                // Escalate to SIGKILL after a short grace period in case the
+                // process group ignores SIGTERM (e.g. a process traps the signal).
+                thread::spawn(move || {
+                    thread::sleep(std::time::Duration::from_secs(5));
+                    // SAFETY: Same considerations as above. If the process group
+                    // already exited, kill() harmlessly returns ESRCH.
+                    unsafe {
+                        // Check if the process group still exists before sending SIGKILL
+                        let ret = libc::kill(-(pid as i32), 0);
+                        if ret == 0 {
+                            libc::kill(-(pid as i32), libc::SIGKILL);
+                        }
+                    }
+                });
+            }
+
+            #[cfg(windows)]
+            {
+                // Use taskkill with /T to kill the process tree on Windows
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .status();
             }
         }
 

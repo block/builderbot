@@ -24,6 +24,11 @@
 
   let showForm = $state(false);
 
+  let formName = $state('');
+  let formLocation = $state<'local' | 'remote'>('local');
+  let formSelectedRepo = $state<string | null>(null);
+  let formSubpath = $state('');
+
   const phrases = [
     'AI coding sessions,',
     'From prompt to pull request,',
@@ -98,7 +103,13 @@
 
     {#if showForm}
       <div class="inline-form">
-        <NewProjectForm {onCreated} />
+        <NewProjectForm
+          {onCreated}
+          bind:name={formName}
+          bind:location={formLocation}
+          bind:selectedRepo={formSelectedRepo}
+          bind:subpath={formSubpath}
+        />
       </div>
     {/if}
   </div>

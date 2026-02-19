@@ -16,14 +16,21 @@
   interface Props {
     onCreated: (project: Project) => void;
     onCancel?: () => void;
+    name?: string;
+    location?: 'local' | 'remote';
+    selectedRepo?: string | null;
+    subpath?: string;
   }
 
-  let { onCreated, onCancel }: Props = $props();
+  let {
+    onCreated,
+    onCancel,
+    name = $bindable(''),
+    location = $bindable('local'),
+    selectedRepo = $bindable(null),
+    subpath = $bindable(''),
+  }: Props = $props();
 
-  let name = $state('');
-  let location = $state<'local' | 'remote'>('local');
-  let selectedRepo = $state<string | null>(null);
-  let subpath = $state('');
   let saving = $state(false);
   let error = $state<string | null>(null);
   let isMonorepo = $state(false);

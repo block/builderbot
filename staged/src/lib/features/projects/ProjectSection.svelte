@@ -4,9 +4,10 @@
   Shows the project name, repo controls, and all branch cards for this project.
 -->
 <script lang="ts">
-  import { Folder, Trash2, Plus } from 'lucide-svelte';
+  import { ChevronLeft, Trash2, Plus } from 'lucide-svelte';
   import type { Project, Branch, WorkspaceStatus } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
+  import { goHome } from '../../navigation.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
@@ -69,7 +70,9 @@
 <div class="project-section">
   <div class="project-header" class:deleting>
     <div class="project-info">
-      <span class="folder-icon"><Folder size={14} /></span>
+      <button class="back-button" onclick={goHome} title="Back to projects">
+        <ChevronLeft size={16} />
+      </button>
       <span class="project-name">{projectDisplayName(project)}</span>
       {#if deleting}
         <div class="deleting-status" role="status" aria-live="polite">
@@ -153,11 +156,25 @@
     gap: 8px;
   }
 
-  .folder-icon {
+  .back-button {
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text-faint);
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background-color: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    flex-shrink: 0;
+  }
+
+  .back-button:hover {
+    color: var(--text-primary);
+    background-color: var(--ui-selection);
   }
 
   .project-name {

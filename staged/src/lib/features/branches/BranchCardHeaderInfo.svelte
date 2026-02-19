@@ -14,10 +14,10 @@
   {#if repoLabel}
     <span class="repo-name" title={repoLabel}>{repoLabel}</span>
     <div class="header-meta">
-      <GitBranch size={12} />
       <span class="branch-name">{branchName}</span>
       {#if secondaryLabel}
         <span class="meta-separator" aria-hidden="true">&middot;</span>
+        <GitBranch size={12} />
         <span class="base-branch-name" title={secondaryLabel}>{secondaryLabel}</span>
       {/if}
     </div>

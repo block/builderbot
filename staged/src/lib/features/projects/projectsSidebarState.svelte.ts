@@ -15,6 +15,7 @@ export const projectsSidebarState = $state({
   width: SIDEBAR_DEFAULT_WIDTH,
   collapsed: false,
   hydrated: false,
+  hasProjects: true,
 });
 
 export async function hydrateProjectsSidebarState(): Promise<void> {
@@ -43,6 +44,10 @@ export function setProjectsSidebarWidth(width: number, persist = true): void {
   if (persist) {
     void setStoreValue(SIDEBAR_WIDTH_KEY, clamped);
   }
+}
+
+export function setHasProjects(value: boolean): void {
+  projectsSidebarState.hasProjects = value;
 }
 
 export function setProjectsSidebarCollapsed(collapsed: boolean): void {

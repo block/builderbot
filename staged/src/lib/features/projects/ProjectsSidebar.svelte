@@ -119,7 +119,7 @@
   }
 </script>
 
-{#if !projectsSidebarState.collapsed}
+{#if !projectsSidebarState.collapsed && projectsSidebarState.hasProjects}
   <aside class="projects-sidebar" class:resizing style={`width: ${projectsSidebarState.width}px;`}>
     <div class="sidebar-header">
       <div class="title-row">

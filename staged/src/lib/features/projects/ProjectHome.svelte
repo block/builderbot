@@ -20,6 +20,7 @@
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import SplashScreen from './SplashScreen.svelte';
   import { alerts } from '../../shared/alerts.svelte';
+  import { setHasProjects } from './projectsSidebarState.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -175,6 +176,7 @@
       const projectList = await commands.listProjects();
       if (generation !== loadGeneration) return;
       projects = projectList;
+      setHasProjects(projectList.length > 0);
       loading = false;
 
       // Seed maps so project sections can render immediately.

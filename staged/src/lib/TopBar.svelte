@@ -43,9 +43,10 @@
     <button
       class="icon-btn"
       onclick={toggleProjectsSidebar}
+      disabled={!projectsSidebarState.hasProjects}
       title={projectsSidebarState.collapsed ? 'Show projects sidebar' : 'Hide projects sidebar'}
     >
-      {#if projectsSidebarState.collapsed}
+      {#if projectsSidebarState.collapsed || !projectsSidebarState.hasProjects}
         <PanelLeftOpen size={14} />
       {:else}
         <PanelLeftClose size={14} />
@@ -135,8 +136,13 @@
       background-color 0.1s;
   }
 
-  .icon-btn:hover {
+  .icon-btn:hover:not(:disabled) {
     color: var(--text-primary);
     background-color: var(--bg-hover);
+  }
+
+  .icon-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
 </style>

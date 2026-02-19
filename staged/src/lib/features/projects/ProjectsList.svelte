@@ -21,6 +21,7 @@
   import { getProjectStatus } from './projectStatus';
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import { setHasProjects } from './projectsSidebarState.svelte';
 
   let projects = $state<Project[]>([]);
   let projectBranches = $state<Map<string, Branch[]>>(new Map());
@@ -106,6 +107,7 @@
     try {
       const loadedProjects = await commands.listProjects();
       projects = loadedProjects;
+      setHasProjects(loadedProjects.length > 0);
       repoCountsByProject = new Map(
         loadedProjects.map((project) => [project.id, project.githubRepo ? 1 : 0] as const)
       );

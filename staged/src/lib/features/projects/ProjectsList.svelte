@@ -168,7 +168,9 @@
     selectProject(projectId);
   }
 
-  function getProjectPrStatus(projectId: string): 'merged' | 'open' | 'closed' | 'conflict' | null {
+  function getProjectPrStatus(
+    projectId: string
+  ): 'merged' | 'open' | 'closed' | 'checks_failing' | 'conflict' | null {
     const branches = projectBranches.get(projectId) || [];
     return aggregateProjectPrStatus(branches);
   }
@@ -313,6 +315,8 @@
               <div class="card-header">
                 {#if prStatus === 'merged'}
                   <GitPullRequest size={16} class="pr-status-merged" />
+                {:else if prStatus === 'checks_failing'}
+                  <GitPullRequest size={16} class="pr-status-checks-failing" />
                 {:else if prStatus === 'open'}
                   <GitPullRequest size={16} />
                 {:else if prStatus === 'closed'}
@@ -545,6 +549,10 @@
   }
 
   .card-header :global(svg.pr-status-conflict) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.pr-status-checks-failing) {
     stroke: var(--ui-danger);
   }
 

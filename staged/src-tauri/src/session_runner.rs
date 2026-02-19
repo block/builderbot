@@ -380,17 +380,19 @@ pub fn cancel_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
     }
 }
 
-/// Check whether a process is alive by sending signal 0.
+/// Check whether a process is alive by sending signal 0 via the `kill` command.
 ///
-/// `kill(pid, 0)` succeeds if the process exists and we have permission to
-/// signal it. On EPERM the process exists but we lack permission — treat as
-/// alive. Any other error (ESRCH) means the process is gone.
+/// `kill -0 pid` succeeds (exit 0) if the process exists and we have permission
+/// to signal it. It also exits 0 on some systems when the process exists but we
+/// lack permission (EPERM). A non-zero exit means the process is gone (ESRCH).
 fn is_process_alive(pid: u32) -> bool {
-    let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if ret == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // =============================================================================

@@ -260,7 +260,7 @@
   .projects-sidebar {
     position: relative;
     flex-shrink: 0;
-    border-right: 1px solid var(--border-subtle);
+    border-right: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
     background-color: var(--bg-surface);
     display: flex;
     flex-direction: column;

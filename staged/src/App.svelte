@@ -332,7 +332,7 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    border-top: 1px solid var(--border-muted);
+    border-top: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
   }
 
   .reset-shell {

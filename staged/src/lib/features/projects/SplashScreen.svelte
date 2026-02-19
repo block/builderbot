@@ -1,7 +1,7 @@
 <!--
   SplashScreen.svelte - Welcome screen shown when no projects exist
 
-  Displays branded icon, tagline, gradient background, and
+  Displays branded icon, rotating tagline, gradient background, and
   a call-to-action to create the first project.
 -->
 <script lang="ts">
@@ -9,6 +9,32 @@
   import StagedIcon from '../../shared/StagedIcon.svelte';
 
   let { onCreateProject }: { onCreateProject: () => void } = $props();
+
+  const phrases = [
+    'AI coding sessions,',
+    'From prompt to pull request,',
+    'Direct what AI builds,',
+    'Review what agents build,',
+    'AI-driven development,',
+    'Orchestrate AI agents,',
+    'AI writes the code,',
+    'Prompt, review, ship,',
+    'Code at the speed of AI,',
+  ];
+
+  let currentIndex = $state(0);
+  let transitioning = $state(false);
+
+  $effect(() => {
+    const id = setInterval(() => {
+      transitioning = true;
+      setTimeout(() => {
+        currentIndex = (currentIndex + 1) % phrases.length;
+        transitioning = false;
+      }, 300);
+    }, 5000);
+    return () => clearInterval(id);
+  });
 </script>
 
 <div class="splash">
@@ -20,7 +46,10 @@
       <StagedIcon size={52} />
     </div>
     <h2 class="splash-heading">
-      Git branch workflows,<br />beautifully <span class="mono accent">staged</span>
+      <span class="phrase-rotator" class:transitioning>
+        {phrases[currentIndex]}
+      </span>
+      <br />beautifully <span class="mono accent">staged</span>
     </h2>
   </div>
 
@@ -111,6 +140,23 @@
 
   .splash-heading .accent {
     color: var(--ui-accent);
+  }
+
+  .phrase-rotator {
+    display: inline-block;
+    transition:
+      opacity 0.3s ease,
+      transform 0.3s ease,
+      filter 0.3s ease;
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+
+  .phrase-rotator.transitioning {
+    opacity: 0;
+    transform: translateY(-8px);
+    filter: blur(4px);
   }
 
   .splash-actions {

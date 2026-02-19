@@ -318,7 +318,7 @@
     border: none;
     border-radius: 8px;
     background-color: transparent;
-    color: var(--text-muted);
+    color: var(--text-primary);
     padding: 8px 10px;
     font-size: var(--size-sm);
     font-weight: 500;
@@ -360,10 +360,10 @@
     justify-content: space-between;
     gap: 8px;
     width: 100%;
-    border: 1px solid transparent;
+    border: none;
     border-radius: 8px;
     background-color: transparent;
-    color: var(--text-muted);
+    color: var(--text-primary);
     cursor: pointer;
     padding: 8px 10px;
     text-align: left;
@@ -373,25 +373,28 @@
   .project-row:hover {
     color: var(--text-primary);
     background-color: var(--ui-selection);
-    border-color: var(--border-subtle);
   }
 
   .project-row.active {
     color: var(--text-primary);
     background-color: var(--bg-hover);
-    border-color: var(--border-muted);
+  }
+
+  .project-row.active .row-meta,
+  .project-row.active .repo-count,
+  .project-row.active :global(svg) {
+    color: var(--text-primary);
+    stroke: var(--text-primary);
   }
 
   .project-row.deleting {
     opacity: 0.7;
-    border-style: dashed;
     cursor: not-allowed;
   }
 
   .project-row:disabled:hover {
     color: var(--text-muted);
     background-color: transparent;
-    border-color: transparent;
   }
 
   .row-main {

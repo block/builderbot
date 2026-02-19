@@ -86,14 +86,6 @@ export interface RunningActionInfo {
   startedAt: number;
 }
 
-/**
- * Detect available actions from a project's build files using AI.
- * Scans package.json, justfile, Makefile, etc. and suggests relevant actions.
- */
-export function detectProjectActions(projectId: string): Promise<SuggestedAction[]> {
-  return invoke<SuggestedAction[]>('detect_project_actions', { projectId });
-}
-
 /** Detect available actions for a repo+subpath context. */
 export function detectRepoActions(
   githubRepo: string,

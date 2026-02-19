@@ -314,24 +314,6 @@ export function listProjectActions(
   return invoke('list_project_actions', { projectId, projectRepoId: projectRepoId ?? null });
 }
 
-export function createProjectAction(
-  projectId: string,
-  name: string,
-  command: string,
-  actionType: string,
-  sortOrder: number,
-  autoCommit: boolean
-): Promise<ProjectAction> {
-  return invoke('create_project_action', {
-    projectId,
-    name,
-    command,
-    actionType,
-    sortOrder,
-    autoCommit,
-  });
-}
-
 export function updateProjectAction(
   actionId: string,
   name: string,

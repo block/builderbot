@@ -720,28 +720,6 @@ fn list_project_actions(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn create_project_action(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    project_id: String,
-    name: String,
-    command: String,
-    action_type: String,
-    sort_order: i32,
-    auto_commit: bool,
-) -> Result<store::models::RepoAction, String> {
-    let store = get_store(&store)?;
-    let context = get_or_create_project_action_context(&store, &project_id)?;
-    let parsed_type = builderbot_actions::ActionType::parse(&action_type)
-        .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
-    let action = store::models::RepoAction::new(context.id, name, command, parsed_type, sort_order)
-        .with_auto_commit(auto_commit);
-    store
-        .create_repo_action(&action)
-        .map_err(|e| e.to_string())?;
-    Ok(action)
-}
-
-#[tauri::command(rename_all = "camelCase")]
 fn update_project_action(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     action_id: String,
@@ -2360,7 +2338,6 @@ pub fn run() {
             branches::get_workspace_info,
             branches::poll_workspace_status,
             list_project_actions,
-            create_project_action,
             update_project_action,
             delete_project_action,
             list_action_contexts,
@@ -2401,7 +2378,6 @@ pub fn run() {
             session_commands::delete_session,
             session_commands::start_branch_session,
             // Actions
-            actions::commands::detect_project_actions,
             actions::commands::detect_repo_actions,
             actions::commands::run_branch_action,
             actions::commands::stop_branch_action,

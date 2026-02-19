@@ -91,60 +91,6 @@ fn resolve_branch_repo_context(
     Ok((repo.to_string(), project.subpath.clone()))
 }
 
-/// Detect available actions from a project's build files using AI.
-///
-/// If a local clone already exists on disk we read files from the filesystem.
-/// Otherwise we use the GitHub API (via `gh`) to inspect the repository
-/// remotely, avoiding an expensive clone just for action detection.
-#[tauri::command]
-pub async fn detect_project_actions(
-    project_id: String,
-    app: AppHandle,
-    store: State<'_, Mutex<Option<Arc<Store>>>>,
-) -> Result<Vec<SuggestedAction>, String> {
-    let store = get_store(&store)?;
-
-    // Get the project
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| format!("Failed to get project: {e}"))?
-        .ok_or_else(|| "Project not found".to_string())?;
-    let github_repo = project
-        .primary_repo()
-        .ok_or_else(|| "Project has no repository attached".to_string())?;
-
-    let context = store
-        .get_or_create_action_context(github_repo, project.subpath.as_deref())
-        .map_err(|e| format!("Failed to get action context: {e}"))?;
-    store
-        .set_action_context_detecting(&context.id, true)
-        .map_err(|e| format!("Failed to set detection status: {e}"))?;
-    let _ = app.emit(
-        "repo-actions-detection",
-        DetectingActionsEvent {
-            github_repo: github_repo.to_string(),
-            subpath: project.subpath.clone(),
-            detecting: true,
-        },
-    );
-
-    let result = detect_actions_for_repo_context(github_repo, project.subpath.as_deref()).await;
-
-    store
-        .mark_action_context_detected(&context.id)
-        .map_err(|e| format!("Failed to update detection status: {e}"))?;
-    let _ = app.emit(
-        "repo-actions-detection",
-        DetectingActionsEvent {
-            github_repo: github_repo.to_string(),
-            subpath: project.subpath.clone(),
-            detecting: false,
-        },
-    );
-
-    result
-}
-
 /// Detect available actions for a specific repo+subpath context using AI.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn detect_repo_actions(

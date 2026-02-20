@@ -57,3 +57,5 @@ just install-claude
 ```
 
 This registers birdseye as a local plugin marketplace and installs the plugin. The birdseye server must be running for the MCP tools to work.
+
+## [Changelog](CHANGELOG.md) | [Roadmap](ROADMAP.md)

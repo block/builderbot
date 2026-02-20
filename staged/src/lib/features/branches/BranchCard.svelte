@@ -88,7 +88,7 @@
 
   interface Props {
     branch: Branch;
-    repoLabel?: string | null;
+    repoLabel?: { githubRepo: string; subpath: string | null } | null;
     deleting?: boolean;
     worktreeError?: string;
     onDelete?: () => void;

@@ -1,9 +1,10 @@
 <script lang="ts">
   import { GitBranch } from 'lucide-svelte';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
 
   interface Props {
     branchName: string;
-    repoLabel?: string | null;
+    repoLabel?: { githubRepo: string; subpath: string | null } | null;
     secondaryLabel?: string | null;
   }
 
@@ -12,7 +13,9 @@
 
 <div class="header-left">
   {#if repoLabel}
-    <span class="repo-name" title={repoLabel}>{repoLabel}</span>
+    <span class="repo-name"
+      ><RepoLabel githubRepo={repoLabel.githubRepo} subpath={repoLabel.subpath} /></span
+    >
     <div class="header-meta">
       <span class="branch-name">{branchName}</span>
       {#if secondaryLabel}

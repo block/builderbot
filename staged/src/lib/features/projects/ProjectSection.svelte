@@ -16,7 +16,7 @@
   interface Props {
     project: Project;
     branches: Branch[];
-    repoLabelsById?: Map<string, string>;
+    repoLabelsById?: Map<string, { githubRepo: string; subpath: string | null }>;
     canAddRepo?: boolean;
     addRepoHint?: string | null;
     deleting?: boolean;
@@ -92,9 +92,14 @@
     return () => window.removeEventListener('pointerdown', onPointerDown);
   });
 
-  function repoLabelForBranch(branch: Branch): string | null {
-    if (!branch.projectRepoId) return project.githubRepo;
-    return repoLabelsById.get(branch.projectRepoId) ?? project.githubRepo;
+  function repoLabelForBranch(
+    branch: Branch
+  ): { githubRepo: string; subpath: string | null } | null {
+    const fallback = project.githubRepo
+      ? { githubRepo: project.githubRepo, subpath: project.subpath ?? null }
+      : null;
+    if (!branch.projectRepoId) return fallback;
+    return repoLabelsById.get(branch.projectRepoId) ?? fallback;
   }
 </script>
 

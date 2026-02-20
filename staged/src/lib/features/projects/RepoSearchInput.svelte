@@ -9,6 +9,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { Search, Lock, Globe, Clock, Plus, Command } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
   import * as commands from '../../commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
 
@@ -278,9 +279,7 @@
             </div>
             <div class="repo-info">
               <span class="repo-name">
-                {recent.githubRepo}{#if recent.subpath}<span class="repo-subpath"
-                    >/{recent.subpath}</span
-                  >{/if}
+                <RepoLabel githubRepo={recent.githubRepo} subpath={recent.subpath} />
               </span>
             </div>
             {#if i < 3}
@@ -336,7 +335,7 @@
                 {/if}
               </div>
               <div class="repo-info">
-                <span class="repo-name">{repo.nameWithOwner}</span>
+                <span class="repo-name"><RepoLabel githubRepo={repo.nameWithOwner} /></span>
                 {#if repo.description}
                   <span class="repo-description">{repo.description}</span>
                 {/if}
@@ -482,11 +481,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .repo-subpath {
-    font-weight: 400;
-    color: var(--text-muted);
   }
 
   .repo-description {

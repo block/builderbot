@@ -47,7 +47,7 @@
 
   interface Props {
     branch: Branch;
-    repoLabel?: string | null;
+    repoLabel?: { githubRepo: string; subpath: string | null } | null;
     deleting?: boolean;
     onDelete?: () => void;
     onRename?: (branchName: string) => void;

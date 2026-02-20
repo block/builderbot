@@ -22,6 +22,7 @@
   import { getProjectStatus } from './projectStatus';
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
   import { setHasProjects } from './projectsSidebarState.svelte';
 
   let projects = $state<Project[]>([]);
@@ -337,15 +338,16 @@
                   <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
                 {/if}
                 <div class="repo">
-                  {repos.length > 0
-                    ? repos
-                        .map((r) => (r.subpath ? `${r.githubRepo}/${r.subpath}` : r.githubRepo))
-                        .join(', ')
-                    : project.githubRepo
-                      ? project.subpath
-                        ? `${project.githubRepo}/${project.subpath}`
-                        : project.githubRepo
-                      : 'No repo attached'}
+                  {#if repos.length > 0}
+                    {#each repos as r, i}
+                      {#if i > 0}<span class="repo-separator">, </span>{/if}
+                      <RepoLabel githubRepo={r.githubRepo} subpath={r.subpath} />
+                    {/each}
+                  {:else if project.githubRepo}
+                    <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
+                  {:else}
+                    No repo attached
+                  {/if}
                 </div>
               </button>
               <div class="card-location">
@@ -530,13 +532,16 @@
 
   .repo {
     margin-top: auto;
-    color: var(--text-primary);
     font-size: var(--size-sm);
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     line-clamp: 2;
     overflow: hidden;
+  }
+
+  .repo-separator {
+    color: var(--text-faint);
   }
 
   .deleting-pill {

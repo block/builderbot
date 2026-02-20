@@ -15,6 +15,7 @@
     Code2,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
   import type { ActionContext, ProjectAction } from '../../commands';
   import * as commands from '../../commands';
   import { detectRepoActions, type SuggestedAction, type ActionType } from '../actions/actions';
@@ -87,11 +88,6 @@
     selectedContextId;
     loadActions();
   });
-
-  function contextLabel(context: ActionContext): string {
-    const repoName = context.githubRepo.split('/').pop() || context.githubRepo;
-    return context.subpath ? `${repoName}/${context.subpath}` : repoName;
-  }
 
   async function detectActions() {
     if (!selectedContext) return;
@@ -305,9 +301,7 @@
                 class:selected={context.id === selectedContextId}
                 onclick={() => (selectedContextId = context.id)}
               >
-                <span class="context-repo">{context.githubRepo}</span>{#if context.subpath}<span
-                    class="context-subpath">/{context.subpath}</span
-                  >{/if}
+                <RepoLabel githubRepo={context.githubRepo} subpath={context.subpath} />
               </button>
             {/each}
           </div>
@@ -520,14 +514,6 @@
   .context-item.selected {
     background: var(--bg-primary);
     border-color: var(--border-muted);
-  }
-
-  .context-repo {
-    color: var(--text-primary);
-  }
-
-  .context-subpath {
-    color: var(--text-muted);
   }
 
   .loading-side,

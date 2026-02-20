@@ -30,7 +30,9 @@
   // Data
   let projects = $state<Project[]>([]);
   let branchesByProject = $state<Map<string, Branch[]>>(new Map());
-  let repoLabelsByProject = $state<Map<string, Map<string, string>>>(new Map());
+  let repoLabelsByProject = $state<
+    Map<string, Map<string, { githubRepo: string; subpath: string | null }>>
+  >(new Map());
   let loading = $state(true);
   let error = $state<string | null>(null);
   let loadGeneration = 0;
@@ -178,7 +180,10 @@
 
       // Seed maps so project sections can render immediately.
       const branchMap = new Map<string, Branch[]>();
-      const repoLabelMap = new Map<string, Map<string, string>>();
+      const repoLabelMap = new Map<
+        string,
+        Map<string, { githubRepo: string; subpath: string | null }>
+      >();
       for (const project of projectList) {
         branchMap.set(project.id, branchesByProject.get(project.id) || []);
         repoLabelMap.set(project.id, repoLabelsByProject.get(project.id) || new Map());
@@ -202,7 +207,7 @@
                   (repo) =>
                     [
                       repo.id,
-                      repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo,
+                      { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null },
                     ] as const
                 )
               )
@@ -330,10 +335,7 @@
       new Map(
         repos.map(
           (repo) =>
-            [
-              repo.id,
-              repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo,
-            ] as const
+            [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
         )
       )
     );
@@ -442,10 +444,7 @@
         new Map(
           repos.map(
             (repo) =>
-              [
-                repo.id,
-                repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo,
-              ] as const
+              [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
           )
         )
       );
@@ -653,10 +652,7 @@
           new Map(
             repos.map(
               (repo) =>
-                [
-                  repo.id,
-                  repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo,
-                ] as const
+                [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
             )
           )
         );
@@ -793,7 +789,9 @@
               handleRenameBranch(branchId, project.id, branchName)}
             onWorkspaceStatusChange={(branchId, workspaceStatus) =>
               handleWorkspaceStatusChange(project.id, branchId, workspaceStatus)}
-            excludeRepos={new Set(repoLabelsByProject.get(project.id)?.values())}
+            excludeRepos={new Set(
+              [...(repoLabelsByProject.get(project.id)?.values() ?? [])].map((r) => r.githubRepo)
+            )}
             onRepoSelected={(nameWithOwner, subpath) =>
               handleRepoSelected(project.id, nameWithOwner, subpath)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}

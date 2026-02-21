@@ -176,6 +176,7 @@ func (s *Server) ensureLoaded() {
 // populateProjects scans file lists and fills in git info in the background.
 func (s *Server) populateProjects() {
 	s.cache.RefreshAllProjects()
+	s.seedRecentActivity()
 	log.Printf("Background file scan complete")
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 
@@ -201,6 +202,16 @@ func (s *Server) populateProjects() {
 	wg.Wait()
 	log.Printf("Background enrichment complete (git info)")
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
+}
+
+// seedRecentActivity populates the activity tracker with ModTimes from the
+// most recently modified files in the cache. This ensures /recent has data
+// immediately on startup, even for files modified before the server started.
+func (s *Server) seedRecentActivity() {
+	files := s.cache.AllFiles(50)
+	for _, f := range files {
+		s.activity.RecordAt(activity.FileModified, f.Project, f.FullPath, f.ModTime)
+	}
 }
 
 func (s *Server) routes() {

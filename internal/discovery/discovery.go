@@ -315,6 +315,7 @@ func DiscoverWorkspace(workspacePath, workspaceName string) ([]Project, error) {
 		}
 
 		projectPath := filepath.Join(workspacePath, entry.Name())
+		config.MigrateProjectDir(projectPath)
 		project := Project{
 			Name:          entry.Name(),
 			Path:          projectPath,
@@ -378,6 +379,8 @@ func LoadStandaloneProject(projectPath string, cfg config.ProjectConfig) (Projec
 	if name == "" {
 		name = filepath.Base(absPath)
 	}
+
+	config.MigrateProjectDir(absPath)
 
 	project := Project{
 		Name:   name,

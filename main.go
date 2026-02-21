@@ -41,6 +41,7 @@ func main() {
 }
 
 func runServe(port int, dev bool, rootOverride string) {
+	config.MigrateFromBirdseye()
 	config.EnsureGlobalGitignore()
 
 	// Load or create config

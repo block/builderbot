@@ -2,6 +2,7 @@
 
 ## Feb 20, 2026
 
+- **Renamed from Birdseye to Penpal** — The project, binary, MCP tools, plugin, and all UI branding are now "Penpal". Existing `.birdseye/` data directories and `~/.config/birdseye/` configs are automatically migrated on first run. Run `just install-claude` to switch to the new plugin (the old "birdseye" plugin is cleaned up automatically).
 - **Recent page shows files on startup** — The Recent page now immediately shows recently modified files when the server starts, instead of starting empty and only tracking files changed at runtime
 
 ## Feb 18, 2026

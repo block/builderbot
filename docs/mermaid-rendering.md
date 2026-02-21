@@ -3,7 +3,7 @@
 **Status:** Implemented
 **Area:** Frontend rendering
 
-Birdseye renders mermaid diagrams inline when viewing markdown files. Any fenced code block tagged with `mermaid` is converted from raw text into an SVG diagram.
+Penpal renders mermaid diagrams inline when viewing markdown files. Any fenced code block tagged with `mermaid` is converted from raw text into an SVG diagram.
 
 ## How it works
 

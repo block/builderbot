@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 func TestScanProjectSources_ClassifiesFiles(t *testing.T) {

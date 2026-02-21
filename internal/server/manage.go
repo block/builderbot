@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/loganj/birdseye/internal/config"
-	"github.com/loganj/birdseye/internal/discovery"
-	"github.com/loganj/birdseye/internal/watcher"
+	"github.com/loganj/penpal/internal/config"
+	"github.com/loganj/penpal/internal/discovery"
+	"github.com/loganj/penpal/internal/watcher"
 )
 
 // expandTilde expands a leading ~ to the user's home directory.

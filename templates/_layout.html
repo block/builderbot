@@ -4,10 +4,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{block "title" .}}Birdseye{{end}}</title>
+    <title>{{block "title" .}}Penpal{{end}}</title>
     <script>
         (function() {
-            var theme = localStorage.getItem('birdseye-theme');
+            var theme = localStorage.getItem('penpal-theme');
             if (!theme) {
                 theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
             }
@@ -712,7 +712,7 @@
 <body>
     <div class="app">
         <div class="topbar">
-            <div class="topbar-logo"><a href="/">Birdseye</a></div>
+            <div class="topbar-logo"><a href="/">Penpal</a></div>
             <div class="topbar-search">
                 <form action="/search" method="GET">
                     <input type="search" name="q" placeholder="Search all thoughts..." value="{{.Nav.SearchQuery}}">
@@ -764,7 +764,7 @@
                 </a>
                 <button class="sidebar-dots" onclick="toggleSidebarMenu(event)">&#8942;</button>
                 <div class="sidebar-item-menu">
-                    <button onclick="showRemoveDialog(this)">Remove from Birdseye</button>
+                    <button onclick="showRemoveDialog(this)">Remove from Penpal</button>
                 </div>
             </div>
             {{end}}
@@ -779,7 +779,7 @@
                 </a>
                 <button class="sidebar-dots" onclick="toggleSidebarMenu(event)">&#8942;</button>
                 <div class="sidebar-item-menu">
-                    <button onclick="showRemoveDialog(this)">Remove from Birdseye</button>
+                    <button onclick="showRemoveDialog(this)">Remove from Penpal</button>
                 </div>
             </div>
             {{end}}
@@ -798,11 +798,11 @@
         </div>
     </div>
 
-    <!-- Remove from Birdseye confirmation modal -->
+    <!-- Remove from Penpal confirmation modal -->
     <div class="modal-overlay" id="removeModal">
         <div class="modal">
             <h3>Remove <span id="removeItemName"></span>?</h3>
-            <p style="color:var(--text-muted);font-size:0.9em;margin:0">This will remove it from Birdseye. No data will be deleted.</p>
+            <p style="color:var(--text-muted);font-size:0.9em;margin:0">This will remove it from Penpal. No data will be deleted.</p>
             <div class="modal-actions">
                 <button class="btn-cancel" onclick="closeRemoveDialog()">Cancel</button>
                 <button class="btn-primary" id="confirmRemoveBtn" onclick="confirmRemove()">Remove</button>
@@ -813,7 +813,7 @@
     <!-- Add workspace/project modal -->
     <div class="modal-overlay" id="addModal">
         <div class="modal">
-            <h3>Add to Birdseye</h3>
+            <h3>Add to Penpal</h3>
             <input type="text" class="modal-input" id="addPathInput" placeholder="/path/to/directory">
             <div class="modal-error" id="addModalError"></div>
             <div class="modal-actions">
@@ -908,7 +908,7 @@
             document.querySelectorAll('.sidebar-item-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
         });
 
-        // --- Remove from Birdseye ---
+        // --- Remove from Penpal ---
         var removeTarget = { type: '', path: '', name: '' };
 
         function showRemoveDialog(btn) {
@@ -1162,7 +1162,7 @@
                     (publishURLs[key] ? '' : ' style="display:none"') + '>Copy Blockcell link</button>';
             if (isIndividual) {
                 html += '<div class="menu-divider"></div>';
-                html += '<button onclick="removeFileFromBirdseye(this)">Remove from Birdseye</button>';
+                html += '<button onclick="removeFileFromPenpal(this)">Remove from Penpal</button>';
             }
             html += '<div class="menu-divider"></div>';
             html += '<button class="menu-danger" onclick="confirmDeleteFile(this)">Delete from disk</button>';
@@ -1274,7 +1274,7 @@
             } else {
                 html.removeAttribute('data-theme');
             }
-            localStorage.setItem('birdseye-theme', newTheme);
+            localStorage.setItem('penpal-theme', newTheme);
             updateThemeIcon();
             document.dispatchEvent(new CustomEvent('themechange', { detail: { theme: newTheme } }));
         }

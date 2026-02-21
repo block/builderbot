@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/loganj/birdseye/internal/config"
+	"github.com/loganj/penpal/internal/config"
 )
 
 // SourceType defines a pluggable source type with metadata for discovery,
@@ -268,7 +268,7 @@ func (p *Project) Badges() []Badge {
 }
 
 // QualifiedName returns the workspace-qualified project identifier
-// (e.g., "Development/birdseye"). This is the unique key used for
+// (e.g., "Development/penpal"). This is the unique key used for
 // cache lookups, comment storage, API calls, and SSE events.
 func (p *Project) QualifiedName() string {
 	if p.WorkspaceName != "" {
@@ -315,6 +315,7 @@ func DiscoverWorkspace(workspacePath, workspaceName string) ([]Project, error) {
 		}
 
 		projectPath := filepath.Join(workspacePath, entry.Name())
+		config.MigrateProjectDir(projectPath)
 		project := Project{
 			Name:          entry.Name(),
 			Path:          projectPath,
@@ -378,6 +379,8 @@ func LoadStandaloneProject(projectPath string, cfg config.ProjectConfig) (Projec
 	if name == "" {
 		name = filepath.Base(absPath)
 	}
+
+	config.MigrateProjectDir(absPath)
 
 	project := Project{
 		Name:   name,

@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/loganj/birdseye/internal/comments"
-	"github.com/loganj/birdseye/internal/watcher"
+	"github.com/loganj/penpal/internal/comments"
+	"github.com/loganj/penpal/internal/watcher"
 )
 
 // handleAPIThreads dispatches GET (list threads) and POST (create thread).

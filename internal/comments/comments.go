@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/loganj/birdseye/internal/activity"
-	"github.com/loganj/birdseye/internal/cache"
+	"github.com/loganj/penpal/internal/activity"
+	"github.com/loganj/penpal/internal/cache"
 )
 
 // Store manages comment threads and reviews for project files.

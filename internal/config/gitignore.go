@@ -9,15 +9,15 @@ import (
 	"strings"
 )
 
-// EnsureGlobalGitignore adds .birdseye to the user's global gitignore file
-// so that project-level .birdseye/ directories are not committed.
+// EnsureGlobalGitignore adds .penpal to the user's global gitignore file
+// so that project-level .penpal/ directories are not committed.
 func EnsureGlobalGitignore() {
 	path := globalGitignorePath()
 	if path == "" {
 		return
 	}
 
-	if containsLine(path, ".birdseye") {
+	if containsLine(path, ".penpal") {
 		return
 	}
 
@@ -38,8 +38,8 @@ func EnsureGlobalGitignore() {
 	if info != nil && info.Size() > 0 {
 		f.WriteString("\n")
 	}
-	f.WriteString(".birdseye\n")
-	log.Printf("Added .birdseye to global gitignore: %s", path)
+	f.WriteString(".penpal\n")
+	log.Printf("Added .penpal to global gitignore: %s", path)
 }
 
 // globalGitignorePath returns the path to the global gitignore file.

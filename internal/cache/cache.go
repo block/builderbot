@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 // FileInfo represents a cached file
@@ -67,7 +67,7 @@ func (c *Cache) ProjectsSortedByModTime() []discovery.Project {
 	return projects
 }
 
-// FindProject returns a project by its qualified name (e.g., "Development/birdseye"
+// FindProject returns a project by its qualified name (e.g., "Development/penpal"
 // for workspace projects, or "myproject" for standalone projects).
 func (c *Cache) FindProject(qualifiedName string) *discovery.Project {
 	c.mu.RLock()
@@ -158,7 +158,7 @@ func (c *Cache) FindFile(projectName, filePath string) *FileInfo {
 }
 
 // RefreshProject rescans a single project's files across all its sources.
-// projectName should be the qualified name (e.g., "Development/birdseye").
+// projectName should be the qualified name (e.g., "Development/penpal").
 func (c *Cache) RefreshProject(projectName string) {
 	project := c.FindProject(projectName)
 	if project == nil {
@@ -197,7 +197,7 @@ func (c *Cache) RefreshAllProjects() {
 }
 
 // EnrichProject updates a project's git info without rescanning files.
-// name should be the qualified name (e.g., "Development/birdseye").
+// name should be the qualified name (e.g., "Development/penpal").
 func (c *Cache) EnrichProject(name string, git *discovery.GitInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -210,7 +210,7 @@ func (c *Cache) EnrichProject(name string, git *discovery.GitInfo) {
 }
 
 // RemoveProject removes a project from the cache.
-// name should be the qualified name (e.g., "Development/birdseye").
+// name should be the qualified name (e.g., "Development/penpal").
 func (c *Cache) RemoveProject(name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -225,7 +225,7 @@ func (c *Cache) RemoveProject(name string) {
 
 // RefreshProjectGitInfo re-fetches git info (branch, dirty, unstaged mod times,
 // unpushed commit times) for a single project without rescanning files.
-// name should be the qualified name (e.g., "Development/birdseye").
+// name should be the qualified name (e.g., "Development/penpal").
 func (c *Cache) RefreshProjectGitInfo(name string) {
 	project := c.FindProject(name)
 	if project == nil || project.Name == "(root)" {

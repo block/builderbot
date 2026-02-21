@@ -21,8 +21,8 @@ func TestLoadSaveState(t *testing.T) {
 	// Save a state entry
 	now := time.Now().Truncate(time.Second)
 	err = SaveState(dir, "docs/readme.md", &PublishState{
-		SiteName:      "birdseye-test-readme",
-		URL:           "https://blockcell.sqprod.co/sites/birdseye-test-readme/",
+		SiteName:      "penpal-test-readme",
+		URL:           "https://blockcell.sqprod.co/sites/penpal-test-readme/",
 		LastPublished: now,
 	})
 	if err != nil {
@@ -30,7 +30,7 @@ func TestLoadSaveState(t *testing.T) {
 	}
 
 	// Verify file exists
-	if _, err := os.Stat(dir + "/.birdseye/publish.json"); err != nil {
+	if _, err := os.Stat(dir + "/.penpal/publish.json"); err != nil {
 		t.Fatalf("publish.json not created: %v", err)
 	}
 
@@ -46,17 +46,17 @@ func TestLoadSaveState(t *testing.T) {
 	if entry == nil {
 		t.Fatal("missing entry for docs/readme.md")
 	}
-	if entry.SiteName != "birdseye-test-readme" {
+	if entry.SiteName != "penpal-test-readme" {
 		t.Errorf("unexpected site name: %s", entry.SiteName)
 	}
-	if entry.URL != "https://blockcell.sqprod.co/sites/birdseye-test-readme/" {
+	if entry.URL != "https://blockcell.sqprod.co/sites/penpal-test-readme/" {
 		t.Errorf("unexpected URL: %s", entry.URL)
 	}
 
 	// Save a second entry, verify both exist
 	err = SaveState(dir, "plans/plan.md", &PublishState{
-		SiteName:      "birdseye-test-plan",
-		URL:           "https://blockcell.sqprod.co/sites/birdseye-test-plan/",
+		SiteName:      "penpal-test-plan",
+		URL:           "https://blockcell.sqprod.co/sites/penpal-test-plan/",
 		LastPublished: now,
 	})
 	if err != nil {

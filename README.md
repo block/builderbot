@@ -1,8 +1,8 @@
-# Birdseye
+# Penpal
 
 A local web app that **only** operates on markdown files inside `thoughts/` directories. It auto-discovers projects containing a `thoughts/` directory and provides a web UI for browsing, searching, and collaboratively reviewing the documents within.
 
-**This is NOT a code review tool.** Birdseye is for reviewing _documentation_ -- research, plans, guides, and other markdown artifacts that AI agents generate in `thoughts/` directories.
+**This is NOT a code review tool.** Penpal is for reviewing _documentation_ -- research, plans, guides, and other markdown artifacts that AI agents generate in `thoughts/` directories.
 
 ## Features
 
@@ -30,7 +30,7 @@ A local web app that **only** operates on markdown files inside `thoughts/` dire
 
 The remaining dependencies are auto-installed when you run `just run` or `just dev`:
 
-2. **Claude Code** - Birdseye is designed to work with Claude Code agents for collaborative document review (see [go/claude-code](https://go/claude-code) for setup details)
+2. **Claude Code** - Penpal is designed to work with Claude Code agents for collaborative document review (see [go/claude-code](https://go/claude-code) for setup details)
 3. **Go 1.21+** - Required to build and run the server
 4. **fswatch** (optional) - For hot reload in dev mode, installed automatically by `just dev`
 
@@ -44,18 +44,18 @@ just dev    # Same, but with hot reload on file changes
 ## Options
 
 ```bash
-./birdseye -port 3000              # Custom port (default: 8080)
-./birdseye -root /path/to/projects # Custom root directory
+./penpal -port 3000              # Custom port (default: 8080)
+./penpal -root /path/to/projects # Custom root directory
 ```
 
 ## Claude Code Plugin
 
-Birdseye ships as a Claude Code plugin that bundles an MCP server (for programmatic access to comments and reviews) and the `monitor-reviews` skill. Install it with:
+Penpal ships as a Claude Code plugin that bundles an MCP server (for programmatic access to comments and reviews) and the `monitor-reviews` skill. Install it with:
 
 ```bash
 just install-claude
 ```
 
-This registers birdseye as a local plugin marketplace and installs the plugin. The birdseye server must be running for the MCP tools to work.
+This registers penpal as a local plugin marketplace and installs the plugin. The penpal server must be running for the MCP tools to work.
 
 ## [Changelog](CHANGELOG.md) | [Roadmap](ROADMAP.md)

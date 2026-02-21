@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/loganj/birdseye/internal/cache"
+	"github.com/loganj/penpal/internal/cache"
 )
 
 type RecentFile struct {

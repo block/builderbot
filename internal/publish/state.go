@@ -70,5 +70,5 @@ func SaveState(projectPath, filePath string, state *PublishState) error {
 }
 
 func stateFilePath(projectPath string) string {
-	return filepath.Join(projectPath, ".birdseye", "publish.json")
+	return filepath.Join(projectPath, ".penpal", "publish.json")
 }

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/loganj/birdseye/internal/cache"
-	"github.com/loganj/birdseye/internal/comments"
+	"github.com/loganj/penpal/internal/cache"
+	"github.com/loganj/penpal/internal/comments"
 )
 
 // Agent represents a running Claude Code agent process.
@@ -79,8 +79,8 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 
 	// Write temporary MCP config
 	mcpConfigPath := filepath.Join(os.TempDir(),
-		fmt.Sprintf("birdseye-agent-%s.json", sanitize(projectName)))
-	mcpConfig := fmt.Sprintf(`{"mcpServers":{"birdseye":{"type":"http","url":"http://localhost:%d/mcp"}}}`, m.port)
+		fmt.Sprintf("penpal-agent-%s.json", sanitize(projectName)))
+	mcpConfig := fmt.Sprintf(`{"mcpServers":{"penpal":{"type":"http","url":"http://localhost:%d/mcp"}}}`, m.port)
 	if err := os.WriteFile(mcpConfigPath, []byte(mcpConfig), 0644); err != nil {
 		return nil, fmt.Errorf("write mcp config: %w", err)
 	}
@@ -99,7 +99,7 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 	cmd.Dir = proj.Path
 
 	// Log agent output to a file
-	logPath := filepath.Join(proj.Path, ".birdseye", "agent.log")
+	logPath := filepath.Join(proj.Path, ".penpal", "agent.log")
 	os.MkdirAll(filepath.Dir(logPath), 0755)
 	logFile, err := os.Create(logPath)
 	if err != nil {

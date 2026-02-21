@@ -15,14 +15,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/loganj/birdseye/internal/activity"
-	"github.com/loganj/birdseye/internal/agents"
-	"github.com/loganj/birdseye/internal/cache"
-	"github.com/loganj/birdseye/internal/comments"
-	"github.com/loganj/birdseye/internal/config"
-	"github.com/loganj/birdseye/internal/discovery"
-	"github.com/loganj/birdseye/internal/watcher"
-	"github.com/loganj/birdseye/templates"
+	"github.com/loganj/penpal/internal/activity"
+	"github.com/loganj/penpal/internal/agents"
+	"github.com/loganj/penpal/internal/cache"
+	"github.com/loganj/penpal/internal/comments"
+	"github.com/loganj/penpal/internal/config"
+	"github.com/loganj/penpal/internal/discovery"
+	"github.com/loganj/penpal/internal/watcher"
+	"github.com/loganj/penpal/templates"
 )
 
 type Server struct {

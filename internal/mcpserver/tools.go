@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/loganj/birdseye/internal/cache"
-	"github.com/loganj/birdseye/internal/comments"
+	"github.com/loganj/penpal/internal/cache"
+	"github.com/loganj/penpal/internal/comments"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -69,11 +69,11 @@ func textResult(v any) (*mcp.CallToolResult, error) {
 	}, nil
 }
 
-// registerTools adds all birdseye MCP tools to the server.
+// registerTools adds all penpal MCP tools to the server.
 func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
-	// birdseye_list_threads
+	// penpal_list_threads
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "birdseye_list_threads",
+		Name:        "penpal_list_threads",
 		Description: "List comment threads on documentation files. Paths are relative to the project root (e.g., thoughts/plans/foo.md). When path is omitted, returns all open threads across the project. Optionally filter by status (open/resolved).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input listThreadsInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" {
@@ -122,9 +122,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		return res, nil, err
 	})
 
-	// birdseye_read_thread
+	// penpal_read_thread
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "birdseye_read_thread",
+		Name:        "penpal_read_thread",
 		Description: "Read a full comment thread on a document. Path is relative to project root (e.g., thoughts/plans/foo.md). Returns the complete thread JSON with all comments.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input readThreadInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" || input.Path == "" || input.ThreadID == "" {
@@ -151,9 +151,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		return nil, nil, fmt.Errorf("thread not found: %s", input.ThreadID)
 	})
 
-	// birdseye_reply
+	// penpal_reply
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "birdseye_reply",
+		Name:        "penpal_reply",
 		Description: "Reply to an existing comment thread. The reply is attributed to the agent. Include suggestedReplies when asking for confirmation or presenting options.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input replyInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" || input.Path == "" || input.ThreadID == "" || input.Body == "" {
@@ -176,9 +176,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		return res, nil, err
 	})
 
-	// birdseye_create_thread
+	// penpal_create_thread
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "birdseye_create_thread",
+		Name:        "penpal_create_thread",
 		Description: "Create a new comment thread anchored to specific text in a markdown document. Path is relative to project root (e.g., thoughts/plans/foo.md). The before/after context is computed automatically by finding the selectedText in the file.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input createThreadInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" || input.Path == "" || input.SelectedText == "" || input.Body == "" {
@@ -246,10 +246,10 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		return res, nil, err
 	})
 
-	// birdseye_files_in_review
+	// penpal_files_in_review
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "birdseye_files_in_review",
-		Description: "List all documentation files currently in review for a project. File paths are relative to the project root (e.g., thoughts/plans/foo.md). Records a heartbeat for each file to signal agent presence in the birdseye UI.",
+		Name:        "penpal_files_in_review",
+		Description: "List all documentation files currently in review for a project. File paths are relative to the project root (e.g., thoughts/plans/foo.md). Records a heartbeat for each file to signal agent presence in the penpal UI.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input filesInReviewInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")
@@ -269,10 +269,10 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		return res, nil, err
 	})
 
-	// birdseye_wait_for_changes
+	// penpal_wait_for_changes
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "birdseye_wait_for_changes",
-		Description: "Block until comment threads change for a project (new thread, reply, resolve, or reopen), or until timeout (30s). Returns the current files in review. Use this in a loop instead of polling birdseye_files_in_review. Also records agent heartbeat. Pass the `seq` value from the previous response as `sinceSeq` to avoid missing changes between calls.",
+		Name:        "penpal_wait_for_changes",
+		Description: "Block until comment threads change for a project (new thread, reply, resolve, or reopen), or until timeout (30s). Returns the current files in review. Use this in a loop instead of polling penpal_files_in_review. Also records agent heartbeat. Pass the `seq` value from the previous response as `sinceSeq` to avoid missing changes between calls.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input waitForChangesInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")
@@ -373,10 +373,10 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		return res, nil, err
 	})
 
-	// birdseye_find_project
+	// penpal_find_project
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "birdseye_find_project",
-		Description: "Find the birdseye project for a given directory. Returns the project name to use with other birdseye tools. Call this first if you don't already know your project name.",
+		Name:        "penpal_find_project",
+		Description: "Find the penpal project for a given directory. Returns the project name to use with other penpal tools. Call this first if you don't already know your project name.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input findProjectInput) (*mcp.CallToolResult, any, error) {
 		if input.Directory == "" {
 			return nil, nil, fmt.Errorf("directory is required")

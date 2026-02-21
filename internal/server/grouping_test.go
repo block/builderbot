@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/loganj/birdseye/internal/cache"
-	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/penpal/internal/cache"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 func TestBuildFileGroups_RP1Grouped(t *testing.T) {

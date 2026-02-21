@@ -7,42 +7,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/loganj/penpal/internal/activity"
-	"github.com/loganj/penpal/internal/agents"
 	"github.com/loganj/penpal/internal/cache"
-	"github.com/loganj/penpal/internal/comments"
-	"github.com/loganj/penpal/internal/config"
 	"github.com/loganj/penpal/internal/discovery"
-	"github.com/loganj/penpal/internal/watcher"
 )
 
 func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
-	c := cache.New()
-	act := activity.New()
-	w, err := watcher.New(c, act)
-	if err != nil {
-		t.Fatalf("failed to create watcher: %v", err)
-	}
-
-	cs := comments.NewStore(c, act)
-	am := agents.New(c, cs, 8080)
-	cfg := &config.Config{}
-
-	s := New(c, w, cs, nil, am, act, "", cfg, "")
-
-	// Trigger ensureLoaded so it doesn't reset our test data
-	s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	s, c, _ := testServer(t)
 
 	projectName := "test/project"
-	project := discovery.Project{
-		Name:          "project",
-		Path:          "/tmp/test",
-		WorkspaceName: "test",
-		Origin:        "workspace",
-		Sources: []discovery.FileSource{
-			{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
-		},
+	project := seedProject(c, projectName, "/tmp/test", nil)
+	project.Sources = []discovery.FileSource{
+		{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
 	}
+	// Re-set projects to include the sources we just added
 	c.SetProjects([]discovery.Project{project})
 
 	now := time.Now()
@@ -86,18 +63,7 @@ func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 }
 
 func TestAPIRecent_ReturnsFiles(t *testing.T) {
-	c := cache.New()
-	act := activity.New()
-	w, err := watcher.New(c, act)
-	if err != nil {
-		t.Fatalf("failed to create watcher: %v", err)
-	}
-
-	cs := comments.NewStore(c, act)
-	am := agents.New(c, cs, 8080)
-	cfg := &config.Config{}
-
-	s := New(c, w, cs, nil, am, act, "", cfg, "")
+	s, c, _ := testServer(t)
 
 	projectName := "test/project"
 	now := time.Now()

@@ -1,6 +1,10 @@
 # Binary
 penpal
+birdseye
 .penpal.pid
+
+# Claude Code
+.claude/worktrees/
 
 # IDE
 .idea/

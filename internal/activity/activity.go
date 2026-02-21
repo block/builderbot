@@ -43,6 +43,26 @@ func New() *Tracker {
 	}
 }
 
+// RecordAt records activity with a specific timestamp. It does NOT overwrite
+// existing entries — this is used to seed historical data from filesystem
+// ModTimes so that runtime-observed events always take priority.
+func (t *Tracker) RecordAt(activityType EventType, project, filePath string, timestamp time.Time) {
+	key := fileKey{Project: project, FilePath: filePath}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if _, exists := t.files[key]; exists {
+		return
+	}
+	t.files[key] = &FileActivity{
+		Type:      activityType,
+		Timestamp: timestamp,
+		Project:   project,
+		FilePath:  filePath,
+		FileName:  filepath.Base(filePath),
+	}
+}
+
 // Record updates the latest activity for a file. Always overwrites
 // the previous activity — we only track the most recent one.
 func (t *Tracker) Record(activityType EventType, project, filePath string) {

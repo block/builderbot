@@ -1,5 +1,9 @@
 # Changelog
 
+## Feb 20, 2026
+
+- **Recent page shows files on startup** — The Recent page now immediately shows recently modified files when the server starts, instead of starting empty and only tracking files changed at runtime
+
 ## Feb 18, 2026
 
 - **Copy selection as markdown** — Select text in a document and click "Copy markdown" to copy the raw markdown source for your selection to the clipboard

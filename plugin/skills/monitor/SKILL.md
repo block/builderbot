@@ -3,11 +3,11 @@ name: monitor
 description: "Monitor and respond to penpal document review comments on markdown files in thoughts/ directories."
 ---
 
-# Birdseye Document Review
+# Penpal Document Review
 
-## What is Birdseye?
+## What is Penpal?
 
-Birdseye is a local web app for reviewing markdown files inside `thoughts/`
+Penpal is a local web app for reviewing markdown files inside `thoughts/`
 directories (e.g. `thoughts/shared/plans/api-design.md`). It is for reviewing
 research documents, implementation plans, guides, and similar artifacts -- NOT
 source code or PRs. Humans and AI agents can have conversations anchored to

@@ -141,6 +141,13 @@ test-go:
 test-js:
     node --test js/*_test.js
 
+# Run Playwright e2e tests
+test-e2e:
+    cd e2e && npx playwright test
+
+# Run all tests
+test-all: test test-e2e
+
 # Tidy dependencies
 tidy:
     go mod tidy

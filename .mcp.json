@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "birdseye": {
+    "penpal": {
       "url": "http://localhost:8080/mcp"
     }
   }

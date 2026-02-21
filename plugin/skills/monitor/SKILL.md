@@ -1,6 +1,6 @@
 ---
 name: monitor
-description: "Monitor and respond to birdseye document review comments on markdown files in thoughts/ directories."
+description: "Monitor and respond to penpal document review comments on markdown files in thoughts/ directories."
 ---
 
 # Birdseye Document Review
@@ -21,19 +21,19 @@ in review. Resolving all threads on a file removes it from review.
 
 ## Monitoring Workflow
 
-1. If you don't already know your project name, call `birdseye_find_project`
+1. If you don't already know your project name, call `penpal_find_project`
    with your working directory to get it. Use this name for all subsequent
-   birdseye tool calls.
-2. Call `birdseye_files_in_review` for the project to discover files with open
+   penpal tool calls.
+2. Call `penpal_files_in_review` for the project to discover files with open
    comment threads.
 3. For each file in review:
    a. Read the file content (the markdown file under `thoughts/`) so you have
       full context.
-   b. Call `birdseye_list_threads` with status "open" to find unaddressed
+   b. Call `penpal_list_threads` with status "open" to find unaddressed
       threads.
-   c. Read each thread with `birdseye_read_thread`.
+   c. Read each thread with `penpal_read_thread`.
    d. Reply thoughtfully to comments you haven't yet responded to.
-4. Call `birdseye_wait_for_changes` in a loop to wait for new activity. This
+4. Call `penpal_wait_for_changes` in a loop to wait for new activity. This
    tool blocks for up to 30 seconds and returns immediately when a comment is
    created, replied to, resolved, or reopened. It also maintains your agent
    heartbeat automatically.
@@ -55,8 +55,8 @@ in review. Resolving all threads on a file removes it from review.
   ignoring it
 - Do NOT resolve threads -- only humans resolve threads. Your job is to reply
   and make changes, not to decide when a conversation is done
-- Keep calling `birdseye_wait_for_changes` even when idle -- this maintains the
-  "agent active" heartbeat indicator in the birdseye UI
+- Keep calling `penpal_wait_for_changes` even when idle -- this maintains the
+  "agent active" heartbeat indicator in the penpal UI
 - Do NOT stop monitoring just because there are no open threads; the human may
   add new comments at any time
 
@@ -64,10 +64,10 @@ in review. Resolving all threads on a file removes it from review.
 
 | Tool | Purpose |
 |------|---------|
-| `birdseye_find_project` | Get the project name for your working directory. Call first if you don't know it. |
-| `birdseye_wait_for_changes` | Block until comments change (or 30s timeout). Returns files in review. Use in a loop. |
-| `birdseye_files_in_review` | List all files with open comment threads for a project |
-| `birdseye_list_threads` | List comment threads on a file (optionally filter by status) |
-| `birdseye_read_thread` | Read a full comment thread with all replies |
-| `birdseye_create_thread` | Create a new comment thread anchored to text |
-| `birdseye_reply` | Reply to an existing thread |
+| `penpal_find_project` | Get the project name for your working directory. Call first if you don't know it. |
+| `penpal_wait_for_changes` | Block until comments change (or 30s timeout). Returns files in review. Use in a loop. |
+| `penpal_files_in_review` | List all files with open comment threads for a project |
+| `penpal_list_threads` | List comment threads on a file (optionally filter by status) |
+| `penpal_read_thread` | Read a full comment thread with all replies |
+| `penpal_create_thread` | Create a new comment thread anchored to text |
+| `penpal_reply` | Reply to an existing thread |

@@ -58,4 +58,4 @@
     exports.formatTime = formatTime;
     exports.truncateText = truncateText;
 
-})(typeof module !== 'undefined' && module.exports ? module.exports : (this.birdseye = this.birdseye || {}));
+})(typeof module !== 'undefined' && module.exports ? module.exports : (this.penpal = this.penpal || {}));

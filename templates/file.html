@@ -1,4 +1,4 @@
-{{define "title"}}{{.Page.FileName}} - Birdseye{{end}}
+{{define "title"}}{{.Page.FileName}} - Penpal{{end}}
 
 {{define "head"}}
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js"></script>
@@ -702,10 +702,10 @@
 
     // Author name from localStorage
     function getSavedAuthor() {
-        return localStorage.getItem('birdseye-author') || '';
+        return localStorage.getItem('penpal-author') || '';
     }
     function saveAuthor(name) {
-        if (name) localStorage.setItem('birdseye-author', name);
+        if (name) localStorage.setItem('penpal-author', name);
     }
 
     // Close menus and floating comment btn on click
@@ -728,8 +728,8 @@
         document.querySelectorAll('.file-menu-wrap.menu-open').forEach(function(w) { w.classList.remove('menu-open'); });
     }
 
-    // --- Remove from Birdseye (individually-added files only) ---
-    function removeFileFromBirdseye() {
+    // --- Remove from Penpal (individually-added files only) ---
+    function removeFileFromPenpal() {
         closeAllMenus();
         fetch('/api/sources', {
             method: 'DELETE',
@@ -778,9 +778,9 @@
 
     // --- Comments panel logic ---
 
-    // Utility functions loaded from /static/comments.js (birdseye.* namespace)
-    var formatTime = birdseye.formatTime;
-    var orderComments = birdseye.orderComments;
+    // Utility functions loaded from /static/comments.js (penpal.* namespace)
+    var formatTime = penpal.formatTime;
+    var orderComments = penpal.orderComments;
 
     function renderCommentMarkdown(text) {
         if (!text) return '';
@@ -798,7 +798,7 @@
         return tmp.innerHTML;
     }
 
-    var truncateText = birdseye.truncateText;
+    var truncateText = penpal.truncateText;
 
     // --- Review banner ---
 

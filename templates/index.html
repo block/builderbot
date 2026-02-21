@@ -1,4 +1,4 @@
-{{define "title"}}{{with (index .Page.Workspaces 0)}}{{.Name}} - {{end}}Birdseye{{end}}
+{{define "title"}}{{with (index .Page.Workspaces 0)}}{{.Name}} - {{end}}Penpal{{end}}
 
 {{define "pagestyle"}}
     .projects {
@@ -335,7 +335,7 @@
         var path = el.dataset.projectPath;
         btn.closest('.project-dropdown').classList.remove('open');
 
-        if (!confirm('Close this project? It will be removed from Birdseye but no files will be deleted.')) return;
+        if (!confirm('Close this project? It will be removed from Penpal but no files will be deleted.')) return;
 
         fetch('/api/projects', {
             method: 'DELETE',

@@ -1,4 +1,4 @@
-{{define "title"}}{{.Page.Project.Name}} - Birdseye{{end}}
+{{define "title"}}{{.Page.Project.Name}} - Penpal{{end}}
 
 {{define "pagestyle"}}
     .files { list-style: none; padding: 0; margin: 0; }
@@ -363,7 +363,7 @@
                     <div class="menu-divider"></div>
                     <button onclick="publishSource(this)">Publish</button>
                     {{if not $group.Auto}}<div class="menu-divider"></div>
-                    <button onclick="removeSourceFromBirdseye(this)">Remove from Birdseye</button>{{end}}
+                    <button onclick="removeSourceFromPenpal(this)">Remove from Penpal</button>{{end}}
                     <div class="menu-divider"></div>
                     <button class="menu-danger" onclick="confirmDeleteSource(this)">Delete from disk</button>
                 </div>
@@ -517,8 +517,8 @@
 
     document.addEventListener('click', closeAllMenus);
 
-    // --- Remove file from Birdseye (individual files only) ---
-    function removeFileFromBirdseye(btn) {
+    // --- Remove file from Penpal (individual files only) ---
+    function removeFileFromPenpal(btn) {
         var d = getFileData(btn);
         closeAllMenus();
         fetch('/api/sources', {
@@ -737,14 +737,14 @@
         });
     }
 
-    function removeSourceFromBirdseye(btn) {
+    function removeSourceFromPenpal(btn) {
         var section = btn.closest('.source-section');
         var sourceType = section.dataset.sourceType;
         var source = section.dataset.source;
         closeAllMenus();
         if (sourceType === 'files') {
             var files = getSourceFiles(btn);
-            if (!confirm('Remove ' + files.length + ' file(s) from Birdseye?\nNo files will be deleted.')) return;
+            if (!confirm('Remove ' + files.length + ' file(s) from Penpal?\nNo files will be deleted.')) return;
             Promise.allSettled(files.map(function(f) {
                 return fetch('/api/sources', {
                     method: 'DELETE',
@@ -943,7 +943,7 @@
                     html += '<button onclick="publishSource(this)">Publish</button>';
                     if (!group.auto) {
                         html += '<div class="menu-divider"></div>';
-                        html += '<button onclick="removeSourceFromBirdseye(this)">Remove from Birdseye</button>';
+                        html += '<button onclick="removeSourceFromPenpal(this)">Remove from Penpal</button>';
                     }
                     html += '<div class="menu-divider"></div>';
                     html += '<button class="menu-danger" onclick="confirmDeleteSource(this)">Delete from disk</button>';

@@ -149,6 +149,9 @@ tidy:
 install-claude:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Clean up legacy "birdseye" plugin if installed
+    claude plugin uninstall birdseye 2>/dev/null || true
+    claude plugin marketplace remove birdseye 2>/dev/null || true
     # Clean up legacy skill symlink if present
     rm -f ~/.claude/skills/monitor-reviews
     # Add the penpal directory as a local marketplace, then install the plugin

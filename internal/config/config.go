@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Config is the persistent birdseye configuration.
+// Config is the persistent penpal configuration.
 type Config struct {
 	Workspaces     []Workspace               `json:"workspaces"`
 	Projects       []ProjectConfig           `json:"projects,omitempty"`
@@ -51,7 +51,7 @@ func DefaultConfigPath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", "birdseye", "config.json")
+	return filepath.Join(home, ".config", "penpal", "config.json")
 }
 
 // Load reads the config from the given path.
@@ -98,7 +98,7 @@ func PortFilePath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", "birdseye", "server.port")
+	return filepath.Join(home, ".config", "penpal", "server.port")
 }
 
 // WritePortFile writes the server port to the port file.

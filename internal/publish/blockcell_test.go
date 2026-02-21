@@ -113,9 +113,9 @@ func TestGenerateSiteName(t *testing.T) {
 		filePath string
 		want     string
 	}{
-		{"myproject", "docs/readme.md", "birdseye-myproject-docs-readme"},
-		{"My Project", "thoughts/plans/big-plan.md", "birdseye-my-project-thoughts-plans-big-plan"},
-		{"ws/proj", "file.md", "birdseye-ws-proj-file"},
+		{"myproject", "docs/readme.md", "penpal-myproject-docs-readme"},
+		{"My Project", "thoughts/plans/big-plan.md", "penpal-my-project-thoughts-plans-big-plan"},
+		{"ws/proj", "file.md", "penpal-ws-proj-file"},
 	}
 	for _, tt := range tests {
 		got := GenerateSiteName(tt.project, tt.filePath)

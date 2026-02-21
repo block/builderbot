@@ -131,7 +131,7 @@ func (s *Store) ReopenThread(projectName, filePath, threadID string) error {
 	return fmt.Errorf("thread not found: %s", threadID)
 }
 
-// ListOpenThreads walks the .birdseye/comments/ directory for the given
+// ListOpenThreads walks the .penpal/comments/ directory for the given
 // project and returns all threads with status "open" across all files.
 // Returned file paths are relative to the project root (e.g., "thoughts/shared/plans/foo.md").
 func (s *Store) ListOpenThreads(projectName string) ([]ThreadWithFile, error) {
@@ -140,7 +140,7 @@ func (s *Store) ListOpenThreads(projectName string) ([]ThreadWithFile, error) {
 		return nil, fmt.Errorf("project not found: %s", projectName)
 	}
 
-	commentsDir := filepath.Join(project.Path, ".birdseye", "comments")
+	commentsDir := filepath.Join(project.Path, ".penpal", "comments")
 	var results []ThreadWithFile
 
 	err := filepath.Walk(commentsDir, func(path string, info os.FileInfo, err error) error {
@@ -204,7 +204,7 @@ func (s *Store) HasPendingHumanComments(projectName string) bool {
 	return false
 }
 
-// ListFilesInReview walks the .birdseye/comments/ directory for the given
+// ListFilesInReview walks the .penpal/comments/ directory for the given
 // project and returns all files that have at least one open comment thread.
 // Returned file paths are relative to the project root (e.g., "thoughts/shared/plans/foo.md").
 func (s *Store) ListFilesInReview(projectName string) ([]FileInReview, error) {
@@ -213,7 +213,7 @@ func (s *Store) ListFilesInReview(projectName string) ([]FileInReview, error) {
 		return nil, fmt.Errorf("project not found: %s", projectName)
 	}
 
-	commentsDir := filepath.Join(project.Path, ".birdseye", "comments")
+	commentsDir := filepath.Join(project.Path, ".penpal", "comments")
 	var results []FileInReview
 
 	err := filepath.Walk(commentsDir, func(path string, info os.FileInfo, err error) error {

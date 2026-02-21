@@ -80,7 +80,7 @@ func runServe(port int, dev bool, rootOverride string) {
 	// Write .mcp.json for MCP client discovery
 	mcpConfig := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
-			"birdseye": map[string]interface{}{
+			"penpal": map[string]interface{}{
 				"url": fmt.Sprintf("http://localhost:%d/mcp", port),
 			},
 		},
@@ -104,7 +104,7 @@ func runServe(port int, dev bool, rootOverride string) {
 
 	go func() {
 		fmt.Printf("\nStarting server at http://localhost%s\n", addr)
-		fmt.Printf("birdseye MCP server: http://localhost%s/mcp\n", addr)
+		fmt.Printf("penpal MCP server: http://localhost%s/mcp\n", addr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
 		}
@@ -120,7 +120,7 @@ func runServe(port int, dev bool, rootOverride string) {
 	httpServer.Shutdown(ctx)
 }
 
-// runOpen opens paths in a running birdseye instance, starting the server if needed.
+// runOpen opens paths in a running penpal instance, starting the server if needed.
 func runOpen(paths []string, portFlag int) {
 	port := config.ReadPortFile()
 
@@ -152,7 +152,7 @@ func runOpen(paths []string, portFlag int) {
 	// Release the child so it's not reaped when we exit
 	cmd.Process.Release()
 
-	fmt.Printf("Started birdseye server on port %d (pid %d)\n", port, cmd.Process.Pid)
+	fmt.Printf("Started penpal server on port %d (pid %d)\n", port, cmd.Process.Pid)
 
 	// Wait for server to become ready
 	if !waitForServer(port, 10*time.Second) {
@@ -207,7 +207,7 @@ func openPaths(port int, paths []string) {
 	}
 }
 
-// isServerRunning checks if a birdseye server is responding at the given port.
+// isServerRunning checks if a penpal server is responding at the given port.
 func isServerRunning(port int) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/api/projects", port))

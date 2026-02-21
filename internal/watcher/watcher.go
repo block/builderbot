@@ -79,7 +79,7 @@ func (w *Watcher) Start(workspacePaths []string, discoverFn func() ([]discovery.
 		}
 	}
 
-	// Watch each project's sources and .birdseye/comments directory
+	// Watch each project's sources and .penpal/comments directory
 	for _, p := range w.cache.Projects() {
 		w.watchProject(p)
 	}
@@ -117,7 +117,7 @@ func (w *Watcher) watchProject(p discovery.Project) {
 			}
 		}
 	}
-	commentsDir := filepath.Join(p.Path, ".birdseye", "comments")
+	commentsDir := filepath.Join(p.Path, ".penpal", "comments")
 	if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
 		if err := w.watchDir(commentsDir); err != nil {
 			log.Printf("Warning: could not watch %s: %v", commentsDir, err)
@@ -277,8 +277,8 @@ notAutoDetect:
 		}
 	}
 
-	// Handle changes in .birdseye/comments/ directories
-	if strings.Contains(path, "/.birdseye/") && strings.HasSuffix(path, ".json") {
+	// Handle changes in .penpal/comments/ directories
+	if strings.Contains(path, "/.penpal/") && strings.HasSuffix(path, ".json") {
 		w.debounceRefresh("comments:"+projectName, func() {
 			w.Broadcast(Event{Type: EventCommentsChanged, Project: projectName})
 		})
@@ -311,7 +311,7 @@ notAutoDetect:
 }
 
 // findProjectForPath finds which project a path belongs to by checking
-// all source roots and .birdseye directories. Returns the qualified name.
+// all source roots and .penpal directories. Returns the qualified name.
 func (w *Watcher) findProjectForPath(path string) string {
 	for _, p := range w.cache.Projects() {
 		// Check all source roots
@@ -320,8 +320,8 @@ func (w *Watcher) findProjectForPath(path string) string {
 				return p.QualifiedName()
 			}
 		}
-		// Check .birdseye directory
-		if strings.HasPrefix(path, p.Path+"/.birdseye/") {
+		// Check .penpal directory
+		if strings.HasPrefix(path, p.Path+"/.penpal/") {
 			return p.QualifiedName()
 		}
 	}

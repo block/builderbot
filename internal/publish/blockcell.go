@@ -95,8 +95,8 @@ func GenerateSiteName(project, filePath string) string {
 	slug := nonAlphanumeric.ReplaceAllString(raw, "-")
 	// Trim leading/trailing hyphens
 	slug = strings.Trim(slug, "-")
-	// Prefix with "birdseye-"
-	slug = "birdseye-" + slug
+	// Prefix with "penpal-"
+	slug = "penpal-" + slug
 	// Blockcell site names have a max length; truncate if needed
 	if len(slug) > 63 {
 		slug = slug[:63]

@@ -268,7 +268,7 @@ func (p *Project) Badges() []Badge {
 }
 
 // QualifiedName returns the workspace-qualified project identifier
-// (e.g., "Development/birdseye"). This is the unique key used for
+// (e.g., "Development/penpal"). This is the unique key used for
 // cache lookups, comment storage, API calls, and SSE events.
 func (p *Project) QualifiedName() string {
 	if p.WorkspaceName != "" {

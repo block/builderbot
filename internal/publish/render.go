@@ -134,7 +134,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 /* Main content */
 main { padding: 32px 48px; max-width: 900px; }
 
-/* Article content — matches birdseye file page styles */
+/* Article content — matches penpal file page styles */
 .content { background: #fff; padding: 32px 40px; border-radius: 8px; border: 1px solid #e8e8e8; line-height: 1.7; }
 .content h1, .content h2, .content h3, .content h4 { color: #333; font-weight: 600; }
 .content h1 { border-bottom: 1px solid #e8e8e8; padding-bottom: 8px; }

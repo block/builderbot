@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/loganj/birdseye/internal/activity"
-	"github.com/loganj/birdseye/internal/publish"
+	"github.com/loganj/penpal/internal/activity"
+	"github.com/loganj/penpal/internal/publish"
 )
 
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {

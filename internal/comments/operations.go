@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/loganj/birdseye/internal/activity"
+	"github.com/loganj/penpal/internal/activity"
 )
 
 // CreateThread creates a new comment thread on the given file, anchored to

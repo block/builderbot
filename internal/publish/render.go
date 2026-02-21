@@ -6,7 +6,7 @@ import (
 	"html"
 	"strings"
 
-	"github.com/loganj/birdseye/internal/markdown"
+	"github.com/loganj/penpal/internal/markdown"
 )
 
 //go:embed mermaid.min.js

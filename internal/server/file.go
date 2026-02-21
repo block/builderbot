@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/loganj/birdseye/internal/activity"
-	"github.com/loganj/birdseye/internal/comments"
-	"github.com/loganj/birdseye/internal/discovery"
-	"github.com/loganj/birdseye/internal/markdown"
+	"github.com/loganj/penpal/internal/activity"
+	"github.com/loganj/penpal/internal/comments"
+	"github.com/loganj/penpal/internal/discovery"
+	"github.com/loganj/penpal/internal/markdown"
 )
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {

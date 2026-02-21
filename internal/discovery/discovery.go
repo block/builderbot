@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/loganj/birdseye/internal/config"
+	"github.com/loganj/penpal/internal/config"
 )
 
 // SourceType defines a pluggable source type with metadata for discovery,

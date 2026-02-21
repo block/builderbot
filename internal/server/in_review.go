@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"path/filepath"
 
-	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 // ReviewFileEntry is a single file within a review group.

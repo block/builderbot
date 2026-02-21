@@ -1,4 +1,4 @@
-module github.com/loganj/birdseye
+module github.com/loganj/penpal
 
 go 1.23.0
 

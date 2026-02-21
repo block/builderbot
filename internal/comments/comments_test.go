@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/loganj/birdseye/internal/cache"
-	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/penpal/internal/cache"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 const testProject = "testproj"

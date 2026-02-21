@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 // FileInfo represents a cached file

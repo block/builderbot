@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 // MatchedFile represents a file that matched by name or content

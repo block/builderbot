@@ -3,8 +3,8 @@ package mcpserver
 import (
 	"net/http"
 
-	"github.com/loganj/birdseye/internal/cache"
-	"github.com/loganj/birdseye/internal/comments"
+	"github.com/loganj/penpal/internal/cache"
+	"github.com/loganj/penpal/internal/comments"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

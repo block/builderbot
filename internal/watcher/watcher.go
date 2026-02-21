@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/loganj/birdseye/internal/activity"
-	"github.com/loganj/birdseye/internal/cache"
-	"github.com/loganj/birdseye/internal/discovery"
+	"github.com/loganj/penpal/internal/activity"
+	"github.com/loganj/penpal/internal/cache"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 // EventType represents the type of change

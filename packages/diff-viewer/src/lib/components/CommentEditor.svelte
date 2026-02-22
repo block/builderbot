@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { Trash2 } from 'lucide-svelte';
-  import type { Comment } from '../../types';
+  import type { Comment } from '../types';
 
   interface Props {
     /** Position relative to the viewer container */

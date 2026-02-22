@@ -1,0 +1,13 @@
+[package]
+name = "git-diff"
+version = "0.1.0"
+edition = "2021"
+description = "Git diff computation: file listing, content diffing, and alignment mapping"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+git2 = "0.19"
+
+[dev-dependencies]
+tempfile = "3.0"

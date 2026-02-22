@@ -18,25 +18,28 @@
   import { onMount } from 'svelte';
   import { MessageSquarePlus, MessageSquare, X, FileText, Code } from 'lucide-svelte';
   import { marked } from 'marked';
-  import { sanitize } from '../../shared/sanitize';
-  import type { FileDiff, Alignment, Comment, Span, SmartDiffAnnotation } from '../../types';
+  import { sanitize } from '../utils/sanitize';
+  import type { FileDiff, Alignment, Comment, Span, SmartDiffAnnotation } from '../types';
   import {
     initHighlighter,
     highlightLines,
     detectLanguage,
     prepareLanguage,
     type Token,
-  } from './highlighter';
-  import { createScrollController } from './scrollController.svelte';
-  import { setupMarkdownScrollSync } from './markdownScrollSync';
-  import { ConnectorRendererCanvas, type CommentHighlightInfo } from './connectorRendererCanvas';
+  } from '../utils/highlighter';
+  import { createScrollController } from '../state/scrollController.svelte';
+  import { setupMarkdownScrollSync } from '../utils/markdownScrollSync';
+  import {
+    ConnectorRendererCanvas,
+    type CommentHighlightInfo,
+  } from '../utils/connectorRendererCanvas';
   import {
     getLineBoundary,
     getLanguageFromDiff,
     getFilePath,
     isBinaryDiff,
     getTextLines,
-  } from './diffUtils';
+  } from '../utils/diffUtils';
   import {
     buildAfterMarkers,
     buildBeforeMarkers,
@@ -55,13 +58,13 @@
     measureLineHeight,
     normalizeLineSelection,
     resolveLineSelectionToolbarLeft,
-  } from './diffViewerHelpers';
-  import { setupDiffKeyboardNav } from './diffKeyboard';
+  } from '../utils/diffViewerHelpers';
+  import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
   import CommentEditor from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
-  import Scrollbar from '../../shared/Scrollbar.svelte';
-  import HorizontalScrollbar from '../../shared/HorizontalScrollbar.svelte';
+  import Scrollbar from './Scrollbar.svelte';
+  import HorizontalScrollbar from './HorizontalScrollbar.svelte';
 
   // ==========================================================================
   // Props

@@ -15,7 +15,7 @@
   import { onMount } from 'svelte';
   import { X } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
-  import DiffViewer from './DiffViewer.svelte';
+  import { DiffViewer } from '@builderbot/diff-viewer/components';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';

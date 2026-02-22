@@ -5,7 +5,7 @@
   was doing. Uses the before_description field from annotations.
 -->
 <script lang="ts">
-  import type { SmartDiffAnnotation } from '../../types';
+  import type { SmartDiffAnnotation } from '../types';
 
   interface Props {
     annotation: SmartDiffAnnotation;

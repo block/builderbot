@@ -6,7 +6,7 @@
   by holding down the 'A' key.
 -->
 <script lang="ts">
-  import type { SmartDiffAnnotation } from '../../types';
+  import type { SmartDiffAnnotation } from '../types';
 
   interface Props {
     annotation: SmartDiffAnnotation;

@@ -1705,6 +1705,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "git-diff"
+version = "0.1.0"
+dependencies = [
+ "git2",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "git2"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2551,6 +2560,7 @@ dependencies = [
  "builderbot-actions",
  "dirs 5.0.1",
  "futures",
+ "git-diff",
  "git2",
  "log",
  "reqwest",

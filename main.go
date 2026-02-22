@@ -82,7 +82,8 @@ func runServe(port int, dev bool, rootOverride string) {
 	mcpConfig := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			"penpal": map[string]interface{}{
-				"url": fmt.Sprintf("http://localhost:%d/mcp", port),
+				"type": "http",
+				"url":  fmt.Sprintf("http://localhost:%d/mcp", port),
 			},
 		},
 	}

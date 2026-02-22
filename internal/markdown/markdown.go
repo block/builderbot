@@ -2,14 +2,17 @@ package markdown
 
 import (
 	"bytes"
+	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
+	"github.com/yuin/goldmark/util"
 )
 
 // Heading represents a heading extracted from rendered HTML.
@@ -36,13 +39,73 @@ var md = goldmark.New(
 	),
 )
 
+// HeadingIDPrefix is prepended to all auto-generated heading IDs to avoid
+// collisions with element IDs used by the application UI (e.g. "comments-panel").
+const HeadingIDPrefix = "penpal-md-"
+
 // Render converts markdown source to an HTML fragment string.
 func Render(src []byte) (string, error) {
 	var buf bytes.Buffer
-	if err := md.Convert(src, &buf); err != nil {
+	ctx := parser.NewContext(parser.WithIDs(&prefixedIDs{
+		prefix: HeadingIDPrefix,
+		used:   map[string]bool{},
+	}))
+	if err := md.Convert(src, &buf, parser.WithContext(ctx)); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// prefixedIDs implements parser.IDs, prefixing every generated heading ID
+// so that markdown content cannot collide with application element IDs.
+type prefixedIDs struct {
+	prefix string
+	used   map[string]bool
+}
+
+func (p *prefixedIDs) Generate(value []byte, kind ast.NodeKind) []byte {
+	value = util.TrimLeftSpace(value)
+	value = util.TrimRightSpace(value)
+	result := []byte(p.prefix)
+	for i := 0; i < len(value); {
+		v := value[i]
+		l := util.UTF8Len(v)
+		i += int(l)
+		if l != 1 {
+			continue
+		}
+		if util.IsAlphaNumeric(v) {
+			if 'A' <= v && v <= 'Z' {
+				v += 'a' - 'A'
+			}
+			result = append(result, v)
+		} else if util.IsSpace(v) || v == '-' || v == '_' {
+			result = append(result, '-')
+		}
+	}
+	if len(result) == len(p.prefix) {
+		if kind == ast.KindHeading {
+			result = append(result, "heading"...)
+		} else {
+			result = append(result, "id"...)
+		}
+	}
+	key := string(result)
+	if !p.used[key] {
+		p.used[key] = true
+		return result
+	}
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", key, i)
+		if !p.used[candidate] {
+			p.used[candidate] = true
+			return []byte(candidate)
+		}
+	}
+}
+
+func (p *prefixedIDs) Put(value []byte) {
+	p.used[string(value)] = true
 }
 
 var headingRegex = regexp.MustCompile(`<h([1-3]) id="([^"]+)"[^>]*>(.*?)</h[1-3]>`)

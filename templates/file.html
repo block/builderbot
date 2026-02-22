@@ -1712,13 +1712,13 @@
 
     // --- Mermaid diagram rendering ---
     var mermaidSources = []; // Store sources for re-rendering on theme change
+    var mermaidBlockCounter = 0;
 
     function renderMermaidBlocks() {
         var content = document.getElementById('content');
         if (!content) return;
         var codeBlocks = content.querySelectorAll('code.language-mermaid');
         if (codeBlocks.length === 0) return;
-        var containers = [];
         codeBlocks.forEach(function(code) {
             var pre = code.parentElement;
             if (!pre || pre.tagName !== 'PRE') return;
@@ -1729,7 +1729,6 @@
             if (sourceLine) div.setAttribute('data-source-line', sourceLine);
             var mermaidDiv = document.createElement('div');
             mermaidDiv.className = 'mermaid';
-            mermaidDiv.textContent = text;
             div.appendChild(mermaidDiv);
             var zoomBtn = document.createElement('button');
             zoomBtn.className = 'expand-zoom-btn';
@@ -1740,29 +1739,34 @@
             })(text));
             div.appendChild(zoomBtn);
             pre.parentNode.replaceChild(div, pre);
-            containers.push(mermaidDiv);
-            mermaidSources.push({ container: div, source: text, sourceLine: sourceLine });
+            mermaidSources.push({ container: div, mermaidDiv: mermaidDiv, source: text, sourceLine: sourceLine });
         });
-        if (containers.length > 0) {
-            mermaid.run({ nodes: containers });
-        }
+        // Render each diagram individually to avoid parser state leaking between diagrams
+        renderMermaidSequential(mermaidSources.map(function(item) { return item; }));
+    }
+
+    function renderMermaidSequential(items) {
+        if (items.length === 0) return;
+        var item = items[0];
+        var rest = items.slice(1);
+        mermaidBlockCounter++;
+        var id = 'mermaid-block-' + mermaidBlockCounter;
+        mermaid.render(id, item.source)
+            .then(function(result) {
+                item.mermaidDiv.innerHTML = result.svg;
+            })
+            .catch(function(err) {
+                item.mermaidDiv.innerHTML = '<p style="color:var(--accent-danger)">Failed to render diagram: ' + err.message + '</p>';
+            })
+            .then(function() {
+                renderMermaidSequential(rest);
+            });
     }
 
     function reRenderMermaidForTheme() {
         if (mermaidSources.length === 0) return;
         mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
-        var containers = [];
-        mermaidSources.forEach(function(item) {
-            var mermaidDiv = item.container.querySelector('.mermaid');
-            if (mermaidDiv) {
-                mermaidDiv.removeAttribute('data-processed');
-                mermaidDiv.innerHTML = item.source;
-                containers.push(mermaidDiv);
-            }
-        });
-        if (containers.length > 0) {
-            mermaid.run({ nodes: containers });
-        }
+        renderMermaidSequential(mermaidSources.map(function(item) { return item; }));
     }
 
     // --- Expand modal (mermaid + images) ---

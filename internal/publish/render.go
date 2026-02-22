@@ -82,7 +82,8 @@ function showToast(msg) {
 mermaid.initialize({ startOnLoad: false, theme: 'default' });
 document.addEventListener('DOMContentLoaded', function() {
     var codeBlocks = document.querySelectorAll('code.language-mermaid');
-    var containers = [];
+    var items = [];
+    var counter = 0;
     codeBlocks.forEach(function(code) {
         var pre = code.parentElement;
         if (!pre || pre.tagName !== 'PRE') return;
@@ -91,14 +92,19 @@ document.addEventListener('DOMContentLoaded', function() {
         div.className = 'mermaid-container';
         var mermaidDiv = document.createElement('div');
         mermaidDiv.className = 'mermaid';
-        mermaidDiv.textContent = text;
         div.appendChild(mermaidDiv);
         pre.parentNode.replaceChild(div, pre);
-        containers.push(mermaidDiv);
+        items.push({ div: mermaidDiv, source: text });
     });
-    if (containers.length > 0) {
-        mermaid.run({ nodes: containers });
+    function renderNext(i) {
+        if (i >= items.length) return;
+        counter++;
+        mermaid.render('pub-mermaid-' + counter, items[i].source)
+            .then(function(result) { items[i].div.innerHTML = result.svg; })
+            .catch(function(err) { items[i].div.innerHTML = '<p style="color:red">Diagram render error</p>'; })
+            .then(function() { renderNext(i + 1); });
     }
+    renderNext(0);
 });
 </script>
 </body>

@@ -610,6 +610,49 @@
         border-color: var(--border-strong);
     }
 
+    /* SVG diagram selection */
+    .quoted-svg {
+        text-align: center;
+        margin-bottom: 8px;
+        padding: 6px 10px;
+        border-left: 3px solid var(--accent-primary);
+        background: var(--bg-surface);
+        max-height: 150px;
+        overflow: hidden;
+    }
+    .quoted-svg svg { max-width: 100%; max-height: 140px; }
+    .thread-anchor-svg {
+        padding: 8px 12px;
+        background: var(--bg-surface-secondary);
+        border-bottom: 1px solid var(--border-card);
+        text-align: center;
+        overflow: hidden;
+        white-space: normal;
+    }
+    .thread-anchor-svg::before, .thread-anchor-svg::after { content: none; }
+    .thread-anchor-svg svg { max-width: 100%; max-height: 80px; }
+    .penpal-svg-highlight, .penpal-pending-svg-highlight {
+        fill: #f5c518;
+        fill-opacity: 0.25;
+        stroke: #f5c518;
+        stroke-width: 2;
+        stroke-dasharray: 6 3;
+        pointer-events: none;
+    }
+    .penpal-pending-svg-highlight {
+        fill-opacity: 0.18;
+        stroke-dasharray: none;
+    }
+    .penpal-svg-highlight.active {
+        fill-opacity: 0.35;
+        stroke-width: 3;
+    }
+    [data-theme="dark"] .penpal-svg-highlight,
+    [data-theme="dark"] .penpal-pending-svg-highlight {
+        fill: #a38600;
+        stroke: #a38600;
+    }
+
     @media (max-width: 900px) {
         .main-content { grid-template-columns: 1fr !important; }
         .comments-panel { display: none; }
@@ -940,9 +983,15 @@
             '" data-thread-id="' + tid + '" data-line="' + (line || -1) +
             '" data-action="focus-thread">';
 
-        html += '<div class="thread-anchor">' +
-            '<span class="thread-status ' + thread.status + '">' + thread.status + '</span> ' +
-            escapeHtml(truncateText(thread.anchor.selectedText, 80)) + '</div>';
+        if (thread.anchor.svgSnippet) {
+            html += '<div class="thread-anchor thread-anchor-svg">' +
+                '<span class="thread-status ' + thread.status + '">' + thread.status + '</span> ' +
+                thread.anchor.svgSnippet + '</div>';
+        } else {
+            html += '<div class="thread-anchor">' +
+                '<span class="thread-status ' + thread.status + '">' + thread.status + '</span> ' +
+                escapeHtml(truncateText(thread.anchor.selectedText, 80)) + '</div>';
+        }
 
         if (line === -1) html += '<div class="orphaned-warning">Anchor text not found in document</div>';
 
@@ -1175,6 +1224,7 @@
 
     // --- Text selection and comment creation ---
     var pendingAnchor = null;
+    var mermaidSelectionInProgress = false;
 
     function removeSelectionToolbar() {
         var existing = document.querySelector('.selection-toolbar');
@@ -1184,6 +1234,7 @@
     var removeFloatingCommentBtn = removeSelectionToolbar;
 
     document.getElementById('content').addEventListener('mouseup', function(e) {
+        if (mermaidSelectionInProgress) return;
         setTimeout(function() {
             var sel = window.getSelection();
             if (!sel || sel.isCollapsed || !sel.toString().trim()) { removeSelectionToolbar(); return; }
@@ -1279,6 +1330,7 @@
             parent.removeChild(mark);
             parent.normalize();
         });
+        removePendingSvgHighlights();
     }
 
     function computeAnchor(sel, selectedText) {
@@ -1380,12 +1432,18 @@
     }
 
     // --- New thread form ---
-    function showNewThreadForm(selectedText) {
+    function showNewThreadForm(selectedText, svgSnippet) {
         ensureAgent();
         var container = document.getElementById('new-thread-form-container');
+        var quoteHtml;
+        if (svgSnippet) {
+            quoteHtml = '<div class="quoted-svg">' + svgSnippet + '</div>';
+        } else {
+            quoteHtml = '<div class="quoted-text">' + escapeHtml(truncateText(selectedText, 200)) + '</div>';
+        }
         container.innerHTML =
             '<div class="new-thread-form">' +
-            '<div class="quoted-text">' + escapeHtml(truncateText(selectedText, 200)) + '</div>' +
+            quoteHtml +
             '<textarea id="new-thread-body" placeholder="Write a comment..." onkeydown="handleNewThreadKeydown(event)"></textarea>' +
             '<input type="text" class="author-field" id="new-thread-author" placeholder="Your name" value="' + escapeHtml(getSavedAuthor()) + '" />' +
             '<div class="form-actions">' +
@@ -1399,6 +1457,7 @@
         document.getElementById('new-thread-form-container').innerHTML = '';
         pendingAnchor = null;
         removePendingHighlight();
+        removePendingSvgHighlights();
     }
     function handleNewThreadKeydown(event) {
         if (event.key === 'Escape') hideNewThreadForm();
@@ -1431,6 +1490,7 @@
         var content = document.getElementById('content');
         if (!content) return;
         removePendingHighlight();
+        removeSvgHighlights();
         content.querySelectorAll('.comment-highlight').forEach(function(mark) {
             var parent = mark.parentNode;
             while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
@@ -1438,6 +1498,11 @@
             parent.normalize();
         });
         threadList.forEach(function(t) {
+            // SVG rect threads get overlay highlights instead of text highlighting
+            if (t.anchor && t.anchor.svgRect) {
+                if (t.status !== 'resolved') showSvgHighlight(t.id, t.anchor);
+                return;
+            }
             var selectedText = t.anchor && t.anchor.selectedText;
             if (!selectedText) return;
             var line = lines[t.id];
@@ -1535,6 +1600,27 @@
     function activateThread(threadId, scrollTo) {
         document.querySelectorAll('.thread-card.highlighted').forEach(function(c) { c.classList.remove('highlighted'); });
         document.querySelectorAll('.comment-highlight.active').forEach(function(m) { m.classList.remove('active'); });
+        document.querySelectorAll('.penpal-svg-highlight.active').forEach(function(r) { r.classList.remove('active'); });
+
+        // Check if this is an SVG-anchored thread
+        var thread = (threads || []).find(function(t) { return t.id === threadId; });
+        var svgHighlights = document.querySelectorAll('.penpal-svg-highlight[data-thread-id="' + threadId + '"]');
+        if (thread && thread.anchor && thread.anchor.svgRect && svgHighlights.length > 0) {
+            svgHighlights.forEach(function(r) { r.classList.add('active'); });
+            var card = document.querySelector('.thread-card[data-thread-id="' + threadId + '"]');
+            if (card) card.classList.add('highlighted');
+            if (scrollTo === 'comment' && card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            else if (scrollTo === 'highlight') {
+                var container = svgHighlights[0].closest('.mermaid-container');
+                if (container) container.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            setTimeout(function() {
+                svgHighlights.forEach(function(r) { r.classList.remove('active'); });
+                if (card) card.classList.remove('highlighted');
+            }, 3000);
+            return;
+        }
+
         var marks = document.querySelectorAll('.comment-highlight[data-thread-id="' + threadId + '"]');
         marks.forEach(function(m) { m.classList.add('active'); });
         var card = document.querySelector('.thread-card[data-thread-id="' + threadId + '"]');
@@ -1710,15 +1796,226 @@
         }
     });
 
+    // --- SVG diagram selection ---
+    function removePendingSvgHighlights() {
+        document.querySelectorAll('.penpal-pending-svg-highlight').forEach(function(el) { el.remove(); });
+    }
+
+    function removeSvgHighlights() {
+        document.querySelectorAll('.penpal-svg-highlight').forEach(function(el) { el.remove(); });
+    }
+
+    function showSvgHighlight(threadId, anchor, extraClass) {
+        if (!anchor.svgRect) return;
+        var r = anchor.svgRect;
+        var startLine = anchor.startLine;
+        var container = document.querySelector('.mermaid-container[data-source-line="' + startLine + '"]');
+        if (!container) return;
+        var svg = container.querySelector('svg');
+        if (!svg) return;
+        var ns = 'http://www.w3.org/2000/svg';
+        var rect = document.createElementNS(ns, 'rect');
+        rect.setAttribute('x', r.x);
+        rect.setAttribute('y', r.y);
+        rect.setAttribute('width', r.width);
+        rect.setAttribute('height', r.height);
+        rect.setAttribute('class', 'penpal-svg-highlight' + (extraClass ? ' ' + extraClass : ''));
+        rect.setAttribute('data-thread-id', threadId);
+        svg.appendChild(rect);
+    }
+
+    function extractSvgSnippet(svgElement, rect) {
+        var clone = svgElement.cloneNode(true);
+        clone.setAttribute('viewBox', rect.x + ' ' + rect.y + ' ' + rect.width + ' ' + rect.height);
+        // Size to reasonable display dimensions
+        var aspect = rect.width / rect.height;
+        var maxW = 300, maxH = 200;
+        var w, h;
+        if (aspect > maxW / maxH) { w = maxW; h = maxW / aspect; }
+        else { h = maxH; w = maxH * aspect; }
+        clone.setAttribute('width', Math.round(w));
+        clone.setAttribute('height', Math.round(h));
+        clone.querySelectorAll('.penpal-pending-svg-highlight, .penpal-svg-highlight').forEach(function(el) { el.remove(); });
+
+        // Re-ID every element to avoid DOM collisions while preserving internal
+        // references (CSS selectors, marker-end url(#...), xlink:href, etc.).
+        var prefix = 'ps' + Math.random().toString(36).substring(2, 8) + '-';
+        var idMap = {}; // oldId -> newId
+        clone.querySelectorAll('[id]').forEach(function(el) {
+            var oldId = el.getAttribute('id');
+            var newId = prefix + oldId;
+            idMap[oldId] = newId;
+            el.setAttribute('id', newId);
+        });
+        // Also re-ID the root SVG itself
+        var rootOldId = svgElement.getAttribute('id');
+        if (rootOldId && !idMap[rootOldId]) {
+            idMap[rootOldId] = prefix + rootOldId;
+        }
+        if (rootOldId) {
+            clone.setAttribute('id', idMap[rootOldId]);
+        }
+
+        // Rewrite url(#oldId) references in attributes (marker-end, fill, clip-path, etc.)
+        var urlAttrs = ['marker-end', 'marker-start', 'marker-mid', 'fill', 'stroke', 'clip-path', 'mask', 'filter'];
+        clone.querySelectorAll('*').forEach(function(el) {
+            urlAttrs.forEach(function(attr) {
+                var val = el.getAttribute(attr);
+                if (val && val.indexOf('url(#') !== -1) {
+                    el.setAttribute(attr, val.replace(/url\(#([^)]+)\)/g, function(m, id) {
+                        return 'url(#' + (idMap[id] || id) + ')';
+                    }));
+                }
+            });
+            // Rewrite href/xlink:href="#id" references (e.g. <use>)
+            ['href', 'xlink:href'].forEach(function(attr) {
+                var val = el.getAttribute(attr);
+                if (val && val.charAt(0) === '#') {
+                    var refId = val.substring(1);
+                    if (idMap[refId]) el.setAttribute(attr, '#' + idMap[refId]);
+                }
+            });
+        });
+
+        // Rewrite IDs in <style> blocks
+        clone.querySelectorAll('style').forEach(function(styleEl) {
+            var css = styleEl.textContent;
+            Object.keys(idMap).forEach(function(oldId) {
+                var escaped = oldId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                css = css.replace(new RegExp('#' + escaped + '(?=[\\s{,.:\\[>~+)])', 'g'), '#' + idMap[oldId]);
+            });
+            styleEl.textContent = css;
+        });
+
+        return clone.outerHTML;
+    }
+
+    function attachMermaidSelectionHandlers(item) {
+        var container = item.container;
+        var mermaidDiv = item.mermaidDiv;
+        var startX, startY, startSvgPt, overlayRect, svg, dragging;
+
+        container.addEventListener('mousedown', function(e) {
+            // Don't interfere with the expand button
+            if (e.target.closest('.expand-zoom-btn')) return;
+            svg = mermaidDiv.querySelector('svg');
+            if (!svg) return;
+            dragging = false;
+            var ctm = svg.getScreenCTM();
+            if (!ctm) return;
+            var inv = ctm.inverse();
+            var pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(inv);
+            startX = e.clientX;
+            startY = e.clientY;
+            startSvgPt = { x: pt.x, y: pt.y };
+            overlayRect = null;
+
+            function onMouseMove(e2) {
+                var dx = e2.clientX - startX;
+                var dy = e2.clientY - startY;
+                if (!dragging && Math.sqrt(dx * dx + dy * dy) < 5) return;
+                if (!dragging) {
+                    dragging = true;
+                    mermaidSelectionInProgress = true;
+                    container.style.userSelect = 'none';
+                    window.getSelection().removeAllRanges();
+                    var ns = 'http://www.w3.org/2000/svg';
+                    overlayRect = document.createElementNS(ns, 'rect');
+                    overlayRect.setAttribute('class', 'penpal-pending-svg-highlight');
+                    svg.appendChild(overlayRect);
+                }
+                var ctm2 = svg.getScreenCTM();
+                if (!ctm2) return;
+                var inv2 = ctm2.inverse();
+                var curPt = new DOMPoint(e2.clientX, e2.clientY).matrixTransform(inv2);
+                var rx = Math.min(startSvgPt.x, curPt.x);
+                var ry = Math.min(startSvgPt.y, curPt.y);
+                var rw = Math.abs(curPt.x - startSvgPt.x);
+                var rh = Math.abs(curPt.y - startSvgPt.y);
+                overlayRect.setAttribute('x', rx);
+                overlayRect.setAttribute('y', ry);
+                overlayRect.setAttribute('width', rw);
+                overlayRect.setAttribute('height', rh);
+            }
+
+            function onMouseUp(e2) {
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+                container.style.userSelect = '';
+                if (!dragging) {
+                    mermaidSelectionInProgress = false;
+                    return;
+                }
+                // Finalize
+                var ctm2 = svg.getScreenCTM();
+                if (!ctm2) { mermaidSelectionInProgress = false; return; }
+                var inv2 = ctm2.inverse();
+                var endPt = new DOMPoint(e2.clientX, e2.clientY).matrixTransform(inv2);
+                var selRect = {
+                    x: Math.min(startSvgPt.x, endPt.x),
+                    y: Math.min(startSvgPt.y, endPt.y),
+                    width: Math.abs(endPt.x - startSvgPt.x),
+                    height: Math.abs(endPt.y - startSvgPt.y)
+                };
+                // Ignore tiny selections
+                if (selRect.width < 5 || selRect.height < 5) {
+                    if (overlayRect) overlayRect.remove();
+                    mermaidSelectionInProgress = false;
+                    return;
+                }
+                var snippet = extractSvgSnippet(svg, selRect);
+                var sourceLine = container.getAttribute('data-source-line');
+                var startLineNum = sourceLine ? parseInt(sourceLine, 10) : 0;
+                var headingPath = '';
+                if (container.parentElement) headingPath = computeHeadingPath(container);
+                pendingAnchor = {
+                    selectedText: '[Diagram selection]',
+                    svgSnippet: snippet,
+                    svgRect: selRect,
+                    headingPath: headingPath,
+                    startLine: startLineNum
+                };
+                showNewThreadForm('[Diagram selection]', snippet);
+                // Reset after a short delay to allow click events to pass
+                setTimeout(function() { mermaidSelectionInProgress = false; }, 100);
+            }
+
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+        });
+    }
+
     // --- Mermaid diagram rendering ---
     var mermaidSources = []; // Store sources for re-rendering on theme change
     var mermaidBlockCounter = 0;
+
+    // Find source lines for mermaid fences in raw markdown.
+    // Goldmark doesn't emit data-source-line on fenced code blocks,
+    // so we compute them by matching fence content against the raw markdown.
+    function findMermaidFenceLines() {
+        var result = [];
+        if (!rawMarkdown) return result;
+        var mdLines = rawMarkdown.split('\n');
+        for (var li = 0; li < mdLines.length; li++) {
+            if (mdLines[li].trim().indexOf('```mermaid') === 0) {
+                var fenceContent = [];
+                for (var lj = li + 1; lj < mdLines.length; lj++) {
+                    if (mdLines[lj].trim() === '```') break;
+                    fenceContent.push(mdLines[lj]);
+                }
+                result.push({ line: li + 1, content: fenceContent.join('\n').trim() });
+            }
+        }
+        return result;
+    }
 
     function renderMermaidBlocks() {
         var content = document.getElementById('content');
         if (!content) return;
         var codeBlocks = content.querySelectorAll('code.language-mermaid');
         if (codeBlocks.length === 0) return;
+        var fenceLines = findMermaidFenceLines();
+        var fenceIdx = 0;
         codeBlocks.forEach(function(code) {
             var pre = code.parentElement;
             if (!pre || pre.tagName !== 'PRE') return;
@@ -1726,6 +2023,10 @@
             var div = document.createElement('div');
             div.className = 'mermaid-container';
             var sourceLine = pre.getAttribute('data-source-line');
+            if (!sourceLine && fenceIdx < fenceLines.length && fenceLines[fenceIdx].content === text.trim()) {
+                sourceLine = String(fenceLines[fenceIdx].line);
+                fenceIdx++;
+            }
             if (sourceLine) div.setAttribute('data-source-line', sourceLine);
             var mermaidDiv = document.createElement('div');
             mermaidDiv.className = 'mermaid';
@@ -1742,11 +2043,16 @@
             mermaidSources.push({ container: div, mermaidDiv: mermaidDiv, source: text, sourceLine: sourceLine });
         });
         // Render each diagram individually to avoid parser state leaking between diagrams
-        renderMermaidSequential(mermaidSources.map(function(item) { return item; }));
+        renderMermaidSequential(mermaidSources.map(function(item) { return item; }), function() {
+            // Re-apply SVG comment highlights now that diagrams are rendered
+            if (threads && threads.length > 0) {
+                addCommentHighlights(threads, anchorLines || {});
+            }
+        });
     }
 
-    function renderMermaidSequential(items) {
-        if (items.length === 0) return;
+    function renderMermaidSequential(items, onComplete) {
+        if (items.length === 0) { if (onComplete) onComplete(); return; }
         var item = items[0];
         var rest = items.slice(1);
         mermaidBlockCounter++;
@@ -1754,19 +2060,23 @@
         mermaid.render(id, item.source)
             .then(function(result) {
                 item.mermaidDiv.innerHTML = result.svg;
+                attachMermaidSelectionHandlers(item);
             })
             .catch(function(err) {
                 item.mermaidDiv.innerHTML = '<p style="color:var(--accent-danger)">Failed to render diagram: ' + err.message + '</p>';
             })
             .then(function() {
-                renderMermaidSequential(rest);
+                renderMermaidSequential(rest, onComplete);
             });
     }
 
     function reRenderMermaidForTheme() {
         if (mermaidSources.length === 0) return;
         mermaid.initialize({ startOnLoad: false, theme: getMermaidTheme() });
-        renderMermaidSequential(mermaidSources.map(function(item) { return item; }));
+        renderMermaidSequential(mermaidSources.map(function(item) { return item; }), function() {
+            // Re-apply SVG comment highlights after diagrams re-render
+            addCommentHighlights(threads || [], anchorLines || {});
+        });
     }
 
     // --- Expand modal (mermaid + images) ---

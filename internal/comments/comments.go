@@ -44,11 +44,21 @@ type Thread struct {
 
 // Anchor describes the text selection a thread is attached to.
 type Anchor struct {
-	SelectedText string `json:"selectedText"`
-	Before       string `json:"before,omitempty"`
-	After        string `json:"after,omitempty"`
-	HeadingPath  string `json:"headingPath,omitempty"`
-	StartLine    int    `json:"startLine,omitempty"`
+	SelectedText string   `json:"selectedText"`
+	Before       string   `json:"before,omitempty"`
+	After        string   `json:"after,omitempty"`
+	HeadingPath  string   `json:"headingPath,omitempty"`
+	StartLine    int      `json:"startLine,omitempty"`
+	SvgSnippet   string   `json:"svgSnippet,omitempty"`
+	SvgRect      *SvgRect `json:"svgRect,omitempty"`
+}
+
+// SvgRect describes a rectangle selection within an SVG diagram.
+type SvgRect struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 // Comment is a single message within a thread.

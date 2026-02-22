@@ -5,17 +5,12 @@ output:
 
 pre-commit:
   commands:
-    mark-fmt:
-      root: "apps/mark/"
+    fmt:
       run: just fmt
       stage_fixed: true
 
 pre-push:
   parallel: true
   commands:
-    mark-lint:
-      root: "apps/mark/"
-      run: just lint
-    mark-typecheck:
-      root: "apps/mark/"
-      run: just typecheck
+    ci:
+      run: just ci

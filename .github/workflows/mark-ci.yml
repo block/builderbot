@@ -15,10 +15,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-defaults:
-  run:
-    working-directory: apps/mark
-
 jobs:
   check:
     name: Check
@@ -26,10 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # Install hermit (manages node, rust, just)
+      # Install hermit (manages node, rust, just, pnpm)
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
-        with:
-          working-directory: apps/mark
 
       # Cache Cargo dependencies
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
@@ -47,17 +41,11 @@ jobs:
             patchelf
 
       # Install dependencies
-      - name: Install dependencies (Rust only)
-        working-directory: apps/mark/src-tauri
-        run: cargo fetch
-
-      # Run all checks
-      # TODO: Re-enable full check-all once pnpm lockfile is compatible with CI
-      # - name: Check all (fmt, lint, typecheck)
-      #   run: just check-all
-      - name: Check (Rust only — fmt, lint, typecheck)
-        working-directory: apps/mark/src-tauri
+      - name: Install dependencies
         run: |
-          cargo fmt --check
-          cargo clippy -- -D warnings
-          cargo check
+          pnpm install --frozen-lockfile
+          cd apps/mark/src-tauri && cargo fetch
+
+      # Run all checks via the app justfile
+      - name: Check all (fmt, lint, typecheck)
+        run: just -f apps/mark/justfile ci

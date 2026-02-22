@@ -28,11 +28,12 @@ else
     # Try to find it relative to this script (for development)
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+    MARK_APP="$REPO_ROOT/apps/mark"
 
-    if [ -d "$REPO_ROOT/src-tauri/target/release/bundle/macos/Mark.app" ]; then
-        APP_PATH="$REPO_ROOT/src-tauri/target/release/bundle/macos/Mark.app"
-    elif [ -d "$REPO_ROOT/src-tauri/target/debug/bundle/macos/Mark.app" ]; then
-        APP_PATH="$REPO_ROOT/src-tauri/target/debug/bundle/macos/Mark.app"
+    if [ -d "$MARK_APP/src-tauri/target/release/bundle/macos/Mark.app" ]; then
+        APP_PATH="$MARK_APP/src-tauri/target/release/bundle/macos/Mark.app"
+    elif [ -d "$MARK_APP/src-tauri/target/debug/bundle/macos/Mark.app" ]; then
+        APP_PATH="$MARK_APP/src-tauri/target/debug/bundle/macos/Mark.app"
     else
         echo "Error: Could not find Mark.app" >&2
         echo "Install it to /Applications or build with 'just build'" >&2

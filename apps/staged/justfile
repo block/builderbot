@@ -1,0 +1,64 @@
+# Staged - Standalone Diff Viewer
+# Run `just dev` to start development.
+
+# ============================================================================
+# Setup
+# ============================================================================
+
+# First-time setup: install all dependencies
+install:
+    pnpm install
+    cd src-tauri && cargo fetch
+
+# ============================================================================
+# Development
+# ============================================================================
+
+# Run the app in development mode
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [[ -d node_modules ]] || pnpm install
+    pnpm exec tauri dev
+
+# Build the app for production
+build:
+    pnpm run tauri:build
+
+# ============================================================================
+# Code Quality
+# ============================================================================
+
+# Auto-format all code
+fmt:
+    cd src-tauri && cargo fmt
+    pnpm exec prettier --write "src/**/*.{ts,svelte,css,html}"
+
+# Verify formatting without modifying files (used by CI/hooks)
+fmt-check:
+    cd src-tauri && cargo fmt --check
+    pnpm exec prettier --check "src/**/*.{ts,svelte,css,html}"
+
+# Lint Rust code with clippy
+lint:
+    cd src-tauri && cargo clippy -- -D warnings
+
+# Type-check frontend (Svelte + TypeScript) and backend (Rust)
+typecheck:
+    pnpm run check
+    cd src-tauri && cargo check
+
+# Format, then verify everything passes — run before pushing
+check-all: fmt lint typecheck
+
+# Verify everything without modifying files — for CI
+ci: fmt-check lint typecheck
+
+# ============================================================================
+# Maintenance
+# ============================================================================
+
+# Delete all build artifacts and dependencies
+clean:
+    rm -rf dist node_modules
+    rm -rf src-tauri/target

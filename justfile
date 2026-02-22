@@ -1,37 +1,63 @@
 # Builderbot Monorepo
-# Run `just setup` once after cloning to install git hooks.
+# Run `just setup` once after cloning.
 
-# ============================================================================
-# Setup
-# ============================================================================
+# Default: list available recipes
+default:
+    @just --list
 
-# First-time setup: install git hooks (run once at repo root)
+# ── Setup ──────────────────────────────────────────────────
+
+# First-time setup
 setup:
     lefthook install
+    pnpm install
 
-# ============================================================================
-# Build
-# ============================================================================
+# ── Per-App (delegate) ─────────────────────────────────────
 
-# Build all crates (debug)
+# Run a just recipe in a specific app (e.g., just app mark dev)
+app name *ARGS:
+    just -f apps/{{name}}/justfile {{ARGS}}
+
+# Shortcuts for the most common app commands
+dev app="mark" *ARGS:
+    just -f apps/{{app}}/justfile dev {{ARGS}}
+
+# ── Cross-Cutting ──────────────────────────────────────────
+
+# Format all apps + crates
+fmt:
+    cargo fmt --all
+    for dir in apps/*/; do \
+        [ -f "$dir/justfile" ] && just -f "$dir/justfile" fmt || true; \
+    done
+
+# Lint everything
+lint:
+    cargo clippy --workspace -- -D warnings
+    for dir in apps/*/; do \
+        [ -f "$dir/justfile" ] && just -f "$dir/justfile" lint || true; \
+    done
+
+# Check everything (what CI runs)
+ci:
+    for dir in apps/*/; do \
+        [ -f "$dir/justfile" ] && just -f "$dir/justfile" ci || true; \
+    done
+    cargo test --workspace
+
+# ── Crates ─────────────────────────────────────────────────
+
+# Build shared crates
 build:
     cargo build
 
-# Build all crates (release)
-release:
-    cargo build --release
-
 # Run all tests
 test:
-    cargo test
+    cargo test --workspace
 
-# Install the summarize binary to ~/.cargo/bin
+# Install the summarize binary
 install-summarize:
     cargo install --path crates/summarize
-
-# ============================================================================
-# Summarize
-# ============================================================================
 
 # Run summarize directly (e.g. just summarize --prompt "What?" src/)
 summarize *ARGS:

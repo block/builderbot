@@ -6,6 +6,8 @@ settings:
 
 importers:
 
+  .: {}
+
   apps/mark:
     dependencies:
       '@tauri-apps/api':
@@ -79,6 +81,12 @@ importers:
       '@tsconfig/svelte':
         specifier: ^5.0.6
         version: 5.0.8
+      prettier:
+        specifier: ^3.7.4
+        version: 3.8.1
+      prettier-plugin-svelte:
+        specifier: ^3.4.1
+        version: 3.5.0(prettier@3.8.1)(svelte@5.53.2)
       svelte:
         specifier: ^5.46.4
         version: 5.53.2

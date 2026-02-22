@@ -1,4 +1,4 @@
-# Staged - Git Diff Viewer
+# Mark - AI-Powered Development Workspace
 # Run `just dev` to start development.
 
 # ============================================================================
@@ -7,7 +7,7 @@
 
 # First-time setup: install all dependencies
 install:
-    npm install
+    pnpm install
     cd src-tauri && cargo fetch
 
 # ============================================================================
@@ -20,7 +20,7 @@ dev repo="":
     set -euo pipefail
 
     # Install JS deps if needed
-    [[ -d node_modules ]] || npm install
+    [[ -d node_modules ]] || pnpm install
 
     # Derive a stable port from the working directory so the same worktree
     # always gets the same port. This avoids changing TAURI_CONFIG between
@@ -50,11 +50,11 @@ dev repo="":
 
     echo "Starting on port ${VITE_PORT}"
     {{ if repo != "" { "export STAGED_REPO=" + repo } else { "" } }}
-    npx tauri dev --config "$TAURI_CONFIG"
+    pnpm exec tauri dev --config "$TAURI_CONFIG"
 
 # Build the app for production
 build:
-    npm run tauri:build
+    pnpm run tauri:build
 
 # ============================================================================
 # Code Quality
@@ -63,12 +63,12 @@ build:
 # Auto-format all code
 fmt:
     cd src-tauri && cargo fmt
-    npx prettier --write "src/**/*.{ts,svelte,css,html}"
+    pnpm exec prettier --write "src/**/*.{ts,svelte,css,html}"
 
 # Verify formatting without modifying files (used by CI/hooks)
 fmt-check:
     cd src-tauri && cargo fmt --check
-    npx prettier --check "src/**/*.{ts,svelte,css,html}"
+    pnpm exec prettier --check "src/**/*.{ts,svelte,css,html}"
 
 # Lint Rust code with clippy
 lint:
@@ -76,7 +76,7 @@ lint:
 
 # Type-check frontend (Svelte + TypeScript) and backend (Rust)
 typecheck:
-    npm run check
+    pnpm run check
     cd src-tauri && cargo check
 
 # Format, then verify everything passes — run before pushing

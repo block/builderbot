@@ -1,16 +1,16 @@
 [package]
-name = "staged"
+name = "mark"
 version = "0.3.0"
-description = "A standalone git diff viewer with staging integration"
+description = "AI-powered development workspace"
 authors = ["baxen"]
 license = "MIT"
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"
-default-run = "staged"
+default-run = "mark"
 
 [lib]
-name = "staged_lib"
+name = "mark_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -42,9 +42,9 @@ tokio = { version = "1.49.0", features = ["sync", "process", "io-util", "macros"
 tauri-plugin-opener = "2"
 
 # Actions framework
-builderbot-actions = { path = "../../crates/builderbot-actions" }
-acp-client = { path = "../../crates/acp-client" }
-blox-cli = { path = "../../crates/blox-cli" }
+builderbot-actions = { path = "../../../crates/builderbot-actions" }
+acp-client = { path = "../../../crates/acp-client" }
+blox-cli = { path = "../../../crates/blox-cli" }
 which = "7.0"
 
 async-trait = "0.1"

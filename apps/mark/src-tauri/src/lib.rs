@@ -1,4 +1,4 @@
-//! Staged — clean rewrite.
+//! Mark — AI-powered development workspace.
 //!
 //! Tauri commands for the new frontend, built incrementally.
 //! See `src-archive/lib.rs` for the previous implementation.
@@ -2087,7 +2087,7 @@ pub fn run() {
         .setup(|app| {
             // Build a custom macOS application menu so that the app submenu,
             // "About" item, and "Quit" item use the capitalised product name
-            // "Staged" instead of the lowercase Cargo package name "staged".
+            // "Mark" instead of the lowercase Cargo package name "mark".
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -2096,7 +2096,7 @@ pub fn run() {
                 let pkg_info = handle.package_info();
                 let config = handle.config();
                 let about_metadata = AboutMetadata {
-                    name: Some("Staged".into()),
+                    name: Some("Mark".into()),
                     version: Some(pkg_info.version.to_string()),
                     copyright: config.bundle.copyright.clone(),
                     authors: config.bundle.publisher.clone().map(|p| vec![p]),
@@ -2105,12 +2105,12 @@ pub fn run() {
 
                 let app_menu = Submenu::with_items(
                     handle,
-                    "Staged",
+                    "Mark",
                     true,
                     &[
                         &PredefinedMenuItem::about(
                             handle,
-                            Some("About Staged"),
+                            Some("About Mark"),
                             Some(about_metadata),
                         )?,
                         &PredefinedMenuItem::separator(handle)?,
@@ -2119,7 +2119,7 @@ pub fn run() {
                         &PredefinedMenuItem::hide(handle, None)?,
                         &PredefinedMenuItem::hide_others(handle, None)?,
                         &PredefinedMenuItem::separator(handle)?,
-                        &PredefinedMenuItem::quit(handle, Some("Quit Staged"))?,
+                        &PredefinedMenuItem::quit(handle, Some("Quit Mark"))?,
                     ],
                 )?;
 

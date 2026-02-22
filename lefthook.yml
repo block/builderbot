@@ -5,17 +5,17 @@ output:
 
 pre-commit:
   commands:
-    staged-fmt:
-      root: "staged/"
+    mark-fmt:
+      root: "apps/mark/"
       run: just fmt
       stage_fixed: true
 
 pre-push:
   parallel: true
   commands:
-    staged-lint:
-      root: "staged/"
+    mark-lint:
+      root: "apps/mark/"
       run: just lint
-    staged-typecheck:
-      root: "staged/"
+    mark-typecheck:
+      root: "apps/mark/"
       run: just typecheck

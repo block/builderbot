@@ -77,7 +77,7 @@ clone_repo() {
 
     if git clone --depth 1 "$REPO_URL" "$TEMP_DIR" > /dev/null 2>&1; then
         print_success "Repository cloned"
-        cd "$TEMP_DIR/staged"
+        cd "$TEMP_DIR/apps/mark"
     else
         print_error "Failed to clone repository"
         exit 1
@@ -108,11 +108,11 @@ setup_hermit() {
 install_deps() {
     print_info "Installing dependencies..."
 
-    # Install npm dependencies
-    if npm install > /dev/null 2>&1; then
-        print_success "npm dependencies installed"
+    # Install pnpm dependencies
+    if pnpm install > /dev/null 2>&1; then
+        print_success "pnpm dependencies installed"
     else
-        print_error "Failed to install npm dependencies"
+        print_error "Failed to install pnpm dependencies"
         exit 1
     fi
 
@@ -129,7 +129,7 @@ install_deps() {
 build_app() {
     print_info "Building application (this may take a few minutes)..."
 
-    if npm run tauri:build > /dev/null 2>&1; then
+    if pnpm run tauri:build > /dev/null 2>&1; then
         print_success "Application built successfully"
     else
         print_error "Build failed"
@@ -140,8 +140,8 @@ build_app() {
 # Install to system
 install_to_system() {
     if [ "$OS" = "macos" ]; then
-        APP_PATH="src-tauri/target/release/bundle/macos/staged.app"
-        INSTALL_PATH="/Applications/staged.app"
+        APP_PATH="src-tauri/target/release/bundle/macos/Mark.app"
+        INSTALL_PATH="/Applications/Mark.app"
 
         print_info "Installing to $INSTALL_PATH..."
 
@@ -159,15 +159,15 @@ install_to_system() {
     elif [ "$OS" = "linux" ]; then
         # For Linux, we'd typically install to /usr/local/bin or ~/.local/bin
         print_info "Linux installation not yet implemented"
-        print_info "You can find the built binary in: src-tauri/target/release/staged"
+        print_info "You can find the built binary in: src-tauri/target/release/mark"
     fi
 }
 
 # Install CLI command
 install_cli() {
     if [ "$OS" = "macos" ]; then
-        CLI_PATH="bin/staged"
-        INSTALL_PATH="/usr/local/bin/staged"
+        CLI_PATH="bin/mark"
+        INSTALL_PATH="/usr/local/bin/mark"
 
         print_info "Installing CLI to $INSTALL_PATH..."
 
@@ -179,7 +179,7 @@ install_cli() {
         if sudo cp "$CLI_PATH" "$INSTALL_PATH" && sudo chmod +x "$INSTALL_PATH"; then
             print_success "CLI installed to $INSTALL_PATH"
         else
-            print_warning "Failed to install CLI (you can manually copy bin/staged to your PATH)"
+            print_warning "Failed to install CLI (you can manually copy bin/mark to your PATH)"
         fi
     fi
 }
@@ -198,7 +198,8 @@ cleanup() {
 main() {
     echo ""
     echo "╔═══════════════════════════════════════╗"
-    echo "║   Staged - Git Diff Viewer Installer  ║"
+    echo "║     Mark - Development Workspace      ║"
+    echo "║            Installer                  ║"
     echo "╚═══════════════════════════════════════╝"
     echo ""
 
@@ -217,10 +218,10 @@ main() {
     echo ""
 
     if [ "$OS" = "macos" ]; then
-        echo "You can now launch Staged from your Applications folder,"
+        echo "You can now launch Mark from your Applications folder,"
         echo "or from the command line:"
-        echo "  staged          # opens in current directory"
-        echo "  staged /path    # opens in specified directory"
+        echo "  mark          # opens in current directory"
+        echo "  mark /path    # opens in specified directory"
     fi
 
     echo ""

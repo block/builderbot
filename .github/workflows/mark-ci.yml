@@ -1,21 +1,23 @@
-name: Staged CI
+name: Mark CI
 
 on:
   pull_request:
     branches: [main]
     paths:
-      - "staged/**"
+      - "apps/mark/**"
+      - "crates/**"
   push:
     branches: [main]
     paths:
-      - "staged/**"
+      - "apps/mark/**"
+      - "crates/**"
 
 env:
   CARGO_TERM_COLOR: always
 
 defaults:
   run:
-    working-directory: staged
+    working-directory: apps/mark
 
 jobs:
   check:
@@ -27,12 +29,12 @@ jobs:
       # Install hermit (manages node, rust, just)
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
         with:
-          working-directory: staged
+          working-directory: apps/mark
 
       # Cache Cargo dependencies
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          workspaces: staged/src-tauri
+          workspaces: apps/mark/src-tauri
 
       # Install system dependencies for Tauri (Linux)
       - name: Install Tauri dependencies (Linux)
@@ -45,17 +47,16 @@ jobs:
             patchelf
 
       # Install dependencies
-      # TODO: Add npm install once lockfile is compatible with CI
       - name: Install dependencies (Rust only)
-        working-directory: staged/src-tauri
+        working-directory: apps/mark/src-tauri
         run: cargo fetch
 
       # Run all checks
-      # TODO: Re-enable full check-all once npm lockfile is compatible with CI
+      # TODO: Re-enable full check-all once pnpm lockfile is compatible with CI
       # - name: Check all (fmt, lint, typecheck)
       #   run: just check-all
       - name: Check (Rust only — fmt, lint, typecheck)
-        working-directory: staged/src-tauri
+        working-directory: apps/mark/src-tauri
         run: |
           cargo fmt --check
           cargo clippy -- -D warnings

@@ -1,19 +1,19 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Staged",
+  "productName": "Mark",
   "version": "0.3.0",
-  "identifier": "com.staged.app",
+  "identifier": "com.mark.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5174",
-    "beforeDevCommand": "VITE_PORT=${VITE_PORT:-5174} npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "VITE_PORT=${VITE_PORT:-5174} pnpm run dev",
+    "beforeBuildCommand": "pnpm run build"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Staged",
+        "title": "Mark",
         "width": 1600,
         "height": 1200,
         "minWidth": 1100,

@@ -41,7 +41,7 @@ dev repo="":
             mkdir -p "$ICON_DIR"
             DEV_ICON="$ICON_DIR/icon.icns"
 
-            if swift scripts/generate-dev-icon.swift src-tauri/icons/icon.icns "$DEV_ICON" "$WORKTREE_LABEL"; then
+            if swift ../../scripts/generate-dev-icon.swift src-tauri/icons/icon.icns "$DEV_ICON" "$WORKTREE_LABEL"; then
                 echo "🌳 Worktree: ${WORKTREE_LABEL}"
                 TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\"},\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
             fi

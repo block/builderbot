@@ -19,6 +19,20 @@ use crate::actions::{ActionExecutor, ActionMetadata, ActionRegistry, ActionType}
 use crate::session_runner::{SessionConfig, SessionRegistry};
 use crate::store::{Session, SessionStatus, Store};
 
+/// What outcome the caller expects from a `start_repo_session` call.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum RepoSessionOutcome {
+    /// The session should only return output to the caller. No artifact is created.
+    ReturnOutputOnly,
+    /// The session should produce a note in the repository. A note stub is created and
+    /// the agent is instructed to output note content after a horizontal rule (---).
+    NoteInRepo,
+    /// The session should make code changes and create a commit. A pending commit record
+    /// is created and the agent is instructed to commit with a conventional commit message.
+    Commit,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct StartRepoSessionParams {
     /// GitHub repo slug present in the project, e.g. "org/repo".
@@ -29,8 +43,18 @@ struct StartRepoSessionParams {
     pub subpath: Option<String>,
     /// Instructions to give the agent.
     pub instructions: String,
+    /// What the session should produce. Controls the prompt given to the agent and what
+    /// artifact (if any) is created in the database.
+    ///
+    /// - `"return_output_only"`: Agent returns output only; use `return_info` to
+    ///   specify exactly what you want back.
+    /// - `"note_in_repo"`: Agent researches and produces a note. Instructs the agent to
+    ///   output content after a `---` horizontal rule with an H1 title.
+    /// - `"commit"`: Agent makes code changes and creates a commit with a conventional
+    ///   commit message.
+    pub expected_outcome: RepoSessionOutcome,
+    /// Only used when `expected_outcome` is `"return_output_only"`.
     /// Describe what information you want the session to return to you when it finishes.
-    /// The agent will be instructed to produce this output at the end of its session.
     /// Example: "a summary of all changes made and any errors encountered".
     pub return_info: Option<String>,
     /// Optional ACP provider ID (e.g. "claude", "goose").
@@ -88,17 +112,20 @@ impl ProjectToolsHandler {
 #[tool_router]
 impl ProjectToolsHandler {
     #[tool(
-        description = "Start an agent session in one of the project's repositories. Waits for completion and returns the outcome along with the output produced by the session. Use the `return_info` field to specify exactly what information you want the session to return to you — e.g. 'a list of all files changed and a summary of what was done'. The session agent will be instructed to produce that output at the end. The `repo` + `subpath` combination must exactly match an entry already in the project — call will fail immediately otherwise."
+        description = "Start an agent session in one of the project's repositories. Waits for completion and returns the outcome. Use `expected_outcome` to control what the session produces: `\"return_output_only\"` (use `return_info` to describe what to return), `\"note_in_repo\"` (agent researches and writes a note visible in the branch card), or `\"commit\"` (agent makes code changes and creates a commit visible in the branch card). The `repo` + `subpath` combination must exactly match an entry already in the project — call will fail immediately otherwise."
     )]
     async fn start_repo_session(
         &self,
         Parameters(p): Parameters<StartRepoSessionParams>,
     ) -> String {
         log::info!(
-            "[project_mcp] start_repo_session called: repo={:?} subpath={:?} provider={:?}",
+            "[project_mcp] start_repo_session called: repo={:?} subpath={:?} expected_outcome={:?} return_info={:?} provider={:?} instructions={:?}",
             p.repo,
             p.subpath,
-            p.provider
+            p.expected_outcome,
+            p.return_info,
+            p.provider,
+            p.instructions,
         );
         // Find the matching project repo — must match both github_repo and subpath exactly.
         let repos = match self.store.list_project_repos(&self.project_id) {
@@ -126,15 +153,16 @@ impl ProjectToolsHandler {
             }
         };
 
-        // Find the branch for this repo to get workspace_name if remote
+        // Find the branch for this repo — capture both workspace_name and branch_id.
         let branches = match self.store.list_branches_for_project(&self.project_id) {
             Ok(b) => b,
             Err(e) => return format!("Error listing branches: {e}"),
         };
-        let workspace_name = branches
+        let branch = branches
             .iter()
-            .find(|b| b.project_repo_id.as_deref() == Some(repo.id.as_str()))
-            .and_then(|b| b.workspace_name.clone());
+            .find(|b| b.project_repo_id.as_deref() == Some(repo.id.as_str()));
+        let workspace_name = branch.and_then(|b| b.workspace_name.clone());
+        let branch_id = branch.map(|b| b.id.clone());
 
         // Determine working directory — include subpath when the repo was added with one.
         let working_dir = crate::paths::repos_dir()
@@ -148,17 +176,41 @@ impl ProjectToolsHandler {
             })
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
-        // Build the prompt, appending return instructions if specified
-        let prompt = if let Some(ref return_info) = p.return_info {
-            format!(
-                "{}\n\nIMPORTANT: When you are done, your final message must contain: {}",
-                p.instructions, return_info
-            )
-        } else {
-            p.instructions.clone()
+        // Build the prompt — prefix with action instructions based on expected outcome.
+        let expected_outcome = &p.expected_outcome;
+        let action_prefix = match expected_outcome {
+            RepoSessionOutcome::ReturnOutputOnly => None,
+            RepoSessionOutcome::NoteInRepo => Some(
+                "The user is requesting a note. Generate a note based on their instructions below.\n\n\
+                 You may use any tools needed to research and gather information, but do NOT create \
+                 any commits.\n\n\
+                 To return the note, include a horizontal rule (---) followed by the note content. \
+                 Begin the note with a markdown H1 heading as the title."
+            ),
+            RepoSessionOutcome::Commit => Some(
+                "The user is requesting you make a commit based on the instructions below. Make the necessary \
+                 code changes, following any verification or formatting steps as instructed, and then \
+                 create a commit with a conventional commit message. This commit should describe what \
+                 was requested and how it was fulfilled."
+            ),
+        };
+        let prompt = {
+            let base = match action_prefix {
+                Some(prefix) => format!("{prefix}\n\n{}", p.instructions),
+                None => p.instructions.clone(),
+            };
+            // For output-only sessions, append return_info instructions if provided.
+            match (expected_outcome, p.return_info.as_ref()) {
+                (RepoSessionOutcome::ReturnOutputOnly, Some(return_info)) => {
+                    format!(
+                        "{base}\n\nIMPORTANT: When you are done, your final message must contain: {return_info}"
+                    )
+                }
+                _ => base,
+            }
         };
 
-        // Create the session record
+        // Create the session record.
         let mut session = Session::new_running(&prompt, &working_dir);
         if let Some(ref prov) = p.provider {
             session = session.with_provider(prov);
@@ -168,14 +220,72 @@ impl ProjectToolsHandler {
         }
         let session_id = session.id.clone();
 
-        // Start the agent (returns immediately; work happens on background thread)
+        // Create artifact stub and capture pre_head_sha (for commit sessions).
+        let (artifact_id, pre_head_sha) = match expected_outcome {
+            RepoSessionOutcome::NoteInRepo => match branch_id.as_deref() {
+                Some(bid) => {
+                    let note =
+                        crate::store::Note::new(bid, &p.instructions, "").with_session(&session_id);
+                    let note_id = note.id.clone();
+                    if let Err(e) = self.store.create_note(&note) {
+                        log::error!("[project_mcp] failed to create note stub: {e}");
+                    }
+                    (Some(note_id), None)
+                }
+                None => {
+                    log::warn!(
+                            "[project_mcp] expected_outcome=note_in_repo but no branch found for repo {}",
+                            repo.github_repo
+                        );
+                    (None, None)
+                }
+            },
+            RepoSessionOutcome::Commit => {
+                match branch_id.as_deref() {
+                    Some(bid) => {
+                        let commit =
+                            crate::store::Commit::new_pending(bid).with_session(&session_id);
+                        let commit_id = commit.id.clone();
+                        if let Err(e) = self.store.create_commit(&commit) {
+                            log::error!("[project_mcp] failed to create commit stub: {e}");
+                        }
+                        // Capture HEAD SHA before the session runs so post-completion
+                        // hooks can detect whether a new commit was created.
+                        let wd = working_dir.clone();
+                        let ws = workspace_name.clone();
+                        let sha = if let Some(ws_name) = ws {
+                            tokio::task::spawn_blocking(move || {
+                                crate::blox::ws_exec(&ws_name, &["git", "rev-parse", "HEAD"])
+                                    .map(|s| s.trim().to_string())
+                            })
+                            .await
+                            .ok()
+                            .and_then(|r| r.ok())
+                        } else {
+                            crate::git::get_head_sha(&wd).ok()
+                        };
+                        (Some(commit_id), sha)
+                    }
+                    None => {
+                        log::warn!(
+                            "[project_mcp] expected_outcome=commit but no branch found for repo {}",
+                            repo.github_repo
+                        );
+                        (None, None)
+                    }
+                }
+            }
+            RepoSessionOutcome::ReturnOutputOnly => (None, None),
+        };
+
+        // Start the agent (returns immediately; work happens on background thread).
         let start_result = crate::session_runner::start_session(
             SessionConfig {
                 session_id: session_id.clone(),
                 prompt,
                 working_dir,
                 agent_session_id: None,
-                pre_head_sha: None,
+                pre_head_sha,
                 provider: p.provider,
                 workspace_name,
                 extra_env: vec![],
@@ -191,7 +301,7 @@ impl ProjectToolsHandler {
             return format!("Error starting session: {e}");
         }
 
-        // Poll until the session reaches a terminal state
+        // Poll until the session reaches a terminal state.
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
             match self.store.get_session(&session_id) {
@@ -215,8 +325,12 @@ impl ProjectToolsHandler {
                         })
                         .unwrap_or_default();
                     let output_json = serde_json::to_string(&output).unwrap_or_default();
+                    let artifact_field = match artifact_id.as_deref() {
+                        Some(aid) => format!(r#", "artifact_id": "{aid}""#),
+                        None => String::new(),
+                    };
                     return format!(
-                        r#"{{"session_id": "{session_id}", "outcome": "{outcome}", "output": {output_json}}}"#
+                        r#"{{"session_id": "{session_id}", "outcome": "{outcome}", "output": {output_json}{artifact_field}}}"#
                     );
                 }
                 Ok(_) => continue,

@@ -23,6 +23,10 @@ use crate::store::{Session, SessionStatus, Store};
 struct StartRepoSessionParams {
     /// GitHub repo slug present in the project, e.g. "org/repo".
     pub repo: String,
+    /// Subpath within the repository (for monorepos), e.g. "packages/api".
+    /// Must match exactly the subpath used when the repo was added to the project.
+    /// Use `null` / omit if the repo was added without a subpath (whole-repo).
+    pub subpath: Option<String>,
     /// Instructions to give the agent.
     pub instructions: String,
     /// Describe what information you want the session to return to you when it finishes.
@@ -84,36 +88,40 @@ impl ProjectToolsHandler {
 #[tool_router]
 impl ProjectToolsHandler {
     #[tool(
-        description = "Start an agent session in one of the project's repositories. Waits for completion and returns the outcome along with the output produced by the session. Use the `return_info` field to specify exactly what information you want the session to return to you — e.g. 'a list of all files changed and a summary of what was done'. The session agent will be instructed to produce that output at the end."
+        description = "Start an agent session in one of the project's repositories. Waits for completion and returns the outcome along with the output produced by the session. Use the `return_info` field to specify exactly what information you want the session to return to you — e.g. 'a list of all files changed and a summary of what was done'. The session agent will be instructed to produce that output at the end. The `repo` + `subpath` combination must exactly match an entry already in the project — call will fail immediately otherwise."
     )]
     async fn start_repo_session(
         &self,
         Parameters(p): Parameters<StartRepoSessionParams>,
     ) -> String {
         log::info!(
-            "[project_mcp] start_repo_session called: repo={:?} provider={:?}",
+            "[project_mcp] start_repo_session called: repo={:?} subpath={:?} provider={:?}",
             p.repo,
+            p.subpath,
             p.provider
         );
-        // Find the matching project repo
+        // Find the matching project repo — must match both github_repo and subpath exactly.
         let repos = match self.store.list_project_repos(&self.project_id) {
             Ok(r) => r,
             Err(e) => return format!("Error listing repos: {e}"),
         };
-        let repo = match repos
-            .iter()
-            .find(|r| r.github_repo == p.repo || r.github_repo.ends_with(&format!("/{}", p.repo)))
-        {
+        let repo = match repos.iter().find(|r| {
+            (r.github_repo == p.repo || r.github_repo.ends_with(&format!("/{}", p.repo)))
+                && r.subpath.as_deref() == p.subpath.as_deref()
+        }) {
             Some(r) => r.clone(),
             None => {
                 let available = repos
                     .iter()
-                    .map(|r| r.github_repo.as_str())
+                    .map(|r| match r.subpath.as_deref() {
+                        Some(sp) => format!("{} (subpath: {sp})", r.github_repo),
+                        None => r.github_repo.clone(),
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 return format!(
-                    "Repository '{}' not found in project. Available repos: {}",
-                    p.repo, available
+                    "Repository '{}' with subpath {:?} not found in project. Available repos: {}",
+                    p.repo, p.subpath, available
                 );
             }
         };
@@ -128,9 +136,16 @@ impl ProjectToolsHandler {
             .find(|b| b.project_repo_id.as_deref() == Some(repo.id.as_str()))
             .and_then(|b| b.workspace_name.clone());
 
-        // Determine working directory
+        // Determine working directory — include subpath when the repo was added with one.
         let working_dir = crate::paths::repos_dir()
-            .map(|d| d.join(&repo.github_repo))
+            .map(|d| {
+                let base = d.join(&repo.github_repo);
+                if let Some(ref sp) = repo.subpath {
+                    base.join(sp)
+                } else {
+                    base
+                }
+            })
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
         // Build the prompt, appending return instructions if specified

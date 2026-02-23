@@ -349,7 +349,8 @@ pub async fn start_project_session(
         - start_repo_session: Use this to make changes or run tasks within one of the project's \
         repositories. Pass the repo slug (e.g. \"org/repo\") and clear instructions for what to \
         do there. This tool starts a subagent session and waits for it to complete before \
-        returning the outcome.\n\n\
+        returning the outcome. Do not ask for both a note and a commit in a single start_repo_session \
+        request — choose one outcome per call.\n\n\
         - add_project_repo: Use this when the task requires a repository that isn't yet in the \
         project. Pass the GitHub repo slug to add it.\n\n\
         To discover repositories that might be relevant, use `gh` to explore repos in the user's \

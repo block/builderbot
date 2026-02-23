@@ -261,10 +261,10 @@ pub fn start_session(
 
 /// On startup, cancel any sessions whose owner process is no longer alive.
 ///
-/// Each session records the PID of the staged process that started it
+/// Each session records the PID of the Mark process that started it
 /// (`owner_pid`). On startup we check each running session:
 /// - `owner_pid` is our own PID → shouldn't happen at startup, skip.
-/// - `owner_pid` belongs to a live process → another staged instance owns
+/// - `owner_pid` belongs to a live process → another Mark instance owns
 ///   it; leave it alone.
 /// - `owner_pid` is dead (or NULL for pre-migration rows) → cancel and emit
 ///   `session-status-changed` so the frontend learns the outcome.

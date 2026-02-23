@@ -1078,7 +1078,7 @@ async fn fetch_pr_diff_lines(
         .get(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "staged-app")
+        .header("User-Agent", "mark-app")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await
@@ -1147,7 +1147,7 @@ async fn get_current_user(client: &reqwest::Client, token: &str) -> Result<Strin
         .get("https://api.github.com/user")
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "staged-app")
+        .header("User-Agent", "mark-app")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await
@@ -1183,7 +1183,7 @@ async fn find_pending_review(
         .get(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "staged-app")
+        .header("User-Agent", "mark-app")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await
@@ -1223,7 +1223,7 @@ async fn delete_pending_review(
         .delete(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "staged-app")
+        .header("User-Agent", "mark-app")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await
@@ -1320,7 +1320,7 @@ pub async fn sync_review_to_github(
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "staged-app")
+        .header("User-Agent", "mark-app")
         .header("X-GitHub-Api-Version", "2022-11-28")
         .json(&request)
         .send()
@@ -1729,7 +1729,7 @@ pub async fn update_pull_request(
     let response = client
         .post("https://api.github.com/graphql")
         .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "staged-app")
+        .header("User-Agent", "mark-app")
         .json(&serde_json::json!({ "query": pr_query }))
         .send()
         .await
@@ -1768,7 +1768,7 @@ pub async fn update_pull_request(
     let response = client
         .post("https://api.github.com/graphql")
         .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "staged-app")
+        .header("User-Agent", "mark-app")
         .json(&serde_json::json!({ "query": mutation }))
         .send()
         .await

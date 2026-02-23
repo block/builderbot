@@ -74,11 +74,11 @@ export function selectProjectAndBranch(projectId: string, branchId: string): voi
   }
   if (alreadyOnProject) {
     // Already mounted, scroll immediately.
-    window.dispatchEvent(new CustomEvent('staged:scroll-to-branch', { detail: { branchId } }));
+    window.dispatchEvent(new CustomEvent('mark:scroll-to-branch', { detail: { branchId } }));
   } else {
     // Allow ProjectHome to mount and register its scroll-to-branch listener.
     setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('staged:scroll-to-branch', { detail: { branchId } }));
+      window.dispatchEvent(new CustomEvent('mark:scroll-to-branch', { detail: { branchId } }));
     }, 150);
   }
 }

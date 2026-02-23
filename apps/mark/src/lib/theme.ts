@@ -1,5 +1,5 @@
 /**
- * Adaptive Theme Infrastructure for Staged
+ * Adaptive Theme Infrastructure for Mark
  *
  * The UI chrome colors are derived from the syntax highlighting theme.
  * This ensures a unified look where the sidebar and controls blend

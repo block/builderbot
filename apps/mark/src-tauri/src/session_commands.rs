@@ -757,7 +757,7 @@ fn note_timeline_entries(
         let content = if is_remote {
             format!("### Note: {}\n\n{}", note.title, note.content)
         } else {
-            let note_path = std::env::temp_dir().join(format!("staged-note-{}.md", note.id));
+            let note_path = std::env::temp_dir().join(format!("mark-note-{}.md", note.id));
             if let Err(e) = std::fs::write(&note_path, &note.content) {
                 log::warn!("Failed to write note to temp file: {e}");
                 continue;

@@ -6,8 +6,8 @@
   distinguishing part of the path pop out visually.
 
   Examples:
-    githubRepo="block/staged"              → "block/" muted  + "staged" primary
-    githubRepo="block/staged" subpath="ui" → "block/staged/" muted + "ui" primary
+    githubRepo="block/mark"              → "block/" muted  + "mark" primary
+    githubRepo="block/mark" subpath="ui" → "block/mark/" muted + "ui" primary
 -->
 <script lang="ts">
   interface Props {

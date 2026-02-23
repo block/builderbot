@@ -58,7 +58,7 @@
   <div class="top-bar-actions">
     <button
       class="icon-btn"
-      onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
+      onclick={() => window.dispatchEvent(new CustomEvent('mark:new-project'))}
       title="New project (⌘N)"
     >
       <Plus size={14} />
@@ -74,7 +74,7 @@
 
     <button
       class="icon-btn"
-      onclick={() => window.dispatchEvent(new CustomEvent('staged:open-actions-preferences'))}
+      onclick={() => window.dispatchEvent(new CustomEvent('mark:open-actions-preferences'))}
       title="Actions preferences (;)"
     >
       <SlidersHorizontal size={14} />

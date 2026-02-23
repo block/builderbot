@@ -68,7 +68,7 @@
     checkStoreAndLoad();
 
     const onNewProject = () => handleNewProject();
-    window.addEventListener('staged:new-project', onNewProject);
+    window.addEventListener('mark:new-project', onNewProject);
 
     let unlistenDetection: (() => void) | undefined;
     listenToRepoActionsDetection((event) => {
@@ -124,7 +124,7 @@
     });
 
     return () => {
-      window.removeEventListener('staged:new-project', onNewProject);
+      window.removeEventListener('mark:new-project', onNewProject);
       unlistenDetection?.();
       unlistenPrStatus?.();
       if (kickoffTimer) {
@@ -398,7 +398,7 @@
     projectToDelete = null;
     deletingProjectNames = new Map(deletingProjectNames).set(id, name);
     window.dispatchEvent(
-      new CustomEvent('staged:project-delete-start', {
+      new CustomEvent('mark:project-delete-start', {
         detail: { projectId: id, name },
       })
     );
@@ -426,7 +426,7 @@
       next.delete(id);
       deletingProjectNames = next;
       window.dispatchEvent(
-        new CustomEvent('staged:project-delete-end', {
+        new CustomEvent('mark:project-delete-end', {
           detail: { projectId: id },
         })
       );
@@ -752,8 +752,8 @@
             <span class="version-badge new">v{storeIncompat.appVersion}</span>
           </div>
           <p>
-            Staged beta updates can require backwards-incompatible changes. The info stored by
-            Staged (session history, notes) will be cleared, but your
+            Mark beta updates can require backwards-incompatible changes. The info stored by Mark
+            (session history, notes) will be cleared, but your
             <strong>git repos and branches are not affected</strong>.
           </p>
           <div class="update-footer">
@@ -773,11 +773,11 @@
       <div class="update-state">
         <div class="update-card">
           <div class="update-header">
-            <h1 class="update-title">Update Staged</h1>
+            <h1 class="update-title">Update Mark</h1>
             <span class="version-badge new">v{storeIncompat.dbAppVersion}</span>
           </div>
           <p>
-            This database was last used by a newer version of Staged. Please install
+            This database was last used by a newer version of Mark. Please install
             <strong>v{storeIncompat.dbAppVersion}</strong> or newer to continue.
           </p>
           <div class="update-footer">
@@ -851,7 +851,7 @@
 {#if projectToDelete}
   <ConfirmDialog
     title="Remove Project"
-    message={`Remove "${projectDisplayName(projectToDelete)}" from Staged? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
+    message={`Remove "${projectDisplayName(projectToDelete)}" from Mark? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
     confirmLabel="Remove"
     danger={true}
     onConfirm={confirmDeleteProject}

@@ -1,5 +1,5 @@
 <!--
-  App.svelte — Root shell for Staged
+  App.svelte — Root shell for Mark
 
   Initializes preferences (which loads the syntax theme and applies
   adaptive CSS variables), then renders the top bar and main content.
@@ -84,7 +84,7 @@
     onOpenActionsPreferences = () => {
       showActionsPreferences = true;
     };
-    window.addEventListener('staged:open-actions-preferences', onOpenActionsPreferences);
+    window.addEventListener('mark:open-actions-preferences', onOpenActionsPreferences);
 
     // Listen for the Help → Health Check… menu item.
     unlistenDoctor = await listen('menu:doctor', () => {
@@ -182,7 +182,7 @@
       console.error('Failed to initialize preferences, rendering with defaults:', e);
       preferences.loaded = true;
     }
-    console.debug(`[Staged] preferences ready in ${Math.round(performance.now() - t0)}ms`);
+    console.debug(`[Mark] preferences ready in ${Math.round(performance.now() - t0)}ms`);
 
     // Restore the last viewed project (persistent store is now ready).
     try {
@@ -211,7 +211,7 @@
     document.removeEventListener('keydown', handleKonamiKey);
     document.removeEventListener('keydown', handleGlobalShortcut);
     if (onOpenActionsPreferences) {
-      window.removeEventListener('staged:open-actions-preferences', onOpenActionsPreferences);
+      window.removeEventListener('mark:open-actions-preferences', onOpenActionsPreferences);
       onOpenActionsPreferences = null;
     }
     unlistenDoctor?.();
@@ -246,8 +246,8 @@
             <span class="version-badge new">v{storeIncompat.appVersion}</span>
           </div>
           <p>
-            Staged beta updates can require backwards-incompatible changes. The info stored by
-            Staged (session history, notes) will be cleared, but your
+            Mark beta updates can require backwards-incompatible changes. The info stored by Mark
+            (session history, notes) will be cleared, but your
             <strong>git repos and branches are not affected</strong>.
           </p>
           <div class="update-footer">
@@ -269,11 +269,11 @@
       <div class="update-state">
         <div class="update-card">
           <div class="update-header">
-            <h1 class="update-title">Update Staged</h1>
+            <h1 class="update-title">Update Mark</h1>
             <span class="version-badge new">v{storeIncompat.dbAppVersion}</span>
           </div>
           <p>
-            This database was last used by a newer version of Staged. Please install
+            This database was last used by a newer version of Mark. Please install
             <strong>v{storeIncompat.dbAppVersion}</strong> or newer to continue.
           </p>
           <div class="update-footer">

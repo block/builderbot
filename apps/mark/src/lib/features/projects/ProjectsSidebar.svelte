@@ -20,7 +20,7 @@
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import Spinner from '../../shared/Spinner.svelte';
-  import StagedIcon from '../../shared/StagedIcon.svelte';
+  import MarkIcon from '../../shared/MarkIcon.svelte';
   import { getProjectStatus } from './projectStatus';
   import {
     hydrateProjectsSidebarState,
@@ -58,7 +58,7 @@
   }
 
   function openNewProject() {
-    window.dispatchEvent(new CustomEvent('staged:new-project'));
+    window.dispatchEvent(new CustomEvent('mark:new-project'));
   }
 
   function repoCountForProject(project: Project): number {
@@ -164,8 +164,8 @@
     <div class="sidebar-header">
       <div class="title-row">
         <span class="brand-logo">
-          <StagedIcon size={26} />
-          <span class="brand-text">Staged</span>
+          <MarkIcon size={26} />
+          <span class="brand-text">Mark</span>
         </span>
       </div>
     </div>

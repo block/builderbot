@@ -1,6 +1,6 @@
 //! Agent abstraction layer.
 //!
-//! This module provides adapters between staged's storage layer and the
+//! This module provides adapters between Mark's storage layer and the
 //! acp-client crate's generic interfaces.
 
 pub mod writer;

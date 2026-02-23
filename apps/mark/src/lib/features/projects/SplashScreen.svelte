@@ -10,7 +10,7 @@
   import { X } from 'lucide-svelte';
   import type { Project } from '../../types';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
-  import StagedIcon from '../../shared/StagedIcon.svelte';
+  import MarkIcon from '../../shared/MarkIcon.svelte';
   import NewProjectForm from './NewProjectForm.svelte';
 
   interface Props {
@@ -78,7 +78,7 @@
 
   <div class="splash-center" class:form-open={showForm}>
     <div class="icon-frame" class:collapsed={showForm}>
-      <StagedIcon size={52} />
+      <MarkIcon size={52} />
     </div>
     <h2 class="splash-heading">
       <span class="tagline-collapse" class:collapsed={showForm}>
@@ -88,9 +88,9 @@
           </span>
         </span>
       </span>
-      <span class="staged-line">
+      <span class="mark-line">
         <span class="beautifully-text" class:collapsed={showForm}>beautifully</span><span
-          class="mono accent">staged</span
+          class="mono accent">mark</span
         >
       </span>
     </h2>
@@ -243,7 +243,7 @@
     opacity: 0;
   }
 
-  .staged-line {
+  .mark-line {
     display: flex;
     align-items: baseline;
     justify-content: center;

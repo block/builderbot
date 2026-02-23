@@ -15,6 +15,9 @@ birdseye
 # OS
 .DS_Store
 
+# Test artifacts
+test-results/
+
 # Thoughts and planning
 thoughts/
 

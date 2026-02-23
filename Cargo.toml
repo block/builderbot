@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["staged/src-tauri"]
+exclude = ["apps/mark/src-tauri", "apps/staged/src-tauri"]

@@ -1,0 +1,9 @@
+{
+  "name": "@builderbot/monorepo",
+  "private": true,
+  "packageManager": "pnpm@10.22.0",
+  "scripts": {
+    "fmt": "prettier --write 'apps/*/src/**/*.{ts,svelte,css,html}'",
+    "fmt:check": "prettier --check 'apps/*/src/**/*.{ts,svelte,css,html}'"
+  }
+}

@@ -5,17 +5,12 @@ output:
 
 pre-commit:
   commands:
-    staged-fmt:
-      root: "staged/"
+    fmt:
       run: just fmt
       stage_fixed: true
 
 pre-push:
   parallel: true
   commands:
-    staged-lint:
-      root: "staged/"
-      run: just lint
-    staged-typecheck:
-      root: "staged/"
-      run: just typecheck
+    ci:
+      run: just ci

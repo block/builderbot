@@ -1,0 +1,20 @@
+// Re-export from shared package
+export {
+  buildLineToAlignmentMap,
+  buildBeforeMarkers,
+  buildAfterMarkers,
+  findCommentById,
+  getCommentsForAlignment,
+  getTokensForLine,
+  isLineInChangedAlignment,
+  isLineInIndexedRange,
+  isLineSelected,
+  buildLineCommentEditorLayout,
+  buildLineSelectionToolbarLayout,
+  buildRangeCommentEditorLayout,
+  decideCommentPositionBySpace,
+  measureContentWidth,
+  measureLineHeight,
+  normalizeLineSelection,
+  resolveLineSelectionToolbarLeft,
+} from '@builderbot/diff-viewer/utils';

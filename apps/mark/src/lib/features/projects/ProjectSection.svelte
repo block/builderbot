@@ -12,6 +12,8 @@
   import { projectDisplayName } from '../../shared/utils';
   import { goHome } from '../../navigation.svelte';
   import * as commands from '../../commands';
+  import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
@@ -127,6 +129,8 @@
     try {
       const response = await commands.startProjectSession(project.id, text);
       activeSessionIds = new Set([...activeSessionIds, response.sessionId]);
+      sessionRegistry.register(response.sessionId, project.id, 'other');
+      projectStateStore.addRunningSession(project.id, response.sessionId);
       // Reload notes immediately so the stub appears as "Generating note…"
       await loadProjectNotes();
     } catch (e) {

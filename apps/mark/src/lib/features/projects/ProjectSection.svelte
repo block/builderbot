@@ -118,14 +118,23 @@
 
   // ── Project session input ──────────────────────────────────────────────
   let promptText = $state('');
+  let promptTextarea = $state<HTMLTextAreaElement | null>(null);
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
+
+  function autoResize(el: HTMLTextAreaElement) {
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }
 
   async function handleSubmitPrompt() {
     const text = promptText.trim();
     if (!text) return;
 
     promptText = '';
+    if (promptTextarea) {
+      promptTextarea.style.height = 'auto';
+    }
     try {
       const response = await commands.startProjectSession(project.id, text);
       activeSessionIds = new Set([...activeSessionIds, response.sessionId]);
@@ -297,7 +306,9 @@
         class="prompt-input"
         placeholder="Ask about this project…"
         bind:value={promptText}
+        bind:this={promptTextarea}
         onkeydown={handleKeydown}
+        oninput={(e) => autoResize(e.currentTarget)}
         rows={1}
       ></textarea>
       <button
@@ -589,6 +600,7 @@
     outline: none;
     min-height: 20px;
     max-height: 120px;
+    overflow-y: auto;
   }
 
   .prompt-input::placeholder {

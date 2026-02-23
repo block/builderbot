@@ -15,8 +15,73 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      shared: ${{ steps.filter.outputs.shared }}
+      crates: ${{ steps.filter.outputs.crates }}
+      mark: ${{ steps.filter.outputs.mark }}
+      staged: ${{ steps.filter.outputs.staged }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            shared:
+              - '.github/workflows/**'
+              - 'justfile'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            crates:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            mark:
+              - 'apps/mark/**'
+              - 'packages/**'
+            staged:
+              - 'apps/staged/**'
+
+  crates:
+    name: Crates
+    needs: changes
+    if: needs.changes.outputs.crates == 'true' || needs.changes.outputs.shared == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # Install hermit (manages rust, just)
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+
+      # Cache Cargo dependencies
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  mark:
+    name: Mark
+    needs: changes
+    if: needs.changes.outputs.mark == 'true' || needs.changes.outputs.crates == 'true' || needs.changes.outputs.shared == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -29,8 +94,10 @@ jobs:
       # Enable pnpm via corepack (version from packageManager in package.json)
       - run: corepack enable pnpm
 
-      # Cache Cargo dependencies
+      # Cache Cargo dependencies for Mark Tauri app
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          workspaces: apps/mark/src-tauri
 
       # Install system dependencies for Tauri (Linux)
       - name: Install Tauri dependencies (Linux)
@@ -42,10 +109,68 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      # Install workspace JS dependencies once for all apps/packages
+      # Install workspace JS dependencies once for app checks
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # Run full repo checks (crates + all app ci recipes)
-      - name: Run checks
-        run: just check
+      - name: Run Mark checks
+        run: just -f apps/mark/justfile ci
+
+  staged:
+    name: Staged
+    needs: changes
+    if: needs.changes.outputs.staged == 'true' || needs.changes.outputs.crates == 'true' || needs.changes.outputs.shared == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # Install hermit (manages node, rust, just)
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+
+      # Enable pnpm via corepack (version from packageManager in package.json)
+      - run: corepack enable pnpm
+
+      # Cache Cargo dependencies for Staged Tauri app
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          workspaces: apps/staged/src-tauri
+
+      # Install system dependencies for Tauri (Linux)
+      - name: Install Tauri dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      # Install workspace JS dependencies once for app checks
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Staged checks
+        run: just -f apps/staged/justfile ci
+
+  ci:
+    name: CI
+    needs: [changes, crates, mark, staged]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Verify job outcomes
+        run: |
+          echo "crates=${{ needs.crates.result }}"
+          echo "mark=${{ needs.mark.result }}"
+          echo "staged=${{ needs.staged.result }}"
+
+          for result in "${{ needs.crates.result }}" "${{ needs.mark.result }}" "${{ needs.staged.result }}"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "CI failed because a required job did not succeed."
+              exit 1
+            fi
+          done

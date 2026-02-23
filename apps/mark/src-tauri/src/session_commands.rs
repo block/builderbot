@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
+use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{self, AcpProviderInfo};
 use crate::blox;
 use crate::git;
@@ -156,6 +157,8 @@ pub fn start_session(
             workspace_name: None,
             extra_env: vec![],
             mcp_project_id: None,
+            action_executor: None,
+            action_registry: None,
         },
         store,
         app_handle,
@@ -222,6 +225,8 @@ pub fn resume_session(
             workspace_name: None,
             extra_env: vec![],
             mcp_project_id: None,
+            action_executor: None,
+            action_registry: None,
         },
         store,
         app_handle,
@@ -313,6 +318,8 @@ pub struct ProjectSessionResponse {
 pub async fn start_project_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    action_executor: tauri::State<'_, Arc<ActionExecutor>>,
+    action_registry: tauri::State<'_, Arc<ActionRegistry>>,
     app_handle: tauri::AppHandle,
     project_id: String,
     prompt: String,
@@ -360,8 +367,9 @@ pub async fn start_project_session(
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    // Always create a project note stub
-    let note = store::ProjectNote::new(&project_id, &prompt, "").with_session(&session.id);
+    // Always create a project note stub with empty title and content so that the
+    // frontend can detect it as "generating" via the !title && !content check.
+    let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);
     store
         .create_project_note(&note)
         .map_err(|e| e.to_string())?;
@@ -378,6 +386,8 @@ pub async fn start_project_session(
             workspace_name: None,
             extra_env: vec![],
             mcp_project_id: Some(project_id.clone()),
+            action_executor: Some(Arc::clone(&action_executor)),
+            action_registry: Some(Arc::clone(&action_registry)),
         },
         store,
         app_handle,
@@ -565,6 +575,8 @@ pub async fn start_branch_session(
             workspace_name: branch.workspace_name.clone(),
             extra_env: vec![],
             mcp_project_id: None,
+            action_executor: None,
+            action_registry: None,
         },
         store,
         app_handle,

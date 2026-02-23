@@ -90,6 +90,36 @@
       unlistenDetection = unlisten;
     });
 
+    // Listen for project repo additions triggered by MCP tools
+    let unlistenProjectRepoAdded: UnlistenFn | undefined;
+    listen<string>('project-repo-added', async (event) => {
+      const projectId = event.payload;
+      console.log('[ProjectHome] project-repo-added event for project', projectId);
+      try {
+        const [projectsList, branches, repos] = await Promise.all([
+          commands.listProjects(),
+          commands.listBranchesForProject(projectId),
+          commands.listProjectRepos(projectId),
+        ]);
+        projects = projectsList;
+        branchesByProject = new Map(branchesByProject).set(projectId, branches);
+        repoLabelsByProject = new Map(repoLabelsByProject).set(
+          projectId,
+          new Map(
+            repos.map(
+              (repo) =>
+                [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
+            )
+          )
+        );
+        startInitialBranchSetup(projectId, branches);
+      } catch (e) {
+        console.error('[ProjectHome] Failed to refresh project after repo added:', e);
+      }
+    }).then((unlisten) => {
+      unlistenProjectRepoAdded = unlisten;
+    });
+
     // Listen for PR status changes to update branch state
     let unlistenPrStatus: UnlistenFn | undefined;
     listen<{
@@ -126,6 +156,7 @@
     return () => {
       window.removeEventListener('mark:new-project', onNewProject);
       unlistenDetection?.();
+      unlistenProjectRepoAdded?.();
       unlistenPrStatus?.();
       if (kickoffTimer) {
         clearTimeout(kickoffTimer);

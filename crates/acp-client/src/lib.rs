@@ -37,6 +37,7 @@ mod simple;
 mod types;
 
 // Re-export the main API
+pub use agent_client_protocol::{McpServer, McpServerHttp, McpServerSse};
 pub use driver::{AcpDriver, AgentDriver, BasicMessageWriter, MessageWriter, Store};
 pub use simple::run_acp_prompt;
 pub use types::{

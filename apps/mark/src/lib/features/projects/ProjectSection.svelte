@@ -199,11 +199,18 @@
 
     let unlistenSession: (() => void) | undefined;
     listen<{ sessionId: string; status: string }>('session-status-changed', (event) => {
-      if (activeSessionIds.has(event.payload.sessionId)) {
-        if (event.payload.status === 'completed' || event.payload.status === 'failed') {
-          const next = new Set(activeSessionIds);
-          next.delete(event.payload.sessionId);
-          activeSessionIds = next;
+      const { sessionId, status } = event.payload;
+      const isTracked = activeSessionIds.has(sessionId);
+      // Also reload if this session belongs to a known project note (handles
+      // sessions that were already running when the component mounted).
+      const isKnownNoteSession = projectNotes.some((n) => n.sessionId === sessionId);
+      if (isTracked || isKnownNoteSession) {
+        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+          if (isTracked) {
+            const next = new Set(activeSessionIds);
+            next.delete(sessionId);
+            activeSessionIds = next;
+          }
           // Refresh notes after session completes
           loadProjectNotes();
         }
@@ -306,15 +313,21 @@
       </div>
       <div class="notes-timeline">
         {#each timelineNotes as note, index (note.id)}
-          {@const isGenerating = !note.title.trim() && !note.content.trim()}
+          {@const isRunning = !note.title.trim() && !note.content.trim()}
+          {@const isFailed = !isRunning && !!note.sessionId && !note.content.trim()}
+          {@const noteType = isRunning ? 'generating-note' : isFailed ? 'failed-note' : 'note'}
           <TimelineRow
-            type={isGenerating ? 'generating-note' : 'note'}
-            title={isGenerating ? 'Generating note…' : note.title || 'Untitled note'}
-            secondaryMeta={isGenerating ? undefined : formatRelativeTime(note.createdAt)}
+            type={noteType}
+            title={isRunning
+              ? 'Generating note…'
+              : isFailed
+                ? 'Session finished — no note created'
+                : note.title || 'Untitled note'}
+            secondaryMeta={isRunning || isFailed ? undefined : formatRelativeTime(note.createdAt)}
             deleting={deletingNoteIds.has(note.id)}
             isLast={index === timelineNotes.length - 1}
             sessionId={note.sessionId ?? undefined}
-            onItemClick={isGenerating
+            onItemClick={isRunning || isFailed
               ? undefined
               : () => {
                   openNote = { title: note.title, content: note.content };

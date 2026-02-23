@@ -31,7 +31,7 @@ struct DetectingActionsEvent {
     detecting: bool,
 }
 
-async fn detect_actions_for_repo_context(
+pub(crate) async fn detect_actions_for_repo_context(
     github_repo: &str,
     subpath: Option<&str>,
 ) -> Result<Vec<SuggestedAction>, String> {

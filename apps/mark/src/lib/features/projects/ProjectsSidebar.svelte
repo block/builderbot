@@ -3,9 +3,9 @@
   import { quintIn } from 'svelte/easing';
   import { fade } from 'svelte/transition';
   import {
-    FolderGit2,
     House,
     Plus,
+    Cloud,
     GitPullRequest,
     GitPullRequestClosed,
     GitPullRequestDraft,
@@ -208,7 +208,9 @@
                 title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
               >
                 <div class="row-main">
-                  {#if prStatus === 'merged'}
+                  {#if project.location === 'remote'}
+                    <Cloud size={14} class="project-location-remote" />
+                  {:else if prStatus === 'merged'}
                     <GitPullRequest size={14} class="pr-status-merged" />
                   {:else if prStatus === 'checks_failing'}
                     <GitPullRequest size={14} class="pr-status-checks-failing" />
@@ -446,6 +448,10 @@
 
   .row-main :global(svg.pr-status-draft) {
     stroke: var(--text-faint);
+  }
+
+  .row-main :global(svg.project-location-remote) {
+    stroke: var(--ui-accent);
   }
 
   .row-text {

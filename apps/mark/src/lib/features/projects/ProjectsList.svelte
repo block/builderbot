@@ -7,7 +7,13 @@
   import { onMount } from 'svelte';
   import { fade } from 'svelte/transition';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import { GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Plus } from 'lucide-svelte';
+  import {
+    Cloud,
+    GitPullRequest,
+    GitPullRequestClosed,
+    GitPullRequestDraft,
+    Plus,
+  } from 'lucide-svelte';
   import type { Project, ProjectRepo, Branch } from '../../types';
   import * as commands from '../../commands';
   import {
@@ -319,7 +325,9 @@
                   ></div>
                 {/if}
                 <div class="card-header">
-                  {#if prStatus === 'merged'}
+                  {#if project.location === 'remote'}
+                    <Cloud size={16} class="project-location-remote" />
+                  {:else if prStatus === 'merged'}
                     <GitPullRequest size={16} class="pr-status-merged" />
                   {:else if prStatus === 'checks_failing'}
                     <GitPullRequest size={16} class="pr-status-checks-failing" />
@@ -528,6 +536,10 @@
 
   .card-header :global(svg.pr-status-draft) {
     stroke: var(--text-muted);
+  }
+
+  .card-header :global(svg.project-location-remote) {
+    stroke: var(--ui-accent);
   }
 
   .repo {

@@ -580,6 +580,18 @@ pub fn prune_remote_for_repo(_github_repo: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+fn remove_stale_clone_dir(clone_path: &Path) -> Result<(), GitError> {
+    if !clone_path.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(clone_path).map_err(|e| {
+        GitError::CommandFailed(format!(
+            "Failed to clear stale clone directory '{}': {e}",
+            clone_path.display()
+        ))
+    })
+}
+
 /// Ensure a local clone exists at `<repos_dir>/<owner>/<repo>/`.
 ///
 /// If the directory already exists, runs `git fetch origin` to update.
@@ -607,14 +619,7 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
     }
 
     // If a previous clone attempt failed, clear the stale directory so clone can retry.
-    if clone_path.exists() {
-        std::fs::remove_dir_all(&clone_path).map_err(|e| {
-            GitError::CommandFailed(format!(
-                "Failed to clear stale clone directory '{}': {e}",
-                clone_path.display()
-            ))
-        })?;
-    }
+    remove_stale_clone_dir(&clone_path)?;
 
     // Create parent directory
     if let Some(parent) = clone_path.parent() {
@@ -657,6 +662,15 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
             "gh repo clone failed for '{}', retrying with direct HTTPS git clone",
             github_repo
         );
+        // `gh repo clone` can leave a non-empty directory behind even on
+        // failure. Clear it before falling back to `git clone` so we don't
+        // fail with "destination path ... already exists".
+        remove_stale_clone_dir(&clone_path)?;
+        if let Some(parent) = clone_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                GitError::CommandFailed(format!("Failed to create clone directory: {e}"))
+            })?;
+        }
         super::cli::run(
             clone_path.parent().unwrap_or(Path::new("/")),
             &["clone", &https_url, &clone_str],

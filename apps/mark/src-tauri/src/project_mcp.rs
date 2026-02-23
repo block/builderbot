@@ -39,6 +39,11 @@ struct AddProjectRepoParams {
     pub github_repo: String,
     /// Optional branch name (defaults to project's inferred name).
     pub branch_name: Option<String>,
+    /// Subpath to the specific service or project within the repository.
+    /// Required for monorepos — you must provide the path to the root of the
+    /// relevant service or package (e.g. "packages/api" or "services/auth").
+    /// If omitted for a regular repo, the whole repository is used.
+    pub subpath: Option<String>,
     /// Reason this repository is being added to the project. Shown to the user
     /// in the branch card timeline so they understand why it was added.
     pub reason: Option<String>,
@@ -210,17 +215,51 @@ impl ProjectToolsHandler {
     )]
     async fn add_project_repo(&self, Parameters(p): Parameters<AddProjectRepoParams>) -> String {
         log::info!(
-            "[project_mcp] add_project_repo called: github_repo={:?} branch_name={:?}",
+            "[project_mcp] add_project_repo called: github_repo={:?} branch_name={:?} subpath={:?}",
             p.github_repo,
-            p.branch_name
+            p.branch_name,
+            p.subpath,
         );
+
+        // If no subpath was provided, check whether the repo is a monorepo.
+        // Monorepos require a subpath to identify which service/package to use.
+        if p.subpath.is_none() {
+            let repo_slug = p.github_repo.clone();
+            let monorepo_result = tauri::async_runtime::spawn_blocking(move || {
+                crate::git::check_monorepo_modules(&repo_slug)
+            })
+            .await;
+
+            match monorepo_result {
+                Ok(Ok(score)) if score >= 20 => {
+                    return format!(
+                        "Error: '{}' appears to be a monorepo (score: {}). \
+                         You must provide a `subpath` pointing to the root of the specific \
+                         service or package you want to add (e.g. \"packages/api\" or \
+                         \"services/auth\"). Re-call this tool with the appropriate subpath.",
+                        p.github_repo, score
+                    );
+                }
+                Ok(Err(e)) => {
+                    log::warn!(
+                        "[project_mcp] monorepo check failed for {}: {e}",
+                        p.github_repo
+                    );
+                }
+                Err(e) => {
+                    log::warn!("[project_mcp] monorepo check task panicked: {e}");
+                }
+                Ok(Ok(_)) => {} // score < 20, not a monorepo
+            }
+        }
+
         let github_repo = p.github_repo.clone();
         let repo = match crate::project_commands::add_project_repo_impl(
             Arc::clone(&self.store),
             self.project_id.clone(),
             p.github_repo,
             p.branch_name,
-            None,
+            p.subpath,
             None,
             p.reason,
         )

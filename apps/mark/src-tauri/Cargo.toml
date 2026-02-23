@@ -34,7 +34,7 @@ tauri-plugin-dialog = "2.6.0"
 # Review storage
 rusqlite = { version = "0.38", features = ["bundled"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
-dirs = "5.0"
+dirs = "6.0"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-window-state = "2.4.1"
 reqwest = { version = "0.13.1", features = ["json"] }

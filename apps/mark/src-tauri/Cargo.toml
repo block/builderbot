@@ -48,7 +48,7 @@ git-diff = { path = "../../../crates/git-diff" }
 builderbot-actions = { path = "../../../crates/builderbot-actions" }
 acp-client = { path = "../../../crates/acp-client" }
 blox-cli = { path = "../../../crates/blox-cli" }
-which = "7.0"
+which = "8.0"
 
 async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["compat"] }

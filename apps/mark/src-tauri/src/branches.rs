@@ -255,6 +255,17 @@ fn normalize_branch_ref(branch: &str) -> String {
     branch.strip_prefix("origin/").unwrap_or(branch).to_string()
 }
 
+fn is_blox_onboarding_precondition_error(err: &blox::BloxError) -> bool {
+    match err {
+        blox::BloxError::CommandFailed(stderr) => {
+            let lower = stderr.to_ascii_lowercase();
+            lower.contains("failed_precondition")
+                && (lower.contains("onboard") || lower.contains("has not completed onboarding"))
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn cleanup_branch_resources(
     store: &Arc<Store>,
     branch: &store::Branch,
@@ -826,6 +837,15 @@ pub async fn start_workspace(
             Err("Not authenticated with Blox. Run: sq login".to_string())
         }
         Err(e) => {
+            if is_blox_onboarding_precondition_error(&e) {
+                // Blox onboarding precondition failures are definitive.
+                // Keep the exact CLI error text so the user sees the
+                // onboarding URL and required action.
+                store
+                    .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
+                    .ok();
+                return Err(e.to_string());
+            }
             // Don't set Error status here — `blox ws start` can fail (e.g.
             // timeout, transient network issue) even though the workspace was
             // created and is still booting. Let the frontend's status polling

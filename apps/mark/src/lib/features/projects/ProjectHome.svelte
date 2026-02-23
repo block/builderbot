@@ -52,6 +52,8 @@
 
   // Worktree setup errors — maps branch ID → error message
   let worktreeErrors = $state<Map<string, string>>(new Map());
+  // Remote workspace startup errors — maps branch ID → error message
+  let workspaceErrors = $state<Map<string, string>>(new Map());
   let pendingSetupBranches = $state<Set<string>>(new Set());
   let queuedSetupBranches = $state<Set<string>>(new Set());
   let activeSetupCount = 0;
@@ -321,6 +323,10 @@
     showNewProjectModal = true;
   }
 
+  function errorMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
   async function handleProjectCreated(project: Project) {
     if (!projects.some((p) => p.id === project.id)) {
       projects = [...projects, project];
@@ -496,6 +502,12 @@
     if (!changed) return;
 
     branchesByProject = new Map(branchesByProject).set(projectId, nextBranches);
+
+    if (workspaceStatus !== 'error' && workspaceErrors.has(branchId)) {
+      const nextWorkspaceErrors = new Map(workspaceErrors);
+      nextWorkspaceErrors.delete(branchId);
+      workspaceErrors = nextWorkspaceErrors;
+    }
   }
 
   function startInitialBranchSetup(projectId: string, branches: Branch[]) {
@@ -548,10 +560,22 @@
         branchId,
         run: async () => {
           pendingSetupBranches = new Set([...pendingSetupBranches, branchId]);
+          const nextWorkspaceErrors = new Map(workspaceErrors);
+          nextWorkspaceErrors.delete(branchId);
+          workspaceErrors = nextWorkspaceErrors;
           try {
             await commands.startWorkspace(branchId);
           } catch (e) {
             console.error('[ProjectHome] Failed to start workspace:', e);
+            const message = errorMessage(e);
+            workspaceErrors = new Map(workspaceErrors).set(branchId, message);
+            handleWorkspaceStatusChange(projectId, branchId, 'error');
+            alerts.show({
+              tone: 'error',
+              title: 'Unable to start workspace',
+              message,
+              durationMs: 0,
+            });
           } finally {
             const next = new Set(pendingSetupBranches);
             next.delete(branchId);
@@ -671,6 +695,11 @@
       const next = new Set(deletingBranches);
       next.delete(branch.id);
       deletingBranches = next;
+      if (workspaceErrors.has(branch.id)) {
+        const nextWorkspaceErrors = new Map(workspaceErrors);
+        nextWorkspaceErrors.delete(branch.id);
+        workspaceErrors = nextWorkspaceErrors;
+      }
     }
   }
 
@@ -782,6 +811,7 @@
             safeToDelete={safeToDeleteProjects.has(project.id)}
             {deletingBranches}
             {worktreeErrors}
+            {workspaceErrors}
             detecting={detectingProjectIds.has(project.id)}
             onDeleteProject={() => handleDeleteProjectRequest(project)}
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}

@@ -594,8 +594,10 @@ fn remove_stale_clone_dir(clone_path: &Path) -> Result<(), GitError> {
 
 /// Ensure a local clone exists at `<repos_dir>/<owner>/<repo>/`.
 ///
-/// If the directory already exists, runs `git fetch origin` to update.
-/// If not, clones the repo. Returns the path to the local clone.
+/// If the directory already exists, returns the path immediately without
+/// fetching. Callers that need fresh refs should call [`fetch_for_worktree`]
+/// afterwards. If not cloned yet, clones the repo. Returns the path to the
+/// local clone.
 pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitError> {
     let repos = crate::paths::repos_dir()
         .ok_or_else(|| GitError::CommandFailed("Cannot determine data directory".to_string()))?;
@@ -604,17 +606,6 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
     let https_url = format!("https://github.com/{github_repo}.git");
 
     if clone_path.join(".git").exists() {
-        // Already cloned — fetch latest. If origin is SSH and auth fails,
-        // switch to HTTPS and retry.
-        if let Err(fetch_err) = super::cli::run(&clone_path, &["fetch", "origin"]) {
-            log::warn!(
-                "fetch origin failed for '{}': {}. Retrying with HTTPS origin.",
-                github_repo,
-                fetch_err
-            );
-            super::cli::run(&clone_path, &["remote", "set-url", "origin", &https_url])?;
-            super::cli::run(&clone_path, &["fetch", "origin"])?;
-        }
         return Ok(clone_path);
     }
 
@@ -678,6 +669,70 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
     }
 
     Ok(clone_path)
+}
+
+/// Fetch only the refs needed for worktree creation.
+///
+/// Fetches `base_branch` (always required, always present on the remote) and
+/// does a best-effort fetch of `branch_name` (which may not exist on the
+/// remote yet for newly-created branches). This is far cheaper than
+/// `git fetch origin` and avoids the ref-lock races that occur when hundreds
+/// of remote-tracking refs are updated simultaneously in a shared clone.
+///
+/// If `base_branch` cannot be fetched due to an SSH auth failure the origin
+/// URL is switched to HTTPS and the fetch is retried once.
+pub fn fetch_for_worktree(
+    repo_path: &std::path::Path,
+    github_repo: &str,
+    branch_name: &str,
+    base_branch: &str,
+) -> Result<(), GitError> {
+    let https_url = format!("https://github.com/{github_repo}.git");
+
+    // Fetch the base branch — always needed, always exists on the remote.
+    if let Err(e) = super::cli::run(repo_path, &["fetch", "origin", base_branch]) {
+        let err_str = e.to_string();
+        if is_fetch_auth_failure(&err_str) {
+            log::warn!(
+                "fetch origin {} failed for '{}': {}. Retrying with HTTPS origin.",
+                base_branch,
+                github_repo,
+                e
+            );
+            super::cli::run(repo_path, &["remote", "set-url", "origin", &https_url])?;
+            super::cli::run(repo_path, &["fetch", "origin", base_branch])?;
+        } else {
+            return Err(e);
+        }
+    }
+
+    // Best-effort fetch of the branch itself — it may not exist on the remote
+    // yet for new local branches.
+    if branch_name != base_branch {
+        if let Err(e) = super::cli::run(repo_path, &["fetch", "origin", branch_name]) {
+            let err_str = e.to_string();
+            if !err_str.contains("couldn't find remote ref") {
+                log::warn!(
+                    "fetch origin {} for '{}' failed (non-fatal): {}",
+                    branch_name,
+                    github_repo,
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn is_fetch_auth_failure(err: &str) -> bool {
+    err.contains("Authentication failed")
+        || err.contains("authentication failed")
+        || err.contains("Permission denied")
+        || err.contains("could not read Username")
+        || err.contains("could not read Password")
+        || err.contains("repository not found")
+        || err.contains("fatal: unable to access")
 }
 
 // =============================================================================

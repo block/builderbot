@@ -484,9 +484,16 @@ pub async fn setup_worktree(
         return Ok(to_branch_with_workdir(branch, Some(existing.path)));
     }
 
-    // Ensure we have a local clone (clones on first use, fetches on subsequent)
+    // Ensure we have a local clone, then fetch the specific refs we need.
     let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
     let repo_path = git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
+    git::fetch_for_worktree(
+        &repo_path,
+        &repo_slug,
+        &branch.branch_name,
+        &branch.base_branch,
+    )
+    .map_err(|e| e.to_string())?;
     let desired_worktree_path =
         git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;

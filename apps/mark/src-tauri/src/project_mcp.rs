@@ -643,6 +643,13 @@ fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result<String, St
     // Resolve the repo slug for this branch
     let repo_slug = crate::branches::resolve_branch_repo_slug(store, &project, &branch)?;
     let repo_path = crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
+    crate::git::fetch_for_worktree(
+        &repo_path,
+        &repo_slug,
+        &branch.branch_name,
+        &branch.base_branch,
+    )
+    .map_err(|e| e.to_string())?;
     let desired_worktree_path =
         crate::git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;

@@ -211,6 +211,9 @@ pub fn resume_session(
             session_id: session_id.clone(),
             status: "running".to_string(),
             error_message: None,
+            branch_id: None,
+            project_id: None,
+            session_type: None,
         },
     );
 
@@ -256,6 +259,9 @@ pub fn cancel_session(
                         session_id: session_id.clone(),
                         status: "cancelled".to_string(),
                         error_message: None,
+                        branch_id: None,
+                        project_id: None,
+                        session_type: None,
                     },
                 );
             }

@@ -59,6 +59,11 @@ pub struct SessionStatusEvent {
     pub session_id: String,
     pub status: String,
     pub error_message: Option<String>,
+    /// Set on `"running"` events emitted when an MCP tool starts a repo session,
+    /// so the frontend can register the session and refresh the branch timeline.
+    pub branch_id: Option<String>,
+    pub project_id: Option<String>,
+    pub session_type: Option<String>,
 }
 
 // =============================================================================
@@ -680,9 +685,36 @@ fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Op
         session_id: session_id.to_string(),
         status: status.to_string(),
         error_message: error,
+        branch_id: None,
+        project_id: None,
+        session_type: None,
     };
     if let Err(e) = app_handle.emit("session-status-changed", &event) {
         log::warn!("Failed to emit session-status-changed: {e}");
+    }
+}
+
+/// Emit a `session-status-changed` event with `"running"` status and branch/project
+/// context. Called by the MCP tool when it starts a repo session on behalf of a project
+/// session, so the frontend can register the session in its state stores and refresh
+/// the branch card timeline immediately (without waiting for completion).
+pub fn emit_session_running(
+    app_handle: &AppHandle,
+    session_id: &str,
+    branch_id: &str,
+    project_id: &str,
+    session_type: &str,
+) {
+    let event = SessionStatusEvent {
+        session_id: session_id.to_string(),
+        status: "running".to_string(),
+        error_message: None,
+        branch_id: Some(branch_id.to_string()),
+        project_id: Some(project_id.to_string()),
+        session_type: Some(session_type.to_string()),
+    };
+    if let Err(e) = app_handle.emit("session-status-changed", &event) {
+        log::warn!("Failed to emit session-status-changed (running): {e}");
     }
 }
 

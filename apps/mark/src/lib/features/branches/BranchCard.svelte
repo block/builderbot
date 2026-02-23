@@ -269,8 +269,9 @@
     listen<{
       sessionId: string;
       status: string;
+      branchId?: string;
     }>('session-status-changed', (event) => {
-      const { sessionId: eventSessionId, status } = event.payload;
+      const { sessionId: eventSessionId, status, branchId: eventBranchId } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         loadTimeline();
         // Handle PR session completion
@@ -281,6 +282,10 @@
         if (eventSessionId === pushSessionId) {
           handlePushSessionComplete(status);
         }
+      } else if (status === 'running' && eventBranchId === branchId) {
+        // An MCP-initiated session just started in this branch — refresh the
+        // timeline so the pending note/commit stub appears immediately.
+        loadTimeline();
       }
     }).then((unlisten) => {
       unlistenStatus = unlisten;

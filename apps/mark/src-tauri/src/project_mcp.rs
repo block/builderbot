@@ -301,6 +301,26 @@ impl ProjectToolsHandler {
             return format!("Error starting session: {e}");
         }
 
+        // Notify the frontend that a new session is running in this branch so it
+        // can register the session in its state stores and refresh the branch card
+        // timeline immediately (same pattern as `project-repo-added`).
+        if let Some(ref bid) = branch_id {
+            let session_type = match expected_outcome {
+                RepoSessionOutcome::NoteInRepo => Some("note"),
+                RepoSessionOutcome::Commit => Some("commit"),
+                RepoSessionOutcome::ReturnOutputOnly => None,
+            };
+            if let Some(stype) = session_type {
+                crate::session_runner::emit_session_running(
+                    &self.app_handle,
+                    &session_id,
+                    bid,
+                    &self.project_id,
+                    stype,
+                );
+            }
+        }
+
         // Poll until the session reaches a terminal state.
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;

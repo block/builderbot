@@ -2,8 +2,7 @@
   GitHubRepoPicker.svelte - Embeddable GitHub repo picker (no modal chrome)
 
   Standalone search + list for picking a GitHub repository.
-  Used inline inside NewProjectForm (with spring slide) and wrapped
-  by GitHubRepoPickerModal for standalone overlay usage.
+  Used inline inside NewProjectForm.
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';

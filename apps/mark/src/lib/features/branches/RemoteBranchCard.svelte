@@ -49,6 +49,7 @@
     branch: Branch;
     repoLabel?: { githubRepo: string; subpath: string | null } | null;
     deleting?: boolean;
+    workspaceError?: string;
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
     onWorkspaceStatusChange?: (status: WorkspaceStatus) => void;
@@ -58,6 +59,7 @@
     branch,
     repoLabel = null,
     deleting = false,
+    workspaceError = undefined,
     onDelete,
     onRename,
     onWorkspaceStatusChange,
@@ -85,6 +87,12 @@
 
   // Error state
   let error = $state<string | null>(null);
+
+  $effect(() => {
+    if (workspaceError && workspaceError !== error) {
+      error = workspaceError;
+    }
+  });
 
   // Timeline state
   let timeline = $state<BranchTimelineData | null>(null);
@@ -207,6 +215,7 @@
         polledStatus = newStatus;
         onWorkspaceStatusChange?.(newStatus);
         if (newStatus === 'running') {
+          error = null;
           longProvisioning = false;
           stopPolling();
           loadTimeline();
@@ -230,10 +239,9 @@
         }
 
         // During initial creation, `blox ws start` may still be running
-        // when the first poll fires. The backend tolerates this when the
-        // DB status is Starting, but as a safety net we also keep polling
-        // on the frontend side if our local status is still 'starting'.
-        if (status === 'starting') {
+        // when the first poll fires and `blox ws info` can report
+        // "workspace not found". Keep polling for those expected transients.
+        if (status === 'starting' && isTransientStartupPollError(msg)) {
           console.debug('Poll failed while starting (workspace may not exist yet), retrying…', e);
         } else {
           console.error('Failed to poll workspace status:', e);
@@ -254,6 +262,17 @@
       lower.includes('not authenticated') ||
       lower.includes('not logged in') ||
       lower.includes('sq login')
+    );
+  }
+
+  function isTransientStartupPollError(msg: string): boolean {
+    const lower = msg.toLowerCase();
+    return (
+      lower.includes('not found') ||
+      lower.includes('does not exist') ||
+      lower.includes('no such') ||
+      lower.includes('starting') ||
+      lower.includes('provisioning')
     );
   }
 

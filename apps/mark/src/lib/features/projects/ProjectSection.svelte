@@ -23,6 +23,7 @@
     safeToDelete?: boolean;
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
+    workspaceErrors?: Map<string, string>;
     detecting?: boolean;
     excludeRepos?: Set<string>;
     onDeleteProject?: () => void;
@@ -43,6 +44,7 @@
     safeToDelete = false,
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
+    workspaceErrors = new Map(),
     detecting = false,
     excludeRepos,
     onDeleteProject,
@@ -167,6 +169,7 @@
           {branch}
           repoLabel={repoLabelForBranch(branch)}
           deleting={deletingBranches.has(branch.id)}
+          workspaceError={workspaceErrors.get(branch.id)}
           onDelete={() => onDeleteBranch?.(branch.id)}
           onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
           onWorkspaceStatusChange={(status) => onWorkspaceStatusChange?.(branch.id, status)}

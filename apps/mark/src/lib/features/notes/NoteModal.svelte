@@ -8,6 +8,7 @@
   import { X, Copy, Check } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
+  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { handleExternalLinkClick } from '../../commands';
 
   marked.setOptions({ breaks: true, gfm: true });
@@ -21,6 +22,7 @@
   let { title, content, onClose }: Props = $props();
 
   let copied = $state(false);
+  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
 
   function renderMarkdown(text: string): string {
     return sanitize(marked.parse(text) as string);
@@ -43,12 +45,6 @@
       onClose();
     }
   }
-
-  function handleBackdropClick(e: MouseEvent) {
-    if (e.target === e.currentTarget) {
-      onClose();
-    }
-  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -59,7 +55,8 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onclick={handleBackdropClick}
+  onpointerdown={backdropDismiss.handlePointerDown}
+  onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && onClose()}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->

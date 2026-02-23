@@ -6,6 +6,7 @@
 <script lang="ts">
   import { X } from 'lucide-svelte';
   import type { Project } from '../../types';
+  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import NewProjectForm from './NewProjectForm.svelte';
 
   interface Props {
@@ -14,16 +15,11 @@
   }
 
   let { onCreated, onClose }: Props = $props();
+  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
-      onClose();
-    }
-  }
-
-  function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget) {
       onClose();
     }
   }
@@ -37,7 +33,8 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onclick={handleBackdropClick}
+  onpointerdown={backdropDismiss.handlePointerDown}
+  onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && onClose()}
 >
   <div class="modal">

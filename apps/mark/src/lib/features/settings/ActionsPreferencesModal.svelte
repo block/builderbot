@@ -16,6 +16,7 @@
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import type { ActionContext, ProjectAction } from '../../commands';
   import * as commands from '../../commands';
   import { detectRepoActions, type SuggestedAction, type ActionType } from '../actions/actions';
@@ -233,6 +234,10 @@
       return aDisplay.localeCompare(bDisplay);
     });
   });
+  const backdropDismiss = createBackdropDismissHandlers({
+    onDismiss: () => onClose(),
+    canDismiss: () => !editingAction,
+  });
 
   let groupedActions = $derived.by(() => {
     const groups: Record<string, ProjectAction[]> = {
@@ -257,12 +262,6 @@
       event.preventDefault();
     }
   }
-
-  function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget && !editingAction) {
-      onClose();
-    }
-  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -272,7 +271,8 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onclick={handleBackdropClick}
+  onpointerdown={backdropDismiss.handlePointerDown}
+  onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && !editingAction && onClose()}
 >
   <div class="modal">

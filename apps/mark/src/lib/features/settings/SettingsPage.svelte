@@ -18,7 +18,6 @@
     </button>
     <div class="header-text">
       <h1>Settings</h1>
-      <p>Manage workspace preferences and action automation.</p>
     </div>
   </header>
 
@@ -59,20 +58,27 @@
   }
 
   .back-btn {
-    border: 1px solid var(--border-muted);
+    border: 1px solid transparent;
     border-radius: 8px;
-    background: var(--bg-primary);
-    color: var(--text-primary);
+    background: transparent;
+    color: var(--text-muted);
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px;
+    padding: 6px 9px;
     cursor: pointer;
     flex-shrink: 0;
+    font-size: var(--size-sm);
+    transition:
+      color 0.12s ease,
+      background-color 0.12s ease,
+      border-color 0.12s ease;
   }
 
   .back-btn:hover {
+    color: var(--text-primary);
     background: var(--bg-hover);
+    border-color: color-mix(in srgb, var(--border-subtle) 60%, transparent);
   }
 
   .header-text {
@@ -83,12 +89,6 @@
     margin: 0;
     font-size: calc(var(--size-xl) * 1.1);
     line-height: 1.2;
-  }
-
-  .header-text p {
-    margin: 3px 0 0;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
   }
 
   .settings-body {

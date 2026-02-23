@@ -22,6 +22,7 @@
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { alerts } from '../../shared/alerts.svelte';
+  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
 
   interface Props {
     branch: Branch;
@@ -39,7 +40,7 @@
   let starting = $state(false);
   let initialized = false;
   let textareaEl: HTMLTextAreaElement | null = $state(null);
-  let backdropPointerDown = false;
+  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: handleClose });
 
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
@@ -114,17 +115,6 @@
     }
   }
 
-  function handleBackdropPointerDown(event: PointerEvent) {
-    backdropPointerDown = event.target === event.currentTarget;
-  }
-
-  function handleBackdropClick(e: MouseEvent) {
-    if (e.target === e.currentTarget && backdropPointerDown) {
-      handleClose();
-    }
-    backdropPointerDown = false;
-  }
-
   function formatBaseBranch(baseBranch: string): string {
     return baseBranch.replace(/^origin\//, '');
   }
@@ -138,8 +128,8 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onpointerdown={handleBackdropPointerDown}
-  onclick={handleBackdropClick}
+  onpointerdown={backdropDismiss.handlePointerDown}
+  onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && handleClose()}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->

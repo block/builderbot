@@ -16,6 +16,7 @@
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import type { ActionContext, ProjectAction } from '../../commands';
   import * as commands from '../../commands';
   import { detectRepoActions, type SuggestedAction, type ActionType } from '../actions/actions';
@@ -233,7 +234,10 @@
       return aDisplay.localeCompare(bDisplay);
     });
   });
-  let backdropPointerDown = false;
+  const backdropDismiss = createBackdropDismissHandlers({
+    onDismiss: () => onClose(),
+    canDismiss: () => !editingAction,
+  });
 
   let groupedActions = $derived.by(() => {
     const groups: Record<string, ProjectAction[]> = {
@@ -258,17 +262,6 @@
       event.preventDefault();
     }
   }
-
-  function handleBackdropPointerDown(event: PointerEvent) {
-    backdropPointerDown = event.target === event.currentTarget;
-  }
-
-  function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget && backdropPointerDown && !editingAction) {
-      onClose();
-    }
-    backdropPointerDown = false;
-  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -278,8 +271,8 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onpointerdown={handleBackdropPointerDown}
-  onclick={handleBackdropClick}
+  onpointerdown={backdropDismiss.handlePointerDown}
+  onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && !editingAction && onClose()}
 >
   <div class="modal">

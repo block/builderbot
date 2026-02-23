@@ -50,6 +50,7 @@
     handleExternalLinkClick,
     resumeSession,
   } from '../../commands';
+  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { formatToolArgs, formatToolName, hasXmlBlocks } from './sessionModalHelpers';
 
   // Configure marked
@@ -390,7 +391,7 @@
 
   /** Track which XML blocks are expanded */
   let expandedXmlBlocks = $state<Set<string>>(new Set());
-  let backdropPointerDown = false;
+  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: requestClose });
 
   function toggleXmlBlock(key: string) {
     const next = new Set(expandedXmlBlocks);
@@ -407,17 +408,6 @@
       requestClose();
       e.preventDefault();
     }
-  }
-
-  function handleBackdropPointerDown(event: PointerEvent) {
-    backdropPointerDown = event.target === event.currentTarget;
-  }
-
-  function handleBackdropClick(e: MouseEvent) {
-    if (e.target === e.currentTarget && backdropPointerDown) {
-      requestClose();
-    }
-    backdropPointerDown = false;
   }
 
   function requestClose() {
@@ -494,8 +484,8 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onpointerdown={handleBackdropPointerDown}
-  onclick={handleBackdropClick}
+  onpointerdown={backdropDismiss.handlePointerDown}
+  onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && requestClose()}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->

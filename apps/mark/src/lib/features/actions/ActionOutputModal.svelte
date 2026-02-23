@@ -24,6 +24,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import Convert from 'ansi-to-html';
   import { sanitize } from '../../shared/sanitize';
+  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
   import {
     getActionOutputBuffer,
@@ -62,7 +63,7 @@
   let unlistenOutput: (() => void) | null = null;
   let unlistenStatus: (() => void) | null = null;
   let shouldAutoScroll = $state(true);
-  let backdropPointerDown = false;
+  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
 
   // ANSI to HTML converter
   const ansiConverter = new Convert({
@@ -248,17 +249,6 @@
     }
   }
 
-  function handleBackdropPointerDown(event: PointerEvent) {
-    backdropPointerDown = event.target === event.currentTarget;
-  }
-
-  function handleBackdropClick(e: MouseEvent) {
-    if (e.target === e.currentTarget && backdropPointerDown) {
-      onClose();
-    }
-    backdropPointerDown = false;
-  }
-
   async function handleRemove() {
     try {
       // Clear the execution from the backend
@@ -330,8 +320,8 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onpointerdown={handleBackdropPointerDown}
-  onclick={handleBackdropClick}
+  onpointerdown={backdropDismiss.handlePointerDown}
+  onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && onClose()}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->

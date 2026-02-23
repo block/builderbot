@@ -15,6 +15,7 @@
 -->
 <script lang="ts">
   import { AlertTriangle } from 'lucide-svelte';
+  import { createBackdropDismissHandlers } from './backdropDismiss';
 
   interface Props {
     title?: string;
@@ -35,7 +36,7 @@
     onConfirm,
     onCancel,
   }: Props = $props();
-  let backdropPointerDown = false;
+  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onCancel() });
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
@@ -45,17 +46,6 @@
       onConfirm();
       event.preventDefault();
     }
-  }
-
-  function handleBackdropPointerDown(event: PointerEvent) {
-    backdropPointerDown = event.target === event.currentTarget;
-  }
-
-  function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget && backdropPointerDown) {
-      onCancel();
-    }
-    backdropPointerDown = false;
   }
 </script>
 
@@ -67,8 +57,8 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onpointerdown={handleBackdropPointerDown}
-  onclick={handleBackdropClick}
+  onpointerdown={backdropDismiss.handlePointerDown}
+  onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && onCancel()}
 >
   <div class="modal" class:danger>

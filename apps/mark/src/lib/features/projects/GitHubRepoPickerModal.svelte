@@ -6,6 +6,7 @@
   NewProjectForm uses GitHubRepoPicker directly with an inline slide.
 -->
 <script lang="ts">
+  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import GitHubRepoPicker from './GitHubRepoPicker.svelte';
 
   interface Props {
@@ -15,18 +16,7 @@
   }
 
   let { onSelect, onClose, excludeRepos }: Props = $props();
-  let backdropPointerDown = false;
-
-  function handleBackdropPointerDown(event: PointerEvent) {
-    backdropPointerDown = event.target === event.currentTarget;
-  }
-
-  function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget && backdropPointerDown) {
-      onClose();
-    }
-    backdropPointerDown = false;
-  }
+  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -35,8 +25,8 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
-  onpointerdown={handleBackdropPointerDown}
-  onclick={handleBackdropClick}
+  onpointerdown={backdropDismiss.handlePointerDown}
+  onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && onClose()}
 >
   <div class="modal">

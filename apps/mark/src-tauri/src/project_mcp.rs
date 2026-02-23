@@ -12,7 +12,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 use crate::actions::events::TauriExecutionListener;
 use crate::actions::{ActionExecutor, ActionMetadata, ActionRegistry, ActionType};

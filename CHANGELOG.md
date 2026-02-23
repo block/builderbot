@@ -1,5 +1,9 @@
 # Changelog
 
+## Feb 23, 2026
+
+- **Comment on Mermaid diagrams** — Select an area on any Mermaid diagram to start a comment thread anchored to that region
+
 ## Feb 20, 2026
 
 - **Renamed from Birdseye to Penpal** — The project, binary, MCP tools, plugin, and all UI branding are now "Penpal". Existing `.birdseye/` data directories and `~/.config/birdseye/` configs are automatically migrated on first run. Run `just install-claude` to switch to the new plugin (the old "birdseye" plugin is cleaned up automatically).

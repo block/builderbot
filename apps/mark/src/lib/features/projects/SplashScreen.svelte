@@ -29,15 +29,15 @@
   let formSubpath = $state('');
 
   const phrases = [
-    'AI coding sessions,',
+    'Build using AI,',
     'From prompt to pull request,',
     'Direct what AI builds,',
-    'Review what agents build,',
-    'AI-driven development,',
-    'Orchestrate AI agents,',
-    'AI writes the code,',
-    'Prompt, review, ship,',
-    'Code at the speed of AI,',
+    'Review every change,',
+    'Agent-driven development,',
+    'Run sessions, ship faster,',
+    'Keep every step visible,',
+    'Move fast, stay in control,',
+    'Ship confidently,',
   ];
 
   let currentIndex = $state(0);
@@ -89,7 +89,7 @@
         </span>
       </span>
       <span class="mark-line">
-        <span class="beautifully-text" class:collapsed={showForm}>beautifully</span><span
+        <span class="beautifully-text" class:collapsed={showForm}>with</span><span
           class="mono accent">mark</span
         >
       </span>

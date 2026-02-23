@@ -2103,6 +2103,14 @@ pub fn run() {
                     ..Default::default()
                 };
 
+                let settings_item = MenuItem::with_id(
+                    handle,
+                    "settings",
+                    "Preferences…",
+                    true,
+                    Some("CmdOrCtrl+,"),
+                )?;
+
                 let app_menu = Submenu::with_items(
                     handle,
                     "Mark",
@@ -2113,6 +2121,8 @@ pub fn run() {
                             Some("About Mark"),
                             Some(about_metadata),
                         )?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &settings_item,
                         &PredefinedMenuItem::separator(handle)?,
                         &PredefinedMenuItem::services(handle, None)?,
                         &PredefinedMenuItem::separator(handle)?,
@@ -2165,27 +2175,9 @@ pub fn run() {
                     ],
                 )?;
 
-                let doctor_item =
-                    MenuItem::with_id(handle, "doctor", "Health Check…", true, None::<&str>)?;
-
-                let help_menu = Submenu::with_id_and_items(
-                    handle,
-                    tauri::menu::HELP_SUBMENU_ID,
-                    "Help",
-                    true,
-                    &[&doctor_item],
-                )?;
-
                 let menu = Menu::with_items(
                     handle,
-                    &[
-                        &app_menu,
-                        &file_menu,
-                        &edit_menu,
-                        &view_menu,
-                        &window_menu,
-                        &help_menu,
-                    ],
+                    &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu],
                 )?;
 
                 app.set_menu(menu)?;
@@ -2302,10 +2294,10 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id() == "doctor" {
-                // Emit an event to the frontend to open the doctor modal.
-                if let Err(e) = app.emit("menu:doctor", ()) {
-                    log::warn!("Failed to emit menu:doctor event: {e}");
+            if event.id() == "settings" {
+                // Emit an event to the frontend to open the settings page.
+                if let Err(e) = app.emit("menu:settings", ()) {
+                    log::warn!("Failed to emit menu:settings event: {e}");
                 }
             }
         })

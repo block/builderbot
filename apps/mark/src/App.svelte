@@ -13,13 +13,12 @@
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
-  import DoctorModal from './lib/features/doctor/DoctorModal.svelte';
-  import ActionsPreferencesModal from './lib/features/settings/ActionsPreferencesModal.svelte';
+  import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import ToastHost from './lib/shared/ToastHost.svelte';
   import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
-  import { navigation, initNavigation } from './lib/navigation.svelte';
+  import { navigation, initNavigation, openSettings } from './lib/navigation.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { prStateStore } from './lib/stores/prState.svelte';
   import { sessionRegistry } from './lib/stores/sessionRegistry.svelte';
@@ -27,14 +26,11 @@
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
-  let showDoctor = $state(false);
-  let showActionsPreferences = $state(false);
-  let unlistenDoctor: UnlistenFn | undefined;
+  let unlistenSettings: UnlistenFn | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
-  let onOpenActionsPreferences: (() => void) | null = null;
 
   // Konami code: ↑↑↓↓←→←→BA
   const konamiSequence = [
@@ -72,23 +68,19 @@
 
   function handleGlobalShortcut(e: KeyboardEvent) {
     if (shouldIgnoreGlobalShortcut(e.target)) return;
-    if (e.key === ';') {
+    if ((e.metaKey || e.ctrlKey) && e.key === ',') {
       e.preventDefault();
-      showActionsPreferences = true;
+      openSettings();
     }
   }
 
   onMount(async () => {
     document.addEventListener('keydown', handleKonamiKey);
     document.addEventListener('keydown', handleGlobalShortcut);
-    onOpenActionsPreferences = () => {
-      showActionsPreferences = true;
-    };
-    window.addEventListener('mark:open-actions-preferences', onOpenActionsPreferences);
 
-    // Listen for the Help → Health Check… menu item.
-    unlistenDoctor = await listen('menu:doctor', () => {
-      showDoctor = true;
+    // Listen for the app menu Preferences item.
+    unlistenSettings = await listen('menu:settings', () => {
+      openSettings();
     });
 
     // Listen for session status changes globally to handle spinner cleanup
@@ -210,11 +202,7 @@
   onDestroy(() => {
     document.removeEventListener('keydown', handleKonamiKey);
     document.removeEventListener('keydown', handleGlobalShortcut);
-    if (onOpenActionsPreferences) {
-      window.removeEventListener('mark:open-actions-preferences', onOpenActionsPreferences);
-      onOpenActionsPreferences = null;
-    }
-    unlistenDoctor?.();
+    unlistenSettings?.();
     unlistenSessionStatus?.();
   });
 
@@ -293,6 +281,8 @@
           <div class="error-state">
             <p>{storeError}</p>
           </div>
+        {:else if navigation.activeView === 'settings'}
+          <SettingsPage />
         {:else if navigation.selectedProjectId}
           <ProjectHome selectedProjectId={navigation.selectedProjectId} />
         {:else}
@@ -304,14 +294,6 @@
 
   {#if showSessionLab}
     <SessionLauncher onClose={() => (showSessionLab = false)} />
-  {/if}
-
-  {#if showDoctor}
-    <DoctorModal onClose={() => (showDoctor = false)} />
-  {/if}
-
-  {#if showActionsPreferences}
-    <ActionsPreferencesModal onClose={() => (showActionsPreferences = false)} />
   {/if}
 
   <ToastHost />

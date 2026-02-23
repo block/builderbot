@@ -7,12 +7,17 @@ on:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/crates-ci.yml"
   push:
     branches: [main]
     paths:
       - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/crates-ci.yml"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,6 +26,8 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 

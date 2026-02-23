@@ -23,7 +23,7 @@ dev:
     # Derive a stable port from the working directory
     VITE_PORT=$(python3 -c "import hashlib,os; h=int(hashlib.sha256(os.getcwd().encode()).hexdigest(),16); print(10000 + h % 55000)")
     export VITE_PORT
-    TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\"}}"
+    TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${VITE_PORT} --strictPort\"}}"
 
     # In worktrees, generate a labeled icon so you can tell instances apart
     if git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -38,7 +38,7 @@ dev:
 
             if swift ../../scripts/generate-dev-icon.swift src-tauri/icons/icon.icns "$DEV_ICON" "$WORKTREE_LABEL"; then
                 echo "🌳 Worktree: ${WORKTREE_LABEL}"
-                TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\"},\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
+                TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${VITE_PORT} --strictPort\"},\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
             fi
         fi
     fi

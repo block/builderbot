@@ -689,18 +689,23 @@ pub fn fetch_for_worktree(
 ) -> Result<(), GitError> {
     let https_url = format!("https://github.com/{github_repo}.git");
 
+    // Strip any "origin/" prefix — base_branch is stored in the DB with this
+    // prefix (normalised at creation time) but the remote tracks the bare ref.
+    let base_ref = base_branch.strip_prefix("origin/").unwrap_or(base_branch);
+    let branch_ref = branch_name.strip_prefix("origin/").unwrap_or(branch_name);
+
     // Fetch the base branch — always needed, always exists on the remote.
-    if let Err(e) = super::cli::run(repo_path, &["fetch", "origin", base_branch]) {
+    if let Err(e) = super::cli::run(repo_path, &["fetch", "origin", base_ref]) {
         let err_str = e.to_string();
         if is_fetch_auth_failure(&err_str) {
             log::warn!(
                 "fetch origin {} failed for '{}': {}. Retrying with HTTPS origin.",
-                base_branch,
+                base_ref,
                 github_repo,
                 e
             );
             super::cli::run(repo_path, &["remote", "set-url", "origin", &https_url])?;
-            super::cli::run(repo_path, &["fetch", "origin", base_branch])?;
+            super::cli::run(repo_path, &["fetch", "origin", base_ref])?;
         } else {
             return Err(e);
         }
@@ -708,13 +713,13 @@ pub fn fetch_for_worktree(
 
     // Best-effort fetch of the branch itself — it may not exist on the remote
     // yet for new local branches.
-    if branch_name != base_branch {
-        if let Err(e) = super::cli::run(repo_path, &["fetch", "origin", branch_name]) {
+    if branch_ref != base_ref {
+        if let Err(e) = super::cli::run(repo_path, &["fetch", "origin", branch_ref]) {
             let err_str = e.to_string();
             if !err_str.contains("couldn't find remote ref") {
                 log::warn!(
                     "fetch origin {} for '{}' failed (non-fatal): {}",
-                    branch_name,
+                    branch_ref,
                     github_repo,
                     e
                 );

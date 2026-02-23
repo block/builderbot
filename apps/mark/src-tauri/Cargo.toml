@@ -24,7 +24,7 @@ tauri = { version = "2.10.2", features = [] }
 tauri-plugin-log = "2.8.0"
 
 # Git integration
-git2 = "0.19"
+git2 = "0.20"
 thiserror = "2.0"
 anyhow = "1.0"
 base64 = "0.22"

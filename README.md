@@ -19,6 +19,13 @@ just dev          # start Mark
 just dev staged   # start Staged
 ```
 
+## App Installation
+
+For end-user installs:
+
+- Mark (macOS): `curl -fsSL https://raw.githubusercontent.com/block/builderbot/main/apps/mark/install.sh | bash`
+- Staged: no standalone installer yet; run from source with `just dev staged` or build with `just app staged build`
+
 ## Command Guide
 
 The root `justfile` supports both styles:

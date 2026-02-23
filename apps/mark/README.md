@@ -19,7 +19,7 @@ A desktop app for reviewing git changes, managing branches, and running AI codin
 Install with a single command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/block/builderbot/main/mark/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/block/builderbot/main/apps/mark/install.sh | bash
 ```
 
 The installer will:

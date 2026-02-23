@@ -224,11 +224,10 @@ impl OAuthFlow {
             .map(|s| s.to_string())
             .or_else(|| old_refresh_token.map(|s| s.to_string()));
 
-        let expires_at = if let Some(expires_in) = resp.get("expires_in").and_then(|v| v.as_u64()) {
-            Some(Utc::now() + chrono::Duration::seconds(expires_in as i64))
-        } else {
-            None
-        };
+        let expires_at = resp
+            .get("expires_in")
+            .and_then(|v| v.as_u64())
+            .map(|expires_in| Utc::now() + chrono::Duration::seconds(expires_in as i64));
 
         Ok(TokenData {
             access_token,

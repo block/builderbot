@@ -69,6 +69,7 @@ pub trait Store: Send + Sync {
 /// sending the prompt, translating streaming events into [`MessageWriter`]
 /// calls).
 #[async_trait(?Send)]
+#[allow(clippy::too_many_arguments)]
 pub trait AgentDriver {
     /// Run a single turn: send `prompt`, stream results via `writer`.
     async fn run(

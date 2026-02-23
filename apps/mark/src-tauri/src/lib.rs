@@ -2313,7 +2313,7 @@ pub fn run() {
         })
         .on_menu_event(|app, event| {
             if event.id() == "doctor" {
-                // Emit an event to the frontend to open the doctor modal.
+                // Emit an event to the frontend to open settings on the Doctor section.
                 if let Err(e) = app.emit("menu:doctor", ()) {
                     log::warn!("Failed to emit menu:doctor event: {e}");
                 }

@@ -1,5 +1,5 @@
 /**
- * doctor.svelte.ts — Reactive state for the system health-check modal.
+ * doctor.svelte.ts — Reactive state for the system health-check UI.
  *
  * Exposes `doctorState` (report + loading flag) and an action helper
  * that calls the Tauri `run_doctor` command.

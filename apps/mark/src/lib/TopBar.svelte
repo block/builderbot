@@ -76,7 +76,7 @@
       <Palette size={14} />
     </button>
 
-    <button class="icon-btn" onclick={openSettings} title="Settings (⌘,)">
+    <button class="icon-btn" onclick={() => openSettings()} title="Settings (⌘,)">
       <SlidersHorizontal size={14} />
     </button>
 

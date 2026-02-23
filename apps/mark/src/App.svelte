@@ -13,7 +13,6 @@
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
-  import DoctorModal from './lib/features/doctor/DoctorModal.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import ToastHost from './lib/shared/ToastHost.svelte';
   import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
@@ -27,7 +26,6 @@
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
-  let showDoctor = $state(false);
   let unlistenDoctor: UnlistenFn | undefined;
   let unlistenSettings: UnlistenFn | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
@@ -81,9 +79,9 @@
     document.addEventListener('keydown', handleKonamiKey);
     document.addEventListener('keydown', handleGlobalShortcut);
 
-    // Listen for the Help → Health Check… menu item.
+    // Listen for the Help → Health Check... menu item.
     unlistenDoctor = await listen('menu:doctor', () => {
-      showDoctor = true;
+      openSettings('doctor');
     });
     // Listen for the app menu Preferences item.
     unlistenSettings = await listen('menu:settings', () => {
@@ -302,10 +300,6 @@
 
   {#if showSessionLab}
     <SessionLauncher onClose={() => (showSessionLab = false)} />
-  {/if}
-
-  {#if showDoctor}
-    <DoctorModal onClose={() => (showDoctor = false)} />
   {/if}
 
   <ToastHost />

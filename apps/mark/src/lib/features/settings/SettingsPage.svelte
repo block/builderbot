@@ -1,9 +1,8 @@
 <script lang="ts">
-  import { ArrowLeft, Play } from 'lucide-svelte';
-  import { closeSettings } from '../../navigation.svelte';
+  import { ArrowLeft, Play, Stethoscope } from 'lucide-svelte';
+  import { closeSettings, navigation } from '../../navigation.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
-
-  let section = $state<'actions'>('actions');
+  import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
 
   function handleBack() {
     closeSettings();
@@ -25,16 +24,28 @@
     <aside class="settings-nav" aria-label="Settings sections">
       <button
         class="nav-item"
-        class:active={section === 'actions'}
-        onclick={() => (section = 'actions')}
+        class:active={navigation.settingsSection === 'actions'}
+        onclick={() => (navigation.settingsSection = 'actions')}
       >
         <Play size={14} />
         Actions
       </button>
+      <button
+        class="nav-item"
+        class:active={navigation.settingsSection === 'doctor'}
+        onclick={() => (navigation.settingsSection = 'doctor')}
+      >
+        <Stethoscope size={14} />
+        Doctor
+      </button>
     </aside>
 
     <section class="settings-content">
-      <ActionsSettingsPanel />
+      {#if navigation.settingsSection === 'actions'}
+        <ActionsSettingsPanel />
+      {:else}
+        <DoctorSettingsPanel />
+      {/if}
     </section>
   </div>
 </div>
@@ -105,13 +116,14 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    background: color-mix(in srgb, var(--bg-chrome) 40%, transparent);
   }
 
   .nav-item {
     border: 1px solid transparent;
     border-radius: 8px;
     background: transparent;
-    color: var(--text-muted);
+    color: color-mix(in srgb, var(--text-muted) 90%, var(--text-primary));
     display: inline-flex;
     align-items: center;
     gap: 8px;
@@ -123,13 +135,13 @@
 
   .nav-item:hover {
     color: var(--text-primary);
-    background: var(--bg-hover);
+    background: color-mix(in srgb, var(--bg-hover) 55%, transparent);
   }
 
   .nav-item.active {
-    color: var(--text-primary);
-    border-color: var(--border-muted);
-    background: var(--bg-chrome);
+    color: color-mix(in srgb, var(--text-primary) 88%, var(--text-muted));
+    border-color: color-mix(in srgb, var(--border-subtle) 80%, transparent);
+    background: color-mix(in srgb, var(--bg-primary) 34%, transparent);
   }
 
   .settings-content {

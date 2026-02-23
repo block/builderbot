@@ -5,6 +5,7 @@
  * - `activeView === 'settings'` → Settings page
  * - `activeView === 'workspace'` + `selectedProjectId === null` → ProjectsList (landing page)
  * - `activeView === 'workspace'` + `selectedProjectId === <id>` → ProjectHome filtered to that project
+ * - `settingsSection` selects which settings panel is shown
  *
  * The last viewed project is persisted so the user returns to it on relaunch.
  */
@@ -15,9 +16,12 @@ import { projectStateStore } from './stores/projectState.svelte';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
+export type SettingsSection = 'actions' | 'doctor';
+
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
   selectedProjectId: null as string | null,
+  settingsSection: 'actions' as SettingsSection,
 });
 
 function showWorkspaceView(): void {
@@ -98,8 +102,9 @@ export function goHome(): void {
   persistLastProject(null);
 }
 
-/** Show the dedicated settings view while preserving current project context. */
-export function openSettings(): void {
+/** Show the dedicated settings view and select a settings section. */
+export function openSettings(section: SettingsSection = 'actions'): void {
+  navigation.settingsSection = section;
   navigation.activeView = 'settings';
 }
 

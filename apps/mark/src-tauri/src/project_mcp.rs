@@ -153,16 +153,16 @@ impl ProjectToolsHandler {
             }
         };
 
-        // Find the branch for this repo — capture both workspace_name and branch_id.
+        // Find the branch for this repo — capture the full struct for context building.
         let branches = match self.store.list_branches_for_project(&self.project_id) {
             Ok(b) => b,
             Err(e) => return format!("Error listing branches: {e}"),
         };
         let branch = branches
-            .iter()
+            .into_iter()
             .find(|b| b.project_repo_id.as_deref() == Some(repo.id.as_str()));
-        let workspace_name = branch.and_then(|b| b.workspace_name.clone());
-        let branch_id = branch.map(|b| b.id.clone());
+        let workspace_name = branch.as_ref().and_then(|b| b.workspace_name.clone());
+        let branch_id = branch.as_ref().map(|b| b.id.clone());
 
         // Determine working directory — include subpath when the repo was added with one.
         let working_dir = crate::paths::repos_dir()
@@ -176,9 +176,72 @@ impl ProjectToolsHandler {
             })
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
-        // Build the prompt — prefix with action instructions based on expected outcome.
+        // Build branch history context (commits + notes) and project context, mirroring
+        // what start_branch_session does for user-triggered sessions.
+        let project = self.store.get_project(&self.project_id).ok().flatten();
+        let (branch_context, project_information) = if let Some(ref br) = branch {
+            let store_clone = Arc::clone(&self.store);
+            let branch_id_str = br.id.clone();
+            let base_branch = br.base_branch.clone();
+            let project_id_str = self.project_id.clone();
+            let ws_name = workspace_name.clone();
+            let repo_subpath = repo.subpath.clone();
+
+            // For local branches, use the worktree path; fall back to the clone path.
+            let context_dir = if ws_name.is_none() {
+                self.store
+                    .get_workdir_for_branch(&br.id)
+                    .ok()
+                    .flatten()
+                    .map(|wd| {
+                        let mut path = std::path::PathBuf::from(&wd.path);
+                        if let Some(ref sp) = repo_subpath {
+                            path = path.join(sp);
+                        }
+                        path
+                    })
+                    .unwrap_or_else(|| working_dir.clone())
+            } else {
+                working_dir.clone()
+            };
+
+            let ctx = tokio::task::spawn_blocking(move || {
+                if let Some(ws) = ws_name {
+                    crate::session_commands::build_remote_branch_context(
+                        &ws,
+                        &base_branch,
+                        &store_clone,
+                        &branch_id_str,
+                        &project_id_str,
+                    )
+                } else {
+                    crate::session_commands::build_branch_context(
+                        &context_dir,
+                        &base_branch,
+                        &store_clone,
+                        &branch_id_str,
+                        &project_id_str,
+                    )
+                }
+            })
+            .await
+            .unwrap_or_default();
+
+            let proj_info = if let (Some(proj), Some(br_ref)) = (project.as_ref(), Some(br)) {
+                crate::session_commands::build_project_context(&self.store, proj, br_ref)
+            } else {
+                String::new()
+            };
+
+            (ctx, proj_info)
+        } else {
+            (String::new(), String::new())
+        };
+
+        // Build the prompt — action instructions + project info + branch history + user instructions,
+        // matching the structure produced by build_full_prompt for user-triggered sessions.
         let expected_outcome = &p.expected_outcome;
-        let action_prefix = match expected_outcome {
+        let action_instructions = match expected_outcome {
             RepoSessionOutcome::ReturnOutputOnly => None,
             RepoSessionOutcome::NoteInRepo => Some(
                 "The user is requesting a note. Generate a note based on their instructions below.\n\n\
@@ -194,20 +257,34 @@ impl ProjectToolsHandler {
                  was requested and how it was fulfilled."
             ),
         };
+        let user_instructions = match (expected_outcome, p.return_info.as_ref()) {
+            (RepoSessionOutcome::ReturnOutputOnly, Some(return_info)) => format!(
+                "{}\n\nIMPORTANT: When you are done, your final message must contain: {return_info}",
+                p.instructions
+            ),
+            _ => p.instructions.clone(),
+        };
         let prompt = {
-            let base = match action_prefix {
-                Some(prefix) => format!("{prefix}\n\n{}", p.instructions),
-                None => p.instructions.clone(),
-            };
-            // For output-only sessions, append return_info instructions if provided.
-            match (expected_outcome, p.return_info.as_ref()) {
-                (RepoSessionOutcome::ReturnOutputOnly, Some(return_info)) => {
-                    format!(
-                        "{base}\n\nIMPORTANT: When you are done, your final message must contain: {return_info}"
-                    )
+            let action_block = match action_instructions {
+                Some(instr) if !project_information.is_empty() => format!(
+                    "<action>\n{instr}\n\nProject information:\n{project_information}\n</action>"
+                ),
+                Some(instr) => format!("<action>\n{instr}\n</action>"),
+                None if !project_information.is_empty() => {
+                    format!("<action>\nProject information:\n{project_information}\n</action>")
                 }
-                _ => base,
-            }
+                None => String::new(),
+            };
+            let history_block = if !branch_context.is_empty() {
+                format!("<branch-history>\n{branch_context}\n</branch-history>")
+            } else {
+                String::new()
+            };
+            [action_block, history_block, user_instructions]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n")
         };
 
         // Create the session record.

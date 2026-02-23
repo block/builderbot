@@ -600,7 +600,7 @@ pub async fn start_branch_session(
 // =============================================================================
 
 /// Build the branch history context block for a local branch.
-fn build_branch_context(
+pub(crate) fn build_branch_context(
     worktree: &Path,
     base_branch: &str,
     store: &Arc<Store>,
@@ -638,7 +638,7 @@ fn build_branch_context(
 ///
 /// Uses `blox ws_exec` to run git commands inside the remote workspace,
 /// and reads notes from the DB (which works regardless of worktree location).
-fn build_remote_branch_context(
+pub(crate) fn build_remote_branch_context(
     workspace_name: &str,
     base_branch: &str,
     store: &Arc<Store>,
@@ -714,7 +714,7 @@ fn format_repo_label(repo_slug: &str, subpath: Option<&str>) -> String {
     }
 }
 
-fn build_project_context(
+pub(crate) fn build_project_context(
     store: &Arc<Store>,
     project: &store::Project,
     branch: &store::Branch,

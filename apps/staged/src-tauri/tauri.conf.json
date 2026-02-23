@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5175",
-    "beforeDevCommand": "pnpm run dev",
+    "beforeDevCommand": "VITE_PORT=${VITE_PORT:-5175} pnpm run dev",
     "beforeBuildCommand": "pnpm run build"
   },
   "app": {

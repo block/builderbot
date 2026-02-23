@@ -1,51 +1,108 @@
 # Builderbot Monorepo
 # Run `just setup` once after cloning.
+#
+# Common flows:
+#   just dev            # Start Mark
+#   just dev staged     # Start Staged
+#   just app mark ci    # Run any app recipe
+#   just check          # Full non-modifying checks
 
 # Default: list available recipes
 default:
     @just --list
 
-# ── Setup ──────────────────────────────────────────────────
+# ============================================================================
+# Setup
+# ============================================================================
 
 # First-time setup
 setup:
     lefthook install
     pnpm install
 
-# ── Per-App (delegate) ─────────────────────────────────────
+# ============================================================================
+# App Delegation
+# ============================================================================
 
-# Run a just recipe in a specific app (e.g., just app mark dev)
-app name *ARGS:
-    just -f apps/{{name}}/justfile {{ARGS}}
+# List app workspaces that expose a justfile
+apps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for dir in apps/*/; do
+        [[ -f "$dir/justfile" ]] || continue
+        basename "$dir"
+    done
 
-# Shortcuts for the most common app commands
-dev app="mark" *ARGS:
-    just -f apps/{{app}}/justfile dev {{ARGS}}
+# Run a recipe in a specific app (e.g. `just app mark dev`)
+app name recipe="dev" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
 
-# ── Cross-Cutting ──────────────────────────────────────────
+    app_justfile="apps/{{name}}/justfile"
+    if [[ ! -f "$app_justfile" ]]; then
+        echo "Unknown app '{{name}}'. Available apps:"
+        for dir in apps/*/; do
+            [[ -f "$dir/justfile" ]] || continue
+            echo "  - $(basename "$dir")"
+        done
+        exit 1
+    fi
+
+    just -f "$app_justfile" {{recipe}} {{args}}
+
+# Human-friendly shortcuts (supports `just dev staged` style)
+dev app="mark" *args:
+    just app {{app}} dev {{args}}
+
+# Convenience aliases
+mark recipe="dev" *args:
+    just app mark {{recipe}} {{args}}
+
+staged recipe="dev" *args:
+    just app staged {{recipe}} {{args}}
+
+# ============================================================================
+# Cross-Cutting
+# ============================================================================
 
 # Format all apps + crates
 fmt:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo fmt --all
-    for dir in apps/*/; do \
-        [ -f "$dir/justfile" ] && just -f "$dir/justfile" fmt || true; \
+    for dir in apps/*/; do
+        [[ -f "$dir/justfile" ]] || continue
+        just -f "$dir/justfile" fmt
     done
 
 # Lint everything
 lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo clippy --workspace -- -D warnings
-    for dir in apps/*/; do \
-        [ -f "$dir/justfile" ] && just -f "$dir/justfile" lint || true; \
+    for dir in apps/*/; do
+        [[ -f "$dir/justfile" ]] || continue
+        just -f "$dir/justfile" lint
     done
 
-# Check everything (what CI runs)
-ci:
-    for dir in apps/*/; do \
-        [ -f "$dir/justfile" ] && just -f "$dir/justfile" ci || true; \
+# Verify everything without modifying files (CI-friendly)
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo fmt --all --check
+    cargo clippy --workspace -- -D warnings
+    for dir in apps/*/; do
+        [[ -f "$dir/justfile" ]] || continue
+        just -f "$dir/justfile" ci
     done
     cargo test --workspace
 
-# ── Crates ─────────────────────────────────────────────────
+# Alias: many people expect `just ci`
+ci: check
+
+# ============================================================================
+# Crates
+# ============================================================================
 
 # Build shared crates
 build:
@@ -59,6 +116,6 @@ test:
 install-summarize:
     cargo install --path crates/summarize
 
-# Run summarize directly (e.g. just summarize --prompt "What?" src/)
-summarize *ARGS:
-    cargo run --release -p summarize -- {{ARGS}}
+# Run summarize directly (e.g. `just summarize --prompt "What?" src/`)
+summarize *args:
+    cargo run --release -p summarize -- {{args}}

@@ -2,8 +2,9 @@
  * Lightweight client-side navigation state.
  *
  * Controls which view is shown in the main content area:
- * - `selectedProjectId === null` → ProjectsList (landing page)
- * - `selectedProjectId === <id>` → ProjectHome filtered to that project
+ * - `activeView === 'settings'` → Settings page
+ * - `activeView === 'workspace'` + `selectedProjectId === null` → ProjectsList (landing page)
+ * - `activeView === 'workspace'` + `selectedProjectId === <id>` → ProjectHome filtered to that project
  *
  * The last viewed project is persisted so the user returns to it on relaunch.
  */
@@ -15,8 +16,13 @@ import { projectStateStore } from './stores/projectState.svelte';
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
 export const navigation = $state({
+  activeView: 'workspace' as 'workspace' | 'settings',
   selectedProjectId: null as string | null,
 });
+
+function showWorkspaceView(): void {
+  navigation.activeView = 'workspace';
+}
 
 /**
  * Persist the current navigation target.
@@ -55,6 +61,7 @@ export async function initNavigation(): Promise<void> {
 
 /** Navigate to a specific project's detail view. */
 export function selectProject(projectId: string): void {
+  showWorkspaceView();
   navigation.selectedProjectId = projectId;
   persistLastProject(projectId);
   // Mark the project as read when navigating to it, but only if it's not already read
@@ -65,6 +72,7 @@ export function selectProject(projectId: string): void {
 
 /** Navigate to a project and scroll to a specific branch card. */
 export function selectProjectAndBranch(projectId: string, branchId: string): void {
+  showWorkspaceView();
   const alreadyOnProject = navigation.selectedProjectId === projectId;
   navigation.selectedProjectId = projectId;
   persistLastProject(projectId);
@@ -85,6 +93,17 @@ export function selectProjectAndBranch(projectId: string, branchId: string): voi
 
 /** Navigate back to the projects list (landing page). */
 export function goHome(): void {
+  showWorkspaceView();
   navigation.selectedProjectId = null;
   persistLastProject(null);
+}
+
+/** Show the dedicated settings view while preserving current project context. */
+export function openSettings(): void {
+  navigation.activeView = 'settings';
+}
+
+/** Return from settings to the workspace view (project or home). */
+export function closeSettings(): void {
+  showWorkspaceView();
 }

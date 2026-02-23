@@ -9,6 +9,7 @@
   import { Palette, PanelLeftClose, PanelLeftOpen, Plus, SlidersHorizontal } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import ThemeSelectorModal from './features/settings/ThemeSelectorModal.svelte';
+  import { navigation, openSettings } from './navigation.svelte';
   import {
     hydrateProjectsSidebarState,
     projectsSidebarState,
@@ -59,7 +60,10 @@
     <button
       class="icon-btn"
       onclick={() => window.dispatchEvent(new CustomEvent('mark:new-project'))}
-      title="New project (⌘N)"
+      disabled={navigation.activeView === 'settings'}
+      title={navigation.activeView === 'settings'
+        ? 'Unavailable while viewing settings'
+        : 'New project (⌘N)'}
     >
       <Plus size={14} />
     </button>
@@ -72,11 +76,7 @@
       <Palette size={14} />
     </button>
 
-    <button
-      class="icon-btn"
-      onclick={() => window.dispatchEvent(new CustomEvent('mark:open-actions-preferences'))}
-      title="Actions preferences (;)"
-    >
+    <button class="icon-btn" onclick={openSettings} title="Settings (⌘,)">
       <SlidersHorizontal size={14} />
     </button>
 

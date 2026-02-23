@@ -2103,6 +2103,14 @@ pub fn run() {
                     ..Default::default()
                 };
 
+                let settings_item = MenuItem::with_id(
+                    handle,
+                    "settings",
+                    "Preferences…",
+                    true,
+                    Some("CmdOrCtrl+,"),
+                )?;
+
                 let app_menu = Submenu::with_items(
                     handle,
                     "Mark",
@@ -2113,6 +2121,8 @@ pub fn run() {
                             Some("About Mark"),
                             Some(about_metadata),
                         )?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &settings_item,
                         &PredefinedMenuItem::separator(handle)?,
                         &PredefinedMenuItem::services(handle, None)?,
                         &PredefinedMenuItem::separator(handle)?,
@@ -2306,6 +2316,11 @@ pub fn run() {
                 // Emit an event to the frontend to open the doctor modal.
                 if let Err(e) = app.emit("menu:doctor", ()) {
                     log::warn!("Failed to emit menu:doctor event: {e}");
+                }
+            } else if event.id() == "settings" {
+                // Emit an event to the frontend to open the settings page.
+                if let Err(e) = app.emit("menu:settings", ()) {
+                    log::warn!("Failed to emit menu:settings event: {e}");
                 }
             }
         })

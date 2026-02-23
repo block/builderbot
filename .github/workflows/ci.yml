@@ -1,16 +1,15 @@
-name: Mark CI
+name: CI
 
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "apps/mark/**"
-      - "crates/**"
   push:
     branches: [main]
-    paths:
-      - "apps/mark/**"
-      - "crates/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,19 +18,19 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       # Install hermit (manages node, rust, just)
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
 
-      # Enable pnpm via corepack (node ships with corepack; version comes from packageManager in package.json)
+      # Enable pnpm via corepack (version from packageManager in package.json)
       - run: corepack enable pnpm
 
       # Cache Cargo dependencies
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
-        with:
-          workspaces: apps/mark/src-tauri
 
       # Install system dependencies for Tauri (Linux)
       - name: Install Tauri dependencies (Linux)
@@ -43,12 +42,10 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      # Install dependencies
+      # Install workspace JS dependencies once for all apps/packages
       - name: Install dependencies
-        run: |
-          pnpm install --frozen-lockfile
-          cd apps/mark/src-tauri && cargo fetch
+        run: pnpm install --frozen-lockfile
 
-      # Run all checks via the app justfile
-      - name: Check all (fmt, lint, typecheck)
-        run: just -f apps/mark/justfile ci
+      # Run full repo checks (crates + all app ci recipes)
+      - name: Run checks
+        run: just check

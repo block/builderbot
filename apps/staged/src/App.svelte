@@ -1,26 +1,75 @@
-<main>
-  <h1>Staged</h1>
-  <p>Diff Viewer — placeholder application.</p>
-</main>
+<!--
+  App.svelte — Root component for Staged.
 
-<style>
-  main {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100vh;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    color: #e0e0e0;
-    background-color: #1a1a2e;
+  Simple view router: home <-> diff.
+  Checks CLI launch args to potentially skip straight to diff view.
+-->
+<script lang="ts">
+  import HomePage from './lib/HomePage.svelte';
+  import DiffPage from './lib/DiffPage.svelte';
+  import * as commands from './lib/commands';
+  import type { DiffSpec } from './lib/commands';
+
+  type View = { kind: 'home' } | { kind: 'diff'; spec: DiffSpec; label: string };
+
+  let view = $state<View>({ kind: 'home' });
+  let initialized = $state(false);
+
+  async function init() {
+    try {
+      const args = await commands.getLaunchArgs();
+
+      if (args.mode) {
+        let spec: DiffSpec;
+        let label: string;
+
+        switch (args.mode) {
+          case 'all':
+            spec = commands.specUncommitted();
+            label = 'All Changes';
+            break;
+          case 'branch':
+            spec = commands.specBranch();
+            label = 'Full Branch';
+            break;
+          case 'commit':
+            if (args.commit) {
+              spec = commands.specCommit(args.commit);
+              label = `Commit ${args.commit.slice(0, 7)}`;
+            } else {
+              spec = commands.specCommit('HEAD');
+              label = 'Last Commit';
+            }
+            break;
+          default:
+            spec = commands.specUncommitted();
+            label = 'All Changes';
+        }
+
+        view = { kind: 'diff', spec, label };
+      }
+    } catch (e) {
+      console.error('Failed to get launch args:', e);
+    } finally {
+      initialized = true;
+    }
   }
 
-  h1 {
-    font-size: 2rem;
-    margin-bottom: 0.5rem;
+  init();
+
+  function openDiff(spec: DiffSpec, label: string) {
+    view = { kind: 'diff', spec, label };
   }
 
-  p {
-    opacity: 0.7;
+  function goHome() {
+    view = { kind: 'home' };
   }
-</style>
+</script>
+
+{#if initialized}
+  {#if view.kind === 'home'}
+    <HomePage onOpenDiff={openDiff} />
+  {:else}
+    <DiffPage spec={view.spec} label={view.label} onBack={goHome} />
+  {/if}
+{/if}

@@ -139,26 +139,26 @@
   .splash-glow {
     position: absolute;
     border-radius: 50%;
-    filter: blur(140px);
     pointer-events: none;
+    contain: paint;
   }
 
   .glow-a {
-    width: 600px;
-    height: 600px;
-    top: -15%;
-    left: -10%;
-    background: var(--ui-accent);
-    opacity: 0.06;
+    width: 620px;
+    height: 620px;
+    top: -20%;
+    left: -14%;
+    background: radial-gradient(circle at center, var(--ui-accent) 0%, transparent 72%);
+    opacity: 0.12;
   }
 
   .glow-b {
-    width: 500px;
-    height: 500px;
-    bottom: -10%;
-    right: -10%;
-    background: var(--review-color, #a78bfa);
-    opacity: 0.07;
+    width: 520px;
+    height: 520px;
+    bottom: -14%;
+    right: -12%;
+    background: radial-gradient(circle at center, var(--review-color, #a78bfa) 0%, transparent 72%);
+    opacity: 0.1;
   }
 
   .splash-center {

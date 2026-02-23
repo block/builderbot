@@ -7,7 +7,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { ChevronLeft, Trash2, Plus, Send, FileText, X } from 'lucide-svelte';
+  import { ChevronLeft, Trash2, Plus, Send, FileText } from 'lucide-svelte';
   import type { Project, Branch, WorkspaceStatus, ProjectNote } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome } from '../../navigation.svelte';
@@ -16,6 +16,9 @@
   import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import GitHubRepoPicker from './GitHubRepoPicker.svelte';
+  import TimelineRow from '../timeline/TimelineRow.svelte';
+  import NoteModal from '../notes/NoteModal.svelte';
+  import SessionModal from '../sessions/SessionModal.svelte';
 
   interface Props {
     project: Project;
@@ -161,17 +164,18 @@
     }
   }
 
-  /** Notes sorted newest first, excluding empty ones (in-progress). */
-  let displayNotes = $derived(
-    [...projectNotes]
-      .filter((n) => n.title.trim() || n.content.trim())
-      .sort((a, b) => b.createdAt - a.createdAt)
+  /** All notes: completed (newest first) followed by generating. */
+  let timelineNotes = $derived(
+    [...projectNotes].sort((a, b) => {
+      const aIsGenerating = !a.title.trim() && !a.content.trim();
+      const bIsGenerating = !b.title.trim() && !b.content.trim();
+      if (aIsGenerating !== bIsGenerating) return aIsGenerating ? 1 : -1;
+      return b.createdAt - a.createdAt;
+    })
   );
 
-  /** Notes currently being generated (empty content, has session). */
-  let generatingNotes = $derived(
-    projectNotes.filter((n) => n.sessionId && !n.title.trim() && !n.content.trim())
-  );
+  let openNote = $state<{ title: string; content: string } | null>(null);
+  let openSessionId = $state<string | null>(null);
 
   function formatRelativeTime(timestampMs: number): string {
     const date = new Date(timestampMs);
@@ -294,41 +298,34 @@
   </div>
 
   <!-- Project notes -->
-  {#if generatingNotes.length > 0 || displayNotes.length > 0}
+  {#if projectNotes.length > 0}
     <div class="project-notes">
       <div class="notes-header">
         <FileText size={13} />
         <span>Project Notes</span>
       </div>
-      {#each generatingNotes as _note (_note.id)}
-        <div class="note-card generating">
-          <div class="note-card-header">
-            <span class="note-title">Generating note…</span>
-            <Spinner size={12} />
-          </div>
-        </div>
-      {/each}
-      {#each displayNotes as note (note.id)}
-        <div class="note-card" class:deleting={deletingNoteIds.has(note.id)}>
-          <div class="note-card-header">
-            <span class="note-title">{note.title || 'Untitled note'}</span>
-            <div class="note-actions">
-              <span class="note-time">{formatRelativeTime(note.createdAt)}</span>
-              <button
-                class="note-delete-btn"
-                onclick={() => handleDeleteNote(note.id)}
-                disabled={deletingNoteIds.has(note.id)}
-                title="Delete note"
-              >
-                <X size={12} />
-              </button>
-            </div>
-          </div>
-          {#if note.content}
-            <div class="note-content">{note.content}</div>
-          {/if}
-        </div>
-      {/each}
+      <div class="notes-timeline">
+        {#each timelineNotes as note, index (note.id)}
+          {@const isGenerating = !note.title.trim() && !note.content.trim()}
+          <TimelineRow
+            type={isGenerating ? 'generating-note' : 'note'}
+            title={isGenerating ? 'Generating note…' : note.title || 'Untitled note'}
+            secondaryMeta={isGenerating ? undefined : formatRelativeTime(note.createdAt)}
+            deleting={deletingNoteIds.has(note.id)}
+            isLast={index === timelineNotes.length - 1}
+            sessionId={note.sessionId ?? undefined}
+            onItemClick={isGenerating
+              ? undefined
+              : () => {
+                  openNote = { title: note.title, content: note.content };
+                }}
+            onSessionClick={(sid) => {
+              openSessionId = sid;
+            }}
+            onDeleteClick={() => handleDeleteNote(note.id)}
+          />
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -358,6 +355,20 @@
     {/each}
   </div>
 </div>
+
+{#if openNote}
+  <NoteModal title={openNote.title} content={openNote.content} onClose={() => (openNote = null)} />
+{/if}
+
+{#if openSessionId}
+  <SessionModal
+    sessionId={openSessionId}
+    onClose={() => {
+      openSessionId = null;
+      loadProjectNotes();
+    }}
+  />
+{/if}
 
 <style>
   .project-section {
@@ -593,7 +604,7 @@
   .project-notes {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 6px;
     padding: 0 4px;
   }
 
@@ -608,101 +619,10 @@
     letter-spacing: 0.04em;
   }
 
-  .note-card {
+  .notes-timeline {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 10px 14px;
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    background-color: var(--bg-primary);
-    transition: all 0.15s ease;
-  }
-
-  .note-card:hover {
-    border-color: var(--border-muted);
-  }
-
-  .note-card.generating {
-    opacity: 0.7;
-    border-color: var(--note-color, var(--ui-accent));
-    border-style: dashed;
-  }
-
-  .note-card.deleting {
-    opacity: 0.4;
-    pointer-events: none;
-  }
-
-  .note-card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  .note-title {
-    font-size: var(--size-sm);
-    font-weight: 500;
-    color: var(--text-primary);
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .note-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
-  .note-time {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-    white-space: nowrap;
-  }
-
-  .note-delete-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
-    border: none;
-    border-radius: 4px;
-    background: none;
-    color: var(--text-faint);
-    cursor: pointer;
-    opacity: 0;
-    transition: all 0.15s ease;
-  }
-
-  .note-card:hover .note-delete-btn {
-    opacity: 1;
-  }
-
-  .note-delete-btn:hover {
-    color: var(--ui-danger);
-    background-color: var(--bg-hover);
-  }
-
-  .note-delete-btn:disabled {
-    cursor: not-allowed;
-    opacity: 0.3;
-  }
-
-  .note-content {
-    font-size: var(--size-xs);
-    color: var(--text-muted);
-    line-height: 1.5;
-    white-space: pre-wrap;
-    overflow: hidden;
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    -webkit-box-orient: vertical;
+    padding: 0 8px;
   }
 
   /* ── Branches list ───────────────────────────────────────────────────── */

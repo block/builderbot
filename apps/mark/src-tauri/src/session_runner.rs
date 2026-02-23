@@ -135,6 +135,12 @@ pub struct SessionConfig {
     /// When set, the session runs via `blox acp <workspace_name>` instead
     /// of a local agent binary. Commit detection is skipped (no local git).
     pub workspace_name: Option<String>,
+    /// Extra environment variables to pass to the agent process.
+    pub extra_env: Vec<(String, String)>,
+    /// Project ID for MCP tool server (project sessions only).
+    /// When set, an MCP server is started and the agent is given access to
+    /// `start_repo_session` and `add_project_repo` tools via CLAUDE_MCP_CONFIG.
+    pub mcp_project_id: Option<String>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -181,6 +187,42 @@ pub fn start_session(
 
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&rt, async {
+            // Start MCP server for project sessions, adding its env var to the driver.
+            let (driver, _mcp_handle) = if let Some(ref proj_id) = config.mcp_project_id {
+                match crate::project_mcp::start_project_mcp_server(
+                    proj_id.clone(),
+                    Arc::clone(&store),
+                    Arc::clone(&registry),
+                    app_handle.clone(),
+                )
+                .await
+                {
+                    Ok((port, handle)) => {
+                        // Write temp MCP config pointing at our SSE server
+                        let config_path = match write_temp_mcp_config(port) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                log::error!("Failed to write MCP config: {e}");
+                                return Err(format!("Failed to write MCP config: {e}"));
+                            }
+                        };
+                        log::info!(
+                            "Session {}: MCP server started on port {port}, config at {config_path}",
+                            config.session_id
+                        );
+                        let env = vec![("CLAUDE_MCP_CONFIG".to_string(), config_path)];
+                        (driver.with_extra_env(env), Some(handle))
+                    }
+                    Err(e) => {
+                        log::error!("Failed to start MCP server: {e}");
+                        return Err(format!("Failed to start MCP server: {e}"));
+                    }
+                }
+            } else {
+                let env = config.extra_env.clone();
+                (driver.with_extra_env(env), None)
+            };
+
             let writer = Arc::new(MessageWriter::new(
                 config.session_id.clone(),
                 Arc::clone(&store),
@@ -622,6 +664,26 @@ fn find_closing_fence(text: &str) -> Option<usize> {
         pos = abs + fence.len();
     }
     None
+}
+
+/// Write a temporary MCP config file pointing at the local SSE server.
+///
+/// Returns the path to the written file (as a String so the caller can pass
+/// it in `CLAUDE_MCP_CONFIG`).
+pub(crate) fn write_temp_mcp_config(port: u16) -> Result<String, String> {
+    let config = serde_json::json!({
+        "mcpServers": {
+            "builderbot": {
+                "url": format!("http://127.0.0.1:{port}/sse")
+            }
+        }
+    });
+    let path = std::env::temp_dir().join(format!("staged-mcp-config-{port}.json"));
+    std::fs::write(&path, config.to_string())
+        .map_err(|e| format!("Failed to write MCP config: {e}"))?;
+    path.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "MCP config path is not valid UTF-8".to_string())
 }
 
 fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Option<String>) {

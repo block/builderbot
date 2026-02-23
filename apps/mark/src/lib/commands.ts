@@ -165,7 +165,6 @@ export function startProjectSession(
   return invoke('start_project_session', {
     projectId,
     prompt,
-    createNote: true,
     provider: provider ?? null,
   });
 }

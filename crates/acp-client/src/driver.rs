@@ -95,6 +95,8 @@ pub struct AcpDriver {
     agent_label: String,
     /// When true, this driver proxies through a remote Blox workspace.
     is_remote: bool,
+    /// Extra environment variables to pass to the agent process.
+    extra_env: Vec<(String, String)>,
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
@@ -111,6 +113,7 @@ impl AcpDriver {
                 acp_args: agent.acp_args,
                 agent_label: agent.label,
                 is_remote: false,
+                extra_env: Vec::new(),
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
     }
@@ -123,6 +126,7 @@ impl AcpDriver {
                 acp_args: agent.acp_args,
                 agent_label: agent.label,
                 is_remote: false,
+                extra_env: Vec::new(),
             })
             .ok_or_else(|| {
                 "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
@@ -144,7 +148,14 @@ impl AcpDriver {
             acp_args: args,
             agent_label: "Blox".to_string(),
             is_remote: true,
+            extra_env: Vec::new(),
         })
+    }
+
+    /// Set extra environment variables to pass to the agent process.
+    pub fn with_extra_env(mut self, vars: Vec<(String, String)>) -> Self {
+        self.extra_env = vars;
+        self
     }
 }
 
@@ -160,13 +171,17 @@ impl AgentDriver for AcpDriver {
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
     ) -> Result<(), String> {
-        let mut child = Command::new(&self.binary_path)
-            .args(&self.acp_args)
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.args(&self.acp_args)
             .current_dir(working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        for (k, v) in &self.extra_env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn {}: {e}", self.agent_label))?;
 

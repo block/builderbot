@@ -169,7 +169,7 @@ export interface ProjectNote {
 
 export interface ProjectSessionResponse {
   sessionId: string;
-  noteId: string | null;
+  noteId: string;
 }
 
 // =============================================================================

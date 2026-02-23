@@ -55,6 +55,9 @@ tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
 tauri-plugin-store = "2.4.2"
 
+# MCP server for project sessions
+rmcp = { version = "0.9", features = ["server", "transport-sse-server"] }
+
 # Debug binaries archived — uncomment when needed
 # [[bin]]
 # name = "debug_diff"

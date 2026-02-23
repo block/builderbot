@@ -154,6 +154,8 @@ pub fn start_session(
             pre_head_sha: None,
             provider,
             workspace_name: None,
+            extra_env: vec![],
+            mcp_project_id: None,
         },
         store,
         app_handle,
@@ -218,6 +220,8 @@ pub fn resume_session(
             pre_head_sha: None,
             provider,
             workspace_name: None,
+            extra_env: vec![],
+            mcp_project_id: None,
         },
         store,
         app_handle,
@@ -295,18 +299,16 @@ pub struct BranchSessionResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSessionResponse {
     pub session_id: String,
-    /// The ID of the project note created (if create_note is true).
-    pub note_id: Option<String>,
+    /// The ID of the project note created for this session.
+    pub note_id: String,
 }
 
 /// Start a project-level session.
 ///
 /// Project sessions operate at the project level rather than a specific branch.
-/// The agent receives project context (all repos, existing project notes) and
-/// can research, create notes, or provide analysis.
-///
-/// When `create_note` is true, an empty ProjectNote stub is created and the
-/// agent's output (after `---`) is extracted into it on completion.
+/// The agent receives project context (all repos, existing project notes),
+/// and an MCP server with tools to start repo subagent sessions and add repos.
+/// Always creates a ProjectNote stub that is populated when the session completes.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_project_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -314,7 +316,6 @@ pub async fn start_project_session(
     app_handle: tauri::AppHandle,
     project_id: String,
     prompt: String,
-    create_note: bool,
     provider: Option<String>,
 ) -> Result<ProjectSessionResponse, String> {
     let store = get_store(&store)?;
@@ -328,19 +329,20 @@ pub async fn start_project_session(
     let project_context = build_project_session_context(&store, &project);
 
     // Build the full prompt
-    let action_instructions = if create_note {
-        "The user is requesting research or analysis at the project level. \
-         Investigate the prompt below using any tools available, then produce a note \
-         summarizing your findings.\n\n\
-         To return the note, include a horizontal rule (---) followed by the note content. \
-         Begin the note with a markdown H1 heading as the title.\n\n\
-         Do NOT create any commits."
-    } else {
-        "The user is requesting work at the project level. \
-         Use any tools available to fulfill the request below. \
-         You may research, analyze, or provide recommendations.\n\n\
-         Do NOT create any commits unless explicitly asked."
-    };
+    let action_instructions = "The user is requesting work at the project level. Investigate and \
+        fulfill the request below, then produce a project note summarizing what you found and any \
+        actions taken.\n\n\
+        You have access to the following tools:\n\n\
+        - start_repo_session: Use this to make changes or run tasks within one of the project's \
+        repositories. Pass the repo slug (e.g. \"org/repo\") and clear instructions for what to \
+        do there. This tool starts a subagent session and waits for it to complete before \
+        returning the outcome.\n\n\
+        - add_project_repo: Use this when the task requires a repository that isn't yet in the \
+        project. Pass the GitHub repo slug to add it.\n\n\
+        To discover repositories that might be relevant, use `gh` to explore repos in the user's \
+        GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
+        To return the note, include a horizontal rule (---) followed by the note content. \
+        Begin the note with a markdown H1 heading as the title.";
 
     let full_prompt = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
@@ -358,16 +360,12 @@ pub async fn start_project_session(
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    // Optionally create a project note stub
-    let note_id = if create_note {
-        let note = store::ProjectNote::new(&project_id, &prompt, "").with_session(&session.id);
-        store
-            .create_project_note(&note)
-            .map_err(|e| e.to_string())?;
-        Some(note.id)
-    } else {
-        None
-    };
+    // Always create a project note stub
+    let note = store::ProjectNote::new(&project_id, &prompt, "").with_session(&session.id);
+    store
+        .create_project_note(&note)
+        .map_err(|e| e.to_string())?;
+    let note_id = note.id.clone();
 
     session_runner::start_session(
         SessionConfig {
@@ -378,6 +376,8 @@ pub async fn start_project_session(
             pre_head_sha: None,
             provider,
             workspace_name: None,
+            extra_env: vec![],
+            mcp_project_id: Some(project_id.clone()),
         },
         store,
         app_handle,
@@ -563,6 +563,8 @@ pub async fn start_branch_session(
             pre_head_sha,
             provider: effective_provider,
             workspace_name: branch.workspace_name.clone(),
+            extra_env: vec![],
+            mcp_project_id: None,
         },
         store,
         app_handle,

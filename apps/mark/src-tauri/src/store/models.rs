@@ -1,4 +1,4 @@
-//! Domain types for Staged persistence.
+//! Domain types for Mark persistence.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -451,7 +451,7 @@ pub struct Session {
     pub error_message: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
-    /// PID of the staged process that owns this session while it is running.
+    /// PID of the Mark process that owns this session while it is running.
     /// Used on startup to detect sessions orphaned by a dead process.
     pub owner_pid: Option<u32>,
 }

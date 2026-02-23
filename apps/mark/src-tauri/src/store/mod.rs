@@ -1,4 +1,4 @@
-//! SQLite storage for Staged.
+//! SQLite storage for Mark.
 //!
 //! Fresh schema — no migrations. A `schema_version` table tracks
 //! compatibility. If the database is missing that table or has an

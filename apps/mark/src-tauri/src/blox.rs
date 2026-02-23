@@ -1,6 +1,6 @@
 //! Blox CLI integration.
 //!
-//! Thin wrappers around shared `blox-cli` helpers so existing staged code can
+//! Thin wrappers around shared `blox-cli` helpers so existing Mark code can
 //! keep using `crate::blox::*`.
 
 pub use blox_cli::{BloxError, WorkspaceInfo, WorkspaceListEntry};

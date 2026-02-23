@@ -2200,7 +2200,7 @@ pub fn run() {
 
             // Migrate from older data directories if the new location is empty.
             // Priority: legacy ~/Library/Application Support/staged/ first,
-            // then original Tauri app_data_dir (com.staged.app).
+            // then the current Tauri app_data_dir (com.mark.app).
             if !db_path.exists() {
                 let legacy_candidates: Vec<PathBuf> = [
                     crate::paths::legacy_data_dir(),
@@ -2248,7 +2248,7 @@ pub fn run() {
                         Store::new(&db_path).map_err(|e| format!("Failed to open store: {e}"))?;
                     let store_arc = Arc::new(s);
                     // Cancel sessions whose owner process is dead; leave sessions
-                    // owned by other live staged instances untouched.
+                    // owned by other live Mark instances untouched.
                     session_runner::cancel_dead_sessions(
                         Arc::clone(&store_arc),
                         app.handle().clone(),

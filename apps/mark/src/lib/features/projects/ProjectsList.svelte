@@ -67,9 +67,9 @@
       deletingProjectNames = next;
       loadProjects();
     };
-    window.addEventListener('staged:new-project', onNewProject);
-    window.addEventListener('staged:project-delete-start', onProjectDeleteStart);
-    window.addEventListener('staged:project-delete-end', onProjectDeleteEnd);
+    window.addEventListener('mark:new-project', onNewProject);
+    window.addEventListener('mark:project-delete-start', onProjectDeleteStart);
+    window.addEventListener('mark:project-delete-end', onProjectDeleteEnd);
 
     // Listen for PR status changes to update branch state
     let unlistenPrStatus: UnlistenFn | undefined;
@@ -105,9 +105,9 @@
     });
 
     return () => {
-      window.removeEventListener('staged:new-project', onNewProject);
-      window.removeEventListener('staged:project-delete-start', onProjectDeleteStart);
-      window.removeEventListener('staged:project-delete-end', onProjectDeleteEnd);
+      window.removeEventListener('mark:new-project', onNewProject);
+      window.removeEventListener('mark:project-delete-start', onProjectDeleteStart);
+      window.removeEventListener('mark:project-delete-end', onProjectDeleteEnd);
       unlistenPrStatus?.();
     };
   });

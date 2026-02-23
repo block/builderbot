@@ -49,7 +49,7 @@ dev repo="":
     fi
 
     echo "Starting on port ${VITE_PORT}"
-    {{ if repo != "" { "export STAGED_REPO=" + repo } else { "" } }}
+    {{ if repo != "" { "export MARK_REPO=" + repo } else { "" } }}
     pnpm exec tauri dev --config "$TAURI_CONFIG"
 
 # Build the app for production

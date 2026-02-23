@@ -1,10 +1,10 @@
-# Staged
+# Mark
 
 A desktop app for reviewing git changes, managing branches, and running AI coding sessions. Built with Tauri (Rust + libgit2) and Svelte.
 
 ## What It Does
 
-**Staged** is a visual workspace for git repositories. Browse diffs with syntax highlighting, manage branches and worktrees, and launch AI agent sessions to make changes — all from a single window.
+**Mark** is a visual workspace for git repositories. Browse diffs with syntax highlighting, manage branches and worktrees, and launch AI agent sessions to make changes — all from a single window.
 
 - **Diff viewer** — Side-by-side diffs between any two refs (branches, commits, tags, or the working tree)
 - **Project & branch management** — Track multiple projects, create branches, and view branch timelines
@@ -19,7 +19,7 @@ A desktop app for reviewing git changes, managing branches, and running AI codin
 Install with a single command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/block/builderbot/main/staged/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/block/builderbot/main/mark/install.sh | bash
 ```
 
 The installer will:
@@ -28,23 +28,23 @@ The installer will:
 - Set up the Hermit development environment
 - Install dependencies
 - Build the application
-- Install to `/Applications/staged.app`
-- Install the `staged` CLI to `/usr/local/bin`
+- Install to `/Applications/Mark.app`
+- Install the `mark` CLI to `/usr/local/bin`
 
 **Note**: This builds from source, which takes a few minutes. Requires git to be installed.
 
 ### Command Line Usage
 
-After installation, launch Staged from the terminal:
+After installation, launch Mark from the terminal:
 
 ```bash
-staged                # Open in current directory
-staged /path/to/repo  # Open in specified directory
+mark                # Open in current directory
+mark /path/to/repo  # Open in specified directory
 ```
 
 Each invocation opens a new window, so you can have multiple repos open simultaneously.
 
-If you installed manually (not via the install script), copy `bin/staged` to somewhere in your PATH (e.g., `/usr/local/bin`).
+If you installed manually (not via the install script), copy `bin/mark` to somewhere in your PATH (e.g., `/usr/local/bin`).
 
 ## Development
 

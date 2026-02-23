@@ -104,6 +104,10 @@ export function setPrimaryProjectRepo(projectId: string, projectRepoId: string):
   return invoke('set_primary_project_repo', { projectId, projectRepoId });
 }
 
+export function clearProjectRepoReason(projectRepoId: string): Promise<void> {
+  return invoke('clear_project_repo_reason', { projectRepoId });
+}
+
 /** List the authenticated user's GitHub organization memberships. */
 export function listGithubOrgs(): Promise<string[]> {
   return invoke('list_github_orgs');

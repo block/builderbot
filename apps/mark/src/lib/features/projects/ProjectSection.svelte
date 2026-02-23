@@ -23,7 +23,10 @@
   interface Props {
     project: Project;
     branches: Branch[];
-    repoLabelsById?: Map<string, { githubRepo: string; subpath: string | null }>;
+    repoLabelsById?: Map<
+      string,
+      { githubRepo: string; subpath: string | null; reason: string | null }
+    >;
     canAddRepo?: boolean;
     addRepoHint?: string | null;
     deleting?: boolean;

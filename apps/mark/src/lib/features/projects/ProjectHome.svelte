@@ -31,7 +31,7 @@
   let projects = $state<Project[]>([]);
   let branchesByProject = $state<Map<string, Branch[]>>(new Map());
   let repoLabelsByProject = $state<
-    Map<string, Map<string, { githubRepo: string; subpath: string | null }>>
+    Map<string, Map<string, { githubRepo: string; subpath: string | null; reason: string | null }>>
   >(new Map());
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -108,7 +108,14 @@
           new Map(
             repos.map(
               (repo) =>
-                [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
+                [
+                  repo.id,
+                  {
+                    githubRepo: repo.githubRepo,
+                    subpath: repo.subpath ?? null,
+                    reason: repo.reason ?? null,
+                  },
+                ] as const
             )
           )
         );
@@ -215,7 +222,7 @@
       const branchMap = new Map<string, Branch[]>();
       const repoLabelMap = new Map<
         string,
-        Map<string, { githubRepo: string; subpath: string | null }>
+        Map<string, { githubRepo: string; subpath: string | null; reason: string | null }>
       >();
       for (const project of projectList) {
         branchMap.set(project.id, branchesByProject.get(project.id) || []);
@@ -240,7 +247,11 @@
                   (repo) =>
                     [
                       repo.id,
-                      { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null },
+                      {
+                        githubRepo: repo.githubRepo,
+                        subpath: repo.subpath ?? null,
+                        reason: repo.reason ?? null,
+                      },
                     ] as const
                 )
               )
@@ -372,7 +383,14 @@
       new Map(
         repos.map(
           (repo) =>
-            [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
+            [
+              repo.id,
+              {
+                githubRepo: repo.githubRepo,
+                subpath: repo.subpath ?? null,
+                reason: repo.reason ?? null,
+              },
+            ] as const
         )
       )
     );
@@ -481,7 +499,14 @@
         new Map(
           repos.map(
             (repo) =>
-              [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
+              [
+                repo.id,
+                {
+                  githubRepo: repo.githubRepo,
+                  subpath: repo.subpath ?? null,
+                  reason: repo.reason ?? null,
+                },
+              ] as const
           )
         )
       );
@@ -707,7 +732,14 @@
           new Map(
             repos.map(
               (repo) =>
-                [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
+                [
+                  repo.id,
+                  {
+                    githubRepo: repo.githubRepo,
+                    subpath: repo.subpath ?? null,
+                    reason: repo.reason ?? null,
+                  },
+                ] as const
             )
           )
         );

@@ -39,6 +39,9 @@ struct AddProjectRepoParams {
     pub github_repo: String,
     /// Optional branch name (defaults to project's inferred name).
     pub branch_name: Option<String>,
+    /// Reason this repository is being added to the project. Shown to the user
+    /// in the branch card timeline so they understand why it was added.
+    pub reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -219,6 +222,7 @@ impl ProjectToolsHandler {
             p.branch_name,
             None,
             None,
+            p.reason,
         )
         .await
         {

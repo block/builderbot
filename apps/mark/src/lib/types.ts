@@ -23,6 +23,7 @@ export interface ProjectRepo {
   branchName: string;
   subpath: string | null;
   isPrimary: boolean;
+  reason: string | null;
   createdAt: number;
   updatedAt: number;
 }

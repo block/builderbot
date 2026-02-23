@@ -361,8 +361,20 @@ async fn add_project_repo(
         branch_name,
         subpath,
         set_as_primary,
+        None,
     )
     .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn clear_project_repo_reason(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_repo_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    store
+        .clear_project_repo_reason(&project_repo_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2243,6 +2255,7 @@ pub fn run() {
             list_recent_repos,
             add_project_repo,
             update_project_repo_branch_name,
+            clear_project_repo_reason,
             remove_project_repo,
             set_primary_project_repo,
             delete_project,

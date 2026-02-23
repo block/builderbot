@@ -112,6 +112,15 @@ impl Store {
         Ok(())
     }
 
+    pub fn clear_project_repo_reason(&self, repo_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE project_repos SET reason = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now_timestamp(), repo_id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_project_repo(&self, repo_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM project_repos WHERE id = ?1", params![repo_id])?;

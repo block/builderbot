@@ -19,7 +19,7 @@ tokio = { version = "1", features = ["full"] }
 url = "2"
 nanoid = "0.4"
 axum = "0.8"
-opener = "0.7"
+opener = "0.8"
 dirs = "6"
 
 [dev-dependencies]

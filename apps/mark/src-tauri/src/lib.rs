@@ -2175,27 +2175,9 @@ pub fn run() {
                     ],
                 )?;
 
-                let doctor_item =
-                    MenuItem::with_id(handle, "doctor", "Health Check…", true, None::<&str>)?;
-
-                let help_menu = Submenu::with_id_and_items(
-                    handle,
-                    tauri::menu::HELP_SUBMENU_ID,
-                    "Help",
-                    true,
-                    &[&doctor_item],
-                )?;
-
                 let menu = Menu::with_items(
                     handle,
-                    &[
-                        &app_menu,
-                        &file_menu,
-                        &edit_menu,
-                        &view_menu,
-                        &window_menu,
-                        &help_menu,
-                    ],
+                    &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu],
                 )?;
 
                 app.set_menu(menu)?;
@@ -2312,12 +2294,7 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id() == "doctor" {
-                // Emit an event to the frontend to open settings on the Doctor section.
-                if let Err(e) = app.emit("menu:doctor", ()) {
-                    log::warn!("Failed to emit menu:doctor event: {e}");
-                }
-            } else if event.id() == "settings" {
+            if event.id() == "settings" {
                 // Emit an event to the frontend to open the settings page.
                 if let Err(e) = app.emit("menu:settings", ()) {
                     log::warn!("Failed to emit menu:settings event: {e}");

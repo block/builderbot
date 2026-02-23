@@ -1,7 +1,7 @@
 <!--
   DoctorModal.svelte — Health Check modal.
 
-  Opened via Help → Health Check menu item.
+  Opened from the Settings "Health Check" section.
   Runs all checks on mount and displays results with optional fix buttons.
 -->
 <script lang="ts">

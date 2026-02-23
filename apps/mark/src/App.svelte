@@ -26,7 +26,6 @@
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
-  let unlistenDoctor: UnlistenFn | undefined;
   let unlistenSettings: UnlistenFn | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
@@ -79,10 +78,6 @@
     document.addEventListener('keydown', handleKonamiKey);
     document.addEventListener('keydown', handleGlobalShortcut);
 
-    // Listen for the Help → Health Check... menu item.
-    unlistenDoctor = await listen('menu:doctor', () => {
-      openSettings('doctor');
-    });
     // Listen for the app menu Preferences item.
     unlistenSettings = await listen('menu:settings', () => {
       openSettings();
@@ -207,7 +202,6 @@
   onDestroy(() => {
     document.removeEventListener('keydown', handleKonamiKey);
     document.removeEventListener('keydown', handleGlobalShortcut);
-    unlistenDoctor?.();
     unlistenSettings?.();
     unlistenSessionStatus?.();
   });

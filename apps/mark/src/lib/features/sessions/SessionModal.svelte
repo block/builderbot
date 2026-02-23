@@ -390,6 +390,7 @@
 
   /** Track which XML blocks are expanded */
   let expandedXmlBlocks = $state<Set<string>>(new Set());
+  let backdropPointerDown = false;
 
   function toggleXmlBlock(key: string) {
     const next = new Set(expandedXmlBlocks);
@@ -408,10 +409,15 @@
     }
   }
 
+  function handleBackdropPointerDown(event: PointerEvent) {
+    backdropPointerDown = event.target === event.currentTarget;
+  }
+
   function handleBackdropClick(e: MouseEvent) {
-    if (e.target === e.currentTarget) {
+    if (e.target === e.currentTarget && backdropPointerDown) {
       requestClose();
     }
+    backdropPointerDown = false;
   }
 
   function requestClose() {
@@ -488,6 +494,7 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
+  onpointerdown={handleBackdropPointerDown}
   onclick={handleBackdropClick}
   onkeydown={(e) => e.key === 'Escape' && requestClose()}
 >

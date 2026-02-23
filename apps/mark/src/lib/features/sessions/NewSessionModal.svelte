@@ -39,6 +39,7 @@
   let starting = $state(false);
   let initialized = false;
   let textareaEl: HTMLTextAreaElement | null = $state(null);
+  let backdropPointerDown = false;
 
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
@@ -113,10 +114,15 @@
     }
   }
 
+  function handleBackdropPointerDown(event: PointerEvent) {
+    backdropPointerDown = event.target === event.currentTarget;
+  }
+
   function handleBackdropClick(e: MouseEvent) {
-    if (e.target === e.currentTarget) {
+    if (e.target === e.currentTarget && backdropPointerDown) {
       handleClose();
     }
+    backdropPointerDown = false;
   }
 
   function formatBaseBranch(baseBranch: string): string {
@@ -132,6 +138,7 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
+  onpointerdown={handleBackdropPointerDown}
   onclick={handleBackdropClick}
   onkeydown={(e) => e.key === 'Escape' && handleClose()}
 >

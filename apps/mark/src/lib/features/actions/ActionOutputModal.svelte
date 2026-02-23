@@ -62,6 +62,7 @@
   let unlistenOutput: (() => void) | null = null;
   let unlistenStatus: (() => void) | null = null;
   let shouldAutoScroll = $state(true);
+  let backdropPointerDown = false;
 
   // ANSI to HTML converter
   const ansiConverter = new Convert({
@@ -247,10 +248,15 @@
     }
   }
 
+  function handleBackdropPointerDown(event: PointerEvent) {
+    backdropPointerDown = event.target === event.currentTarget;
+  }
+
   function handleBackdropClick(e: MouseEvent) {
-    if (e.target === e.currentTarget) {
+    if (e.target === e.currentTarget && backdropPointerDown) {
       onClose();
     }
+    backdropPointerDown = false;
   }
 
   async function handleRemove() {
@@ -324,6 +330,7 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
+  onpointerdown={handleBackdropPointerDown}
   onclick={handleBackdropClick}
   onkeydown={(e) => e.key === 'Escape' && onClose()}
 >

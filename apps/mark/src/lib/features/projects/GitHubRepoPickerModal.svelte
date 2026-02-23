@@ -15,11 +15,17 @@
   }
 
   let { onSelect, onClose, excludeRepos }: Props = $props();
+  let backdropPointerDown = false;
+
+  function handleBackdropPointerDown(event: PointerEvent) {
+    backdropPointerDown = event.target === event.currentTarget;
+  }
 
   function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget) {
+    if (event.target === event.currentTarget && backdropPointerDown) {
       onClose();
     }
+    backdropPointerDown = false;
   }
 </script>
 
@@ -29,6 +35,7 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
+  onpointerdown={handleBackdropPointerDown}
   onclick={handleBackdropClick}
   onkeydown={(e) => e.key === 'Escape' && onClose()}
 >

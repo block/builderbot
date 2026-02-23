@@ -233,6 +233,7 @@
       return aDisplay.localeCompare(bDisplay);
     });
   });
+  let backdropPointerDown = false;
 
   let groupedActions = $derived.by(() => {
     const groups: Record<string, ProjectAction[]> = {
@@ -258,10 +259,15 @@
     }
   }
 
+  function handleBackdropPointerDown(event: PointerEvent) {
+    backdropPointerDown = event.target === event.currentTarget;
+  }
+
   function handleBackdropClick(event: MouseEvent) {
-    if (event.target === event.currentTarget && !editingAction) {
+    if (event.target === event.currentTarget && backdropPointerDown && !editingAction) {
       onClose();
     }
+    backdropPointerDown = false;
   }
 </script>
 
@@ -272,6 +278,7 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
+  onpointerdown={handleBackdropPointerDown}
   onclick={handleBackdropClick}
   onkeydown={(e) => e.key === 'Escape' && !editingAction && onClose()}
 >

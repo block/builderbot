@@ -21,6 +21,7 @@
   let { title, content, onClose }: Props = $props();
 
   let copied = $state(false);
+  let backdropPointerDown = false;
 
   function renderMarkdown(text: string): string {
     return sanitize(marked.parse(text) as string);
@@ -44,10 +45,15 @@
     }
   }
 
+  function handleBackdropPointerDown(event: PointerEvent) {
+    backdropPointerDown = event.target === event.currentTarget;
+  }
+
   function handleBackdropClick(e: MouseEvent) {
-    if (e.target === e.currentTarget) {
+    if (e.target === e.currentTarget && backdropPointerDown) {
       onClose();
     }
+    backdropPointerDown = false;
   }
 </script>
 
@@ -59,6 +65,7 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
+  onpointerdown={handleBackdropPointerDown}
   onclick={handleBackdropClick}
   onkeydown={(e) => e.key === 'Escape' && onClose()}
 >

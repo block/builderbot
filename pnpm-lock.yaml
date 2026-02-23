@@ -26,8 +26,8 @@ importers:
         specifier: ^0.7.2
         version: 0.7.2
       lucide-svelte:
-        specifier: ^0.562.0
-        version: 0.562.0(svelte@5.53.2)
+        specifier: ^0.575.0
+        version: 0.575.0(svelte@5.53.2)
       marked:
         specifier: ^17.0.1
         version: 17.0.3
@@ -697,6 +697,11 @@ packages:
     peerDependencies:
       svelte: ^3 || ^4 || ^5.0.0-next.42
 
+  lucide-svelte@0.575.0:
+    resolution: {integrity: sha512-Tu15tJfbmRNPaU61yeNFf3jfRHs8ABA+NwTt7TWmwVbhlSA3H7sW65tX6RttcP7HGV4aHUlYhXixZOlntoFBdw==}
+    peerDependencies:
+      svelte: ^3 || ^4 || ^5.0.0-next.42
+
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
 
@@ -1352,6 +1357,10 @@ snapshots:
   locate-character@3.0.0: {}
 
   lucide-svelte@0.562.0(svelte@5.53.2):
+    dependencies:
+      svelte: 5.53.2
+
+  lucide-svelte@0.575.0(svelte@5.53.2):
     dependencies:
       svelte: 5.53.2
 

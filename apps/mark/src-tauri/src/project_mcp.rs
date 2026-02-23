@@ -25,6 +25,10 @@ struct StartRepoSessionParams {
     pub repo: String,
     /// Instructions to give the agent.
     pub instructions: String,
+    /// Describe what information you want the session to return to you when it finishes.
+    /// The agent will be instructed to produce this output at the end of its session.
+    /// Example: "a summary of all changes made and any errors encountered".
+    pub return_info: Option<String>,
     /// Optional ACP provider ID (e.g. "claude", "goose").
     pub provider: Option<String>,
 }
@@ -72,7 +76,7 @@ impl ProjectToolsHandler {
 #[tool_router]
 impl ProjectToolsHandler {
     #[tool(
-        description = "Start an agent session in one of the project's repositories. Waits for completion and returns the outcome. Use this to make changes or run tasks in a specific repo."
+        description = "Start an agent session in one of the project's repositories. Waits for completion and returns the outcome along with the output produced by the session. Use the `return_info` field to specify exactly what information you want the session to return to you — e.g. 'a list of all files changed and a summary of what was done'. The session agent will be instructed to produce that output at the end."
     )]
     async fn start_repo_session(
         &self,
@@ -121,8 +125,18 @@ impl ProjectToolsHandler {
             .map(|d| d.join(&repo.github_repo))
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
 
+        // Build the prompt, appending return instructions if specified
+        let prompt = if let Some(ref return_info) = p.return_info {
+            format!(
+                "{}\n\nIMPORTANT: When you are done, your final message must contain: {}",
+                p.instructions, return_info
+            )
+        } else {
+            p.instructions.clone()
+        };
+
         // Create the session record
-        let mut session = Session::new_running(&p.instructions, &working_dir);
+        let mut session = Session::new_running(&prompt, &working_dir);
         if let Some(ref prov) = p.provider {
             session = session.with_provider(prov);
         }
@@ -135,7 +149,7 @@ impl ProjectToolsHandler {
         let start_result = crate::session_runner::start_session(
             SessionConfig {
                 session_id: session_id.clone(),
-                prompt: p.instructions,
+                prompt,
                 working_dir,
                 agent_session_id: None,
                 pre_head_sha: None,
@@ -164,7 +178,23 @@ impl ProjectToolsHandler {
                         SessionStatus::Cancelled => "cancelled",
                         _ => "failed",
                     };
-                    return format!(r#"{{"session_id": "{session_id}", "outcome": "{outcome}"}}"#);
+                    // Return the last assistant message as the session output so the
+                    // parent agent receives the result the child was asked to produce.
+                    let output = self
+                        .store
+                        .get_session_messages(&session_id)
+                        .ok()
+                        .and_then(|msgs| {
+                            msgs.into_iter()
+                                .filter(|m| m.role == crate::store::MessageRole::Assistant)
+                                .last()
+                                .map(|m| m.content)
+                        })
+                        .unwrap_or_default();
+                    let output_json = serde_json::to_string(&output).unwrap_or_default();
+                    return format!(
+                        r#"{{"session_id": "{session_id}", "outcome": "{outcome}", "output": {output_json}}}"#
+                    );
                 }
                 Ok(_) => continue,
                 Err(e) => return format!("Error polling session status: {e}"),
@@ -195,6 +225,11 @@ impl ProjectToolsHandler {
             Ok(repo) => repo,
             Err(e) => return format!("Error adding repo: {e}"),
         };
+
+        // Notify the UI so the repo appears immediately
+        let _ = self
+            .app_handle
+            .emit("project-repo-added", self.project_id.clone());
 
         // Find the branch that was just created for this repo
         let branch = match self.store.list_branches_for_project(&self.project_id) {
@@ -240,6 +275,10 @@ impl ProjectToolsHandler {
                         "[project_mcp] add_project_repo: worktree ready at {}",
                         worktree_path
                     );
+                    // Notify UI that the worktree is ready so branch state updates
+                    let _ = self
+                        .app_handle
+                        .emit("project-repo-added", self.project_id.clone());
                 }
                 Ok(Err(e)) => {
                     log::warn!(
@@ -284,6 +323,10 @@ impl ProjectToolsHandler {
                             "[project_mcp] add_project_repo: ran {count} prerun actions for branch {}",
                             branch.id
                         );
+                        // Notify UI that prerun actions finished
+                        let _ = self
+                            .app_handle
+                            .emit("project-repo-added", self.project_id.clone());
                     }
                     Err(e) => {
                         log::warn!(

@@ -22,22 +22,38 @@
 
   <div class="settings-body">
     <aside class="settings-nav" aria-label="Settings sections">
-      <button
-        class="nav-item"
-        class:active={navigation.settingsSection === 'actions'}
-        onclick={() => (navigation.settingsSection = 'actions')}
-      >
-        <Play size={14} />
-        Actions
-      </button>
-      <button
-        class="nav-item"
-        class:active={navigation.settingsSection === 'doctor'}
-        onclick={() => (navigation.settingsSection = 'doctor')}
-      >
-        <Stethoscope size={14} />
-        Doctor
-      </button>
+      <div class="settings-nav-header">
+        <span class="settings-nav-title">Sections</span>
+      </div>
+
+      <div class="settings-nav-list">
+        <button
+          class="nav-item"
+          class:active={navigation.settingsSection === 'actions'}
+          onclick={() => (navigation.settingsSection = 'actions')}
+        >
+          <div class="nav-main">
+            <Play size={14} />
+            <div class="nav-text">
+              <span class="nav-name">Actions</span>
+              <span class="nav-meta">Providers, prompts, and defaults</span>
+            </div>
+          </div>
+        </button>
+        <button
+          class="nav-item"
+          class:active={navigation.settingsSection === 'doctor'}
+          onclick={() => (navigation.settingsSection = 'doctor')}
+        >
+          <div class="nav-main">
+            <Stethoscope size={14} />
+            <div class="nav-text">
+              <span class="nav-name">Doctor</span>
+              <span class="nav-meta">Environment checks and setup</span>
+            </div>
+          </div>
+        </button>
+      </div>
     </aside>
 
     <section class="settings-content">
@@ -112,36 +128,102 @@
 
   .settings-nav {
     border-right: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
-    padding: 12px;
+    padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    background: color-mix(in srgb, var(--bg-chrome) 40%, transparent);
+    min-height: 0;
+    background: color-mix(in srgb, var(--bg-chrome) 75%, transparent);
+  }
+
+  .settings-nav-header {
+    padding: 14px 12px 8px;
+  }
+
+  .settings-nav-title {
+    display: inline-block;
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .settings-nav-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 0 8px 10px;
+    overflow: auto;
   }
 
   .nav-item {
-    border: 1px solid transparent;
+    border: none;
     border-radius: 8px;
     background: transparent;
-    color: color-mix(in srgb, var(--text-muted) 90%, var(--text-primary));
-    display: inline-flex;
+    color: var(--text-primary);
+    display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: space-between;
+    width: 100%;
     padding: 8px 10px;
     cursor: pointer;
     text-align: left;
     font-size: var(--size-sm);
+    transition: all 0.15s ease;
+  }
+
+  .nav-item:focus-visible {
+    outline: 2px solid var(--ui-accent);
+    outline-offset: -1px;
   }
 
   .nav-item:hover {
-    color: var(--text-primary);
-    background: color-mix(in srgb, var(--bg-hover) 55%, transparent);
+    background: var(--ui-selection);
   }
 
   .nav-item.active {
-    color: color-mix(in srgb, var(--text-primary) 88%, var(--text-muted));
-    border-color: color-mix(in srgb, var(--border-subtle) 80%, transparent);
-    background: color-mix(in srgb, var(--bg-primary) 34%, transparent);
+    background: var(--bg-hover);
+  }
+
+  .nav-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .nav-main :global(svg) {
+    flex-shrink: 0;
+    width: 16px;
+    color: inherit;
+    stroke: currentColor;
+  }
+
+  .nav-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .nav-name {
+    font-size: var(--size-sm);
+    font-weight: 600;
+    color: inherit;
+    line-height: 1.2;
+  }
+
+  .nav-meta {
+    font-size: calc(var(--size-xs) - 1px);
+    color: var(--text-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nav-item.active .nav-meta {
+    color: var(--text-muted);
   }
 
   .settings-content {
@@ -164,9 +246,29 @@
     .settings-nav {
       border-right: 0;
       border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
+      background: color-mix(in srgb, var(--bg-chrome) 65%, transparent);
+    }
+
+    .settings-nav-header {
+      display: none;
+    }
+
+    .settings-nav-list {
       flex-direction: row;
       align-items: center;
+      padding: 8px;
+      gap: 6px;
       overflow-x: auto;
+    }
+
+    .nav-item {
+      width: auto;
+      min-width: max-content;
+      padding: 8px 12px;
+    }
+
+    .nav-meta {
+      display: none;
     }
   }
 </style>

@@ -6,6 +6,7 @@ import { useSSE } from '../hooks/useSSE';
 import { useTabs, deriveTitleFromPath } from '../hooks/useTabs';
 import { openInNewWindow } from '../utils/window';
 import TableOfContents from './TableOfContents';
+import FindBar from './FindBar';
 import type { Heading } from './TableOfContents';
 import type { APIProject, SSEEvent } from '../types';
 
@@ -40,6 +41,9 @@ export default function Layout() {
   const [addPath, setAddPath] = useState('');
   const [addError, setAddError] = useState('');
   const [addLoading, setAddLoading] = useState(false);
+
+  // Find bar state
+  const [showFindBar, setShowFindBar] = useState(false);
 
   // Sidebar three-dot menu state
   const [openSidebarMenu, setOpenSidebarMenu] = useState<string | null>(null);
@@ -107,10 +111,16 @@ export default function Layout() {
   const standaloneProjects = projects.filter((p) => p.origin === 'standalone');
   const workspaces = [...new Set(workspaceProjects.map((p) => p.workspace))];
 
-  // Listen for native menu events (Cmd+W close tab, Cmd+T new tab)
+  // Listen for native menu events (tab/window shortcuts)
   useEffect(() => {
-    function handleCloseTab() {
-      closeTab(activeTabId);
+    async function handleCloseTab() {
+      if (tabs.length <= 1) {
+        // Last tab — close the window
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        getCurrentWindow().close();
+      } else {
+        closeTab(activeTabId);
+      }
     }
     function handleNewTab() {
       const ws = workspaces[0];
@@ -122,13 +132,39 @@ export default function Layout() {
         openTab('/');
       }
     }
+    function handlePrevTab() {
+      const idx = tabs.findIndex((t) => t.id === activeTabId);
+      if (idx > 0) activateTab(tabs[idx - 1].id);
+      else if (tabs.length > 0) activateTab(tabs[tabs.length - 1].id);
+    }
+    function handleNextTab() {
+      const idx = tabs.findIndex((t) => t.id === activeTabId);
+      if (idx < tabs.length - 1) activateTab(tabs[idx + 1].id);
+      else if (tabs.length > 0) activateTab(tabs[0].id);
+    }
     window.addEventListener('menu-close-tab', handleCloseTab);
     window.addEventListener('menu-new-tab', handleNewTab);
+    window.addEventListener('menu-prev-tab', handlePrevTab);
+    window.addEventListener('menu-next-tab', handleNextTab);
     return () => {
       window.removeEventListener('menu-close-tab', handleCloseTab);
       window.removeEventListener('menu-new-tab', handleNewTab);
+      window.removeEventListener('menu-prev-tab', handlePrevTab);
+      window.removeEventListener('menu-next-tab', handleNextTab);
     };
-  }, [activeTabId, closeTab, openTab, workspaces, standaloneProjects]);
+  }, [activeTabId, closeTab, openTab, activateTab, tabs, workspaces, standaloneProjects]);
+
+  // Listen for find bar toggle (Tauri menu event only — in browser, native Cmd+F works)
+  useEffect(() => {
+    if (!isDesktopApp) return;
+    function handleMenuFind() {
+      setShowFindBar((prev) => !prev);
+    }
+    window.addEventListener('menu-find', handleMenuFind);
+    return () => {
+      window.removeEventListener('menu-find', handleMenuFind);
+    };
+  }, []);
 
   // Detect project-mode view: /project/:qn or /file/:qn/*
   // QN may contain slashes (e.g. "Development/birdseye"), so match against known projects
@@ -428,6 +464,7 @@ export default function Layout() {
       </nav>
 
       <div className="main-content" style={isFilePage ? { padding: 0, overflow: 'hidden' } : undefined}>
+        {isDesktopApp && showFindBar && <FindBar onClose={() => setShowFindBar(false)} />}
         <Outlet context={outletContext} />
       </div>
 

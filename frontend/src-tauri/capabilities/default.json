@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capabilities for the main window",
-  "windows": ["main"],
+  "windows": ["main", "win-*"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

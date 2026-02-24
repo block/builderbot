@@ -6,24 +6,33 @@
   Failed sessions appear in chronological order with completed items.
 -->
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import type { Snippet } from 'svelte';
   import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
   import type { BranchTimeline as BranchTimelineData } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType } from './TimelineRow.svelte';
+  import {
+    collectRunningSessionIds,
+    createLiveSessionHints,
+    fallbackHintForPendingType,
+    type PendingHintItemType,
+  } from './liveSessionHints';
+
+  type PendingItem = {
+    key: string;
+    type: PendingHintItemType;
+    title: string;
+    secondaryMeta?: string;
+    sessionId?: string;
+  };
 
   interface Props {
     timeline: BranchTimelineData;
     /** Placeholder items for notes being created from drag-and-drop. */
     pendingDropNotes?: { key: string; title: string }[];
     /** Placeholder items for newly started sessions before timeline persistence catches up. */
-    pendingItems?: {
-      key: string;
-      type: 'pending-commit' | 'generating-note' | 'generating-review';
-      title: string;
-      secondaryMeta?: string;
-      sessionId?: string;
-    }[];
+    pendingItems?: PendingItem[];
     /** Existing timeline rows currently being deleted (rendered in-place as deleting). */
     deletingItems?: { type: 'commit' | 'note' | 'review'; id: string }[];
     onSessionClick?: (sessionId: string) => void;
@@ -68,6 +77,10 @@
       timeline.reviews.some((review) => review.sessionStatus === 'running')
   );
   let disableNewSessionActions = $derived(newSessionDisabled || hasRunningSessionGeneration);
+  let liveSessionHints = $state<Record<string, string>>({});
+  const liveSessionHintPoller = createLiveSessionHints((nextHints) => {
+    liveSessionHints = nextHints;
+  });
 
   // Unified timeline item for display
   type DisplayItem = {
@@ -94,6 +107,16 @@
     return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
   }
 
+  let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
+
+  $effect(() => {
+    liveSessionHintPoller.syncRunningSessionIds(runningSessionIds);
+  });
+
+  onDestroy(() => {
+    liveSessionHintPoller.destroy();
+  });
+
   // Merge commits, notes, and reviews into a single sorted list
   let items = $derived.by(() => {
     const all: DisplayItem[] = [];
@@ -112,6 +135,7 @@
       const isRunning = commit.sessionStatus === 'running';
       const isFailed = isPending && !isRunning && !!commit.sessionId;
       const isDeleting = !!commit.id && deletingCommitIds.has(commit.id);
+      const liveHint = commit.sessionId ? liveSessionHints[commit.sessionId] : undefined;
 
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
@@ -121,7 +145,7 @@
         secondaryMeta = 'Session finished — no commit created';
       } else if (isPending || isRunning) {
         type = 'pending-commit';
-        secondaryMeta = 'Generating commit';
+        secondaryMeta = liveHint ?? 'Generating commit';
       } else {
         type = 'commit';
         secondaryMeta = formatRelativeTime(commit.timestamp);
@@ -146,6 +170,7 @@
       const isRunning = note.sessionStatus === 'running';
       const isFailed = !isRunning && !!note.sessionId && !note.content?.trim();
       const isDeleting = deletingNoteIds.has(note.id);
+      const liveHint = note.sessionId ? liveSessionHints[note.sessionId] : undefined;
 
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
@@ -155,7 +180,7 @@
         secondaryMeta = 'Session finished — no note created';
       } else if (isRunning) {
         type = 'generating-note';
-        secondaryMeta = 'Generating note';
+        secondaryMeta = liveHint ?? 'Generating note';
       } else {
         type = 'note';
         secondaryMeta = formatRelativeTimeMs(note.createdAt);
@@ -181,6 +206,7 @@
       const isRunning = review.sessionStatus === 'running';
       const isFailed = !isRunning && !!review.sessionId && review.commentCount === 0;
       const isDeleting = deletingReviewIds.has(review.id);
+      const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
 
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
@@ -190,7 +216,7 @@
         secondaryMeta = 'Session finished — no comments created';
       } else if (isRunning) {
         type = 'generating-review';
-        secondaryMeta = 'Generating review';
+        secondaryMeta = liveHint ?? 'Generating review';
       } else {
         type = 'review';
         secondaryMeta = formatRelativeTimeMs(review.createdAt);
@@ -369,7 +395,11 @@
       <TimelineRow
         type={item.type}
         title={item.title}
-        secondaryMeta={item.secondaryMeta}
+        secondaryMeta={item.sessionId
+          ? (liveSessionHints[item.sessionId] ??
+            item.secondaryMeta ??
+            fallbackHintForPendingType(item.type))
+          : item.secondaryMeta}
         sessionId={item.sessionId}
         isLast={index === pendingItems.length - 1 && !onNewNote && !onNewCommit}
       />

@@ -12,9 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "Staged — Diff Viewer",
-        "width": 1200,
-        "height": 800
+        "title": "Staged",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

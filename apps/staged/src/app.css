@@ -1,10 +1,103 @@
+* {
+  box-sizing: border-box;
+}
+
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  color: #e0e0e0;
-  background-color: #1a1a2e;
+  --bg-primary: #27212e;
+  --bg-chrome: #18151d;
+  --bg-deepest: #020203;
+  --bg-elevated: #38333f;
+  --bg-hover: #342e3b;
+
+  --border-subtle: #38333f;
+  --border-muted: #47424d;
+  --border-emphasis: #5d5962;
+
+  --text-primary: #ffffff;
+  --text-muted: #91889b;
+  --text-faint: #5c5565;
+  --text-accent: #58a6ff;
+
+  --status-modified: #d29922;
+  --status-added: #3fb950;
+  --status-deleted: #f85149;
+  --status-renamed: #58a6ff;
+  --status-untracked: #91889b;
+
+  --diff-added-bg: rgba(63, 185, 80, 0.08);
+  --diff-removed-bg: rgba(248, 81, 73, 0.08);
+  --diff-changed-bg: rgba(255, 255, 255, 0.04);
+  --diff-range-border: #524d58;
+  --diff-comment-highlight: rgba(88, 166, 255, 0.5);
+
+  --search-match-bg: rgba(250, 200, 50, 0.35);
+  --search-current-match-bg: rgba(255, 150, 50, 0.5);
+
+  --annotation-overlay-bg: rgba(0, 0, 0, 0.5);
+  --annotation-border: rgba(255, 255, 255, 0.1);
+
+  --ui-accent: #3fb950;
+  --ui-accent-hover: #2ea043;
+  --ui-success: #3fb950;
+  --ui-danger: #f85149;
+  --ui-danger-bg: rgba(248, 81, 73, 0.1);
+  --ui-selection: rgba(255, 255, 255, 0.08);
+
+  --scrollbar-thumb: #47424d;
+  --scrollbar-thumb-hover: #5d5962;
+  --scrollbar-thumb-transparent: rgba(255, 255, 255, 0.15);
+  --scrollbar-thumb-hover-transparent: rgba(255, 255, 255, 0.25);
+
+  --shadow-overlay: rgba(0, 0, 0, 0.6);
+  --shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.4);
+
+  --size-base: 13px;
+  --size-xs: calc(var(--size-base) * 0.846);
+  --size-sm: calc(var(--size-base) * 0.923);
+  --size-md: var(--size-base);
+  --size-lg: calc(var(--size-base) * 1.077);
+  --size-xl: calc(var(--size-base) * 1.231);
+
+  --accent-primary: #58a6ff;
+
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  font-size: var(--size-md);
+  line-height: 1.5;
+  font-weight: 400;
+
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
   margin: 0;
   padding: 0;
+  min-height: 100vh;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
 }

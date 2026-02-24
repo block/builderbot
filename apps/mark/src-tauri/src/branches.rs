@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::blox;
@@ -255,6 +255,128 @@ fn normalize_branch_ref(branch: &str) -> String {
     branch.strip_prefix("origin/").unwrap_or(branch).to_string()
 }
 
+fn find_existing_worktree_for_branch(
+    repo_path: &Path,
+    branch_name: &str,
+) -> Result<Option<PathBuf>, String> {
+    Ok(git::list_worktrees(repo_path)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find_map(|(path, wt_branch)| match wt_branch.as_deref() {
+            Some(name) if name == branch_name => Some(path),
+            _ => None,
+        }))
+}
+
+fn is_worktree_path_exists_error(err: &str) -> bool {
+    err.contains("Worktree already exists at ")
+}
+
+fn fallback_worktree_path_for(desired_path: &Path) -> Option<PathBuf> {
+    if !desired_path.exists() {
+        return Some(desired_path.to_path_buf());
+    }
+
+    let parent = desired_path.parent()?;
+    let file_name = desired_path.file_name()?.to_string_lossy();
+
+    for suffix in 2..=50 {
+        let candidate = parent.join(format!("{file_name}-{suffix}"));
+        if !candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn create_worktree_for_existing_branch_with_fallback(
+    repo_path: &Path,
+    branch_name: &str,
+    desired_worktree_path: &Path,
+) -> Result<PathBuf, String> {
+    match git::create_worktree_for_existing_branch_at_path(
+        repo_path,
+        branch_name,
+        desired_worktree_path,
+    ) {
+        Ok(path) => Ok(path),
+        Err(err) => {
+            if let Some(path) = find_existing_worktree_for_branch(repo_path, branch_name)? {
+                log::warn!(
+                    "Reusing existing worktree '{}' for branch '{}' after create retry",
+                    path.display(),
+                    branch_name
+                );
+                return Ok(path);
+            }
+
+            let err_msg = err.to_string();
+            if !is_worktree_path_exists_error(&err_msg) {
+                return Err(err_msg);
+            }
+
+            let Some(fallback_path) = fallback_worktree_path_for(desired_worktree_path) else {
+                return Err(err_msg);
+            };
+            if fallback_path == desired_worktree_path {
+                return Err(err_msg);
+            }
+
+            log::warn!(
+                "Desired worktree path '{}' is occupied for branch '{}'; retrying at '{}'",
+                desired_worktree_path.display(),
+                branch_name,
+                fallback_path.display()
+            );
+            git::create_worktree_for_existing_branch_at_path(repo_path, branch_name, &fallback_path)
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+fn create_worktree_with_fallback(
+    repo_path: &Path,
+    branch_name: &str,
+    base_branch: &str,
+    desired_worktree_path: &Path,
+) -> Result<PathBuf, String> {
+    match git::create_worktree_at_path(repo_path, branch_name, base_branch, desired_worktree_path) {
+        Ok(path) => Ok(path),
+        Err(err) => {
+            if let Some(path) = find_existing_worktree_for_branch(repo_path, branch_name)? {
+                log::warn!(
+                    "Reusing existing worktree '{}' for branch '{}' after create failure",
+                    path.display(),
+                    branch_name
+                );
+                return Ok(path);
+            }
+
+            let err_msg = err.to_string();
+            if !is_worktree_path_exists_error(&err_msg) {
+                return Err(err_msg);
+            }
+
+            let Some(fallback_path) = fallback_worktree_path_for(desired_worktree_path) else {
+                return Err(err_msg);
+            };
+            if fallback_path == desired_worktree_path {
+                return Err(err_msg);
+            }
+
+            log::warn!(
+                "Desired worktree path '{}' is occupied for new branch '{}'; retrying at '{}'",
+                desired_worktree_path.display(),
+                branch_name,
+                fallback_path.display()
+            );
+            git::create_worktree_at_path(repo_path, branch_name, base_branch, &fallback_path)
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
 fn is_blox_onboarding_precondition_error(err: &blox::BloxError) -> bool {
     match err {
         blox::BloxError::CommandFailed(stderr) => {
@@ -492,25 +614,20 @@ pub async fn setup_worktree(
             .map_err(|e| e.to_string())?;
 
     // Reuse any existing worktree for this branch; otherwise create one.
-    let existing_worktree_path = git::list_worktrees(&repo_path)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find_map(|(path, wt_branch)| match wt_branch.as_deref() {
-            Some(name) if name == branch.branch_name => Some(path),
-            _ => None,
-        });
+    let existing_worktree_path =
+        find_existing_worktree_for_branch(&repo_path, &branch.branch_name)?;
 
     let worktree_path = if let Some(path) = existing_worktree_path {
         path
     } else if git::branch_exists(&repo_path, &branch.branch_name).map_err(|e| e.to_string())? {
-        git::create_worktree_for_existing_branch_at_path(
+        create_worktree_for_existing_branch_with_fallback(
             &repo_path,
             &branch.branch_name,
             &desired_worktree_path,
         )
         .map_err(|e| e.to_string())?
     } else {
-        match git::create_worktree_at_path(
+        match create_worktree_with_fallback(
             &repo_path,
             &branch.branch_name,
             &branch.base_branch,
@@ -518,22 +635,33 @@ pub async fn setup_worktree(
         ) {
             Ok(path) => path,
             Err(create_err) => {
-                // Handle races/stale refs where the branch appears between our
-                // pre-check and `git worktree add -b ...`.
-                if git::branch_exists(&repo_path, &branch.branch_name).map_err(|e| e.to_string())? {
+                if let Some(path) =
+                    find_existing_worktree_for_branch(&repo_path, &branch.branch_name)?
+                {
+                    log::warn!(
+                        "Reusing existing worktree '{}' for branch '{}' after create failure",
+                        path.display(),
+                        branch.branch_name
+                    );
+                    path
+                } else if git::branch_exists(&repo_path, &branch.branch_name)
+                    .map_err(|e| e.to_string())?
+                {
+                    // Handle races/stale refs where the branch appears between our
+                    // pre-check and `git worktree add -b ...`.
                     log::warn!(
                         "Branch '{}' already exists after create attempt; retrying with existing branch in repo '{}'",
                         branch.branch_name,
                         repo_slug
                     );
-                    git::create_worktree_for_existing_branch_at_path(
+                    create_worktree_for_existing_branch_with_fallback(
                         &repo_path,
                         &branch.branch_name,
                         &desired_worktree_path,
                     )
                     .map_err(|e| e.to_string())?
                 } else {
-                    return Err(create_err.to_string());
+                    return Err(create_err);
                 }
             }
         }

@@ -38,10 +38,12 @@ pub fn run() {
             app.set_menu(menu)?;
 
             // Spawn Go server sidecar
+            let port = std::env::var("PENPAL_PORT").unwrap_or_else(|_| "8080".to_string());
+            let go_port = std::env::var("PENPAL_GO_PORT").unwrap_or_else(|_| "8081".to_string());
             let sidecar = app.shell().sidecar("penpal-server")
                 .expect("failed to locate penpal-server sidecar");
             let (_rx, child) = sidecar
-                .args(["-port", "8080"])
+                .args(["-port", &port, "-go-port", &go_port])
                 .spawn()
                 .expect("failed to spawn penpal-server sidecar");
 
@@ -49,8 +51,9 @@ pub fn run() {
             *app.state::<Sidecar>().0.lock().unwrap() = Some(child);
 
             // Wait for server to be ready
+            let addr = format!("127.0.0.1:{}", port);
             for _ in 0..50 {
-                if std::net::TcpStream::connect("127.0.0.1:8080").is_ok() {
+                if std::net::TcpStream::connect(&addr).is_ok() {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));

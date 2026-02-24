@@ -39,7 +39,8 @@ build:
 dev:
     #!/usr/bin/env bash
     PIDFILE=".penpal.pid"
-    PORT=8080
+    PORT=8082
+    GO_PORT=8083
 
     # Kill previous penpal dev server if running (via PID file or port probe)
     if [ -f "$PIDFILE" ]; then
@@ -78,7 +79,7 @@ dev:
     trap cleanup INT TERM
 
     # Build and start Go server
-    go build -o penpal . && ./penpal -dev -port $PORT &
+    go build -o penpal . && ./penpal -dev -port $PORT -go-port $GO_PORT &
     GO_PID=$!
     echo $GO_PID > "$PIDFILE"
 
@@ -93,13 +94,16 @@ dev:
     VITE_PID=$!
     cd ..
 
-    # Wait briefly for Vite to start, then open browser
-    sleep 2
+    # Wait for Vite to be ready, then open browser
+    echo "Waiting for Vite..."
+    until curl -s http://localhost:5173/ > /dev/null 2>&1; do
+        sleep 0.2
+    done
     open "http://localhost:5173"
 
     echo ""
     echo "Go server:    http://localhost:$PORT"
-    echo "Go template:  http://localhost:8081"
+    echo "Go template:  http://localhost:$GO_PORT"
     echo "Vite (React): http://localhost:5173"
     echo ""
 
@@ -107,7 +111,7 @@ dev:
 
 # Development mode: full desktop app with Vite HMR
 dev-desktop: build-sidecar
-    cd frontend && VITE_BASE=/ npm run tauri:dev
+    cd frontend && VITE_BASE=/ VITE_API_URL=http://localhost:8082 PENPAL_PORT=8082 PENPAL_GO_PORT=8083 npm run tauri:dev
 
 # Build Go sidecar binaries for desktop app
 build-sidecar:

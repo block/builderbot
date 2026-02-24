@@ -10,9 +10,9 @@ export default defineConfig(({ command }) => ({
     port: 5173,
     strictPort: true,
     proxy: {
-      '/api': 'http://localhost:8080',
+      '/api': 'http://localhost:8082',
       '/events': {
-        target: 'http://localhost:8080',
+        target: 'http://localhost:8082',
         configure: (proxy) => {
           proxy.on('proxyRes', (proxyRes) => {
             proxyRes.headers['cache-control'] = 'no-cache';
@@ -20,8 +20,8 @@ export default defineConfig(({ command }) => ({
           });
         },
       },
-      '/mcp': 'http://localhost:8080',
-      '/static': 'http://localhost:8080',
+      '/mcp': 'http://localhost:8082',
+      '/static': 'http://localhost:8082',
     },
   },
   build: {

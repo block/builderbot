@@ -41,17 +41,20 @@ struct StartRepoSessionParams {
     /// Must match exactly the subpath used when the repo was added to the project.
     /// Use `null` / omit if the repo was added without a subpath (whole-repo).
     pub subpath: Option<String>,
-    /// Instructions to give the agent.
+    /// Instructions to give the agent. Notes previously created for this repo are available
+    /// to the session, so you can refer to them by name (e.g. "refer to the architecture
+    /// overview note").
     pub instructions: String,
     /// What the session should produce. Controls the prompt given to the agent and what
     /// artifact (if any) is created in the database.
     ///
     /// - `"return_output_only"`: Agent returns output only; use `return_info` to
     ///   specify exactly what you want back.
-    /// - `"note_in_repo"`: Agent researches and produces a note. Instructs the agent to
-    ///   output content after a `---` horizontal rule with an H1 title.
-    /// - `"commit"`: Agent makes code changes and creates a commit with a conventional
-    ///   commit message.
+    /// - `"note_in_repo"`: Use this for generating notes that can be referred to again
+    ///   later by other sessions or by the user. Useful for architecture overviews, plans,
+    ///   research, reviews.
+    /// - `"commit"`: Use this to request code changes. Agent makes code changes and
+    ///   creates a commit with a conventional commit message.
     pub expected_outcome: RepoSessionOutcome,
     /// Only used when `expected_outcome` is `"return_output_only"`.
     /// Describe what information you want the session to return to you when it finishes.
@@ -73,7 +76,9 @@ struct AddProjectRepoParams {
     /// If omitted for a regular repo, the whole repository is used.
     pub subpath: Option<String>,
     /// Reason this repository is being added to the project. Shown to the user
-    /// in the branch card timeline so they understand why it was added.
+    /// in the branch card timeline so they understand why it was added. Describe what
+    /// the repo is and how it relates to the project — do not include todos or details
+    /// about what needs to change.
     pub reason: Option<String>,
 }
 
@@ -162,6 +167,7 @@ impl ProjectToolsHandler {
             .into_iter()
             .find(|b| b.project_repo_id.as_deref() == Some(repo.id.as_str()));
         let workspace_name = branch.as_ref().and_then(|b| b.workspace_name.clone());
+        let is_remote_session = workspace_name.is_some();
         let branch_id = branch.as_ref().map(|b| b.id.clone());
 
         // Determine working directory — include subpath when the repo was added with one.
@@ -426,8 +432,41 @@ impl ProjectToolsHandler {
                         Some(aid) => format!(r#", "artifact_id": "{aid}""#),
                         None => String::new(),
                     };
+                    // If this was a note session, include the note info in the same format
+                    // provided at session start for available notes.
+                    let note_field = if matches!(expected_outcome, RepoSessionOutcome::NoteInRepo) {
+                        if let Some(note_id) = artifact_id.as_deref() {
+                            match self.store.get_note(note_id) {
+                                Ok(Some(note)) if !note.content.is_empty() => {
+                                    let note_info = if is_remote_session {
+                                        format!("### Note: {}\n\n{}", note.title, note.content)
+                                    } else {
+                                        let note_path = std::env::temp_dir()
+                                            .join(format!("staged-note-{}.md", note.id));
+                                        if std::fs::write(&note_path, &note.content).is_ok() {
+                                            format!(
+                                                "### Note: {}\n\nSee: `{}`",
+                                                note.title,
+                                                note_path.display()
+                                            )
+                                        } else {
+                                            format!("### Note: {}\n\n{}", note.title, note.content)
+                                        }
+                                    };
+                                    let note_json =
+                                        serde_json::to_string(&note_info).unwrap_or_default();
+                                    format!(r#", "note": {note_json}"#)
+                                }
+                                _ => String::new(),
+                            }
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
                     return format!(
-                        r#"{{"session_id": "{session_id}", "outcome": "{outcome}", "output": {output_json}{artifact_field}}}"#
+                        r#"{{"session_id": "{session_id}", "outcome": "{outcome}", "output": {output_json}{artifact_field}{note_field}}}"#
                     );
                 }
                 Ok(_) => continue,

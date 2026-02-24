@@ -13,6 +13,7 @@ import type {
   ProjectInfo,
   AgentStatus,
   PublishState,
+  SearchResponse,
 } from './types';
 
 export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080';
@@ -122,6 +123,10 @@ export const api = {
     apiFetch<PublishState>(
       `/api/publish-state?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`,
     ),
+
+  // Search
+  search: (query: string) =>
+    apiFetch<SearchResponse>(`/api/search?q=${encodeURIComponent(query)}`),
 
   // Misc
   open: (path: string) =>

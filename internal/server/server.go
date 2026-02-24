@@ -274,6 +274,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/project/", s.handleAPIProjectFiles)
 	s.mux.HandleFunc("/api/recent", s.handleAPIRecent)
 	s.mux.HandleFunc("/api/in-review", s.handleAPIInReview)
+	s.mux.HandleFunc("/api/search", s.handleAPISearch)
 	s.mux.HandleFunc("/api/copy-file", s.handleCopyFile)
 	s.mux.HandleFunc("/api/project-info", s.handleProjectInfo)
 	s.mux.HandleFunc("/api/delete-project", s.handleDeleteProject)

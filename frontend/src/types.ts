@@ -160,6 +160,29 @@ export interface SSEEvent {
   project?: string;
 }
 
+// Search types
+export interface SearchMatchedFile {
+  path: string;
+  name: string;
+  nameMatch?: boolean;
+  fileType: string;
+}
+
+export interface SearchProjectResults {
+  project: string;
+  qualifiedName: string;
+  workspace?: string;
+  projectPath: string;
+  files?: SearchMatchedFile[];
+}
+
+export interface SearchResponse {
+  query: string;
+  matchingProjects?: SearchProjectResults[];
+  projectResults?: SearchProjectResults[];
+  totalFiles: number;
+}
+
 // Request types
 export interface CreateThreadReq {
   project: string;

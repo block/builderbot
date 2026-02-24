@@ -80,6 +80,9 @@ importers:
       '@tauri-apps/plugin-dialog':
         specifier: ^2.2.0
         version: 2.6.0
+      '@tauri-apps/plugin-store':
+        specifier: ^2.2.0
+        version: 2.4.2
       lucide-svelte:
         specifier: ^0.575.0
         version: 0.575.0(svelte@5.53.2)

@@ -34,6 +34,18 @@ export interface LaunchArgs {
   commit: string | null;
 }
 
+export interface DirEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  isRepo: boolean;
+}
+
+export interface RecentRepo {
+  name: string;
+  path: string;
+}
+
 /** Matches the git-diff crate's GitRef enum (tagged union). */
 export type GitRef =
   | { type: 'WorkingTree' }
@@ -110,6 +122,36 @@ export function getLaunchArgs(): Promise<LaunchArgs> {
   return invoke('get_launch_args');
 }
 
-export function openRepoDialog(): Promise<string | null> {
-  return invoke('open_repo_dialog');
+export function setRepoPath(path: string): Promise<void> {
+  return invoke('set_repo_path', { path });
+}
+
+// =============================================================================
+// Directory browsing
+// =============================================================================
+
+export function listDirectory(path: string): Promise<DirEntry[]> {
+  return invoke('list_directory', { path });
+}
+
+export function searchDirectories(
+  path: string,
+  query: string,
+  maxDepth?: number,
+  limit?: number
+): Promise<DirEntry[]> {
+  return invoke('search_directories', {
+    path,
+    query,
+    maxDepth: maxDepth ?? 3,
+    limit: limit ?? 20,
+  });
+}
+
+export function getHomeDir(): Promise<string> {
+  return invoke('get_home_dir');
+}
+
+export function findRecentRepos(hoursAgo?: number, limit?: number): Promise<RecentRepo[]> {
+  return invoke('find_recent_repos', { hoursAgo, limit });
 }

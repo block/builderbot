@@ -20,6 +20,8 @@ serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 tauri = { version = "2.10.2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+dirs = "5.0"
 
 # Shared crate for diff computation
 git-diff = { path = "../../../crates/git-diff" }

@@ -94,12 +94,11 @@ export const api = {
   getAgentStatus: (project: string) =>
     apiFetch<AgentStatus>(`/api/agents?project=${encodeURIComponent(project)}`),
   startAgent: (project: string) =>
-    apiFetch<AgentStatus>('/api/agents/start', {
+    apiFetch<AgentStatus>(`/api/agents/start?project=${encodeURIComponent(project)}`, {
       method: 'POST',
-      body: JSON.stringify({ project }),
     }),
   stopAgent: (project: string) =>
-    apiVoid('/api/agents/stop', { method: 'POST', body: JSON.stringify({ project }) }),
+    apiVoid(`/api/agents/stop?project=${encodeURIComponent(project)}`, { method: 'POST' }),
 
   // Workspaces
   addWorkspace: (path: string) =>

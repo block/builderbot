@@ -21,6 +21,7 @@
     CirclePlus,
     CircleMinus,
     CircleArrowUp,
+    CircleDashed,
     MessageSquare,
     Copy,
     Check,
@@ -42,6 +43,7 @@
   import type { DiffSpec, RepoInfo, CommitInfo, RecentRepo } from './lib/commands';
   import FolderPickerModal from './lib/FolderPickerModal.svelte';
   import ThemePicker from './lib/ThemePicker.svelte';
+  import GitTreeAnimation from './lib/GitTreeAnimation.svelte';
   import { initPreferences } from './lib/preferences.svelte';
 
   // ==========================================================================
@@ -516,8 +518,17 @@
             </button>
           </div>
         {:else if files.length === 0}
-          <div class="center-message">
-            <span>No changes</span>
+          <div class="empty-state">
+            <div class="empty-content">
+              <div class="empty-icon">
+                <CircleDashed size={28} />
+              </div>
+              <h2 class="empty-heading">No changes found</h2>
+              <p class="empty-hint">Choose a change set from the toolbar above</p>
+            </div>
+            <div class="empty-tree">
+              <GitTreeAnimation />
+            </div>
           </div>
         {:else}
           <DiffViewer
@@ -939,6 +950,80 @@
 
   .center-message.error {
     color: var(--ui-danger);
+  }
+
+  /* Empty state */
+  .empty-state {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    overflow: hidden;
+    animation: empty-fade-in 0.4s ease both;
+  }
+
+  @keyframes empty-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .empty-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    z-index: 1;
+  }
+
+  .empty-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border-radius: 18px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    box-shadow:
+      0 4px 16px rgba(0, 0, 0, 0.15),
+      0 0 0 1px var(--border-subtle);
+    color: var(--text-muted);
+  }
+
+  .empty-heading {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-primary);
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+
+  .empty-hint {
+    font-size: var(--size-sm);
+    color: var(--text-faint);
+    margin: 0;
+  }
+
+  .empty-tree {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    opacity: 0.2;
+    pointer-events: none;
+  }
+
+  .empty-tree :global(.animation-wrapper) {
+    width: 100%;
   }
 
   .open-btn {

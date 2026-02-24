@@ -6,8 +6,6 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
-    "dialog:default",
-    "dialog:allow-open",
     "store:default"
   ]
 }

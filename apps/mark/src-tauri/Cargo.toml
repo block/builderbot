@@ -24,12 +24,9 @@ tauri = { version = "2.10.2", features = [] }
 tauri-plugin-log = "2.8.0"
 
 # Git integration
-git2 = "0.20"
 thiserror = "2.0"
 anyhow = "1.0"
 base64 = "0.22"
-
-tauri-plugin-dialog = "2.6.0"
 
 # Review storage
 rusqlite = { version = "0.38", features = ["bundled"] }
@@ -48,17 +45,12 @@ git-diff = { path = "../../../crates/git-diff" }
 builderbot-actions = { path = "../../../crates/builderbot-actions" }
 acp-client = { path = "../../../crates/acp-client" }
 blox-cli = { path = "../../../crates/blox-cli" }
-which = "8.0"
 
 async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["compat"] }
-futures = "0.3"
 tauri-plugin-store = "2.4.2"
 
 # Debug binaries archived — uncomment when needed
 # [[bin]]
 # name = "debug_diff"
 # path = "src/bin/debug_diff.rs"
-
-[dev-dependencies]
-tempfile = "3.0"

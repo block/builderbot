@@ -244,14 +244,27 @@ export default function Layout() {
       .catch((err) => alert('Failed to close project: ' + err.message));
   }
 
-  // Intercept cmd-click (new tab) and cmd+shift+click (new window) on internal links
+  // Intercept clicks on links:
+  // - External links (http/https) → open in default browser (desktop only)
+  // - Cmd/Ctrl+click on internal links → new tab or new window
   function handleAppClick(e: React.MouseEvent) {
-    if (!e.metaKey && !e.ctrlKey) return;
     const target = (e.target as HTMLElement).closest('a');
     if (!target) return;
     const href = target.getAttribute('href');
-    if (!href || href.startsWith('http://') || href.startsWith('https://') || href.startsWith('//')) return;
+    if (!href) return;
 
+    // External links: open in default browser on desktop
+    if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('//')) {
+      if (isDesktopApp) {
+        e.preventDefault();
+        e.stopPropagation();
+        import('@tauri-apps/plugin-shell').then(({ open }) => open(href));
+      }
+      return;
+    }
+
+    // Internal links: only intercept cmd/ctrl+click
+    if (!e.metaKey && !e.ctrlKey) return;
     e.preventDefault();
     e.stopPropagation();
     const title = deriveTitleFromPath(href);

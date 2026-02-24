@@ -9,23 +9,30 @@
   import { onDestroy } from 'svelte';
   import type { Snippet } from 'svelte';
   import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
-  import * as commands from '../../commands';
-  import type { BranchTimeline as BranchTimelineData, SessionMessage } from '../../types';
+  import type { BranchTimeline as BranchTimelineData } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType } from './TimelineRow.svelte';
+  import {
+    collectRunningSessionIds,
+    createLiveSessionHints,
+    fallbackHintForPendingType,
+    type PendingHintItemType,
+  } from './liveSessionHints';
+
+  type PendingItem = {
+    key: string;
+    type: PendingHintItemType;
+    title: string;
+    secondaryMeta?: string;
+    sessionId?: string;
+  };
 
   interface Props {
     timeline: BranchTimelineData;
     /** Placeholder items for notes being created from drag-and-drop. */
     pendingDropNotes?: { key: string; title: string }[];
     /** Placeholder items for newly started sessions before timeline persistence catches up. */
-    pendingItems?: {
-      key: string;
-      type: 'pending-commit' | 'generating-note' | 'generating-review';
-      title: string;
-      secondaryMeta?: string;
-      sessionId?: string;
-    }[];
+    pendingItems?: PendingItem[];
     /** Existing timeline rows currently being deleted (rendered in-place as deleting). */
     deletingItems?: { type: 'commit' | 'note' | 'review'; id: string }[];
     onSessionClick?: (sessionId: string) => void;
@@ -70,20 +77,10 @@
       timeline.reviews.some((review) => review.sessionStatus === 'running')
   );
   let disableNewSessionActions = $derived(newSessionDisabled || hasRunningSessionGeneration);
-
-  const HINT_POLL_INTERVAL_MS = 750;
-  const MAX_HINT_LENGTH = 72;
-  const MAX_HINT_MESSAGES = 40;
-
-  type HintTracker = {
-    lastMessageId: number | null;
-    messages: SessionMessage[];
-  };
-
-  const hintTrackers = new Map<string, HintTracker>();
   let liveSessionHints = $state<Record<string, string>>({});
-  let hintPollTimer: ReturnType<typeof setInterval> | null = null;
-  let hintPollInFlight = false;
+  const liveSessionHintPoller = createLiveSessionHints((nextHints) => {
+    liveSessionHints = nextHints;
+  });
 
   // Unified timeline item for display
   type DisplayItem = {
@@ -110,262 +107,14 @@
     return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
   }
 
-  function fallbackHintForPendingType(type: TimelineItemType): string {
-    if (type === 'pending-commit') return 'Generating commit';
-    if (type === 'generating-review') return 'Generating review';
-    return 'Generating note';
-  }
-
-  function normalizeHintText(text: string): string | undefined {
-    const cleaned = stripXmlTags(text)
-      .replace(/```[\s\S]*?```/g, ' ')
-      .replace(/<\/?[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    if (!cleaned) return undefined;
-    if (cleaned.length <= MAX_HINT_LENGTH) return cleaned;
-    return `${cleaned.slice(0, MAX_HINT_LENGTH - 1).trimEnd()}…`;
-  }
-
-  function withTrailingEllipsis(text: string): string {
-    if (/[.!?…]$/.test(text)) {
-      if (text.endsWith('.')) {
-        return `${text.slice(0, -1)}…`;
-      }
-      return text;
-    }
-    return `${text}…`;
-  }
-
-  function formatToolCallHint(content: string): string | undefined {
-    const normalized = normalizeHintText(content);
-    if (!normalized) return undefined;
-
-    const withProgressVerb = normalized
-      .replace(/^Run\s+/i, 'Running ')
-      .replace(/^Read\s+/i, 'Reading ')
-      .replace(/^Write\s+/i, 'Writing ')
-      .replace(/^Open\s+/i, 'Opening ')
-      .replace(/^Search\s+/i, 'Searching ')
-      .replace(/^List\s+/i, 'Listing ')
-      .replace(/^Create\s+/i, 'Creating ')
-      .replace(/^Update\s+/i, 'Updating ')
-      .replace(/^Delete\s+/i, 'Deleting ')
-      .replace(/^Fetch\s+/i, 'Fetching ')
-      .replace(/^Draft\s+/i, 'Drafting ');
-
-    return normalizeHintText(withTrailingEllipsis(withProgressVerb));
-  }
-
-  function formatAssistantHint(content: string): string | undefined {
-    const lines = stripXmlTags(content)
-      .replace(/```[\s\S]*?```/g, ' ')
-      .split(/\r?\n/)
-      .map((line) =>
-        line
-          .trim()
-          .replace(/^[-*]\s+/, '')
-          .replace(/^\d+\.\s+/, '')
-          .replace(/^#+\s+/, '')
-      )
-      .filter(Boolean);
-
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const normalized = normalizeHintText(lines[i]);
-      if (normalized) {
-        return normalized;
-      }
-    }
-
-    return undefined;
-  }
-
-  function deriveHint(messages: SessionMessage[]): string | undefined {
-    let latestToolHint: { id: number; text: string } | null = null;
-    let latestAssistantHint: { id: number; text: string } | null = null;
-
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (!latestToolHint && message.role === 'tool_call') {
-        const hint = formatToolCallHint(message.content);
-        if (hint) {
-          latestToolHint = { id: message.id, text: hint };
-        }
-      }
-      if (!latestAssistantHint && message.role === 'assistant') {
-        const hint = formatAssistantHint(message.content);
-        if (hint) {
-          latestAssistantHint = { id: message.id, text: hint };
-        }
-      }
-      if (latestToolHint && latestAssistantHint) {
-        break;
-      }
-    }
-
-    if (latestToolHint && (!latestAssistantHint || latestToolHint.id >= latestAssistantHint.id)) {
-      return latestToolHint.text;
-    }
-    if (latestAssistantHint) {
-      return latestAssistantHint.text;
-    }
-    if (latestToolHint) {
-      return latestToolHint.text;
-    }
-    return undefined;
-  }
-
-  function setHint(sessionId: string, hint: string) {
-    if (liveSessionHints[sessionId] === hint) return;
-    liveSessionHints = { ...liveSessionHints, [sessionId]: hint };
-  }
-
-  function clearHint(sessionId: string) {
-    if (!(sessionId in liveSessionHints)) return;
-    const next = { ...liveSessionHints };
-    delete next[sessionId];
-    liveSessionHints = next;
-  }
-
-  function mergeHintMessages(
-    previous: SessionMessage[],
-    updated: SessionMessage[],
-    hadPrevious: boolean
-  ): SessionMessage[] {
-    if (updated.length === 0) return previous;
-    const merged = hadPrevious ? [...previous.slice(0, -1), ...updated] : updated;
-    return merged.slice(-MAX_HINT_MESSAGES);
-  }
-
-  async function refreshHint(sessionId: string, tracker: HintTracker) {
-    try {
-      const session = await commands.getSession(sessionId);
-      if (!session || session.status !== 'running') {
-        hintTrackers.delete(sessionId);
-        clearHint(sessionId);
-        return;
-      }
-
-      const updatedMessages =
-        tracker.lastMessageId === null
-          ? await commands.getSessionMessages(sessionId)
-          : await commands.getSessionMessagesSince(sessionId, tracker.lastMessageId);
-
-      if (!hintTrackers.has(sessionId)) return;
-
-      if (updatedMessages.length > 0) {
-        tracker.messages = mergeHintMessages(
-          tracker.messages,
-          updatedMessages,
-          tracker.lastMessageId !== null
-        );
-        const latestMessage = tracker.messages[tracker.messages.length - 1];
-        tracker.lastMessageId = latestMessage?.id ?? tracker.lastMessageId;
-      }
-
-      const nextHint = deriveHint(tracker.messages);
-      if (nextHint) {
-        setHint(sessionId, nextHint);
-      } else {
-        clearHint(sessionId);
-      }
-    } catch {
-      // Fail-safe: keep existing static fallback labels when hint polling fails.
-    }
-  }
-
-  async function pollHints() {
-    if (hintPollInFlight || hintTrackers.size === 0) return;
-    hintPollInFlight = true;
-
-    try {
-      const entries = Array.from(hintTrackers.entries());
-      await Promise.all(entries.map(([sessionId, tracker]) => refreshHint(sessionId, tracker)));
-    } finally {
-      hintPollInFlight = false;
-      if (hintTrackers.size === 0) {
-        stopHintPolling();
-      }
-    }
-  }
-
-  function startHintPolling() {
-    if (hintPollTimer) return;
-    hintPollTimer = setInterval(() => {
-      void pollHints();
-    }, HINT_POLL_INTERVAL_MS);
-  }
-
-  function stopHintPolling() {
-    if (hintPollTimer) {
-      clearInterval(hintPollTimer);
-      hintPollTimer = null;
-    }
-    hintPollInFlight = false;
-  }
-
-  let runningSessionIds = $derived.by(() => {
-    const ids = new Set<string>();
-
-    for (const commit of timeline.commits) {
-      if (commit.sessionStatus === 'running' && commit.sessionId) {
-        ids.add(commit.sessionId);
-      }
-    }
-    for (const note of timeline.notes) {
-      if (note.sessionStatus === 'running' && note.sessionId) {
-        ids.add(note.sessionId);
-      }
-    }
-    for (const review of timeline.reviews) {
-      if (review.sessionStatus === 'running' && review.sessionId) {
-        ids.add(review.sessionId);
-      }
-    }
-    for (const item of pendingItems) {
-      if (!item.sessionId) continue;
-      if (
-        item.type === 'pending-commit' ||
-        item.type === 'generating-note' ||
-        item.type === 'generating-review'
-      ) {
-        ids.add(item.sessionId);
-      }
-    }
-
-    return Array.from(ids);
-  });
+  let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
 
   $effect(() => {
-    const activeIds = new Set(runningSessionIds);
-
-    for (const sessionId of activeIds) {
-      if (!hintTrackers.has(sessionId)) {
-        hintTrackers.set(sessionId, {
-          lastMessageId: null,
-          messages: [],
-        });
-      }
-    }
-
-    for (const sessionId of Array.from(hintTrackers.keys())) {
-      if (!activeIds.has(sessionId)) {
-        hintTrackers.delete(sessionId);
-        clearHint(sessionId);
-      }
-    }
-
-    if (hintTrackers.size > 0) {
-      startHintPolling();
-      void pollHints();
-    } else {
-      stopHintPolling();
-    }
+    liveSessionHintPoller.syncRunningSessionIds(runningSessionIds);
   });
 
   onDestroy(() => {
-    stopHintPolling();
-    hintTrackers.clear();
+    liveSessionHintPoller.destroy();
   });
 
   // Merge commits, notes, and reviews into a single sorted list

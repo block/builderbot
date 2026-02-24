@@ -52,7 +52,11 @@
   }: Props = $props();
 
   function openProject(projectId: string) {
-    const status = getProjectStatus(projectId, deletingProjectNames);
+    const status = getProjectStatus(
+      projectId,
+      deletingProjectNames,
+      projectBranches.get(projectId) || []
+    );
     if (status.kind === 'deleting') return;
     selectProject(projectId);
   }
@@ -195,7 +199,11 @@
             <div class="state">No projects yet.</div>
           {:else}
             {#each projects as project (project.id)}
-              {@const status = getProjectStatus(project.id, deletingProjectNames)}
+              {@const status = getProjectStatus(
+                project.id,
+                deletingProjectNames,
+                projectBranches.get(project.id) || []
+              )}
               {@const repoCount = repoCountForProject(project)}
               {@const prStatus = getProjectPrStatus(project.id)}
               {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}

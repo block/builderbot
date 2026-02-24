@@ -40,6 +40,9 @@
   let deletingProjectNames = $state<Map<string, string>>(new Map());
   let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
   let repoLoadGeneration = 0;
+  const WORKSPACE_STATUS_POLL_MS = 3000;
+  let workspaceStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+  let workspaceStatusPollInFlight = false;
 
   let repoCountsByProject = $derived(
     new Map(
@@ -52,6 +55,7 @@
 
   onMount(() => {
     loadProjects();
+    startWorkspaceStatusPolling();
 
     const onNewProject = () => {
       showNewProjectModal = true;
@@ -111,6 +115,7 @@
     });
 
     return () => {
+      stopWorkspaceStatusPolling();
       window.removeEventListener('mark:new-project', onNewProject);
       window.removeEventListener('mark:project-delete-start', onProjectDeleteStart);
       window.removeEventListener('mark:project-delete-end', onProjectDeleteEnd);
@@ -180,6 +185,100 @@
   function openProject(projectId: string) {
     if (isProjectDeleting(projectId)) return;
     selectProject(projectId);
+  }
+
+  function startWorkspaceStatusPolling() {
+    if (workspaceStatusPollTimer) return;
+    void pollStartingWorkspaceStatuses();
+    workspaceStatusPollTimer = setInterval(() => {
+      void pollStartingWorkspaceStatuses();
+    }, WORKSPACE_STATUS_POLL_MS);
+  }
+
+  function stopWorkspaceStatusPolling() {
+    if (workspaceStatusPollTimer) {
+      clearInterval(workspaceStatusPollTimer);
+      workspaceStatusPollTimer = null;
+    }
+    workspaceStatusPollInFlight = false;
+  }
+
+  function collectStartingRemoteBranchIds(): string[] {
+    const branchIds: string[] = [];
+    for (const branches of projectBranches.values()) {
+      for (const branch of branches) {
+        if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
+          branchIds.push(branch.id);
+        }
+      }
+    }
+    return branchIds;
+  }
+
+  function toWorkspaceStatus(status: string): Branch['workspaceStatus'] {
+    return status === 'starting' ||
+      status === 'running' ||
+      status === 'stopped' ||
+      status === 'error'
+      ? status
+      : null;
+  }
+
+  function withUpdatedWorkspaceStatus(
+    branchesByProject: Map<string, Branch[]>,
+    branchId: string,
+    workspaceStatus: Branch['workspaceStatus']
+  ): Map<string, Branch[]> {
+    for (const [projectId, branches] of branchesByProject.entries()) {
+      const branchIndex = branches.findIndex((branch) => branch.id === branchId);
+      if (branchIndex === -1) continue;
+
+      const current = branches[branchIndex];
+      if (current.workspaceStatus === workspaceStatus) {
+        return branchesByProject;
+      }
+
+      const nextBranches = [...branches];
+      nextBranches[branchIndex] = { ...current, workspaceStatus };
+      return new Map(branchesByProject).set(projectId, nextBranches);
+    }
+
+    return branchesByProject;
+  }
+
+  async function pollStartingWorkspaceStatuses() {
+    if (workspaceStatusPollInFlight) return;
+
+    const startingBranchIds = collectStartingRemoteBranchIds();
+    if (startingBranchIds.length === 0) return;
+
+    workspaceStatusPollInFlight = true;
+    try {
+      const results = await Promise.allSettled(
+        startingBranchIds.map((branchId) => commands.pollWorkspaceStatus(branchId))
+      );
+
+      let nextProjectBranches = projectBranches;
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        if (result.status !== 'fulfilled') continue;
+
+        const nextStatus = toWorkspaceStatus(result.value);
+        if (!nextStatus) continue;
+
+        nextProjectBranches = withUpdatedWorkspaceStatus(
+          nextProjectBranches,
+          startingBranchIds[i],
+          nextStatus
+        );
+      }
+
+      if (nextProjectBranches !== projectBranches) {
+        projectBranches = nextProjectBranches;
+      }
+    } finally {
+      workspaceStatusPollInFlight = false;
+    }
   }
 
   function getProjectPrStatus(
@@ -290,7 +389,11 @@
         </div>
         <div class="projects-grid">
           {#each projects as project, index (project.id)}
-            {@const status = getProjectStatus(project.id, deletingProjectNames)}
+            {@const status = getProjectStatus(
+              project.id,
+              deletingProjectNames,
+              projectBranches.get(project.id) || []
+            )}
             {@const prStatus = getProjectPrStatus(project.id)}
             {@const repos = reposByProject.get(project.id) ?? []}
             {@const repoCount = repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0)}

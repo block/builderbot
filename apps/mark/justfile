@@ -74,10 +74,9 @@ fmt-check:
 lint:
     cd src-tauri && cargo clippy -- -D warnings
 
-# Type-check frontend (Svelte + TypeScript) and backend (Rust)
+# Type-check frontend (Svelte + TypeScript)
 typecheck:
     pnpm run check
-    cd src-tauri && cargo check
 
 # Format, then verify everything passes — run before pushing
 check-all: fmt lint typecheck

@@ -12,5 +12,13 @@ pre-commit:
 pre-push:
   parallel: true
   commands:
-    ci:
-      run: just ci
+    crates-fmt:
+      run: cargo fmt --all --check
+    crates-lint:
+      run: cargo clippy --workspace -- -D warnings
+    crates-test:
+      run: cargo test --workspace
+    mark-ci:
+      run: just app mark ci
+    staged-ci:
+      run: just app staged ci

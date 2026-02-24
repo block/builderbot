@@ -31,11 +31,11 @@ describe('api', () => {
     expect(result).toEqual(projects);
   });
 
-  it('getProjectFiles encodes qualified name', async () => {
+  it('getProjectFiles passes qualified name as path segments', async () => {
     mockFetch.mockReturnValueOnce(jsonResponse([]));
     await api.getProjectFiles('ws/my project');
     expect(mockFetch).toHaveBeenCalledWith(
-      expect.stringContaining('/api/project/ws%2Fmy%20project'),
+      expect.stringContaining('/api/project/ws/my project'),
       expect.anything(),
     );
   });

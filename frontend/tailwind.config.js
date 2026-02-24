@@ -2,6 +2,9 @@
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   darkMode: ['selector', '[data-theme="dark"]'],
+  corePlugins: {
+    preflight: false,
+  },
   theme: {
     extend: {},
   },

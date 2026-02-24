@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useOutletContext } from 'react-router-dom';
 import { api } from '../api';
 import { useSSE } from '../hooks/useSSE';
+import type { LayoutContext } from '../components/Layout';
 import type { APIProject, SSEEvent, ProjectInfo } from '../types';
 
 function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
@@ -14,7 +15,9 @@ function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
 
 export default function WorkspacePage() {
   const { name } = useParams<{ name: string }>();
+  const { setSidebarExtra } = useOutletContext<LayoutContext>();
   const [projects, setProjects] = useState<APIProject[]>([]);
+  const [standaloneProjects, setStandaloneProjects] = useState<APIProject[]>([]);
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<APIProject | null>(null);
   const [deleteInfo, setDeleteInfo] = useState<ProjectInfo | null>(null);
@@ -29,6 +32,7 @@ export default function WorkspacePage() {
         return 0;
       });
       setProjects(filtered);
+      setStandaloneProjects(all.filter((p) => p.origin === 'standalone'));
     }).catch(() => {});
   }, [name]);
 
@@ -51,6 +55,31 @@ export default function WorkspacePage() {
       [debouncedRefresh],
     ),
   );
+
+  // Push sidebar card listing projects
+  useEffect(() => {
+    if (projects.length === 0) {
+      setSidebarExtra(null);
+      return;
+    }
+    setSidebarExtra(
+      <div className="sidebar-card">
+        <div className="sidebar-card-title">Projects</div>
+        <nav className="sidebar-card-nav">
+          {projects.map((p) => (
+            <Link
+              key={p.qualifiedName}
+              to={`/project/${p.qualifiedName}`}
+              className={p.fileCount === 0 ? 'deemphasized' : undefined}
+            >
+              {p.name}
+            </Link>
+          ))}
+        </nav>
+      </div>,
+    );
+    return () => setSidebarExtra(null);
+  }, [projects, setSidebarExtra]);
 
   function handleCopyPath(project: APIProject, e: React.MouseEvent) {
     e.stopPropagation();
@@ -86,55 +115,69 @@ export default function WorkspacePage() {
       });
   }
 
+  function renderProjectCard(p: APIProject) {
+    const isStandalone = p.origin === 'standalone';
+    return (
+      <div
+        key={p.qualifiedName}
+        className={`project-card${p.fileCount === 0 ? ' deemphasized' : ''}${deleting.has(p.qualifiedName) ? ' deleting' : ''}`}
+      >
+        <div className="project-card-header">
+          <div className="project-card-name">
+            <Link to={`/project/${p.qualifiedName}`}>{p.name}</Link>
+            {p.badges.map((b) => (
+              <span key={b.text} className="source-badge" style={{ color: b.color, backgroundColor: b.bg }}>
+                {b.text}
+              </span>
+            ))}
+            {(p.agentConnected || p.agentRunning) && <span className="agent-dot" title="Agent active" />}
+            {(p.reviewCount ?? 0) > 0 && <span className="review-count">{p.reviewCount} in review</span>}
+            {deleting.has(p.qualifiedName) && <span className="deleting-badge">Deleting...</span>}
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {p.age && <span className="project-age">{p.age}</span>}
+            <div className="dropdown-menu-wrap">
+              <button className="dropdown-dots" onClick={(e) => { e.stopPropagation(); setOpenMenu(openMenu === p.qualifiedName ? null : p.qualifiedName); }}>
+                &#8942;
+              </button>
+              {openMenu === p.qualifiedName && (
+                <div className="dropdown-menu">
+                  <button onClick={(e) => handleCopyPath(p, e)}>Copy path</button>
+                  {isStandalone ? (
+                    <button className="menu-muted" onClick={(e) => handleCloseProject(p, e)}>Close</button>
+                  ) : p.name !== '(root)' ? (
+                    <button className="menu-danger" onClick={(e) => handleShowDelete(p, e)}>Delete</button>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+        {p.branch && (
+          <div className="project-card-meta">
+            <span className="branch">{p.branch}{p.dirty && <span className="dirty">*</span>}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div data-testid="workspace-page">
       <div className="projects-grid">
-        {projects.map((p) => (
-          <div
-            key={p.qualifiedName}
-            className={`project-card${p.fileCount === 0 ? ' deemphasized' : ''}${deleting.has(p.qualifiedName) ? ' deleting' : ''}`}
-          >
-            <div className="project-card-header">
-              <div className="project-card-name">
-                <Link to={`/project/${encodeURIComponent(p.qualifiedName)}`}>{p.name}</Link>
-                {p.badges.map((b) => (
-                  <span key={b.text} className="source-badge" style={{ color: b.color, backgroundColor: b.bg }}>
-                    {b.text}
-                  </span>
-                ))}
-                {(p.agentConnected || p.agentRunning) && <span className="agent-dot" title="Agent active" />}
-                {(p.reviewCount ?? 0) > 0 && <span className="review-count">{p.reviewCount} in review</span>}
-                {deleting.has(p.qualifiedName) && <span className="deleting-badge">Deleting...</span>}
-              </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                {p.age && <span className="project-age">{p.age}</span>}
-                <div className="dropdown-menu-wrap">
-                  <button className="dropdown-dots" onClick={(e) => { e.stopPropagation(); setOpenMenu(openMenu === p.qualifiedName ? null : p.qualifiedName); }}>
-                    &#8942;
-                  </button>
-                  {openMenu === p.qualifiedName && (
-                    <div className="dropdown-menu">
-                      <button onClick={(e) => handleCopyPath(p, e)}>Copy path</button>
-                      {p.origin === 'standalone' ? (
-                        <button className="menu-muted" onClick={(e) => handleCloseProject(p, e)}>Close</button>
-                      ) : p.name !== '(root)' ? (
-                        <button className="menu-danger" onClick={(e) => handleShowDelete(p, e)}>Delete</button>
-                      ) : null}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-            {p.branch && (
-              <div className="project-card-meta">
-                <span className="branch">{p.branch}{p.dirty && <span className="dirty">*</span>}</span>
-              </div>
-            )}
-          </div>
-        ))}
+        {projects.map(renderProjectCard)}
       </div>
 
       {projects.length === 0 && <p className="empty">No projects in this workspace.</p>}
+
+      {standaloneProjects.length > 0 && (
+        <>
+          <div className="standalone-section-header">Standalone Projects</div>
+          <div className="projects-grid">
+            {standaloneProjects.map(renderProjectCard)}
+          </div>
+        </>
+      )}
 
       {/* Delete modal */}
       <div className={`modal-overlay${deleteTarget ? ' open' : ''}`} onClick={() => setDeleteTarget(null)}>

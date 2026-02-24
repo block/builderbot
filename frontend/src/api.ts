@@ -16,7 +16,7 @@ import type {
   SearchResponse,
 } from './types';
 
-export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8080';
+export const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export const isDesktopApp = typeof window !== 'undefined' && '__TAURI__' in window;
 
@@ -47,7 +47,7 @@ export const api = {
 
   // Project files
   getProjectFiles: (qn: string) =>
-    apiFetch<APIFileGroupView[]>(`/api/project/${encodeURIComponent(qn)}`),
+    apiFetch<APIFileGroupView[]>(`/api/project/${qn}`),
   getProjectInfo: (name: string) =>
     apiFetch<ProjectInfo>(`/api/project-info?name=${encodeURIComponent(name)}`),
   deleteProject: (project: string) =>

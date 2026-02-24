@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useOutletContext, useLocation } from 'react-router-dom';
 import { api } from '../api';
 import { useSSE } from '../hooks/useSSE';
 import MarkdownViewer from '../components/MarkdownViewer';
@@ -8,18 +8,19 @@ import SelectionToolbar, {
   addCommentHighlights,
   removePendingHighlight,
 } from '../components/SelectionToolbar';
+import FileTypeBadge from '../components/FileTypeBadge';
 import FileMenu from '../components/FileMenu';
-import TableOfContents from '../components/TableOfContents';
 import { renderMermaidBlocks } from '../components/MermaidRenderer';
 import type { Heading } from '../components/TableOfContents';
+import type { LayoutContext } from '../components/Layout';
 import type { ThreadResponse, Anchor, AgentStatus } from '../types';
 
 export default function FilePage() {
-  const { qualifiedName, '*': filePath } = useParams();
+  const location = useLocation();
+  const { setHeadings: pushHeadings, projects } = useOutletContext<LayoutContext>();
   const [rawMarkdown, setRawMarkdown] = useState('');
   const [threads, setThreads] = useState<ThreadResponse[]>([]);
   const [anchorLines, setAnchorLines] = useState<Record<string, number>>({});
-  const [headings, setHeadings] = useState<Heading[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
@@ -32,8 +33,28 @@ export default function FilePage() {
   const contentRef = useRef<HTMLDivElement>(null);
   const agentPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const project = qualifiedName || '';
-  const path = filePath || '';
+  // Resolve project QN and file path from URL by matching against known projects.
+  // The URL is /file/{qualifiedName}/{filePath} where qualifiedName may contain slashes
+  // (e.g. "Development/birdseye"), so we can't rely on a single :param.
+  const { project, path } = useMemo(() => {
+    const rest = location.pathname.replace(/^\/file\//, '');
+    // Try matching against known projects (longest match first)
+    const sorted = [...projects].sort((a, b) => b.qualifiedName.length - a.qualifiedName.length);
+    for (const p of sorted) {
+      if (rest === p.qualifiedName || rest.startsWith(p.qualifiedName + '/')) {
+        return {
+          project: p.qualifiedName,
+          path: rest.slice(p.qualifiedName.length + 1),
+        };
+      }
+    }
+    // Fallback: assume first two segments are the QN
+    const segments = rest.split('/');
+    return {
+      project: segments.slice(0, 2).join('/'),
+      path: segments.slice(2).join('/'),
+    };
+  }, [location.pathname, projects]);
 
   // Fetch raw file content
   const fetchContent = useCallback(async () => {
@@ -203,8 +224,8 @@ export default function FilePage() {
   }, []);
 
   const handleHeadingsExtracted = useCallback((h: Heading[]) => {
-    setHeadings(h);
-  }, []);
+    pushHeadings(h);
+  }, [pushHeadings]);
 
   if (loading) {
     return (
@@ -226,9 +247,7 @@ export default function FilePage() {
     <div data-testid="file-page" className="file-page-layout">
       <div className="file-main" id="file-main">
         <div className="file-toolbar">
-          {fileType && fileType !== 'other' && (
-            <span className={`file-type ${fileType}`}>{fileType}</span>
-          )}
+          <FileTypeBadge type={fileType} />
           <span className="toolbar-filename">{displayName || path.split('/').pop()}</span>
           <FileMenu
             project={project}
@@ -256,21 +275,18 @@ export default function FilePage() {
         </div>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {headings.length > 0 && <TableOfContents headings={headings} />}
-        <CommentsPanel
-          threads={threads}
-          anchorLines={anchorLines}
-          project={project}
-          filePath={path}
-          onRefresh={fetchThreads}
-          onThreadFocus={handleThreadFocus}
-          agentStatus={agentStatus}
-          pendingAnchor={pendingAnchor}
-          pendingText={pendingText}
-          onCancelNewThread={handleCancelNewThread}
-        />
-      </div>
+      <CommentsPanel
+        threads={threads}
+        anchorLines={anchorLines}
+        project={project}
+        filePath={path}
+        onRefresh={fetchThreads}
+        onThreadFocus={handleThreadFocus}
+        agentStatus={agentStatus}
+        pendingAnchor={pendingAnchor}
+        pendingText={pendingText}
+        onCancelNewThread={handleCancelNewThread}
+      />
     </div>
   );
 }

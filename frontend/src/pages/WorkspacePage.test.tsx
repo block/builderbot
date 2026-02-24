@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, Outlet } from 'react-router-dom';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import WorkspacePage from './WorkspacePage';
 
@@ -43,11 +43,17 @@ vi.mock('../hooks/useSSE', () => ({
   useSSE: vi.fn(),
 }));
 
+function ContextProvider() {
+  return <Outlet context={{ setHeadings: vi.fn(), setSidebarExtra: vi.fn(), projects: [] }} />;
+}
+
 function renderPage() {
   return render(
     <MemoryRouter initialEntries={['/workspace/ws']}>
       <Routes>
-        <Route path="/workspace/:name" element={<WorkspacePage />} />
+        <Route element={<ContextProvider />}>
+          <Route path="/workspace/:name" element={<WorkspacePage />} />
+        </Route>
       </Routes>
     </MemoryRouter>,
   );

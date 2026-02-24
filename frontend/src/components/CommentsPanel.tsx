@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import type { ThreadResponse, Anchor } from '../types';
 import { api } from '../api';
 import { orderComments, formatTime, truncateText } from '../utils/comments';
@@ -24,19 +26,13 @@ function saveAuthor(name: string) {
   if (name) localStorage.setItem('penpal-author', name);
 }
 
-function renderCommentBody(text: string): string {
-  if (!text) return '';
-  // Simple markdown-to-HTML: bold, italic, code, links, line breaks
-  let html = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/\n/g, '<br>');
-  // Wrap in paragraph
-  return `<p>${html}</p>`;
+function CommentBody({ text }: { text: string }) {
+  if (!text) return null;
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+      {text}
+    </ReactMarkdown>
+  );
 }
 
 function agentContextColorClass(pct: number): string {
@@ -426,10 +422,9 @@ function ThreadCard({
             {c.role && <span className={`comment-role ${c.role}`}>{c.role}</span>}
             <span className="comment-time">{formatTime(c.createdAt)}</span>
           </div>
-          <div
-            className="comment-body"
-            dangerouslySetInnerHTML={{ __html: renderCommentBody(c.body) }}
-          />
+          <div className="comment-body">
+            <CommentBody text={c.body} />
+          </div>
         </div>
       ))}
 

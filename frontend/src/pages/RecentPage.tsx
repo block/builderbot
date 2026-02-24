@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useSSE } from '../hooks/useSSE';
+import FileTypeBadge from '../components/FileTypeBadge';
 import type { APIFile, SSEEvent } from '../types';
 
 function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
@@ -41,10 +42,8 @@ export default function RecentPage() {
         <div key={`${f.project}/${f.path}`} className="recent-file">
           <div className="recent-file-info">
             <div className="recent-file-name">
-              {f.fileType && f.fileType !== 'other' && (
-                <span className={`file-type ${f.fileType}`}>{f.fileType}</span>
-              )}
-              <Link to={`/file/${encodeURIComponent(f.project || '')}/${f.path}`}>
+              <FileTypeBadge type={f.fileType} />
+              <Link to={`/file/${(f.project || '')}/${f.path}`}>
                 {f.name}
               </Link>
             </div>

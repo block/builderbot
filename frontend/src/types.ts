@@ -4,6 +4,8 @@ export interface APIBadge {
   text: string;
   color: string;
   bg: string;
+  activeBg?: string;
+  activeColor?: string;
 }
 
 export interface APIProject {

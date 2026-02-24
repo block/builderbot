@@ -12,19 +12,20 @@ test.describe('React app', () => {
   test('renders topbar with logo and search', async ({ page }) => {
     await page.goto('/');
     await expect(page.getByText('Penpal', { exact: true })).toBeVisible();
-    await expect(page.getByPlaceholder('Search files...')).toBeVisible();
+    await expect(page.getByPlaceholder('Search all thoughts...')).toBeVisible();
   });
 
   test('renders sidebar with navigation links', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByTestId('sidebar')).toBeVisible();
-    await expect(page.getByText('Recent')).toBeVisible();
-    await expect(page.getByText('In Review')).toBeVisible();
+    const sidebar = page.getByTestId('sidebar');
+    await expect(sidebar).toBeVisible();
+    await expect(sidebar.getByText('Recent')).toBeVisible();
+    await expect(sidebar.getByText('In Review')).toBeVisible();
   });
 
   test('renders theme toggle', async ({ page }) => {
     await page.goto('/');
-    await expect(page.getByLabel('Toggle theme')).toBeVisible();
+    await expect(page.getByLabel('Toggle dark mode')).toBeVisible();
   });
 
   test('SPA routing works for recent', async ({ page }) => {

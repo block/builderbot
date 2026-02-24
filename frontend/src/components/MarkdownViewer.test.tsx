@@ -20,9 +20,9 @@ describe('MarkdownViewer', () => {
     const md = '# My Heading\n\n## Sub Heading';
     const { container } = render(<MarkdownViewer content={md} rawMarkdown={md} />);
     const h1 = container.querySelector('h1');
-    expect(h1?.id).toBe('my-heading');
+    expect(h1?.id).toBe('penpal-md-my-heading');
     const h2 = container.querySelector('h2');
-    expect(h2?.id).toBe('sub-heading');
+    expect(h2?.id).toBe('penpal-md-sub-heading');
   });
 
   it('calls onHeadingsExtracted with headings', async () => {

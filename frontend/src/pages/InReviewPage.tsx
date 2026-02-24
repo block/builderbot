@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useSSE } from '../hooks/useSSE';
+import FileTypeBadge from '../components/FileTypeBadge';
 import type { ReviewGroup, SSEEvent } from '../types';
 
 function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
@@ -64,12 +65,12 @@ export default function InReviewPage() {
                     <span className="breadcrumb-sep">/</span>
                   </>
                 )}
-                <Link to={`/project/${encodeURIComponent(group.projectQN)}`}>
+                <Link to={`/project/${group.projectQN}`}>
                   {group.projectName}
                 </Link>
                 <span className="breadcrumb-sep">/</span>
                 <Link
-                  to={`/project/${encodeURIComponent(group.projectQN)}#source-${group.sourceName}`}
+                  to={`/project/${group.projectQN}#source-${group.sourceName}`}
                   className="breadcrumb-source"
                 >
                   {group.sourceName}
@@ -83,11 +84,9 @@ export default function InReviewPage() {
               {group.files.map((file) => (
                 <li key={file.path} className="file-row">
                   <div className="file-left">
-                    {file.fileType && file.fileType !== 'other' && (
-                      <span className={`file-type ${file.fileType}`}>{file.fileType}</span>
-                    )}
+                    <FileTypeBadge type={file.fileType} />
                     <span className="file-name">
-                      <Link to={`/file/${encodeURIComponent(file.project)}/${file.path}`}>
+                      <Link to={`/file/${file.project}/${file.path}`}>
                         {file.name}
                       </Link>
                     </span>

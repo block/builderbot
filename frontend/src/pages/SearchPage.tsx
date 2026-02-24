@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
+import FileTypeBadge from '../components/FileTypeBadge';
 import type { SearchResponse } from '../types';
 
 export default function SearchPage() {
@@ -52,7 +53,7 @@ export default function SearchPage() {
                 {results.matchingProjects!.map((p) => (
                   <div key={p.qualifiedName} className="search-project-card">
                     <div style={{ fontWeight: 600, fontSize: '1.05em', marginBottom: 4 }}>
-                      <Link to={`/project/${encodeURIComponent(p.qualifiedName)}`}>{p.project}</Link>
+                      <Link to={`/project/${p.qualifiedName}`}>{p.project}</Link>
                     </div>
                   </div>
                 ))}
@@ -66,17 +67,15 @@ export default function SearchPage() {
               {results.projectResults!.map((pr) => (
                 <div key={pr.qualifiedName} className="project-group">
                   <div className="project-group-header">
-                    <Link to={`/project/${encodeURIComponent(pr.qualifiedName)}`}>{pr.project}</Link>
+                    <Link to={`/project/${pr.qualifiedName}`}>{pr.project}</Link>
                   </div>
                   {(pr.files || []).map((f) => (
                     <div key={f.path} className="file-row">
                       <div className="file-left">
-                        {f.fileType && f.fileType !== 'other' && (
-                          <span className={`file-type ${f.fileType}`}>{f.fileType}</span>
-                        )}
+                        <FileTypeBadge type={f.fileType} />
                         {f.nameMatch && <span className="match-type">name</span>}
                         <span className="file-name">
-                          <Link to={`/file/${encodeURIComponent(pr.qualifiedName)}/${f.path}`}>{f.name}</Link>
+                          <Link to={`/file/${pr.qualifiedName}/${f.path}`}>{f.name}</Link>
                         </span>
                       </div>
                     </div>

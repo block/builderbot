@@ -62,7 +62,7 @@ export default function FileMenu({
     setDeleting(true);
     try {
       await api.deleteFile(project, filePath);
-      navigate(`/project/${encodeURIComponent(project)}`);
+      navigate(`/project/${project}`);
     } catch (err) {
       console.error('Delete failed:', err);
       setDeleting(false);
@@ -73,7 +73,7 @@ export default function FileMenu({
     setOpen(false);
     try {
       await api.removeSource(project, undefined, filePath);
-      navigate(`/project/${encodeURIComponent(project)}`);
+      navigate(`/project/${project}`);
     } catch (err) {
       console.error('Remove failed:', err);
     }

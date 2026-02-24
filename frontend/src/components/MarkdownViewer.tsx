@@ -2,8 +2,37 @@ import { useEffect, useRef, useMemo, forwardRef, useImperativeHandle } from 'rea
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { dracula as prismDracula } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Components } from 'react-markdown';
 import type { Heading } from './TableOfContents';
+
+// Customize Prism's Dracula to match Go's Chroma Dracula output.
+// Chroma uses #f1fa8c (yellow) for strings; Prism defaults to #50fa7b (green).
+const dracula: Record<string, React.CSSProperties> = {
+  ...prismDracula,
+  'string': { color: '#f1fa8c' },
+};
+
+const HEADING_ID_PREFIX = 'penpal-md-';
+
+/** Generate heading ID matching Go's goldmark prefixedIDs algorithm */
+function generateHeadingId(text: string): string {
+  let result = HEADING_ID_PREFIX;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (/[a-zA-Z0-9]/.test(c)) {
+      result += c.toLowerCase();
+    } else if (c === ' ' || c === '-' || c === '_') {
+      result += '-';
+    }
+    // skip other characters (including multi-byte)
+  }
+  if (result === HEADING_ID_PREFIX) {
+    result += 'heading';
+  }
+  return result;
+}
 
 interface MarkdownViewerProps {
   content: string;
@@ -67,8 +96,7 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
       innerRef.current.querySelectorAll('h1, h2, h3').forEach((el) => {
         const level = parseInt(el.tagName[1], 10) as 1 | 2 | 3;
         const text = el.textContent || '';
-        const id =
-          el.id || text.toLowerCase().replace(/[^\w]+/g, '-').replace(/(^-|-$)/g, '');
+        const id = el.id || generateHeadingId(text);
         if (!el.id) el.id = id;
         headings.push({ level, text, id });
       });
@@ -96,32 +124,17 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
     // Custom components to generate IDs for headings and handle mermaid
     const components: Components = useMemo(
       () => ({
-        h1: ({ children, ...props }) => {
-          const text = String(children);
-          const id = text.toLowerCase().replace(/[^\w]+/g, '-').replace(/(^-|-$)/g, '');
-          return (
-            <h1 id={id} {...props}>
-              {children}
-            </h1>
-          );
+        h1: ({ children, node: _node, ...props }) => {
+          const id = generateHeadingId(String(children));
+          return <h1 id={id} {...props}>{children}</h1>;
         },
-        h2: ({ children, ...props }) => {
-          const text = String(children);
-          const id = text.toLowerCase().replace(/[^\w]+/g, '-').replace(/(^-|-$)/g, '');
-          return (
-            <h2 id={id} {...props}>
-              {children}
-            </h2>
-          );
+        h2: ({ children, node: _node, ...props }) => {
+          const id = generateHeadingId(String(children));
+          return <h2 id={id} {...props}>{children}</h2>;
         },
-        h3: ({ children, ...props }) => {
-          const text = String(children);
-          const id = text.toLowerCase().replace(/[^\w]+/g, '-').replace(/(^-|-$)/g, '');
-          return (
-            <h3 id={id} {...props}>
-              {children}
-            </h3>
-          );
+        h3: ({ children, node: _node, ...props }) => {
+          const id = generateHeadingId(String(children));
+          return <h3 id={id} {...props}>{children}</h3>;
         },
         code: ({ className: codeClassName, children, ...props }) => {
           const match = /language-(\w+)/.exec(codeClassName || '');
@@ -130,6 +143,7 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
               <div
                 className="mermaid-container"
                 data-mermaid-source={String(children)}
+                data-unwrap-pre=""
               >
                 <pre>
                   <code>{children}</code>
@@ -137,25 +151,42 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
               </div>
             );
           }
+          // Fenced code block (has language class) — use SyntaxHighlighter
+          if (match) {
+            return (
+              <div data-unwrap-pre="">
+                <SyntaxHighlighter
+                  style={dracula}
+                  language={match[1]}
+                  PreTag="div"
+                  customStyle={{ margin: 0, padding: '16px', borderRadius: '6px', fontSize: '0.85em' }}
+                >
+                  {String(children).replace(/\n$/, '')}
+                </SyntaxHighlighter>
+              </div>
+            );
+          }
+          // Plain code (inline or fenced without language) — keep as-is
+          // Filter out non-DOM props like 'node' from react-markdown
+          const { node: _node, ...domProps } = props as Record<string, unknown>;
           return (
-            <code className={codeClassName} {...props}>
+            <code className={codeClassName} {...domProps}>
               {children}
             </code>
           );
         },
         pre: ({ children, ...props }) => {
-          // Check if the child is a mermaid container — unwrap the pre
+          // Unwrap pre when child has data-unwrap-pre (mermaid or SyntaxHighlighter)
           const child = Array.isArray(children) ? children[0] : children;
-          if (
-            child &&
-            typeof child === 'object' &&
-            'props' in child &&
-            (child as { props?: Record<string, unknown> }).props?.['data-mermaid-source'] !==
-              undefined
-          ) {
-            return <>{children}</>;
+          if (child && typeof child === 'object' && 'props' in child) {
+            const childProps = (child as { props?: Record<string, unknown> }).props;
+            if (childProps?.['data-unwrap-pre'] !== undefined) {
+              return <>{children}</>;
+            }
           }
-          return <pre {...props}>{children}</pre>;
+          // Filter out non-DOM props
+          const { node: _node, ...domProps } = props as Record<string, unknown>;
+          return <pre {...domProps}>{children}</pre>;
         },
       }),
       [],

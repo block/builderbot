@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useOutletContext } from 'react-router-dom';
 import { api } from '../api';
 import { useSSE } from '../hooks/useSSE';
+import type { LayoutContext } from '../components/Layout';
 import type { APIFileGroupView, APIFile, APIFileInReview, AgentStatus, SSEEvent } from '../types';
+import FileTypeBadge from '../components/FileTypeBadge';
 
 function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
   let timer: ReturnType<typeof setTimeout>;
@@ -10,11 +12,6 @@ function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
     clearTimeout(timer);
     timer = setTimeout(() => fn(...args), ms);
   }) as T;
-}
-
-function FileTypeBadge({ type }: { type?: string }) {
-  if (!type || type === 'other') return null;
-  return <span className={`file-type ${type}`}>{type}</span>;
 }
 
 function TypingIndicator() {
@@ -27,8 +24,9 @@ function TypingIndicator() {
 }
 
 export default function ProjectPage() {
-  const { qualifiedName } = useParams<{ qualifiedName: string }>();
-  const qn = qualifiedName || '';
+  const location = useLocation();
+  const { setSidebarExtra } = useOutletContext<LayoutContext>();
+  const qn = location.pathname.replace(/^\/project\//, '');
   const [groups, setGroups] = useState<APIFileGroupView[]>([]);
   const [reviewData, setReviewData] = useState<Record<string, APIFileInReview>>({});
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
@@ -108,6 +106,47 @@ export default function ProjectPage() {
       [qn, debouncedRefreshFiles, debouncedRefreshReviews, refreshAgent, refreshProjectStatus],
     ),
   );
+
+  // Push sidebar card listing sources (with In Review if applicable)
+  const hasReviews = Object.keys(reviewData).length > 0;
+  useEffect(() => {
+    if (groups.length === 0 && !hasReviews) {
+      setSidebarExtra(null);
+      return;
+    }
+    setSidebarExtra(
+      <div className="sidebar-card">
+        <div className="sidebar-card-title">Sources</div>
+        <nav className="sidebar-card-nav">
+          {hasReviews && (
+            <a href="#source-In Review">
+              <span
+                className="sidebar-source-tag"
+                style={{ color: 'var(--file-type-research-color)', background: 'var(--file-type-research-bg)' }}
+              >
+                Review
+              </span>
+              In Review
+            </a>
+          )}
+          {groups.map((g) => (
+            <a key={g.name} href={`#source-${g.name}`}>
+              {g.badgeText && (
+                <span
+                  className="sidebar-source-tag"
+                  style={{ color: g.badgeColor, background: g.badgeBg }}
+                >
+                  {g.badgeText}
+                </span>
+              )}
+              {g.name}
+            </a>
+          ))}
+        </nav>
+      </div>,
+    );
+    return () => setSidebarExtra(null);
+  }, [groups, hasReviews, setSidebarExtra]);
 
   // Close menus on outside click
   useEffect(() => {
@@ -329,7 +368,7 @@ export default function ProjectPage() {
           )}
           {review && (review.typingThreads ?? 0) > 0 && <TypingIndicator />}
           <span className="file-name">
-            <Link to={`/file/${encodeURIComponent(qn)}/${file.path}`} onClick={(e) => e.stopPropagation()}>
+            <Link to={`/file/${qn}/${file.path}`} onClick={(e) => e.stopPropagation()}>
               {file.name}
             </Link>
           </span>
@@ -409,10 +448,10 @@ export default function ProjectPage() {
                 <li key={path} className="file-row">
                   <div className="file-left">
                     <FileTypeBadge type={fileType} />
-                    {reviewData[path].agentActive && <span className="review-badge agent-active">in review</span>}
+                    <span className={`review-badge${reviewData[path].agentActive ? ' agent-active' : ''}`}>in review</span>
                     {(reviewData[path].typingThreads ?? 0) > 0 && <TypingIndicator />}
                     <span className="file-name">
-                      <Link to={`/file/${encodeURIComponent(qn)}/${path}`}>{name}</Link>
+                      <Link to={`/file/${qn}/${path}`}>{name}</Link>
                     </span>
                   </div>
                   <div className="file-right">

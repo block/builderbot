@@ -43,7 +43,7 @@ describe('Layout', () => {
     );
 
     expect(screen.getByText('Penpal')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Search files...')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Search all thoughts...')).toBeInTheDocument();
   });
 
   it('renders sidebar', async () => {
@@ -65,7 +65,7 @@ describe('Layout', () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByLabelText('Toggle theme')).toBeInTheDocument();
+    expect(screen.getByLabelText('Toggle dark mode')).toBeInTheDocument();
   });
 
   it('renders workspace items after API loads', async () => {

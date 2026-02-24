@@ -46,6 +46,10 @@ pub fn get_unified_diff(repo: &Path, spec: &DiffSpec, path: &Path) -> Result<Str
             // Diff from commit to working tree
             cli::run(repo, &["diff", base.as_str(), "--", path_str])
         }
+        (GitRef::Rev(base), GitRef::Index) => {
+            // Diff from commit to staging area
+            cli::run(repo, &["diff", "--cached", base.as_str(), "--", path_str])
+        }
         (GitRef::Rev(base), GitRef::Rev(head)) => {
             // Diff between two commits
             cli::run(
@@ -53,8 +57,8 @@ pub fn get_unified_diff(repo: &Path, spec: &DiffSpec, path: &Path) -> Result<Str
                 &["diff", base.as_str(), head.as_str(), "--", path_str],
             )
         }
-        (GitRef::WorkingTree, _) => Err(GitError::CommandFailed(
-            "Cannot use working tree as base".to_string(),
+        (GitRef::WorkingTree, _) | (GitRef::Index, _) => Err(GitError::CommandFailed(
+            "Cannot use working tree or index as base".to_string(),
         )),
         (GitRef::MergeBase | GitRef::MergeBaseOf(_), _)
         | (_, GitRef::MergeBase | GitRef::MergeBaseOf(_)) => {
@@ -92,14 +96,20 @@ pub fn list_diff_files(repo: &Path, spec: &DiffSpec) -> Result<Vec<FileDiffSumma
             // Working tree diff - use git status for fsmonitor support
             list_working_tree_changes(repo, base)
         }
+        (GitRef::Rev(base), GitRef::Index) => {
+            // Staged changes: diff between a rev and the index
+            let args = ["diff", "--cached", "--name-status", "-z", base.as_str()];
+            let output = cli::run(repo, &args)?;
+            parse_name_status(&output)
+        }
         (GitRef::Rev(base), GitRef::Rev(head)) => {
             // Commit range - use git diff
             let args = ["diff", "--name-status", "-z", base.as_str(), head.as_str()];
             let output = cli::run(repo, &args)?;
             parse_name_status(&output)
         }
-        (GitRef::WorkingTree, _) => Err(GitError::CommandFailed(
-            "Cannot use working tree as base".to_string(),
+        (GitRef::WorkingTree, _) | (GitRef::Index, _) => Err(GitError::CommandFailed(
+            "Cannot use working tree or index as base".to_string(),
         )),
         (GitRef::MergeBase | GitRef::MergeBaseOf(_), _)
         | (_, GitRef::MergeBase | GitRef::MergeBaseOf(_)) => {
@@ -322,13 +332,20 @@ pub fn get_file_diff(repo_path: &Path, spec: &DiffSpec, path: &Path) -> Result<F
 
     // Resolve trees
     let base_tree = resolve_to_tree(&repo, &spec.base)?;
-    let head_tree = resolve_to_tree(&repo, &spec.head)?;
     let is_working_tree = matches!(spec.head, GitRef::WorkingTree);
+    let is_index = matches!(spec.head, GitRef::Index);
+    let head_tree = if is_index {
+        None
+    } else {
+        resolve_to_tree(&repo, &spec.head)?
+    };
 
     // Load file content
     let before = load_file_from_tree(&repo, base_tree.as_ref(), path)?;
     let after = if is_working_tree {
         load_file_from_workdir(&repo, path)?
+    } else if is_index {
+        load_file_from_index(&repo, path)?
     } else {
         load_file_from_tree(&repo, head_tree.as_ref(), path)?
     };
@@ -339,6 +356,7 @@ pub fn get_file_diff(repo_path: &Path, spec: &DiffSpec, path: &Path) -> Result<F
         base_tree.as_ref(),
         head_tree.as_ref(),
         is_working_tree,
+        is_index,
         path,
     )?;
 
@@ -359,7 +377,7 @@ fn resolve_to_tree<'a>(
     git_ref: &GitRef,
 ) -> Result<Option<git2::Tree<'a>>, GitError> {
     match git_ref {
-        GitRef::WorkingTree => Ok(None),
+        GitRef::WorkingTree | GitRef::Index => Ok(None),
         GitRef::Rev(rev) => {
             let obj = repo
                 .revparse_single(rev)
@@ -401,6 +419,29 @@ fn load_file_from_tree(
         Some(b) => b,
         None => return Ok(None), // Not a file (maybe a submodule)
     };
+
+    let content = bytes_to_content(blob.content());
+
+    Ok(Some(File {
+        path: path.to_string_lossy().to_string(),
+        content,
+    }))
+}
+
+/// Load file content from the git index (staging area)
+fn load_file_from_index(repo: &Repository, path: &Path) -> Result<Option<File>, GitError> {
+    let index = repo
+        .index()
+        .map_err(|e| GitError::CommandFailed(format!("Cannot read index: {e}")))?;
+
+    let entry = match index.get_path(path, 0) {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+
+    let blob = repo
+        .find_blob(entry.id)
+        .map_err(|e| GitError::CommandFailed(format!("Cannot load blob from index: {e}")))?;
 
     let content = bytes_to_content(blob.content());
 
@@ -455,13 +496,17 @@ fn get_hunks_libgit2(
     base_tree: Option<&git2::Tree>,
     head_tree: Option<&git2::Tree>,
     is_working_tree: bool,
+    is_index: bool,
     path: &Path,
 ) -> Result<Vec<Hunk>, GitError> {
     let mut opts = DiffOptions::new();
     opts.context_lines(0); // No context, just the changes
     opts.pathspec(path);
 
-    let diff = if is_working_tree {
+    let diff = if is_index {
+        // Staged changes: tree → index
+        repo.diff_tree_to_index(base_tree, None, Some(&mut opts))
+    } else if is_working_tree {
         repo.diff_tree_to_workdir_with_index(base_tree, Some(&mut opts))
     } else {
         repo.diff_tree_to_tree(base_tree, head_tree, Some(&mut opts))

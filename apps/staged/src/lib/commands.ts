@@ -49,6 +49,7 @@ export interface RecentRepo {
 /** Matches the git-diff crate's GitRef enum (tagged union). */
 export type GitRef =
   | { type: 'WorkingTree' }
+  | { type: 'Index' }
   | { type: 'Rev'; value: string }
   | { type: 'MergeBase' }
   | { type: 'MergeBaseOf'; value: [string, string] };
@@ -67,6 +68,14 @@ export function specUncommitted(): DiffSpec {
   return {
     base: { type: 'Rev', value: 'HEAD' },
     head: { type: 'WorkingTree' },
+  };
+}
+
+/** Staged changes only: HEAD -> index */
+export function specStaged(): DiffSpec {
+  return {
+    base: { type: 'Rev', value: 'HEAD' },
+    head: { type: 'Index' },
   };
 }
 

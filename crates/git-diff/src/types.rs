@@ -10,6 +10,8 @@ pub const WORKDIR: &str = "WORKDIR";
 pub enum GitRef {
     /// The working tree (uncommitted changes)
     WorkingTree,
+    /// The staging area / index (what has been `git add`'d)
+    Index,
     /// Anything that resolves to a commit: SHA, branch, tag, origin/main, HEAD~3, etc.
     Rev(String),
     /// Merge-base between the default branch and HEAD.
@@ -27,6 +29,7 @@ impl GitRef {
     pub fn as_git_arg(&self) -> Option<&str> {
         match self {
             GitRef::WorkingTree => None,
+            GitRef::Index => None,
             GitRef::Rev(s) => Some(s),
             GitRef::MergeBase => panic!("MergeBase must be resolved before use"),
             GitRef::MergeBaseOf(_) => panic!("MergeBaseOf must be resolved before use"),
@@ -37,6 +40,7 @@ impl GitRef {
     pub fn display(&self) -> &str {
         match self {
             GitRef::WorkingTree => "@",
+            GitRef::Index => "index",
             GitRef::Rev(s) => s,
             GitRef::MergeBase => "merge-base",
             GitRef::MergeBaseOf(_) => "merge-base",

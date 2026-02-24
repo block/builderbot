@@ -25,6 +25,7 @@
     Copy,
     Check,
     Trash2,
+    ListChecks,
   } from 'lucide-svelte';
   import { DiffViewer } from '@builderbot/diff-viewer/components';
   import {
@@ -60,7 +61,7 @@
   // State: Diff mode
   // ==========================================================================
 
-  type DiffMode = 'all' | 'branch' | 'commit';
+  type DiffMode = 'all' | 'staged' | 'branch' | 'commit';
 
   let diffMode = $state<DiffMode>('all');
   let diffSpec = $state<DiffSpec>(commands.specUncommitted());
@@ -131,6 +132,9 @@
           case 'all':
             setMode('all');
             break;
+          case 'staged':
+            setMode('staged');
+            break;
           case 'branch':
             setMode('branch');
             break;
@@ -183,6 +187,11 @@
       case 'all':
         diffSpec = commands.specUncommitted();
         diffLabel = 'All Changes';
+        selectedCommit = null;
+        break;
+      case 'staged':
+        diffSpec = commands.specStaged();
+        diffLabel = 'Staged';
         selectedCommit = null;
         break;
       case 'branch':
@@ -388,63 +397,73 @@
     <div class="titlebar" data-tauri-drag-region>
       <div class="titlebar-left" data-tauri-drag-region></div>
 
-      <div class="titlebar-center">
-        <button
-          class="mode-btn"
-          class:active={diffMode === 'all'}
-          onclick={() => setMode('all')}
-          title="All uncommitted changes"
-        >
-          <FileEdit size={13} />
-          <span>All Changes</span>
-        </button>
-
-        <button
-          class="mode-btn"
-          class:active={diffMode === 'branch'}
-          onclick={() => setMode('branch')}
-          title="Full branch diff"
-        >
-          <GitBranch size={13} />
-          <span>Branch</span>
-        </button>
-
-        <div class="commit-picker-wrap">
+      <div class="titlebar-center" data-tauri-drag-region>
+        <div class="mode-segmented">
           <button
-            class="mode-btn"
-            class:active={diffMode === 'commit'}
-            onclick={toggleCommitPicker}
-            title="Pick a commit"
+            class="mode-seg"
+            class:active={diffMode === 'all'}
+            onclick={() => setMode('all')}
+            title="All uncommitted changes"
           >
-            <GitCommitHorizontal size={13} />
-            <span>{selectedCommit ? selectedCommit.shortSha : 'Commit'}</span>
-            <ChevronDown size={12} class="chevron" />
+            <FileEdit size={12} />
+            <span>All</span>
+          </button>
+          <button
+            class="mode-seg"
+            class:active={diffMode === 'staged'}
+            onclick={() => setMode('staged')}
+            title="Staged changes only"
+          >
+            <ListChecks size={12} />
+            <span>Staged</span>
+          </button>
+          <button
+            class="mode-seg"
+            class:active={diffMode === 'branch'}
+            onclick={() => setMode('branch')}
+            title="Full branch diff"
+          >
+            <GitBranch size={12} />
+            <span>Branch</span>
           </button>
 
-          {#if showCommitPicker}
-            <div class="commit-dropdown">
-              {#if loadingCommits}
-                <div class="commit-loading">
-                  <span class="spinner small"></span>
-                  Loading commits...
-                </div>
-              {:else if commits.length === 0}
-                <div class="commit-empty">No commits found</div>
-              {:else}
-                {#each commits as commit (commit.sha)}
-                  <button
-                    class="commit-row"
-                    class:active={selectedCommit?.sha === commit.sha}
-                    onclick={() => setMode('commit', commit)}
-                  >
-                    <span class="commit-sha">{commit.shortSha}</span>
-                    <span class="commit-message">{commit.message}</span>
-                    <span class="commit-time">{timeAgo(commit.timestamp)}</span>
-                  </button>
-                {/each}
-              {/if}
-            </div>
-          {/if}
+          <div class="commit-picker-wrap">
+            <button
+              class="mode-seg last"
+              class:active={diffMode === 'commit'}
+              onclick={toggleCommitPicker}
+              title="Pick a commit"
+            >
+              <GitCommitHorizontal size={12} />
+              <span>{selectedCommit ? selectedCommit.shortSha : 'Commit'}</span>
+              <ChevronDown size={11} class="chevron" />
+            </button>
+
+            {#if showCommitPicker}
+              <div class="commit-dropdown">
+                {#if loadingCommits}
+                  <div class="commit-loading">
+                    <span class="spinner small"></span>
+                    Loading commits...
+                  </div>
+                {:else if commits.length === 0}
+                  <div class="commit-empty">No commits found</div>
+                {:else}
+                  {#each commits as commit (commit.sha)}
+                    <button
+                      class="commit-row"
+                      class:active={selectedCommit?.sha === commit.sha}
+                      onclick={() => setMode('commit', commit)}
+                    >
+                      <span class="commit-sha">{commit.shortSha}</span>
+                      <span class="commit-message">{commit.message}</span>
+                      <span class="commit-time">{timeAgo(commit.timestamp)}</span>
+                    </button>
+                  {/each}
+                {/if}
+              </div>
+            {/if}
+          </div>
         </div>
 
         {#if files.length > 0}
@@ -691,8 +710,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 2px;
-    -webkit-app-region: no-drag;
+    gap: 8px;
   }
 
   .titlebar-right {
@@ -703,38 +721,50 @@
     -webkit-app-region: no-drag;
   }
 
-  /* Mode buttons */
-  .mode-btn {
+  /* Segmented control */
+  .mode-segmented {
     display: flex;
     align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
+    background-color: var(--bg-deepest);
+    border: 1px solid var(--border-subtle);
+    border-radius: 7px;
+    padding: 2px;
+    gap: 1px;
+    -webkit-app-region: no-drag;
+  }
+
+  .mode-seg {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
     background: none;
     border: 1px solid transparent;
-    border-radius: 6px;
-    color: var(--text-muted);
+    border-radius: 5px;
+    color: var(--text-faint);
     cursor: pointer;
     font-size: var(--size-xs);
     font-family: inherit;
     transition:
-      color 0.1s,
-      background-color 0.1s,
-      border-color 0.1s;
+      color 0.15s,
+      background-color 0.15s,
+      border-color 0.15s,
+      box-shadow 0.15s;
     white-space: nowrap;
   }
 
-  .mode-btn:hover {
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
+  .mode-seg:hover {
+    color: var(--text-muted);
   }
 
-  .mode-btn.active {
+  .mode-seg.active {
     color: var(--text-primary);
-    background-color: var(--bg-primary);
+    background-color: var(--bg-elevated);
     border-color: var(--border-muted);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
   }
 
-  .mode-btn :global(.chevron) {
+  .mode-seg :global(.chevron) {
     color: var(--text-faint);
     margin-left: -2px;
   }
@@ -742,12 +772,13 @@
   .file-count {
     color: var(--text-faint);
     font-size: var(--size-xs);
-    margin-left: 4px;
+    -webkit-app-region: no-drag;
   }
 
   /* Commit picker */
   .commit-picker-wrap {
     position: relative;
+    display: flex;
   }
 
   .commit-dropdown {

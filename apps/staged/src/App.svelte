@@ -21,7 +21,6 @@
     CirclePlus,
     CircleMinus,
     CircleArrowUp,
-    CircleDashed,
     MessageSquare,
     Copy,
     Check,
@@ -44,6 +43,7 @@
   import FolderPickerModal from './lib/FolderPickerModal.svelte';
   import ThemePicker from './lib/ThemePicker.svelte';
   import GitTreeAnimation from './lib/GitTreeAnimation.svelte';
+  import MarkIcon from './lib/MarkIcon.svelte';
   import { initPreferences } from './lib/preferences.svelte';
 
   // ==========================================================================
@@ -521,7 +521,7 @@
           <div class="empty-state">
             <div class="empty-content">
               <div class="empty-icon">
-                <CircleDashed size={28} />
+                <MarkIcon size={52} />
               </div>
               <h2 class="empty-heading">No changes found</h2>
               <p class="empty-hint">Choose a change set from the toolbar above</p>
@@ -988,15 +988,14 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 64px;
-    height: 64px;
-    border-radius: 18px;
+    width: 104px;
+    height: 104px;
+    border-radius: 26px;
     background: var(--bg-elevated);
     border: 1px solid var(--border-subtle);
     box-shadow:
-      0 4px 16px rgba(0, 0, 0, 0.15),
+      0 8px 32px rgba(0, 0, 0, 0.2),
       0 0 0 1px var(--border-subtle);
-    color: var(--text-muted);
   }
 
   .empty-heading {

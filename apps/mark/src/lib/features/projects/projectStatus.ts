@@ -9,9 +9,14 @@ export interface ProjectStatus {
 }
 
 function hasProvisioningWorkspace(branches: Branch[]): boolean {
-  return branches.some(
-    (branch) => branch.branchType === 'remote' && branch.workspaceStatus === 'starting'
-  );
+  return branches.some((branch) => {
+    if (branch.branchType === 'remote') {
+      return branch.workspaceStatus === 'starting';
+    }
+
+    // Local branches are considered provisioning until their worktree path is attached.
+    return !branch.worktreePath;
+  });
 }
 
 export function getProjectStatus(

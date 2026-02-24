@@ -132,7 +132,7 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 		ThreadsJSON: template.JS(threadsJSON),
 		AnchorLines: template.JS(anchorLinesJSON),
 	}
-	nav := s.buildNav(project.QualifiedName())
+	nav := s.buildNav(r, project.QualifiedName())
 	nav.InProject = true
 	s.renderPage(w, "file.html", nav, data)
 

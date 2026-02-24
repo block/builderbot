@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,6 +35,7 @@ type Server struct {
 	activity    *activity.Tracker
 	mcpHandler  http.Handler
 	mux         *http.ServeMux
+	goMux       *http.ServeMux
 	tmpl        *template.Template
 	layoutTmpl  *template.Template // base layout for sidebar pages
 	loadOnce    sync.Once
@@ -58,6 +61,7 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 		activity:    act,
 		mcpHandler:  mcpHandler,
 		mux:         http.NewServeMux(),
+		goMux:       http.NewServeMux(),
 		templateDir: templateDir,
 		frontendDir: frontendDir,
 		cfg:         cfg,
@@ -118,7 +122,36 @@ func (s *Server) getPageTemplate(pageName string) *template.Template {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.ensureLoaded()
+	// Allow cross-origin requests from Tauri desktop app (tauri://localhost)
+	// and local development servers.
+	origin := r.Header.Get("Origin")
+	if origin != "" && isLocalOrigin(origin) {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// isLocalOrigin returns true for origins that should be allowed CORS access.
+func isLocalOrigin(origin string) bool {
+	return strings.HasPrefix(origin, "tauri://") ||
+		strings.HasPrefix(origin, "https://tauri.") ||
+		strings.HasPrefix(origin, "http://localhost") ||
+		strings.HasPrefix(origin, "http://127.0.0.1")
+}
+
+// GoHandler returns an http.Handler that serves the Go template UI.
+// This is used for the secondary server port.
+func (s *Server) GoHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.ensureLoaded()
+		s.goMux.ServeHTTP(w, r)
+	})
 }
 
 // discoverAllProjects discovers projects from all configured workspaces and standalone projects.
@@ -261,13 +294,14 @@ func (s *Server) seedRecentActivity() {
 }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("/", s.handleIndex)
-	s.mux.HandleFunc("/workspace/", s.handleWorkspace)
-	s.mux.HandleFunc("/project/", s.handleProject)
-	s.mux.HandleFunc("/file/", s.handleFile)
-	s.mux.HandleFunc("/search", s.handleSearch)
-	s.mux.HandleFunc("/recent", s.handleRecent)
-	s.mux.HandleFunc("/in-review", s.handleInReview)
+	// Main mux (:8080) — API, SSE, MCP, and React SPA
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Redirect(w, r, "/app/", http.StatusFound)
+	})
 	s.mux.HandleFunc("/events", s.handleEvents)
 	// API endpoints for dynamic updates
 	s.mux.HandleFunc("/api/projects", s.handleAPIProjects)
@@ -296,16 +330,75 @@ func (s *Server) routes() {
 	// Publish to Blockcell
 	s.mux.HandleFunc("/api/publish", s.handlePublish)
 	s.mux.HandleFunc("/api/publish-state", s.handlePublishState)
-	// Static assets embedded in the templates package
-	s.mux.HandleFunc("/static/", s.handleStatic)
 	// React SPA at /app/ (served from frontend/dist/ when it exists)
-	s.mux.Handle("/app/", newSPAHandler(s.frontendDir))
+	s.mux.Handle("/app/", newSPAHandler(s.frontendDir, "/app"))
 	s.mux.Handle("/app", http.RedirectHandler("/app/", http.StatusMovedPermanently))
 	// MCP (Model Context Protocol) endpoint
 	if s.mcpHandler != nil {
 		s.mux.Handle("/mcp", s.mcpHandler)
 		s.mux.Handle("/mcp/", s.mcpHandler)
 	}
+
+	// Go template mux (:8081) — Go template UI under /app/
+	// Routes are registered at /app/... and handlers receive rewritten paths
+	// (with /app stripped) so their existing TrimPrefix logic works unchanged.
+	// Redirects and template links are rewritten via appPrefixWriter.
+	s.goMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Redirect(w, r, "/app/", http.StatusFound)
+	})
+	s.goMux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/app/", http.StatusMovedPermanently)
+	})
+	appHandler := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			// Set base path in context so buildNav/handlers produce /app-prefixed links
+			ctx := context.WithValue(r.Context(), basePathKey, "/app")
+			r2 := r.WithContext(ctx)
+			r2.URL = new(url.URL)
+			*r2.URL = *r.URL
+			// Strip /app prefix so handlers see /workspace/... not /app/workspace/...
+			r2.URL.Path = strings.TrimPrefix(r.URL.Path, "/app")
+			if r2.URL.Path == "" {
+				r2.URL.Path = "/"
+			}
+			h(w, r2)
+		}
+	}
+	s.goMux.HandleFunc("/app/", appHandler(s.handleIndex))
+	s.goMux.HandleFunc("/app/workspace/", appHandler(s.handleWorkspace))
+	s.goMux.HandleFunc("/app/project/", appHandler(s.handleProject))
+	s.goMux.HandleFunc("/app/file/", appHandler(s.handleFile))
+	s.goMux.HandleFunc("/app/search", appHandler(s.handleSearch))
+	s.goMux.HandleFunc("/app/recent", appHandler(s.handleRecent))
+	s.goMux.HandleFunc("/app/in-review", appHandler(s.handleInReview))
+	s.goMux.HandleFunc("/app/static/", appHandler(s.handleStatic))
+	// API and SSE on goMux so the Go template JS (live updates, comments) works
+	s.goMux.HandleFunc("/events", s.handleEvents)
+	s.goMux.HandleFunc("/api/projects", s.handleAPIProjects)
+	s.goMux.HandleFunc("/api/project/", s.handleAPIProjectFiles)
+	s.goMux.HandleFunc("/api/recent", s.handleAPIRecent)
+	s.goMux.HandleFunc("/api/in-review", s.handleAPIInReview)
+	s.goMux.HandleFunc("/api/search", s.handleAPISearch)
+	s.goMux.HandleFunc("/api/copy-file", s.handleCopyFile)
+	s.goMux.HandleFunc("/api/project-info", s.handleProjectInfo)
+	s.goMux.HandleFunc("/api/delete-project", s.handleDeleteProject)
+	s.goMux.HandleFunc("/api/delete-file", s.handleDeleteFile)
+	s.goMux.HandleFunc("/api/workspaces", s.handleAPIWorkspaces)
+	s.goMux.HandleFunc("/api/sources", s.handleAPISources)
+	s.goMux.HandleFunc("/api/open", s.handleAPIOpen)
+	s.goMux.HandleFunc("/api/threads", s.handleAPIThreads)
+	s.goMux.HandleFunc("/api/threads/", s.handleAPIThreadAction)
+	s.goMux.HandleFunc("/api/reviews", s.handleAPIListReviews)
+	s.goMux.HandleFunc("/api/agents", s.handleAgentStatus)
+	s.goMux.HandleFunc("/api/agents/start", s.handleAgentStart)
+	s.goMux.HandleFunc("/api/agents/stop", s.handleAgentStop)
+	s.goMux.HandleFunc("/api/raw", s.handleRawFile)
+	s.goMux.HandleFunc("/api/publish", s.handlePublish)
+	s.goMux.HandleFunc("/api/publish-state", s.handlePublishState)
 }
 
 // handleStatic serves embedded static assets (JS, CSS) from the templates package.
@@ -340,8 +433,22 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+// contextKey is an unexported type for context keys in this package.
+type contextKey string
+
+const basePathKey contextKey = "basePath"
+
+// basePath returns the URL path prefix from the request context (e.g. "/app" on goMux).
+func basePath(r *http.Request) string {
+	if v, ok := r.Context().Value(basePathKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
 // NavData provides the sidebar with workspace/project links on every page.
 type NavData struct {
+	BasePath      string // URL prefix for all route links (e.g. "/app" on goMux, "" on main mux)
 	Workspaces    []NavWorkspace
 	Standalone    []NavProject
 	ActiveProject *NavProject // active workspace project (shown indented under workspace)
@@ -371,8 +478,8 @@ type NavProject struct {
 }
 
 // buildNav builds NavData from current config and cache state.
-func (s *Server) buildNav(activeQN string) NavData {
-	nav := NavData{ActiveQN: activeQN}
+func (s *Server) buildNav(r *http.Request, activeQN string) NavData {
+	nav := NavData{ActiveQN: activeQN, BasePath: basePath(r)}
 
 	projects := s.cache.ProjectsSortedByModTime()
 
@@ -476,28 +583,30 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bp := basePath(r)
+
 	// Redirect to first workspace or standalone project
 	if len(s.cfg.Workspaces) > 0 {
-		http.Redirect(w, r, "/workspace/"+s.cfg.Workspaces[0].DisplayName(), http.StatusFound)
+		http.Redirect(w, r, bp+"/workspace/"+s.cfg.Workspaces[0].DisplayName(), http.StatusFound)
 		return
 	}
 
 	projects := s.cache.ProjectsSortedByModTime()
 	for _, p := range projects {
 		if p.Origin == "standalone" {
-			http.Redirect(w, r, "/project/"+p.QualifiedName(), http.StatusFound)
+			http.Redirect(w, r, bp+"/project/"+p.QualifiedName(), http.StatusFound)
 			return
 		}
 	}
 
 	// Nothing configured
-	http.Redirect(w, r, "/recent", http.StatusFound)
+	http.Redirect(w, r, bp+"/recent", http.StatusFound)
 }
 
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	wsName := strings.TrimPrefix(r.URL.Path, "/workspace/")
 	if wsName == "" {
-		http.Redirect(w, r, "/", http.StatusFound)
+		http.Redirect(w, r, basePath(r)+"/", http.StatusFound)
 		return
 	}
 
@@ -548,7 +657,7 @@ func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 
 	wg := WorkspaceGroup{Name: wsConfig.DisplayName(), Path: wsConfig.Path, Projects: wsProjects}
 
-	nav := s.buildNav("")
+	nav := s.buildNav(r, "")
 	nav.ActiveWS = wsConfig.Path
 	nav.ActiveWSName = wsConfig.DisplayName()
 	pageData := struct {
@@ -839,7 +948,7 @@ func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
 	cachedFiles := s.cache.ProjectFiles(qualifiedName)
 	groups := buildFileGroups(project, cachedFiles)
 
-	nav := s.buildNav(project.QualifiedName())
+	nav := s.buildNav(r, project.QualifiedName())
 	nav.InProject = true
 	pageData := struct {
 		Project *discovery.Project

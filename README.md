@@ -16,7 +16,7 @@ A desktop app and local web server that **only** operates on markdown files insi
 - **MCP server** at `/mcp` for AI agents to participate in document review programmatically
 - **Agent presence** -- shows when an agent is actively monitoring a file
 
-## Installation
+## Quick Start
 
 ### Prerequisites
 
@@ -25,42 +25,66 @@ A desktop app and local web server that **only** operates on markdown files insi
 brew install just
 ```
 
-The remaining dependencies (Go, Node.js, Rust) are needed to build from source.
+### Run the web UI
+
+```bash
+just run
+```
+
+Builds the frontend and Go server, then opens the React UI at `localhost:8080`. The Go template UI is also available at `localhost:8081`.
+
+### Claude Code plugin
+
+```bash
+just install-claude      # Install the Penpal plugin for Claude Code
+just uninstall-claude    # Remove it
+```
+
+## Desktop App
+
+Penpal also ships as a native macOS desktop app. Building requires Go, Node.js, and Rust.
+
+### Develop
+
+```bash
+just dev-desktop    # Desktop app with Vite HMR + Go sidecar
+```
 
 ### Install
 
 ```bash
-just install
-```
-
-This builds the Penpal desktop app, copies it to `/Applications`, and installs the Claude Code plugin.
-
-### Uninstall
-
-```bash
-just uninstall
+just install      # Build .app, copy to /Applications, install Claude Code plugin
+just uninstall    # Remove .app and Claude Code plugin
 ```
 
 ## Development
 
 ```bash
-just dev         # Go server (:8080) + Vite dev server (:5173), opens browser
-just dev-tauri   # Full Tauri desktop app with Vite HMR
-just test        # Run all tests (Go + React + JS)
+just dev           # Go server + Vite dev server, opens localhost:5173
+just test          # Run all tests (Go + React + JS)
 ```
 
-| Command | What's built | Ports | UI |
-|---|---|---|---|
-| `just dev` | Go binary | Go `:8080`, Vite `:5173` | Opens `localhost:5173` in browser |
-| `just dev-tauri` | Go sidecar binaries | Sidecar `:8080`, Vite `:5173` | Tauri native window |
-| `just build` | Sidecar + frontend + `.app` bundle | — | — |
-| `just install` | Same as build | — | Copies `.app` to `/Applications` |
-| `just test` | — | — | — |
+| Command | Description |
+|---|---|
+| `just dev` | Go server (`:8080`/`:8081`) + Vite dev (`:5173`), opens browser |
+| `just build` | Build Go binary |
+| `just build-sidecar` | Build Go sidecar binaries for desktop app |
+| `just build-desktop` | Build sidecar + frontend + desktop `.app` bundle |
+| `just test` | Run all tests (`test-go` + `test-frontend` + `test-js`) |
+| `just test-go` | Go tests |
+| `just test-frontend` | React tests |
+| `just test-js` | Legacy JS tests |
+| `just test-e2e` | Playwright end-to-end tests |
+| `just test-all` | All tests including e2e |
+| `just fmt` | Format Go code |
+| `just tidy` | Tidy Go dependencies |
+| `just clean` | Remove build artifacts |
 
-### Options
+### Server options
 
 ```bash
-./penpal -port 3000              # Custom port (default: 8080)
+./penpal -port 3000              # Custom API port (default: 8080)
+./penpal -go-port 9000           # Custom Go template UI port (default: 8081)
 ./penpal -root /path/to/projects # Custom root directory
 ```
 

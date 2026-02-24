@@ -12,11 +12,12 @@ import (
 // any path that doesn't match a real file (enabling client-side routing).
 // If the directory doesn't exist, all requests return 404.
 type spaHandler struct {
-	dir string
+	dir    string
+	prefix string // URL prefix to strip (e.g. "/app" when mounted at /app/)
 }
 
-func newSPAHandler(dir string) *spaHandler {
-	return &spaHandler{dir: dir}
+func newSPAHandler(dir string, prefix string) *spaHandler {
+	return &spaHandler{dir: dir, prefix: prefix}
 }
 
 func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +37,7 @@ func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clean the path and prevent traversal
-	urlPath := strings.TrimPrefix(r.URL.Path, "/app")
+	urlPath := strings.TrimPrefix(r.URL.Path, h.prefix)
 	if urlPath == "" || urlPath == "/" {
 		urlPath = "/index.html"
 	}

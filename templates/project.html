@@ -375,7 +375,7 @@
                     <div class="file-left">
                         <input type="checkbox" class="file-checkbox" />
                         {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                        <span class="file-name"><a href="/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
+                        <span class="file-name"><a href="{{$.Nav.BasePath}}/file/{{$.Page.Project.QualifiedName}}/{{.Path}}">{{.Name}}</a></span>
                     </div>
                     <div class="file-right">
                         <span class="file-age">{{.Age}}</span>
@@ -905,7 +905,7 @@
             '<div class="file-left">' +
                 '<input type="checkbox" class="file-checkbox" />' +
                 (f.fileType && f.fileType !== 'other' ? '<span class="file-type ' + escapeHtml(f.fileType) + '">' + escapeHtml(f.fileType) + '</span>' : '') +
-                '<span class="file-name"><a href="/file/' + encodeURI(qualifiedName) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>' +
+                '<span class="file-name"><a href="' + appPath + '/file/' + encodeURI(qualifiedName) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>' +
             '</div>' +
             '<div class="file-right">' +
                 '<span class="file-age">' + escapeHtml(f.age) + '</span>' +

@@ -28,6 +28,7 @@ func assertHTMLResponse(t *testing.T, rec *httptest.ResponseRecorder) string {
 func TestHTMLIndex_Redirects(t *testing.T) {
 	s, _, _ := testServer(t)
 
+	// Main mux: / redirects to /app/
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	s.ServeHTTP(rec, req)
@@ -35,8 +36,32 @@ func TestHTMLIndex_Redirects(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/recent" {
-		t.Errorf("expected redirect to /recent, got %q", loc)
+	if loc := rec.Header().Get("Location"); loc != "/app/" {
+		t.Errorf("expected redirect to /app/, got %q", loc)
+	}
+
+	// Go mux: / redirects to /app/
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	s.GoHandler().ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec2.Code)
+	}
+	if loc := rec2.Header().Get("Location"); loc != "/app/" {
+		t.Errorf("expected redirect to /app/, got %q", loc)
+	}
+
+	// Go mux: /app/ redirects to /app/recent (no workspaces configured in test)
+	rec3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest(http.MethodGet, "/app/", nil)
+	s.GoHandler().ServeHTTP(rec3, req3)
+
+	if rec3.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec3.Code)
+	}
+	if loc := rec3.Header().Get("Location"); loc != "/app/recent" {
+		t.Errorf("expected redirect to /app/recent, got %q", loc)
 	}
 }
 
@@ -59,8 +84,8 @@ func TestHTMLProject_RendersFileGroups(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/project/test/myproject", nil)
-	s.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/app/project/test/myproject", nil)
+	s.GoHandler().ServeHTTP(rec, req)
 
 	body := assertHTMLResponse(t, rec)
 	if !strings.Contains(body, "roadmap.md") {
@@ -92,8 +117,8 @@ func TestHTMLFile_RendersMarkdown(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/file/test/project/thoughts/plans/test.md", nil)
-	s.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/app/file/test/project/thoughts/plans/test.md", nil)
+	s.GoHandler().ServeHTTP(rec, req)
 
 	body := assertHTMLResponse(t, rec)
 	if !strings.Contains(body, "Hello World") {
@@ -105,8 +130,8 @@ func TestHTMLRecent_RendersList(t *testing.T) {
 	s, _, _ := testServer(t)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/recent", nil)
-	s.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/app/recent", nil)
+	s.GoHandler().ServeHTTP(rec, req)
 
 	assertHTMLResponse(t, rec)
 }
@@ -115,8 +140,8 @@ func TestHTMLInReview_RendersList(t *testing.T) {
 	s, _, _ := testServer(t)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/in-review", nil)
-	s.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/app/in-review", nil)
+	s.GoHandler().ServeHTTP(rec, req)
 
 	assertHTMLResponse(t, rec)
 }
@@ -125,8 +150,8 @@ func TestHTMLSearch_Empty(t *testing.T) {
 	s, _, _ := testServer(t)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/search", nil)
-	s.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/app/search", nil)
+	s.GoHandler().ServeHTTP(rec, req)
 
 	body := assertHTMLResponse(t, rec)
 	if !strings.Contains(strings.ToLower(body), "search") {
@@ -158,8 +183,8 @@ func TestHTMLSearch_WithQuery(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/search?q=test", nil)
-	s.ServeHTTP(rec, req)
+	req := httptest.NewRequest(http.MethodGet, "/app/search?q=test", nil)
+	s.GoHandler().ServeHTTP(rec, req)
 
 	body := assertHTMLResponse(t, rec)
 	if !strings.Contains(body, "test-file.md") {

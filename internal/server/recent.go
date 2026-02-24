@@ -23,7 +23,7 @@ type RecentFile struct {
 func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
 	files := s.mergeRecentFiles(50)
 
-	nav := s.buildNav("")
+	nav := s.buildNav(r, "")
 	nav.ActivePage = "recent"
 	pageData := struct {
 		Files []RecentFile

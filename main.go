@@ -28,6 +28,7 @@ import (
 
 func main() {
 	port := flag.Int("port", 8080, "port to listen on")
+	goPort := flag.Int("go-port", 8081, "port for Go template UI")
 	root := flag.String("root", "", "root directory (deprecated, use config file)")
 	dev := flag.Bool("dev", false, "development mode: reload templates from disk on each request")
 	flag.Parse()
@@ -37,10 +38,10 @@ func main() {
 		return
 	}
 
-	runServe(*port, *dev, *root)
+	runServe(*port, *goPort, *dev, *root)
 }
 
-func runServe(port int, dev bool, rootOverride string) {
+func runServe(port int, goPort int, dev bool, rootOverride string) {
 	config.MigrateFromBirdseye()
 	config.EnsureGlobalGitignore()
 
@@ -100,15 +101,28 @@ func runServe(port int, dev bool, rootOverride string) {
 		Handler: srv,
 	}
 
+	goAddr := fmt.Sprintf(":%d", goPort)
+	goHTTPServer := &http.Server{
+		Addr:    goAddr,
+		Handler: srv.GoHandler(),
+	}
+
 	// Graceful shutdown on SIGINT/SIGTERM
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		fmt.Printf("\nStarting server at http://localhost%s\n", addr)
+		fmt.Printf("Go template UI:    http://localhost%s\n", goAddr)
 		fmt.Printf("penpal MCP server: http://localhost%s/mcp\n", addr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
+		}
+	}()
+
+	go func() {
+		if err := goHTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Go template server error: %v", err)
 		}
 	}()
 
@@ -120,6 +134,7 @@ func runServe(port int, dev bool, rootOverride string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	httpServer.Shutdown(ctx)
+	goHTTPServer.Shutdown(ctx)
 }
 
 // runOpen opens paths in a running penpal instance, starting the server if needed.

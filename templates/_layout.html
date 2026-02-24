@@ -716,9 +716,9 @@
 <body>
     <div class="app">
         <div class="topbar" data-tauri-drag-region>
-            <div class="topbar-logo"><a href="/">Penpal</a></div>
+            <div class="topbar-logo"><a href="{{.Nav.BasePath}}/">Penpal</a></div>
             <div class="topbar-search">
-                <form action="/search" method="GET">
+                <form action="{{.Nav.BasePath}}/search" method="GET">
                     <input type="search" name="q" placeholder="Search all thoughts..." value="{{.Nav.SearchQuery}}">
                 </form>
             </div>
@@ -731,17 +731,17 @@
         <nav class="sidebar">
             {{if .Nav.InProject}}
             <!-- Focused mode: only show parent context + active project -->
-            <a class="sidebar-item sidebar-back" href="{{if .Nav.ActiveWSName}}/workspace/{{.Nav.ActiveWSName}}{{else}}/{{end}}">&#8592; Home</a>
+            <a class="sidebar-item sidebar-back" href="{{if .Nav.ActiveWSName}}{{.Nav.BasePath}}/workspace/{{.Nav.ActiveWSName}}{{else}}{{.Nav.BasePath}}/{{end}}">&#8592; Home</a>
             <div class="sidebar-divider"></div>
             {{if .Nav.ActiveWS}}
             {{range .Nav.Workspaces}}{{if eq .Path $.Nav.ActiveWS}}
-            <a class="sidebar-item" href="/workspace/{{.Name}}">
+            <a class="sidebar-item" href="{{$.Nav.BasePath}}/workspace/{{.Name}}">
                 {{.Name}}
                 {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
             </a>
             {{end}}{{end}}
             {{if .Nav.ActiveProject}}
-            <a class="sidebar-item subitem active" href="/project/{{.Nav.ActiveProject.QualifiedName}}">
+            <a class="sidebar-item subitem active" href="{{.Nav.BasePath}}/project/{{.Nav.ActiveProject.QualifiedName}}">
                 {{.Nav.ActiveProject.Name}}
                 {{range .Nav.ActiveProject.Badges}}<span class="source-badge" style="--badge-bg:{{.Bg}};--badge-color:{{.Color}};--badge-active-bg:{{.ActiveBg}};--badge-active-color:{{.ActiveColor}}">{{.Text}}</span>{{end}}
                 {{if .Nav.ActiveProject.HasAgent}}<span class="agent-dot"></span>{{end}}
@@ -750,7 +750,7 @@
             {{end}}
             {{else}}
             {{range .Nav.Standalone}}{{if eq .QualifiedName $.Nav.ActiveQN}}
-            <a class="sidebar-item active" href="/project/{{.QualifiedName}}">
+            <a class="sidebar-item active" href="{{$.Nav.BasePath}}/project/{{.QualifiedName}}">
                 {{.Name}}
                 {{range .Badges}}<span class="source-badge" style="--badge-bg:{{.Bg}};--badge-color:{{.Color}};--badge-active-bg:{{.ActiveBg}};--badge-active-color:{{.ActiveColor}}">{{.Text}}</span>{{end}}
                 {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
@@ -762,7 +762,7 @@
             <!-- Home mode: show all workspaces and standalone projects -->
             {{range .Nav.Workspaces}}
             <div class="sidebar-item-wrap" data-remove-type="workspace" data-remove-path="{{.Path}}" data-remove-name="{{.Name}}">
-                <a class="sidebar-item{{if eq .Path $.Nav.ActiveWS}} active{{end}}" href="/workspace/{{.Name}}">
+                <a class="sidebar-item{{if eq .Path $.Nav.ActiveWS}} active{{end}}" href="{{$.Nav.BasePath}}/workspace/{{.Name}}">
                     {{.Name}}
                     {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
                 </a>
@@ -775,7 +775,7 @@
 
             {{range .Nav.Standalone}}
             <div class="sidebar-item-wrap" data-remove-type="project" data-remove-path="{{.Path}}" data-remove-name="{{.Name}}">
-                <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}" href="/project/{{.QualifiedName}}">
+                <a class="sidebar-item{{if eq .QualifiedName $.Nav.ActiveQN}} active{{end}}" href="{{$.Nav.BasePath}}/project/{{.QualifiedName}}">
                     {{.Name}}
                     {{range .Badges}}<span class="source-badge" style="--badge-bg:{{.Bg}};--badge-color:{{.Color}};--badge-active-bg:{{.ActiveBg}};--badge-active-color:{{.ActiveColor}}">{{.Text}}</span>{{end}}
                     {{if .HasAgent}}<span class="agent-dot"></span>{{end}}
@@ -789,8 +789,8 @@
             {{end}}
 
             <div class="sidebar-divider"></div>
-            <a class="sidebar-link{{if eq .Nav.ActivePage "in-review"}} active{{end}}{{if not (gt .Nav.ReviewCount 0)}} no-reviews{{end}}" id="sidebar-review-link"{{if gt .Nav.ReviewCount 0}} href="/in-review"{{end}}>In Review</a>
-            <a class="sidebar-link{{if eq .Nav.ActivePage "recent"}} active{{end}}" href="/recent">Recent</a>
+            <a class="sidebar-link{{if eq .Nav.ActivePage "in-review"}} active{{end}}{{if not (gt .Nav.ReviewCount 0)}} no-reviews{{end}}" id="sidebar-review-link"{{if gt .Nav.ReviewCount 0}} href="{{.Nav.BasePath}}/in-review"{{end}}>In Review</a>
+            <a class="sidebar-link{{if eq .Nav.ActivePage "recent"}} active{{end}}" href="{{.Nav.BasePath}}/recent">Recent</a>
             <div class="sidebar-add" onclick="showAddDialog(event)">+ Add workspace or project</div>
             {{end}}
 
@@ -829,6 +829,8 @@
     </div>
 
     <script>
+        var appPath = '{{.Nav.BasePath}}';
+
         // --- Sidebar: prevent click on active item from losing selection ---
         document.addEventListener('click', function(e) {
             var item = e.target.closest('.sidebar-item.active');
@@ -944,7 +946,7 @@
             .then(function(r) {
                 if (!r.ok) return r.text().then(function(t) { throw new Error(t); });
                 closeRemoveDialog();
-                window.location.href = '/';
+                window.location.href = appPath + '/';
             })
             .catch(function(err) {
                 alert('Failed to remove: ' + err.message);
@@ -1102,7 +1104,7 @@
                     var hasReviews = groups && groups.length > 0;
                     if (hasReviews) {
                         link.classList.remove('no-reviews');
-                        link.href = '/in-review';
+                        link.href = appPath + '/in-review';
                     } else {
                         link.classList.add('no-reviews');
                         link.removeAttribute('href');
@@ -1116,8 +1118,8 @@
                 .then(function(r) { return r.json(); })
                 .then(function(projects) {
                     // Update project sidebar items with agent dots
-                    document.querySelectorAll('.sidebar-item[href^="/project/"]').forEach(function(item) {
-                        var qn = item.getAttribute('href').replace('/project/', '');
+                    document.querySelectorAll('.sidebar-item[href$="/project/"], .sidebar-item[href*="/project/"]').forEach(function(item) {
+                        var qn = item.getAttribute('href').replace(appPath + '/project/', '');
                         var proj = projects.find(function(p) { return p.qualifiedName === qn; });
                         if (!proj) return;
                         var dot = item.querySelector('.agent-dot');
@@ -1132,8 +1134,8 @@
                     projects.forEach(function(p) {
                         if (p.agentRunning && p.workspace) wsHasAgent[p.workspace] = true;
                     });
-                    document.querySelectorAll('.sidebar-item[href^="/workspace/"]').forEach(function(item) {
-                        var name = item.getAttribute('href').replace('/workspace/', '');
+                    document.querySelectorAll('.sidebar-item[href$="/workspace/"], .sidebar-item[href*="/workspace/"]').forEach(function(item) {
+                        var name = item.getAttribute('href').replace(appPath + '/workspace/', '');
                         var dot = item.querySelector('.agent-dot');
                         if (wsHasAgent[name] && !dot) {
                             item.insertAdjacentHTML('beforeend', ' <span class="agent-dot"></span>');

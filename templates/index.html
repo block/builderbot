@@ -139,7 +139,7 @@
         <div class="sidebar-card-title">Projects</div>
         <nav class="sidebar-card-nav">
             {{range .Projects}}
-            <a href="/project/{{.QualifiedName}}"{{if eq .FileCount 0}} class="deemphasized"{{end}}>{{.Name}}</a>
+            <a href="{{$.Nav.BasePath}}/project/{{.QualifiedName}}"{{if eq .FileCount 0}} class="deemphasized"{{end}}>{{.Name}}</a>
             {{end}}
         </nav>
     </div>
@@ -154,7 +154,7 @@
         <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-workspace="{{.WorkspaceName}}" data-project-path="{{.Path}}" data-origin="workspace">
             <div class="project-header">
                 <div class="project-name">
-                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{range .Badges}}<span class="source-badge" style="background:{{.Bg}};color:{{.Color}}">{{.Text}}</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
+                    <a href="{{$.Nav.BasePath}}/project/{{.QualifiedName}}">{{.Name}}</a>{{range .Badges}}<span class="source-badge" style="background:{{.Bg}};color:{{.Color}}">{{.Text}}</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                     {{if index $.Page.Ages .QualifiedName}}<span class="project-age">{{index $.Page.Ages .QualifiedName}}</span>{{end}}
@@ -179,7 +179,7 @@
         <div class="project{{if eq .FileCount 0}} deemphasized{{end}}" data-name="{{.QualifiedName}}" data-project-path="{{.Path}}" data-origin="standalone">
             <div class="project-header">
                 <div class="project-name">
-                    <a href="/project/{{.QualifiedName}}">{{.Name}}</a>{{range .Badges}}<span class="source-badge" style="background:{{.Bg}};color:{{.Color}}">{{.Text}}</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
+                    <a href="{{$.Nav.BasePath}}/project/{{.QualifiedName}}">{{.Name}}</a>{{range .Badges}}<span class="source-badge" style="background:{{.Bg}};color:{{.Color}}">{{.Text}}</span>{{end}}{{if index $.Page.AgentConnected .QualifiedName}}<span class="agent-dot" title="MCP connected"></span>{{end}}
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                     {{if index $.Page.Ages .QualifiedName}}<span class="project-age">{{index $.Page.Ages .QualifiedName}}</span>{{end}}
@@ -375,7 +375,7 @@
 
         return '<div class="project' + deemph + '" data-name="' + escapeHtml(p.qualifiedName) + '" data-workspace="' + escapeHtml(p.workspace || '') + '" data-project-path="' + escapeHtml(p.projectPath) + '" data-origin="' + p.origin + '">' +
             '<div class="project-header">' +
-                '<div class="project-name"><a href="/project/' + encodeURI(p.qualifiedName) + '">' + escapeHtml(p.name) + '</a>' + badgesHtml + agentDot + reviewBadge + '</div>' +
+                '<div class="project-name"><a href="' + appPath + '/project/' + encodeURI(p.qualifiedName) + '">' + escapeHtml(p.name) + '</a>' + badgesHtml + agentDot + reviewBadge + '</div>' +
                 '<div style="display:flex;gap:8px;align-items:center">' +
                     age +
                     '<div class="project-dropdown">' +

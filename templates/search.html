@@ -126,7 +126,7 @@
                 {{range .Page.MatchingProjects}}
                 <div class="project" data-path="{{.Path}}">
                     <div class="project-header">
-                        <div class="project-name"><a href="/project/{{.QualifiedName}}">{{.Name}}</a></div>
+                        <div class="project-name"><a href="{{$.Nav.BasePath}}/project/{{.QualifiedName}}">{{.Name}}</a></div>
                         <button class="copy-btn" onclick="copyItemPath(this, event)">Copy</button>
                     </div>
                     {{if .Git}}<div class="project-meta"><span class="branch">{{.Git.Branch}}{{if .Git.Dirty}}<span class="dirty">*</span>{{end}}</span></div>{{end}}
@@ -143,7 +143,7 @@
             {{$projPath := .ProjectPath}}
             <div class="project-group">
                 <div class="project-group-header" data-path="{{$projPath}}">
-                    <a href="/project/{{$qn}}">{{.Project}}</a>
+                    <a href="{{$.Nav.BasePath}}/project/{{$qn}}">{{.Project}}</a>
                     <button class="copy-btn" onclick="copyItemPath(this, event)">Copy</button>
                 </div>
                 {{range .Files}}
@@ -152,7 +152,7 @@
                         <input type="checkbox" class="file-checkbox" />
                         {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
                         {{if .NameMatch}}<span class="match-type">name</span>{{end}}
-                        <span class="file-name"><a href="/file/{{$qn}}/{{.Path}}">{{.Name}}</a></span>
+                        <span class="file-name"><a href="{{$.Nav.BasePath}}/file/{{$qn}}/{{.Path}}">{{.Name}}</a></span>
                     </div>
                     <div class="file-right">
                         <div class="copy-dropdown">

@@ -41,7 +41,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 
 	if query == "" {
-		nav := s.buildNav("")
+		nav := s.buildNav(r, "")
 		s.renderPage(w, "search.html", nav, SearchData{})
 		return
 	}
@@ -142,7 +142,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return projectResults[i].Project < projectResults[j].Project
 	})
 
-	nav := s.buildNav("")
+	nav := s.buildNav(r, "")
 	nav.SearchQuery = query
 	pageData := SearchData{
 		Query:            query,

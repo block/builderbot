@@ -38,6 +38,10 @@ function IndexRedirect() {
   return null;
 }
 
+// Vite sets import.meta.env.BASE_URL from the `base` config (e.g. '/app/' for
+// Go-served builds, '/' for dev/Tauri). Strip trailing slash for router basename.
+const basename = import.meta.env.BASE_URL.replace(/\/+$/, '') || '/';
+
 const router = createBrowserRouter([
   {
     element: <Layout />,
@@ -51,7 +55,7 @@ const router = createBrowserRouter([
       { path: '/in-review', element: <InReviewPage /> },
     ],
   },
-]);
+], { basename });
 
 export default function App() {
   return <RouterProvider router={router} />;

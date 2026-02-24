@@ -150,7 +150,7 @@
             <div class="source-header">
                 {{if $group.BadgeText}}<span class="source-badge" style="color:{{$group.BadgeColor}};background:{{$group.BadgeBg}}">{{$group.BadgeText}}</span>{{end}}
                 <span class="source-breadcrumb">
-                    {{if $group.Workspace}}<a href="{{$group.WorkspaceURL}}">{{$group.Workspace}}</a><span class="breadcrumb-sep">/</span>{{end}}<a href="/project/{{$group.ProjectQN}}">{{$group.ProjectName}}</a><span class="breadcrumb-sep">/</span><a href="/project/{{$group.ProjectQN}}#source-{{$group.SourceName}}" class="breadcrumb-source">{{$group.SourceName}}</a>
+                    {{if $group.Workspace}}<a href="{{$group.WorkspaceURL}}">{{$group.Workspace}}</a><span class="breadcrumb-sep">/</span>{{end}}<a href="{{$.Nav.BasePath}}/project/{{$group.ProjectQN}}">{{$group.ProjectName}}</a><span class="breadcrumb-sep">/</span><a href="{{$.Nav.BasePath}}/project/{{$group.ProjectQN}}#source-{{$group.SourceName}}" class="breadcrumb-source">{{$group.SourceName}}</a>
                 </span>
                 {{if gt $group.TypingThreads 0}}
                 <span class="file-typing" style="margin-left:auto">
@@ -164,7 +164,7 @@
                 <li class="file" data-project="{{.Project}}" data-project-path="{{.ProjectPath}}" data-path="{{.Path}}" data-source="{{.Source}}" data-source-type="{{.SourceType}}">
                     <div class="file-left">
                         {{if ne .FileType "other"}}<span class="file-type {{.FileType}}">{{.FileType}}</span>{{end}}
-                        <span class="file-name"><a href="/file/{{.Project}}/{{.Path}}">{{.Name}}</a></span>
+                        <span class="file-name"><a href="{{$.Nav.BasePath}}/file/{{.Project}}/{{.Path}}">{{.Name}}</a></span>
                     </div>
                     <div class="file-right">
                         <span class="file-age">{{.Age}}</span>
@@ -224,7 +224,7 @@
         if (f.fileType && f.fileType !== 'other') {
             html += '<span class="file-type ' + escapeHtml(f.fileType) + '">' + escapeHtml(f.fileType) + '</span>';
         }
-        html += '<span class="file-name"><a href="/file/' + escapeHtml(f.project) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>';
+        html += '<span class="file-name"><a href="' + appPath + '/file/' + escapeHtml(f.project) + '/' + encodeURI(f.path) + '">' + escapeHtml(f.name) + '</a></span>';
         html += '</div>';
         html += '<div class="file-right">';
         html += '<span class="file-age">' + escapeHtml(f.age || '') + '</span>';
@@ -260,9 +260,9 @@
                 if (g.workspace) {
                     html += '<a href="' + escapeHtml(g.workspaceURL) + '">' + escapeHtml(g.workspace) + '</a><span class="breadcrumb-sep">/</span>';
                 }
-                html += '<a href="/project/' + escapeHtml(g.projectQN) + '">' + escapeHtml(g.projectName) + '</a>';
+                html += '<a href="' + appPath + '/project/' + escapeHtml(g.projectQN) + '">' + escapeHtml(g.projectName) + '</a>';
                 html += '<span class="breadcrumb-sep">/</span>';
-                html += '<a href="/project/' + escapeHtml(g.projectQN) + '#source-' + escapeHtml(g.sourceName) + '" class="breadcrumb-source">' + escapeHtml(g.sourceName) + '</a>';
+                html += '<a href="' + appPath + '/project/' + escapeHtml(g.projectQN) + '#source-' + escapeHtml(g.sourceName) + '" class="breadcrumb-source">' + escapeHtml(g.sourceName) + '</a>';
                 html += '</span>';
                 if (g.typingThreads > 0) {
                     html += '<span style="margin-left:auto">' + typingHTML(g.typingThreads) + '</span>';
@@ -289,7 +289,7 @@
         if (!link) return;
         if (hasReviews) {
             link.classList.remove('no-reviews');
-            link.href = '/in-review';
+            link.href = appPath + '/in-review';
         } else {
             link.classList.add('no-reviews');
             link.removeAttribute('href');

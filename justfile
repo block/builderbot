@@ -13,6 +13,28 @@ ensure-deps:
         brew install claude-code
     fi
 
+# Production run: build frontend + Go binary, start server, open React UI
+run: ensure-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Building frontend..."
+    cd frontend && npm install && npm run build && cd ..
+    echo "Building Go binary..."
+    go build -o penpal .
+    echo "Starting server..."
+    ./penpal &
+    SERVER_PID=$!
+    # Wait for server to be ready
+    until curl -s http://localhost:8080/api/projects > /dev/null 2>&1; do
+        sleep 0.2
+    done
+    open "http://localhost:8080"
+    wait $SERVER_PID
+
+# Build Go binary
+build:
+    go build -o penpal .
+
 # Development mode: Go server + Vite dev server, opens browser
 dev:
     #!/usr/bin/env bash
@@ -77,27 +99,37 @@ dev:
 
     echo ""
     echo "Go server:    http://localhost:$PORT"
+    echo "Go template:  http://localhost:8081"
     echo "Vite (React): http://localhost:5173"
     echo ""
 
     wait $GO_PID
 
-# Development mode: full Tauri desktop app with Vite HMR
-dev-tauri: build-sidecar
-    cd frontend && npm run tauri:dev
+# Development mode: full desktop app with Vite HMR
+dev-desktop: build-sidecar
+    cd frontend && VITE_BASE=/ npm run tauri:dev
 
-# Build Go sidecar binaries for Tauri
+# Build Go sidecar binaries for desktop app
 build-sidecar:
     ./scripts/build-sidecar.sh
 
-# Build production Tauri app
-build: ensure-deps build-sidecar
-    cd frontend && npm install && npm run build && npm run tauri:build
+# Build production desktop app
+build-desktop: ensure-deps build-sidecar
+    cd frontend && npm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 npm run build && npm run tauri:build
 
 # Install Penpal: build desktop app + install Claude Code plugin
-install: build
+install: build-desktop
     #!/usr/bin/env bash
     set -euo pipefail
+
+    # Quit running Penpal if present
+    if pgrep -x Penpal >/dev/null 2>&1; then
+        echo "Quitting Penpal..."
+        osascript -e 'quit app "Penpal"' 2>/dev/null || true
+        sleep 1
+        # Force kill if it didn't quit gracefully
+        pkill -x Penpal 2>/dev/null || true
+    fi
 
     # Copy .app to /Applications
     APP_SRC="frontend/src-tauri/target/release/bundle/macos/Penpal.app"
@@ -118,11 +150,31 @@ install: build
     claude plugin install penpal
     echo "Penpal Claude Code plugin installed."
 
+    # Launch the app
+    open /Applications/Penpal.app
+
 # Uninstall Penpal
 uninstall:
     #!/usr/bin/env bash
     rm -rf /Applications/Penpal.app 2>/dev/null || true
     echo "Penpal.app removed from /Applications."
+    claude plugin uninstall penpal 2>/dev/null || true
+    claude plugin marketplace remove penpal 2>/dev/null || true
+    echo "Penpal Claude Code plugin uninstalled."
+
+# Install Claude Code plugin only
+install-claude: ensure-deps
+    #!/usr/bin/env bash
+    claude plugin uninstall birdseye 2>/dev/null || true
+    claude plugin marketplace remove birdseye 2>/dev/null || true
+    rm -f ~/.claude/skills/monitor-reviews
+    claude plugin marketplace add "$(pwd)" 2>/dev/null || true
+    claude plugin install penpal
+    echo "Penpal Claude Code plugin installed."
+
+# Uninstall Claude Code plugin only
+uninstall-claude:
+    #!/usr/bin/env bash
     claude plugin uninstall penpal 2>/dev/null || true
     claude plugin marketplace remove penpal 2>/dev/null || true
     echo "Penpal Claude Code plugin uninstalled."
@@ -141,6 +193,9 @@ test-frontend:
 # Run legacy JavaScript tests
 test-js:
     node --test js/*_test.js
+
+# Run all tests including e2e
+test-all: test test-e2e
 
 # Run Playwright e2e tests
 test-e2e:

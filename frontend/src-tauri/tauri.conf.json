@@ -5,7 +5,7 @@
     "devUrl": "http://localhost:5173",
     "frontendDist": "../dist",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": ""
   },
   "app": {
     "withGlobalTauri": true,
@@ -27,7 +27,6 @@
   "bundle": {
     "active": true,
     "targets": [
-      "dmg",
       "app"
     ],
     "icon": [

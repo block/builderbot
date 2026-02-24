@@ -42,7 +42,7 @@ type ReviewGroup struct {
 func (s *Server) handleInReview(w http.ResponseWriter, r *http.Request) {
 	groups := s.listAllReviewGroups()
 
-	nav := s.buildNav("")
+	nav := s.buildNav(r, "")
 	nav.ActivePage = "in-review"
 	pageData := struct {
 		Groups []ReviewGroup

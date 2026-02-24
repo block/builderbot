@@ -9,7 +9,7 @@ import (
 )
 
 func TestSPAHandler_NoDistDir(t *testing.T) {
-	h := newSPAHandler("")
+	h := newSPAHandler("", "/app")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/app/", nil)
 	h.ServeHTTP(rec, req)
@@ -19,7 +19,7 @@ func TestSPAHandler_NoDistDir(t *testing.T) {
 }
 
 func TestSPAHandler_MissingDistDir(t *testing.T) {
-	h := newSPAHandler("/nonexistent/path/frontend/dist")
+	h := newSPAHandler("/nonexistent/path/frontend/dist", "/app")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/app/", nil)
 	h.ServeHTTP(rec, req)
@@ -32,7 +32,7 @@ func TestSPAHandler_ServesIndexHTML(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0644)
 
-	h := newSPAHandler(dir)
+	h := newSPAHandler(dir, "/app")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/app/", nil)
 	h.ServeHTTP(rec, req)
@@ -50,7 +50,7 @@ func TestSPAHandler_ServesStaticFile(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "assets"), 0755)
 	os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("console.log('hi')"), 0644)
 
-	h := newSPAHandler(dir)
+	h := newSPAHandler(dir, "/app")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/app/assets/app.js", nil)
 	h.ServeHTTP(rec, req)
@@ -66,7 +66,7 @@ func TestSPAHandler_FallbackToIndex(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0644)
 
-	h := newSPAHandler(dir)
+	h := newSPAHandler(dir, "/app")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/app/workspace/default", nil)
 	h.ServeHTTP(rec, req)
@@ -82,7 +82,7 @@ func TestSPAHandler_MethodNotAllowed(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0644)
 
-	h := newSPAHandler(dir)
+	h := newSPAHandler(dir, "/app")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/app/", nil)
 	h.ServeHTTP(rec, req)
@@ -99,7 +99,7 @@ func TestSPAHandler_PathTraversal(t *testing.T) {
 	parent := filepath.Dir(dir)
 	os.WriteFile(filepath.Join(parent, "secret.txt"), []byte("secret"), 0644)
 
-	h := newSPAHandler(dir)
+	h := newSPAHandler(dir, "/app")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/app/../secret.txt", nil)
 	h.ServeHTTP(rec, req)

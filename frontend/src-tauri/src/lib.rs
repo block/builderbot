@@ -1,6 +1,16 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use tauri::menu::*;
 use tauri::Manager;
+use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
+
+/// Holds the sidecar child process so we can kill it on quit.
+struct Sidecar(Mutex<Option<CommandChild>>);
+
+/// Tracks whether a window was just destroyed, so we can distinguish
+/// "last window closed" from "user quit" in ExitRequested.
+static WINDOW_CLOSED: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 fn get_platform() -> String {
@@ -11,6 +21,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_decorum::init())
+        .manage(Sidecar(Mutex::new(None)))
         .setup(|app| {
             let win = app.get_webview_window("main").unwrap();
 
@@ -29,10 +40,13 @@ pub fn run() {
             // Spawn Go server sidecar
             let sidecar = app.shell().sidecar("penpal-server")
                 .expect("failed to locate penpal-server sidecar");
-            let (_rx, _child) = sidecar
+            let (_rx, child) = sidecar
                 .args(["-port", "8080"])
                 .spawn()
                 .expect("failed to spawn penpal-server sidecar");
+
+            // Store the child so we can kill it on quit
+            *app.state::<Sidecar>().0.lock().unwrap() = Some(child);
 
             // Wait for server to be ready
             for _ in 0..50 {
@@ -44,7 +58,12 @@ pub fn run() {
 
             // Handle custom menu events — dispatch to the focused window
             app.on_menu_event(move |app_handle, event| {
-                // Handle new_window first — it doesn't need an existing window
+                if event.id().as_ref() == "quit" {
+                    app_handle.exit(0);
+                    return;
+                }
+
+                // Handle new_window — doesn't need an existing window
                 if event.id().as_ref() == "new_window" {
                     let label = format!("win-{}", std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -104,13 +123,25 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } = &event
+            {
+                if app_handle.webview_windows().is_empty() {
+                    WINDOW_CLOSED.store(true, Ordering::SeqCst);
+                }
+            }
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::ExitRequested { api, .. } = &event {
-                // Prevent app from quitting when all windows are closed
-                api.prevent_exit();
+                // If a window just closed, keep the app alive in the dock.
+                // Otherwise it's a real quit (Cmd+Q, dock quit) — let it exit.
+                if WINDOW_CLOSED.swap(false, Ordering::SeqCst) {
+                    api.prevent_exit();
+                }
             }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
-                // Re-open a window when the dock icon is clicked
                 if app_handle.webview_windows().is_empty() {
                     let _ = tauri::WebviewWindowBuilder::new(
                         app_handle,
@@ -120,6 +151,11 @@ pub fn run() {
                     .title("Penpal")
                     .inner_size(1200.0, 800.0)
                     .build();
+                }
+            }
+            if let tauri::RunEvent::Exit = event {
+                if let Some(child) = app_handle.state::<Sidecar>().0.lock().unwrap().take() {
+                    let _ = child.kill();
                 }
             }
         });
@@ -144,7 +180,7 @@ fn build_menu(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> 
                 &PredefinedMenuItem::hide_others(app, None)?,
                 &PredefinedMenuItem::show_all(app, None)?,
                 &PredefinedMenuItem::separator(app)?,
-                &PredefinedMenuItem::quit(app, None)?,
+                &MenuItem::with_id(app, "quit", "Quit Penpal", true, Some("CmdOrCtrl+Q"))?,
             ],
         )?;
         menu.append(&app_menu)?;

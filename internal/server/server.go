@@ -37,12 +37,19 @@ type Server struct {
 	layoutTmpl  *template.Template // base layout for sidebar pages
 	loadOnce    sync.Once
 	templateDir string // if set, reload templates from disk on each request
+	frontendDir string // if set, serve React SPA from this directory at /app/
 	cfg         *config.Config
 	cfgPath     string
 	cfgMu       sync.Mutex // protects cfg mutations
 }
 
 func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, am *agents.Manager, act *activity.Tracker, templateDir string, cfg *config.Config, cfgPath string) *Server {
+	// Auto-detect frontend/dist directory for SPA serving
+	var frontendDir string
+	if dir := "frontend/dist"; dirExists(dir) {
+		frontendDir = dir
+	}
+
 	s := &Server{
 		cache:       c,
 		watcher:     w,
@@ -52,6 +59,7 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 		mcpHandler:  mcpHandler,
 		mux:         http.NewServeMux(),
 		templateDir: templateDir,
+		frontendDir: frontendDir,
 		cfg:         cfg,
 		cfgPath:     cfgPath,
 	}
@@ -289,6 +297,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/publish-state", s.handlePublishState)
 	// Static assets embedded in the templates package
 	s.mux.HandleFunc("/static/", s.handleStatic)
+	// React SPA at /app/ (served from frontend/dist/ when it exists)
+	s.mux.Handle("/app/", newSPAHandler(s.frontendDir))
+	s.mux.Handle("/app", http.RedirectHandler("/app/", http.StatusMovedPermanently))
 	// MCP (Model Context Protocol) endpoint
 	if s.mcpHandler != nil {
 		s.mux.Handle("/mcp", s.mcpHandler)
@@ -1245,6 +1256,12 @@ func removeEmptyParents(dir, stopAt string) {
 // Helper for templates - kept for backward compat
 func (s *Server) projects() []discovery.Project {
 	return s.cache.Projects()
+}
+
+// dirExists returns true if the given path is an existing directory.
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // sortProjectsByModTime is used by handleIndex

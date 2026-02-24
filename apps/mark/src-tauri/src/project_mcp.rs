@@ -422,8 +422,7 @@ impl ProjectToolsHandler {
                         .ok()
                         .and_then(|msgs| {
                             msgs.into_iter()
-                                .filter(|m| m.role == crate::store::MessageRole::Assistant)
-                                .next_back()
+                                .rfind(|m| m.role == crate::store::MessageRole::Assistant)
                                 .map(|m| m.content)
                         })
                         .unwrap_or_default();

@@ -122,6 +122,14 @@ dev:
         start_server
     done
 
+# Build Go sidecar binaries for Tauri
+build-sidecar:
+    ./scripts/build-sidecar.sh
+
+# Run Tauri dev mode (builds sidecar first)
+tauri-dev: build-sidecar
+    cd frontend && npm run tauri:dev
+
 # Clean build artifacts
 clean:
     rm -f penpal

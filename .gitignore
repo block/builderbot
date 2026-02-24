@@ -18,6 +18,10 @@ birdseye
 # Test artifacts
 test-results/
 
+# Tauri build artifacts
+frontend/src-tauri/target/
+frontend/src-tauri/binaries/
+
 # Thoughts and planning
 thoughts/
 

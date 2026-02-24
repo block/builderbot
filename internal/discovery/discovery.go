@@ -504,6 +504,36 @@ func groupRP1Paths(paths []string) []FileGroup {
 	return groups
 }
 
+// DiscoverClaudePlans checks for markdown files in ~/.claude/plans/ and
+// returns a synthetic Project if any are found. This lets the app surface
+// plan files that Claude Code writes there without any manual configuration.
+func DiscoverClaudePlans() (Project, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Project{}, false
+	}
+	plansDir := filepath.Join(home, ".claude", "plans")
+	info, err := os.Stat(plansDir)
+	if err != nil || !info.IsDir() {
+		return Project{}, false
+	}
+	if countMdFiles(plansDir) == 0 {
+		return Project{}, false
+	}
+	return Project{
+		Name:   ".claude/plans",
+		Path:   plansDir,
+		Origin: "standalone",
+		Sources: []FileSource{{
+			Name:           "plans",
+			Type:           "tree",
+			SourceTypeName: "manual",
+			RootPath:       plansDir,
+			Auto:           true,
+		}},
+	}, true
+}
+
 func countMdFiles(dir string) int {
 	count := 0
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {

@@ -138,6 +138,35 @@ func (s *Server) discoverAllProjects() []discovery.Project {
 		}
 		allProjects = append(allProjects, p)
 	}
+
+	// Auto-include ~/.claude/plans/ if it has markdown files.
+	// If a project for that path already exists (user added it manually), inject the
+	// tree source so all files show — not just any individually-added ones.
+	if claudePlans, ok := discovery.DiscoverClaudePlans(); ok {
+		existingIdx := -1
+		for i, p := range allProjects {
+			if filepath.Clean(p.Path) == filepath.Clean(claudePlans.Path) {
+				existingIdx = i
+				break
+			}
+		}
+		if existingIdx == -1 {
+			allProjects = append(allProjects, claudePlans)
+		} else {
+			// Project exists but may lack a tree source covering the directory.
+			hasTreeSource := false
+			for _, src := range allProjects[existingIdx].Sources {
+				if src.Type == "tree" && filepath.Clean(src.RootPath) == filepath.Clean(claudePlans.Path) {
+					hasTreeSource = true
+					break
+				}
+			}
+			if !hasTreeSource {
+				allProjects[existingIdx].Sources = append(allProjects[existingIdx].Sources, claudePlans.Sources...)
+			}
+		}
+	}
+
 	return allProjects
 }
 
@@ -179,6 +208,15 @@ func (s *Server) populateProjects() {
 	s.seedRecentActivity()
 	log.Printf("Background file scan complete")
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
+
+	// Notify any open project pages that their file lists are now ready.
+	// Without this, a page loaded before the scan completes would show
+	// "No files yet." indefinitely since EventProjectsChanged only triggers
+	// a project-existence check, not a file list refresh.
+	// A single broadcast with no project field signals all project pages to
+	// refresh; this avoids flooding subscriber channels (buffered to 10) when
+	// there are many projects.
+	s.watcher.Broadcast(watcher.Event{Type: watcher.EventFilesChanged})
 
 	// Now enrich with git info
 	projects := s.cache.Projects()

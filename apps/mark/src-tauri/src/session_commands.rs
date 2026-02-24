@@ -321,6 +321,7 @@ pub struct ProjectSessionResponse {
 /// and an MCP server with tools to start repo subagent sessions and add repos.
 /// Always creates a ProjectNote stub that is populated when the session completes.
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub async fn start_project_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,

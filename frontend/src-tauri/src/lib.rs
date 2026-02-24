@@ -56,6 +56,12 @@ pub fn run() {
                             win_clone.open_devtools();
                         }
                     }
+                    "close_tab" => {
+                        let _ = win_clone.eval("window.dispatchEvent(new CustomEvent('menu-close-tab'))");
+                    }
+                    "new_tab" => {
+                        let _ = win_clone.eval("window.dispatchEvent(new CustomEvent('menu-new-tab'))");
+                    }
                     _ => {}
                 }
             });
@@ -139,7 +145,8 @@ fn build_menu(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> 
             &PredefinedMenuItem::minimize(app, None)?,
             &PredefinedMenuItem::maximize(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, None)?,
+            &MenuItem::with_id(app, "new_tab", "New Tab", true, Some("CmdOrCtrl+T"))?,
+            &MenuItem::with_id(app, "close_tab", "Close Tab", true, Some("CmdOrCtrl+W"))?,
         ],
     )?;
     menu.append(&window_menu)?;

@@ -10,7 +10,7 @@ export interface Tab {
 export interface TabsState {
   tabs: Tab[];
   activeTabId: string;
-  openTab: (path: string, title?: string) => void;
+  openTab: (path: string, title?: string, options?: { background?: boolean }) => void;
   closeTab: (id: string) => void;
   activateTab: (id: string) => void;
   updateActiveTab: (path: string, title?: string) => void;
@@ -68,12 +68,14 @@ export function useTabs(): TabsState {
     ));
   }, [location.pathname, location.search]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const openTab = useCallback((path: string, title?: string) => {
+  const openTab = useCallback((path: string, title?: string, options?: { background?: boolean }) => {
     const id = nextTabId();
     const newTab: Tab = { id, path, title: title || deriveTitleFromPath(path) };
     setTabs(prev => [...prev, newTab]);
-    setActiveTabId(id);
-    navigate(path);
+    if (!options?.background) {
+      setActiveTabId(id);
+      navigate(path);
+    }
   }, [navigate]);
 
   const closeTab = useCallback((id: string) => {

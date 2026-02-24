@@ -107,6 +107,29 @@ export default function Layout() {
   const standaloneProjects = projects.filter((p) => p.origin === 'standalone');
   const workspaces = [...new Set(workspaceProjects.map((p) => p.workspace))];
 
+  // Listen for native menu events (Cmd+W close tab, Cmd+T new tab)
+  useEffect(() => {
+    function handleCloseTab() {
+      closeTab(activeTabId);
+    }
+    function handleNewTab() {
+      const ws = workspaces[0];
+      if (ws) {
+        openTab(`/workspace/${encodeURIComponent(ws)}`, ws);
+      } else if (standaloneProjects[0]) {
+        openTab(`/project/${standaloneProjects[0].qualifiedName}`, standaloneProjects[0].name);
+      } else {
+        openTab('/');
+      }
+    }
+    window.addEventListener('menu-close-tab', handleCloseTab);
+    window.addEventListener('menu-new-tab', handleNewTab);
+    return () => {
+      window.removeEventListener('menu-close-tab', handleCloseTab);
+      window.removeEventListener('menu-new-tab', handleNewTab);
+    };
+  }, [activeTabId, closeTab, openTab, workspaces, standaloneProjects]);
+
   // Detect project-mode view: /project/:qn or /file/:qn/*
   // QN may contain slashes (e.g. "Development/birdseye"), so match against known projects
   const pathAfterPrefix = location.pathname.match(/^\/(project|file)\/(.+)/)?.[2] || '';
@@ -200,7 +223,7 @@ export default function Layout() {
     if (e.shiftKey) {
       openInNewWindow(href, title);
     } else {
-      openTab(href, title);
+      openTab(href, title, { background: true });
     }
   }
 

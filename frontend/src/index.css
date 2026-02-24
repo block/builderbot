@@ -189,8 +189,8 @@ a:hover { text-decoration: underline; }
   display: flex;
   align-items: stretch;
   height: 32px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-default);
+  background: color-mix(in srgb, var(--bg-body) 90%, black);
+  box-shadow: inset 0 -1px 0 var(--border-default);
   overflow-x: auto;
   overflow-y: hidden;
 }
@@ -201,7 +201,7 @@ a:hover { text-decoration: underline; }
   gap: 6px;
   padding: 0 12px;
   border: none;
-  background: none;
+  background: color-mix(in srgb, var(--bg-body) 90%, black);
   color: var(--text-muted);
   font-size: 0.8em;
   cursor: pointer;
@@ -211,7 +211,7 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
 }
 .tab-bar-tab.active {
-  background: var(--bg-body);
+  background: var(--bg-surface);
   color: var(--text-primary);
   font-weight: 500;
 }
@@ -299,9 +299,11 @@ a:hover { text-decoration: underline; }
 }
 .source-badge {
   font-size: 0.7em;
-  padding: 0px 4px;
+  padding: 1px 5px;
   border-radius: 3px;
   font-weight: 500;
+  margin-left: 6px;
+  vertical-align: middle;
   background: var(--badge-bg);
   color: var(--badge-color);
 }
@@ -1126,6 +1128,10 @@ a:hover { text-decoration: underline; }
 .project-card-meta .branch { color: var(--accent-success); }
 .project-card-meta .dirty { color: var(--accent-danger); }
 .project-card .project-age { font-size: 0.8em; color: var(--text-faint); }
+.project-card-name .agent-dot {
+  margin-left: 8px;
+  vertical-align: middle;
+}
 .project-card .review-count {
   font-size: 0.75em;
   font-weight: 500;

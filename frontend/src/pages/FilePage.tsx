@@ -5,7 +5,7 @@ import { useSSE } from '../hooks/useSSE';
 import MarkdownViewer from '../components/MarkdownViewer';
 import CommentsPanel from '../components/CommentsPanel';
 import SelectionToolbar, {
-  addCommentHighlights,
+  applySvgHighlights,
   removePendingHighlight,
 } from '../components/SelectionToolbar';
 import MermaidSelection, { removePendingSvgHighlight } from '../components/MermaidSelection';
@@ -14,6 +14,7 @@ import FileMenu from '../components/FileMenu';
 import { renderMermaidBlocks } from '../components/MermaidRenderer';
 import type { Heading } from '../components/TableOfContents';
 import type { LayoutContext } from '../components/Layout';
+import type { ThreadHighlight } from '../components/rehypeCommentHighlights';
 import type { ThreadResponse, Anchor, AgentStatus } from '../types';
 
 export default function FilePage() {
@@ -34,6 +35,22 @@ export default function FilePage() {
   const contentRef = useRef<HTMLDivElement>(null);
   const mermaidDraggingRef = useRef(false);
   const agentPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Compute highlights for the rehype plugin (text highlights only, not SVG)
+  const threadHighlights = useMemo<ThreadHighlight[]>(() => {
+    return threads
+      .filter((t) => t.status !== 'resolved' && !t.anchor.svgRect)
+      .map((t) => {
+        const line = anchorLines[t.id];
+        if (!line || line === -1 || !t.anchor.selectedText) return null;
+        return {
+          threadId: t.id,
+          selectedText: t.anchor.selectedText,
+          startLine: line,
+        };
+      })
+      .filter((h): h is ThreadHighlight => h !== null);
+  }, [threads, anchorLines]);
 
   // Resolve project QN and file path from URL by matching against known projects.
   // The URL is /file/{qualifiedName}/{filePath} where qualifiedName may contain slashes
@@ -154,32 +171,20 @@ export default function FilePage() {
     };
   }, [fetchContent, fetchThreads, fetchAgentStatus]);
 
-  // Render mermaid after content updates, then re-apply highlights
+  // Render mermaid after content updates, then apply SVG highlights
   useEffect(() => {
     if (!contentRef.current || !rawMarkdown) return;
-    // Small delay to let React finish rendering
     const timer = setTimeout(async () => {
       if (contentRef.current) {
         await renderMermaidBlocks(contentRef.current);
-        // Re-apply highlights after mermaid renders (needed for SVG highlights)
+        // Apply SVG highlights after mermaid renders
         if (contentRef.current && threads.length > 0) {
-          addCommentHighlights(threads, anchorLines, contentRef.current, rawMarkdown);
+          applySvgHighlights(threads, contentRef.current, rawMarkdown);
         }
       }
     }, 100);
     return () => clearTimeout(timer);
   }, [rawMarkdown, threads, anchorLines]);
-
-  // Apply comment highlights after threads update
-  useEffect(() => {
-    if (!contentRef.current || threads.length === 0) return;
-    const timer = setTimeout(() => {
-      if (contentRef.current) {
-        addCommentHighlights(threads, anchorLines, contentRef.current);
-      }
-    }, 200);
-    return () => clearTimeout(timer);
-  }, [threads, anchorLines]);
 
   // SSE: refresh on relevant events
   useSSE(
@@ -303,6 +308,7 @@ export default function FilePage() {
               content={rawMarkdown}
               rawMarkdown={rawMarkdown}
               onHeadingsExtracted={handleHeadingsExtracted}
+              highlights={threadHighlights}
               ref={contentRef}
             />
             <SelectionToolbar

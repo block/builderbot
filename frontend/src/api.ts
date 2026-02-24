@@ -83,7 +83,9 @@ export const api = {
 
   // Raw file content
   getRawFile: (project: string, path: string) =>
-    fetch(`${API_BASE}/api/raw?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`).then(
+    fetch(`${API_BASE}/api/raw?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`, {
+      cache: 'no-store',
+    }).then(
       (r) => {
         if (!r.ok) throw new Error(`API error: ${r.status}`);
         return r.text();

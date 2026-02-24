@@ -171,5 +171,6 @@ func (s *Server) handleRawFile(w http.ResponseWriter, r *http.Request) {
 
 	content = markdown.StripFrontmatter(content)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Write(content)
 }

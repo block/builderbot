@@ -232,90 +232,21 @@ function showSvgHighlight(threadId: string, anchor: Anchor, contentEl: HTMLEleme
 }
 
 /**
- * Adds comment highlight marks to the content for existing threads.
+ * Applies SVG overlay highlights for mermaid diagram threads.
+ * Text highlights are now handled by the rehype plugin (rehypeCommentHighlights).
  */
-export function addCommentHighlights(
+export function applySvgHighlights(
   threads: { id: string; status: string; anchor: Anchor }[],
-  anchorLines: Record<string, number>,
   contentEl: HTMLElement,
-  rawMarkdown?: string,
+  rawMarkdown: string,
 ) {
-  // Remove existing text highlights
-  contentEl.querySelectorAll('.comment-highlight').forEach((mark) => {
-    const parent = mark.parentNode!;
-    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-    parent.removeChild(mark);
-    parent.normalize();
-  });
-
   // Remove existing SVG highlights
   contentEl.querySelectorAll('.penpal-svg-highlight').forEach((el) => el.remove());
 
   threads.forEach((thread) => {
     if (thread.status === 'resolved') return;
-
-    // SVG rect threads get overlay highlights instead of text highlighting
     if (thread.anchor.svgRect) {
-      showSvgHighlight(thread.id, thread.anchor, contentEl, rawMarkdown || '');
-      return;
-    }
-
-    const line = anchorLines[thread.id];
-    if (line === -1 || line === undefined) return;
-    const selectedText = thread.anchor.selectedText;
-    if (!selectedText) return;
-
-    // Find the block element with the matching source line
-    const blockEl = contentEl.querySelector(`[data-source-line="${line}"]`);
-    const searchRoot = blockEl || contentEl;
-
-    // Walk text nodes to find and highlight the selected text
-    const treeWalker = document.createTreeWalker(searchRoot, NodeFilter.SHOW_TEXT);
-    let accumulated = '';
-    const textNodes: { node: Text; start: number }[] = [];
-
-    while (treeWalker.nextNode()) {
-      const node = treeWalker.currentNode as Text;
-      textNodes.push({ node, start: accumulated.length });
-      accumulated += node.nodeValue || '';
-    }
-
-    // Normalize whitespace for matching
-    const normalizedAccumulated = accumulated.replace(/\s+/g, ' ');
-    const normalizedSelected = selectedText.replace(/\s+/g, ' ');
-    const matchIndex = normalizedAccumulated.indexOf(normalizedSelected);
-    if (matchIndex === -1) return;
-
-    const matchStart = matchIndex;
-    const matchEnd = matchIndex + normalizedSelected.length;
-
-    // Apply highlights
-    for (let i = textNodes.length - 1; i >= 0; i--) {
-      const { node, start: nodeStart } = textNodes[i];
-      const nodeText = node.nodeValue || '';
-
-      // Check overlap
-      const overlapStart = Math.max(matchStart - nodeStart, 0);
-      const overlapEnd = Math.min(matchEnd - nodeStart, nodeText.length);
-      if (overlapStart >= overlapEnd) continue;
-
-      const mark = document.createElement('mark');
-      mark.className = 'comment-highlight';
-      mark.dataset.threadId = thread.id;
-
-      if (overlapStart === 0 && overlapEnd === nodeText.length) {
-        node.parentNode!.insertBefore(mark, node);
-        mark.appendChild(node);
-      } else {
-        try {
-          const range = document.createRange();
-          range.setStart(node, overlapStart);
-          range.setEnd(node, overlapEnd);
-          range.surroundContents(mark);
-        } catch {
-          // surroundContents can fail across element boundaries
-        }
-      }
+      showSvgHighlight(thread.id, thread.anchor, contentEl, rawMarkdown);
     }
   });
 }

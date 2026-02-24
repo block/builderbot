@@ -6,6 +6,8 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { dracula as prismDracula } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Components } from 'react-markdown';
 import type { Heading } from './TableOfContents';
+import rehypeCommentHighlights from './rehypeCommentHighlights';
+import type { ThreadHighlight } from './rehypeCommentHighlights';
 
 // Customize Prism's Dracula to match Go's Chroma Dracula output.
 // Chroma uses #f1fa8c (yellow) for strings; Prism defaults to #50fa7b (green).
@@ -39,10 +41,11 @@ interface MarkdownViewerProps {
   rawMarkdown: string;
   onHeadingsExtracted?: (headings: Heading[]) => void;
   className?: string;
+  highlights?: ThreadHighlight[];
 }
 
 const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
-  function MarkdownViewer({ content, rawMarkdown, onHeadingsExtracted, className }, ref) {
+  function MarkdownViewer({ content, rawMarkdown, onHeadingsExtracted, className, highlights }, ref) {
     const innerRef = useRef<HTMLDivElement>(null);
 
     // Expose the inner ref to the parent
@@ -120,6 +123,15 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
         }
       });
     }, [content, sourceLineData]);
+
+    // Build rehype plugins array, including comment highlights when provided
+    const rehypePlugins = useMemo(() => {
+      const plugins: Array<[typeof rehypeRaw] | [typeof rehypeCommentHighlights, { highlights: ThreadHighlight[] }]> = [[rehypeRaw]];
+      if (highlights && highlights.length > 0) {
+        plugins.push([rehypeCommentHighlights, { highlights }]);
+      }
+      return plugins;
+    }, [highlights]);
 
     // Custom components to generate IDs for headings and handle mermaid
     const components: Components = useMemo(
@@ -200,7 +212,7 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
       <div ref={innerRef} className={`content ${className || ''}`} id="content">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeRaw]}
+          rehypePlugins={rehypePlugins}
           components={components}
         >
           {content}

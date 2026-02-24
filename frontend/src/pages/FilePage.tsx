@@ -8,6 +8,7 @@ import SelectionToolbar, {
   addCommentHighlights,
   removePendingHighlight,
 } from '../components/SelectionToolbar';
+import MermaidSelection, { removePendingSvgHighlight } from '../components/MermaidSelection';
 import FileTypeBadge from '../components/FileTypeBadge';
 import FileMenu from '../components/FileMenu';
 import { renderMermaidBlocks } from '../components/MermaidRenderer';
@@ -31,6 +32,7 @@ export default function FilePage() {
   const [sourceType, setSourceType] = useState('');
   const [projectPath, setProjectPath] = useState('');
   const contentRef = useRef<HTMLDivElement>(null);
+  const mermaidDraggingRef = useRef(false);
   const agentPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Resolve project QN and file path from URL by matching against known projects.
@@ -152,19 +154,23 @@ export default function FilePage() {
     };
   }, [fetchContent, fetchThreads, fetchAgentStatus]);
 
-  // Render mermaid after content updates
+  // Render mermaid after content updates, then re-apply highlights
   useEffect(() => {
     if (!contentRef.current || !rawMarkdown) return;
     // Small delay to let React finish rendering
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       if (contentRef.current) {
-        renderMermaidBlocks(contentRef.current);
+        await renderMermaidBlocks(contentRef.current);
+        // Re-apply highlights after mermaid renders (needed for SVG highlights)
+        if (contentRef.current && threads.length > 0) {
+          addCommentHighlights(threads, anchorLines, contentRef.current, rawMarkdown);
+        }
       }
     }, 100);
     return () => clearTimeout(timer);
-  }, [rawMarkdown]);
+  }, [rawMarkdown, threads, anchorLines]);
 
-  // Apply comment highlights after threads/content update
+  // Apply comment highlights after threads update
   useEffect(() => {
     if (!contentRef.current || threads.length === 0) return;
     const timer = setTimeout(() => {
@@ -173,7 +179,7 @@ export default function FilePage() {
       }
     }, 200);
     return () => clearTimeout(timer);
-  }, [threads, anchorLines, rawMarkdown]);
+  }, [threads, anchorLines]);
 
   // SSE: refresh on relevant events
   useSSE(
@@ -197,15 +203,34 @@ export default function FilePage() {
     setPendingAnchor(null);
     setPendingText('');
     removePendingHighlight();
+    removePendingSvgHighlight();
   }, []);
 
   const handleThreadFocus = useCallback((threadId: string, line: number) => {
     if (!contentRef.current || line < 1) return;
-    const el = contentRef.current.querySelector(`[data-source-line="${line}"]`);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    // For SVG highlights, scroll to the highlight rect itself (not the container top)
+    const svgHighlight = contentRef.current.querySelector(
+      `.penpal-svg-highlight[data-thread-id="${threadId}"]`
+    );
+    if (svgHighlight) {
+      const rect = svgHighlight.getBoundingClientRect();
+      const scrollParent = contentRef.current.closest('.file-main-scroll') || window;
+      if (scrollParent instanceof HTMLElement) {
+        const parentRect = scrollParent.getBoundingClientRect();
+        const targetY = scrollParent.scrollTop + rect.top - parentRect.top - parentRect.height / 2 + rect.height / 2;
+        scrollParent.scrollTo({ top: targetY, behavior: 'smooth' });
+      } else {
+        svgHighlight.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    } else {
+      const el = contentRef.current.querySelector(`[data-source-line="${line}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
     }
-    // Activate highlight
+
+    // Activate text highlights
     contentRef.current.querySelectorAll('.comment-highlight.active').forEach((m) => {
       m.classList.remove('active');
     });
@@ -214,9 +239,23 @@ export default function FilePage() {
       .forEach((m) => {
         m.classList.add('active');
       });
+    // Activate SVG highlights
+    contentRef.current.querySelectorAll('.penpal-svg-highlight.active').forEach((m) => {
+      m.classList.remove('active');
+    });
+    contentRef.current
+      .querySelectorAll(`.penpal-svg-highlight[data-thread-id="${threadId}"]`)
+      .forEach((m) => {
+        m.classList.add('active');
+      });
     setTimeout(() => {
       contentRef.current
         ?.querySelectorAll(`.comment-highlight[data-thread-id="${threadId}"]`)
+        .forEach((m) => {
+          m.classList.remove('active');
+        });
+      contentRef.current
+        ?.querySelectorAll(`.penpal-svg-highlight[data-thread-id="${threadId}"]`)
         .forEach((m) => {
           m.classList.remove('active');
         });
@@ -270,6 +309,12 @@ export default function FilePage() {
               contentRef={contentRef}
               rawMarkdown={rawMarkdown}
               onComment={handleComment}
+            />
+            <MermaidSelection
+              contentRef={contentRef}
+              rawMarkdown={rawMarkdown}
+              onComment={handleComment}
+              draggingRef={mermaidDraggingRef}
             />
           </div>
         </div>

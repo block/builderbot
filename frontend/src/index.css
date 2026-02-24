@@ -717,6 +717,29 @@ a:hover { text-decoration: underline; }
   color: var(--text-primary);
 }
 
+/* Mermaid SVG selection highlights */
+.penpal-svg-highlight, .penpal-pending-svg-highlight {
+  fill: #f5c518;
+  fill-opacity: 0.25;
+  stroke: #f5c518;
+  stroke-width: 2;
+  stroke-dasharray: 6 3;
+  pointer-events: none;
+}
+.penpal-pending-svg-highlight {
+  fill-opacity: 0.18;
+  stroke-dasharray: none;
+}
+.penpal-svg-highlight.active {
+  fill-opacity: 0.35;
+  stroke-width: 3;
+}
+[data-theme="dark"] .penpal-svg-highlight,
+[data-theme="dark"] .penpal-pending-svg-highlight {
+  fill: #a38600;
+  stroke: #a38600;
+}
+
 /* Expand modal */
 .expand-modal-overlay {
   display: none;
@@ -804,9 +827,9 @@ a:hover { text-decoration: underline; }
 }
 .thread-anchor::before { content: '\201C'; }
 .thread-anchor::after { content: '\201D'; }
-.thread-anchor-svg { padding: 8px 12px; background: var(--bg-surface-secondary); border-bottom: 1px solid var(--border-card); text-align: center; overflow: hidden; }
+.thread-anchor-svg { padding: 8px 12px; background: var(--bg-surface-secondary); border-bottom: 1px solid var(--border-card); text-align: center; overflow: hidden; white-space: normal; text-overflow: clip; font-style: normal; }
 .thread-anchor-svg::before, .thread-anchor-svg::after { content: none; }
-.thread-anchor-svg svg { max-width: 100%; max-height: 80px; }
+.thread-anchor-svg svg { display: block; margin: 4px auto 0; max-width: 100%; max-height: 80px; }
 .thread-comment { padding: 8px 12px; border-bottom: 1px solid var(--border-divider); }
 .thread-comment:last-child { border-bottom: none; }
 .comment-header { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }

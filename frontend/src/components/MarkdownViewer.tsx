@@ -110,7 +110,7 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
       let blockIdx = 0;
 
       const blockElements = el.querySelectorAll(
-        ':scope > p, :scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6, :scope > ul > li, :scope > ol > li, :scope > blockquote, :scope > pre, :scope > hr, :scope > table, :scope > div.mermaid-container',
+        ':scope > p, :scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6, :scope > ul > li, :scope > ol > li, :scope > blockquote, :scope > pre, :scope > hr, :scope > table, :scope > div[data-unwrap-pre]',
       );
 
       blockElements.forEach((blockEl) => {
@@ -136,14 +136,18 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
           const id = generateHeadingId(String(children));
           return <h3 id={id} {...props}>{children}</h3>;
         },
-        code: ({ className: codeClassName, children, ...props }) => {
+        code: ({ className: codeClassName, children, node, ...props }) => {
           const match = /language-(\w+)/.exec(codeClassName || '');
           if (match && match[1] === 'mermaid') {
+            // Use AST node position to set data-source-line at render time,
+            // matching how the Go template sets it server-side.
+            const sourceLine = node?.position?.start?.line;
             return (
               <div
                 className="mermaid-container"
                 data-mermaid-source={String(children)}
                 data-unwrap-pre=""
+                {...(sourceLine ? { 'data-source-line': String(sourceLine) } : {})}
               >
                 <pre>
                   <code>{children}</code>

@@ -175,14 +175,72 @@ export function removePendingHighlight() {
 }
 
 /**
+ * Finds which mermaid container index corresponds to a given startLine
+ * by counting ```mermaid fences in the raw markdown.
+ */
+function findMermaidContainerIndex(rawMarkdown: string, startLine: number): number {
+  if (startLine < 1) return -1;
+  const lines = rawMarkdown.split('\n');
+  let mermaidIdx = 0;
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith('```')) {
+      if (!inFence) {
+        if (/^```mermaid\b/.test(trimmed)) {
+          if (i + 1 === startLine) return mermaidIdx;
+          mermaidIdx++;
+        }
+        inFence = true;
+      } else {
+        inFence = false;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * Adds an SVG highlight rect to a mermaid diagram for a thread with svgRect anchor.
+ */
+function showSvgHighlight(threadId: string, anchor: Anchor, contentEl: HTMLElement, rawMarkdown: string) {
+  if (!anchor.svgRect) return;
+  const r = anchor.svgRect;
+  const startLine = anchor.startLine || 0;
+  // Try data-source-line lookup first (set at render time, like Go template)
+  let container = startLine > 0
+    ? contentEl.querySelector(`.mermaid-container[data-source-line="${startLine}"]`)
+    : null;
+  // Fallback: find by index in raw markdown
+  if (!container) {
+    const containerIndex = findMermaidContainerIndex(rawMarkdown, startLine);
+    const containers = contentEl.querySelectorAll('.mermaid-container');
+    container = containerIndex >= 0 && containerIndex < containers.length ? containers[containerIndex] : null;
+  }
+  if (!container) return;
+  const svg = container.querySelector('svg');
+  if (!svg) return;
+  const ns = 'http://www.w3.org/2000/svg';
+  const rect = document.createElementNS(ns, 'rect');
+  rect.setAttribute('x', String(r.x));
+  rect.setAttribute('y', String(r.y));
+  rect.setAttribute('width', String(r.width));
+  rect.setAttribute('height', String(r.height));
+  rect.setAttribute('class', 'penpal-svg-highlight');
+  rect.setAttribute('data-thread-id', threadId);
+  svg.appendChild(rect);
+}
+
+/**
  * Adds comment highlight marks to the content for existing threads.
  */
 export function addCommentHighlights(
   threads: { id: string; status: string; anchor: Anchor }[],
   anchorLines: Record<string, number>,
   contentEl: HTMLElement,
+  rawMarkdown?: string,
 ) {
-  // Remove existing highlights
+  // Remove existing text highlights
   contentEl.querySelectorAll('.comment-highlight').forEach((mark) => {
     const parent = mark.parentNode!;
     while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
@@ -190,8 +248,18 @@ export function addCommentHighlights(
     parent.normalize();
   });
 
+  // Remove existing SVG highlights
+  contentEl.querySelectorAll('.penpal-svg-highlight').forEach((el) => el.remove());
+
   threads.forEach((thread) => {
     if (thread.status === 'resolved') return;
+
+    // SVG rect threads get overlay highlights instead of text highlighting
+    if (thread.anchor.svgRect) {
+      showSvgHighlight(thread.id, thread.anchor, contentEl, rawMarkdown || '');
+      return;
+    }
+
     const line = anchorLines[thread.id];
     if (line === -1 || line === undefined) return;
     const selectedText = thread.anchor.selectedText;

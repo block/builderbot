@@ -706,6 +706,18 @@ pub fn fetch_for_worktree(
             );
             super::cli::run(repo_path, &["remote", "set-url", "origin", &https_url])?;
             super::cli::run(repo_path, &["fetch", "origin", base_ref])?;
+        } else if err_str.contains("incorrect old value provided") {
+            // Ref-update CAS race: a concurrent fetch already updated
+            // refs/remotes/origin/<base_ref> between when git read the old
+            // value and when it tried to write the new one.  The downloaded
+            // data and FETCH_HEAD are valid; the tracking ref is at least as
+            // up-to-date as we need.
+            log::warn!(
+                "fetch origin {} for '{}' hit a ref-update race (non-fatal): {}",
+                base_ref,
+                github_repo,
+                e
+            );
         } else {
             return Err(e);
         }

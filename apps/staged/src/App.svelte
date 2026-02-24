@@ -723,12 +723,13 @@
   }
 
   .titlebar-left {
-    width: 72px;
-    flex-shrink: 0;
+    flex: 1 1 0;
+    min-width: 72px;
   }
 
   .titlebar-center {
-    flex: 1;
+    position: relative;
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -738,8 +739,10 @@
   .titlebar-right {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 6px;
-    flex-shrink: 0;
+    flex: 1 1 0;
+    min-width: 0;
   }
 
   /* Segmented control */
@@ -790,8 +793,13 @@
   }
 
   .file-count {
+    position: absolute;
+    left: calc(100% + 8px);
+    top: 50%;
+    transform: translateY(-50%);
     color: var(--text-faint);
     font-size: var(--size-xs);
+    white-space: nowrap;
   }
 
   /* Commit picker */

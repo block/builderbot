@@ -839,8 +839,16 @@ fn build_full_prompt(
 You may use any tools needed to research and gather information, but do NOT create \
 any commits.
 
-To return the note, include a horizontal rule (---) followed by the note content. \
-Begin the note with a markdown H1 heading as the title."
+To return the note, your final response must include this exact structure:
+
+---
+# <Title>
+<Body>
+
+Formatting requirements:
+- `---` must be on its own line, with a newline immediately before and after it.
+- The note content must start immediately after `---` with a markdown H1 (`# Title`).
+- Do not wrap the note in code fences."
         }
         BranchSessionType::Commit => {
             "The user is requesting you make a commit based on the prompt below. Make the necessary \
@@ -889,7 +897,7 @@ Reserve `\"warning\"` and `\"issue\"` for genuine concerns.
 
 ## Output format
 
-Return your review as a JSON block fenced with ```review-comments markers:
+Return your review as exactly one fenced JSON block with this structure:
 
 ```review-comments
 [
@@ -907,6 +915,12 @@ Return your review as a JSON block fenced with ```review-comments markers:
   }
 ]
 ```
+
+Formatting requirements:
+- The opening fence line must be exactly: ```review-comments
+- The closing fence line must be exactly: ```
+- Put only the JSON array between the fences (no prose or markdown inside).
+- Do not wrap this block in any additional code fences.
 
 Rules:
 - `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end).
@@ -926,4 +940,26 @@ Rules:
          </branch-history>\n\n\
          {user_prompt}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_prompt_requires_strict_fence_lines() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Review,
+        );
+
+        assert!(prompt
+            .contains("Return your review as exactly one fenced JSON block with this structure:"));
+        assert!(prompt.contains("The opening fence line must be exactly: ```review-comments"));
+        assert!(prompt.contains("The closing fence line must be exactly: ```"));
+        assert!(prompt
+            .contains("Put only the JSON array between the fences (no prose or markdown inside)."));
+    }
 }

@@ -440,16 +440,24 @@ fn run_post_completion_hooks(
 
 /// Extract note content from assistant output.
 ///
-/// Looks for the first `---` (horizontal rule) on its own line and returns
-/// everything after it. Returns `None` if no rule is found.
+/// Primary path: find the first markdown horizontal rule (`---`, `***`, `___`)
+/// on its own line and return everything after it.
+///
+/// Fallback path: handle model outputs where the rule is accidentally attached
+/// to prior text (for example, `Preamble.---\n# Title`) by accepting inline
+/// rules only when the remaining content starts with an H1.
 fn extract_note_content(text: &str) -> Option<String> {
+    extract_note_after_standalone_hr(text).or_else(|| extract_note_after_inline_hr(text))
+}
+
+fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
     // Look for --- on its own line (possibly with surrounding whitespace).
     // We match the same patterns markdown parsers treat as thematic breaks:
     // a line containing only ---, ***, or ___ (with optional spaces).
     for (i, line) in text.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-            // Everything after this line
+            // Everything after this line.
             let remaining: String = text.lines().skip(i + 1).collect::<Vec<_>>().join("\n");
             let trimmed_remaining = remaining.trim().to_string();
             if !trimmed_remaining.is_empty() {
@@ -458,6 +466,34 @@ fn extract_note_content(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_note_after_inline_hr(text: &str) -> Option<String> {
+    let mut best: Option<(usize, String)> = None;
+
+    for marker in ["---", "***", "___"] {
+        let marker_char = marker.chars().next().unwrap();
+        for (idx, _) in text.match_indices(marker) {
+            let marker_end = idx + marker.len();
+
+            // Ignore markers that are part of longer runs like ----.
+            if text[..idx].ends_with(marker_char) || text[marker_end..].starts_with(marker_char) {
+                continue;
+            }
+
+            let remaining = text[marker_end..].trim_start();
+            if !remaining.starts_with("# ") {
+                continue;
+            }
+
+            match best {
+                Some((best_idx, _)) if idx >= best_idx => {}
+                _ => best = Some((idx, remaining.to_string())),
+            }
+        }
+    }
+
+    best.map(|(_, content)| content)
 }
 
 /// Extract a title (leading `# H1`) from note content.
@@ -823,6 +859,23 @@ Second batch:
     #[test]
     fn note_content_none_without_hr() {
         let text = "Just some text without a horizontal rule.";
+        assert_eq!(extract_note_content(text), None);
+    }
+
+    #[test]
+    fn note_content_inline_hr_before_h1() {
+        let text =
+            "I gathered enough context.---\n# Repo Purpose\nThis repo ships desktop tooling.";
+        let content = extract_note_content(text);
+        assert_eq!(
+            content,
+            Some("# Repo Purpose\nThis repo ships desktop tooling.".to_string())
+        );
+    }
+
+    #[test]
+    fn note_content_inline_hr_without_h1_is_ignored() {
+        let text = "Two reasons:--- this session is read-only.";
         assert_eq!(extract_note_content(text), None);
     }
 

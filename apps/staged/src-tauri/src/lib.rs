@@ -637,7 +637,6 @@ pub fn run() {
     let repo_path = resolve_repo_path();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(Mutex::new(AppState { repo_path }))
         .invoke_handler(tauri::generate_handler![

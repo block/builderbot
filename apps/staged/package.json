@@ -28,7 +28,6 @@
   "dependencies": {
     "@builderbot/diff-viewer": "workspace:*",
     "@tauri-apps/api": "^2.10.0",
-    "@tauri-apps/plugin-dialog": "^2.2.0",
     "@tauri-apps/plugin-store": "^2.2.0",
     "lucide-svelte": "^0.575.0",
     "marked": "^17.0.1",

@@ -445,6 +445,7 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
 // Protocol helpers
 // =============================================================================
 
+#[allow(clippy::too_many_arguments)]
 async fn run_acp_protocol(
     connection: &ClientSideConnection,
     working_dir: &Path,

@@ -266,6 +266,13 @@ fn create_project(
         project = project.with_subpath(sub);
     }
     store.create_project(&project).map_err(|e| e.to_string())?;
+
+    // Create the project-scoped worktree root so project sessions always
+    // have a real directory to run in, even before any repos are attached.
+    if let Ok(project_dir) = git::project_worktree_root_for(&project.id) {
+        let _ = std::fs::create_dir_all(&project_dir);
+    }
+
     if let Some(repo) = project.primary_repo() {
         store
             .get_or_create_action_context(repo, project.subpath.as_deref())

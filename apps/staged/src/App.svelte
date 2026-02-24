@@ -38,6 +38,7 @@
     type TreeNode,
   } from '@builderbot/diff-viewer/utils';
   import type { FileDiff, FileDiffSummary, Comment, Span } from '@builderbot/diff-viewer/types';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import * as commands from './lib/commands';
   import type { DiffSpec, RepoInfo, CommitInfo, RecentRepo } from './lib/commands';
   import FolderPickerModal from './lib/FolderPickerModal.svelte';
@@ -383,6 +384,16 @@
   // Helpers
   // ==========================================================================
 
+  function startDrag(e: PointerEvent) {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    const isInteractive = target.closest('button, a, input, [role="button"]');
+    if (!isInteractive) {
+      e.preventDefault();
+      getCurrentWindow().startDragging();
+    }
+  }
+
   function timeAgo(timestamp: number): string {
     const now = Date.now() / 1000;
     const diff = now - timestamp;
@@ -396,10 +407,11 @@
 {#if initialized}
   <div class="app">
     <!-- Titlebar -->
-    <div class="titlebar" data-tauri-drag-region>
-      <div class="titlebar-left" data-tauri-drag-region></div>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="titlebar" onpointerdown={startDrag}>
+      <div class="titlebar-left"></div>
 
-      <div class="titlebar-center" data-tauri-drag-region>
+      <div class="titlebar-center">
         <div class="mode-segmented">
           <button
             class="mode-seg"
@@ -706,7 +718,6 @@
     height: 40px;
     flex-shrink: 0;
     border-bottom: 1px solid var(--border-subtle);
-    -webkit-app-region: drag;
     padding: 0 8px;
     gap: 8px;
   }
@@ -729,7 +740,6 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
-    -webkit-app-region: no-drag;
   }
 
   /* Segmented control */
@@ -741,7 +751,6 @@
     border-radius: 7px;
     padding: 2px;
     gap: 1px;
-    -webkit-app-region: no-drag;
   }
 
   .mode-seg {
@@ -783,7 +792,6 @@
   .file-count {
     color: var(--text-faint);
     font-size: var(--size-xs);
-    -webkit-app-region: no-drag;
   }
 
   /* Commit picker */

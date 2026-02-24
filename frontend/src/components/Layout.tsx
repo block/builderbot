@@ -3,6 +3,8 @@ import { Link, NavLink, Outlet, useNavigate, useLocation } from 'react-router-do
 import { api, isDesktopApp } from '../api';
 import { useTheme } from '../hooks/useTheme';
 import { useSSE } from '../hooks/useSSE';
+import { useTabs, deriveTitleFromPath } from '../hooks/useTabs';
+import { openInNewWindow } from '../utils/window';
 import TableOfContents from './TableOfContents';
 import type { Heading } from './TableOfContents';
 import type { APIProject, SSEEvent } from '../types';
@@ -25,6 +27,7 @@ export default function Layout() {
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
+  const { tabs, activeTabId, openTab, closeTab, activateTab } = useTabs();
   const [projects, setProjects] = useState<APIProject[]>([]);
   const [reviewCount, setReviewCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
@@ -182,6 +185,25 @@ export default function Layout() {
       .catch((err) => alert('Failed to close project: ' + err.message));
   }
 
+  // Intercept cmd-click (new tab) and cmd+shift+click (new window) on internal links
+  function handleAppClick(e: React.MouseEvent) {
+    if (!e.metaKey && !e.ctrlKey) return;
+    const target = (e.target as HTMLElement).closest('a');
+    if (!target) return;
+    const href = target.getAttribute('href');
+    if (!href || href.startsWith('http://') || href.startsWith('https://') || href.startsWith('//')) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    const title = deriveTitleFromPath(href);
+
+    if (e.shiftKey) {
+      openInNewWindow(href, title);
+    } else {
+      openTab(href, title);
+    }
+  }
+
   function renderSidebarMenu(id: string, items: { label: string; className?: string; onClick: () => void }[]) {
     return (
       <div className="sidebar-menu-wrap" ref={openSidebarMenu === id ? sidebarMenuRef : undefined}>
@@ -219,7 +241,7 @@ export default function Layout() {
   const outletContext: LayoutContext = { setHeadings, setSidebarExtra, projects };
 
   return (
-    <div className="app" data-testid="app-layout">
+    <div className="app" data-testid="app-layout" onClick={handleAppClick}>
       <div
         className="topbar"
         {...(isDesktopApp ? { 'data-tauri-drag-region': '' } : {})}
@@ -239,6 +261,32 @@ export default function Layout() {
         <button className="theme-toggle" onClick={toggle} aria-label="Toggle dark mode" title="Toggle dark mode">
           {theme === 'dark' ? '☾' : '☀'}
         </button>
+      </div>
+
+      <div className="tab-bar" data-testid="topbar-tabs">
+        {tabs.map(tab => (
+          <button
+            key={tab.id}
+            className={`tab-bar-tab${tab.id === activeTabId ? ' active' : ''}`}
+            onClick={() => activateTab(tab.id)}
+            onAuxClick={(e) => { if (e.button === 1) closeTab(tab.id); }}
+          >
+            <span className="tab-title">{tab.title}</span>
+            {tabs.length > 1 && (
+              <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}>×</span>
+            )}
+          </button>
+        ))}
+        <button className="tab-bar-new" onClick={() => {
+          const ws = workspaces[0];
+          if (ws) {
+            openTab(`/workspace/${encodeURIComponent(ws)}`, ws);
+          } else if (standaloneProjects[0]) {
+            openTab(`/project/${standaloneProjects[0].qualifiedName}`, standaloneProjects[0].name);
+          } else {
+            openTab('/');
+          }
+        }} aria-label="New tab">+</button>
       </div>
 
       <nav className="sidebar" data-testid="sidebar">

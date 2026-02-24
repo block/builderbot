@@ -706,12 +706,16 @@
         }
         .selection-bar .danger-btn:hover { background: var(--accent-danger-hover); }
 
+        /* Tauri desktop app adjustments */
+        body.tauri .topbar { padding-left: 80px; }
+        body.tauri .sidebar { padding-top: 0; }
+
         {{block "pagestyle" .}}{{end}}
     </style>
 </head>
 <body>
     <div class="app">
-        <div class="topbar">
+        <div class="topbar" data-tauri-drag-region>
             <div class="topbar-logo"><a href="/">Penpal</a></div>
             <div class="topbar-search">
                 <form action="/search" method="GET">
@@ -1291,6 +1295,11 @@
 
         // Update icon on load
         updateThemeIcon();
+
+        // Detect Tauri desktop app
+        if ('__TAURI__' in window) {
+            document.body.classList.add('tauri');
+        }
 
         {{block "pagescript" .}}{{end}}
     </script>

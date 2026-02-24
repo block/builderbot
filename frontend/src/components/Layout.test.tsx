@@ -46,6 +46,37 @@ describe('Layout', () => {
     expect(screen.getByPlaceholderText('Search all thoughts...')).toBeInTheDocument();
   });
 
+  it('renders tab bar', async () => {
+    render(
+      <MemoryRouter>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByTestId('topbar-tabs')).toBeInTheDocument();
+  });
+
+  it('renders initial tab matching URL', async () => {
+    render(
+      <MemoryRouter initialEntries={['/recent']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    const tabs = screen.getByTestId('topbar-tabs');
+    expect(tabs.querySelector('.tab-bar-tab.active .tab-title')?.textContent).toBe('Recent');
+  });
+
+  it('renders new tab button', () => {
+    render(
+      <MemoryRouter>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByLabelText('New tab')).toBeInTheDocument();
+  });
+
   it('renders sidebar', async () => {
     render(
       <MemoryRouter>
@@ -54,7 +85,6 @@ describe('Layout', () => {
     );
 
     expect(screen.getByTestId('sidebar')).toBeInTheDocument();
-    expect(screen.getByText('Recent')).toBeInTheDocument();
     expect(screen.getByText('In Review')).toBeInTheDocument();
   });
 

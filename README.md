@@ -1,6 +1,6 @@
 # Penpal
 
-A local web app that **only** operates on markdown files inside `thoughts/` directories. It auto-discovers projects containing a `thoughts/` directory and provides a web UI for browsing, searching, and collaboratively reviewing the documents within.
+A desktop app and local web server that **only** operates on markdown files inside `thoughts/` directories. It auto-discovers projects containing a `thoughts/` directory and provides a UI for browsing, searching, and collaboratively reviewing the documents within.
 
 **This is NOT a code review tool.** Penpal is for reviewing _documentation_ -- research, plans, guides, and other markdown artifacts that AI agents generate in `thoughts/` directories.
 
@@ -9,7 +9,7 @@ A local web app that **only** operates on markdown files inside `thoughts/` dire
 - Auto-discovers projects with `thoughts/` directories
 - Flat file view with research/plan type badges
 - Full-text search across all files
-- Rendered markdown with syntax highlighting
+- Rendered markdown with syntax highlighting and mermaid diagrams
 - Git branch and status display
 - **Comment threads** anchored to specific text in documents (like Google Docs)
 - **Review workflow** -- agents can request review, humans leave comments, agents respond
@@ -20,42 +20,48 @@ A local web app that **only** operates on markdown files inside `thoughts/` dire
 
 ### Prerequisites
 
-1. **just** - Command runner for development tasks (the only manual install)
-   ```bash
-   # On macOS with Homebrew
-   brew install just
-
-   # Or see https://github.com/casey/just for other platforms
-   ```
-
-The remaining dependencies are auto-installed when you run `just run` or `just dev`:
-
-2. **Claude Code** - Penpal is designed to work with Claude Code agents for collaborative document review (see [go/claude-code](https://go/claude-code) for setup details)
-3. **Go 1.21+** - Required to build and run the server
-4. **fswatch** (optional) - For hot reload in dev mode, installed automatically by `just dev`
-
-## Usage
-
+**just** - Command runner ([install guide](https://github.com/casey/just))
 ```bash
-just run    # Build, start server, open browser
-just dev    # Same, but with hot reload on file changes
+brew install just
 ```
 
-## Options
+The remaining dependencies (Go, Node.js, Rust) are needed to build from source.
+
+### Install
+
+```bash
+just install
+```
+
+This builds the Penpal desktop app, copies it to `/Applications`, and installs the Claude Code plugin.
+
+### Uninstall
+
+```bash
+just uninstall
+```
+
+## Development
+
+```bash
+just dev         # Go server (:8080) + Vite dev server (:5173), opens browser
+just dev-tauri   # Full Tauri desktop app with Vite HMR
+just test        # Run all tests (Go + React + JS)
+```
+
+| Command | What's built | Ports | UI |
+|---|---|---|---|
+| `just dev` | Go binary | Go `:8080`, Vite `:5173` | Opens `localhost:5173` in browser |
+| `just dev-tauri` | Go sidecar binaries | Sidecar `:8080`, Vite `:5173` | Tauri native window |
+| `just build` | Sidecar + frontend + `.app` bundle | — | — |
+| `just install` | Same as build | — | Copies `.app` to `/Applications` |
+| `just test` | — | — | — |
+
+### Options
 
 ```bash
 ./penpal -port 3000              # Custom port (default: 8080)
 ./penpal -root /path/to/projects # Custom root directory
 ```
-
-## Claude Code Plugin
-
-Penpal ships as a Claude Code plugin that bundles an MCP server (for programmatic access to comments and reviews) and the `monitor-reviews` skill. Install it with:
-
-```bash
-just install-claude
-```
-
-This registers penpal as a local plugin marketplace and installs the plugin. The penpal server must be running for the MCP tools to work.
 
 ## [Changelog](CHANGELOG.md) | [Roadmap](ROADMAP.md)

@@ -12,6 +12,8 @@
     "windows": [
       {
         "title": "Penpal",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "width": 1200,
         "height": 800,
         "minWidth": 800,
@@ -24,7 +26,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"],
+    "targets": [
+      "dmg",
+      "app"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -32,6 +37,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "icons/Assets.car": "Assets.car"
+    },
     "externalBin": [
       "binaries/penpal-server"
     ]

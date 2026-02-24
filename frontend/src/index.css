@@ -126,7 +126,7 @@ a:hover { text-decoration: underline; }
 .app {
   display: grid;
   grid-template-columns: 240px 1fr;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr;
   height: 100vh;
 }
 
@@ -183,9 +183,69 @@ a:hover { text-decoration: underline; }
   color: var(--text-primary);
 }
 
+/* ── Tab bar ── */
+.tab-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: stretch;
+  height: 32px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.tab-bar-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.8em;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 200px;
+  border-right: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.tab-bar-tab.active {
+  background: var(--bg-body);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.tab-bar-tab:hover { background: var(--bg-surface-secondary); }
+
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-close {
+  opacity: 0;
+  font-size: 1.1em;
+  line-height: 1;
+  padding: 2px;
+  border-radius: 3px;
+}
+.tab-bar-tab:hover .tab-close { opacity: 0.5; }
+.tab-close:hover { opacity: 1; background: var(--bg-surface-tertiary); }
+
+.tab-bar-new {
+  padding: 0 10px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1em;
+  flex-shrink: 0;
+}
+.tab-bar-new:hover { color: var(--text-primary); background: var(--bg-surface-secondary); }
+
 /* ── Sidebar ── */
 .sidebar {
-  grid-row: 2;
+  grid-row: 3;
   background: var(--bg-surface);
   border-right: 1px solid var(--border-default);
   overflow-y: auto;
@@ -331,7 +391,7 @@ a:hover { text-decoration: underline; }
 
 /* ── Main content ── */
 .main-content {
-  grid-row: 2;
+  grid-row: 3;
   overflow-y: auto;
   padding: 24px;
 }

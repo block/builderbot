@@ -2355,6 +2355,18 @@
           "markdownDescription": "Denies the unminimize command without any pre-configured scope."
         },
         {
+          "description": "Enables the show_snap_overlay command without any pre-configured scope.",
+          "type": "string",
+          "const": "decorum:allow-show-snap-overlay",
+          "markdownDescription": "Enables the show_snap_overlay command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the show_snap_overlay command without any pre-configured scope.",
+          "type": "string",
+          "const": "decorum:deny-show-snap-overlay",
+          "markdownDescription": "Denies the show_snap_overlay command without any pre-configured scope."
+        },
+        {
           "description": "This permission set configures which\nshell functionality is exposed by default.\n\n#### Granted Permissions\n\nIt allows to use the `open` functionality with a reasonable\nscope pre-configured. It will allow opening `http(s)://`,\n`tel:` and `mailto:` links.\n\n#### This default permission set includes:\n\n- `allow-open`",
           "type": "string",
           "const": "shell:default",

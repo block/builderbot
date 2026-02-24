@@ -1,9 +1,5 @@
 # Default recipe
-default: run
-
-# Build the binary
-build: ensure-deps
-    go build -o penpal .
+default: dev
 
 # Ensure required tools are installed
 ensure-deps:
@@ -17,48 +13,10 @@ ensure-deps:
         brew install claude-code
     fi
 
-# Run the server and open browser
-run: build
-    #!/usr/bin/env bash
-    PORT=8080
-
-    # If port is in use, check if it's a penpal instance we can take over
-    if lsof -ti:$PORT >/dev/null 2>&1; then
-        if curl -s "http://localhost:$PORT/api/projects" >/dev/null 2>&1; then
-            echo "Port $PORT held by another penpal instance, stopping it..."
-            BLOCKING_PID=$(lsof -ti:$PORT)
-            kill $BLOCKING_PID 2>/dev/null
-            sleep 0.5
-        else
-            echo "Error: port $PORT is in use by a non-penpal process." >&2
-            echo "Stop that process or use: ./penpal -port <other-port>" >&2
-            exit 1
-        fi
-    fi
-
-    ./penpal &
-    PID=$!
-
-    # Wait for server to be ready
-    echo "Waiting for server..."
-    until curl -s http://localhost:$PORT/ > /dev/null 2>&1; do
-        sleep 0.2
-    done
-    open "http://localhost:$PORT"
-
-    wait $PID
-
-# Development mode with hot reload
+# Development mode: Go server + Vite dev server, opens browser
 dev:
     #!/usr/bin/env bash
-    # Install fswatch if needed
-    if ! command -v fswatch &> /dev/null; then
-        echo "Installing fswatch..."
-        brew install fswatch
-    fi
-
     PIDFILE=".penpal.pid"
-
     PORT=8080
 
     # Kill previous penpal dev server if running (via PID file or port probe)
@@ -86,66 +44,101 @@ dev:
         fi
     fi
 
-    start_server() {
-        go build -o penpal . && ./penpal -dev -port $PORT &
-        PID=$!
-        echo $PID > "$PIDFILE"
-    }
-
+    GO_PID=""
+    VITE_PID=""
     cleanup() {
-        echo "Stopping server..."
-        kill $PID 2>/dev/null
+        echo "Stopping..."
+        [ -n "$GO_PID" ] && kill $GO_PID 2>/dev/null
+        [ -n "$VITE_PID" ] && kill $VITE_PID 2>/dev/null
         rm -f "$PIDFILE"
         exit 0
     }
     trap cleanup INT TERM
 
-    start_server
+    # Build and start Go server
+    go build -o penpal . && ./penpal -dev -port $PORT &
+    GO_PID=$!
+    echo $GO_PID > "$PIDFILE"
 
-    # Wait for server to be ready before opening browser
-    echo "Waiting for server..."
+    # Wait for Go server to be ready
+    echo "Waiting for Go server..."
     until curl -s http://localhost:$PORT/ > /dev/null 2>&1; do
         sleep 0.2
     done
-    open "http://localhost:$PORT"
 
-    # Only watch .go files — template changes are picked up live via -dev flag
-    echo "Watching for Go changes... (Ctrl+C to stop)"
-    echo "Template changes are live — just reload the browser."
-    fswatch -o -r --include='\.go$' --exclude='.*' . | while read; do
-        echo "Go change detected, rebuilding..."
-        kill $PID 2>/dev/null
-        # Wait for port to be released
-        while lsof -ti:$PORT >/dev/null 2>&1; do
-            sleep 0.1
-        done
-        start_server
-    done
+    # Start Vite dev server
+    cd frontend && npm run dev &
+    VITE_PID=$!
+    cd ..
+
+    # Wait briefly for Vite to start, then open browser
+    sleep 2
+    open "http://localhost:5173"
+
+    echo ""
+    echo "Go server:    http://localhost:$PORT"
+    echo "Vite (React): http://localhost:5173"
+    echo ""
+
+    wait $GO_PID
+
+# Development mode: full Tauri desktop app with Vite HMR
+dev-tauri: build-sidecar
+    cd frontend && npm run tauri:dev
 
 # Build Go sidecar binaries for Tauri
 build-sidecar:
     ./scripts/build-sidecar.sh
 
-# Run Tauri dev mode (builds sidecar first)
-tauri-dev: build-sidecar
-    cd frontend && npm run tauri:dev
+# Build production Tauri app
+build: ensure-deps build-sidecar
+    cd frontend && npm install && npm run build && npm run tauri:build
 
-# Clean build artifacts
-clean:
-    rm -f penpal
+# Install Penpal: build desktop app + install Claude Code plugin
+install: build
+    #!/usr/bin/env bash
+    set -euo pipefail
 
-# Format code
-fmt:
-    go fmt ./...
+    # Copy .app to /Applications
+    APP_SRC="frontend/src-tauri/target/release/bundle/macos/Penpal.app"
+    if [ -d "$APP_SRC" ]; then
+        echo "Installing Penpal.app to /Applications..."
+        rm -rf /Applications/Penpal.app
+        cp -R "$APP_SRC" /Applications/Penpal.app
+        echo "Penpal.app installed."
+    else
+        echo "Warning: $APP_SRC not found, skipping app install."
+    fi
 
-# Run tests
-test: test-go test-js
+    # Install Claude Code plugin
+    claude plugin uninstall birdseye 2>/dev/null || true
+    claude plugin marketplace remove birdseye 2>/dev/null || true
+    rm -f ~/.claude/skills/monitor-reviews
+    claude plugin marketplace add "$(pwd)" 2>/dev/null || true
+    claude plugin install penpal
+    echo "Penpal Claude Code plugin installed."
+
+# Uninstall Penpal
+uninstall:
+    #!/usr/bin/env bash
+    rm -rf /Applications/Penpal.app 2>/dev/null || true
+    echo "Penpal.app removed from /Applications."
+    claude plugin uninstall penpal 2>/dev/null || true
+    claude plugin marketplace remove penpal 2>/dev/null || true
+    echo "Penpal Claude Code plugin uninstalled."
+
+# Run all tests
+test: test-go test-frontend test-js
 
 # Run Go tests
 test-go:
     go test ./...
 
-# Run JavaScript tests
+# Run React frontend tests
+test-frontend:
+    cd frontend && npm run test:run
+
+# Run legacy JavaScript tests
 test-js:
     node --test js/*_test.js
 
@@ -153,30 +146,17 @@ test-js:
 test-e2e:
     cd e2e && npx playwright test
 
-# Run all tests
-test-all: test test-e2e
+# Clean build artifacts
+clean:
+    rm -f penpal
+    rm -rf frontend/dist
+    rm -rf frontend/src-tauri/target
+    rm -rf frontend/src-tauri/binaries
+
+# Format code
+fmt:
+    go fmt ./...
 
 # Tidy dependencies
 tidy:
     go mod tidy
-
-# Install penpal as a Claude Code plugin (MCP server + skills)
-install-claude:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Clean up legacy "birdseye" plugin if installed
-    claude plugin uninstall birdseye 2>/dev/null || true
-    claude plugin marketplace remove birdseye 2>/dev/null || true
-    # Clean up legacy skill symlink if present
-    rm -f ~/.claude/skills/monitor-reviews
-    # Add the penpal directory as a local marketplace, then install the plugin
-    claude plugin marketplace add "$(pwd)" 2>/dev/null || true
-    claude plugin install penpal
-    echo "Penpal plugin installed for Claude Code."
-
-# Uninstall penpal Claude Code plugin
-uninstall-claude:
-    #!/usr/bin/env bash
-    claude plugin uninstall penpal 2>/dev/null || true
-    claude plugin marketplace remove penpal 2>/dev/null || true
-    echo "Penpal plugin uninstalled."

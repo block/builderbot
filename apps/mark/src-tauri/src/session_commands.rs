@@ -350,13 +350,15 @@ pub async fn start_project_session(
         repositories. Pass the repo slug (e.g. \"org/repo\") and clear instructions for what to \
         do there. This tool starts a subagent session and waits for it to complete before \
         returning the outcome. Do not ask for both a note and a commit in a single start_repo_session \
-        request — choose one outcome per call.\n\n\
+        request — choose one outcome per call. All reasoning specific to a repo should be done within \
+        a repo session rather in this project wide context.\n\n\
         - add_project_repo: Use this when the task requires a repository that isn't yet in the \
         project. Pass the GitHub repo slug to add it.\n\n\
         To discover repositories that might be relevant, use `gh` to explore repos in the user's \
         GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
         To return the note, include a horizontal rule (---) followed by the note content. \
-        Begin the note with a markdown H1 heading as the title.";
+        Begin the note with a markdown H1 heading as the title. \n\n\
+        ";
 
     let full_prompt = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"

@@ -51,9 +51,9 @@ export const api = {
   getProjectInfo: (name: string) =>
     apiFetch<ProjectInfo>(`/api/project-info?name=${encodeURIComponent(name)}`),
   deleteProject: (project: string) =>
-    apiVoid('/api/delete-project', { method: 'POST', body: JSON.stringify({ project }) }),
+    apiVoid(`/api/delete-project?name=${encodeURIComponent(project)}`, { method: 'POST' }),
   deleteFile: (project: string, path: string) =>
-    apiVoid('/api/delete-file', { method: 'POST', body: JSON.stringify({ project, path }) }),
+    apiVoid(`/api/delete-file?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`, { method: 'POST' }),
 
   // Recent / In-review
   getRecentFiles: () => apiFetch<APIFile[]>('/api/recent'),

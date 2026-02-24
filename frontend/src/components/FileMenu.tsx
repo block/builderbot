@@ -20,8 +20,19 @@ export default function FileMenu({
   const [open, setOpen] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [publishURL, setPublishURL] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
+
+  // Load publish state on mount
+  useEffect(() => {
+    api.getPublishState(project, filePath)
+      .then((state) => {
+        if (state.url) setPublishURL(state.url);
+      })
+      .catch(() => {});
+  }, [project, filePath]);
 
   useEffect(() => {
     if (!open) return;
@@ -30,19 +41,32 @@ export default function FileMenu({
     return () => document.removeEventListener('click', handleClick);
   }, [open]);
 
+  // Auto-dismiss toast
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 8000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  const copyMarkdown = () => {
+    navigator.clipboard.writeText(rawMarkdown);
+    setOpen(false);
+  };
+
+  const copyFile = () => {
+    setOpen(false);
+    api.copyFile(project, filePath).catch((err) => {
+      console.error('Copy file failed:', err);
+    });
+  };
+
   const copyRelativePath = () => {
     navigator.clipboard.writeText(`@${filePath}`);
     setOpen(false);
   };
 
   const copyAbsolutePath = () => {
-    const fullPath = `${projectPath}/${filePath}`;
-    navigator.clipboard.writeText(fullPath);
-    setOpen(false);
-  };
-
-  const copyMarkdown = () => {
-    navigator.clipboard.writeText(rawMarkdown);
+    navigator.clipboard.writeText(`${projectPath}/${filePath}`);
     setOpen(false);
   };
 
@@ -51,11 +75,19 @@ export default function FileMenu({
     try {
       const result = await api.publish(project, filePath);
       if (result.url) {
-        navigator.clipboard.writeText(result.url);
+        setPublishURL(result.url);
+        setToast(result.url);
       }
     } catch (err) {
-      console.error('Publish failed:', err);
+      alert('Publish failed: ' + (err instanceof Error ? err.message : err));
     }
+  };
+
+  const copyBlockcellLink = () => {
+    if (publishURL) {
+      navigator.clipboard.writeText(publishURL);
+    }
+    setOpen(false);
   };
 
   const handleDelete = async () => {
@@ -94,11 +126,15 @@ export default function FileMenu({
         </button>
         {open && (
           <div className="file-menu" style={{ display: 'block' }}>
+            <button onClick={copyMarkdown}>Copy markdown</button>
+            <button onClick={copyFile}>Copy file</button>
             <button onClick={copyRelativePath}>Copy relative path</button>
             <button onClick={copyAbsolutePath}>Copy absolute path</button>
-            <button onClick={copyMarkdown}>Copy markdown</button>
             <div className="menu-divider" />
-            <button onClick={handlePublish}>Publish</button>
+            <button onClick={handlePublish}>Publish to Blockcell</button>
+            {publishURL && (
+              <button onClick={copyBlockcellLink}>Copy Blockcell link</button>
+            )}
             {sourceType === 'file' && (
               <>
                 <div className="menu-divider" />
@@ -119,6 +155,17 @@ export default function FileMenu({
         )}
       </div>
 
+      {/* Publish toast */}
+      {toast && (
+        <div className="publish-toast">
+          <strong>Published!</strong>{' '}
+          <a href={toast} target="_blank" rel="noreferrer">
+            {toast}
+          </a>
+        </div>
+      )}
+
+      {/* Delete confirmation modal */}
       {showDeleteModal && (
         <div
           className="modal-overlay open"

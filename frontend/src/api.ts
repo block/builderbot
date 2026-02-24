@@ -128,6 +128,10 @@ export const api = {
   search: (query: string) =>
     apiFetch<SearchResponse>(`/api/search?q=${encodeURIComponent(query)}`),
 
+  // File operations
+  copyFile: (project: string, path: string) =>
+    apiVoid(`/api/copy-file?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`),
+
   // Misc
   open: (path: string) =>
     apiFetch<{ url: string }>('/api/open', { method: 'POST', body: JSON.stringify({ path }) }),

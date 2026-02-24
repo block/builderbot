@@ -427,6 +427,24 @@ impl ProjectToolsHandler {
                                 .map(|m| m.content)
                         })
                         .unwrap_or_default();
+                    // For note sessions, strip the note content (everything from the
+                    // first --- separator onwards) — it's provided separately in `note`.
+                    let output = if matches!(expected_outcome, RepoSessionOutcome::NoteInRepo) {
+                        let mut sep_line = None;
+                        for (i, line) in output.lines().enumerate() {
+                            let t = line.trim();
+                            if t == "---" || t == "***" || t == "___" {
+                                sep_line = Some(i);
+                                break;
+                            }
+                        }
+                        match sep_line {
+                            Some(i) => output.lines().take(i).collect::<Vec<_>>().join("\n"),
+                            None => output,
+                        }
+                    } else {
+                        output
+                    };
                     let output_json = serde_json::to_string(&output).unwrap_or_default();
                     let artifact_field = match artifact_id.as_deref() {
                         Some(aid) => format!(r#", "artifact_id": "{aid}""#),

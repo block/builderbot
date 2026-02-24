@@ -221,7 +221,7 @@
       // sessions that were already running when the component mounted).
       const isKnownNoteSession = projectNotes.some((n) => n.sessionId === sessionId);
       if (isTracked || isKnownNoteSession) {
-        if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+        if (status === 'completed' || status === 'error' || status === 'cancelled') {
           if (isTracked) {
             const next = new Set(activeSessionIds);
             next.delete(sessionId);

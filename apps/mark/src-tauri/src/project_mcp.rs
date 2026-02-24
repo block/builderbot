@@ -18,6 +18,7 @@ use crate::actions::events::TauriExecutionListener;
 use crate::actions::{ActionExecutor, ActionMetadata, ActionRegistry, ActionType};
 use crate::session_runner::{SessionConfig, SessionRegistry};
 use crate::store::{Session, SessionStatus, Store};
+use tokio_util::sync::CancellationToken;
 
 /// What outcome the caller expects from a `start_repo_session` call.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -91,6 +92,9 @@ struct ProjectToolsHandler {
     app_handle: AppHandle,
     action_executor: Option<Arc<ActionExecutor>>,
     action_registry: Option<Arc<ActionRegistry>>,
+    /// Cancellation token for the parent project session.
+    /// Signalled when the user cancels the project session.
+    cancel_token: CancellationToken,
 }
 
 impl ProjectToolsHandler {
@@ -101,6 +105,7 @@ impl ProjectToolsHandler {
         app_handle: AppHandle,
         action_executor: Option<Arc<ActionExecutor>>,
         action_registry: Option<Arc<ActionRegistry>>,
+        cancel_token: CancellationToken,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -110,6 +115,7 @@ impl ProjectToolsHandler {
             app_handle,
             action_executor,
             action_registry,
+            cancel_token,
         }
     }
 }
@@ -307,8 +313,7 @@ impl ProjectToolsHandler {
         let (artifact_id, pre_head_sha) = match expected_outcome {
             RepoSessionOutcome::NoteInRepo => match branch_id.as_deref() {
                 Some(bid) => {
-                    let note =
-                        crate::store::Note::new(bid, &p.instructions, "").with_session(&session_id);
+                    let note = crate::store::Note::new(bid, "", "").with_session(&session_id);
                     let note_id = note.id.clone();
                     if let Err(e) = self.store.create_note(&note) {
                         log::error!("[project_mcp] failed to create note stub: {e}");
@@ -405,8 +410,17 @@ impl ProjectToolsHandler {
         }
 
         // Poll until the session reaches a terminal state.
+        // Also watch the parent project session's cancellation token so we
+        // don't loop forever if the project session is cancelled while waiting.
         loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                _ = self.cancel_token.cancelled() => {
+                    return format!(
+                        r#"{{"session_id": "{session_id}", "outcome": "cancelled", "output": ""}}"#
+                    );
+                }
+            }
             match self.store.get_session(&session_id) {
                 Ok(Some(s)) if s.status != SessionStatus::Running => {
                     let outcome = match s.status {
@@ -610,19 +624,21 @@ impl ProjectToolsHandler {
                         "[project_mcp] add_project_repo: worktree setup failed (continuing): {e}"
                     );
                     // Don't abort — return the repo even if worktree setup failed
-                    return format!(
-                        r#"{{"repo_id": "{}", "message": "Added repository {} to project (worktree setup failed: {})"}}"#,
-                        repo.id, github_repo, e
-                    );
+                    let msg = serde_json::to_string(&format!(
+                        "Added repository {github_repo} to project (worktree setup failed: {e})"
+                    ))
+                    .unwrap_or_default();
+                    return format!(r#"{{"repo_id": "{}", "message": {msg}}}"#, repo.id);
                 }
                 Err(e) => {
                     log::warn!(
                         "[project_mcp] add_project_repo: worktree task panicked (continuing): {e}"
                     );
-                    return format!(
-                        r#"{{"repo_id": "{}", "message": "Added repository {} to project (worktree task error: {})"}}"#,
-                        repo.id, github_repo, e
-                    );
+                    let msg = serde_json::to_string(&format!(
+                        "Added repository {github_repo} to project (worktree task error: {e})"
+                    ))
+                    .unwrap_or_default();
+                    return format!(r#"{{"repo_id": "{}", "message": {msg}}}"#, repo.id);
                 }
             }
 
@@ -1002,6 +1018,7 @@ pub async fn start_project_mcp_server(
     app_handle: AppHandle,
     action_executor: Option<Arc<ActionExecutor>>,
     action_registry: Option<Arc<ActionRegistry>>,
+    cancel_token: CancellationToken,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1018,6 +1035,7 @@ pub async fn start_project_mcp_server(
         app_handle,
         action_executor,
         action_registry,
+        cancel_token,
     );
     log::info!(
         "[project_mcp] HTTP server bound on port {port} for project {}",

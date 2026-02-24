@@ -679,8 +679,9 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
 /// `git fetch origin` and avoids the ref-lock races that occur when hundreds
 /// of remote-tracking refs are updated simultaneously in a shared clone.
 ///
-/// If `base_branch` cannot be fetched due to an SSH auth failure the origin
-/// URL is switched to HTTPS and the fetch is retried once.
+/// If `base_branch` cannot be fetched, the origin URL is switched to HTTPS
+/// and the fetch is retried once (same behaviour as the original fetch in
+/// `ensure_local_clone`).
 pub fn fetch_for_worktree(
     repo_path: &std::path::Path,
     github_repo: &str,
@@ -697,16 +698,7 @@ pub fn fetch_for_worktree(
     // Fetch the base branch — always needed, always exists on the remote.
     if let Err(e) = super::cli::run(repo_path, &["fetch", "origin", base_ref]) {
         let err_str = e.to_string();
-        if is_fetch_auth_failure(&err_str) {
-            log::warn!(
-                "fetch origin {} failed for '{}': {}. Retrying with HTTPS origin.",
-                base_ref,
-                github_repo,
-                e
-            );
-            super::cli::run(repo_path, &["remote", "set-url", "origin", &https_url])?;
-            super::cli::run(repo_path, &["fetch", "origin", base_ref])?;
-        } else if err_str.contains("incorrect old value provided") {
+        if err_str.contains("incorrect old value provided") {
             // Ref-update CAS race: a concurrent fetch already updated
             // refs/remotes/origin/<base_ref> between when git read the old
             // value and when it tried to write the new one.  The downloaded
@@ -719,7 +711,14 @@ pub fn fetch_for_worktree(
                 e
             );
         } else {
-            return Err(e);
+            log::warn!(
+                "fetch origin {} failed for '{}': {}. Retrying with HTTPS origin.",
+                base_ref,
+                github_repo,
+                e
+            );
+            super::cli::run(repo_path, &["remote", "set-url", "origin", &https_url])?;
+            super::cli::run(repo_path, &["fetch", "origin", base_ref])?;
         }
     }
 
@@ -740,16 +739,6 @@ pub fn fetch_for_worktree(
     }
 
     Ok(())
-}
-
-fn is_fetch_auth_failure(err: &str) -> bool {
-    err.contains("Authentication failed")
-        || err.contains("authentication failed")
-        || err.contains("Permission denied")
-        || err.contains("could not read Username")
-        || err.contains("could not read Password")
-        || err.contains("repository not found")
-        || err.contains("fatal: unable to access")
 }
 
 // =============================================================================

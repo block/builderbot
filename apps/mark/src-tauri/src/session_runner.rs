@@ -210,6 +210,7 @@ pub fn start_session(
                     app_handle.clone(),
                     config.action_executor.clone(),
                     config.action_registry.clone(),
+                    cancel_token.clone(),
                 )
                 .await
                 {

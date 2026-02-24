@@ -1,5 +1,10 @@
 # Changelog
 
+## Feb 24, 2026
+
+- **Desktop app** — Penpal has a macOS app with tabs, multiple window support, and Cmd+F find-in-page. Run `just install` to put the app in /Applications and install the Claude plugin.
+- **Auto-discover Claude plans** — Automatically surfaces plan files from `~/.claude/plans/` ([thanks @donley!](https://github.com/squareup/personal-loganj-penpal/pull/59))
+
 ## Feb 23, 2026
 
 - **Comment on Mermaid diagrams** — Select an area on any Mermaid diagram to start a comment thread anchored to that region

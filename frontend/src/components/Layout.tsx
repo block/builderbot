@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { Link, NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { api, isDesktopApp } from '../api';
 import { useTheme } from '../hooks/useTheme';
 import { useSSE } from '../hooks/useSSE';
@@ -16,9 +16,11 @@ function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
 export default function Layout() {
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
   const [projects, setProjects] = useState<APIProject[]>([]);
   const [reviewCount, setReviewCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
+  const isFilePage = location.pathname.startsWith('/file/');
 
   const refreshProjects = useCallback(() => {
     api.listProjects().then(setProjects).catch(() => {});
@@ -146,7 +148,7 @@ export default function Layout() {
         </NavLink>
       </nav>
 
-      <div className="main-content">
+      <div className="main-content" style={isFilePage ? { padding: 0, overflow: 'hidden' } : undefined}>
         <Outlet />
       </div>
     </div>

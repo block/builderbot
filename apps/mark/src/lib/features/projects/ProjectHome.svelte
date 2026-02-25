@@ -777,22 +777,7 @@
       console.error('Failed to rename branch:', e);
     }
   }
-
-  // ── Keyboard shortcuts ──
-
-  function handleKeydown(e: KeyboardEvent) {
-    const target = e.target as HTMLElement;
-    const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
-    if (isInput && e.key !== 'Escape') return;
-
-    if (e.metaKey && e.key === 'n') {
-      e.preventDefault();
-      handleNewProject();
-    }
-  }
 </script>
-
-<svelte:window onkeydown={handleKeydown} />
 
 <div class="project-home">
   <ProjectsSidebar

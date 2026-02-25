@@ -5,6 +5,7 @@
   Read-only view.
 -->
 <script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
   import { X, Copy, Check } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
@@ -12,6 +13,7 @@
   import { handleExternalLinkClick } from '../../api/commands';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
+  import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -33,6 +35,19 @@
   let currentMatchIndex = $state(0);
   let matchElements: HTMLElement[] = [];
   let contentEl: HTMLDivElement;
+  let unregisterSearchTarget: (() => void) | null = null;
+
+  onMount(() => {
+    unregisterSearchTarget = registerSearchShortcutTarget({
+      find: openSearch,
+      next: nextMatch,
+      previous: previousMatch,
+    });
+  });
+
+  onDestroy(() => {
+    unregisterSearchTarget?.();
+  });
 
   function renderMarkdown(text: string): string {
     return sanitize(marked.parse(text) as string);
@@ -50,9 +65,6 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    const isMac = navigator.platform.toLowerCase().includes('mac');
-    const cmdKey = isMac ? e.metaKey : e.ctrlKey;
-
     // Handle Escape key
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -62,19 +74,6 @@
         onClose();
       }
       return;
-    }
-
-    // Handle search shortcuts
-    if (cmdKey && e.key === 'f') {
-      e.preventDefault();
-      openSearch();
-    } else if (cmdKey && e.key === 'g') {
-      e.preventDefault();
-      if (e.shiftKey) {
-        previousMatch();
-      } else {
-        nextMatch();
-      }
     }
   }
 

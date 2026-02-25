@@ -60,6 +60,7 @@
   } from './sessionModalHelpers';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
+  import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
 
   // Configure marked
   marked.setOptions({ breaks: true, gfm: true });
@@ -102,12 +103,19 @@
   let matchCount = $state(0);
   let currentMatchIndex = $state(0);
   let matchElements: HTMLElement[] = [];
+  let unregisterSearchTarget: (() => void) | null = null;
 
   // =========================================================================
   // Lifecycle
   // =========================================================================
 
   onMount(async () => {
+    unregisterSearchTarget = registerSearchShortcutTarget({
+      find: openSearch,
+      next: nextMatch,
+      previous: previousMatch,
+    });
+
     await loadSession();
     if (session?.status === 'running') {
       startPolling();
@@ -119,7 +127,12 @@
   onDestroy(() => {
     closed = true;
     stopPolling();
+    unregisterSearchTarget?.();
   });
+
+  function isComposerFocused(): boolean {
+    return document.activeElement === inputEl;
+  }
 
   // =========================================================================
   // Data loading
@@ -430,9 +443,6 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    const isMac = navigator.platform.toLowerCase().includes('mac');
-    const cmdKey = isMac ? e.metaKey : e.ctrlKey;
-
     // Handle Escape key
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -442,26 +452,6 @@
         requestClose();
       }
       return;
-    }
-
-    // Handle search shortcuts
-    const target = e.target as HTMLElement;
-    const isTypingInInput =
-      target.tagName === 'TEXTAREA' && target.classList.contains('message-input');
-
-    // Cmd+F should work even from the input field to open search
-    if (cmdKey && e.key === 'f') {
-      e.preventDefault();
-      openSearch();
-    }
-    // Cmd+G navigation only works when not typing in input
-    else if (!isTypingInInput && cmdKey && e.key === 'g') {
-      e.preventDefault();
-      if (e.shiftKey) {
-        previousMatch();
-      } else {
-        nextMatch();
-      }
     }
   }
 
@@ -504,6 +494,7 @@
   }
 
   function nextMatch() {
+    if (isComposerFocused()) return;
     if (matchElements.length === 0) return;
 
     // Remove current class from old match
@@ -520,6 +511,7 @@
   }
 
   function previousMatch() {
+    if (isComposerFocused()) return;
     if (matchElements.length === 0) return;
 
     // Remove current class from old match

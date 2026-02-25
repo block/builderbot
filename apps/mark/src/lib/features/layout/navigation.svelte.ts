@@ -16,7 +16,7 @@ import { projectStateStore } from '../../stores/projectState.svelte';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
-export type SettingsSection = 'repo' | 'doctor';
+export type SettingsSection = 'repo' | 'keyboard' | 'doctor';
 
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',

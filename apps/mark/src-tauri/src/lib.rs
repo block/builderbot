@@ -2295,6 +2295,28 @@ pub fn run() {
                     true,
                     Some("CmdOrCtrl+,"),
                 )?;
+                let find_item =
+                    MenuItem::with_id(handle, "find", "Find…", true, Some("CmdOrCtrl+F"))?;
+                let find_next_item =
+                    MenuItem::with_id(handle, "find_next", "Find Next", true, Some("CmdOrCtrl+G"))?;
+                let find_previous_item = MenuItem::with_id(
+                    handle,
+                    "find_previous",
+                    "Find Previous",
+                    true,
+                    Some("CmdOrCtrl+Shift+G"),
+                )?;
+                let zoom_in_item =
+                    MenuItem::with_id(handle, "zoom_in", "Zoom In", true, Some("CmdOrCtrl+="))?;
+                let zoom_out_item =
+                    MenuItem::with_id(handle, "zoom_out", "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+                let zoom_reset_item = MenuItem::with_id(
+                    handle,
+                    "zoom_reset",
+                    "Actual Size",
+                    true,
+                    Some("CmdOrCtrl+0"),
+                )?;
 
                 let app_menu = Submenu::with_items(
                     handle,
@@ -2337,6 +2359,10 @@ pub fn run() {
                         &PredefinedMenuItem::copy(handle, None)?,
                         &PredefinedMenuItem::paste(handle, None)?,
                         &PredefinedMenuItem::select_all(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &find_item,
+                        &find_next_item,
+                        &find_previous_item,
                     ],
                 )?;
 
@@ -2344,7 +2370,13 @@ pub fn run() {
                     handle,
                     "View",
                     true,
-                    &[&PredefinedMenuItem::fullscreen(handle, None)?],
+                    &[
+                        &zoom_in_item,
+                        &zoom_out_item,
+                        &zoom_reset_item,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::fullscreen(handle, None)?,
+                    ],
                 )?;
 
                 let window_menu = Submenu::with_id_and_items(
@@ -2536,10 +2568,20 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id() == "settings" {
-                // Emit an event to the frontend to open the settings page.
-                if let Err(e) = app.emit("menu:settings", ()) {
-                    log::warn!("Failed to emit menu:settings event: {e}");
+            let maybe_event_name = match event.id().as_ref() {
+                "settings" => Some("menu:settings"),
+                "find" => Some("menu:find"),
+                "find_next" => Some("menu:find-next"),
+                "find_previous" => Some("menu:find-previous"),
+                "zoom_in" => Some("menu:zoom-in"),
+                "zoom_out" => Some("menu:zoom-out"),
+                "zoom_reset" => Some("menu:zoom-reset"),
+                _ => None,
+            };
+
+            if let Some(event_name) = maybe_event_name {
+                if let Err(e) = app.emit(event_name, ()) {
+                    log::warn!("Failed to emit {event_name} event: {e}");
                 }
             }
         })

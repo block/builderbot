@@ -213,12 +213,13 @@ export function setAiAgent(agentId: string): void {
  *
  * Walks `recentAgents` in order and returns the first match, so local
  * and remote contexts each get the best agent for their environment.
- * Returns `null` if no recent agent is available.
+ * Falls back to the first available agent when no recent match exists.
+ * Returns `null` only when `available` is empty.
  */
 export function getPreferredAgent(available: { id: string }[]): string | null {
   const ids = new Set(available.map((a) => a.id));
   for (const agentId of preferences.recentAgents) {
     if (ids.has(agentId)) return agentId;
   }
-  return null;
+  return available[0]?.id ?? null;
 }

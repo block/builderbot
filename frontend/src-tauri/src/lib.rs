@@ -115,6 +115,12 @@ pub fn run() {
                     "next_tab" => {
                         let _ = win.eval("window.dispatchEvent(new CustomEvent('menu-next-tab'))");
                     }
+                    "go_back" => {
+                        let _ = win.eval("window.dispatchEvent(new CustomEvent('menu-go-back'))");
+                    }
+                    "go_forward" => {
+                        let _ = win.eval("window.dispatchEvent(new CustomEvent('menu-go-forward'))");
+                    }
                     _ => {}
                 }
             });
@@ -214,6 +220,9 @@ fn build_menu(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> 
         "View",
         true,
         &[
+            &MenuItem::with_id(app, "go_back", "Go Back", true, Some("CmdOrCtrl+["))?,
+            &MenuItem::with_id(app, "go_forward", "Go Forward", true, Some("CmdOrCtrl+]"))?,
+            &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(app, "reload", "Reload", true, Some("CmdOrCtrl+R"))?,
             &PredefinedMenuItem::separator(app)?,
             &MenuItem::with_id(

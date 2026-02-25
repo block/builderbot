@@ -98,6 +98,22 @@ describe('Layout', () => {
     expect(screen.getByLabelText('Toggle dark mode')).toBeInTheDocument();
   });
 
+  it('renders back and forward buttons', () => {
+    render(
+      <MemoryRouter>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    const backBtn = screen.getByLabelText('Go back');
+    const fwdBtn = screen.getByLabelText('Go forward');
+    expect(backBtn).toBeInTheDocument();
+    expect(fwdBtn).toBeInTheDocument();
+    // Both should be disabled on a fresh tab
+    expect(backBtn).toBeDisabled();
+    expect(fwdBtn).toBeDisabled();
+  });
+
   it('renders workspace items after API loads', async () => {
     render(
       <MemoryRouter>

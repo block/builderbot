@@ -92,4 +92,44 @@ describe('useTabs', () => {
     expect(result.current.tabs[0].path).toBe('/search?q=test');
     expect(result.current.tabs[0].title).toBe('Search: test');
   });
+
+  it('initializes tab with history', () => {
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    const tab = result.current.tabs[0];
+    expect(tab.history).toEqual(['/recent']);
+    expect(tab.historyIndex).toBe(0);
+  });
+
+  it('openTab initializes new tab with single history entry', () => {
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    act(() => result.current.openTab('/in-review'));
+    const newTab = result.current.tabs[1];
+    expect(newTab.history).toEqual(['/in-review']);
+    expect(newTab.historyIndex).toBe(0);
+  });
+
+  it('canGoBack and canGoForward are false for new tab', () => {
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    expect(result.current.canGoBack).toBe(false);
+    expect(result.current.canGoForward).toBe(false);
+  });
+
+  it('goBack and goForward are no-ops at boundaries', () => {
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    // Should not throw
+    act(() => result.current.goBack());
+    act(() => result.current.goForward());
+    expect(result.current.tabs[0].path).toBe('/recent');
+    expect(result.current.tabs[0].historyIndex).toBe(0);
+  });
+
+  it('activateTab on already-active tab does not corrupt navigating flag', () => {
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    const tabId = result.current.tabs[0].id;
+    // Re-activate same tab — should be a no-op for navigation
+    act(() => result.current.activateTab(tabId));
+    expect(result.current.activeTabId).toBe(tabId);
+    expect(result.current.tabs[0].path).toBe('/recent');
+    expect(result.current.tabs[0].historyIndex).toBe(0);
+  });
 });

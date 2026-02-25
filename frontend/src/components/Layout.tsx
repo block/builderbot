@@ -28,7 +28,7 @@ export default function Layout() {
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
-  const { tabs, activeTabId, openTab, closeTab, activateTab } = useTabs();
+  const { tabs, activeTabId, openTab, closeTab, activateTab, canGoBack, canGoForward, goBack, goForward } = useTabs();
   const [projects, setProjects] = useState<APIProject[]>([]);
   const [reviewCount, setReviewCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
@@ -146,13 +146,17 @@ export default function Layout() {
     window.addEventListener('menu-new-tab', handleNewTab);
     window.addEventListener('menu-prev-tab', handlePrevTab);
     window.addEventListener('menu-next-tab', handleNextTab);
+    window.addEventListener('menu-go-back', goBack);
+    window.addEventListener('menu-go-forward', goForward);
     return () => {
       window.removeEventListener('menu-close-tab', handleCloseTab);
       window.removeEventListener('menu-new-tab', handleNewTab);
       window.removeEventListener('menu-prev-tab', handlePrevTab);
       window.removeEventListener('menu-next-tab', handleNextTab);
+      window.removeEventListener('menu-go-back', goBack);
+      window.removeEventListener('menu-go-forward', goForward);
     };
-  }, [activeTabId, closeTab, openTab, activateTab, tabs, workspaces, standaloneProjects]);
+  }, [activeTabId, closeTab, openTab, activateTab, tabs, workspaces, standaloneProjects, goBack, goForward]);
 
   // Listen for find bar toggle (Tauri menu event only — in browser, native Cmd+F works)
   useEffect(() => {
@@ -165,6 +169,23 @@ export default function Layout() {
       window.removeEventListener('menu-find', handleMenuFind);
     };
   }, []);
+
+  // Keyboard shortcuts for back/forward in browser mode
+  useEffect(() => {
+    if (isDesktopApp) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (!e.metaKey && !e.ctrlKey) return;
+      if (e.key === '[' && canGoBack) {
+        e.preventDefault();
+        goBack();
+      } else if (e.key === ']' && canGoForward) {
+        e.preventDefault();
+        goForward();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [goBack, goForward, canGoBack, canGoForward]);
 
   // Detect project-mode view: /project/:qn or /file/:qn/*
   // QN may contain slashes (e.g. "Development/birdseye"), so match against known projects
@@ -318,6 +339,8 @@ export default function Layout() {
         className="topbar"
         {...(isDesktopApp ? { 'data-tauri-drag-region': '' } : {})}
       >
+        <button className="topbar-nav" disabled={!canGoBack} onClick={goBack} aria-label="Go back">‹</button>
+        <button className="topbar-nav" disabled={!canGoForward} onClick={goForward} aria-label="Go forward">›</button>
         <Link to="/" className="topbar-logo">
           Penpal
         </Link>

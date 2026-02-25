@@ -146,6 +146,18 @@ a:hover { text-decoration: underline; }
   color: var(--text-primary);
 }
 .topbar-logo:hover { color: var(--text-primary); text-decoration: none; }
+.topbar-nav {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.3em;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+  line-height: 1;
+}
+.topbar-nav:hover:not(:disabled) { background: var(--bg-surface-hover); }
+.topbar-nav:disabled { opacity: 0.3; cursor: default; }
 .topbar-search {
   flex: 1;
   max-width: 400px;

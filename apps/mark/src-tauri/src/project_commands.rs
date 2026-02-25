@@ -27,6 +27,13 @@ pub(crate) async fn add_project_repo_impl(
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| branches::infer_branch_name(&project.name));
+    // Validate that the subpath exists as a directory in the repo before
+    // creating anything. This prevents repos being added with invalid
+    // subpaths that would fail later during worktree setup.
+    if let Some(sub) = &subpath {
+        git::validate_subpath_in_repo(&github_repo, sub).map_err(|e| e.to_string())?;
+    }
+
     let repo_subpath = if project.location == store::ProjectLocation::Remote {
         let requested = subpath
             .as_deref()

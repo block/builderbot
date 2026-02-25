@@ -1906,6 +1906,92 @@ pub async fn update_pull_request(
 }
 
 // =============================================================================
+// Subpath Validation
+// =============================================================================
+
+/// Validate that a subpath exists as a directory in a GitHub repository.
+///
+/// Uses the GitHub contents API to check that the path exists and is a
+/// directory (the API returns an array for directories). Returns an error
+/// if the path does not exist or points to a file rather than a directory.
+pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), GitError> {
+    let trimmed = subpath.trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let endpoint = format!("repos/{github_repo}/contents/{trimmed}");
+    match run_gh_global(&["api", &endpoint]) {
+        Ok(body) => {
+            // The contents API returns a JSON array for directories and a JSON
+            // object for files. A quick heuristic: arrays start with '['.
+            let body = body.trim_start();
+            if body.starts_with('[') {
+                Ok(())
+            } else {
+                Err(GitError::CommandFailed("Invalid path in repo".to_string()))
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Not Found") || msg.contains("HTTP 404") {
+                Err(GitError::CommandFailed("Invalid path in repo".to_string()))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// List directories at a given path in a GitHub repository.
+/// Returns a list of directory names (not files) at the specified path.
+/// If `path` is empty, lists directories at the repository root.
+pub fn list_repo_directories(github_repo: &str, path: &str) -> Result<Vec<String>, GitError> {
+    let trimmed = path.trim_matches('/');
+    let endpoint = if trimmed.is_empty() {
+        format!("repos/{github_repo}/contents")
+    } else {
+        format!("repos/{github_repo}/contents/{trimmed}")
+    };
+
+    match run_gh_global(&["api", &endpoint]) {
+        Ok(body) => {
+            let body = body.trim_start();
+            if !body.starts_with('[') {
+                // Path points to a file, not a directory – no subdirectories to list
+                return Ok(vec![]);
+            }
+
+            #[derive(Deserialize)]
+            struct Entry {
+                name: String,
+                #[serde(rename = "type")]
+                entry_type: String,
+            }
+
+            let entries: Vec<Entry> =
+                serde_json::from_str(body).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+            let dirs: Vec<String> = entries
+                .into_iter()
+                .filter(|e| e.entry_type == "dir")
+                .map(|e| e.name)
+                .collect();
+
+            Ok(dirs)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Not Found") || msg.contains("HTTP 404") {
+                Ok(vec![])
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Monorepo Detection
 // =============================================================================
 

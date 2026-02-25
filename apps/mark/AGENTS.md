@@ -2,7 +2,8 @@
 
 ## Commands
 
-use `just check-all` before you finalize any commit.
+rely on git hooks for commit/push checks; don't run `just ci` before every commit.
+run `just ci` manually only when you want early pre-push feedback.
 generally don't run the dev server unless asked, usually it is run from a UI integration.
 
 ## Backend

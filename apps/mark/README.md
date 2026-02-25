@@ -46,6 +46,21 @@ Each invocation opens a new window, so you can have multiple repos open simultan
 
 If you installed manually (not via the install script), copy `bin/mark` to somewhere in your PATH (e.g., `/usr/local/bin`).
 
+### AI Agent Setup (ACP)
+
+Mark discovers ACP providers by CLI command name. For Claude Code ACP:
+
+```bash
+npm install -g @zed-industries/claude-agent-acp
+```
+
+This package installs the `claude-agent-acp` executable. Mark supports both:
+
+- `claude-agent-acp` (current)
+- `claude-code-acp` (legacy fallback)
+
+After installing, open Mark and run **Settings -> Doctor** to verify the Claude check is detected as installed.
+
 ## Development
 
 ### Prerequisites

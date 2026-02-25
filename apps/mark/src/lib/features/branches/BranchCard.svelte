@@ -129,31 +129,36 @@
   }
 
   // =========================================================================
-  // PR button state
+  // PR button state — derived directly from the global prStateStore
+  //
+  // This ensures the spinner/state is always in sync with the store,
+  // even if the component was unmounted while App.svelte's global
+  // session-status-changed handler updated the store.
   // =========================================================================
-  let prStateOverride = $state<PrState | null>(null);
-  let prState = $derived<PrState>(prStateOverride ?? (branch.prNumber ? 'created' : 'idle'));
-  let prSessionId = $state<string | null>(null);
-  let prError = $state<string | null>(null);
-  let prUrl = $state<string | null>(null);
+  let storePrState = $derived(prStateStore.getPrState(branch.id));
+  let prState = $derived<PrState>(
+    // If PR already exists (has prNumber) but store still says 'creating',
+    // treat it as 'created' (stale store entry)
+    storePrState
+      ? branch.prNumber && storePrState.state === 'creating'
+        ? 'created'
+        : storePrState.state
+      : branch.prNumber
+        ? 'created'
+        : 'idle'
+  );
+  let prSessionId = $derived(storePrState?.sessionId ?? null);
+  let prError = $derived(storePrState?.error ?? null);
+  let prUrl = $derived(storePrState?.url ?? null);
+  // Local cache for PR URLs fetched lazily via getPrUrl (not stored in prStateStore)
+  let cachedPrUrl = $state<string | null>(null);
   let showPrErrorDialog = $state(false);
 
-  // Initialize PR state from store on mount
-  // Run only once per branch by tracking the branch ID
+  // Clean up stale 'creating' entries when branch already has a PR number
   $effect(() => {
-    const currentBranchId = branch.id;
-    const storedState = prStateStore.getPrState(currentBranchId);
-    if (storedState) {
-      // If PR already exists (has prNumber), clear any stale creating state
-      if (branch.prNumber && storedState.state === 'creating') {
-        prStateStore.clearPrState(currentBranchId);
-        prStateOverride = 'created';
-        return;
-      }
-      prStateOverride = storedState.state;
-      prSessionId = storedState.sessionId;
-      prError = storedState.error;
-      prUrl = storedState.url;
+    const stored = prStateStore.getPrState(branch.id);
+    if (stored && branch.prNumber && stored.state === 'creating') {
+      prStateStore.clearPrState(branch.id);
     }
   });
 
@@ -394,9 +399,8 @@
         }
       } catch {
         // Session may have been deleted — clear the creating state
-        prStateOverride = 'error';
-        prError = 'Lost track of PR creation session.';
-        prSessionId = null;
+        prStateStore.setPrError(branch.id, 'Lost track of PR creation session.');
+        prStateStore.clearSessionTracking(branch.id);
       }
     }, 5_000);
 
@@ -1004,9 +1008,10 @@
   async function handleCreatePr(draft = false) {
     if (prState === 'creating') return;
 
-    prStateOverride = 'creating';
-    prError = null;
-    prUrl = null;
+    // Set creating state in the store immediately for instant UI feedback.
+    // We use a temporary placeholder session ID; it will be replaced once
+    // the real session is created.
+    prStateStore.setPrCreating(branch.id, '__pending__');
 
     try {
       // Pick the best available agent for this branch's location (local vs remote)
@@ -1014,32 +1019,27 @@
       const agents = remote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.createPr(branch.id, provider, draft);
-      prSessionId = sessionId;
-      prStateOverride = 'creating';
       // Register session in the unified registry
       sessionRegistry.register(sessionId, branch.projectId, 'pr', branch.id);
-      // Store the creating state globally
+      // Store the creating state globally (now with real session ID)
       prStateStore.setPrCreating(branch.id, sessionId);
       // Track the running session in the project state store
       projectStateStore.addRunningSession(branch.projectId, sessionId);
       // The session-status-changed listener will handle completion
     } catch (e) {
-      prStateOverride = 'error';
-      prError = e instanceof Error ? e.message : String(e);
       prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
     }
   }
 
   async function handlePrSessionComplete(status: string) {
-    if (status === 'completed' && prSessionId) {
+    const sid = prSessionId;
+    if (status === 'completed' && sid) {
       try {
         // Fetch session messages to find the PR URL
-        const messages = await commands.getSessionMessages(prSessionId);
+        const messages = await commands.getSessionMessages(sid);
         const foundUrl = extractPrUrl(messages);
 
         if (foundUrl) {
-          prUrl = foundUrl;
-          prStateOverride = 'created';
           const prNumber = extractPrNumber(foundUrl);
           if (prNumber) {
             // Save PR number to storage
@@ -1053,28 +1053,22 @@
           prStateStore.setPrCreated(branch.id, foundUrl);
         } else {
           // Session completed but we couldn't find a PR URL
-          prStateOverride = 'error';
-          prError = 'PR session completed but no PR URL was found in the output.';
           prStateStore.setPrError(
             branch.id,
             'PR session completed but no PR URL was found in the output.'
           );
         }
       } catch (e) {
-        prStateOverride = 'error';
-        prError = e instanceof Error ? e.message : String(e);
         prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
       }
     } else {
       // Session errored or was cancelled
-      prStateOverride = 'error';
-      prError = `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
       prStateStore.setPrError(
         branch.id,
         `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
       );
     }
-    prSessionId = null;
+    prStateStore.clearSessionTracking(branch.id);
   }
 
   // =========================================================================
@@ -1187,14 +1181,15 @@
       handlePush();
     } else if (prState === 'created') {
       // View PR - open in browser
-      if (prUrl) {
-        commands.openUrl(prUrl);
+      const url = prUrl ?? cachedPrUrl;
+      if (url) {
+        commands.openUrl(url);
       } else if (branch.prNumber) {
         commands
           .getPrUrl(branch.id, branch.prNumber)
-          .then((url) => {
-            prUrl = url;
-            commands.openUrl(url);
+          .then((fetchedUrl) => {
+            cachedPrUrl = fetchedUrl;
+            commands.openUrl(fetchedUrl);
           })
           .catch((e) => console.error('Failed to get PR URL:', e));
       }
@@ -1217,8 +1212,6 @@
 
   function handlePrErrorClose() {
     showPrErrorDialog = false;
-    prStateOverride = null;
-    prError = null;
     prStateStore.clearPrState(branch.id);
   }
 

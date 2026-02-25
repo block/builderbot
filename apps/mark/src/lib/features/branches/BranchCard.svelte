@@ -62,6 +62,7 @@
     runBranchAction,
     getRunningBranchActions,
     clearActionExecution,
+    stopBranchAction,
     type ActionStatusEvent,
   } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
@@ -161,6 +162,18 @@
   }
   function handleOptionUp(e: KeyboardEvent) {
     if (e.key === 'Alt') optionHeld = false;
+  }
+
+  // =========================================================================
+  // Alt-key tracking (for quick stop action)
+  // =========================================================================
+  let altHeld = $state(false);
+
+  function handleAltDown(e: KeyboardEvent) {
+    if (e.key === 'Alt') altHeld = true;
+  }
+  function handleAltUp(e: KeyboardEvent) {
+    if (e.key === 'Alt') altHeld = false;
   }
 
   // =========================================================================
@@ -277,6 +290,7 @@
   };
   let runningActions = $state<RunningAction[]>([]);
   let actionOutputModal = $state<{ executionId: string; actionName: string } | null>(null);
+  let stoppingExecutions = $state<Set<string>>(new Set());
 
   // Commit diff modal (opened by clicking a commit in the timeline)
   let commitDiffSha = $state<string | null>(null);
@@ -370,6 +384,15 @@
           runningActions[existingIndex].status = payload.status as any;
           runningActions[existingIndex].exitCode = payload.exitCode;
           runningActions[existingIndex].completedAt = payload.completedAt;
+
+          // Clean up stopping state when action reaches terminal state
+          if (
+            payload.status === 'stopped' ||
+            payload.status === 'completed' ||
+            payload.status === 'failed'
+          ) {
+            stoppingExecutions.delete(payload.executionId);
+          }
 
           // Auto-remove terminal states after a delay
           const action = runningActions[existingIndex];
@@ -576,6 +599,10 @@
     window.addEventListener('keydown', handleOptionDown);
     window.addEventListener('keyup', handleOptionUp);
 
+    // Alt-key tracking for quick stop action
+    window.addEventListener('keydown', handleAltDown);
+    window.addEventListener('keyup', handleAltUp);
+
     // Window focus tracking for smart polling
     handleFocus = () => {
       isWindowFocused = true;
@@ -618,6 +645,9 @@
     // Clean up option-key listeners
     window.removeEventListener('keydown', handleOptionDown);
     window.removeEventListener('keyup', handleOptionUp);
+    // Clean up alt-key listeners
+    window.removeEventListener('keydown', handleAltDown);
+    window.removeEventListener('keyup', handleAltUp);
   });
   async function loadTimeline() {
     // Only show the loading spinner on the initial load. Subsequent refreshes
@@ -838,6 +868,21 @@
     } catch (e) {
       console.error('Failed to run action:', e);
       notifyError(`Failed to run action "${action.name}"`, e);
+    }
+  }
+
+  async function handleStopAction(executionId: string, actionName: string) {
+    if (stoppingExecutions.has(executionId)) return;
+
+    stoppingExecutions.add(executionId);
+    try {
+      await stopBranchAction(executionId);
+      // Backend will emit 'stopped' status event
+    } catch (e) {
+      console.error(`Failed to stop action ${actionName}:`, e);
+      // Remove from stopping set on error so user can retry
+      stoppingExecutions.delete(executionId);
+      notifyError(`Failed to stop action "${actionName}"`, e);
     }
   }
 
@@ -1512,6 +1557,9 @@
       <div class="header-actions">
         <!-- Running actions (excluding primary action) -->
         {#each secondaryRunningActions as execution (execution.executionId)}
+          {@const isRunning = execution.status === 'running'}
+          {@const isStopping = stoppingExecutions.has(execution.executionId)}
+          {@const showStopIcon = altHeld && isRunning && !isStopping}
           <div
             class="running-action-container"
             class:fading={execution.fading}
@@ -1519,12 +1567,36 @@
           >
             <button
               class="running-action-button"
+              class:running={isRunning}
+              class:stopping={isStopping}
               class:completed={execution.status === 'completed'}
               class:failed={execution.status === 'failed'}
-              onclick={() => handleShowActionOutput(execution)}
-              title="View output"
+              class:show-stop={showStopIcon}
+              onclick={() => {
+                if (isStopping) return;
+                if (isRunning && altHeld) {
+                  handleStopAction(execution.executionId, execution.actionName);
+                } else {
+                  handleShowActionOutput(execution);
+                }
+              }}
+              title={isStopping
+                ? 'Stopping…'
+                : showStopIcon
+                  ? `Stop ${execution.actionName}`
+                  : isRunning
+                    ? `View output for ${execution.actionName}`
+                    : execution.status === 'completed'
+                      ? `${execution.actionName} completed`
+                      : execution.status === 'failed'
+                        ? `${execution.actionName} failed`
+                        : execution.actionName}
             >
-              {#if execution.status === 'running'}
+              {#if isStopping}
+                <Spinner size={12} />
+              {:else if showStopIcon}
+                <StopCircle size={12} />
+              {:else if isRunning}
                 <Spinner size={12} />
               {:else if execution.status === 'completed'}
                 <CheckCircle size={12} />
@@ -1539,6 +1611,10 @@
         {/each}
         <!-- Primary run action button -->
         {#if primaryRunAction && branch.branchType === 'local'}
+          {@const execution = primaryActionExecution}
+          {@const isRunning = execution?.status === 'running'}
+          {@const isStopping = execution && stoppingExecutions.has(execution.executionId)}
+          {@const showStopIcon = altHeld && isRunning && !isStopping}
           <div
             class="primary-action-container"
             in:slide={{ duration: 300, axis: 'x' }}
@@ -1546,20 +1622,42 @@
           >
             <button
               class="primary-action-button"
-              class:running={primaryActionExecution?.status === 'running'}
-              class:completed={primaryActionExecution?.status === 'completed'}
-              class:failed={primaryActionExecution?.status === 'failed'}
-              onclick={() =>
-                primaryActionExecution?.status === 'running'
-                  ? handleShowActionOutput(primaryActionExecution)
-                  : handleRunAction(primaryRunAction)}
-              title={primaryRunAction.name}
+              class:running={isRunning}
+              class:stopping={isStopping}
+              class:completed={execution?.status === 'completed'}
+              class:failed={execution?.status === 'failed'}
+              class:show-stop={showStopIcon}
+              onclick={() => {
+                if (isStopping) return;
+                if (isRunning && altHeld && execution) {
+                  handleStopAction(execution.executionId, primaryRunAction.name);
+                } else if (execution) {
+                  handleShowActionOutput(execution);
+                } else {
+                  handleRunAction(primaryRunAction);
+                }
+              }}
+              title={isStopping
+                ? 'Stopping…'
+                : showStopIcon
+                  ? `Stop ${primaryRunAction.name}`
+                  : isRunning
+                    ? `View output for ${primaryRunAction.name}`
+                    : execution?.status === 'completed'
+                      ? `${primaryRunAction.name} completed`
+                      : execution?.status === 'failed'
+                        ? `${primaryRunAction.name} failed`
+                        : primaryRunAction.name}
             >
-              {#if primaryActionExecution?.status === 'running'}
+              {#if isStopping}
                 <Spinner size={14} />
-              {:else if primaryActionExecution?.status === 'completed'}
+              {:else if showStopIcon}
+                <StopCircle size={14} />
+              {:else if isRunning}
+                <Spinner size={14} />
+              {:else if execution?.status === 'completed'}
                 <CheckCircle size={14} />
-              {:else if primaryActionExecution?.status === 'failed'}
+              {:else if execution?.status === 'failed'}
                 <AlertCircle size={14} />
               {:else}
                 <Play size={14} />
@@ -2143,6 +2241,19 @@
     color: var(--ui-danger);
   }
 
+  .primary-action-button.stopping {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .primary-action-button.stopping:hover {
+    background: var(--bg-elevated);
+  }
+
+  .primary-action-button.show-stop {
+    color: var(--ui-danger);
+  }
+
   .primary-action-button :global(svg) {
     flex-shrink: 0;
     width: 14px;
@@ -2193,6 +2304,21 @@
   }
 
   .running-action-button.failed {
+    border-color: var(--ui-danger);
+    color: var(--ui-danger);
+  }
+
+  .running-action-button.stopping {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .running-action-button.stopping:hover {
+    background: var(--bg-elevated);
+    border-color: var(--border-muted);
+  }
+
+  .running-action-button.show-stop {
     border-color: var(--ui-danger);
     color: var(--ui-danger);
   }

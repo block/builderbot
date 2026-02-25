@@ -94,9 +94,10 @@ struct ProjectToolsHandler {
     /// Cancellation token for the parent project session.
     /// Signalled when the user cancels the project session.
     cancel_token: CancellationToken,
-    /// Whether the parent project session is running in a remote workspace.
-    /// Controls whether note content is inlined or referenced by file path.
-    is_remote: bool,
+    /// Optional workspace name for the parent project session.
+    /// When `Some`, notes are written to temp files inside the remote workspace
+    /// via `ws_exec`. When `None`, notes are written to local temp files.
+    workspace_name: Option<String>,
 }
 
 impl ProjectToolsHandler {
@@ -109,7 +110,7 @@ impl ProjectToolsHandler {
         action_executor: Option<Arc<ActionExecutor>>,
         action_registry: Option<Arc<ActionRegistry>>,
         cancel_token: CancellationToken,
-        is_remote: bool,
+        workspace_name: Option<String>,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -120,7 +121,7 @@ impl ProjectToolsHandler {
             action_executor,
             action_registry,
             cancel_token,
-            is_remote,
+            workspace_name,
         }
     }
 }
@@ -491,7 +492,7 @@ impl ProjectToolsHandler {
                                             &note.id,
                                             &note.title,
                                             &note.content,
-                                            self.is_remote,
+                                            self.workspace_name.as_deref(),
                                         )
                                     }
                                     _ => None,
@@ -727,7 +728,7 @@ pub async fn start_project_mcp_server(
     action_executor: Option<Arc<ActionExecutor>>,
     action_registry: Option<Arc<ActionRegistry>>,
     cancel_token: CancellationToken,
-    is_remote: bool,
+    workspace_name: Option<String>,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -745,7 +746,7 @@ pub async fn start_project_mcp_server(
         action_executor,
         action_registry,
         cancel_token,
-        is_remote,
+        workspace_name,
     );
     log::info!(
         "[project_mcp] HTTP server bound on port {port} for project {}",

@@ -16,6 +16,7 @@
   import { X, ArrowLeft } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Spinner from '../../shared/Spinner.svelte';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
   import { DiffViewer } from '@builderbot/diff-viewer/components';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
@@ -285,18 +286,6 @@
       getCurrentWindow().startDragging();
     }
   }
-
-  // ==========================================================================
-  // Derived title bar display
-  // ==========================================================================
-
-  let repoDisplay = $derived(
-    githubRepo
-      ? subpath
-        ? `${githubRepo} (${subpath})`
-        : githubRepo
-      : null
-  );
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -315,8 +304,8 @@
         {#if projectName}
           <span class="project-name">{projectName}</span>
         {/if}
-        {#if repoDisplay}
-          <span class="repo-display">{repoDisplay}</span>
+        {#if githubRepo}
+          <RepoLabel {githubRepo} {subpath} />
         {/if}
       </div>
       <div class="drag-spacer"></div>
@@ -436,7 +425,6 @@
     display: flex;
     align-items: stretch;
     justify-content: center;
-    padding: 40px 0 0 0;
   }
 
   .diff-modal {
@@ -487,10 +475,6 @@
   .project-name {
     color: var(--text-primary);
     font-weight: 500;
-  }
-
-  .repo-display {
-    color: var(--text-muted);
   }
 
   .drag-spacer {

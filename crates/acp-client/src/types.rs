@@ -213,10 +213,16 @@ fn find_via_login_shell(cmd: &str) -> Option<PathBuf> {
 /// Map an agent ID to the `--command` value for `blox acp`.
 ///
 /// Returns `None` if the agent uses the workspace default (no flag needed).
+///
+/// When the agent has `command_aliases`, we prefer the first alias for the
+/// remote command because Blox workspaces may still have the older binary
+/// name installed (e.g. `claude-code-acp` rather than `claude-agent-acp`).
 pub(crate) fn blox_acp_command(agent_id: &str) -> Option<String> {
     KNOWN_AGENTS.iter().find(|a| a.id == agent_id).map(|a| {
-        // Build "command,arg1,arg2,..." from the command name and acp_args.
-        let mut parts = vec![a.command];
+        // Prefer the first alias for remote — remote environments may not
+        // have the latest binary name yet.
+        let cmd = a.command_aliases.first().copied().unwrap_or(a.command);
+        let mut parts = vec![cmd];
         parts.extend(a.acp_args.iter().copied());
         parts.join(",")
     })

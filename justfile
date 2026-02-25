@@ -21,7 +21,7 @@ ensure-deps:
 
 # Build production desktop app
 build: ensure-deps build-sidecar
-    cd frontend && npm install && VITE_BASE=/ npm run build && npm run tauri:build
+    cd frontend && npm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 npm run build && npm run tauri:build
 
 # Development mode: full desktop app with Vite HMR
 dev: build-sidecar

@@ -154,30 +154,47 @@ export default function FilePage() {
     }
   }, [project, path]);
 
-  // Fetch agent status
+  // Start polling for agent status updates
+  const startAgentPolling = useCallback(() => {
+    if (agentPollRef.current) return;
+    agentPollRef.current = setInterval(async () => {
+      if (!project) return;
+      try {
+        const s = await api.getAgentStatus(project);
+        setAgentStatus(s);
+        if (!s.running && agentPollRef.current) {
+          clearInterval(agentPollRef.current);
+          agentPollRef.current = null;
+        }
+      } catch {
+        // ignore
+      }
+    }, 5000);
+  }, [project]);
+
+  // Fetch agent status and auto-start if needed
   const fetchAgentStatus = useCallback(async () => {
     if (!project) return;
     try {
       const status = await api.getAgentStatus(project);
       setAgentStatus(status);
-      if (status.running && !agentPollRef.current) {
-        agentPollRef.current = setInterval(async () => {
-          try {
-            const s = await api.getAgentStatus(project);
-            setAgentStatus(s);
-            if (!s.running && agentPollRef.current) {
-              clearInterval(agentPollRef.current);
-              agentPollRef.current = null;
-            }
-          } catch {
-            // ignore
-          }
-        }, 5000);
+      if (status.needsAgent && !status.running) {
+        // Auto-start, then fetch updated status to show the running dot
+        try {
+          await api.startAgent(project);
+          const updated = await api.getAgentStatus(project);
+          setAgentStatus(updated);
+          if (updated.running) startAgentPolling();
+        } catch {
+          // ignore start failure
+        }
+        return;
       }
+      if (status.running) startAgentPolling();
     } catch {
       // ignore
     }
-  }, [project]);
+  }, [project, startAgentPolling]);
 
   // Fetch file metadata
   useEffect(() => {
@@ -243,6 +260,10 @@ export default function FilePage() {
       },
       [project, fetchThreads, fetchContent, fetchAgentStatus],
     ),
+    useCallback(() => {
+      fetchAgentStatus();
+      fetchThreads();
+    }, [fetchAgentStatus, fetchThreads]),
   );
 
   const handleComment = useCallback((anchor: Anchor, selectedText: string) => {

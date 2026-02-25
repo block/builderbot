@@ -2,9 +2,11 @@ import { useEffect, useRef } from 'react';
 import { API_BASE } from '../api';
 import type { SSEEvent } from '../types';
 
-export function useSSE(onEvent: (event: SSEEvent) => void) {
+export function useSSE(onEvent: (event: SSEEvent) => void, onReconnect?: () => void) {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
+  const onReconnectRef = useRef(onReconnect);
+  onReconnectRef.current = onReconnect;
 
   useEffect(() => {
     let es: EventSource | null = null;
@@ -12,6 +14,10 @@ export function useSSE(onEvent: (event: SSEEvent) => void) {
 
     function connect() {
       es = new EventSource(`${API_BASE}/events`);
+
+      es.onopen = () => {
+        onReconnectRef.current?.();
+      };
 
       es.addEventListener('change', (e) => {
         try {

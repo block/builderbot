@@ -4,7 +4,15 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+
+	"github.com/loganj/penpal/internal/agents"
 )
+
+// agentStatusResponse wraps AgentStatus with server-level fields.
+type agentStatusResponse struct {
+	*agents.AgentStatus
+	NeedsAgent bool `json:"needsAgent,omitempty"`
+}
 
 // handleAgentStatus handles GET /api/agents?project=X.
 func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
@@ -14,27 +22,24 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.agents == nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"running": false,
-			"project": projectName,
-		})
-		return
+	var status *agents.AgentStatus
+	if s.agents != nil {
+		status = s.agents.Status(projectName)
+	}
+	if status == nil {
+		status = &agents.AgentStatus{
+			Project: projectName,
+			Running: false,
+		}
 	}
 
-	status := s.agents.Status(projectName)
-	if status == nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"running": false,
-			"project": projectName,
-		})
-		return
+	resp := agentStatusResponse{AgentStatus: status}
+	if !status.Running && s.comments != nil && s.comments.HasPendingHumanComments(projectName) {
+		resp.NeedsAgent = true
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	json.NewEncoder(w).Encode(resp)
 }
 
 // handleAgentStart handles POST /api/agents/start?project=X.

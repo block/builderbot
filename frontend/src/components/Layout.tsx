@@ -91,6 +91,10 @@ export default function Layout() {
       },
       [debouncedRefreshProjects, debouncedRefreshReview],
     ),
+    useCallback(() => {
+      refreshProjects();
+      refreshReviewCount();
+    }, [refreshProjects, refreshReviewCount]),
   );
 
   // Close sidebar menu on outside click

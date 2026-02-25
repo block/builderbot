@@ -6,6 +6,7 @@ class MockEventSource {
   static instances: MockEventSource[] = [];
   url: string;
   listeners: Record<string, ((e: { data: string }) => void)[]> = {};
+  onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   closed = false;
 
@@ -25,6 +26,10 @@ class MockEventSource {
 
   emit(type: string, data: string) {
     this.listeners[type]?.forEach((fn) => fn({ data }));
+  }
+
+  simulateOpen() {
+    this.onopen?.();
   }
 }
 
@@ -72,5 +77,59 @@ describe('useSSE', () => {
     });
 
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('calls onReconnect when connection opens', () => {
+    const handler = vi.fn();
+    const onReconnect = vi.fn();
+    renderHook(() => useSSE(handler, onReconnect));
+
+    act(() => {
+      MockEventSource.instances[0].simulateOpen();
+    });
+
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls onReconnect again after reconnect', () => {
+    vi.useFakeTimers();
+    const handler = vi.fn();
+    const onReconnect = vi.fn();
+    renderHook(() => useSSE(handler, onReconnect));
+
+    // First open
+    act(() => {
+      MockEventSource.instances[0].simulateOpen();
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+
+    // Simulate error → reconnect
+    act(() => {
+      MockEventSource.instances[0].onerror?.();
+    });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+
+    // Second connection should have been created
+    expect(MockEventSource.instances).toHaveLength(2);
+
+    // Simulate second open
+    act(() => {
+      MockEventSource.instances[1].simulateOpen();
+    });
+    expect(onReconnect).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+  });
+
+  it('does not error when onReconnect is not provided', () => {
+    const handler = vi.fn();
+    renderHook(() => useSSE(handler));
+
+    // Should not throw
+    act(() => {
+      MockEventSource.instances[0].simulateOpen();
+    });
   });
 });

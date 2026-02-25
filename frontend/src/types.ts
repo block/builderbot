@@ -151,6 +151,7 @@ export interface AgentStatus {
   contextPercent: number;
   totalCostUSD: number;
   numTurns: number;
+  needsAgent?: boolean;
 }
 
 export interface PublishState {

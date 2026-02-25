@@ -2,9 +2,14 @@
  * Global PR creation state store
  * Persists PR creation state across navigation/component remounting
  *
- * Note: The Map is wrapped in $state, and direct mutations (.set(), .delete())
- * trigger reactivity in Svelte 5. Cleanup is performed to prevent memory leaks
- * by removing stale states when branches are deleted or PRs are completed.
+ * Note: The Map is wrapped in $state, but $state(Map) does not provide
+ * fine-grained reactivity for .get()/.set() calls. A version counter is
+ * used so that readers (via getPrState / getSessionId) establish a reactive
+ * dependency and re-evaluate when mutations bump the counter. This mirrors
+ * the pattern used in projectState.svelte.ts.
+ *
+ * Cleanup is performed to prevent memory leaks by removing stale states
+ * when branches are deleted or PRs are completed.
  *
  * Session lookups are now delegated to the unified sessionRegistry
  */
@@ -28,7 +33,16 @@ const CLEANUP_THRESHOLD = 0.8; // Run cleanup when store is 80% full
 class PrStateStore {
   private states = $state<Map<string, BranchPrState>>(new Map());
 
+  // Track version for manual reactivity triggering.
+  // $state(Map) does not provide fine-grained reactivity for .get()/.set(),
+  // so readers must access this counter to establish a reactive dependency
+  // (same pattern used by projectState store).
+  private version = $state(0);
+
   getPrState(branchId: string): BranchPrState | null {
+    // Access version to establish a reactive dependency so $derived callers
+    // re-evaluate when any mutation bumps the counter.
+    this.version;
     return this.states.get(branchId) ?? null;
   }
 
@@ -44,6 +58,7 @@ class PrStateStore {
       url: null,
       timestamp: Date.now(),
     });
+    this.version++;
   }
 
   setPrCreated(branchId: string, url: string | null = null): void {
@@ -57,6 +72,7 @@ class PrStateStore {
       url,
       timestamp: Date.now(),
     });
+    this.version++;
   }
 
   setPrError(branchId: string, error: string): void {
@@ -71,10 +87,12 @@ class PrStateStore {
       url: null,
       timestamp: Date.now(),
     });
+    this.version++;
   }
 
   clearPrState(branchId: string): void {
     this.states.delete(branchId);
+    this.version++;
   }
 
   /**
@@ -106,6 +124,7 @@ class PrStateStore {
   }
 
   getSessionId(branchId: string): string | null {
+    this.version;
     return this.states.get(branchId)?.sessionId ?? null;
   }
 
@@ -138,9 +157,10 @@ class PrStateStore {
   clearSessionTracking(branchId: string): void {
     const state = this.states.get(branchId);
     if (state?.sessionId) {
-      // Clear the session ID reference, but leave the final state (created/error)
-      // This maintains the PR outcome while removing the transient session reference
-      state.sessionId = null;
+      // Replace the entry to maintain immutability and trigger reactivity.
+      // Directly mutating state.sessionId would not be tracked.
+      this.states.set(branchId, { ...state, sessionId: null });
+      this.version++;
     }
   }
 }

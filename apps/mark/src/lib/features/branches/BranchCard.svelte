@@ -217,6 +217,15 @@
   let error = $state<string | null>(null);
   let showBranchDiff = $state(false);
   let loadedTimelineKey = $state<string | null>(null);
+  type TimelineReviewDetails = {
+    commitSha: string;
+    scope: 'branch' | 'commit';
+    comments: number;
+    annotations: number;
+  };
+  let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
+  let reviewDetailsLoadVersion = 0;
+  let reviewDiffTarget = $state<{ commitSha: string; scope: 'branch' | 'commit' } | null>(null);
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
@@ -588,12 +597,61 @@
     }
     error = null;
     try {
-      timeline = await commands.getBranchTimeline(branch.id, { force: !isInitialLoad });
+      const nextTimeline = await commands.getBranchTimeline(branch.id, { force: !isInitialLoad });
+      timeline = nextTimeline;
+      void loadTimelineReviewDetails(nextTimeline.reviews);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
+  }
+
+  async function loadTimelineReviewDetails(reviews: BranchTimelineData['reviews']) {
+    const loadVersion = ++reviewDetailsLoadVersion;
+    if (reviews.length === 0) {
+      timelineReviewDetailsById = {};
+      return;
+    }
+
+    const reviewDetails = await Promise.all(
+      reviews.map(async (review) => {
+        try {
+          const fullReview = await commands.getReview(review.id);
+          if (!fullReview) return null;
+
+          let comments = 0;
+          let annotations = 0;
+          for (const comment of fullReview.comments) {
+            if (comment.commentType === 'information') {
+              annotations += 1;
+            } else {
+              comments += 1;
+            }
+          }
+
+          const details: TimelineReviewDetails = {
+            commitSha: fullReview.commitSha,
+            scope: fullReview.scope,
+            comments,
+            annotations,
+          };
+          return { id: review.id, details };
+        } catch (e) {
+          console.error(`Failed to load review details for ${review.id}:`, e);
+          return null;
+        }
+      })
+    );
+
+    if (loadVersion !== reviewDetailsLoadVersion) return;
+
+    const nextDetails: Record<string, TimelineReviewDetails> = {};
+    for (const item of reviewDetails) {
+      if (!item) continue;
+      nextDetails[item.id] = item.details;
+    }
+    timelineReviewDetailsById = nextDetails;
   }
 
   async function loadActions() {
@@ -908,8 +966,27 @@
     openNote = { title, content };
   }
 
-  function handleReviewClick(reviewId: string) {
-    showBranchDiff = true;
+  async function handleReviewClick(reviewId: string) {
+    const cached = timelineReviewDetailsById[reviewId];
+    if (cached) {
+      reviewDiffTarget = { commitSha: cached.commitSha, scope: cached.scope };
+      showBranchDiff = true;
+      return;
+    }
+
+    try {
+      const review = await commands.getReview(reviewId);
+      if (!review) {
+        notifyError('Review not found', 'This review no longer exists.');
+        await loadTimeline();
+        return;
+      }
+      reviewDiffTarget = { commitSha: review.commitSha, scope: review.scope };
+      showBranchDiff = true;
+    } catch (e) {
+      console.error('Failed to open review:', e);
+      notifyError('Failed to open review', e);
+    }
   }
 
   function handleDeleteCommit(sha: string, sessionId?: string) {
@@ -1545,10 +1622,11 @@
         <BranchTimeline
           {timeline}
           {pendingDropNotes}
+          reviewCommentBreakdown={timelineReviewDetailsById}
           onSessionClick={handleTimelineSessionClick}
           onCommitClick={handleCommitClick}
           onNoteClick={handleNoteClick}
-          onReviewClick={(reviewId) => handleReviewClick(reviewId)}
+          onReviewClick={handleReviewClick}
           onDeleteCommit={handleDeleteCommit}
           onDeletePendingCommit={handleDeletePendingCommit}
           onDeleteNote={handleDeleteNote}
@@ -1630,7 +1708,10 @@
                 </button>
                 <button
                   class="pr-btn diff-btn"
-                  onclick={() => (showBranchDiff = true)}
+                  onclick={() => {
+                    reviewDiffTarget = null;
+                    showBranchDiff = true;
+                  }}
                   title="View diff"
                 >
                   <FileDiff size={13} />
@@ -1648,14 +1729,20 @@
 {#if showBranchDiff}
   <DiffModal
     branchId={branch.id}
-    scope="branch"
-    beforeLabel={formatBaseBranch(branch.baseBranch)}
-    afterLabel={branch.branchName}
+    commitSha={reviewDiffTarget?.commitSha}
+    scope={reviewDiffTarget?.scope ?? 'branch'}
+    beforeLabel={reviewDiffTarget?.scope === 'commit'
+      ? 'parent'
+      : formatBaseBranch(branch.baseBranch)}
+    afterLabel={reviewDiffTarget?.commitSha
+      ? reviewDiffTarget.commitSha.slice(0, 7)
+      : branch.branchName}
     {projectName}
     githubRepo={repoLabel?.githubRepo}
     subpath={repoLabel?.subpath}
     onClose={() => {
       showBranchDiff = false;
+      reviewDiffTarget = null;
       loadTimeline();
     }}
   />

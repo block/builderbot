@@ -1929,17 +1929,13 @@ pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), 
             if body.starts_with('[') {
                 Ok(())
             } else {
-                Err(GitError::CommandFailed(format!(
-                    "Subpath '{trimmed}' in {github_repo} is a file, not a directory"
-                )))
+                Err(GitError::CommandFailed("Invalid path in repo".to_string()))
             }
         }
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("Not Found") || msg.contains("HTTP 404") {
-                Err(GitError::CommandFailed(format!(
-                    "Subpath '{trimmed}' does not exist in {github_repo}"
-                )))
+                Err(GitError::CommandFailed("Invalid path in repo".to_string()))
             } else {
                 Err(e)
             }

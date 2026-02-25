@@ -142,8 +142,8 @@
       await commands.validateSubpath(repo, trimmed);
       validationError = null;
       return true;
-    } catch (e) {
-      validationError = typeof e === 'string' ? e : String(e);
+    } catch {
+      validationError = 'Invalid path in repo';
       return false;
     } finally {
       validating = false;

@@ -240,7 +240,8 @@
   // ==========================================================================
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
+    // Command+Left Arrow to go back
+    if (event.key === 'ArrowLeft' && event.metaKey) {
       event.preventDefault();
       event.stopPropagation();
       onClose();
@@ -296,7 +297,7 @@
     <div class="title-bar" onpointerdown={startDrag}>
       <div class="traffic-light-spacer"></div>
       <div class="left-actions">
-        <button class="icon-btn" onclick={onClose} title="Back (Esc)">
+        <button class="icon-btn" onclick={onClose} title="Back (⌘←)">
           <ArrowLeft size={14} />
         </button>
       </div>

@@ -46,6 +46,11 @@ pub struct MessageWriter {
     current_tool_result_msg_id: Mutex<Option<i64>>,
 }
 
+/// Strip backticks from agent-provided tool-call titles.
+fn sanitize_title(title: &str) -> String {
+    title.replace('`', "")
+}
+
 impl MessageWriter {
     pub fn new(session_id: String, store: Arc<Store>) -> Self {
         Self {
@@ -95,16 +100,18 @@ impl MessageWriter {
         self.finalize().await;
         *self.current_tool_result_msg_id.lock().await = None;
 
+        let title = sanitize_title(title);
+
         // Some providers may resend ToolCall for the same ID while streaming.
         // Treat those as updates to the existing row.
         if let Some(&row_id) = self.tool_call_rows.lock().await.get(tool_call_id) {
-            let _ = self.store.update_message_content(row_id, title);
+            let _ = self.store.update_message_content(row_id, &title);
             return;
         }
 
         match self
             .store
-            .add_session_message(&self.session_id, MessageRole::ToolCall, title)
+            .add_session_message(&self.session_id, MessageRole::ToolCall, &title)
         {
             Ok(id) => {
                 self.tool_call_rows
@@ -118,9 +125,10 @@ impl MessageWriter {
 
     /// Update a previously recorded tool call's title.
     pub async fn update_tool_call_title(&self, tool_call_id: &str, title: &str) {
+        let title = sanitize_title(title);
         let rows = self.tool_call_rows.lock().await;
         if let Some(&row_id) = rows.get(tool_call_id) {
-            let _ = self.store.update_message_content(row_id, title);
+            let _ = self.store.update_message_content(row_id, &title);
         }
     }
 

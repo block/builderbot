@@ -540,8 +540,10 @@ fn run_post_completion_hooks(
 
 /// Extract note content from assistant output.
 ///
-/// Primary path: find the first markdown horizontal rule (`---`, `***`, `___`)
-/// on its own line and return everything after it.
+/// Primary path: find the **last** markdown horizontal rule (`---`, `***`, `___`)
+/// on its own line (outside code fences) and return everything after it. We use
+/// the last match because the agent places the note at the very end of its
+/// response — earlier HRs from code examples or echoed instructions are skipped.
 ///
 /// Fallback path: handle model outputs where the rule is accidentally attached
 /// to prior text (for example, `Preamble.---\n# Title`) by accepting inline
@@ -554,11 +556,37 @@ fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
     // Look for --- on its own line (possibly with surrounding whitespace).
     // We match the same patterns markdown parsers treat as thematic breaks:
     // a line containing only ---, ***, or ___ (with optional spaces).
-    for (i, line) in text.lines().enumerate() {
+    //
+    // We scan from the **bottom** so the *last* HR wins. The agent is
+    // instructed to place the note at the very end of its response, so
+    // earlier HRs — from code-fence examples, echoed instructions, or
+    // reasoning — are safely skipped.
+    //
+    // Additionally, we track whether we are inside a fenced code block
+    // (``` or ~~~) and skip any HR that appears inside one. This provides
+    // defense-in-depth against the common case where the agent quotes a
+    // `---` inside a code example.
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Pre-compute which lines are inside a code fence so the reverse scan
+    // can check in O(1).
+    let mut in_fence = vec![false; lines.len()];
+    let mut inside = false;
+    for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            inside = !inside;
+        }
+        in_fence[i] = inside;
+    }
+
+    for i in (0..lines.len()).rev() {
+        if in_fence[i] {
+            continue;
+        }
+        let trimmed = lines[i].trim();
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-            // Everything after this line.
-            let remaining: String = text.lines().skip(i + 1).collect::<Vec<_>>().join("\n");
+            let remaining: String = lines[i + 1..].join("\n");
             let trimmed_remaining = remaining.trim().to_string();
             if !trimmed_remaining.is_empty() {
                 return Some(trimmed_remaining);
@@ -569,11 +597,23 @@ fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
 }
 
 fn extract_note_after_inline_hr(text: &str) -> Option<String> {
+    // Pre-compute a set of byte offsets that fall inside fenced code blocks
+    // so we can skip inline HRs that appear in code examples.
+    let fence_ranges = compute_fence_ranges(text);
+
     let mut best: Option<(usize, String)> = None;
 
     for marker in ["---", "***", "___"] {
         let marker_char = marker.chars().next().unwrap();
         for (idx, _) in text.match_indices(marker) {
+            // Skip markers inside fenced code blocks.
+            if fence_ranges
+                .iter()
+                .any(|(start, end)| idx >= *start && idx < *end)
+            {
+                continue;
+            }
+
             let marker_end = idx + marker.len();
 
             // Ignore markers that are part of longer runs like ----.
@@ -586,14 +626,50 @@ fn extract_note_after_inline_hr(text: &str) -> Option<String> {
                 continue;
             }
 
+            // Keep the *last* (latest) match — the note is at the end.
             match best {
-                Some((best_idx, _)) if idx >= best_idx => {}
+                Some((best_idx, _)) if idx <= best_idx => {}
                 _ => best = Some((idx, remaining.to_string())),
             }
         }
     }
 
     best.map(|(_, content)| content)
+}
+
+/// Return byte-offset ranges `(start, end)` for content inside fenced code
+/// blocks (``` or ~~~). The ranges cover from the character after the opening
+/// fence line's newline to the start of the closing fence line.
+fn compute_fence_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut fence_start: Option<usize> = None;
+
+    for (line_start, line) in line_byte_offsets(text) {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            if fence_start.is_some() {
+                // Closing fence — record the range.
+                ranges.push((fence_start.unwrap(), line_start));
+                fence_start = None;
+            } else {
+                // Opening fence — content starts after this line.
+                let after_line = line_start + line.len() + 1; // +1 for newline
+                fence_start = Some(after_line.min(text.len()));
+            }
+        }
+    }
+    ranges
+}
+
+/// Iterate over `(byte_offset, line_str)` pairs for each line in `text`.
+fn line_byte_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut offset = 0;
+    text.lines().map(move |line| {
+        let start = offset;
+        // +1 accounts for the newline character (or end of string for last line)
+        offset += line.len() + 1;
+        (start, line)
+    })
 }
 
 /// Extract a title (leading `# H1`) from note content.
@@ -1004,6 +1080,44 @@ Second batch:
     fn note_content_inline_hr_without_h1_is_ignored() {
         let text = "Two reasons:--- this session is read-only.";
         assert_eq!(extract_note_content(text), None);
+    }
+
+    #[test]
+    fn note_content_last_hr_wins_over_earlier_hr() {
+        // The agent echoes instructions containing a --- before the real note.
+        let text = "Here is the format:\n---\n# <Title>\n<Body>\n\nNow here is my actual note:\n---\n# Real Title\nReal body.";
+        let content = extract_note_content(text);
+        assert_eq!(content, Some("# Real Title\nReal body.".to_string()));
+    }
+
+    #[test]
+    fn note_content_hr_inside_code_fence_is_skipped() {
+        // A --- inside a fenced code block should not be treated as a note separator.
+        let text = "Here is an example:\n```\n---\n# <Title>\n<Body>\n```\n---\n# Actual Note\nActual body.";
+        let content = extract_note_content(text);
+        assert_eq!(content, Some("# Actual Note\nActual body.".to_string()));
+    }
+
+    #[test]
+    fn note_content_hr_inside_tilde_fence_is_skipped() {
+        let text = "Example:\n~~~\n---\n# Fake\n~~~\n---\n# Real\nBody.";
+        let content = extract_note_content(text);
+        assert_eq!(content, Some("# Real\nBody.".to_string()));
+    }
+
+    #[test]
+    fn note_content_only_hr_is_inside_code_fence() {
+        // If the only --- is inside a code fence, no note should be detected.
+        let text = "Some reasoning:\n```\n---\n# Title\nBody\n```\nDone.";
+        assert_eq!(extract_note_content(text), None);
+    }
+
+    #[test]
+    fn note_content_multiple_hrs_picks_last() {
+        // Multiple standalone HRs — the last one delimits the note.
+        let text = "Section 1\n---\nSection 2\n---\n# Final Note\nFinal body.";
+        let content = extract_note_content(text);
+        assert_eq!(content, Some("# Final Note\nFinal body.".to_string()));
     }
 
     // ── extract_note_title ──────────────────────────────────────────────

@@ -28,8 +28,8 @@ describe('RecentPage', () => {
   it('renders recent files', async () => {
     render(<MemoryRouter><RecentPage /></MemoryRouter>);
     await waitFor(() => {
-      expect(screen.getByText('plan.md')).toBeTruthy();
-      expect(screen.getByText('research.md')).toBeTruthy();
+      expect(screen.getByText('thoughts/plan.md')).toBeTruthy();
+      expect(screen.getByText('thoughts/research.md')).toBeTruthy();
     });
   });
 
@@ -49,9 +49,21 @@ describe('RecentPage', () => {
     });
   });
 
-  it('shows project path', async () => {
+  it('shows project as subtitle when no title', async () => {
     render(<MemoryRouter><RecentPage /></MemoryRouter>);
     await waitFor(() => {
+      expect(screen.getAllByText('ws/proj').length).toBe(2);
+    });
+  });
+
+  it('shows title as primary and project/path as subtitle when title is set', async () => {
+    const { api } = await import('../api');
+    (api.getRecentFiles as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      { name: 'plan.md', title: 'My Plan', path: 'thoughts/plan.md', project: 'ws/proj', age: '1h ago', fileType: 'plan' },
+    ]);
+    render(<MemoryRouter><RecentPage /></MemoryRouter>);
+    await waitFor(() => {
+      expect(screen.getByText('My Plan')).toBeTruthy();
       expect(screen.getByText('ws/proj/thoughts/plan.md')).toBeTruthy();
     });
   });

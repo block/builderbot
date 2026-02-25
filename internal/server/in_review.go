@@ -11,6 +11,7 @@ import (
 // ReviewFileEntry is a single file within a review group.
 type ReviewFileEntry struct {
 	Name          string `json:"name"`
+	Title         string `json:"title,omitempty"`
 	Path          string `json:"path"`
 	Project       string `json:"project"`
 	ProjectPath   string `json:"projectPath"`
@@ -95,11 +96,13 @@ func (s *Server) listAllReviewGroups() []ReviewGroup {
 			fileType := ""
 			age := ""
 			sourceType := ""
+			title := ""
 			if fi := s.cache.FindFile(qn, f.FilePath); fi != nil {
 				sourceName = fi.Source
 				fileType = fi.FileType
 				age = formatAge(fi.ModTime)
 				sourceType = fi.SourceType
+				title = fi.Title
 			}
 			if sourceName == "" {
 				sourceName = "files"
@@ -141,6 +144,7 @@ func (s *Server) listAllReviewGroups() []ReviewGroup {
 
 			g.Files = append(g.Files, ReviewFileEntry{
 				Name:          name,
+				Title:         title,
 				Path:          f.FilePath,
 				Project:       qn,
 				ProjectPath:   p.Path,

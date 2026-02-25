@@ -87,8 +87,9 @@ export default function InReviewPage() {
                     <FileTypeBadge type={file.fileType} />
                     <span className="file-name">
                       <Link to={`/file/${file.project}/${file.path}`}>
-                        {file.name}
+                        {file.title || file.path}
                       </Link>
+                      <span className="file-subtitle">{file.title ? file.path : '\u00A0'}</span>
                     </span>
                   </div>
                   <div className="file-right">

@@ -57,7 +57,7 @@ describe('InReviewPage', () => {
   it('shows files within groups', async () => {
     render(<MemoryRouter><InReviewPage /></MemoryRouter>);
     await waitFor(() => {
-      expect(screen.getByText('plan.md')).toBeTruthy();
+      expect(screen.getByText('thoughts/plan.md')).toBeTruthy();
     });
   });
 
@@ -65,6 +65,26 @@ describe('InReviewPage', () => {
     render(<MemoryRouter><InReviewPage /></MemoryRouter>);
     await waitFor(() => {
       expect(screen.getByText('plan')).toBeTruthy();
+    });
+  });
+
+  it('shows title as primary and path as subtitle when title is set', async () => {
+    const { api } = await import('../api');
+    (api.getInReview as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{
+      workspace: 'ws',
+      projectName: 'my-proj',
+      projectQN: 'ws/my-proj',
+      sourceName: 'thoughts',
+      sourceAnchor: 'thoughts',
+      agentActive: false,
+      files: [
+        { name: 'plan.md', title: 'My Plan', path: 'thoughts/plan.md', project: 'ws/my-proj', projectPath: '/tmp', openThreads: 1, agentActive: false, fileType: 'plan', age: '1h ago' },
+      ],
+    }]);
+    render(<MemoryRouter><InReviewPage /></MemoryRouter>);
+    await waitFor(() => {
+      expect(screen.getByText('My Plan')).toBeTruthy();
+      expect(screen.getByText('thoughts/plan.md')).toBeTruthy();
     });
   });
 });

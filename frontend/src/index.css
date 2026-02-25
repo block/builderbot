@@ -1601,42 +1601,13 @@ a:hover { text-decoration: underline; }
 
 /* ── Recent page ── */
 .recent-file {
-  padding: 12px 16px;
   background: var(--bg-surface);
   margin-bottom: 8px;
   border-radius: 6px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
   border: 1px solid var(--border-card);
   transition: border-color 0.15s;
 }
 .recent-file:hover { border-color: var(--border-strong); }
-.recent-file a { text-decoration: none; }
-.recent-file a:hover { text-decoration: none; }
-.recent-file-info { min-width: 0; }
-.recent-file-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.recent-file-name-text {
-  min-width: 0;
-  overflow: hidden;
-}
-.recent-file-project { color: var(--text-subtle); font-size: 0.85em; }
-.recent-file-meta {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  white-space: nowrap;
-  margin-left: 16px;
-}
-.recent-file-time { color: var(--text-subtle); font-size: 0.85em; }
 
 /* Activity labels */
 :root {

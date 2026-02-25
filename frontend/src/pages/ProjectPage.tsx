@@ -443,6 +443,7 @@ export default function ProjectPage() {
             {reviewPaths.map((path) => {
               const file = groups.flatMap((g) => g.files || []).find((f) => f.path === path);
               const name = file?.name || path.split('/').pop() || path;
+              const title = file?.title;
               const age = file?.age || '';
               const fileType = file?.fileType;
               return (
@@ -452,7 +453,8 @@ export default function ProjectPage() {
                     <span className={`review-badge${reviewData[path].agentActive ? ' agent-active' : ''}`}>in review</span>
                     {(reviewData[path].typingThreads ?? 0) > 0 && <TypingIndicator />}
                     <span className="file-name">
-                      <Link to={`/file/${qn}/${path}`}>{name}</Link>
+                      <Link to={`/file/${qn}/${path}`}>{title || name}</Link>
+                      <span className="file-subtitle">{title ? name : '\u00A0'}</span>
                     </span>
                   </div>
                   <div className="file-right">

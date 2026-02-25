@@ -95,4 +95,22 @@ describe('ProjectPage', () => {
     renderPage();
     expect(screen.getByTestId('project-page')).toBeTruthy();
   });
+
+  it('shows title as primary and name as subtitle when title is set', async () => {
+    const { api } = await import('../api');
+    (api.getProjectFiles as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{
+      name: 'thoughts',
+      source: 'thoughts',
+      sourceType: 'tree',
+      auto: true,
+      files: [
+        { name: 'plan.md', title: 'My Plan', path: 'thoughts/plan.md', age: '1h ago', fileType: 'plan', source: 'thoughts', sourceType: 'tree' },
+      ],
+    }]);
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText('My Plan')).toBeTruthy();
+      expect(screen.getByText('plan.md')).toBeTruthy();
+    });
+  });
 });

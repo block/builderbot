@@ -39,26 +39,23 @@ export default function RecentPage() {
       <p style={{ color: 'var(--text-subtle)', marginBottom: 20 }}>Recently active files across all projects</p>
 
       {files.map((f) => (
-        <div key={`${f.project}/${f.path}`} className="recent-file">
-          <div className="recent-file-info">
-            <div className="recent-file-name">
-              <FileTypeBadge type={f.fileType} />
-              <span className="recent-file-name-text">
-                <Link to={`/file/${(f.project || '')}/${f.path}`}>
-                  {f.title || f.name}
-                </Link>
-                <span className="file-subtitle">{f.title ? f.name : '\u00A0'}</span>
-              </span>
-            </div>
-            <div className="recent-file-project">{f.project}/{f.path}</div>
+        <div key={`${f.project}/${f.path}`} className="file-row recent-file">
+          <div className="file-left">
+            <FileTypeBadge type={f.fileType} />
+            <span className="file-name">
+              <Link to={`/file/${(f.project || '')}/${f.path}`}>
+                {f.title || f.path}
+              </Link>
+              <span className="file-subtitle">{f.title ? `${f.project}/${f.path}` : f.project}</span>
+            </span>
           </div>
-          <div className="recent-file-meta">
+          <div className="file-right">
             {f.activityType && (
               <span className={`activity-label activity-${f.activityType}`}>
                 {f.activityType} {f.activityAge}
               </span>
             )}
-            <span className="recent-file-time">{f.age}</span>
+            <span className="file-age">{f.age}</span>
           </div>
         </div>
       ))}

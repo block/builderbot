@@ -60,8 +60,8 @@ describe('SearchPage', () => {
     renderWithQuery('plan');
     await waitFor(() => {
       expect(screen.getByText('my-proj')).toBeTruthy();
-      expect(screen.getByText('plan.md')).toBeTruthy();
-      expect(screen.getByText('research.md')).toBeTruthy();
+      expect(screen.getByText('thoughts/plan.md')).toBeTruthy();
+      expect(screen.getByText('thoughts/research.md')).toBeTruthy();
     });
   });
 
@@ -77,6 +77,28 @@ describe('SearchPage', () => {
     await waitFor(() => {
       expect(screen.getByText(/1 project/)).toBeTruthy();
       expect(screen.getByText(/2 files/)).toBeTruthy();
+    });
+  });
+
+  it('shows title as primary and path as subtitle when title is set', async () => {
+    const { api } = await import('../api');
+    (api.search as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      query: 'plan',
+      matchingProjects: [],
+      projectResults: [{
+        project: 'my-proj',
+        qualifiedName: 'ws/my-proj',
+        projectPath: '/tmp/ws/my-proj',
+        files: [
+          { path: 'thoughts/plan.md', name: 'plan.md', title: 'My Plan', fileType: 'plan' },
+        ],
+      }],
+      totalFiles: 1,
+    });
+    renderWithQuery('plan');
+    await waitFor(() => {
+      expect(screen.getByText('My Plan')).toBeTruthy();
+      expect(screen.getByText('thoughts/plan.md')).toBeTruthy();
     });
   });
 });

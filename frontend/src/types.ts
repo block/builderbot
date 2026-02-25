@@ -107,6 +107,7 @@ export interface APIFileInReview {
 
 export interface ReviewFileEntry {
   name: string;
+  title?: string;
   path: string;
   project: string;
   projectPath: string;

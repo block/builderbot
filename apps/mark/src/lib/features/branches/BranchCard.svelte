@@ -734,6 +734,15 @@
     return getRemainingRunActions(groupedActions);
   });
 
+  // Check if there are any actions to display in the Actions submenu
+  let hasActionsForSubmenu = $derived.by(() => {
+    const actionTypes = ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as const;
+    return actionTypes.some((type) => {
+      const typeActions = type === 'run' ? remainingRunActions : groupedActions[type];
+      return typeActions && typeActions.length > 0;
+    });
+  });
+
   // Actions submenu handlers
   function handleActionsSubmenuEnter() {
     if (actionsSubmenuTimeout) {
@@ -1565,7 +1574,7 @@
           {#if showMoreMenu}
             <div class="more-menu">
               <!-- Actions submenu -->
-              {#if actions.length > 0 && branch.branchType === 'local'}
+              {#if hasActionsForSubmenu && branch.branchType === 'local'}
                 <div class="submenu-container">
                   <button
                     class="more-menu-item submenu-trigger"

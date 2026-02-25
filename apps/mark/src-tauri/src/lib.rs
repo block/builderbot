@@ -2296,19 +2296,27 @@ pub fn run() {
                 .map_err(|e| format!("Cannot create data dir: {e}"))?;
 
             let db_path = data_dir.join("data.db");
+            let legacy_home_data_dir = crate::paths::legacy_data_dir();
+            let legacy_platform_data_dir = crate::paths::legacy_platform_data_dir();
 
             // Migrate from older data directories if the new location is empty.
-            // Priority: legacy ~/Library/Application Support/staged/ first,
+            // Priority: legacy ~/.staged/ first, then legacy platform app-data
+            // (for example ~/Library/Application Support/staged on macOS),
             // then the current Tauri app_data_dir (com.mark.app).
             if !db_path.exists() {
-                let legacy_candidates: Vec<PathBuf> = [
-                    crate::paths::legacy_data_dir(),
+                let mut legacy_candidates: Vec<PathBuf> = Vec::new();
+                for candidate in [
+                    legacy_home_data_dir.clone(),
+                    legacy_platform_data_dir.clone(),
                     app.path().app_data_dir().ok(),
                 ]
                 .into_iter()
                 .flatten()
-                .filter(|d| d != &data_dir)
-                .collect();
+                {
+                    if candidate != data_dir && !legacy_candidates.contains(&candidate) {
+                        legacy_candidates.push(candidate);
+                    }
+                }
 
                 for old_dir in legacy_candidates {
                     let old_db = old_dir.join("data.db");
@@ -2325,15 +2333,41 @@ pub fn run() {
                 }
             }
 
-            // Move local worktrees from the legacy top-level `worktrees/` folder
-            // into the workspace-scoped `workspaces/local/` folder.
-            if let (Some(old_worktrees), Some(new_worktrees)) = (
-                crate::paths::legacy_worktrees_dir(),
-                crate::paths::worktrees_dir(),
-            ) {
-                if old_worktrees.exists() && old_worktrees != new_worktrees {
-                    migrate_db_path_prefixes(&db_path, &old_worktrees, &new_worktrees)?;
-                    crate::paths::migrate_legacy_worktrees_layout();
+            // Rewrite stored worktree paths from legacy prefixes and move local
+            // worktrees from the legacy top-level `worktrees/` folder into the
+            // workspace-scoped `workspaces/local/` folder.
+            let current_legacy_worktrees = crate::paths::legacy_worktrees_dir();
+            if let Some(new_worktrees) = crate::paths::worktrees_dir() {
+                let mut legacy_worktree_prefixes: Vec<PathBuf> = Vec::new();
+                for prefix in [
+                    current_legacy_worktrees.clone(),
+                    legacy_home_data_dir.clone().map(|d| d.join("worktrees")),
+                    legacy_home_data_dir
+                        .clone()
+                        .map(|d| d.join("workspaces").join("local")),
+                    legacy_platform_data_dir
+                        .clone()
+                        .map(|d| d.join("worktrees")),
+                    legacy_platform_data_dir
+                        .clone()
+                        .map(|d| d.join("workspaces").join("local")),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if prefix != new_worktrees && !legacy_worktree_prefixes.contains(&prefix) {
+                        legacy_worktree_prefixes.push(prefix);
+                    }
+                }
+
+                for old_prefix in legacy_worktree_prefixes {
+                    migrate_db_path_prefixes(&db_path, &old_prefix, &new_worktrees)?;
+                }
+
+                if let Some(old_worktrees) = current_legacy_worktrees {
+                    if old_worktrees.exists() && old_worktrees != new_worktrees {
+                        crate::paths::migrate_legacy_worktrees_layout();
+                    }
                 }
             }
 

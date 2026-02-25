@@ -1,48 +1,54 @@
 //! Centralized data-directory helpers.
 //!
-//! All application data lives under `~/.staged/`.
+//! All application data lives under `~/.mark/`.
 
 use std::path::PathBuf;
 
-/// Base data directory: `~/.staged/`
+/// Base data directory: `~/.mark/`
 pub fn data_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|d| d.join(".mark"))
+}
+
+/// Legacy home data directory used before the move to `~/.mark/`.
+/// This was shared with Staged: `~/.staged/`.
+pub fn legacy_data_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|d| d.join(".staged"))
 }
 
-/// Legacy data directory used before the move to `~/.staged/`.
+/// Legacy platform data directory used before the move into the home folder.
 /// On macOS this was `~/Library/Application Support/staged/`.
-pub fn legacy_data_dir() -> Option<PathBuf> {
+pub fn legacy_platform_data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("staged"))
 }
 
-/// Directory for bare/clone repos: `~/.staged/repos/`
+/// Directory for bare/clone repos: `~/.mark/repos/`
 pub fn repos_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("repos"))
 }
 
-/// Root directory for workspace-scoped local data: `~/.staged/workspaces/`
+/// Root directory for workspace-scoped local data: `~/.mark/workspaces/`
 pub fn workspaces_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("workspaces"))
 }
 
-/// Legacy directory for local worktrees: `~/.staged/worktrees/`
+/// Legacy directory for local worktrees: `~/.mark/worktrees/`
 pub fn legacy_worktrees_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("worktrees"))
 }
 
-/// Directory for local git worktrees: `~/.staged/workspaces/local/`
+/// Directory for local git worktrees: `~/.mark/workspaces/local/`
 pub fn worktrees_dir() -> Option<PathBuf> {
     workspaces_dir().map(|d| d.join("local"))
 }
 
-/// Path for the SQLite database: `~/.staged/data.db`
+/// Path for the SQLite database: `~/.mark/data.db`
 pub fn db_path() -> Option<PathBuf> {
     data_dir().map(|d| d.join("data.db"))
 }
 
 /// Migrate local worktrees from the legacy path to the new workspace-scoped path.
 ///
-/// Moves entries from `~/.staged/worktrees/` to `~/.staged/workspaces/local/`.
+/// Moves entries from `~/.mark/worktrees/` to `~/.mark/workspaces/local/`.
 /// Safe to call repeatedly.
 pub fn migrate_legacy_worktrees_layout() {
     let Some(old_dir) = legacy_worktrees_dir() else {

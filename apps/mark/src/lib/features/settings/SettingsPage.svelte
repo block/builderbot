@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { ArrowLeft, FolderGit2, Stethoscope } from 'lucide-svelte';
+  import { ArrowLeft, FolderGit2, Keyboard, Stethoscope } from 'lucide-svelte';
   import { closeSettings, navigation } from '../layout/navigation.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
+  import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
 
   function handleBack() {
     closeSettings();
@@ -42,6 +43,19 @@
         </button>
         <button
           class="nav-item"
+          class:active={navigation.settingsSection === 'keyboard'}
+          onclick={() => (navigation.settingsSection = 'keyboard')}
+        >
+          <div class="nav-main">
+            <Keyboard size={14} />
+            <div class="nav-text">
+              <span class="nav-name">Keyboard</span>
+              <span class="nav-meta">Global shortcuts and keybindings</span>
+            </div>
+          </div>
+        </button>
+        <button
+          class="nav-item"
           class:active={navigation.settingsSection === 'doctor'}
           onclick={() => (navigation.settingsSection = 'doctor')}
         >
@@ -59,6 +73,8 @@
     <section class="settings-content">
       {#if navigation.settingsSection === 'repo'}
         <ActionsSettingsPanel />
+      {:else if navigation.settingsSection === 'keyboard'}
+        <KeyboardSettingsPanel />
       {:else}
         <DoctorSettingsPanel />
       {/if}

@@ -19,6 +19,9 @@
     preferences,
     initPreferences,
     setAiAgent,
+    increaseSize,
+    decreaseSize,
+    resetSize,
   } from './lib/features/settings/preferences.svelte';
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
@@ -27,6 +30,12 @@
     initNavigation,
     openSettings,
   } from './lib/features/layout/navigation.svelte';
+  import {
+    initializeShortcutBindings,
+    registerShortcuts,
+    triggerShortcut,
+  } from './lib/features/keyboard/shortcuts';
+  import { runSearchShortcut } from './lib/features/keyboard/searchTargets';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { prStateStore } from './lib/stores/prState.svelte';
   import { pushStateStore } from './lib/stores/pushState.svelte';
@@ -40,7 +49,14 @@
 
   let showSessionLab = $state(false);
   let unlistenSettings: UnlistenFn | undefined;
+  let unlistenFind: UnlistenFn | undefined;
+  let unlistenFindNext: UnlistenFn | undefined;
+  let unlistenFindPrevious: UnlistenFn | undefined;
+  let unlistenZoomIn: UnlistenFn | undefined;
+  let unlistenZoomOut: UnlistenFn | undefined;
+  let unlistenZoomReset: UnlistenFn | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
+  let unregisterShortcuts: (() => void) | null = null;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
@@ -72,28 +88,35 @@
     }
   }
 
-  function shouldIgnoreGlobalShortcut(target: EventTarget | null): boolean {
-    if (!(target instanceof HTMLElement)) return false;
-    if (target.isContentEditable) return true;
-    const tagName = target.tagName;
-    return tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT';
-  }
-
-  function handleGlobalShortcut(e: KeyboardEvent) {
-    if (shouldIgnoreGlobalShortcut(e.target)) return;
-    if ((e.metaKey || e.ctrlKey) && e.key === ',') {
-      e.preventDefault();
-      openSettings();
-    }
+  function requestNewProject() {
+    if (navigation.activeView === 'settings') return;
+    window.dispatchEvent(new CustomEvent('mark:new-project'));
   }
 
   onMount(async () => {
     document.addEventListener('keydown', handleKonamiKey);
-    document.addEventListener('keydown', handleGlobalShortcut);
 
     // Listen for the app menu Preferences item.
     unlistenSettings = await listen('menu:settings', () => {
-      openSettings();
+      if (!triggerShortcut('app-open-settings')) openSettings();
+    });
+    unlistenFind = await listen('menu:find', () => {
+      if (!triggerShortcut('search-find')) runSearchShortcut('find');
+    });
+    unlistenFindNext = await listen('menu:find-next', () => {
+      if (!triggerShortcut('search-find-next')) runSearchShortcut('next');
+    });
+    unlistenFindPrevious = await listen('menu:find-previous', () => {
+      if (!triggerShortcut('search-find-previous')) runSearchShortcut('previous');
+    });
+    unlistenZoomIn = await listen('menu:zoom-in', () => {
+      if (!triggerShortcut('view-increase-size')) increaseSize();
+    });
+    unlistenZoomOut = await listen('menu:zoom-out', () => {
+      if (!triggerShortcut('view-decrease-size')) decreaseSize();
+    });
+    unlistenZoomReset = await listen('menu:zoom-reset', () => {
+      if (!triggerShortcut('view-reset-size')) resetSize();
     });
 
     // Listen for session status changes globally to handle spinner cleanup
@@ -254,6 +277,90 @@
     }
 
     try {
+      await initializeShortcutBindings();
+    } catch (e) {
+      console.warn('Failed to initialize custom keyboard bindings:', e);
+    }
+
+    unregisterShortcuts = registerShortcuts([
+      {
+        id: 'app-open-settings',
+        description: 'Open settings',
+        category: 'app',
+        keys: [','],
+        modifiers: { meta: true },
+        allowInInputs: true,
+        handler: () => openSettings(),
+      },
+      {
+        id: 'app-new-project',
+        description: 'New project',
+        category: 'app',
+        keys: ['n'],
+        modifiers: { meta: true },
+        handler: requestNewProject,
+      },
+      {
+        id: 'search-find',
+        description: 'Find in open note/session',
+        category: 'search',
+        keys: ['f'],
+        modifiers: { meta: true },
+        allowInInputs: true,
+        handler: () => {
+          runSearchShortcut('find');
+        },
+      },
+      {
+        id: 'search-find-next',
+        description: 'Find next match',
+        category: 'search',
+        keys: ['g'],
+        modifiers: { meta: true },
+        handler: () => {
+          runSearchShortcut('next');
+        },
+      },
+      {
+        id: 'search-find-previous',
+        description: 'Find previous match',
+        category: 'search',
+        keys: ['g'],
+        modifiers: { meta: true, shift: true },
+        handler: () => {
+          runSearchShortcut('previous');
+        },
+      },
+      {
+        id: 'view-increase-size',
+        description: 'Increase text size',
+        category: 'view',
+        keys: ['=', '+'],
+        modifiers: { meta: true },
+        allowInInputs: true,
+        handler: increaseSize,
+      },
+      {
+        id: 'view-decrease-size',
+        description: 'Decrease text size',
+        category: 'view',
+        keys: ['-'],
+        modifiers: { meta: true },
+        allowInInputs: true,
+        handler: decreaseSize,
+      },
+      {
+        id: 'view-reset-size',
+        description: 'Reset text size',
+        category: 'view',
+        keys: ['0'],
+        modifiers: { meta: true },
+        allowInInputs: true,
+        handler: resetSize,
+      },
+    ]);
+
+    try {
       storeIncompat = await commands.getStoreStatus();
     } catch (e) {
       storeError = e instanceof Error ? e.message : String(e);
@@ -277,8 +384,14 @@
 
   onDestroy(() => {
     document.removeEventListener('keydown', handleKonamiKey);
-    document.removeEventListener('keydown', handleGlobalShortcut);
+    unregisterShortcuts?.();
     unlistenSettings?.();
+    unlistenFind?.();
+    unlistenFindNext?.();
+    unlistenFindPrevious?.();
+    unlistenZoomIn?.();
+    unlistenZoomOut?.();
+    unlistenZoomReset?.();
     unlistenSessionStatus?.();
   });
 

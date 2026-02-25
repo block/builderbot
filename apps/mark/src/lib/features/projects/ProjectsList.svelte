@@ -309,13 +309,6 @@
       verifyCommandKeyState(e);
     }
 
-    // Command+N to open new project modal
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
-      e.preventDefault();
-      showNewProjectModal = true;
-      return;
-    }
-
     // Command+1-9 to open projects by number
     if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
       e.preventDefault();

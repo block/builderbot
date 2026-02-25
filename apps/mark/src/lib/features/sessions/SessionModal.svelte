@@ -52,6 +52,8 @@
   } from '../../commands';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { formatToolArgs, formatToolName, hasXmlBlocks } from './sessionModalHelpers';
+  import InContentSearch from '../../shared/InContentSearch.svelte';
+  import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
 
   // Configure marked
   marked.setOptions({ breaks: true, gfm: true });
@@ -86,6 +88,13 @@
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
+
+  // Search state
+  let searchVisible = $state(false);
+  let searchQuery = $state('');
+  let matchCount = $state(0);
+  let currentMatchIndex = $state(0);
+  let matchElements: HTMLElement[] = [];
 
   // =========================================================================
   // Lifecycle
@@ -404,11 +413,121 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    const isMac = navigator.platform.toLowerCase().includes('mac');
+    const cmdKey = isMac ? e.metaKey : e.ctrlKey;
+
+    // Handle Escape key
     if (e.key === 'Escape') {
-      requestClose();
       e.preventDefault();
+      if (searchVisible) {
+        closeSearch();
+      } else {
+        requestClose();
+      }
+      return;
+    }
+
+    // Handle search shortcuts
+    const target = e.target as HTMLElement;
+    const isTypingInInput =
+      target.tagName === 'TEXTAREA' && target.classList.contains('message-input');
+
+    // Cmd+F should work even from the input field to open search
+    if (cmdKey && e.key === 'f') {
+      e.preventDefault();
+      openSearch();
+    }
+    // Cmd+G navigation only works when not typing in input
+    else if (!isTypingInInput && cmdKey && e.key === 'g') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        previousMatch();
+      } else {
+        nextMatch();
+      }
     }
   }
+
+  function openSearch() {
+    searchVisible = true;
+  }
+
+  function closeSearch() {
+    searchVisible = false;
+    searchQuery = '';
+    if (messagesEl) {
+      clearHighlights(messagesEl);
+    }
+    matchCount = 0;
+    currentMatchIndex = 0;
+    matchElements = [];
+  }
+
+  function performSearch(query: string) {
+    if (!messagesEl) return;
+
+    // Clear previous highlights
+    clearHighlights(messagesEl);
+    matchElements = [];
+    matchCount = 0;
+    currentMatchIndex = 0;
+
+    // If query is empty, nothing to highlight
+    if (!query.trim()) return;
+
+    // Highlight matches
+    const result = highlightMatches(messagesEl, query, currentMatchIndex);
+    matchElements = result.elements;
+    matchCount = result.total;
+
+    // Scroll to first match if any
+    if (matchElements.length > 0) {
+      scrollToMatch(matchElements[0]);
+    }
+  }
+
+  function nextMatch() {
+    if (matchElements.length === 0) return;
+
+    // Remove current class from old match
+    if (matchElements[currentMatchIndex]) {
+      matchElements[currentMatchIndex].classList.remove('search-match-current');
+    }
+
+    // Cycle to next match (wrap around)
+    currentMatchIndex = (currentMatchIndex + 1) % matchElements.length;
+
+    // Add current class to new match
+    matchElements[currentMatchIndex].classList.add('search-match-current');
+    scrollToMatch(matchElements[currentMatchIndex]);
+  }
+
+  function previousMatch() {
+    if (matchElements.length === 0) return;
+
+    // Remove current class from old match
+    if (matchElements[currentMatchIndex]) {
+      matchElements[currentMatchIndex].classList.remove('search-match-current');
+    }
+
+    // Cycle to previous match (wrap around)
+    currentMatchIndex = (currentMatchIndex - 1 + matchElements.length) % matchElements.length;
+
+    // Add current class to new match
+    matchElements[currentMatchIndex].classList.add('search-match-current');
+    scrollToMatch(matchElements[currentMatchIndex]);
+  }
+
+  // Re-apply search when messages change (for live sessions)
+  $effect(() => {
+    if (searchVisible && searchQuery.trim() && messagesEl) {
+      // Debounce to avoid excessive highlighting during streaming
+      const timer = setTimeout(() => {
+        performSearch(searchQuery);
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  });
 
   function requestClose() {
     if (closed) return;
@@ -500,6 +619,15 @@
             : 'Session'}
         </span>
       </div>
+      <InContentSearch
+        visible={searchVisible}
+        {matchCount}
+        currentIndex={currentMatchIndex}
+        onSearch={performSearch}
+        onNext={nextMatch}
+        onPrevious={previousMatch}
+        onClose={closeSearch}
+      />
       <div class="header-actions">
         <button class="close-btn" onclick={requestClose} title="Close (Esc)">
           <X size={16} />
@@ -789,6 +917,7 @@
   /* ----- Header ---------------------------------------------------------- */
 
   .modal-header {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: space-between;

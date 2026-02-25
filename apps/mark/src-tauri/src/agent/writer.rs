@@ -46,6 +46,29 @@ pub struct MessageWriter {
     current_tool_result_msg_id: Mutex<Option<i64>>,
 }
 
+/// Strip backticks from agent-provided tool-call titles.
+fn sanitize_title(title: &str) -> String {
+    title.replace('`', "")
+}
+
+/// Strip outer markdown code fences from tool-result content.
+/// Agents often wrap results in ``` fences which are redundant in our `<pre>` display.
+/// The closing fence may be absent when content was truncated by the preview limit.
+fn strip_code_fences(content: &str) -> String {
+    let trimmed = content.trim();
+    if let Some(after_open) = trimmed.strip_prefix("```") {
+        if let Some(nl) = after_open.find('\n') {
+            let body = after_open[nl + 1..].trim_end();
+            return body
+                .strip_suffix("```")
+                .unwrap_or(body)
+                .trim_end()
+                .to_string();
+        }
+    }
+    content.to_string()
+}
+
 impl MessageWriter {
     pub fn new(session_id: String, store: Arc<Store>) -> Self {
         Self {
@@ -95,16 +118,18 @@ impl MessageWriter {
         self.finalize().await;
         *self.current_tool_result_msg_id.lock().await = None;
 
+        let title = sanitize_title(title);
+
         // Some providers may resend ToolCall for the same ID while streaming.
         // Treat those as updates to the existing row.
         if let Some(&row_id) = self.tool_call_rows.lock().await.get(tool_call_id) {
-            let _ = self.store.update_message_content(row_id, title);
+            let _ = self.store.update_message_content(row_id, &title);
             return;
         }
 
         match self
             .store
-            .add_session_message(&self.session_id, MessageRole::ToolCall, title)
+            .add_session_message(&self.session_id, MessageRole::ToolCall, &title)
         {
             Ok(id) => {
                 self.tool_call_rows
@@ -118,23 +143,25 @@ impl MessageWriter {
 
     /// Update a previously recorded tool call's title.
     pub async fn update_tool_call_title(&self, tool_call_id: &str, title: &str) {
+        let title = sanitize_title(title);
         let rows = self.tool_call_rows.lock().await;
         if let Some(&row_id) = rows.get(tool_call_id) {
-            let _ = self.store.update_message_content(row_id, title);
+            let _ = self.store.update_message_content(row_id, &title);
         }
     }
 
     /// Record the result/output of a tool call.
     pub async fn record_tool_result(&self, content: &str) {
+        let content = strip_code_fences(content);
         let mut current_result_id = self.current_tool_result_msg_id.lock().await;
         if let Some(id) = *current_result_id {
-            let _ = self.store.update_message_content(id, content);
+            let _ = self.store.update_message_content(id, &content);
             return;
         }
 
         match self
             .store
-            .add_session_message(&self.session_id, MessageRole::ToolResult, content)
+            .add_session_message(&self.session_id, MessageRole::ToolResult, &content)
         {
             Ok(id) => *current_result_id = Some(id),
             Err(e) => log::error!("Failed to insert tool_result message: {e}"),

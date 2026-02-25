@@ -25,6 +25,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
+  import { slide } from 'svelte/transition';
   import {
     X,
     AlertCircle,
@@ -34,7 +35,6 @@
     Check,
     ChevronRight,
     ChevronDown,
-    Wrench,
     Zap,
     GitBranch,
   } from 'lucide-svelte';
@@ -51,7 +51,13 @@
     resumeSession,
   } from '../../commands';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import { formatToolArgs, formatToolName, hasXmlBlocks } from './sessionModalHelpers';
+  import {
+    formatToolDisplay,
+    groupByVerb,
+    verbGroupSummary,
+    hasXmlBlocks,
+    stripCodeFences,
+  } from './sessionModalHelpers';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
 
@@ -85,6 +91,7 @@
   let messageQueue = $state<string[]>([]);
   let copiedId = $state<number | string | null>(null);
   let expandedTools = $state<Set<number>>(new Set());
+  let expandedVerbGroups = $state<Set<string>>(new Set());
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
@@ -305,6 +312,16 @@
       next.add(msgId);
     }
     expandedTools = next;
+  }
+
+  function toggleVerbGroup(key: string) {
+    const next = new Set(expandedVerbGroups);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    expandedVerbGroups = next;
   }
 
   // =========================================================================
@@ -745,63 +762,95 @@
               </div>
             {:else}
               <div class="message-row tool-group">
-                {#each group.pairs as pair}
-                  {@const toolName = formatToolName(pair.call.content)}
-                  {@const toolArgs = formatToolArgs(pair.call.content)}
-                  {@const isExpanded = expandedTools.has(pair.call.id)}
-                  <div class="tool-card">
-                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                    <div
-                      class="tool-header"
-                      class:tool-header-expandable={!!pair.result}
-                      onclick={() => pair.result && toggleTool(pair.call.id)}
-                    >
-                      <span class="tool-chevron">
-                        {#if pair.result}
-                          {#if isExpanded}
-                            <ChevronDown size={12} />
-                          {:else}
-                            <ChevronRight size={12} />
-                          {/if}
-                        {/if}
-                      </span>
-                      <Wrench size={12} class="tool-icon" />
-                      <span class="tool-name">{toolName}</span>
-                      {#if toolArgs}
-                        <span class="tool-args-preview">{toolArgs}</span>
-                      {/if}
-                      <button
-                        class="copy-btn tool-copy"
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          copyContent(pair.call.content, `tc-${pair.call.id}`);
-                        }}
-                        title="Copy tool call"
+                {#each groupByVerb(group.pairs) as vg, vgIdx}
+                  {#if vg.items.length === 1}
+                    {@const item = vg.items[0]}
+                    {@const isExpanded = expandedTools.has(item.pair.call.id)}
+                    <div class="tool-card">
+                      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                      <div
+                        class="tool-header"
+                        class:tool-header-expandable={!!item.pair.result}
+                        onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
                       >
-                        {#if copiedId === `tc-${pair.call.id}`}
-                          <Check size={10} />
-                        {:else}
-                          <Copy size={10} />
-                        {/if}
-                      </button>
-                    </div>
-                    {#if isExpanded && pair.result}
-                      <div class="tool-output">
-                        <pre>{pair.result.content}</pre>
-                        <button
-                          class="copy-btn tool-output-copy"
-                          onclick={() => copyContent(pair.result!.content, `tr-${pair.result!.id}`)}
-                          title="Copy output"
+                        <span
+                          class="tool-caret"
+                          class:tool-caret-expanded={isExpanded}
+                          class:tool-caret-hidden={!item.pair.result}>›</span
                         >
-                          {#if copiedId === `tr-${pair.result.id}`}
-                            <Check size={10} />
-                          {:else}
-                            <Copy size={10} />
-                          {/if}
-                        </button>
+                        <span class="tool-name">{item.verb}</span>
+                        {#if item.detail}
+                          <span class="tool-args-preview">{item.detail}</span>
+                        {/if}
                       </div>
+                      {#if isExpanded && item.pair.result}
+                        {@const resultContent = stripCodeFences(item.pair.result.content)}
+                        <div class="tool-code-block" transition:slide={{ duration: 150 }}>
+                          {#if item.verb === 'Ran' && item.detail}
+                            <div class="tool-code-command">$ {item.detail}</div>
+                          {/if}
+                          {#if resultContent}
+                            <pre class="tool-code-output">{resultContent}</pre>
+                          {/if}
+                          <div class="tool-code-status">
+                            <Check size={11} /> Success
+                          </div>
+                        </div>
+                      {/if}
+                    </div>
+                  {:else}
+                    {@const groupKey = `${vg.items[0].pair.call.id}-${vg.verb}`}
+                    {@const isGroupExpanded = expandedVerbGroups.has(groupKey)}
+                    <div class="tool-card">
+                      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                      <div
+                        class="tool-header tool-header-expandable"
+                        onclick={() => toggleVerbGroup(groupKey)}
+                      >
+                        <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}>›</span
+                        >
+                        <span class="tool-name">{vg.verb}</span>
+                        <span class="tool-args-preview">{verbGroupSummary(vg)}</span>
+                      </div>
+                    </div>
+                    {#if isGroupExpanded}
+                      {#each vg.items as item}
+                        {@const isExpanded = expandedTools.has(item.pair.call.id)}
+                        <div class="tool-card">
+                          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                          <div
+                            class="tool-header"
+                            class:tool-header-expandable={!!item.pair.result}
+                            onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
+                          >
+                            <span
+                              class="tool-caret"
+                              class:tool-caret-expanded={isExpanded}
+                              class:tool-caret-hidden={!item.pair.result}>›</span
+                            >
+                            <span class="tool-name">{item.verb}</span>
+                            {#if item.detail}
+                              <span class="tool-args-preview">{item.detail}</span>
+                            {/if}
+                          </div>
+                          {#if isExpanded && item.pair.result}
+                            {@const resultContent = stripCodeFences(item.pair.result.content)}
+                            <div class="tool-code-block" transition:slide={{ duration: 150 }}>
+                              {#if item.verb === 'Ran' && item.detail}
+                                <div class="tool-code-command">$ {item.detail}</div>
+                              {/if}
+                              {#if resultContent}
+                                <pre class="tool-code-output">{resultContent}</pre>
+                              {/if}
+                              <div class="tool-code-status">
+                                <Check size={11} /> Success
+                              </div>
+                            </div>
+                          {/if}
+                        </div>
+                      {/each}
                     {/if}
-                  </div>
+                  {/if}
                 {/each}
               </div>
             {/if}
@@ -1189,23 +1238,21 @@
   .tool-group {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    padding-left: 2px;
+    gap: 2px;
+    width: 100%;
+    min-width: 0;
   }
 
   .tool-card {
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    overflow: hidden;
-    background: var(--bg-primary);
+    overflow: visible;
+    min-width: 0;
   }
 
   .tool-header {
     display: flex;
     align-items: center;
-    gap: 6px;
-    width: 100%;
-    padding: 6px 8px;
+    gap: 4px;
+    padding: 2px 0;
     background: none;
     color: var(--text-muted);
     font-size: var(--size-xs);
@@ -1217,29 +1264,34 @@
     cursor: pointer;
   }
 
-  .tool-header-expandable:hover {
-    background: var(--bg-hover);
+  .tool-header-expandable:hover .tool-name {
+    text-decoration: underline;
   }
 
-  .tool-chevron {
-    display: flex;
-    align-items: center;
-    width: 12px;
+  .tool-caret {
+    display: inline-block;
     flex-shrink: 0;
+    width: 8px;
+    margin-left: -8px;
+    font-size: var(--size-xs);
     color: var(--text-faint);
+    transition: transform 0.15s ease;
+    line-height: 1;
   }
 
-  .tool-header :global(.tool-icon) {
-    flex-shrink: 0;
-    color: var(--text-faint);
+  .tool-caret-expanded {
+    transform: rotate(90deg);
+  }
+
+  .tool-caret-hidden {
+    visibility: hidden;
   }
 
   .tool-name {
-    font-weight: 500;
-    color: var(--text-primary);
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: calc(var(--size-xs) * 0.95);
     flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    white-space: nowrap;
   }
 
   .tool-args-preview {
@@ -1249,60 +1301,55 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--text-faint);
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: calc(var(--size-xs) * 0.9);
+    font-size: var(--size-xs);
   }
 
-  .tool-copy {
-    flex-shrink: 0;
-    opacity: 0;
-    transition: opacity 0.15s;
-    margin-left: auto;
-  }
-
-  .tool-header:hover .tool-copy {
-    opacity: 1;
-  }
-
-  .tool-output {
-    position: relative;
-    border-top: 1px solid var(--border-subtle);
-    padding: 8px 10px;
-    max-height: 200px;
+  .tool-code-block {
+    background: color-mix(in srgb, var(--bg-chrome) 80%, black);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-top: 4px;
+    max-height: 240px;
     overflow-y: auto;
-  }
-
-  .tool-output pre {
-    margin: 0;
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
     font-size: calc(var(--size-xs) * 0.9);
-    color: var(--text-muted);
-    white-space: pre-wrap;
-    word-break: break-word;
     line-height: 1.5;
   }
 
-  .tool-output-copy {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    opacity: 0;
-    transition: opacity 0.15s;
+  .tool-code-command {
+    color: var(--text-primary);
+    font-weight: 500;
+    margin-bottom: 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 
-  .tool-output:hover .tool-output-copy {
-    opacity: 1;
+  .tool-code-output {
+    margin: 0;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
-  .tool-output::-webkit-scrollbar {
+  .tool-code-status {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 3px;
+    margin-top: 8px;
+    font-size: calc(var(--size-xs) * 0.85);
+    color: var(--text-muted);
+  }
+
+  .tool-code-block::-webkit-scrollbar {
     width: 4px;
   }
 
-  .tool-output::-webkit-scrollbar-track {
+  .tool-code-block::-webkit-scrollbar-track {
     background: transparent;
   }
 
-  .tool-output::-webkit-scrollbar-thumb {
+  .tool-code-block::-webkit-scrollbar-thumb {
     background: var(--scrollbar-thumb-transparent);
     border-radius: 2px;
   }

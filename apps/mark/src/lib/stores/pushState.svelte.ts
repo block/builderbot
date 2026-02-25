@@ -46,11 +46,18 @@ class PushStateStore {
     return this.states.get(branchId) ?? null;
   }
 
-  setPushing(branchId: string, sessionId: string): void {
-    // Only cleanup when approaching size limit to avoid O(n) cost on every operation
+  /**
+   * Run cleanup when store size approaches the limit to prevent memory leaks.
+   * Only cleanup when approaching size limit to avoid O(n) cost on every operation.
+   */
+  private maybeCleanup(): void {
     if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
       this.cleanup();
     }
+  }
+
+  setPushing(branchId: string, sessionId: string): void {
+    this.maybeCleanup();
     this.states.set(branchId, {
       state: 'pushing',
       sessionId,
@@ -62,9 +69,7 @@ class PushStateStore {
   }
 
   setPushDone(branchId: string): void {
-    if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
-      this.cleanup();
-    }
+    this.maybeCleanup();
     this.states.set(branchId, {
       state: 'done',
       sessionId: null,
@@ -76,9 +81,7 @@ class PushStateStore {
   }
 
   setPushError(branchId: string, error: string, rejectedNonFastForward = false): void {
-    if (this.states.size >= MAX_STORE_SIZE * CLEANUP_THRESHOLD) {
-      this.cleanup();
-    }
+    this.maybeCleanup();
     const existing = this.states.get(branchId);
     this.states.set(branchId, {
       state: 'error',

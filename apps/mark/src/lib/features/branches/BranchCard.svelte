@@ -426,8 +426,12 @@
         if (session && session.status !== 'running') {
           handlePushSessionComplete(session.status);
         }
-      } catch {
+      } catch (err) {
         // Session may have been deleted — clear the pushing state
+        console.error(
+          `[BranchCard] Lost track of push session ${sid} for branch ${branch.id}:`,
+          err
+        );
         pushStateStore.setPushError(branch.id, 'Lost track of push session.');
         pushStateStore.clearSessionTracking(branch.id);
       }

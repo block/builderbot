@@ -51,7 +51,7 @@
     resumeSession,
   } from '../../commands';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import { formatToolDisplay, hasXmlBlocks } from './sessionModalHelpers';
+  import { formatToolDisplay, hasXmlBlocks, stripCodeFences } from './sessionModalHelpers';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
 
@@ -768,12 +768,13 @@
                       {/if}
                     </div>
                     {#if isExpanded && pair.result}
+                      {@const resultContent = stripCodeFences(pair.result.content)}
                       <div class="tool-code-block" transition:slide={{ duration: 150 }}>
                         {#if toolName === 'Ran' && toolArgs}
                           <div class="tool-code-command">$ {toolArgs}</div>
                         {/if}
-                        {#if pair.result.content}
-                          <pre class="tool-code-output">{pair.result.content}</pre>
+                        {#if resultContent}
+                          <pre class="tool-code-output">{resultContent}</pre>
                         {/if}
                         <div class="tool-code-status">
                           <Check size={11} /> Success

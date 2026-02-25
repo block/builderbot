@@ -114,6 +114,13 @@ function formatArgs(args: Record<string, unknown>): string {
     .join(', ');
 }
 
+/** Strip outer markdown code fences (handles truncated content missing the closing fence). */
+export function stripCodeFences(content: string): string {
+  const trimmed = content.trim();
+  const m = trimmed.match(/^```\w*\n([\s\S]*?)(?:\n```\s*$|$)/);
+  return m ? m[1].trimEnd() : content;
+}
+
 export function formatToolDisplay(content: string): ToolDisplay {
   const parsed = parseToolCall(content);
   if (parsed) {

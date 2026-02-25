@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 // =============================================================================
@@ -99,6 +99,7 @@ struct CachedPRList {
 
 /// Global cache for PR lists, keyed by repo path.
 static PR_CACHE: RwLock<Option<HashMap<String, CachedPRList>>> = RwLock::new(None);
+static REPO_CLONE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
 fn get_cached_prs(repo: &Path) -> Option<Vec<PullRequest>> {
     let key = repo.to_string_lossy().to_string();
@@ -592,6 +593,27 @@ fn remove_stale_clone_dir(clone_path: &Path) -> Result<(), GitError> {
     })
 }
 
+fn clone_lock_key(github_repo: &str) -> String {
+    // GitHub repo slugs are case-insensitive. Normalizing avoids duplicate
+    // lock entries for case variants like Owner/Repo vs owner/repo.
+    github_repo.trim().to_ascii_lowercase()
+}
+
+fn clone_lock_for_repo(github_repo: &str) -> Arc<Mutex<()>> {
+    let locks = REPO_CLONE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut lock_map = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Opportunistically drop lock entries that are no longer referenced by any
+    // active clone operation so the map does not grow without bound.
+    lock_map.retain(|_, lock| Arc::strong_count(lock) > 1);
+    let key = clone_lock_key(github_repo);
+    lock_map
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 /// Fetch the latest from origin and reset the main checkout's working tree to
 /// the remote default branch tip.
 ///
@@ -659,6 +681,13 @@ pub fn update_clone_to_remote_head(repo_path: &std::path::Path, github_repo: &st
 /// afterwards. If not cloned yet, clones the repo. Returns the path to the
 /// local clone.
 pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitError> {
+    // Multiple setup flows (frontend + backend) can request the same clone at once.
+    // Serialize clone creation/deletion per repo to avoid races on first run.
+    let repo_lock = clone_lock_for_repo(github_repo);
+    let _clone_guard = repo_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let repos = crate::paths::repos_dir()
         .ok_or_else(|| GitError::CommandFailed("Cannot determine data directory".to_string()))?;
 
@@ -2044,6 +2073,25 @@ pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
 mod tests {
     use super::*;
 
+    static CLONE_LOCK_TEST_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+
+    fn lock_clone_lock_tests() -> std::sync::MutexGuard<'static, ()> {
+        CLONE_LOCK_TEST_MUTEX
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn clear_clone_lock_map() {
+        if let Some(locks) = REPO_CLONE_LOCKS.get() {
+            locks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
+        }
+    }
+
     #[test]
     fn test_check_github_auth_returns_status() {
         // This test just verifies the function runs without panicking
@@ -2051,5 +2099,47 @@ mod tests {
         let status = check_github_auth();
         // Either authenticated or has a setup hint
         assert!(status.authenticated || status.setup_hint.is_some());
+    }
+
+    #[test]
+    fn test_clone_lock_for_repo_normalizes_repo_case() {
+        let _test_guard = lock_clone_lock_tests();
+        clear_clone_lock_map();
+
+        let upper = clone_lock_for_repo("Owner/Repo");
+        let lower = clone_lock_for_repo("owner/repo");
+
+        assert!(std::sync::Arc::ptr_eq(&upper, &lower));
+
+        clear_clone_lock_map();
+    }
+
+    #[test]
+    fn test_clone_lock_for_repo_prunes_inactive_entries() {
+        let _test_guard = lock_clone_lock_tests();
+        clear_clone_lock_map();
+
+        let stale_key = clone_lock_key("Owner/StaleRepo");
+        {
+            let stale_lock = clone_lock_for_repo("Owner/StaleRepo");
+            assert!(std::sync::Arc::strong_count(&stale_lock) >= 2);
+        }
+
+        let active_lock = clone_lock_for_repo("Owner/ActiveRepo");
+        drop(active_lock);
+
+        let lock_map = REPO_CLONE_LOCKS
+            .get()
+            .expect("clone lock map should be initialized")
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        assert!(
+            !lock_map.contains_key(&stale_key),
+            "inactive clone lock entry should be pruned"
+        );
+
+        drop(lock_map);
+        clear_clone_lock_map();
     }
 }

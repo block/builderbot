@@ -1103,7 +1103,7 @@ fn write_note_to_remote(
     Ok(remote_path)
 }
 
-/// Format a single note's content for inclusion in an agent context string.
+/// Format a note's content for inclusion in an agent context string.
 ///
 /// When `workspace_name` is `Some`, the note is written to a temp file inside
 /// the remote workspace via `ws_exec` and referenced by path. When `None`,
@@ -1111,32 +1111,50 @@ fn write_note_to_remote(
 /// `See: <path>` output format, keeping large notes out of the prompt.
 ///
 /// Falls back to inlining if the write fails (remote or local).
+fn format_note_with_heading(
+    id: &str,
+    title: &str,
+    content: &str,
+    workspace_name: Option<&str>,
+    heading: &str,
+) -> String {
+    if let Some(ws_name) = workspace_name {
+        match write_note_to_remote(ws_name, id, content) {
+            Ok(remote_path) => format!("### {heading}: {title}\n\nSee: `{remote_path}`"),
+            Err(e) => {
+                log::warn!("Failed to write note to remote workspace, inlining: {e}");
+                format!("### {heading}: {title}\n\n{content}")
+            }
+        }
+    } else {
+        let note_path = std::env::temp_dir().join(format!("mark-note-{id}.md"));
+        match std::fs::write(&note_path, content) {
+            Ok(()) => format!("### {heading}: {title}\n\nSee: `{}`", note_path.display()),
+            Err(e) => {
+                log::warn!("Failed to write note to temp file, inlining: {e}");
+                format!("### {heading}: {title}\n\n{content}")
+            }
+        }
+    }
+}
+
+/// Format a single note's content for inclusion in an agent context string.
+///
+/// Wrapper around `format_note_with_heading` that uses "Note" as the heading
+/// and returns `Option<String>` for backward compatibility with timeline filtering.
 pub(crate) fn format_note_for_context(
     id: &str,
     title: &str,
     content: &str,
     workspace_name: Option<&str>,
 ) -> Option<String> {
-    if let Some(ws_name) = workspace_name {
-        match write_note_to_remote(ws_name, id, content) {
-            Ok(remote_path) => Some(format!("### Note: {title}\n\nSee: `{remote_path}`")),
-            Err(e) => {
-                log::warn!("Failed to write note to remote workspace, inlining: {e}");
-                Some(format!("### Note: {title}\n\n{content}"))
-            }
-        }
-    } else {
-        let note_path = std::env::temp_dir().join(format!("mark-note-{id}.md"));
-        if let Err(e) = std::fs::write(&note_path, content) {
-            log::warn!("Failed to write note to temp file: {e}");
-            None
-        } else {
-            Some(format!(
-                "### Note: {title}\n\nSee: `{}`",
-                note_path.display()
-            ))
-        }
-    }
+    Some(format_note_with_heading(
+        id,
+        title,
+        content,
+        workspace_name,
+        "Note",
+    ))
 }
 
 /// Convert notes from the DB into timeline entries.
@@ -1176,38 +1194,14 @@ fn note_timeline_entries(
 
 /// Format a single project note for inclusion in context.
 ///
-/// Mirrors `format_note_for_context` but uses the "Project Note" heading.
-/// When `workspace_name` is `Some`, writes to the remote workspace; when
-/// `None`, writes to a local temp file. Falls back to inlining on failure.
+/// Wrapper around `format_note_with_heading` that uses "Project Note" as the heading.
 fn format_project_note_for_context(
     id: &str,
     title: &str,
     content: &str,
     workspace_name: Option<&str>,
 ) -> String {
-    if let Some(ws_name) = workspace_name {
-        match write_note_to_remote(ws_name, id, content) {
-            Ok(remote_path) => {
-                format!("### Project Note: {title}\n\nSee: `{remote_path}`")
-            }
-            Err(e) => {
-                log::warn!("Failed to write project note to remote workspace, inlining: {e}");
-                format!("### Project Note: {title}\n\n{content}")
-            }
-        }
-    } else {
-        let note_path = std::env::temp_dir().join(format!("mark-note-{id}.md"));
-        match std::fs::write(&note_path, content) {
-            Ok(()) => format!(
-                "### Project Note: {title}\n\nSee: `{}`",
-                note_path.display()
-            ),
-            Err(e) => {
-                log::warn!("Failed to write project note to temp file, inlining: {e}");
-                format!("### Project Note: {title}\n\n{content}")
-            }
-        }
-    }
+    format_note_with_heading(id, title, content, workspace_name, "Project Note")
 }
 
 /// Convert project notes from the DB into timeline entries.

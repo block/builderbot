@@ -138,7 +138,7 @@
     try {
       const response = await commands.startProjectSession(project.id, text);
       activeSessionIds = new Set([...activeSessionIds, response.sessionId]);
-      sessionRegistry.register(response.sessionId, project.id, 'other');
+      sessionRegistry.register(response.sessionId, project.id, 'note');
       projectStateStore.addRunningSession(project.id, response.sessionId);
       // Reload notes immediately so the stub appears as "Generating note…"
       await loadProjectNotes();

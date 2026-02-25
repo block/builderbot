@@ -10,9 +10,9 @@
  * The last viewed project is persisted so the user returns to it on relaunch.
  */
 
-import { getStoreValue, setStoreValue } from './shared/persistentStore';
-import * as commands from './commands';
-import { projectStateStore } from './stores/projectState.svelte';
+import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
+import * as commands from '../../api/commands';
+import { projectStateStore } from '../../stores/projectState.svelte';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 

@@ -22,7 +22,7 @@
     projectSubtitle,
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
-  import { selectProject } from '../../navigation.svelte';
+  import { selectProject } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import { getProjectStatus } from './projectStatus';

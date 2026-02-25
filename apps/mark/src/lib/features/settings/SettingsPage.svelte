@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ArrowLeft, FolderGit2, Stethoscope } from 'lucide-svelte';
-  import { closeSettings, navigation } from '../../navigation.svelte';
+  import { closeSettings, navigation } from '../layout/navigation.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
 

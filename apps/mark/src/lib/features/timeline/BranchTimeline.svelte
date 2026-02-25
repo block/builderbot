@@ -43,6 +43,8 @@
     onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
     onDeleteNote?: (noteId: string, sessionId?: string) => void;
     onDeleteReview?: (reviewId: string, sessionId?: string) => void;
+    /** Optional per-review breakdown of visible comments vs hold-to-reveal annotations. */
+    reviewCommentBreakdown?: Record<string, { comments: number; annotations: number }>;
     onNewNote?: () => void;
     onNewCommit?: () => void;
     onNewReview?: () => void;
@@ -63,6 +65,7 @@
     onDeletePendingCommit,
     onDeleteNote,
     onDeleteReview,
+    reviewCommentBreakdown = {},
     onNewNote,
     onNewCommit,
     onNewReview,
@@ -105,6 +108,10 @@
   /** Strip XML-tagged context blocks (action, branch-history) from display text. */
   function stripXmlTags(text: string): string {
     return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
+  }
+
+  function formatCount(count: number, singular: string): string {
+    return `${count} ${singular}${count === 1 ? '' : 's'}`;
   }
 
   let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
@@ -203,10 +210,17 @@
     }
 
     for (const review of timeline.reviews) {
+      const breakdown = reviewCommentBreakdown[review.id];
+      const commentCount = breakdown?.comments ?? review.commentCount;
+      const annotationCount = breakdown?.annotations ?? 0;
+      const totalCount = commentCount + annotationCount;
       const isRunning = review.sessionStatus === 'running';
-      const isFailed = !isRunning && !!review.sessionId && review.commentCount === 0;
+      const isFailed = !isRunning && !!review.sessionId && totalCount === 0;
       const isDeleting = deletingReviewIds.has(review.id);
       const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
+      const countParts: string[] = [];
+      if (commentCount > 0) countParts.push(formatCount(commentCount, 'comment'));
+      if (annotationCount > 0) countParts.push(formatCount(annotationCount, 'annotation'));
 
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
@@ -226,7 +240,7 @@
         key: `review-${review.id}`,
         type,
         title: `Code Review`,
-        meta: review.commentCount > 0 ? `${review.commentCount} comments` : undefined,
+        meta: countParts.length > 0 ? countParts.join(' + ') : undefined,
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
         timestamp: Math.floor(review.createdAt / 1000),

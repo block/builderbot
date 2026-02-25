@@ -423,19 +423,18 @@ fn run_post_completion_hooks(
 
     // --- Note extraction ---
     if let Ok(Some(empty_note)) = store.get_empty_note_by_session(session_id) {
-        // Collect all assistant messages for this session and find note content.
+        // Find the last assistant message that contains a note separator,
+        // then use the *first* `---` within that message. This avoids
+        // false positives from earlier messages where the agent may have
+        // echoed instructions containing `---`.
         if let Ok(messages) = store.get_session_messages(session_id) {
-            // Concatenate all assistant messages (the note content could span
-            // multiple assistant message chunks if the model was interrupted
-            // by tool calls and resumed).
-            let full_text: String = messages
+            let note_content = messages
                 .iter()
+                .rev()
                 .filter(|m| m.role == MessageRole::Assistant)
-                .map(|m| m.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
+                .find_map(|m| extract_note_content(&m.content));
 
-            if let Some(note_content) = extract_note_content(&full_text) {
+            if let Some(note_content) = note_content {
                 let (title, body) = extract_note_title(&note_content);
                 let final_title = if title.is_empty() {
                     // Fallback title from the session prompt
@@ -470,14 +469,13 @@ fn run_post_completion_hooks(
     // --- Project note extraction ---
     if let Ok(Some(empty_note)) = store.get_empty_project_note_by_session(session_id) {
         if let Ok(messages) = store.get_session_messages(session_id) {
-            let full_text: String = messages
+            let note_content = messages
                 .iter()
+                .rev()
                 .filter(|m| m.role == MessageRole::Assistant)
-                .map(|m| m.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
+                .find_map(|m| extract_note_content(&m.content));
 
-            if let Some(note_content) = extract_note_content(&full_text) {
+            if let Some(note_content) = note_content {
                 let (title, body) = extract_note_title(&note_content);
                 let final_title = if title.is_empty() {
                     store
@@ -538,12 +536,16 @@ fn run_post_completion_hooks(
     }
 }
 
-/// Extract note content from assistant output.
+/// Extract note content from a single assistant message.
 ///
-/// Primary path: find the **last** markdown horizontal rule (`---`, `***`, `___`)
-/// on its own line (outside code fences) and return everything after it. We use
-/// the last match because the agent places the note at the very end of its
-/// response — earlier HRs from code examples or echoed instructions are skipped.
+/// Callers are responsible for choosing which message to pass — typically the
+/// **last** assistant message that contains a `---`. Within that message we
+/// use the **first** HR (outside code fences) as the note separator, because
+/// the agent places the `---` at the boundary between preamble and note
+/// content.
+///
+/// Primary path: find the first markdown horizontal rule (`---`, `***`, `___`)
+/// on its own line (outside code fences) and return everything after it.
 ///
 /// Fallback path: handle model outputs where the rule is accidentally attached
 /// to prior text (for example, `Preamble.---\n# Title`) by accepting inline
@@ -557,19 +559,15 @@ fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
     // We match the same patterns markdown parsers treat as thematic breaks:
     // a line containing only ---, ***, or ___ (with optional spaces).
     //
-    // We scan from the **bottom** so the *last* HR wins. The agent is
-    // instructed to place the note at the very end of its response, so
-    // earlier HRs — from code-fence examples, echoed instructions, or
-    // reasoning — are safely skipped.
+    // We scan from the **top** so the *first* HR wins. The caller already
+    // selects the last assistant message that contains a separator, so
+    // within that message the first `---` marks the start of the note.
     //
-    // Additionally, we track whether we are inside a fenced code block
-    // (``` or ~~~) and skip any HR that appears inside one. This provides
-    // defense-in-depth against the common case where the agent quotes a
-    // `---` inside a code example.
+    // We track whether we are inside a fenced code block (``` or ~~~) and
+    // skip any HR that appears inside one.
     let lines: Vec<&str> = text.lines().collect();
 
-    // Pre-compute which lines are inside a code fence so the reverse scan
-    // can check in O(1).
+    // Pre-compute which lines are inside a code fence.
     let mut in_fence = vec![false; lines.len()];
     let mut inside = false;
     for (i, line) in lines.iter().enumerate() {
@@ -580,7 +578,7 @@ fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
         in_fence[i] = inside;
     }
 
-    for i in (0..lines.len()).rev() {
+    for i in 0..lines.len() {
         if in_fence[i] {
             continue;
         }
@@ -626,9 +624,10 @@ fn extract_note_after_inline_hr(text: &str) -> Option<String> {
                 continue;
             }
 
-            // Keep the *last* (latest) match — the note is at the end.
+            // Keep the *first* (earliest) match — the note starts at the
+            // first separator in the message.
             match best {
-                Some((best_idx, _)) if idx <= best_idx => {}
+                Some((best_idx, _)) if idx >= best_idx => {}
                 _ => best = Some((idx, remaining.to_string())),
             }
         }
@@ -1083,11 +1082,18 @@ Second batch:
     }
 
     #[test]
-    fn note_content_last_hr_wins_over_earlier_hr() {
-        // The agent echoes instructions containing a --- before the real note.
+    fn note_content_first_hr_wins_within_message() {
+        // Within a single message the first --- is the note separator.
+        // The caller is responsible for picking the right message.
         let text = "Here is the format:\n---\n# <Title>\n<Body>\n\nNow here is my actual note:\n---\n# Real Title\nReal body.";
         let content = extract_note_content(text);
-        assert_eq!(content, Some("# Real Title\nReal body.".to_string()));
+        assert_eq!(
+            content,
+            Some(
+                "# <Title>\n<Body>\n\nNow here is my actual note:\n---\n# Real Title\nReal body."
+                    .to_string()
+            ),
+        );
     }
 
     #[test]
@@ -1113,11 +1119,14 @@ Second batch:
     }
 
     #[test]
-    fn note_content_multiple_hrs_picks_last() {
-        // Multiple standalone HRs — the last one delimits the note.
+    fn note_content_multiple_hrs_picks_first() {
+        // Multiple standalone HRs — the first one delimits the note.
         let text = "Section 1\n---\nSection 2\n---\n# Final Note\nFinal body.";
         let content = extract_note_content(text);
-        assert_eq!(content, Some("# Final Note\nFinal body.".to_string()));
+        assert_eq!(
+            content,
+            Some("Section 2\n---\n# Final Note\nFinal body.".to_string()),
+        );
     }
 
     // ── extract_note_title ──────────────────────────────────────────────

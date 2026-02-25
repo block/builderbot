@@ -422,11 +422,8 @@ fn run_post_completion_hooks(
     }
 
     // --- Note extraction ---
-    if let Ok(Some(empty_note)) = store.get_empty_note_by_session(session_id) {
-        // Find the last assistant message that contains a note separator,
-        // then use the *first* `---` within that message. This avoids
-        // false positives from earlier messages where the agent may have
-        // echoed instructions containing `---`.
+    if let Ok(Some(note)) = store.get_note_by_session(session_id) {
+        // Collect all assistant messages for this session and find note content.
         if let Ok(messages) = store.get_session_messages(session_id) {
             let note_content = messages
                 .iter()
@@ -454,10 +451,12 @@ fn run_post_completion_hooks(
                 } else {
                     title
                 };
-                log::info!("Session {session_id}: extracted note \"{final_title}\"");
-                if let Err(e) =
-                    store.update_note_title_and_content(&empty_note.id, &final_title, &body)
-                {
+                let is_amendment = !note.content.is_empty();
+                log::info!(
+                    "Session {session_id}: {} note \"{final_title}\"",
+                    if is_amendment { "amended" } else { "extracted" }
+                );
+                if let Err(e) = store.update_note_title_and_content(&note.id, &final_title, &body) {
                     log::error!("Failed to update note content: {e}");
                 }
             } else {
@@ -467,7 +466,7 @@ fn run_post_completion_hooks(
     }
 
     // --- Project note extraction ---
-    if let Ok(Some(empty_note)) = store.get_empty_project_note_by_session(session_id) {
+    if let Ok(Some(note)) = store.get_project_note_by_session(session_id) {
         if let Ok(messages) = store.get_session_messages(session_id) {
             let note_content = messages
                 .iter()
@@ -494,9 +493,13 @@ fn run_post_completion_hooks(
                 } else {
                     title
                 };
-                log::info!("Session {session_id}: extracted project note \"{final_title}\"");
+                let is_amendment = !note.content.is_empty();
+                log::info!(
+                    "Session {session_id}: {} project note \"{final_title}\"",
+                    if is_amendment { "amended" } else { "extracted" }
+                );
                 if let Err(e) =
-                    store.update_project_note_title_and_content(&empty_note.id, &final_title, &body)
+                    store.update_project_note_title_and_content(&note.id, &final_title, &body)
                 {
                     log::error!("Failed to update project note content: {e}");
                 }

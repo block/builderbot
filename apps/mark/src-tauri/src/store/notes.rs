@@ -46,6 +46,19 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Find a note linked to a given session (regardless of content).
+    pub fn get_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at
+             FROM notes WHERE session_id = ?1",
+            params![session_id],
+            Self::row_to_note,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Find an empty note (content = '') linked to a given session.
     pub fn get_empty_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();

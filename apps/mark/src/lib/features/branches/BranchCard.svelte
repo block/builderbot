@@ -14,6 +14,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { untrack } from 'svelte';
   import { slide, fade } from 'svelte/transition';
+  import { cubicOut } from 'svelte/easing';
   import {
     GitBranch,
     GitCommitVertical,
@@ -109,6 +110,37 @@
     onRename,
     onRetryWorktree,
   }: Props = $props();
+
+  // Custom transition combining slide and fade effects
+  function slideAndFade(
+    node: Element,
+    { duration = 300, axis = 'x' }: { duration?: number; axis?: 'x' | 'y' } = {}
+  ) {
+    const style = getComputedStyle(node);
+    const opacity = +style.opacity;
+    const primaryDimension = axis === 'y' ? 'height' : 'width';
+    const primaryDimensionValue = parseFloat(style[primaryDimension]);
+    const paddingStart = axis === 'y' ? 'paddingTop' : 'paddingLeft';
+    const paddingEnd = axis === 'y' ? 'paddingBottom' : 'paddingRight';
+    const marginStart = axis === 'y' ? 'marginTop' : 'marginLeft';
+    const marginEnd = axis === 'y' ? 'marginBottom' : 'marginRight';
+
+    return {
+      duration,
+      easing: cubicOut,
+      css: (t: number) => {
+        return [
+          `overflow: hidden`,
+          `opacity: ${t * opacity}`,
+          `${primaryDimension}: ${t * primaryDimensionValue}px`,
+          `padding-${paddingStart.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}: ${t * parseFloat(style[paddingStart])}px`,
+          `padding-${paddingEnd.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}: ${t * parseFloat(style[paddingEnd])}px`,
+          `margin-${marginStart.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}: ${t * parseFloat(style[marginStart])}px`,
+          `margin-${marginEnd.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`)}: ${t * parseFloat(style[marginEnd])}px`,
+        ].join(';');
+      },
+    };
+  }
 
   function notifyError(title: string, e: unknown): void {
     alerts.show({
@@ -1474,8 +1506,7 @@
           <div
             class="running-action-container"
             class:fading={execution.fading}
-            in:slide={{ duration: 300, axis: 'x' }}
-            out:slide={{ duration: 300, axis: 'x' }}
+            transition:slideAndFade={{ duration: 300, axis: 'x' }}
           >
             <button
               class="running-action-button"
@@ -2132,7 +2163,7 @@
     padding: 6px 12px;
     background: var(--bg-elevated);
     border: 1px solid var(--border-muted);
-    border-radius: 6px;
+    border-radius: 999px;
     color: var(--text-primary);
     font-size: var(--size-xs);
     cursor: pointer;

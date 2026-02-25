@@ -47,7 +47,7 @@
     reviewCommentBreakdown?: Record<string, { comments: number; annotations: number }>;
     onNewNote?: () => void;
     onNewCommit?: () => void;
-    onNewReview?: () => void;
+    onNewReview?: (e: MouseEvent) => void;
     newSessionDisabled?: boolean;
     footerActions?: Snippet;
   }
@@ -365,7 +365,7 @@
     {#if onNewReview}
       <button
         class="empty-action-btn review-action"
-        onclick={onNewReview}
+        onclick={(e) => onNewReview?.(e)}
         disabled={disableNewSessionActions}
       >
         <FileSearch size={18} />
@@ -446,7 +446,7 @@
           {#if onNewReview}
             <button
               class="add-item-btn review-btn"
-              onclick={onNewReview}
+              onclick={(e) => onNewReview?.(e)}
               disabled={disableNewSessionActions}
               title="New code review"
             >

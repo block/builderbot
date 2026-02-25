@@ -925,9 +925,35 @@
   // New session modal
   // =========================================================================
 
-  function openNewSession(mode: BranchSessionType) {
+  function openNewSession(mode: BranchSessionType, e?: MouseEvent) {
+    // If option-clicking "New code review", start immediately without showing the dialog
+    if (mode === 'review' && e?.altKey) {
+      startReviewSessionImmediately();
+      return;
+    }
     newSessionMode = mode;
     showNewSession = true;
+  }
+
+  async function startReviewSessionImmediately() {
+    try {
+      newSessionMode = 'review'; // Set mode for handleNewSessionStarted
+      const agents = branch.branchType === 'remote' ? REMOTE_AGENTS : agentState.providers;
+      const result = await commands.startBranchSession(
+        branch.id,
+        'Review the code changes on this branch.',
+        'review',
+        getPreferredAgent(agents) ?? undefined
+      );
+      handleNewSessionStarted({ sessionId: result.sessionId, artifactId: result.artifactId });
+    } catch (e) {
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to start session',
+        message: e instanceof Error ? e.message : String(e),
+        durationMs: 0,
+      });
+    }
   }
 
   function handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType }) {
@@ -1633,7 +1659,7 @@
           onDeleteReview={handleDeleteReview}
           onNewNote={() => openNewSession('note')}
           onNewCommit={() => openNewSession('commit')}
-          onNewReview={hasCodeChanges ? () => openNewSession('review') : undefined}
+          onNewReview={hasCodeChanges ? (e) => openNewSession('review', e) : undefined}
           newSessionDisabled={showNewSession}
         >
           {#snippet footerActions()}

@@ -62,6 +62,7 @@ export { sanitize } from './sanitize';
 export {
 	findMatches,
 	describeMatch,
+	getMatchSnippet,
 	MAX_MATCHES,
 	type SearchMatch,
 	type MatchLocation

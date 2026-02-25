@@ -6,3 +6,4 @@ export { default as Scrollbar } from './Scrollbar.svelte';
 export { default as HorizontalScrollbar } from './HorizontalScrollbar.svelte';
 export { default as CrossFileSearchBar } from './CrossFileSearchBar.svelte';
 export { default as SearchResultItem } from './SearchResultItem.svelte';
+export { default as FileSearchResults } from './FileSearchResults.svelte';

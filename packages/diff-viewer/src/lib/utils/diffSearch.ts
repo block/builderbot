@@ -123,3 +123,35 @@ export function findMatches(
 export function describeMatch(match: SearchMatch, currentIndex: number, total: number): string {
 	return `${currentIndex + 1}/${total}`;
 }
+
+/**
+ * Extract a snippet of text around a search match for display in the sidebar.
+ * Shows context before and after the match with ellipsis when truncated.
+ *
+ * @param match - The search match
+ * @param afterLines - Lines from the "after" side of the diff
+ * @param contextBefore - Number of characters to show before match (default: 20)
+ * @param contextAfter - Number of characters to show after match (default: 30)
+ * @returns Snippet string with ellipsis if truncated
+ */
+export function getMatchSnippet(
+	match: SearchMatch,
+	afterLines: string[],
+	contextBefore: number = 20,
+	contextAfter: number = 30
+): string {
+	const line = afterLines[match.lineIndex];
+	const location = match.right;
+
+	if (!line || !location) return '';
+
+	// Extract context around match
+	const start = Math.max(0, location.startCol - contextBefore);
+	const end = Math.min(line.length, location.endCol + contextAfter);
+
+	let snippet = line.slice(start, end).trim();
+	if (start > 0) snippet = '...' + snippet;
+	if (end < line.length) snippet = snippet + '...';
+
+	return snippet;
+}

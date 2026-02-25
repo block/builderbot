@@ -27,7 +27,11 @@
     Trash2,
     ListChecks,
   } from 'lucide-svelte';
-  import { DiffViewer, CrossFileSearchBar } from '@builderbot/diff-viewer/components';
+  import {
+    DiffViewer,
+    CrossFileSearchBar,
+    FileSearchResults,
+  } from '@builderbot/diff-viewer/components';
   import {
     buildFileEntries,
     buildTree,
@@ -37,6 +41,9 @@
     type FileEntry,
     type TreeNode,
     setupDiffKeyboardNav,
+    getMatchSnippet,
+    getTextLines,
+    type SearchMatch,
   } from '@builderbot/diff-viewer/utils';
   import { createSearchState } from '@builderbot/diff-viewer/state';
   import type { FileDiff, FileDiffSummary, Comment, Span } from '@builderbot/diff-viewer/types';
@@ -419,6 +426,48 @@
   }
 
   // ==========================================================================
+  // Search helpers
+  // ==========================================================================
+
+  // Helper to get snippet for a search result
+  function getSnippet(match: SearchMatch, filePath: string): string {
+    const diff = diffCache.get(filePath);
+    if (!diff) return '';
+    const afterLines = getTextLines(diff, 'after');
+    return getMatchSnippet(match, afterLines);
+  }
+
+  // Handle clicking a search result
+  async function handleSearchResultClick(
+    filePath: string,
+    match: SearchMatch,
+    globalIndex: number
+  ) {
+    // Update current result index
+    searchState.setCurrentResult(globalIndex);
+
+    // Auto-expand search results for this file
+    if (searchState.areSearchResultsCollapsed(filePath)) {
+      searchState.toggleSearchResults(filePath);
+    }
+
+    // Select the file and scroll to the match
+    await selectFile(filePath);
+    // Note: Scrolling to the specific line would require additional integration
+  }
+
+  // Initialize collapsed state when search results are ready
+  $effect(() => {
+    if (
+      searchState.state.isOpen &&
+      searchState.state.fileResults.size > 0 &&
+      !searchState.state.loading
+    ) {
+      searchState.initializeCollapsedState(files);
+    }
+  });
+
+  // ==========================================================================
   // Keyboard shortcuts
   // ==========================================================================
 
@@ -429,6 +478,10 @@
       onNextSearchResult: async () => {
         const result = await searchState.goToNextResult(files);
         if (result) {
+          // Auto-expand search results for this file
+          if (searchState.areSearchResultsCollapsed(result.filePath)) {
+            searchState.toggleSearchResults(result.filePath);
+          }
           await selectFile(result.filePath);
           // TODO: Scroll to the specific line (result.match.lineIndex)
         }
@@ -436,6 +489,10 @@
       onPrevSearchResult: async () => {
         const result = await searchState.goToPrevResult(files);
         if (result) {
+          // Auto-expand search results for this file
+          if (searchState.areSearchResultsCollapsed(result.filePath)) {
+            searchState.toggleSearchResults(result.filePath);
+          }
           await selectFile(result.filePath);
           // TODO: Scroll to the specific line (result.match.lineIndex)
         }
@@ -643,9 +700,39 @@
                       <button
                         class="tree-item file-item"
                         class:selected={selectedFile === node.file.path}
+                        class:has-search-results={searchState.state.isOpen &&
+                          searchState.state.fileResults.has(node.file.path)}
                         style="padding-left: {8 + depth * 12}px"
                         onclick={() => handleSelectFile(node.file!)}
                       >
+                        {#if searchState.state.isOpen}
+                          {#if searchState.state.fileResults.has(node.file.path)}
+                            <span
+                              class="search-chevron"
+                              onclick={(e) => {
+                                e.stopPropagation();
+                                searchState.toggleSearchResults(node.file!.path);
+                              }}
+                              role="button"
+                              tabindex="0"
+                              onkeydown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  searchState.toggleSearchResults(node.file!.path);
+                                }
+                              }}
+                            >
+                              {#if searchState.areSearchResultsCollapsed(node.file.path)}
+                                <ChevronRight size={14} />
+                              {:else}
+                                <ChevronDown size={14} />
+                              {/if}
+                            </span>
+                          {:else}
+                            <span class="search-spacer"></span>
+                          {/if}
+                        {/if}
                         <span class="status-icon">
                           {#if node.file.status === 'added'}
                             <CirclePlus size={16} />
@@ -661,7 +748,36 @@
                             <MessageSquare size={12} />
                           </span>
                         {/if}
+                        {#if searchState.state.isOpen && searchState.state.fileResults.has(node.file.path)}
+                          {@const resultCount =
+                            searchState.state.fileResults.get(node.file.path)?.matches.length ?? 0}
+                          <span
+                            class="search-result-count"
+                            title="{resultCount} search result{resultCount !== 1 ? 's' : ''}"
+                          >
+                            {resultCount}
+                          </span>
+                        {/if}
                       </button>
+
+                      <!-- Search results (if search is active and this file has matches) -->
+                      {#if searchState.state.isOpen && searchState.state.fileResults.has(node.file.path) && !searchState.areSearchResultsCollapsed(node.file.path)}
+                        {@const fileResult = searchState.state.fileResults.get(node.file.path)}
+                        {#if fileResult}
+                          <FileSearchResults
+                            {fileResult}
+                            filePath={node.file.path}
+                            {depth}
+                            {getSnippet}
+                            isCurrentResult={(fp, idx) =>
+                              searchState.isCurrentResult(files, fp, idx)}
+                            onResultClick={handleSearchResultClick}
+                            getGlobalIndex={(fp, idx) => searchState.getGlobalIndex(files, fp, idx)}
+                            onExpandResults={(fp) => searchState.expandFileResults(fp)}
+                            onCollapseResults={(fp) => searchState.collapseFileResults(fp)}
+                          />
+                        {/if}
+                      {/if}
                     </li>
                   {/if}
                 {/each}
@@ -1309,6 +1425,47 @@
     flex-shrink: 0;
     margin-left: auto;
     padding-left: 4px;
+  }
+
+  /* Search-related styles */
+  .search-chevron {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 14px;
+    cursor: pointer;
+    color: var(--text-muted);
+    transition: color 0.1s;
+  }
+
+  .search-chevron:hover {
+    color: var(--text-primary);
+  }
+
+  .search-spacer {
+    width: 14px;
+    flex-shrink: 0;
+  }
+
+  .search-result-count {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 16px;
+    padding: 0 4px;
+    margin-left: auto;
+    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.15));
+    color: var(--accent-primary);
+    border-radius: 8px;
+    font-size: var(--size-xs);
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+
+  .has-search-results {
+    /* Optional: add subtle styling for files with search results */
   }
 
   .comments-section {

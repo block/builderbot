@@ -276,6 +276,17 @@
     }
   }
 
+  // Initialize collapsed state when search results are ready
+  $effect(() => {
+    if (
+      searchState.state.isOpen &&
+      searchState.state.fileResults.size > 0 &&
+      !searchState.state.loading
+    ) {
+      searchState.initializeCollapsedState(diffViewer.state.files);
+    }
+  });
+
   // Set up keyboard navigation for diff viewer and search
   $effect(() => {
     const cleanup = setupDiffKeyboardNav({
@@ -283,6 +294,10 @@
       onNextSearchResult: async () => {
         const result = await searchState.goToNextResult(diffViewer.state.files);
         if (result) {
+          // Auto-expand search results for this file
+          if (searchState.areSearchResultsCollapsed(result.filePath)) {
+            searchState.toggleSearchResults(result.filePath);
+          }
           await diffViewer.selectFile(result.filePath);
           // TODO: Scroll to the specific line (result.match.lineIndex)
         }
@@ -290,6 +305,10 @@
       onPrevSearchResult: async () => {
         const result = await searchState.goToPrevResult(diffViewer.state.files);
         if (result) {
+          // Auto-expand search results for this file
+          if (searchState.areSearchResultsCollapsed(result.filePath)) {
+            searchState.toggleSearchResults(result.filePath);
+          }
           await diffViewer.selectFile(result.filePath);
           // TODO: Scroll to the specific line (result.match.lineIndex)
         }
@@ -401,6 +420,8 @@
               onToggleDir={toggleDir}
               onSelectFile={selectFile}
               onToggleReviewed={toggleReviewed}
+              {searchState}
+              diffViewerState={diffViewer}
             />
             {#if !readonly}
               <DiffReferenceSection

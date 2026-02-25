@@ -31,6 +31,7 @@ export interface SearchState {
 	loading: boolean;
 	searchedFileCount: number;
 	totalFileCount: number;
+	collapsedSearchResults: Set<string>; // File paths with collapsed search results
 }
 
 // =============================================================================
@@ -101,7 +102,8 @@ export function createSearchState() {
 		totalMatches: 0,
 		loading: false,
 		searchedFileCount: 0,
-		totalFileCount: 0
+		totalFileCount: 0,
+		collapsedSearchResults: new Set()
 	});
 
 	// =============================================================================
@@ -128,6 +130,7 @@ export function createSearchState() {
 		state.loading = false;
 		state.searchedFileCount = 0;
 		state.totalFileCount = 0;
+		state.collapsedSearchResults = new Set();
 	}
 
 	/**
@@ -385,6 +388,47 @@ export function createSearchState() {
 		state.currentResultIndex = globalIndex;
 	}
 
+	/**
+	 * Toggle the collapsed state of search results for a file.
+	 */
+	function toggleSearchResults(filePath: string): void {
+		const newCollapsed = new Set(state.collapsedSearchResults);
+		if (newCollapsed.has(filePath)) {
+			newCollapsed.delete(filePath);
+		} else {
+			newCollapsed.add(filePath);
+		}
+		state.collapsedSearchResults = newCollapsed;
+	}
+
+	/**
+	 * Check if search results for a file are collapsed.
+	 */
+	function areSearchResultsCollapsed(filePath: string): boolean {
+		return state.collapsedSearchResults.has(filePath);
+	}
+
+	/**
+	 * Initialize collapsed state after a search.
+	 * Collapses all files except the first result's file.
+	 */
+	function initializeCollapsedState(files: FileDiffSummary[]): void {
+		if (!state.isOpen || state.fileResults.size === 0) return;
+
+		const flattened = getFlattenedResults(files);
+		const firstResultPath = flattened.length > 0 ? flattened[0].filePath : null;
+
+		const newCollapsed = new Set<string>();
+		for (const filePath of state.fileResults.keys()) {
+			// Collapse all except the first result's file
+			if (filePath !== firstResultPath) {
+				newCollapsed.add(filePath);
+			}
+		}
+
+		state.collapsedSearchResults = newCollapsed;
+	}
+
 	return {
 		get state() {
 			return state;
@@ -400,6 +444,9 @@ export function createSearchState() {
 		collapseFileResults,
 		isCurrentResult,
 		getGlobalIndex,
-		setCurrentResult
+		setCurrentResult,
+		toggleSearchResults,
+		areSearchResultsCollapsed,
+		initializeCollapsedState
 	};
 }

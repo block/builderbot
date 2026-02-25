@@ -208,7 +208,7 @@
       <RepoSearchInput onSelect={handleRepoSelected} disabled={saving} />
     {/if}
 
-    {#if recentRepos.length > 0}
+    {#if !selectedRepo && recentRepos.length > 0}
       <div class="recent-repos">
         {#each recentRepos.slice(0, 5) as recent, i}
           <button

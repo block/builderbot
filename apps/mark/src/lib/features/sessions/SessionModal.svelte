@@ -25,6 +25,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
+  import { slide } from 'svelte/transition';
   import {
     X,
     AlertCircle,
@@ -767,8 +768,16 @@
                       {/if}
                     </div>
                     {#if isExpanded && pair.result}
-                      <div class="tool-output">
-                        <pre>{pair.result.content}</pre>
+                      <div class="tool-code-block" transition:slide={{ duration: 150 }}>
+                        {#if toolName === 'Ran' && toolArgs}
+                          <div class="tool-code-command">$ {toolArgs}</div>
+                        {/if}
+                        {#if pair.result.content}
+                          <pre class="tool-code-output">{pair.result.content}</pre>
+                        {/if}
+                        <div class="tool-code-status">
+                          <Check size={11} /> Success
+                        </div>
                       </div>
                     {/if}
                   </div>
@@ -1225,31 +1234,52 @@
     font-size: var(--size-xs);
   }
 
-  .tool-output {
-    padding: 4px 0 4px 14px;
-    max-height: 200px;
+  .tool-code-block {
+    background: var(--bg-deepest);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-top: 4px;
+    max-height: 240px;
     overflow-y: auto;
-  }
-
-  .tool-output pre {
-    margin: 0;
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
     font-size: calc(var(--size-xs) * 0.9);
-    color: var(--text-muted);
-    white-space: pre-wrap;
-    word-break: break-word;
     line-height: 1.5;
   }
 
-  .tool-output::-webkit-scrollbar {
+  .tool-code-command {
+    color: var(--text-primary);
+    font-weight: 500;
+    margin-bottom: 6px;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .tool-code-output {
+    margin: 0;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .tool-code-status {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 3px;
+    margin-top: 8px;
+    font-size: calc(var(--size-xs) * 0.85);
+    color: var(--text-muted);
+  }
+
+  .tool-code-block::-webkit-scrollbar {
     width: 4px;
   }
 
-  .tool-output::-webkit-scrollbar-track {
+  .tool-code-block::-webkit-scrollbar-track {
     background: transparent;
   }
 
-  .tool-output::-webkit-scrollbar-thumb {
+  .tool-code-block::-webkit-scrollbar-thumb {
     background: var(--scrollbar-thumb-transparent);
     border-radius: 2px;
   }

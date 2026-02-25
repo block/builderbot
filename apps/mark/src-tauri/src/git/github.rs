@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 // =============================================================================
@@ -99,6 +99,7 @@ struct CachedPRList {
 
 /// Global cache for PR lists, keyed by repo path.
 static PR_CACHE: RwLock<Option<HashMap<String, CachedPRList>>> = RwLock::new(None);
+static REPO_CLONE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
 fn get_cached_prs(repo: &Path) -> Option<Vec<PullRequest>> {
     let key = repo.to_string_lossy().to_string();
@@ -592,6 +593,17 @@ fn remove_stale_clone_dir(clone_path: &Path) -> Result<(), GitError> {
     })
 }
 
+fn clone_lock_for_repo(github_repo: &str) -> Arc<Mutex<()>> {
+    let locks = REPO_CLONE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut lock_map = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    lock_map
+        .entry(github_repo.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 /// Fetch the latest from origin and reset the main checkout's working tree to
 /// the remote default branch tip.
 ///
@@ -659,6 +671,13 @@ pub fn update_clone_to_remote_head(repo_path: &std::path::Path, github_repo: &st
 /// afterwards. If not cloned yet, clones the repo. Returns the path to the
 /// local clone.
 pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitError> {
+    // Multiple setup flows (frontend + backend) can request the same clone at once.
+    // Serialize clone creation/deletion per repo to avoid races on first run.
+    let repo_lock = clone_lock_for_repo(github_repo);
+    let _clone_guard = repo_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let repos = crate::paths::repos_dir()
         .ok_or_else(|| GitError::CommandFailed("Cannot determine data directory".to_string()))?;
 

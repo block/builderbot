@@ -5,13 +5,15 @@
   Used inside NewProjectModal (as a dialog) and SplashScreen (inline).
 -->
 <script lang="ts">
-  import { GitBranch, Monitor, Cloud, X } from 'lucide-svelte';
-  import type { Project } from '../../types';
+  import { onMount } from 'svelte';
+  import { GitBranch, Monitor, Cloud, X, Clock, Command } from 'lucide-svelte';
+  import type { Project, RecentRepo } from '../../types';
   import * as commands from '../../commands';
   import FormInput from '../../shared/FormInput.svelte';
   import FormButton from '../../shared/FormButton.svelte';
   import FormToggle from '../../shared/FormToggle.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
   import RepoSearchInput from './RepoSearchInput.svelte';
   import SubpathInput from './SubpathInput.svelte';
   import type { SubpathInputApi } from './SubpathInput.svelte';
@@ -39,6 +41,15 @@
   let isMonorepo = $state(false);
   let checkingMonorepo = $state(false);
   let subpathApi = $state<SubpathInputApi | undefined>(undefined);
+  let recentRepos = $state<RecentRepo[]>([]);
+
+  onMount(async () => {
+    try {
+      recentRepos = await commands.listRecentRepos(9);
+    } catch {
+      // Silently ignore — recents are a convenience, not critical
+    }
+  });
 
   async function checkIfMonorepo(repo: string) {
     if (!repo) {
@@ -112,6 +123,17 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    // ⌘1-⌘9: select a recent repo
+    if (e.metaKey && e.key >= '1' && e.key <= '9') {
+      const idx = parseInt(e.key) - 1;
+      if (idx < recentRepos.length) {
+        e.preventDefault();
+        const recent = recentRepos[idx];
+        handleRepoSelected(recent.githubRepo, recent.subpath ?? undefined);
+      }
+      return;
+    }
+
     if (e.key === 'Enter') {
       const target = e.target as HTMLElement;
       if (target.closest('.repo-search-wrapper')) return;
@@ -184,6 +206,26 @@
       </div>
     {:else}
       <RepoSearchInput onSelect={handleRepoSelected} disabled={saving} />
+    {/if}
+
+    {#if !selectedRepo && recentRepos.length > 0}
+      <div class="recent-repos">
+        {#each recentRepos.slice(0, 5) as recent, i}
+          <button
+            class="recent-repo-item"
+            onclick={() => handleRepoSelected(recent.githubRepo, recent.subpath ?? undefined)}
+          >
+            <Clock size={12} class="recent-repo-icon" />
+            <span class="recent-repo-label">
+              <RepoLabel githubRepo={recent.githubRepo} subpath={recent.subpath} />
+            </span>
+            <span class="recent-repo-shortcut">
+              <Command size={9} />
+              {i + 1}
+            </span>
+          </button>
+        {/each}
+      </div>
     {/if}
   </div>
 
@@ -344,5 +386,58 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+  }
+
+  .recent-repos {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+  }
+
+  .recent-repo-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 5px 8px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+    font-family: inherit;
+  }
+
+  .recent-repo-item:hover {
+    background-color: var(--bg-hover);
+  }
+
+  .recent-repo-item :global(.recent-repo-icon) {
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+
+  .recent-repo-label {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--size-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-repo-shortcut {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 1px 4px;
+    background: var(--bg-hover);
+    border-radius: 3px;
+    color: var(--text-faint);
+    font-size: 10px;
+    flex-shrink: 0;
+    line-height: 1;
   }
 </style>

@@ -9,7 +9,7 @@
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import { handleExternalLinkClick } from '../../commands';
+  import { handleExternalLinkClick } from '../../api/commands';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
 

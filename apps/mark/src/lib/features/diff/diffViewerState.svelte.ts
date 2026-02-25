@@ -2,7 +2,7 @@
 export { fileSummaryPath, type DiffViewerState } from '@builderbot/diff-viewer/state';
 
 // Re-export with Mark's Tauri commands pre-bound
-import * as commands from '../../commands';
+import * as commands from '../../api/commands';
 import { createDiffViewerState as _create } from '@builderbot/diff-viewer/state';
 
 /**

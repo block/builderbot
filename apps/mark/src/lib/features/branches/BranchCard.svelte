@@ -48,8 +48,8 @@
     BranchTimeline as BranchTimelineData,
     BranchSessionType,
   } from '../../types';
-  import * as commands from '../../commands';
-  import type { ProjectAction } from '../../commands';
+  import * as commands from '../../api/commands';
+  import type { ProjectAction } from '../../api/commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
   import DiffModal from '../diff/DiffModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';

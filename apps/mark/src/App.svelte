@@ -8,8 +8,8 @@
   import { onMount, onDestroy } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import * as commands from './lib/commands';
-  import TopBar from './lib/TopBar.svelte';
+  import * as commands from './lib/api/commands';
+  import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
@@ -22,7 +22,11 @@
   } from './lib/features/settings/preferences.svelte';
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
-  import { navigation, initNavigation, openSettings } from './lib/navigation.svelte';
+  import {
+    navigation,
+    initNavigation,
+    openSettings,
+  } from './lib/features/layout/navigation.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { prStateStore } from './lib/stores/prState.svelte';
   import { pushStateStore } from './lib/stores/pushState.svelte';

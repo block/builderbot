@@ -11,7 +11,7 @@
  * the registry of supported agent IDs and CLI commands.
  */
 
-import { discoverAcpProviders, type AcpProviderInfo } from '../../commands';
+import { discoverAcpProviders, type AcpProviderInfo } from '../../api/commands';
 
 // =============================================================================
 // Known agent metadata (display-only — the backend owns the real registry)

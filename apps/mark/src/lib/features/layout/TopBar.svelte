@@ -8,13 +8,13 @@
   import { onMount } from 'svelte';
   import { Palette, PanelLeftClose, PanelLeftOpen, Plus, SlidersHorizontal } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import ThemeSelectorModal from './features/settings/ThemeSelectorModal.svelte';
+  import ThemeSelectorModal from '../settings/ThemeSelectorModal.svelte';
   import { navigation, openSettings } from './navigation.svelte';
   import {
     hydrateProjectsSidebarState,
     projectsSidebarState,
     setProjectsSidebarCollapsed,
-  } from './features/projects/projectsSidebarState.svelte';
+  } from '../projects/projectsSidebarState.svelte';
 
   let showThemeModal = $state(false);
 

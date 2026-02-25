@@ -9,10 +9,10 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { Project, Branch, StoreIncompatibility, WorkspaceStatus } from '../../types';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, selectProject } from '../../navigation.svelte';
+  import { goHome, selectProject } from '../layout/navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';

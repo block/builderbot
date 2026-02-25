@@ -15,14 +15,14 @@
     Plus,
   } from 'lucide-svelte';
   import type { Project, ProjectRepo, Branch } from '../../types';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
   import {
     projectDisplayName,
     aggregateProjectPrStatus,
     projectSubtitle,
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
-  import { selectProject } from '../../navigation.svelte';
+  import { selectProject } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import { getProjectStatus } from './projectStatus';

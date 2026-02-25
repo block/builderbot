@@ -17,7 +17,7 @@
   import { X, GitCommitVertical, FileText, FileSearch, GitBranch, Send } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import type { Branch, BranchSessionType } from '../../types';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
   import AgentSelector from '../agents/AgentSelector.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';

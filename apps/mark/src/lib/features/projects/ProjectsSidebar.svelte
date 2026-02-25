@@ -12,7 +12,7 @@
     GitBranch,
   } from 'lucide-svelte';
   import type { Project, Branch } from '../../types';
-  import { goHome, navigation, selectProject } from '../../navigation.svelte';
+  import { goHome, navigation, selectProject } from '../layout/navigation.svelte';
   import {
     projectDisplayName,
     aggregateProjectPrStatus,

@@ -17,8 +17,8 @@
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import type { ActionContext, ProjectAction } from '../../commands';
-  import * as commands from '../../commands';
+  import type { ActionContext, ProjectAction } from '../../api/commands';
+  import * as commands from '../../api/commands';
   import { detectRepoActions, type ActionType } from '../actions/actions';
 
   type RepoAttachment = {

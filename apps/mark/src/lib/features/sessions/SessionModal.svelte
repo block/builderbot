@@ -427,22 +427,23 @@
       return;
     }
 
-    // Handle search shortcuts (only when not typing in input)
+    // Handle search shortcuts
     const target = e.target as HTMLElement;
     const isTypingInInput =
       target.tagName === 'TEXTAREA' && target.classList.contains('message-input');
 
-    if (!isTypingInInput) {
-      if (cmdKey && e.key === 'f') {
-        e.preventDefault();
-        openSearch();
-      } else if (cmdKey && e.key === 'g') {
-        e.preventDefault();
-        if (e.shiftKey) {
-          previousMatch();
-        } else {
-          nextMatch();
-        }
+    // Cmd+F should work even from the input field to open search
+    if (cmdKey && e.key === 'f') {
+      e.preventDefault();
+      openSearch();
+    }
+    // Cmd+G navigation only works when not typing in input
+    else if (!isTypingInInput && cmdKey && e.key === 'g') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        previousMatch();
+      } else {
+        nextMatch();
       }
     }
   }

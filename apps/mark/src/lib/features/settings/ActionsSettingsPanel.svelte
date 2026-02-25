@@ -15,6 +15,7 @@
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import type { ActionContext, ProjectAction } from '../../commands';
   import * as commands from '../../commands';
   import { detectRepoActions, type ActionType } from '../actions/actions';
@@ -26,6 +27,7 @@
   let actions = $state<ProjectAction[]>([]);
   let loadingActions = $state(false);
   let detecting = $state(false);
+  let showDeleteAllConfirm = $state(false);
   let editingAction = $state<ProjectAction | null>(null);
   let editForm = $state({
     name: '',
@@ -197,6 +199,18 @@
     }
   }
 
+  async function deleteAllActions() {
+    if (!selectedContext) return;
+    try {
+      await commands.deleteAllRepoActions(selectedContext.id);
+      actions = [];
+      showDeleteAllConfirm = false;
+      window.dispatchEvent(new CustomEvent('project-actions-changed'));
+    } catch (e) {
+      console.error('Failed to delete all actions:', e);
+    }
+  }
+
   function getActionIcon(actionType: string) {
     switch (actionType) {
       case 'prerun':
@@ -280,6 +294,12 @@
         <div class="empty-main">Select a repo context to configure actions</div>
       {:else}
         <div class="actions-header">
+          {#if actions.length > 0}
+            <button class="danger-btn" onclick={() => (showDeleteAllConfirm = true)}>
+              <Trash2 size={14} />
+              Delete All
+            </button>
+          {/if}
           <button class="secondary-btn" onclick={detectActions} disabled={detecting}>
             {#if detecting}
               <Spinner size={14} />
@@ -370,6 +390,17 @@
     </div>
   {/if}
 </div>
+
+{#if showDeleteAllConfirm}
+  <ConfirmDialog
+    title="Delete All Actions"
+    message="Are you sure you want to delete all actions for this repo? This action cannot be undone."
+    confirmLabel="Delete All"
+    danger={true}
+    onConfirm={deleteAllActions}
+    onCancel={() => (showDeleteAllConfirm = false)}
+  />
+{/if}
 
 <style>
   .actions-settings-panel {
@@ -503,7 +534,8 @@
   }
 
   .primary-btn,
-  .secondary-btn {
+  .secondary-btn,
+  .danger-btn {
     border: 1px solid var(--border-muted);
     border-radius: 8px;
     padding: 7px 10px;
@@ -525,8 +557,20 @@
     color: var(--text-primary);
   }
 
+  .danger-btn {
+    background: var(--bg-primary);
+    border-color: var(--ui-danger);
+    color: var(--ui-danger);
+  }
+
+  .danger-btn:hover {
+    background: var(--ui-danger);
+    color: white;
+  }
+
   .primary-btn:disabled,
-  .secondary-btn:disabled {
+  .secondary-btn:disabled,
+  .danger-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }

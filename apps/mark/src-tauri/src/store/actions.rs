@@ -152,6 +152,15 @@ impl Store {
         Ok(())
     }
 
+    pub fn delete_all_repo_actions(&self, context_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM repo_actions WHERE context_id = ?1",
+            params![context_id],
+        )?;
+        Ok(())
+    }
+
     pub fn reorder_repo_actions(&self, action_ids: &[String]) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();

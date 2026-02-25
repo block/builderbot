@@ -507,7 +507,8 @@ impl ProjectToolsHandler {
                     }
                     return result.to_string();
                 }
-                Ok(_) => continue,
+                Ok(Some(_)) => continue, // still running
+                Ok(None) => return format!("Session {session_id} was deleted while running"),
                 Err(e) => return format!("Error polling session status: {e}"),
             }
         }

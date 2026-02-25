@@ -891,7 +891,7 @@
   function getPrStatusIndicator(): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
     // Push/PR creation states - no indicator during creation (spinner is enough)
     if (prState === 'creating') return null;
-    if (pushState === 'pushing') return 'pending';
+    if (pushState === 'pushing') return null;
     if (pushState === 'error' || prState === 'error') return 'error';
 
     if (!branch.prNumber) return null;

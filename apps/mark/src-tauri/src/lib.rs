@@ -253,6 +253,13 @@ fn create_project(
     if trimmed.is_empty() {
         return Err("Project name is required".to_string());
     }
+    // Validate that the subpath exists as a directory in the repo before
+    // creating anything. This prevents projects being created with invalid
+    // subpaths that would fail later during worktree setup.
+    if let (Some(repo), Some(sub)) = (&github_repo, &subpath) {
+        git::validate_subpath_in_repo(repo, sub).map_err(|e| e.to_string())?;
+    }
+
     let project_location = match location.as_deref() {
         Some("remote") => store::ProjectLocation::Remote,
         _ => store::ProjectLocation::Local,

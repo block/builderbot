@@ -1906,6 +1906,48 @@ pub async fn update_pull_request(
 }
 
 // =============================================================================
+// Subpath Validation
+// =============================================================================
+
+/// Validate that a subpath exists as a directory in a GitHub repository.
+///
+/// Uses the GitHub contents API to check that the path exists and is a
+/// directory (the API returns an array for directories). Returns an error
+/// if the path does not exist or points to a file rather than a directory.
+pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), GitError> {
+    let trimmed = subpath.trim_matches('/');
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let endpoint = format!("repos/{github_repo}/contents/{trimmed}");
+    match run_gh_global(&["api", &endpoint]) {
+        Ok(body) => {
+            // The contents API returns a JSON array for directories and a JSON
+            // object for files. A quick heuristic: arrays start with '['.
+            let body = body.trim_start();
+            if body.starts_with('[') {
+                Ok(())
+            } else {
+                Err(GitError::CommandFailed(format!(
+                    "Subpath '{trimmed}' in {github_repo} is a file, not a directory"
+                )))
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Not Found") || msg.contains("HTTP 404") {
+                Err(GitError::CommandFailed(format!(
+                    "Subpath '{trimmed}' does not exist in {github_repo}"
+                )))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+// =============================================================================
 // Monorepo Detection
 // =============================================================================
 

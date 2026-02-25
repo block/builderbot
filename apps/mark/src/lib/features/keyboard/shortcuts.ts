@@ -40,6 +40,7 @@ let savedBindings: BindingMap = {};
 let bindingsLoaded = false;
 let listenerAttached = false;
 let suppressionDepth = 0;
+const SHIFT_TYPED_KEYS = new Set(['+', '_', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')']);
 
 function cloneModifiers(modifiers?: ShortcutModifiers): ShortcutModifiers | undefined {
   if (!modifiers) return undefined;
@@ -80,6 +81,24 @@ function modifiersEqual(a?: ShortcutModifiers, b?: ShortcutModifiers): boolean {
     !!a?.shift === !!b?.shift &&
     !!a?.alt === !!b?.alt
   );
+}
+
+function nonShiftModifiersEqual(a?: ShortcutModifiers, b?: ShortcutModifiers): boolean {
+  return !!a?.ctrl === !!b?.ctrl && !!a?.meta === !!b?.meta && !!a?.alt === !!b?.alt;
+}
+
+function modifiersCanOverlapForKey(
+  key: string,
+  first?: ShortcutModifiers,
+  second?: ShortcutModifiers
+): boolean {
+  if (!nonShiftModifiersEqual(first, second)) return false;
+
+  const firstShift = !!first?.shift;
+  const secondShift = !!second?.shift;
+  if (firstShift === secondShift) return true;
+
+  return SHIFT_TYPED_KEYS.has(normalizeKey(key));
 }
 
 function bindingsEqual(a: ShortcutBinding, b: ShortcutBinding): boolean {
@@ -141,8 +160,7 @@ function modifiersMatch(event: KeyboardEvent, mods?: ShortcutModifiers): boolean
   if (wantShift && !event.shiftKey) return false;
   if (!wantShift && event.shiftKey) {
     // Allow shift when it is only being used to type a symbol key (for example '+').
-    const shiftTypedKeys = new Set(['+', '_', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')']);
-    if (!shiftTypedKeys.has(event.key)) return false;
+    if (!SHIFT_TYPED_KEYS.has(event.key)) return false;
   }
 
   return true;
@@ -319,11 +337,12 @@ export function hasShortcutConflict(
   for (const [id, shortcut] of shortcuts.entries()) {
     if (id === excludeId) continue;
 
-    const sameModifiers = modifiersEqual(target.modifiers, shortcut.modifiers);
-    if (!sameModifiers) continue;
-
     const keyOverlap = target.keys.some((key) =>
-      shortcut.keys.some((shortcutKey) => normalizeKey(shortcutKey) === key)
+      shortcut.keys.some(
+        (shortcutKey) =>
+          normalizeKey(shortcutKey) === key &&
+          modifiersCanOverlapForKey(key, target.modifiers, shortcut.modifiers)
+      )
     );
     if (keyOverlap) return id;
   }

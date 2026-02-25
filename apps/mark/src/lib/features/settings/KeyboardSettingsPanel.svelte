@@ -35,6 +35,7 @@
   let editingShortcutId = $state<string | null>(null);
   let capturedBinding = $state<ShortcutBinding | null>(null);
   let conflictId = $state<string | null>(null);
+  let captureError = $state<string | null>(null);
   let busy = $state(false);
   let resumeShortcutHandling: (() => void) | null = null;
 
@@ -88,6 +89,7 @@
     editingShortcutId = id;
     capturedBinding = null;
     conflictId = null;
+    captureError = null;
     error = null;
     resumeShortcutHandling = suspendShortcutHandling();
   }
@@ -96,6 +98,7 @@
     editingShortcutId = null;
     capturedBinding = null;
     conflictId = null;
+    captureError = null;
     releaseShortcutCapture();
   }
 
@@ -118,6 +121,14 @@
     }
 
     return modifiers;
+  }
+
+  function hasPrimaryModifier(modifiers: ShortcutBinding['modifiers']): boolean {
+    return !!modifiers?.ctrl || !!modifiers?.meta || !!modifiers?.alt;
+  }
+
+  function isPrintableKey(key: string): boolean {
+    return key.length === 1;
   }
 
   function handleCaptureKeydown(event: KeyboardEvent) {
@@ -145,14 +156,24 @@
       return;
     }
 
-    const keys = [normalizeCapturedKey(event.key)];
+    const capturedKey = normalizeCapturedKey(event.key);
+    const keys = [capturedKey];
     const modifiers = captureModifiers(event);
+
+    if (isPrintableKey(capturedKey) && !hasPrimaryModifier(modifiers)) {
+      capturedBinding = null;
+      conflictId = null;
+      captureError = 'Printable shortcuts must include Ctrl/Cmd or Alt.';
+      return;
+    }
+
+    captureError = null;
     capturedBinding = { keys, modifiers };
     conflictId = hasShortcutConflict(keys, modifiers, editingShortcutId);
   }
 
   async function confirmBinding() {
-    if (!editingShortcutId || !capturedBinding || busy) return;
+    if (!editingShortcutId || !capturedBinding || busy || captureError) return;
 
     const conflict = hasShortcutConflict(
       capturedBinding.keys,
@@ -256,6 +277,10 @@
         Press a new key combo while editing. Use <strong>Enter</strong> to save and
         <strong>Escape</strong> to cancel.
       </div>
+
+      {#if captureError}
+        <div class="error-banner">{captureError}</div>
+      {/if}
 
       {#each shortcutGroups as group (group.id)}
         <section class="shortcut-group">

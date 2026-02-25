@@ -317,6 +317,7 @@
         category: 'search',
         keys: ['g'],
         modifiers: { meta: true },
+        allowInInputs: true,
         handler: () => {
           runSearchShortcut('next');
         },
@@ -327,6 +328,7 @@
         category: 'search',
         keys: ['g'],
         modifiers: { meta: true, shift: true },
+        allowInInputs: true,
         handler: () => {
           runSearchShortcut('previous');
         },

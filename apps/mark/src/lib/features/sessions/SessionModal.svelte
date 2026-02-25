@@ -130,6 +130,10 @@
     unregisterSearchTarget?.();
   });
 
+  function isComposerFocused(): boolean {
+    return document.activeElement === inputEl;
+  }
+
   // =========================================================================
   // Data loading
   // =========================================================================
@@ -490,6 +494,7 @@
   }
 
   function nextMatch() {
+    if (isComposerFocused()) return;
     if (matchElements.length === 0) return;
 
     // Remove current class from old match
@@ -506,6 +511,7 @@
   }
 
   function previousMatch() {
+    if (isComposerFocused()) return;
     if (matchElements.length === 0) return;
 
     // Remove current class from old match

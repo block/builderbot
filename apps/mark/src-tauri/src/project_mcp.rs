@@ -101,6 +101,7 @@ struct ProjectToolsHandler {
 }
 
 impl ProjectToolsHandler {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         project_id: String,
         store: Arc<Store>,
@@ -579,7 +580,7 @@ impl ProjectToolsHandler {
         // Notify the UI so the repo appears immediately
         let _ = self
             .app_handle
-            .emit("project-repo-added", self.project_id.clone());
+            .emit("project-setup-progress", self.project_id.clone());
 
         // Find the branch that was just created for this repo
         let branch = match self.store.list_branches_for_project(&self.project_id) {
@@ -628,7 +629,7 @@ impl ProjectToolsHandler {
                     // Notify UI that the worktree is ready so branch state updates
                     let _ = self
                         .app_handle
-                        .emit("project-repo-added", self.project_id.clone());
+                        .emit("project-setup-progress", self.project_id.clone());
                 }
                 Ok(Err(e)) => {
                     log::warn!(
@@ -678,7 +679,7 @@ impl ProjectToolsHandler {
                         // Notify UI that prerun actions finished
                         let _ = self
                             .app_handle
-                            .emit("project-repo-added", self.project_id.clone());
+                            .emit("project-setup-progress", self.project_id.clone());
                     }
                     Err(e) => {
                         log::warn!(
@@ -705,7 +706,7 @@ impl ProjectToolsHandler {
 ///
 /// This replicates the core logic from `branches::setup_worktree` without
 /// requiring Tauri state, so it can be called from the MCP server.
-fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result<String, String> {
+pub(crate) fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result<String, String> {
     let branch = store
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
@@ -828,7 +829,7 @@ fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result<String, St
 ///
 /// This replicates the core logic from `actions::commands::run_prerun_actions`
 /// without requiring Tauri state.
-async fn run_prerun_actions_for_branch(
+pub(crate) async fn run_prerun_actions_for_branch(
     store: &Arc<Store>,
     app_handle: &AppHandle,
     branch_id: &str,
@@ -1023,6 +1024,7 @@ impl ServerHandler for ProjectToolsHandler {
 ///
 /// Returns the bound port and a JoinHandle. The server runs until
 /// the handle (and its parent LocalSet) is dropped.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_project_mcp_server(
     project_id: String,
     store: Arc<Store>,

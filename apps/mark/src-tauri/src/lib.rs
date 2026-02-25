@@ -242,6 +242,7 @@ fn list_projects(
 #[tauri::command(rename_all = "camelCase")]
 fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     name: String,
     github_repo: Option<String>,
     location: Option<String>,
@@ -295,7 +296,6 @@ fn create_project(
 
         // Create the initial branch record for the first repo so each new
         // project starts with exactly one branch tracked for that repository.
-        // Worktree/workspace setup runs asynchronously from the frontend.
         let detected_base =
             git::detect_default_branch_for_repo(&repo).unwrap_or_else(|_| "main".to_string());
         let effective_base = if detected_base.starts_with("origin/") {
@@ -304,12 +304,13 @@ fn create_project(
             format!("origin/{detected_base}")
         };
 
-        match project.location {
+        let branch_id = match project.location {
             store::ProjectLocation::Local => {
                 let branch =
                     store::Branch::new(&project.id, &inferred_branch_name, &effective_base)
                         .with_project_repo(&project_repo.id);
                 store.create_branch(&branch).map_err(|e| e.to_string())?;
+                Some(branch.id)
             }
             store::ProjectLocation::Remote => {
                 let workspace_name = branches::infer_workspace_name(&inferred_branch_name);
@@ -321,7 +322,59 @@ fn create_project(
                 )
                 .with_project_repo(&project_repo.id);
                 store.create_branch(&branch).map_err(|e| e.to_string())?;
+                None // remote branches don't need worktree setup
             }
+        };
+
+        // Spawn background worktree + prerun-actions setup for local branches.
+        if let Some(branch_id) = branch_id {
+            let project_id = project.id.clone();
+            let store_bg = Arc::clone(&store);
+            tauri::async_runtime::spawn(async move {
+                let _ = app_handle.emit("project-setup-progress", project_id.clone());
+
+                let store_clone = Arc::clone(&store_bg);
+                let branch_id_clone = branch_id.clone();
+                let worktree_result = tauri::async_runtime::spawn_blocking(move || {
+                    project_mcp::setup_worktree_sync(&store_clone, &branch_id_clone)
+                })
+                .await;
+
+                match worktree_result {
+                    Ok(Ok(path)) => {
+                        log::info!("[create_project] worktree ready at {path}");
+                        let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("[create_project] worktree setup failed: {e}");
+                        return;
+                    }
+                    Err(e) => {
+                        log::warn!("[create_project] worktree task panicked: {e}");
+                        return;
+                    }
+                }
+
+                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
+                let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
+                match project_mcp::run_prerun_actions_for_branch(
+                    &store_bg,
+                    &app_handle,
+                    &branch_id,
+                    &executor,
+                    &act_registry,
+                )
+                .await
+                {
+                    Ok(count) => {
+                        log::info!("[create_project] ran {count} prerun actions");
+                        let _ = app_handle.emit("project-setup-progress", project_id);
+                    }
+                    Err(e) => {
+                        log::warn!("[create_project] prerun actions failed: {e}");
+                    }
+                }
+            });
         }
     }
 
@@ -354,6 +407,7 @@ fn list_recent_repos(
 #[tauri::command(rename_all = "camelCase")]
 async fn add_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     project_id: String,
     github_repo: String,
     branch_name: Option<String>,
@@ -361,16 +415,87 @@ async fn add_project_repo(
     set_as_primary: Option<bool>,
 ) -> Result<store::ProjectRepo, String> {
     let store = get_store(&store)?;
-    project_commands::add_project_repo_impl(
-        store,
-        project_id,
+    let repo = project_commands::add_project_repo_impl(
+        Arc::clone(&store),
+        project_id.clone(),
         github_repo,
         branch_name,
         subpath,
         set_as_primary,
         None,
     )
-    .await
+    .await?;
+
+    // Spawn background worktree + prerun-actions setup — fire and forget.
+    tauri::async_runtime::spawn({
+        let repo_id = repo.id.clone();
+        async move {
+            let _ = app_handle.emit("project-setup-progress", project_id.clone());
+
+            let branch = match store.list_branches_for_project(&project_id) {
+                Ok(branches) => branches
+                    .into_iter()
+                    .find(|b| b.project_repo_id.as_deref() == Some(repo_id.as_str())),
+                Err(e) => {
+                    log::warn!("[add_project_repo] failed to list branches: {e}");
+                    return;
+                }
+            };
+            let branch = match branch {
+                Some(b) => b,
+                None => {
+                    log::warn!("[add_project_repo] no branch found for repo {repo_id}");
+                    return;
+                }
+            };
+
+            if branch.workspace_name.is_none() {
+                let branch_id = branch.id.clone();
+                let store_clone = Arc::clone(&store);
+                let worktree_result = tauri::async_runtime::spawn_blocking(move || {
+                    project_mcp::setup_worktree_sync(&store_clone, &branch_id)
+                })
+                .await;
+
+                match worktree_result {
+                    Ok(Ok(path)) => {
+                        log::info!("[add_project_repo] worktree ready at {path}");
+                        let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("[add_project_repo] worktree setup failed: {e}");
+                        return;
+                    }
+                    Err(e) => {
+                        log::warn!("[add_project_repo] worktree task panicked: {e}");
+                        return;
+                    }
+                }
+
+                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
+                let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
+                match project_mcp::run_prerun_actions_for_branch(
+                    &store,
+                    &app_handle,
+                    &branch.id,
+                    &executor,
+                    &act_registry,
+                )
+                .await
+                {
+                    Ok(count) => {
+                        log::info!("[add_project_repo] ran {count} prerun actions");
+                        let _ = app_handle.emit("project-setup-progress", project_id);
+                    }
+                    Err(e) => {
+                        log::warn!("[add_project_repo] prerun actions failed: {e}");
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(repo)
 }
 
 #[tauri::command(rename_all = "camelCase")]

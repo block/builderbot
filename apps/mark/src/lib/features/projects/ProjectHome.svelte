@@ -64,14 +64,6 @@
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
 
-  // Tracks branch IDs for which startInitialBranchSetup has already been
-  // called via the `project-repo-added` event path. The MCP add_project_repo
-  // handler emits this event three times (after repo creation, after worktree
-  // setup, after prerun actions) as progressive status updates. Without this
-  // guard, each emission would re-invoke startInitialBranchSetup, potentially
-  // queuing redundant/racing worktree setup tasks for the same branch.
-  const repoAddedSetupBranches = new Set<string>();
-
   onMount(() => {
     checkStoreAndLoad();
 
@@ -98,17 +90,13 @@
       unlistenDetection = unlisten;
     });
 
-    // Listen for project repo additions triggered by MCP tools.
-    // add_project_repo emits this event three times as progressive status
-    // updates (after repo creation, after worktree setup, after prerun
-    // actions). We refresh UI state on every emission so the frontend stays
-    // up to date, but we only call startInitialBranchSetup for branch IDs
-    // that have not been submitted yet, preventing redundant/racing worktree
-    // setup tasks from being queued for the same branch.
+    // Listen for backend-driven setup progress events. The backend emits this
+    // after repo creation, after worktree setup, and after prerun actions.
+    // We only refresh display state here — setup itself is owned by the backend.
     let unlistenProjectRepoAdded: UnlistenFn | undefined;
-    listen<string>('project-repo-added', async (event) => {
+    listen<string>('project-setup-progress', async (event) => {
       const projectId = event.payload;
-      console.log('[ProjectHome] project-repo-added event for project', projectId);
+      console.log('[ProjectHome] project-setup-progress event for project', projectId);
       try {
         const [projectsList, branches, repos] = await Promise.all([
           commands.listProjects(),
@@ -133,18 +121,8 @@
             )
           )
         );
-        // Only invoke startInitialBranchSetup for branches that have not
-        // already been submitted via this event path. This makes the handler
-        // idempotent across the three rapid-fire emissions from add_project_repo.
-        const newBranches = branches.filter((b) => !repoAddedSetupBranches.has(b.id));
-        if (newBranches.length > 0) {
-          for (const b of newBranches) {
-            repoAddedSetupBranches.add(b.id);
-          }
-          startInitialBranchSetup(projectId, newBranches);
-        }
       } catch (e) {
-        console.error('[ProjectHome] Failed to refresh project after repo added:', e);
+        console.error('[ProjectHome] Failed to refresh project after setup progress:', e);
       }
     }).then((unlisten) => {
       unlistenProjectRepoAdded = unlisten;
@@ -417,7 +395,6 @@
         )
       )
     );
-    startInitialBranchSetup(project.id, branches);
     showNewProjectModal = false;
     selectProject(project.id);
   }
@@ -533,7 +510,6 @@
           )
         )
       );
-      startInitialBranchSetup(projectId, branches);
     } catch (e) {
       console.error('Failed to add repo:', e);
       const message = e instanceof Error ? e.message : String(e);

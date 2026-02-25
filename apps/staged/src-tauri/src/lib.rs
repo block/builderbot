@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use tauri::Manager;
 
 // =============================================================================
 // App state
@@ -451,6 +452,101 @@ fn get_home_dir() -> Result<String, String> {
         .ok_or_else(|| "Could not determine home directory".to_string())
 }
 
+fn mark_data_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|d| d.join(".mark"))
+}
+
+fn preferences_store_path_buf() -> Option<PathBuf> {
+    mark_data_dir().map(|d| d.join("preferences.json"))
+}
+
+fn migrate_legacy_preferences_file(current_app_data_dir: Option<PathBuf>) {
+    let Some(target_path) = preferences_store_path_buf() else {
+        eprintln!("Cannot determine preferences path, skipping preferences migration");
+        return;
+    };
+
+    if target_path.exists() {
+        return;
+    }
+
+    if let Some(parent) = target_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "Cannot create preferences directory {}: {e}",
+                parent.display()
+            );
+            return;
+        }
+    }
+
+    let Some(target_dir) = target_path.parent() else {
+        return;
+    };
+
+    let mut legacy_dirs: Vec<PathBuf> = Vec::new();
+    for candidate in [
+        dirs::home_dir().map(|d| d.join(".staged")),
+        dirs::data_dir().map(|d| d.join("staged")),
+        current_app_data_dir,
+        dirs::data_dir().map(|d| d.join("com.mark.app")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if candidate != target_dir && !legacy_dirs.contains(&candidate) {
+            legacy_dirs.push(candidate);
+        }
+    }
+
+    for old_dir in legacy_dirs {
+        let old_path = old_dir.join("preferences.json");
+        if old_path == target_path || !old_path.exists() {
+            continue;
+        }
+
+        eprintln!(
+            "Migrating preferences from {} to {}",
+            old_path.display(),
+            target_path.display()
+        );
+
+        if let Err(rename_err) = std::fs::rename(&old_path, &target_path) {
+            eprintln!(
+                "Failed to move preferences {} -> {}: {rename_err}",
+                old_path.display(),
+                target_path.display()
+            );
+
+            if let Err(copy_err) = std::fs::copy(&old_path, &target_path) {
+                eprintln!(
+                    "Failed to copy preferences {} -> {}: {copy_err}",
+                    old_path.display(),
+                    target_path.display()
+                );
+                continue;
+            }
+
+            if let Err(remove_err) = std::fs::remove_file(&old_path) {
+                eprintln!(
+                    "Copied preferences but could not remove legacy file {}: {remove_err}",
+                    old_path.display()
+                );
+            }
+        }
+
+        break;
+    }
+}
+
+/// Return the absolute path for the shared preferences store file.
+#[tauri::command]
+fn preferences_store_path() -> Result<String, String> {
+    preferences_store_path_buf()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| "Could not determine preferences store path".to_string())
+}
+
 // =============================================================================
 // Commands: Recent repos (Spotlight)
 // =============================================================================
@@ -638,6 +734,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
+        .setup(|app| {
+            migrate_legacy_preferences_file(app.path().app_data_dir().ok());
+            Ok(())
+        })
         .manage(Mutex::new(AppState { repo_path }))
         .invoke_handler(tauri::generate_handler![
             get_repo_info,
@@ -650,6 +750,7 @@ pub fn run() {
             list_directory,
             search_directories,
             get_home_dir,
+            preferences_store_path,
             find_recent_repos,
         ])
         .run(tauri::generate_context!())

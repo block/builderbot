@@ -5,6 +5,7 @@
  * Handles syntax theme selection with adaptive UI theming.
  */
 
+import { invoke } from '@tauri-apps/api/core';
 import {
   SYNTAX_THEMES,
   setSyntaxTheme,
@@ -34,7 +35,8 @@ let store: Store | null = null;
 
 async function initStore(): Promise<void> {
   if (store) return;
-  store = await load('preferences.json', {
+  const storePath = await invoke<string>('preferences_store_path');
+  store = await load(storePath, {
     defaults: {},
     autoSave: true,
     overrideDefaults: true,

@@ -1,12 +1,18 @@
 # Default recipe
 default: dev
 
+export PATH := env_var_or_default("CARGO_HOME", env_var("HOME") + "/.cargo") + "/bin:" + env_var("PATH")
+
 # Ensure required tools are installed
 ensure-deps:
     #!/usr/bin/env bash
     if ! command -v go &> /dev/null; then
         echo "Installing Go..."
         brew install go
+    fi
+    if ! command -v cargo &> /dev/null; then
+        echo "Installing Rust..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     fi
     if ! command -v claude &> /dev/null; then
         echo "Installing Claude Code..."

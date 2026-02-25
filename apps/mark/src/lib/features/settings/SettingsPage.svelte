@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, Play, Stethoscope } from 'lucide-svelte';
+  import { ArrowLeft, FolderGit2, Stethoscope } from 'lucide-svelte';
   import { closeSettings, navigation } from '../../navigation.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
@@ -29,14 +29,14 @@
       <div class="settings-nav-list">
         <button
           class="nav-item"
-          class:active={navigation.settingsSection === 'actions'}
-          onclick={() => (navigation.settingsSection = 'actions')}
+          class:active={navigation.settingsSection === 'repo'}
+          onclick={() => (navigation.settingsSection = 'repo')}
         >
           <div class="nav-main">
-            <Play size={14} />
+            <FolderGit2 size={14} />
             <div class="nav-text">
-              <span class="nav-name">Actions</span>
-              <span class="nav-meta">Providers, prompts, and defaults</span>
+              <span class="nav-name">Repo</span>
+              <span class="nav-meta">Per-repo actions and cleanup</span>
             </div>
           </div>
         </button>
@@ -57,7 +57,7 @@
     </aside>
 
     <section class="settings-content">
-      {#if navigation.settingsSection === 'actions'}
+      {#if navigation.settingsSection === 'repo'}
         <ActionsSettingsPanel />
       {:else}
         <DoctorSettingsPanel />

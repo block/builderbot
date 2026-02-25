@@ -16,12 +16,12 @@ import { projectStateStore } from './stores/projectState.svelte';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
-export type SettingsSection = 'actions' | 'doctor';
+export type SettingsSection = 'repo' | 'doctor';
 
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
   selectedProjectId: null as string | null,
-  settingsSection: 'actions' as SettingsSection,
+  settingsSection: 'repo' as SettingsSection,
 });
 
 function showWorkspaceView(): void {
@@ -103,7 +103,7 @@ export function goHome(): void {
 }
 
 /** Show the dedicated settings view and select a settings section. */
-export function openSettings(section: SettingsSection = 'actions'): void {
+export function openSettings(section: SettingsSection = 'repo'): void {
   navigation.settingsSection = section;
   navigation.activeView = 'settings';
 }

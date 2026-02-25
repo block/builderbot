@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import {
+    FolderGit2,
     Play,
     Hammer,
     FlaskConical,
@@ -20,14 +21,26 @@
   import * as commands from '../../commands';
   import { detectRepoActions, type ActionType } from '../actions/actions';
 
+  type RepoAttachment = {
+    projectId: string;
+    projectName: string;
+    projectRepoId: string;
+    branchName: string;
+  };
+
   let contexts = $state<ActionContext[]>([]);
   let selectedContextId = $state<string | null>(null);
   let loadingContexts = $state(false);
+  let loadingRepoAttachments = $state(false);
+  let repoAttachmentsByContext = $state<Record<string, RepoAttachment[]>>({});
+  let repoAttachmentLoadGeneration = 0;
 
   let actions = $state<ProjectAction[]>([]);
   let loadingActions = $state(false);
   let detecting = $state(false);
+  let deletingRepo = $state(false);
   let showDeleteAllConfirm = $state(false);
+  let showDeleteRepoConfirm = $state(false);
   let editingAction = $state<ProjectAction | null>(null);
   let editForm = $state({
     name: '',
@@ -37,15 +50,91 @@
   });
 
   let selectedContext = $derived(contexts.find((c) => c.id === selectedContextId) ?? null);
+  let selectedContextAttachments = $derived(
+    selectedContext ? (repoAttachmentsByContext[selectedContext.id] ?? []) : []
+  );
 
   onMount(async () => {
     await loadContexts();
   });
 
+  function contextKey(githubRepo: string, subpath: string | null | undefined): string {
+    return `${githubRepo}::${subpath ?? ''}`;
+  }
+
+  function contextDisplay(context: ActionContext): string {
+    return context.subpath ? `${context.githubRepo}/${context.subpath}` : context.githubRepo;
+  }
+
+  function formatProjectCount(count: number): string {
+    return `${count} project${count === 1 ? '' : 's'}`;
+  }
+
+  async function loadRepoAttachments(actionContexts: ActionContext[]) {
+    const generation = ++repoAttachmentLoadGeneration;
+    loadingRepoAttachments = true;
+
+    const byContext: Record<string, RepoAttachment[]> = Object.fromEntries(
+      actionContexts.map((context) => [context.id, [] as RepoAttachment[]])
+    );
+
+    try {
+      if (actionContexts.length === 0) {
+        repoAttachmentsByContext = {};
+        return;
+      }
+
+      const contextIdByRepo = new Map(
+        actionContexts.map((context) => [
+          contextKey(context.githubRepo, context.subpath),
+          context.id,
+        ])
+      );
+      const projects = await commands.listProjects();
+      const reposByProject = await Promise.all(
+        projects.map(async (project) => {
+          const repos = await commands.listProjectRepos(project.id);
+          return { project, repos };
+        })
+      );
+
+      for (const { project, repos } of reposByProject) {
+        for (const repo of repos) {
+          const contextId = contextIdByRepo.get(contextKey(repo.githubRepo, repo.subpath));
+          if (!contextId) continue;
+          byContext[contextId] = [
+            ...byContext[contextId],
+            {
+              projectId: project.id,
+              projectName: project.name,
+              projectRepoId: repo.id,
+              branchName: repo.branchName,
+            },
+          ];
+        }
+      }
+
+      if (generation === repoAttachmentLoadGeneration) {
+        repoAttachmentsByContext = byContext;
+      }
+    } catch (e) {
+      console.error('Failed to load repo attachments for action contexts:', e);
+      if (generation === repoAttachmentLoadGeneration) {
+        repoAttachmentsByContext = byContext;
+      }
+    } finally {
+      if (generation === repoAttachmentLoadGeneration) {
+        loadingRepoAttachments = false;
+      }
+    }
+  }
+
   async function loadContexts() {
     loadingContexts = true;
     try {
-      contexts = await commands.listActionContexts();
+      const nextContexts = await commands.listActionContexts();
+      contexts = nextContexts;
+      await loadRepoAttachments(nextContexts);
       if (!selectedContextId && contexts.length > 0) {
         selectedContextId = contexts[0].id;
       } else if (selectedContextId && !contexts.some((c) => c.id === selectedContextId)) {
@@ -125,7 +214,7 @@
         window.dispatchEvent(new CustomEvent('project-actions-changed'));
       }
 
-      contexts = await commands.listActionContexts();
+      await loadContexts();
     } catch (e) {
       console.error('Failed to detect actions:', e);
     } finally {
@@ -236,6 +325,32 @@
     }
   }
 
+  async function deleteRepo() {
+    if (!selectedContext) return;
+
+    const contextId = selectedContext.id;
+    const attachments = [...(repoAttachmentsByContext[contextId] ?? [])];
+
+    deletingRepo = true;
+    try {
+      for (const attachment of attachments) {
+        await commands.removeProjectRepo(attachment.projectId, attachment.projectRepoId);
+      }
+
+      await commands.deleteActionContext(contextId);
+      if (selectedContextId === contextId) {
+        actions = [];
+      }
+      showDeleteRepoConfirm = false;
+      window.dispatchEvent(new CustomEvent('project-actions-changed'));
+      await loadContexts();
+    } catch (e) {
+      console.error('Failed to delete repo:', e);
+    } finally {
+      deletingRepo = false;
+    }
+  }
+
   function getActionIcon(actionType: string) {
     switch (actionType) {
       case 'prerun':
@@ -286,10 +401,10 @@
 <div class="actions-settings-panel">
   <div class="panel-intro">
     <h2>
-      <Play size={16} />
-      Actions
+      <FolderGit2 size={16} />
+      Repo
     </h2>
-    <p>Configure per-repository action commands used across your projects.</p>
+    <p>Manage per-repo actions and remove repos from Mark when they are no longer needed.</p>
   </div>
 
   <div class="panel-body">
@@ -307,7 +422,16 @@
               class:selected={context.id === selectedContextId}
               onclick={() => (selectedContextId = context.id)}
             >
-              <RepoLabel githubRepo={context.githubRepo} subpath={context.subpath} />
+              <div class="context-item-main">
+                <RepoLabel githubRepo={context.githubRepo} subpath={context.subpath} />
+                <span class="context-meta">
+                  {#if loadingRepoAttachments}
+                    Loading usage...
+                  {:else}
+                    {formatProjectCount((repoAttachmentsByContext[context.id] ?? []).length)} attached
+                  {/if}
+                </span>
+              </div>
             </button>
           {/each}
         </div>
@@ -318,14 +442,59 @@
       {#if !selectedContext}
         <div class="empty-main">Select a repo context to configure actions</div>
       {:else}
+        <div class="repo-overview">
+          <div class="repo-overview-main">
+            <RepoLabel githubRepo={selectedContext.githubRepo} subpath={selectedContext.subpath} />
+            <span class="repo-overview-meta">
+              {#if loadingRepoAttachments}
+                Loading usage...
+              {:else}
+                {formatProjectCount(selectedContextAttachments.length)} attached
+              {/if}
+            </span>
+          </div>
+
+          {#if selectedContextAttachments.length > 0}
+            <div class="repo-attachments">
+              {#each selectedContextAttachments as attachment (attachment.projectRepoId)}
+                <span class="attachment-chip"
+                  >{attachment.projectName} ({attachment.branchName})</span
+                >
+              {/each}
+            </div>
+          {:else}
+            <div class="repo-empty-attachments">This repo is not attached to any projects.</div>
+          {/if}
+        </div>
+
         <div class="actions-header">
-          {#if actions.length > 0}
-            <button class="danger-btn" onclick={() => (showDeleteAllConfirm = true)}>
+          <button
+            class="danger-btn"
+            onclick={() => (showDeleteRepoConfirm = true)}
+            disabled={deletingRepo}
+          >
+            {#if deletingRepo}
+              <Spinner size={14} />
+            {:else}
               <Trash2 size={14} />
-              Delete All
+            {/if}
+            Delete Repo
+          </button>
+          {#if actions.length > 0}
+            <button
+              class="secondary-btn"
+              onclick={() => (showDeleteAllConfirm = true)}
+              disabled={deletingRepo}
+            >
+              <Trash2 size={14} />
+              Delete All Actions
             </button>
           {/if}
-          <button class="secondary-btn" onclick={detectActions} disabled={detecting}>
+          <button
+            class="secondary-btn"
+            onclick={detectActions}
+            disabled={detecting || deletingRepo}
+          >
             {#if detecting}
               <Spinner size={14} />
             {:else}
@@ -333,7 +502,7 @@
             {/if}
             Detect Actions
           </button>
-          <button class="primary-btn" onclick={startAddAction}>
+          <button class="primary-btn" onclick={startAddAction} disabled={deletingRepo}>
             <Plus size={14} />
             Add Action
           </button>
@@ -415,6 +584,19 @@
     </div>
   {/if}
 </div>
+
+{#if showDeleteRepoConfirm && selectedContext}
+  <ConfirmDialog
+    title="Delete Repo"
+    message={selectedContextAttachments.length > 0
+      ? `Delete "${contextDisplay(selectedContext)}" from Mark? This removes ${formatProjectCount(selectedContextAttachments.length)} and deletes tracked worktrees/workspaces tied to this repo.`
+      : `Delete "${contextDisplay(selectedContext)}" from Mark? This removes its repo settings and actions.`}
+    confirmLabel="Delete Repo"
+    danger={true}
+    onConfirm={deleteRepo}
+    onCancel={() => (showDeleteRepoConfirm = false)}
+  />
+{/if}
 
 {#if showDeleteAllConfirm}
   <ConfirmDialog
@@ -533,6 +715,18 @@
     border-color: var(--border-muted);
   }
 
+  .context-item-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .context-meta {
+    font-size: calc(var(--size-xs) - 1px);
+    color: var(--text-faint);
+  }
+
   .loading-side,
   .empty-side,
   .empty-main,
@@ -551,9 +745,54 @@
     min-height: 0;
   }
 
+  .repo-overview {
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  .repo-overview-main {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .repo-overview-meta {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .repo-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .attachment-chip {
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    padding: 4px 8px;
+    font-size: calc(var(--size-xs) - 1px);
+    color: var(--text-muted);
+    background: var(--bg-primary);
+  }
+
+  .repo-empty-attachments {
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+  }
+
   .actions-header {
     display: flex;
-    justify-content: flex-end;
+    justify-content: flex-start;
+    flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 12px;
   }
@@ -588,7 +827,7 @@
     color: var(--ui-danger);
   }
 
-  .danger-btn:hover {
+  .danger-btn:hover:not(:disabled) {
     background: var(--ui-danger);
     color: white;
   }
@@ -698,6 +937,16 @@
       border-right: none;
       border-bottom: 1px solid var(--border-subtle);
       max-height: 160px;
+    }
+
+    .repo-overview-main {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .actions-header button {
+      flex: 1 1 auto;
+      justify-content: center;
     }
 
     .editor {

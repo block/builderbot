@@ -40,6 +40,16 @@ pub(crate) async fn detect_actions_for_repo_context(
         .map(|d| d.join(github_repo))
         .filter(|p| p.exists());
 
+    // If we have a local clone, update its working tree to the latest remote
+    // default branch so that action detection sees the current file layout.
+    // This is essential when the upstream repo has been restructured (e.g. a
+    // subpath moved) — without this the stale working tree would be missing
+    // the expected directories. Only the main checkout is affected; worktrees
+    // are separate directories and remain untouched.
+    if let Some(clone_path) = &local_clone {
+        crate::git::update_clone_to_remote_head(clone_path, github_repo);
+    }
+
     // Pick the right AI provider working directory. When we have a local
     // clone we point the provider at it; otherwise we use a temp dir (the
     // provider only needs a cwd for spawning processes, not for file access).

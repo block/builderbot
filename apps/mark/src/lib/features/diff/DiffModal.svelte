@@ -17,13 +17,15 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import { DiffViewer } from '@builderbot/diff-viewer/components';
+  import { DiffViewer, CrossFileSearchBar } from '@builderbot/diff-viewer/components';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
+  import { createSearchState } from '@builderbot/diff-viewer/state';
+  import { setupDiffKeyboardNav } from '@builderbot/diff-viewer/utils';
   import type { Comment, SmartDiffAnnotation, Span } from '../../types';
   import {
     buildFileEntries,
@@ -78,6 +80,9 @@
 
   // svelte-ignore state_referenced_locally
   const diffViewer = createDiffViewerState(branchId, scope, commitSha);
+
+  // svelte-ignore state_referenced_locally
+  const searchState = createSearchState();
 
   type ReviewHandle = ReturnType<typeof createReviewState>;
   let reviewHandle = $state<ReviewHandle | null>(null);
@@ -219,6 +224,12 @@
     jumpToComment = { id: comment.id, token: commentJumpToken };
   }
 
+  // Wrapper for search that returns the loaded diff
+  async function loadFileDiffForSearch(path: string) {
+    await diffViewer.selectFile(path);
+    return diffViewer.getCurrentDiff();
+  }
+
   // ==========================================================================
   // Comment callbacks (wired to review state)
   // ==========================================================================
@@ -264,6 +275,29 @@
       annotationsRevealed = false;
     }
   }
+
+  // Set up keyboard navigation for diff viewer and search
+  $effect(() => {
+    const cleanup = setupDiffKeyboardNav({
+      onOpenSearch: () => searchState.openSearch(),
+      onNextSearchResult: async () => {
+        const result = await searchState.goToNextResult(diffViewer.state.files);
+        if (result) {
+          await diffViewer.selectFile(result.filePath);
+          // TODO: Scroll to the specific line (result.match.lineIndex)
+        }
+      },
+      onPrevSearchResult: async () => {
+        const result = await searchState.goToPrevResult(diffViewer.state.files);
+        if (result) {
+          await diffViewer.selectFile(result.filePath);
+          // TODO: Scroll to the specific line (result.match.lineIndex)
+        }
+      },
+    });
+
+    return cleanup;
+  });
 
   onMount(() => {
     document.addEventListener('keydown', handleKeydown);
@@ -347,6 +381,13 @@
           </div>
         {:else}
           <div class="sidebar-content">
+            <!-- Search bar -->
+            <CrossFileSearchBar
+              files={diffViewer.state.files}
+              loadFileDiff={loadFileDiffForSearch}
+              {searchState}
+            />
+
             <DiffFileTreeSection
               {readonly}
               {fileEntries}

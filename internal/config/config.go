@@ -46,7 +46,11 @@ type SourceConfig struct {
 }
 
 // DefaultConfigPath returns the default config file location.
+// Set PENPAL_CONFIG to override (used by e2e tests for isolation).
 func DefaultConfigPath() string {
+	if p := os.Getenv("PENPAL_CONFIG"); p != "" {
+		return p
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""

@@ -33,12 +33,25 @@ func main() {
 	dev := flag.Bool("dev", false, "development mode: reload templates from disk on each request")
 	flag.Parse()
 
-	if flag.NArg() > 0 {
-		runOpen(flag.Args(), *port)
+	args := flag.Args()
+	if len(args) == 0 {
+		// No subcommand: start server
+		runServe(*port, *goPort, *dev, *root)
 		return
 	}
 
-	runServe(*port, *goPort, *dev, *root)
+	switch args[0] {
+	case "open":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "Usage: penpal open <path>...\n")
+			os.Exit(1)
+		}
+		runOpen(args[1:], *port)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", args[0])
+		fmt.Fprintf(os.Stderr, "Usage: penpal [open <path>...]\n")
+		os.Exit(1)
+	}
 }
 
 func runServe(port int, goPort int, dev bool, rootOverride string) {
@@ -137,50 +150,43 @@ func runServe(port int, goPort int, dev bool, rootOverride string) {
 	goHTTPServer.Shutdown(ctx)
 }
 
-// runOpen opens paths in a running penpal instance, starting the server if needed.
+// runOpen opens paths in the Penpal desktop app, launching it if needed.
 func runOpen(paths []string, portFlag int) {
 	port := config.ReadPortFile()
 
-	// Check if server is already running at that port
+	// Check if server is already running (desktop app is open)
 	if port > 0 && isServerRunning(port) {
 		openPaths(port, paths)
 		return
 	}
 
-	// No running server - start one on the fixed port
-	port = portFlag
+	// No running server — launch the desktop app, which starts its own sidecar.
+	// Poll ReadPortFile() to discover the actual port the sidecar chose.
+	openApp()
 
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: could not determine executable path: %v\n", err)
-		os.Exit(1)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		port = config.ReadPortFile()
+		if port > 0 && isServerRunning(port) {
+			break
+		}
+		port = 0
+		time.Sleep(200 * time.Millisecond)
 	}
 
-	cmd := exec.Command(exe, fmt.Sprintf("-port=%d", port))
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	// Detach the child process so it survives parent exit
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: could not start server: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Release the child so it's not reaped when we exit
-	cmd.Process.Release()
-
-	fmt.Printf("Started penpal server on port %d (pid %d)\n", port, cmd.Process.Pid)
-
-	// Wait for server to become ready
-	if !waitForServer(port, 10*time.Second) {
-		fmt.Fprintf(os.Stderr, "Error: server did not start within timeout\n")
-		os.Exit(1)
+	if port == 0 {
+		// Final fallback: use portFlag for backwards compatibility
+		port = portFlag
+		if !isServerRunning(port) {
+			fmt.Fprintf(os.Stderr, "Error: server did not start within timeout\n")
+			os.Exit(1)
+		}
 	}
 
 	openPaths(port, paths)
 }
 
-// openPaths sends each path to the /api/open endpoint and opens the returned URL in a browser.
+// openPaths sends each path to the /api/open endpoint, then opens the desktop app.
 func openPaths(port int, paths []string) {
 	for _, arg := range paths {
 		absPath, err := filepath.Abs(arg)
@@ -209,19 +215,11 @@ func openPaths(port int, paths []string) {
 			fmt.Fprintf(os.Stderr, "Warning: server error for %q: %s\n", arg, errResp.Error)
 			continue
 		}
-
-		var result struct {
-			URL string `json:"url"`
-		}
-		json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-
-		if result.URL != "" {
-			fullURL := fmt.Sprintf("http://localhost:%d%s", port, result.URL)
-			fmt.Printf("Opening %s\n", fullURL)
-			openBrowser(fullURL)
-		}
 	}
+
+	// Open/focus the desktop app (deep link navigation is a future enhancement)
+	openApp()
 }
 
 // isServerRunning checks if a penpal server is responding at the given port.
@@ -235,29 +233,20 @@ func isServerRunning(port int) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// waitForServer polls the server until it responds or the timeout expires.
-func waitForServer(port int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if isServerRunning(port) {
-			return true
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return false
-}
-
-// openBrowser opens the given URL in the default browser.
-func openBrowser(url string) {
+// openApp opens (or focuses) the Penpal desktop app.
+func openApp() {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", "-a", "Penpal")
 	case "linux":
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", "penpal://")
 	default:
-		fmt.Printf("Open in browser: %s\n", url)
+		fmt.Fprintf(os.Stderr, "Error: unsupported platform %s\n", runtime.GOOS)
 		return
 	}
-	cmd.Start()
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not open Penpal app: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Is Penpal.app installed? Run: just install\n")
+	}
 }

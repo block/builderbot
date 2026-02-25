@@ -1,4 +1,9 @@
 import { defineConfig } from '@playwright/test';
+import * as path from 'path';
+import * as os from 'os';
+
+// Use an isolated config file so e2e tests never touch the user's real config
+const e2eConfig = path.join(os.tmpdir(), 'penpal-e2e-config.json');
 
 export default defineConfig({
   testDir: './tests',
@@ -9,7 +14,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'cd .. && go build -o penpal . && ./penpal -port 18923',
+      command: `cd .. && go build -o penpal . && PENPAL_CONFIG=${e2eConfig} ./penpal -port 18923`,
       port: 18923,
       reuseExistingServer: !process.env.CI,
     },

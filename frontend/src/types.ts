@@ -161,8 +161,9 @@ export interface PublishState {
 }
 
 export interface SSEEvent {
-  type: 'projects' | 'files' | 'comments' | 'agents';
+  type: 'projects' | 'files' | 'comments' | 'agents' | 'navigate';
   project?: string;
+  path?: string;
 }
 
 // Search types

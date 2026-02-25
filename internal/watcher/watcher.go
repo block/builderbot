@@ -22,12 +22,14 @@ const (
 	EventFilesChanged    EventType = "files"
 	EventCommentsChanged EventType = "comments"
 	EventAgentsChanged   EventType = "agents"
+	EventNavigate        EventType = "navigate"
 )
 
 // Event represents a change notification
 type Event struct {
 	Type    EventType `json:"type"`
 	Project string    `json:"project,omitempty"`
+	Path    string    `json:"path,omitempty"`
 }
 
 // Watcher watches for filesystem changes and updates the cache
@@ -171,17 +173,21 @@ func (w *Watcher) Unsubscribe(ch chan Event) {
 	w.eventsMu.Unlock()
 }
 
-// Broadcast sends an event to all subscribers
-func (w *Watcher) Broadcast(evt Event) {
+// Broadcast sends an event to all subscribers and returns the number of
+// subscribers the event was successfully delivered to.
+func (w *Watcher) Broadcast(evt Event) int {
 	w.eventsMu.RLock()
 	defer w.eventsMu.RUnlock()
+	n := 0
 	for ch := range w.subs {
 		select {
 		case ch <- evt:
+			n++
 		default:
 			// Skip if channel is full
 		}
 	}
+	return n
 }
 
 func (w *Watcher) loop() {

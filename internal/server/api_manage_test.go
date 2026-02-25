@@ -86,6 +86,62 @@ func TestAPIOpen_ExistingProject(t *testing.T) {
 	}
 }
 
+func TestAPINavigate_EmptyByDefault(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/navigate", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["url"] != "" {
+		t.Errorf("expected empty url, got %q", resp["url"])
+	}
+}
+
+func TestAPINavigate_SetByOpen(t *testing.T) {
+	s, c, _ := testServer(t)
+
+	dir := t.TempDir()
+	seedProject(c, "test-proj", dir, nil)
+
+	// Call /api/open to set pending navigation
+	body, _ := json.Marshal(map[string]string{"path": dir})
+	req := httptest.NewRequest(http.MethodPost, "/api/open", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("open: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// /api/navigate should return the pending URL
+	req = httptest.NewRequest(http.MethodGet, "/api/navigate", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	var resp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["url"] != "/project/test-proj" {
+		t.Errorf("expected '/project/test-proj', got %q", resp["url"])
+	}
+
+	// Second call should return empty (consumed)
+	req = httptest.NewRequest(http.MethodGet, "/api/navigate", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	resp = map[string]string{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["url"] != "" {
+		t.Errorf("expected empty after consume, got %q", resp["url"])
+	}
+}
+
 func TestAPIOpen_NewDirectory(t *testing.T) {
 	s, _, _ := testServer(t)
 	dir := t.TempDir()

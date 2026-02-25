@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { api, isDesktopApp } from '../api';
+import { api, isDesktopApp, API_BASE } from '../api';
 import { useTheme } from '../hooks/useTheme';
 import { useSSE } from '../hooks/useSSE';
 import { useTabs, deriveTitleFromPath } from '../hooks/useTabs';
@@ -88,13 +88,24 @@ export default function Layout() {
         if (event.type === 'comments') {
           debouncedRefreshReview();
         }
+        if (event.type === 'navigate' && event.path) {
+          navigate(event.path);
+        }
       },
-      [debouncedRefreshProjects, debouncedRefreshReview],
+      [debouncedRefreshProjects, debouncedRefreshReview, navigate],
     ),
-    useCallback(() => {
+    useCallback(async () => {
       refreshProjects();
       refreshReviewCount();
-    }, [refreshProjects, refreshReviewCount]),
+      // Check for pending navigation that fired while SSE was disconnected
+      try {
+        const res = await fetch(`${API_BASE}/api/navigate`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.url) navigate(data.url);
+        }
+      } catch { /* ignore */ }
+    }, [refreshProjects, refreshReviewCount, navigate]),
   );
 
   // Close sidebar menu on outside click

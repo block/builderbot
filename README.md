@@ -40,6 +40,12 @@ just install       # Build .app, copy to /Applications, install Claude Code plug
 just uninstall     # Remove .app and Claude Code plugin
 ```
 
+### CLI
+
+```bash
+penpal open thoughts/shared/plans/my-doc.md   # Open file in Penpal desktop app
+```
+
 ## Development
 
 | Command | Description |

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/loganj/penpal/internal/config"
 	"github.com/loganj/penpal/internal/discovery"
@@ -549,23 +550,54 @@ func (s *Server) handleAPIOpen(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
+	var url string
 	if info.IsDir() {
-		s.handleOpenDirectory(w, absPath)
+		url = s.resolveOpenDirectory(w, absPath)
 	} else {
-		s.handleOpenFile(w, absPath)
+		url = s.resolveOpenFile(w, absPath)
+	}
+
+	if url != "" {
+		s.navMu.Lock()
+		s.pendingNav = url
+		s.pendingNavAt = time.Now()
+		s.navMu.Unlock()
+		if n := s.watcher.Broadcast(watcher.Event{Type: watcher.EventNavigate, Path: url}); n > 0 {
+			s.navMu.Lock()
+			s.pendingNav = ""
+			s.navMu.Unlock()
+		}
 	}
 }
 
-// handleOpenDirectory handles /api/open for a directory path.
+// handleAPINavigate returns and clears any pending navigation from /api/open.
+// The frontend calls this on SSE reconnect to catch navigations that fired
+// while the connection was down (e.g., app was backgrounded).
+func (s *Server) handleAPINavigate(w http.ResponseWriter, r *http.Request) {
+	s.navMu.Lock()
+	url := s.pendingNav
+	at := s.pendingNavAt
+	s.pendingNav = ""
+	s.navMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if url != "" && time.Since(at) < 30*time.Second {
+		json.NewEncoder(w).Encode(map[string]string{"url": url})
+	} else {
+		json.NewEncoder(w).Encode(map[string]string{})
+	}
+}
+
+// resolveOpenDirectory handles /api/open for a directory path.
 // Checks if it matches an existing project, otherwise adds as standalone.
-func (s *Server) handleOpenDirectory(w http.ResponseWriter, absPath string) {
+// Returns the resolved URL path.
+func (s *Server) resolveOpenDirectory(w http.ResponseWriter, absPath string) string {
 	// Check if this path is an existing project
 	for _, p := range s.cache.Projects() {
 		if filepath.Clean(p.Path) == filepath.Clean(absPath) {
-			json.NewEncoder(w).Encode(map[string]string{
-				"url": "/project/" + p.QualifiedName(),
-			})
-			return
+			url := "/project/" + p.QualifiedName()
+			json.NewEncoder(w).Encode(map[string]string{"url": url})
+			return url
 		}
 	}
 
@@ -579,16 +611,13 @@ func (s *Server) handleOpenDirectory(w http.ResponseWriter, absPath string) {
 			s.refreshAfterConfigChange()
 			for _, p := range s.cache.Projects() {
 				if filepath.Clean(p.Path) == filepath.Clean(absPath) {
-					json.NewEncoder(w).Encode(map[string]string{
-						"url": "/project/" + p.QualifiedName(),
-					})
-					return
+					url := "/project/" + p.QualifiedName()
+					json.NewEncoder(w).Encode(map[string]string{"url": url})
+					return url
 				}
 			}
-			json.NewEncoder(w).Encode(map[string]string{
-				"url": "/",
-			})
-			return
+			json.NewEncoder(w).Encode(map[string]string{"url": "/"})
+			return ""
 		}
 	}
 
@@ -600,22 +629,21 @@ func (s *Server) handleOpenDirectory(w http.ResponseWriter, absPath string) {
 	for _, p := range s.cache.Projects() {
 		if filepath.Clean(p.Path) == filepath.Clean(absPath) {
 			log.Printf("Opened new standalone project: %s", absPath)
-			json.NewEncoder(w).Encode(map[string]string{
-				"url": "/project/" + p.QualifiedName(),
-			})
-			return
+			url := "/project/" + p.QualifiedName()
+			json.NewEncoder(w).Encode(map[string]string{"url": url})
+			return url
 		}
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{
-		"url": "/",
-	})
+	json.NewEncoder(w).Encode(map[string]string{"url": "/"})
+	return ""
 }
 
-// handleOpenFile handles /api/open for a file path.
+// resolveOpenFile handles /api/open for a file path.
 // Checks if the file is in an existing project, otherwise adds it as a file
 // source to the appropriate project or creates a new standalone project.
-func (s *Server) handleOpenFile(w http.ResponseWriter, absPath string) {
+// Returns the resolved URL path.
+func (s *Server) resolveOpenFile(w http.ResponseWriter, absPath string) string {
 	// Check if this file is already in an existing project
 	for _, p := range s.cache.Projects() {
 		cleanProjectPath := filepath.Clean(p.Path)
@@ -624,10 +652,9 @@ func (s *Server) handleOpenFile(w http.ResponseWriter, absPath string) {
 			// Check if the file is in the cache (already being tracked)
 			for _, f := range s.cache.ProjectFiles(p.QualifiedName()) {
 				if f.FullPath == relPath {
-					json.NewEncoder(w).Encode(map[string]string{
-						"url": "/file/" + p.QualifiedName() + "/" + relPath,
-					})
-					return
+					url := "/file/" + p.QualifiedName() + "/" + relPath
+					json.NewEncoder(w).Encode(map[string]string{"url": url})
+					return url
 				}
 			}
 			// File is under a known project but not tracked.
@@ -644,17 +671,15 @@ func (s *Server) handleOpenFile(w http.ResponseWriter, absPath string) {
 				s.refreshAfterConfigChange()
 				s.cfgMu.Unlock()
 
+				url := "/file/" + p.QualifiedName() + "/" + relPath
 				log.Printf("Added file %s to project %s", relPath, p.QualifiedName())
-				json.NewEncoder(w).Encode(map[string]string{
-					"url": "/file/" + p.QualifiedName() + "/" + relPath,
-				})
-				return
+				json.NewEncoder(w).Encode(map[string]string{"url": url})
+				return url
 			}
 			// Non-markdown file in known project - just navigate to project
-			json.NewEncoder(w).Encode(map[string]string{
-				"url": "/project/" + p.QualifiedName(),
-			})
-			return
+			url := "/project/" + p.QualifiedName()
+			json.NewEncoder(w).Encode(map[string]string{"url": url})
+			return url
 		}
 	}
 
@@ -663,7 +688,7 @@ func (s *Server) handleOpenFile(w http.ResponseWriter, absPath string) {
 	if !strings.HasSuffix(absPath, ".md") {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "only .md files can be opened directly"})
-		return
+		return ""
 	}
 
 	projectDir := filepath.Dir(absPath)
@@ -685,17 +710,15 @@ func (s *Server) handleOpenFile(w http.ResponseWriter, absPath string) {
 	// Find the new project and return its file URL
 	for _, p := range s.cache.Projects() {
 		if filepath.Clean(p.Path) == filepath.Clean(projectDir) {
+			url := "/file/" + p.QualifiedName() + "/" + fileName
 			log.Printf("Opened file %s in new project %s", fileName, p.QualifiedName())
-			json.NewEncoder(w).Encode(map[string]string{
-				"url": "/file/" + p.QualifiedName() + "/" + fileName,
-			})
-			return
+			json.NewEncoder(w).Encode(map[string]string{"url": url})
+			return url
 		}
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{
-		"url": "/",
-	})
+	json.NewEncoder(w).Encode(map[string]string{"url": "/"})
+	return ""
 }
 
 // removeFileFromConfig removes a single file from a "files" source in config.

@@ -44,6 +44,10 @@ type Server struct {
 	cfg         *config.Config
 	cfgPath     string
 	cfgMu       sync.Mutex // protects cfg mutations
+
+	pendingNav   string    // URL path set by /api/open, consumed by /api/navigate
+	pendingNavAt time.Time // when it was set
+	navMu        sync.Mutex
 }
 
 func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, am *agents.Manager, act *activity.Tracker, templateDir string, cfg *config.Config, cfgPath string) *Server {
@@ -317,6 +321,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/workspaces", s.handleAPIWorkspaces)
 	s.mux.HandleFunc("/api/sources", s.handleAPISources)
 	s.mux.HandleFunc("/api/open", s.handleAPIOpen)
+	s.mux.HandleFunc("/api/navigate", s.handleAPINavigate)
 	// Comment and review API endpoints
 	s.mux.HandleFunc("/api/threads", s.handleAPIThreads)
 	s.mux.HandleFunc("/api/threads/", s.handleAPIThreadAction)

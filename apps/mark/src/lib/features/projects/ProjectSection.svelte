@@ -366,6 +366,7 @@
         <RemoteBranchCard
           {branch}
           repoLabel={repoLabelForBranch(branch)}
+          projectName={project.name}
           deleting={deletingBranches.has(branch.id)}
           workspaceError={workspaceErrors.get(branch.id)}
           onDelete={() => onDeleteBranch?.(branch.id)}
@@ -376,6 +377,7 @@
         <BranchCard
           {branch}
           repoLabel={repoLabelForBranch(branch)}
+          projectName={project.name}
           deleting={deletingBranches.has(branch.id)}
           worktreeError={worktreeErrors.get(branch.id)}
           onDelete={() => onDeleteBranch?.(branch.id)}

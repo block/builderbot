@@ -49,6 +49,7 @@
   interface Props {
     branch: Branch;
     repoLabel?: { githubRepo: string; subpath: string | null; reason?: string | null } | null;
+    projectName?: string;
     deleting?: boolean;
     workspaceError?: string;
     onDelete?: () => void;
@@ -59,6 +60,7 @@
   let {
     branch,
     repoLabel = null,
+    projectName,
     deleting = false,
     workspaceError = undefined,
     onDelete,
@@ -785,6 +787,9 @@
     scope="branch"
     beforeLabel={formatBaseBranch(branch.baseBranch)}
     afterLabel={branch.branchName}
+    projectName={projectName}
+    githubRepo={repoLabel?.githubRepo}
+    subpath={repoLabel?.subpath}
     onClose={() => {
       showBranchDiff = false;
       loadTimeline();
@@ -799,6 +804,9 @@
     scope="commit"
     beforeLabel="parent"
     afterLabel={commitDiffSha.slice(0, 7)}
+    projectName={projectName}
+    githubRepo={repoLabel?.githubRepo}
+    subpath={repoLabel?.subpath}
     readonly
     onClose={() => {
       commitDiffSha = null;

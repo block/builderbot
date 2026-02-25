@@ -764,35 +764,10 @@
                       {#if toolArgs}
                         <span class="tool-args-preview">{toolArgs}</span>
                       {/if}
-                      <button
-                        class="copy-btn tool-copy"
-                        onclick={(e) => {
-                          e.stopPropagation();
-                          copyContent(pair.call.content, `tc-${pair.call.id}`);
-                        }}
-                        title="Copy tool call"
-                      >
-                        {#if copiedId === `tc-${pair.call.id}`}
-                          <Check size={10} />
-                        {:else}
-                          <Copy size={10} />
-                        {/if}
-                      </button>
                     </div>
                     {#if isExpanded && pair.result}
                       <div class="tool-output">
                         <pre>{pair.result.content}</pre>
-                        <button
-                          class="copy-btn tool-output-copy"
-                          onclick={() => copyContent(pair.result!.content, `tr-${pair.result!.id}`)}
-                          title="Copy output"
-                        >
-                          {#if copiedId === `tr-${pair.result.id}`}
-                            <Check size={10} />
-                          {:else}
-                            <Copy size={10} />
-                          {/if}
-                        </button>
                       </div>
                     {/if}
                   </div>
@@ -1184,17 +1159,19 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    width: 100%;
+    min-width: 0;
   }
 
   .tool-card {
     overflow: visible;
+    min-width: 0;
   }
 
   .tool-header {
     display: flex;
     align-items: center;
     gap: 4px;
-    width: 100%;
     padding: 2px 0;
     background: none;
     color: var(--text-muted);
@@ -1231,9 +1208,13 @@
   }
 
   .tool-name {
+    flex: 1;
+    min-width: 0;
     color: var(--text-muted);
     font-size: var(--size-xs);
-    flex-shrink: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .tool-args-preview {
@@ -1246,19 +1227,7 @@
     font-size: var(--size-xs);
   }
 
-  .tool-copy {
-    flex-shrink: 0;
-    opacity: 0;
-    transition: opacity 0.15s;
-    margin-left: auto;
-  }
-
-  .tool-header:hover .tool-copy {
-    opacity: 1;
-  }
-
   .tool-output {
-    position: relative;
     padding: 4px 0 4px 14px;
     max-height: 200px;
     overflow-y: auto;
@@ -1272,18 +1241,6 @@
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.5;
-  }
-
-  .tool-output-copy {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    opacity: 0;
-    transition: opacity 0.15s;
-  }
-
-  .tool-output:hover .tool-output-copy {
-    opacity: 1;
   }
 
   .tool-output::-webkit-scrollbar {

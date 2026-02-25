@@ -851,6 +851,17 @@ fn create_repo_action(
     Ok(action)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn delete_all_repo_actions(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    context_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    store
+        .delete_all_repo_actions(&context_id)
+        .map_err(|e| e.to_string())
+}
+
 // =============================================================================
 // Timeline commands
 // =============================================================================
@@ -2412,6 +2423,7 @@ pub fn run() {
             list_action_contexts,
             list_repo_actions,
             create_repo_action,
+            delete_all_repo_actions,
             get_branch_timeline,
             create_note,
             delete_note,

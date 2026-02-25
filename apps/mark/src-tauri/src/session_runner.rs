@@ -147,7 +147,8 @@ pub struct SessionConfig {
     pub extra_env: Vec<(String, String)>,
     /// Project ID for MCP tool server (project sessions only).
     /// When set, an MCP server is started and the agent is given access to
-    /// `start_repo_session` and `add_project_repo` tools via CLAUDE_MCP_CONFIG.
+    /// `start_repo_session` and `add_project_repo` tools. The MCP server URL
+    /// is injected into the ACP session via `NewSessionRequest`.
     pub mcp_project_id: Option<String>,
     /// Action executor for running setup actions in the MCP add_project_repo tool.
     /// Required when `mcp_project_id` is set so the MCP server can run prerun actions.

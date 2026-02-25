@@ -336,7 +336,7 @@ fn create_project(
                 let store_clone = Arc::clone(&store_bg);
                 let branch_id_clone = branch_id.clone();
                 let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                    project_mcp::setup_worktree_sync(&store_clone, &branch_id_clone)
+                    branches::setup_worktree_sync(&store_clone, &branch_id_clone)
                 })
                 .await;
 
@@ -357,7 +357,7 @@ fn create_project(
 
                 let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
                 let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                match project_mcp::run_prerun_actions_for_branch(
+                match branches::run_prerun_actions_for_branch(
                     &store_bg,
                     &app_handle,
                     &branch_id,
@@ -453,7 +453,7 @@ async fn add_project_repo(
                 let branch_id = branch.id.clone();
                 let store_clone = Arc::clone(&store);
                 let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                    project_mcp::setup_worktree_sync(&store_clone, &branch_id)
+                    branches::setup_worktree_sync(&store_clone, &branch_id)
                 })
                 .await;
 
@@ -474,7 +474,7 @@ async fn add_project_repo(
 
                 let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
                 let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                match project_mcp::run_prerun_actions_for_branch(
+                match branches::run_prerun_actions_for_branch(
                     &store,
                     &app_handle,
                     &branch.id,

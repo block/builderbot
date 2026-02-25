@@ -39,8 +39,6 @@
     Wand2,
     MoreVertical,
     ExternalLink,
-    Info,
-    X,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -84,6 +82,7 @@
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
+  import ReasonBanner from './ReasonBanner.svelte';
   import { alerts } from '../../shared/alerts.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
@@ -1227,10 +1226,7 @@
   // Repo reason banner
   // =========================================================================
 
-  let reasonDismissed = $state(false);
-
   async function handleDismissReason() {
-    reasonDismissed = true;
     if (branch.projectRepoId) {
       try {
         await commands.clearProjectRepoReason(branch.projectRepoId);
@@ -1532,15 +1528,7 @@
     </div>
 
     <div class="card-content">
-      {#if repoLabel?.reason && !reasonDismissed}
-        <div class="reason-banner">
-          <Info size={13} class="reason-icon" />
-          <span class="reason-text">{repoLabel.reason}</span>
-          <button class="reason-dismiss" onclick={handleDismissReason} title="Dismiss">
-            <X size={12} />
-          </button>
-        </div>
-      {/if}
+      <ReasonBanner reason={repoLabel?.reason} onDismiss={handleDismissReason} />
       {#if loading}
         <div class="loading">
           <Spinner size={14} />
@@ -2055,61 +2043,6 @@
   .card-content {
     padding: 16px;
     min-height: 80px;
-  }
-
-  /* Repo reason banner */
-  .reason-banner {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 8px 10px;
-    margin-bottom: 10px;
-    border-radius: 6px;
-    background-color: color-mix(in srgb, var(--ui-info, #3b82f6) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--ui-info, #3b82f6) 25%, transparent);
-  }
-
-  .reason-banner :global(.reason-icon) {
-    color: var(--ui-info, #3b82f6);
-    flex-shrink: 0;
-    margin-top: 1px;
-  }
-
-  .reason-text {
-    flex: 1;
-    font-size: var(--size-xs);
-    color: var(--text-primary);
-    line-height: 1.4;
-    min-width: 0;
-  }
-
-  .reason-dismiss {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    padding: 0;
-    flex-shrink: 0;
-    background: none;
-    border: none;
-    border-radius: 3px;
-    color: var(--text-faint);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity 0.1s,
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .reason-banner:hover .reason-dismiss {
-    opacity: 1;
-  }
-
-  .reason-dismiss:hover {
-    color: var(--text-primary);
-    background-color: color-mix(in srgb, var(--ui-info, #3b82f6) 15%, transparent);
   }
 
   .loading {

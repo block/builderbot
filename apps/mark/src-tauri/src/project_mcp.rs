@@ -14,8 +14,7 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
 use tauri::{AppHandle, Emitter};
 
-use crate::actions::events::TauriExecutionListener;
-use crate::actions::{ActionExecutor, ActionMetadata, ActionRegistry, ActionType};
+use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::session_runner::{SessionConfig, SessionRegistry};
 use crate::store::{Session, SessionStatus, Store};
 use tokio_util::sync::CancellationToken;
@@ -149,10 +148,10 @@ impl ProjectToolsHandler {
             Ok(r) => r,
             Err(e) => return format!("Error listing repos: {e}"),
         };
-        let repo = match repos.iter().find(|r| {
-            (r.github_repo == p.repo || r.github_repo.ends_with(&format!("/{}", p.repo)))
-                && r.subpath.as_deref() == p.subpath.as_deref()
-        }) {
+        let repo = match repos
+            .iter()
+            .find(|r| r.github_repo == p.repo && r.subpath.as_deref() == p.subpath.as_deref())
+        {
             Some(r) => r.clone(),
             None => {
                 let available = repos
@@ -251,7 +250,10 @@ impl ProjectToolsHandler {
                 }
             })
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                log::warn!("[project_mcp] context build task panicked: {e}");
+                String::new()
+            });
 
             let proj_info = if let (Some(proj), Some(br_ref)) = (project.as_ref(), Some(br)) {
                 crate::session_commands::build_project_context(&self.store, proj, br_ref)
@@ -616,7 +618,7 @@ impl ProjectToolsHandler {
             let worktree_result = tauri::async_runtime::spawn_blocking(move || {
                 // We need to run the worktree setup synchronously
                 // Reuse the core logic from branches::setup_worktree
-                setup_worktree_sync(&store, &branch_id)
+                crate::branches::setup_worktree_sync(&store, &branch_id)
             })
             .await;
 
@@ -662,7 +664,7 @@ impl ProjectToolsHandler {
                     "[project_mcp] add_project_repo: running prerun actions for branch {}",
                     branch.id
                 );
-                let prerun_result = run_prerun_actions_for_branch(
+                let prerun_result = crate::branches::run_prerun_actions_for_branch(
                     &self.store,
                     &self.app_handle,
                     &branch.id,
@@ -700,314 +702,6 @@ impl ProjectToolsHandler {
         })
         .to_string()
     }
-}
-
-/// Set up a git worktree for a branch synchronously.
-///
-/// This replicates the core logic from `branches::setup_worktree` without
-/// requiring Tauri state, so it can be called from the MCP server.
-pub(crate) fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result<String, String> {
-    let branch = store
-        .get_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let project = store
-        .get_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-    // Idempotent fast-path: if the branch already has a workdir, reuse it.
-    if let Some(existing) = store
-        .get_workdir_for_branch(&branch.id)
-        .map_err(|e| e.to_string())?
-    {
-        return Ok(existing.path);
-    }
-
-    // Resolve the repo slug for this branch
-    let repo_slug = crate::branches::resolve_branch_repo_slug(store, &project, &branch)?;
-    let repo_path = crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-    crate::git::fetch_for_worktree(
-        &repo_path,
-        &repo_slug,
-        &branch.branch_name,
-        &branch.base_branch,
-    )
-    .map_err(|e| e.to_string())?;
-    let desired_worktree_path =
-        crate::git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
-            .map_err(|e| e.to_string())?;
-
-    // Reuse any existing worktree for this branch; otherwise create one.
-    let existing_worktree_path = crate::git::list_worktrees(&repo_path)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find_map(|(path, wt_branch)| match wt_branch.as_deref() {
-            Some(name) if name == branch.branch_name => Some(path),
-            _ => None,
-        });
-
-    let worktree_path = if let Some(path) = existing_worktree_path {
-        path
-    } else if crate::git::branch_exists(&repo_path, &branch.branch_name)
-        .map_err(|e| e.to_string())?
-    {
-        crate::git::create_worktree_for_existing_branch_at_path(
-            &repo_path,
-            &branch.branch_name,
-            &desired_worktree_path,
-        )
-        .map_err(|e| e.to_string())?
-    } else {
-        match crate::git::create_worktree_at_path(
-            &repo_path,
-            &branch.branch_name,
-            &branch.base_branch,
-            &desired_worktree_path,
-        ) {
-            Ok(path) => path,
-            Err(create_err) => {
-                if crate::git::branch_exists(&repo_path, &branch.branch_name)
-                    .map_err(|e| e.to_string())?
-                {
-                    log::warn!(
-                        "[project_mcp] Branch '{}' already exists after create attempt; retrying with existing branch",
-                        branch.branch_name
-                    );
-                    crate::git::create_worktree_for_existing_branch_at_path(
-                        &repo_path,
-                        &branch.branch_name,
-                        &desired_worktree_path,
-                    )
-                    .map_err(|e| e.to_string())?
-                } else {
-                    return Err(create_err.to_string());
-                }
-            }
-        }
-    };
-
-    let worktree_str = worktree_path
-        .to_str()
-        .ok_or("Invalid worktree path")?
-        .to_string();
-
-    // Link this path to the branch in DB (create or assign existing record).
-    let tracked_workdir = store
-        .list_workdirs_for_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|wd| wd.path == worktree_str);
-
-    match tracked_workdir {
-        Some(wd) => match wd.branch_id.as_deref() {
-            Some(existing_branch_id) if existing_branch_id != branch.id => {
-                return Err(format!(
-                    "Worktree '{}' is already assigned to another branch",
-                    wd.path
-                ));
-            }
-            Some(_) => {}
-            None => {
-                store
-                    .assign_workdir(&wd.id, &branch.id)
-                    .map_err(|e| e.to_string())?;
-            }
-        },
-        None => {
-            let workdir = crate::store::Workdir::new(&branch.project_id, &worktree_str)
-                .with_branch(&branch.id);
-            store.create_workdir(&workdir).map_err(|e| e.to_string())?;
-        }
-    }
-
-    Ok(worktree_str)
-}
-
-/// Run detect_actions (if needed) and all prerun actions for a branch.
-///
-/// This replicates the core logic from `actions::commands::run_prerun_actions`
-/// without requiring Tauri state.
-pub(crate) async fn run_prerun_actions_for_branch(
-    store: &Arc<Store>,
-    app_handle: &AppHandle,
-    branch_id: &str,
-    executor: &Arc<ActionExecutor>,
-    act_registry: &Arc<ActionRegistry>,
-) -> Result<usize, String> {
-    let branch = store
-        .get_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Branch not found".to_string())?;
-
-    let project = store
-        .get_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Project not found".to_string())?;
-
-    // Resolve the repo/subpath for this branch
-    let (github_repo, subpath) = if let Some(project_repo_id) = &branch.project_repo_id {
-        let project_repo = store
-            .get_project_repo(project_repo_id)
-            .map_err(|e| format!("Failed to get project repo: {e}"))?
-            .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
-        (project_repo.github_repo, project_repo.subpath)
-    } else {
-        let repo = project
-            .primary_repo()
-            .ok_or_else(|| "Project has no repository attached".to_string())?;
-        (repo.to_string(), project.subpath.clone())
-    };
-
-    let context = store
-        .get_or_create_action_context(&github_repo, subpath.as_deref())
-        .map_err(|e| format!("Failed to get action context: {e}"))?;
-
-    // If actions haven't been detected yet for this repo+subpath, detect now
-    if !context.has_detected_actions {
-        log::info!(
-            "[project_mcp] detecting actions for repo {} (subpath: {:?})",
-            github_repo,
-            subpath
-        );
-        store
-            .set_action_context_detecting(&context.id, true)
-            .map_err(|e| format!("Failed to set detection status: {e}"))?;
-
-        let _ = app_handle.emit(
-            "repo-actions-detection",
-            serde_json::json!({
-                "githubRepo": github_repo,
-                "subpath": subpath,
-                "detecting": true,
-            }),
-        );
-
-        // Run detection (may call out to AI)
-        let detected = crate::actions::commands::detect_actions_for_repo_context(
-            &github_repo,
-            subpath.as_deref(),
-        )
-        .await
-        .unwrap_or_default();
-
-        // Persist detected actions (skip duplicates)
-        let existing_actions = store
-            .list_repo_actions(&context.id)
-            .map_err(|e| format!("Failed to list actions: {e}"))?;
-        let mut existing_commands: std::collections::HashSet<String> =
-            existing_actions.iter().map(|a| a.command.clone()).collect();
-        let mut next_sort_order = existing_actions
-            .iter()
-            .map(|a| a.sort_order)
-            .max()
-            .unwrap_or(-1)
-            + 1;
-
-        for suggestion in detected {
-            if existing_commands.contains(&suggestion.command) {
-                continue;
-            }
-            existing_commands.insert(suggestion.command.clone());
-            let action = crate::store::RepoAction::new(
-                context.id.clone(),
-                suggestion.name,
-                suggestion.command,
-                suggestion.action_type,
-                next_sort_order,
-            )
-            .with_auto_commit(suggestion.auto_commit);
-            store
-                .create_repo_action(&action)
-                .map_err(|e| format!("Failed to create detected action: {e}"))?;
-            next_sort_order += 1;
-        }
-
-        store
-            .mark_action_context_detected(&context.id)
-            .map_err(|e| format!("Failed to update detection status: {e}"))?;
-
-        let _ = app_handle.emit(
-            "repo-actions-detection",
-            serde_json::json!({
-                "githubRepo": github_repo,
-                "subpath": subpath,
-                "detecting": false,
-            }),
-        );
-    }
-
-    // Get all prerun actions for this context
-    let actions = store
-        .list_repo_actions(&context.id)
-        .map_err(|e| format!("Failed to list actions: {e}"))?;
-    let prerun_actions: Vec<_> = actions
-        .into_iter()
-        .filter(|a| matches!(a.action_type, ActionType::Prerun))
-        .collect();
-
-    if prerun_actions.is_empty() {
-        return Ok(0);
-    }
-
-    // Get the worktree path for this branch
-    let workdir = store
-        .get_workdir_for_branch(branch_id)
-        .map_err(|e| format!("Failed to get workdir: {e}"))?
-        .ok_or_else(|| "No worktree found for branch".to_string())?;
-
-    let working_dir = if let Some(ref sp) = subpath {
-        std::path::PathBuf::from(&workdir.path)
-            .join(sp)
-            .to_string_lossy()
-            .to_string()
-    } else {
-        workdir.path
-    };
-
-    // Execute each prerun action, waiting for each to complete
-    let mut count = 0;
-    for action in prerun_actions {
-        let listener = Arc::new(TauriExecutionListener::new(
-            app_handle.clone(),
-            branch_id.to_string(),
-            action.id.clone(),
-            action.name.clone(),
-            Arc::clone(act_registry),
-        ));
-
-        let metadata = ActionMetadata {
-            action_id: action.id.clone(),
-            action_name: action.name.clone(),
-            auto_commit: action.auto_commit,
-        };
-
-        // execute_and_wait runs the action and waits for it to finish,
-        // regardless of success or failure (task requirement)
-        match executor
-            .execute_and_wait(action.command, working_dir.clone(), metadata, listener)
-            .await
-        {
-            Ok(_execution_id) => {
-                count += 1;
-                log::info!(
-                    "[project_mcp] prerun action '{}' completed for branch {}",
-                    action.id,
-                    branch_id
-                );
-            }
-            Err(e) => {
-                log::warn!(
-                    "[project_mcp] prerun action '{}' failed (continuing): {e}",
-                    action.id
-                );
-                count += 1; // count even if failed — we waited for it
-            }
-        }
-    }
-
-    Ok(count)
 }
 
 #[tool_handler]

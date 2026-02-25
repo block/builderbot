@@ -634,7 +634,7 @@ pub(crate) fn build_branch_context(
     timeline.extend(review_timeline_entries(store, branch_id));
 
     // Project-level notes
-    timeline.extend(project_note_timeline_entries(store, project_id));
+    timeline.extend(project_note_timeline_entries(store, project_id, false));
 
     parts.push(render_timeline(timeline, commit_error));
     parts.join("\n\n")
@@ -690,7 +690,7 @@ pub(crate) fn build_remote_branch_context(
     timeline.extend(review_timeline_entries(store, branch_id));
 
     // Project-level notes
-    timeline.extend(project_note_timeline_entries(store, project_id));
+    timeline.extend(project_note_timeline_entries(store, project_id, true));
 
     parts.push(render_timeline(timeline, None));
     parts.join("\n\n")
@@ -911,7 +911,19 @@ fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -
         lines.push(String::new());
         lines.push("## Existing Project Notes".to_string());
         for note in &non_empty_notes {
-            lines.push(format!("\n### {}\n\n{}", note.title, note.content));
+            let note_path = std::env::temp_dir().join(format!("mark-note-{}.md", note.id));
+            let formatted = match std::fs::write(&note_path, &note.content) {
+                Ok(()) => format!(
+                    "### Project Note: {}\n\nSee: `{}`",
+                    note.title,
+                    note_path.display()
+                ),
+                Err(e) => {
+                    log::warn!("Failed to write project note to temp file, inlining: {e}");
+                    format!("### Project Note: {}\n\n{}", note.title, note.content)
+                }
+            };
+            lines.push(formatted);
         }
     }
 
@@ -1097,7 +1109,11 @@ fn note_timeline_entries(
 }
 
 /// Convert project notes from the DB into timeline entries.
-fn project_note_timeline_entries(store: &Arc<Store>, project_id: &str) -> Vec<TimelineEntry> {
+fn project_note_timeline_entries(
+    store: &Arc<Store>,
+    project_id: &str,
+    is_remote: bool,
+) -> Vec<TimelineEntry> {
     let notes = match store.list_project_notes(project_id) {
         Ok(n) => n,
         Err(e) => {
@@ -1111,7 +1127,22 @@ fn project_note_timeline_entries(store: &Arc<Store>, project_id: &str) -> Vec<Ti
         if note.content.is_empty() {
             continue; // skip notes still generating
         }
-        let content = format!("### Project Note: {}\n\n{}", note.title, note.content);
+        let content = if is_remote {
+            format!("### Project Note: {}\n\n{}", note.title, note.content)
+        } else {
+            let note_path = std::env::temp_dir().join(format!("mark-note-{}.md", note.id));
+            match std::fs::write(&note_path, &note.content) {
+                Ok(()) => format!(
+                    "### Project Note: {}\n\nSee: `{}`",
+                    note.title,
+                    note_path.display()
+                ),
+                Err(e) => {
+                    log::warn!("Failed to write project note to temp file, inlining: {e}");
+                    format!("### Project Note: {}\n\n{}", note.title, note.content)
+                }
+            }
+        };
         entries.push(TimelineEntry {
             timestamp: note.created_at,
             content,

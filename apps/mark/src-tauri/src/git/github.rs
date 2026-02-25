@@ -592,6 +592,66 @@ fn remove_stale_clone_dir(clone_path: &Path) -> Result<(), GitError> {
     })
 }
 
+/// Fetch the latest from origin and reset the main checkout's working tree to
+/// the remote default branch tip.
+///
+/// This ensures the files on disk in the bare/main clone reflect the latest
+/// upstream state — critical for action detection which reads files from the
+/// working tree. Worktrees are separate directories and are **not** affected
+/// by this reset.
+///
+/// Errors are logged but not propagated; a stale working tree is better than
+/// failing action detection entirely.
+pub fn update_clone_to_remote_head(repo_path: &std::path::Path, github_repo: &str) {
+    let https_url = format!("https://github.com/{github_repo}.git");
+
+    // Fetch all remote refs so we have the latest commits.
+    if let Err(e) = super::cli::run(repo_path, &["fetch", "origin"]) {
+        log::warn!(
+            "fetch origin failed for '{}': {}. Retrying with HTTPS origin.",
+            github_repo,
+            e
+        );
+        if super::cli::run(repo_path, &["remote", "set-url", "origin", &https_url]).is_err() {
+            log::warn!("failed to set HTTPS origin for '{}'", github_repo);
+            return;
+        }
+        if let Err(e) = super::cli::run(repo_path, &["fetch", "origin"]) {
+            log::warn!(
+                "fetch origin (HTTPS retry) failed for '{}': {}",
+                github_repo,
+                e
+            );
+            return;
+        }
+    }
+
+    // Detect the default branch from remote refs (e.g. origin/main).
+    let default_branch = match super::refs::detect_default_branch(repo_path) {
+        Ok(branch) => branch,
+        Err(e) => {
+            log::warn!(
+                "could not detect default branch for '{}': {}",
+                github_repo,
+                e
+            );
+            return;
+        }
+    };
+
+    // Reset the working tree + index to the remote default branch tip.
+    // This is equivalent to `git reset --hard origin/main` and only touches
+    // the main checkout — worktrees have their own HEAD and working tree.
+    if let Err(e) = super::cli::run(repo_path, &["reset", "--hard", &default_branch]) {
+        log::warn!(
+            "reset --hard {} failed for '{}': {}",
+            default_branch,
+            github_repo,
+            e
+        );
+    }
+}
+
 /// Ensure a local clone exists at `<repos_dir>/<owner>/<repo>/`.
 ///
 /// If the directory already exists, returns the path immediately without

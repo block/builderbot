@@ -18,8 +18,8 @@ pub use github::{
     list_branches_for_repo, list_github_orgs, list_github_repos, list_issues, list_issues_for_repo,
     list_pull_requests, list_pull_requests_for_repo, list_user_repos, prune_remote_for_repo,
     push_branch, search_github_repos, search_issues, search_pull_requests, sync_review_to_github,
-    update_pull_request, ChecksSummary, CreatePrResult, GitHubAuthStatus, GitHubRepo,
-    GitHubSyncResult, Issue, PrStatus, PullRequest, PullRequestInfo,
+    update_clone_to_remote_head, update_pull_request, ChecksSummary, CreatePrResult,
+    GitHubAuthStatus, GitHubRepo, GitHubSyncResult, Issue, PrStatus, PullRequest, PullRequestInfo,
 };
 pub use refs::{
     detect_default_branch, get_current_branch, get_remote_url, get_repo_root, list_branches,

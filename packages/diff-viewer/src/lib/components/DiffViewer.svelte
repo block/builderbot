@@ -310,6 +310,21 @@
     scrollController.setAlignments(activeAlignments, filePath);
   });
 
+  // Scroll to first diff when file changes
+  $effect(() => {
+    const filePath = diff ? getFilePath(diff) : null;
+    // Wait for next frame to ensure dimensions are set
+    if (filePath && changedAlignments.length > 0 && (afterPane || beforePane)) {
+      requestAnimationFrame(() => {
+        const firstHunk = changedAlignments[0].alignment;
+        // Scroll to first change in the after pane (or before pane for deleted files)
+        const side = isDeletedFile ? 'before' : 'after';
+        const startRow = side === 'before' ? firstHunk.before.start : firstHunk.after.start;
+        scrollController.scrollToRow(startRow, side);
+      });
+    }
+  });
+
   // Update dimensions when panes are available or content changes
   $effect(() => {
     if (beforePane && beforeLines.length > 0) {

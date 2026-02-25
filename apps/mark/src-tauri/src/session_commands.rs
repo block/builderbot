@@ -630,11 +630,11 @@ pub(crate) fn build_branch_context(
     }
 
     // Notes and reviews from DB
-    timeline.extend(note_timeline_entries(store, branch_id, false));
+    timeline.extend(note_timeline_entries(store, branch_id, None));
     timeline.extend(review_timeline_entries(store, branch_id));
 
     // Project-level notes
-    timeline.extend(project_note_timeline_entries(store, project_id, false));
+    timeline.extend(project_note_timeline_entries(store, project_id, None));
 
     parts.push(render_timeline(timeline, commit_error));
     parts.join("\n\n")
@@ -685,12 +685,20 @@ pub(crate) fn build_remote_branch_context(
         }
     }
 
-    // Notes (inlined — remote agent can't access local temp files) and reviews
-    timeline.extend(note_timeline_entries(store, branch_id, true));
+    // Notes written to temp files inside the remote workspace via ws_exec
+    timeline.extend(note_timeline_entries(
+        store,
+        branch_id,
+        Some(workspace_name),
+    ));
     timeline.extend(review_timeline_entries(store, branch_id));
 
     // Project-level notes
-    timeline.extend(project_note_timeline_entries(store, project_id, true));
+    timeline.extend(project_note_timeline_entries(
+        store,
+        project_id,
+        Some(workspace_name),
+    ));
 
     parts.push(render_timeline(timeline, None));
     parts.join("\n\n")
@@ -960,9 +968,8 @@ fn build_branch_timeline_summary(store: &Arc<Store>, branch: &store::Branch) -> 
         }
     }
 
-    // Notes (inlined for project context — the project agent may not have
-    // access to the branch's local temp files)
-    timeline.extend(note_timeline_entries(store, &branch.id, true));
+    // Notes written to local temp files — project sessions run locally
+    timeline.extend(note_timeline_entries(store, &branch.id, None));
     timeline.extend(review_timeline_entries(store, &branch.id));
 
     if timeline.is_empty() {
@@ -1045,20 +1052,79 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     entries
 }
 
+/// Write note content to a temp file inside a remote workspace via `ws_exec`.
+///
+/// Uses base64 encoding to avoid shell-escaping issues with arbitrary markdown.
+/// Returns the remote path on success, or an error string on failure.
+fn write_note_to_remote(
+    workspace_name: &str,
+    note_id: &str,
+    content: &str,
+) -> Result<String, String> {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(content);
+    let remote_path = format!("/tmp/mark-note-{note_id}.md");
+
+    // For very large notes, chunk the base64 to stay under ARG_MAX (~1MB on macOS).
+    // Each chunk is ~500KB of base64 (~375KB decoded), well within limits.
+    const CHUNK_SIZE: usize = 500_000;
+
+    if encoded.len() <= CHUNK_SIZE {
+        blox::ws_exec(
+            workspace_name,
+            &[
+                "sh",
+                "-c",
+                &format!("echo '{}' | base64 -d > '{}'", encoded, remote_path),
+            ],
+        )
+        .map_err(|e| format!("Failed to write note to remote workspace: {e}"))?;
+    } else {
+        // Chunk: first chunk overwrites, subsequent chunks append
+        for (i, chunk) in encoded.as_bytes().chunks(CHUNK_SIZE).enumerate() {
+            let chunk_str = std::str::from_utf8(chunk)
+                .map_err(|e| format!("Invalid UTF-8 in base64 chunk: {e}"))?;
+            let redirect = if i == 0 { ">" } else { ">>" };
+            blox::ws_exec(
+                workspace_name,
+                &[
+                    "sh",
+                    "-c",
+                    &format!(
+                        "echo '{}' | base64 -d {} '{}'",
+                        chunk_str, redirect, remote_path
+                    ),
+                ],
+            )
+            .map_err(|e| format!("Failed to write note chunk {i} to remote workspace: {e}"))?;
+        }
+    }
+
+    Ok(remote_path)
+}
+
 /// Format a single note's content for inclusion in an agent context string.
 ///
-/// When `is_remote` is true, content is inlined directly because the remote
-/// agent cannot access local temp files. For local sessions, the content is
-/// written to a temp file and referenced by path so large notes don't bloat
-/// the context; falls back to inline if the write fails.
+/// When `workspace_name` is `Some`, the note is written to a temp file inside
+/// the remote workspace via `ws_exec` and referenced by path. When `None`,
+/// the note is written to a local temp file. Both produce the same
+/// `See: <path>` output format, keeping large notes out of the prompt.
+///
+/// Falls back to inlining if the write fails (remote or local).
 pub(crate) fn format_note_for_context(
     id: &str,
     title: &str,
     content: &str,
-    is_remote: bool,
+    workspace_name: Option<&str>,
 ) -> Option<String> {
-    if is_remote {
-        Some(format!("### Note: {title}\n\n{content}"))
+    if let Some(ws_name) = workspace_name {
+        match write_note_to_remote(ws_name, id, content) {
+            Ok(remote_path) => Some(format!("### Note: {title}\n\nSee: `{remote_path}`")),
+            Err(e) => {
+                log::warn!("Failed to write note to remote workspace, inlining: {e}");
+                Some(format!("### Note: {title}\n\n{content}"))
+            }
+        }
     } else {
         let note_path = std::env::temp_dir().join(format!("mark-note-{id}.md"));
         if let Err(e) = std::fs::write(&note_path, content) {
@@ -1075,13 +1141,13 @@ pub(crate) fn format_note_for_context(
 
 /// Convert notes from the DB into timeline entries.
 ///
-/// When `is_remote` is true, note content is inlined directly because the
-/// remote agent cannot access local temp files. For local branches, notes
-/// are written to temp files and referenced by path.
+/// When `workspace_name` is `Some`, notes are written to temp files inside the
+/// remote workspace via `ws_exec`. When `None`, notes are written to local temp
+/// files. Both produce path references to keep large notes out of the prompt.
 fn note_timeline_entries(
     store: &Arc<Store>,
     branch_id: &str,
-    is_remote: bool,
+    workspace_name: Option<&str>,
 ) -> Vec<TimelineEntry> {
     let notes = match store.list_notes_for_branch(branch_id) {
         Ok(n) => n,
@@ -1097,7 +1163,7 @@ fn note_timeline_entries(
             continue; // skip notes still generating
         }
         if let Some(content) =
-            format_note_for_context(&note.id, &note.title, &note.content, is_remote)
+            format_note_for_context(&note.id, &note.title, &note.content, workspace_name)
         {
             entries.push(TimelineEntry {
                 timestamp: note.created_at,
@@ -1108,11 +1174,47 @@ fn note_timeline_entries(
     entries
 }
 
+/// Format a single project note for inclusion in context.
+///
+/// Mirrors `format_note_for_context` but uses the "Project Note" heading.
+/// When `workspace_name` is `Some`, writes to the remote workspace; when
+/// `None`, writes to a local temp file. Falls back to inlining on failure.
+fn format_project_note_for_context(
+    id: &str,
+    title: &str,
+    content: &str,
+    workspace_name: Option<&str>,
+) -> String {
+    if let Some(ws_name) = workspace_name {
+        match write_note_to_remote(ws_name, id, content) {
+            Ok(remote_path) => {
+                format!("### Project Note: {title}\n\nSee: `{remote_path}`")
+            }
+            Err(e) => {
+                log::warn!("Failed to write project note to remote workspace, inlining: {e}");
+                format!("### Project Note: {title}\n\n{content}")
+            }
+        }
+    } else {
+        let note_path = std::env::temp_dir().join(format!("mark-note-{id}.md"));
+        match std::fs::write(&note_path, content) {
+            Ok(()) => format!(
+                "### Project Note: {title}\n\nSee: `{}`",
+                note_path.display()
+            ),
+            Err(e) => {
+                log::warn!("Failed to write project note to temp file, inlining: {e}");
+                format!("### Project Note: {title}\n\n{content}")
+            }
+        }
+    }
+}
+
 /// Convert project notes from the DB into timeline entries.
 fn project_note_timeline_entries(
     store: &Arc<Store>,
     project_id: &str,
-    is_remote: bool,
+    workspace_name: Option<&str>,
 ) -> Vec<TimelineEntry> {
     let notes = match store.list_project_notes(project_id) {
         Ok(n) => n,
@@ -1127,22 +1229,8 @@ fn project_note_timeline_entries(
         if note.content.is_empty() {
             continue; // skip notes still generating
         }
-        let content = if is_remote {
-            format!("### Project Note: {}\n\n{}", note.title, note.content)
-        } else {
-            let note_path = std::env::temp_dir().join(format!("mark-note-{}.md", note.id));
-            match std::fs::write(&note_path, &note.content) {
-                Ok(()) => format!(
-                    "### Project Note: {}\n\nSee: `{}`",
-                    note.title,
-                    note_path.display()
-                ),
-                Err(e) => {
-                    log::warn!("Failed to write project note to temp file, inlining: {e}");
-                    format!("### Project Note: {}\n\n{}", note.title, note.content)
-                }
-            }
-        };
+        let content =
+            format_project_note_for_context(&note.id, &note.title, &note.content, workspace_name);
         entries.push(TimelineEntry {
             timestamp: note.created_at,
             content,

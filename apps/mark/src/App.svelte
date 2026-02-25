@@ -21,8 +21,13 @@
   import { navigation, initNavigation, openSettings } from './lib/navigation.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { prStateStore } from './lib/stores/prState.svelte';
+  import { pushStateStore } from './lib/stores/pushState.svelte';
   import { sessionRegistry } from './lib/stores/sessionRegistry.svelte';
-  import { extractPrUrl, extractPrNumber } from './lib/features/branches/branchCardHelpers';
+  import {
+    extractPrUrl,
+    extractPrNumber,
+    isPushRejectedNonFastForward,
+  } from './lib/features/branches/branchCardHelpers';
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
@@ -86,9 +91,10 @@
     // Listen for session status changes globally to handle spinner cleanup
     // This must be at the App level so it works regardless of which view the user is on
     //
-    // Session completion handler updates TWO independent state stores:
+    // Session completion handler updates THREE independent state stores:
     // 1. projectState: Aggregate view of all sessions in a project (for project tiles)
     // 2. prState: Branch-specific PR creation workflow state (for PR buttons)
+    // 3. pushState: Branch-specific push workflow state (for push operations)
     //
     // Session lookups are delegated to the unified sessionRegistry for consistency
     unlistenSessionStatus = await listen<{
@@ -183,6 +189,39 @@
           }
           // Clear PR state's session tracking (does NOT unregister from registry)
           prStateStore.clearSessionTracking(branchId);
+        }
+
+        // Handle push-specific completion logic
+        if (sessionType === 'push' && branchId) {
+          if (status === 'completed') {
+            try {
+              // Check session messages for the non-fast-forward rejection marker
+              const messages = await commands.getSessionMessages(sessionId);
+              if (isPushRejectedNonFastForward(messages)) {
+                // The agent stopped because the remote would lose commits.
+                // Go to error state — clicking the button will open the force push dialog.
+                pushStateStore.setPushError(branchId, '', true); // rejectedNonFastForward=true
+              } else {
+                // Push completed successfully
+                pushStateStore.setPushDone(branchId);
+                // Reset to idle after a brief moment so the button returns to "View PR"
+                setTimeout(() => {
+                  pushStateStore.clearPushState(branchId);
+                }, 1_500);
+              }
+            } catch (e) {
+              // Failed to get session messages - treat as error
+              pushStateStore.setPushError(branchId, e instanceof Error ? e.message : String(e));
+            }
+          } else {
+            // Session errored or was cancelled
+            pushStateStore.setPushError(
+              branchId,
+              `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`
+            );
+          }
+          // Clear push state's session tracking (does NOT unregister from registry)
+          pushStateStore.clearSessionTracking(branchId);
         }
 
         // Clean up the session from the unified registry (single point of cleanup)

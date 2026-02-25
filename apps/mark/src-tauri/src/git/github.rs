@@ -1909,37 +1909,11 @@ pub async fn update_pull_request(
 // Monorepo Detection
 // =============================================================================
 
-/// Check if a file exists in a repository via GitHub API.
-/// Returns true if the file exists, false if it returns 404.
-fn check_file_exists(github_repo: &str, path: &str) -> Result<bool, GitError> {
-    let endpoint = format!("repos/{github_repo}/contents/{path}");
-    let output = run_gh_global(&["api", &endpoint]);
-
-    match output {
-        Ok(_) => Ok(true),
-        Err(e) => {
-            let error_msg = e.to_string();
-            if error_msg.contains("Not Found") || error_msg.contains("HTTP 404") {
-                Ok(false)
-            } else {
-                Err(e)
-            }
-        }
-    }
-}
-
-/// Check if a repository is likely a monorepo by checking for monorepo indicators.
-/// Returns a score representing the likelihood (0 = not a monorepo, higher = more likely).
-/// A score of 20+ is considered a monorepo.
-///
-/// Detection strategies:
-/// 1. Count modules in MODULES.yaml (Block's Owner Owl system)
-/// 2. Check for monorepo tool configuration files (nx.json, pnpm-workspace.yaml, etc.)
-/// 3. Check for "monorepo" in repository description
+/// Check if a repository is likely a monorepo by counting modules in MODULES.yaml
+/// (Block's Owner Owl system). Returns the number of YAML document separators (`---`)
+/// found in the file, which corresponds to the module count. Returns 0 if the file
+/// does not exist. A count of 20+ is considered a monorepo.
 pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
-    let mut score = 0u32;
-
-    // Strategy 1: Check MODULES.yaml and count module separators
     let modules_endpoint = format!("repos/{github_repo}/contents/MODULES.yaml");
 
     let modules_result = run_gh_global(&["api", &modules_endpoint]);
@@ -1958,68 +1932,22 @@ pub fn check_monorepo_modules(github_repo: &str) -> Result<u32, GitError> {
                     if let Ok(content) = String::from_utf8(decoded) {
                         let module_count =
                             content.lines().filter(|line| line.trim() == "---").count() as u32;
-                        score += module_count;
+                        return Ok(module_count);
                     }
                 }
             }
+
+            Ok(0)
         }
         Err(e) => {
             let error_msg = e.to_string();
             if error_msg.contains("Not Found") || error_msg.contains("HTTP 404") {
-                // MODULES.yaml not found - continue checking other indicators
+                Ok(0)
             } else {
-                return Err(e);
+                Err(e)
             }
         }
     }
-
-    // Strategy 2: Check for other monorepo indicator files
-    // Each indicator file gives a score of 30 (above the 20 threshold)
-    let indicator_files = [
-        ("nx.json", "Nx monorepo tool"),
-        ("pnpm-workspace.yaml", "PNPM workspace"),
-        ("lerna.json", "Lerna monorepo tool"),
-        ("MODULE.bazel", "Bazel monorepo"),
-    ];
-
-    for (file, _description) in &indicator_files {
-        match check_file_exists(github_repo, file) {
-            Ok(true) => {
-                score += 30;
-                break; // One indicator file is enough
-            }
-            Ok(false) => {}
-            Err(e) => {
-                return Err(e);
-            }
-        }
-    }
-
-    // Strategy 3: Check repository description for "monorepo"
-    let repo_endpoint = format!("repos/{github_repo}");
-
-    match run_gh_global(&["api", &repo_endpoint]) {
-        Ok(json) => {
-            #[derive(Debug, Deserialize)]
-            struct RepoInfo {
-                description: Option<String>,
-            }
-
-            if let Ok(repo_info) = serde_json::from_str::<RepoInfo>(&json) {
-                if let Some(desc) = repo_info.description {
-                    if desc.to_lowercase().contains("monorepo") {
-                        score += 30;
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            // Don't propagate this error - description check is optional
-            let _ = e;
-        }
-    }
-
-    Ok(score)
 }
 
 // =============================================================================

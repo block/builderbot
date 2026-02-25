@@ -211,6 +211,7 @@ pub fn start_session(
                     config.action_executor.clone(),
                     config.action_registry.clone(),
                     cancel_token.clone(),
+                    config.workspace_name.is_some(),
                 )
                 .await
                 {

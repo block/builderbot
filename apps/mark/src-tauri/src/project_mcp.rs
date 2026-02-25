@@ -95,6 +95,9 @@ struct ProjectToolsHandler {
     /// Cancellation token for the parent project session.
     /// Signalled when the user cancels the project session.
     cancel_token: CancellationToken,
+    /// Whether the parent project session is running in a remote workspace.
+    /// Controls whether note content is inlined or referenced by file path.
+    is_remote: bool,
 }
 
 impl ProjectToolsHandler {
@@ -106,6 +109,7 @@ impl ProjectToolsHandler {
         action_executor: Option<Arc<ActionExecutor>>,
         action_registry: Option<Arc<ActionRegistry>>,
         cancel_token: CancellationToken,
+        is_remote: bool,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -116,6 +120,7 @@ impl ProjectToolsHandler {
             action_executor,
             action_registry,
             cancel_token,
+            is_remote,
         }
     }
 }
@@ -173,11 +178,12 @@ impl ProjectToolsHandler {
             .into_iter()
             .find(|b| b.project_repo_id.as_deref() == Some(repo.id.as_str()));
         let workspace_name = branch.as_ref().and_then(|b| b.workspace_name.clone());
-        let is_remote_session = workspace_name.is_some();
         let branch_id = branch.as_ref().map(|b| b.id.clone());
 
         // Determine working directory — include subpath when the repo was added with one.
-        let working_dir = crate::paths::repos_dir()
+        // For local branches, use the project worktree path so the agent operates on the
+        // correct branch; error if no worktree is recorded (repo not fully set up yet).
+        let clone_dir = crate::paths::repos_dir()
             .map(|d| {
                 let base = d.join(&repo.github_repo);
                 if let Some(ref sp) = repo.subpath {
@@ -187,6 +193,29 @@ impl ProjectToolsHandler {
                 }
             })
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let working_dir = if workspace_name.is_none() {
+            match branch.as_ref().and_then(|br| {
+                self.store
+                    .get_workdir_for_branch(&br.id)
+                    .ok()
+                    .flatten()
+                    .map(|wd| {
+                        let mut path = std::path::PathBuf::from(&wd.path);
+                        if let Some(ref sp) = repo.subpath {
+                            path = path.join(sp);
+                        }
+                        path
+                    })
+            }) {
+                Some(path) => path,
+                None => return format!(
+                    "No worktree found for repo '{}'. Ensure the repo has been fully set up via add_project_repo before starting a session.",
+                    repo.github_repo
+                ),
+            }
+        } else {
+            clone_dir
+        };
 
         // Build branch history context (commits + notes) and project context, mirroring
         // what start_branch_session does for user-triggered sessions.
@@ -197,25 +226,9 @@ impl ProjectToolsHandler {
             let base_branch = br.base_branch.clone();
             let project_id_str = self.project_id.clone();
             let ws_name = workspace_name.clone();
-            let repo_subpath = repo.subpath.clone();
 
-            // For local branches, use the worktree path; fall back to the clone path.
-            let context_dir = if ws_name.is_none() {
-                self.store
-                    .get_workdir_for_branch(&br.id)
-                    .ok()
-                    .flatten()
-                    .map(|wd| {
-                        let mut path = std::path::PathBuf::from(&wd.path);
-                        if let Some(ref sp) = repo_subpath {
-                            path = path.join(sp);
-                        }
-                        path
-                    })
-                    .unwrap_or_else(|| working_dir.clone())
-            } else {
-                working_dir.clone()
-            };
+            // working_dir is already the worktree path for local branches.
+            let context_dir = working_dir.clone();
 
             let ctx = tokio::task::spawn_blocking(move || {
                 if let Some(ws) = ws_name {
@@ -416,9 +429,12 @@ impl ProjectToolsHandler {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                 _ = self.cancel_token.cancelled() => {
-                    return format!(
-                        r#"{{"session_id": "{session_id}", "outcome": "cancelled", "output": ""}}"#
-                    );
+                    return serde_json::json!({
+                        "session_id": session_id,
+                        "outcome": "cancelled",
+                        "output": "",
+                    })
+                    .to_string();
                 }
             }
             match self.store.get_session(&session_id) {
@@ -458,47 +474,38 @@ impl ProjectToolsHandler {
                     } else {
                         output
                     };
-                    let output_json = serde_json::to_string(&output).unwrap_or_default();
-                    let artifact_field = match artifact_id.as_deref() {
-                        Some(aid) => format!(r#", "artifact_id": "{aid}""#),
-                        None => String::new(),
-                    };
                     // If this was a note session, include the note info in the same format
                     // provided at session start for available notes.
-                    let note_field = if matches!(expected_outcome, RepoSessionOutcome::NoteInRepo) {
-                        if let Some(note_id) = artifact_id.as_deref() {
-                            match self.store.get_note(note_id) {
-                                Ok(Some(note)) if !note.content.is_empty() => {
-                                    let note_info = if is_remote_session {
-                                        format!("### Note: {}\n\n{}", note.title, note.content)
-                                    } else {
-                                        let note_path = std::env::temp_dir()
-                                            .join(format!("staged-note-{}.md", note.id));
-                                        if std::fs::write(&note_path, &note.content).is_ok() {
-                                            format!(
-                                                "### Note: {}\n\nSee: `{}`",
-                                                note.title,
-                                                note_path.display()
-                                            )
-                                        } else {
-                                            format!("### Note: {}\n\n{}", note.title, note.content)
-                                        }
-                                    };
-                                    let note_json =
-                                        serde_json::to_string(&note_info).unwrap_or_default();
-                                    format!(r#", "note": {note_json}"#)
+                    let note_info: Option<String> =
+                        if matches!(expected_outcome, RepoSessionOutcome::NoteInRepo) {
+                            artifact_id.as_deref().and_then(|note_id| {
+                                match self.store.get_note(note_id) {
+                                    Ok(Some(note)) if !note.content.is_empty() => {
+                                        crate::session_commands::format_note_for_context(
+                                            &note.id,
+                                            &note.title,
+                                            &note.content,
+                                            self.is_remote,
+                                        )
+                                    }
+                                    _ => None,
                                 }
-                                _ => String::new(),
-                            }
+                            })
                         } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    };
-                    return format!(
-                        r#"{{"session_id": "{session_id}", "outcome": "{outcome}", "output": {output_json}{artifact_field}{note_field}}}"#
-                    );
+                            None
+                        };
+                    let mut result = serde_json::json!({
+                        "session_id": session_id,
+                        "outcome": outcome,
+                        "output": output,
+                    });
+                    if let Some(aid) = artifact_id.as_deref() {
+                        result["artifact_id"] = serde_json::Value::String(aid.to_string());
+                    }
+                    if let Some(note) = note_info {
+                        result["note"] = serde_json::Value::String(note);
+                    }
+                    return result.to_string();
                 }
                 Ok(_) => continue,
                 Err(e) => return format!("Error polling session status: {e}"),
@@ -624,21 +631,21 @@ impl ProjectToolsHandler {
                         "[project_mcp] add_project_repo: worktree setup failed (continuing): {e}"
                     );
                     // Don't abort — return the repo even if worktree setup failed
-                    let msg = serde_json::to_string(&format!(
-                        "Added repository {github_repo} to project (worktree setup failed: {e})"
-                    ))
-                    .unwrap_or_default();
-                    return format!(r#"{{"repo_id": "{}", "message": {msg}}}"#, repo.id);
+                    return serde_json::json!({
+                        "repo_id": repo.id,
+                        "message": format!("Added repository {github_repo} to project (worktree setup failed: {e})"),
+                    })
+                    .to_string();
                 }
                 Err(e) => {
                     log::warn!(
                         "[project_mcp] add_project_repo: worktree task panicked (continuing): {e}"
                     );
-                    let msg = serde_json::to_string(&format!(
-                        "Added repository {github_repo} to project (worktree task error: {e})"
-                    ))
-                    .unwrap_or_default();
-                    return format!(r#"{{"repo_id": "{}", "message": {msg}}}"#, repo.id);
+                    return serde_json::json!({
+                        "repo_id": repo.id,
+                        "message": format!("Added repository {github_repo} to project (worktree task error: {e})"),
+                    })
+                    .to_string();
                 }
             }
 
@@ -682,10 +689,11 @@ impl ProjectToolsHandler {
             }
         }
 
-        format!(
-            r#"{{"repo_id": "{}", "message": "Added repository {} to project"}}"#,
-            repo.id, github_repo
-        )
+        serde_json::json!({
+            "repo_id": repo.id,
+            "message": format!("Added repository {github_repo} to project"),
+        })
+        .to_string()
     }
 }
 
@@ -1019,6 +1027,7 @@ pub async fn start_project_mcp_server(
     action_executor: Option<Arc<ActionExecutor>>,
     action_registry: Option<Arc<ActionRegistry>>,
     cancel_token: CancellationToken,
+    is_remote: bool,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1036,6 +1045,7 @@ pub async fn start_project_mcp_server(
         action_executor,
         action_registry,
         cancel_token,
+        is_remote,
     );
     log::info!(
         "[project_mcp] HTTP server bound on port {port} for project {}",

@@ -1033,6 +1033,34 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     entries
 }
 
+/// Format a single note's content for inclusion in an agent context string.
+///
+/// When `is_remote` is true, content is inlined directly because the remote
+/// agent cannot access local temp files. For local sessions, the content is
+/// written to a temp file and referenced by path so large notes don't bloat
+/// the context; falls back to inline if the write fails.
+pub(crate) fn format_note_for_context(
+    id: &str,
+    title: &str,
+    content: &str,
+    is_remote: bool,
+) -> Option<String> {
+    if is_remote {
+        Some(format!("### Note: {title}\n\n{content}"))
+    } else {
+        let note_path = std::env::temp_dir().join(format!("mark-note-{id}.md"));
+        if let Err(e) = std::fs::write(&note_path, content) {
+            log::warn!("Failed to write note to temp file: {e}");
+            None
+        } else {
+            Some(format!(
+                "### Note: {title}\n\nSee: `{}`",
+                note_path.display()
+            ))
+        }
+    }
+}
+
 /// Convert notes from the DB into timeline entries.
 ///
 /// When `is_remote` is true, note content is inlined directly because the
@@ -1056,20 +1084,14 @@ fn note_timeline_entries(
         if note.content.is_empty() {
             continue; // skip notes still generating
         }
-        let content = if is_remote {
-            format!("### Note: {}\n\n{}", note.title, note.content)
-        } else {
-            let note_path = std::env::temp_dir().join(format!("mark-note-{}.md", note.id));
-            if let Err(e) = std::fs::write(&note_path, &note.content) {
-                log::warn!("Failed to write note to temp file: {e}");
-                continue;
-            }
-            format!("### Note: {}\n\nSee: `{}`", note.title, note_path.display())
-        };
-        entries.push(TimelineEntry {
-            timestamp: note.created_at,
-            content,
-        });
+        if let Some(content) =
+            format_note_for_context(&note.id, &note.title, &note.content, is_remote)
+        {
+            entries.push(TimelineEntry {
+                timestamp: note.created_at,
+                content,
+            });
+        }
     }
     entries
 }

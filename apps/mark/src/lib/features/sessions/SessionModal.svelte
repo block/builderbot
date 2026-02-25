@@ -50,7 +50,7 @@
     resumeSession,
   } from '../../commands';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import { formatToolArgs, formatToolName, hasXmlBlocks } from './sessionModalHelpers';
+  import { formatToolDisplay, hasXmlBlocks } from './sessionModalHelpers';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
 
@@ -745,8 +745,9 @@
             {:else}
               <div class="message-row tool-group">
                 {#each group.pairs as pair}
-                  {@const toolName = formatToolName(pair.call.content)}
-                  {@const toolArgs = formatToolArgs(pair.call.content)}
+                  {@const { verb: toolName, detail: toolArgs } = formatToolDisplay(
+                    pair.call.content
+                  )}
                   {@const isExpanded = expandedTools.has(pair.call.id)}
                   <div class="tool-card">
                     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -1208,12 +1209,9 @@
   }
 
   .tool-name {
-    flex: 1;
-    min-width: 0;
+    flex-shrink: 0;
     color: var(--text-muted);
     font-size: var(--size-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
     white-space: nowrap;
   }
 

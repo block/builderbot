@@ -11,7 +11,10 @@
   import FormInput from '../../shared/FormInput.svelte';
   import FormButton from '../../shared/FormButton.svelte';
   import FormToggle from '../../shared/FormToggle.svelte';
+  import Spinner from '../../shared/Spinner.svelte';
   import RepoSearchInput from './RepoSearchInput.svelte';
+  import SubpathInput from './SubpathInput.svelte';
+  import type { SubpathInputApi } from './SubpathInput.svelte';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -35,6 +38,7 @@
   let error = $state<string | null>(null);
   let isMonorepo = $state(false);
   let checkingMonorepo = $state(false);
+  let subpathApi = $state<SubpathInputApi | undefined>(undefined);
 
   async function checkIfMonorepo(repo: string) {
     if (!repo) {
@@ -68,6 +72,15 @@
     error = null;
 
     try {
+      // If there's a subpath and a repo, wait for validation to complete
+      if (selectedRepo && subpath.trim() && subpathApi) {
+        const isValid = await subpathApi.waitForValidation();
+        if (!isValid) {
+          saving = false;
+          return;
+        }
+      }
+
       const normalizedSubpath = selectedRepo
         ? subpath.trim().replace(/^\/+|\/+$/g, '') || undefined
         : undefined;
@@ -95,6 +108,8 @@
     if (e.key === 'Enter') {
       const target = e.target as HTMLElement;
       if (target.closest('.repo-search-wrapper')) return;
+      // Don't submit if a suggestion is highlighted in the subpath dropdown
+      if (target.closest('.subpath-input-wrapper')) return;
       e.preventDefault();
       handleCreate();
     }
@@ -106,6 +121,9 @@
       subpath = selectedSubpath;
     }
   }
+
+  let isSubpathValidating = $derived(subpathApi?.validating ?? false);
+  let hasSubpathError = $derived(subpathApi?.validationError != null);
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -173,15 +191,11 @@
           >{isMonorepo ? 'Recommended' : 'Optional'}</span
         ></label
       >
-      <FormInput
+      <SubpathInput
         bind:value={subpath}
-        id="project-subpath"
-        placeholder="e.g., packages/frontend"
+        repo={selectedRepo}
         disabled={saving}
-        autocomplete="off"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck={false}
+        bind:api={subpathApi}
       />
     </div>
   {/if}
@@ -198,9 +212,16 @@
       variant="primary"
       class={!onCancel ? 'full-width-btn' : ''}
       onclick={handleCreate}
-      disabled={saving || !name.trim()}
+      disabled={saving || !name.trim() || hasSubpathError}
     >
-      {saving ? 'Creating...' : 'Create Project'}
+      {#if saving}
+        <span class="button-content">
+          <Spinner size={14} />
+          <span>{isSubpathValidating ? 'Validating...' : 'Creating...'}</span>
+        </span>
+      {:else}
+        Create Project
+      {/if}
     </FormButton>
   </div>
 </div>
@@ -313,5 +334,11 @@
 
   :global(.full-width-btn) {
     width: 100%;
+  }
+
+  .button-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
 </style>

@@ -1947,6 +1947,54 @@ pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), 
     }
 }
 
+/// List directories at a given path in a GitHub repository.
+/// Returns a list of directory names (not files) at the specified path.
+/// If `path` is empty, lists directories at the repository root.
+pub fn list_repo_directories(github_repo: &str, path: &str) -> Result<Vec<String>, GitError> {
+    let trimmed = path.trim_matches('/');
+    let endpoint = if trimmed.is_empty() {
+        format!("repos/{github_repo}/contents")
+    } else {
+        format!("repos/{github_repo}/contents/{trimmed}")
+    };
+
+    match run_gh_global(&["api", &endpoint]) {
+        Ok(body) => {
+            let body = body.trim_start();
+            if !body.starts_with('[') {
+                // Path points to a file, not a directory – no subdirectories to list
+                return Ok(vec![]);
+            }
+
+            #[derive(Deserialize)]
+            struct Entry {
+                name: String,
+                #[serde(rename = "type")]
+                entry_type: String,
+            }
+
+            let entries: Vec<Entry> =
+                serde_json::from_str(body).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+            let dirs: Vec<String> = entries
+                .into_iter()
+                .filter(|e| e.entry_type == "dir")
+                .map(|e| e.name)
+                .collect();
+
+            Ok(dirs)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Not Found") || msg.contains("HTTP 404") {
+                Ok(vec![])
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Monorepo Detection
 // =============================================================================

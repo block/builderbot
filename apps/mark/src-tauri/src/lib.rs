@@ -676,6 +676,19 @@ async fn check_monorepo_modules(github_repo: String) -> Result<u32, String> {
     git::check_monorepo_modules(&github_repo).map_err(|e| e.to_string())
 }
 
+/// Validate that a subpath exists as a directory in a GitHub repository.
+#[tauri::command]
+async fn validate_subpath(github_repo: String, subpath: String) -> Result<(), String> {
+    git::validate_subpath_in_repo(&github_repo, &subpath).map_err(|e| e.to_string())
+}
+
+/// List directories at a given path in a GitHub repository.
+/// Returns directory names (not files) at the specified path.
+#[tauri::command]
+async fn list_repo_directories(github_repo: String, path: String) -> Result<Vec<String>, String> {
+    git::list_repo_directories(&github_repo, &path).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn delete_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -2414,6 +2427,8 @@ pub fn run() {
             get_github_repo,
             search_github_repos,
             check_monorepo_modules,
+            validate_subpath,
+            list_repo_directories,
             branches::list_branches_for_project,
             branches::create_branch,
             branches::setup_worktree,

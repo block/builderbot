@@ -141,6 +141,16 @@ export function checkMonorepoModules(githubRepo: string): Promise<number> {
   return invoke('check_monorepo_modules', { githubRepo });
 }
 
+/** Validate that a subpath exists as a directory in a GitHub repository. */
+export function validateSubpath(githubRepo: string, subpath: string): Promise<void> {
+  return invoke('validate_subpath', { githubRepo, subpath });
+}
+
+/** List directories at a given path in a GitHub repository. */
+export function listRepoDirectories(githubRepo: string, path: string): Promise<string[]> {
+  return invoke('list_repo_directories', { githubRepo, path });
+}
+
 // =============================================================================
 // Project notes & sessions
 // =============================================================================

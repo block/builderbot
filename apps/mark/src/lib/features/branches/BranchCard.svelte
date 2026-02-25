@@ -834,6 +834,9 @@
     if (prStatusState === 'CLOSED') return 'neutral';
     if (prStatusDraft) return 'neutral';
 
+    // Mergeable status — check before checks/review so conflicts always show as red
+    if (prStatusMergeable === false) return 'error';
+
     // Check-based states
     if (prStatusChecks === 'FAILURE') return 'error';
     if (prStatusChecks === 'PENDING') return 'pending';
@@ -841,11 +844,7 @@
 
     // Review-based states
     if (prStatusReviewDecision === 'CHANGES_REQUESTED') return 'warning';
-    if (prStatusReviewDecision === 'APPROVED' && prStatusMergeable) return 'success';
     if (prStatusReviewDecision === 'APPROVED') return 'success';
-
-    // Mergeable status
-    if (prStatusMergeable === false) return 'error';
 
     return 'neutral';
   }

@@ -1,24 +1,18 @@
 <!--
-  SubpathInput.svelte - Subpath input with directory autocomplete and validation
+  SubpathInput.svelte - Subpath input with directory autocomplete
 
   Features:
-  - Debounced validation via validateSubpath command
   - Directory suggestions dropdown from listRepoDirectories
-  - Spinner on RHS while validating
-  - Error display below the field
-  - Exposes waitForValidation() so parent can await pending checks
+  - Exposes waitForValidation() so parent can validate on submit
 -->
 <script lang="ts" module>
   export interface SubpathInputApi {
     waitForValidation(): Promise<boolean>;
-    validating: boolean;
-    validationError: string | null;
   }
 </script>
 
 <script lang="ts">
   import { FolderOpen } from 'lucide-svelte';
-  import Spinner from '../../shared/Spinner.svelte';
   import * as commands from '../../commands';
 
   interface Props {
@@ -35,24 +29,15 @@
     api = $bindable(undefined),
   }: Props = $props();
 
-  let validationError = $state<string | null>(null);
-  let validating = $state(false);
   let suggestions = $state<string[]>([]);
   let showDropdown = $state(false);
   let highlightedIndex = $state(-1);
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let inputEl: HTMLInputElement | undefined = $state();
 
   // Expose the API to the parent via bindable prop
   $effect(() => {
     api = {
       waitForValidation,
-      get validating() {
-        return validating;
-      },
-      get validationError() {
-        return validationError;
-      },
     };
   });
 
@@ -130,64 +115,27 @@
     }
   }
 
-  async function runValidation(trimmed: string): Promise<boolean> {
-    if (!trimmed) {
-      validationError = null;
-      validating = false;
-      return true;
-    }
-
-    validating = true;
-    try {
-      await commands.validateSubpath(repo, trimmed);
-      validationError = null;
-      return true;
-    } catch {
-      validationError = 'Invalid path in repo';
-      return false;
-    } finally {
-      validating = false;
-    }
-  }
-
   /**
    * Returns a promise that resolves to true if the current subpath is valid,
-   * or false if validation fails. If a debounce is pending, fires immediately.
+   * or false if validation fails. Called by the parent on submit.
    */
   async function waitForValidation(): Promise<boolean> {
-    // If there's a pending debounce, fire it immediately
-    if (debounceTimer !== null) {
-      clearTimeout(debounceTimer);
-      debounceTimer = null;
-    }
-
-    const trimmed = normalize(value);
-    return runValidation(trimmed);
-  }
-
-  function scheduleValidation() {
-    if (debounceTimer !== null) {
-      clearTimeout(debounceTimer);
-    }
-
     const trimmed = normalize(value);
     if (!trimmed) {
-      validationError = null;
-      validating = false;
-      return;
+      return true;
     }
 
-    validating = true;
-    debounceTimer = setTimeout(() => {
-      debounceTimer = null;
-      runValidation(trimmed);
-    }, 500);
+    try {
+      await commands.validateSubpath(repo, trimmed);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function handleInput() {
     highlightedIndex = -1;
     showDropdown = true;
-    scheduleValidation();
     fetchSuggestions(value);
   }
 
@@ -208,7 +156,6 @@
     value = dir;
     showDropdown = false;
     highlightedIndex = -1;
-    scheduleValidation();
     // Fetch next level of suggestions for the newly selected path
     fetchSuggestions(dir);
     inputEl?.focus();
@@ -245,21 +192,19 @@
     return suggestions.filter((s) => s.toLowerCase().startsWith(trimmed));
   });
 
-  // Re-fetch suggestions and reset when repo changes
+  // Re-fetch suggestions when repo changes
   $effect(() => {
     if (repo) {
       suggestions = [];
-      validationError = null;
       if (value.trim()) {
         fetchSuggestions(value);
-        scheduleValidation();
       }
     }
   });
 </script>
 
 <div class="subpath-input-wrapper">
-  <div class="input-container" class:has-error={validationError !== null}>
+  <div class="input-container">
     <input
       bind:this={inputEl}
       class="subpath-input"
@@ -277,11 +222,6 @@
       spellcheck={false}
       {disabled}
     />
-    {#if validating}
-      <div class="input-spinner">
-        <Spinner size={14} />
-      </div>
-    {/if}
   </div>
 
   {#if showDropdown && filteredSuggestions.length > 0 && !disabled}
@@ -300,10 +240,6 @@
         </button>
       {/each}
     </div>
-  {/if}
-
-  {#if validationError}
-    <div class="validation-error">{validationError}</div>
   {/if}
 </div>
 
@@ -325,7 +261,7 @@
     background: transparent;
     color: var(--text-primary);
     border-radius: 10px;
-    padding: 10px 36px 10px 14px;
+    padding: 10px 14px;
     font-size: var(--size-md);
     font-family: inherit;
     outline: none;
@@ -343,20 +279,6 @@
 
   .subpath-input:disabled {
     opacity: 0.6;
-  }
-
-  .input-container.has-error .subpath-input {
-    border-color: var(--ui-danger);
-  }
-
-  .input-spinner {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    color: var(--text-faint);
-    display: flex;
-    align-items: center;
   }
 
   .suggestions-dropdown {
@@ -404,11 +326,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .validation-error {
-    color: var(--ui-danger);
-    font-size: var(--size-xs);
-    margin-top: 4px;
   }
 </style>

@@ -65,6 +65,12 @@
     }
   });
 
+  // Clear error when user edits the subpath
+  $effect(() => {
+    subpath;
+    error = null;
+  });
+
   async function handleCreate() {
     if (!name.trim() || saving) return;
 
@@ -72,10 +78,11 @@
     error = null;
 
     try {
-      // If there's a subpath and a repo, wait for validation to complete
+      // If there's a subpath and a repo, validate before creating
       if (selectedRepo && subpath.trim() && subpathApi) {
         const isValid = await subpathApi.waitForValidation();
         if (!isValid) {
+          error = 'Invalid path in repo';
           saving = false;
           return;
         }
@@ -121,9 +128,6 @@
       subpath = selectedSubpath;
     }
   }
-
-  let isSubpathValidating = $derived(subpathApi?.validating ?? false);
-  let hasSubpathError = $derived(subpathApi?.validationError != null);
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -212,12 +216,12 @@
       variant="primary"
       class={!onCancel ? 'full-width-btn' : ''}
       onclick={handleCreate}
-      disabled={saving || !name.trim() || hasSubpathError}
+      disabled={saving || !name.trim()}
     >
       {#if saving}
         <span class="button-content">
           <Spinner size={14} />
-          <span>{isSubpathValidating ? 'Validating...' : 'Creating...'}</span>
+          <span>Creating...</span>
         </span>
       {:else}
         Create Project

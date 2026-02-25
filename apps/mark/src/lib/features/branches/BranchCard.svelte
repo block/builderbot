@@ -81,6 +81,7 @@
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
+  import { pushStateStore, type PushState } from '../../stores/pushState.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import ReasonBanner from './ReasonBanner.svelte';
   import { alerts } from '../../shared/alerts.svelte';
@@ -188,13 +189,18 @@
     prStatusDraft = branch.prDraft;
   });
 
-  // Push session state (mirrors PR session pattern)
-  type PushState = 'idle' | 'pushing' | 'error' | 'done';
-  let pushStateOverride = $state<PushState | null>(null);
-  let pushState = $derived<PushState>(pushStateOverride ?? 'idle');
-  let pushSessionId = $state<string | null>(null);
-  let pushError = $state<string | null>(null);
-  let pushRejectedNonFastForward = $state(false);
+  // =========================================================================
+  // Push button state — derived directly from the global pushStateStore
+  //
+  // This ensures the spinner/state is always in sync with the store,
+  // even if the component was unmounted while App.svelte's global
+  // session-status-changed handler updated the store.
+  // =========================================================================
+  let storePushState = $derived(pushStateStore.getPushState(branch.id));
+  let pushState = $derived<PushState>(storePushState?.state ?? 'idle');
+  let pushSessionId = $derived(storePushState?.sessionId ?? null);
+  let pushError = $derived(storePushState?.error ?? null);
+  let pushRejectedNonFastForward = $derived(storePushState?.rejectedNonFastForward ?? false);
   let showPushErrorDialog = $state(false);
   let showForcePushDialog = $state(false);
 
@@ -420,10 +426,14 @@
         if (session && session.status !== 'running') {
           handlePushSessionComplete(session.status);
         }
-      } catch {
-        pushStateOverride = 'error';
-        pushError = 'Lost track of push session.';
-        pushSessionId = null;
+      } catch (err) {
+        // Session may have been deleted — clear the pushing state
+        console.error(
+          `[BranchCard] Lost track of push session ${sid} for branch ${branch.id}:`,
+          err
+        );
+        pushStateStore.setPushError(branch.id, 'Lost track of push session.');
+        pushStateStore.clearSessionTracking(branch.id);
       }
     }, 5_000);
 
@@ -1088,68 +1098,68 @@
   async function handlePush(force = false) {
     if (pushState === 'pushing') return;
 
-    pushStateOverride = 'pushing';
-    pushError = null;
+    // Set pushing state in the store immediately for instant UI feedback.
+    // We use a temporary placeholder session ID; it will be replaced once
+    // the real session is created.
+    pushStateStore.setPushing(branch.id, '__pending__');
 
     try {
       const remote = branch.branchType === 'remote';
       const agents = remote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.pushBranch(branch.id, provider, force);
-      pushSessionId = sessionId;
       // Register session in the unified registry
       sessionRegistry.register(sessionId, branch.projectId, 'push', branch.id);
+      // Store the pushing state globally (now with real session ID)
+      pushStateStore.setPushing(branch.id, sessionId);
       // Track the running session in the project state store
       projectStateStore.addRunningSession(branch.projectId, sessionId);
       // The session-status-changed listener will handle completion
     } catch (e) {
-      pushStateOverride = 'error';
-      pushError = e instanceof Error ? e.message : String(e);
+      pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
     }
   }
 
   async function handlePushSessionComplete(status: string) {
-    if (status === 'completed' && pushSessionId) {
+    const sid = pushSessionId;
+    if (status === 'completed' && sid) {
       // Check session messages for the non-fast-forward rejection marker
       try {
-        const messages = await commands.getSessionMessages(pushSessionId);
+        const messages = await commands.getSessionMessages(sid);
         if (isPushRejectedNonFastForward(messages)) {
           // The agent stopped because the remote would lose commits.
           // Go to error state — clicking the button will open the force push dialog.
-          pushStateOverride = 'error';
-          pushRejectedNonFastForward = true;
-          pushError = null;
-          pushSessionId = null;
+          pushStateStore.setPushError(branch.id, '', true); // rejectedNonFastForward=true
+          pushStateStore.clearSessionTracking(branch.id);
           return;
         }
       } catch {
         // If we can't read messages, treat as success (push likely worked)
       }
 
-      pushStateOverride = 'done';
+      pushStateStore.setPushDone(branch.id);
       hasUnpushed = false;
       // Reset to idle after a brief moment so the button returns to "View PR"
       setTimeout(() => {
-        pushStateOverride = null;
+        pushStateStore.clearPushState(branch.id);
       }, 1_500);
     } else {
-      pushStateOverride = 'error';
-      pushError = `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`;
+      pushStateStore.setPushError(
+        branch.id,
+        `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`
+      );
     }
-    pushSessionId = null;
+    pushStateStore.clearSessionTracking(branch.id);
   }
 
   function handleForcePushConfirm() {
     showForcePushDialog = false;
-    pushRejectedNonFastForward = false;
     handlePush(true);
   }
 
   function handleForcePushCancel() {
     showForcePushDialog = false;
-    pushRejectedNonFastForward = false;
-    pushStateOverride = null;
-    pushError = null;
+    pushStateStore.clearPushState(branch.id);
   }
 
   function handlePushErrorRetry() {
@@ -1159,8 +1169,7 @@
 
   function handlePushErrorClose() {
     showPushErrorDialog = false;
-    pushStateOverride = null;
-    pushError = null;
+    pushStateStore.clearPushState(branch.id);
   }
 
   function handlePrButtonClick() {

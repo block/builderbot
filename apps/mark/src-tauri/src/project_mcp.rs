@@ -429,6 +429,9 @@ impl ProjectToolsHandler {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                 _ = self.cancel_token.cancelled() => {
+                    // Cancel the child session so it doesn't run as an orphan
+                    // after the parent project session has been cancelled.
+                    self.registry.cancel(&session_id);
                     return serde_json::json!({
                         "session_id": session_id,
                         "outcome": "cancelled",

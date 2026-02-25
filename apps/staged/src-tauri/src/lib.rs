@@ -452,12 +452,12 @@ fn get_home_dir() -> Result<String, String> {
         .ok_or_else(|| "Could not determine home directory".to_string())
 }
 
-fn mark_data_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|d| d.join(".mark"))
+fn staged_data_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|d| d.join(".staged"))
 }
 
 fn preferences_store_path_buf() -> Option<PathBuf> {
-    mark_data_dir().map(|d| d.join("preferences.json"))
+    staged_data_dir().map(|d| d.join("preferences.json"))
 }
 
 fn migrate_legacy_preferences_file(current_app_data_dir: Option<PathBuf>) {
@@ -486,10 +486,11 @@ fn migrate_legacy_preferences_file(current_app_data_dir: Option<PathBuf>) {
 
     let mut legacy_dirs: Vec<PathBuf> = Vec::new();
     for candidate in [
+        dirs::home_dir().map(|d| d.join(".mark")),
+        dirs::data_dir().map(|d| d.join("com.mark.app")),
         dirs::home_dir().map(|d| d.join(".staged")),
         dirs::data_dir().map(|d| d.join("staged")),
         current_app_data_dir,
-        dirs::data_dir().map(|d| d.join("com.mark.app")),
     ]
     .into_iter()
     .flatten()
@@ -511,35 +512,20 @@ fn migrate_legacy_preferences_file(current_app_data_dir: Option<PathBuf>) {
             target_path.display()
         );
 
-        if let Err(rename_err) = std::fs::rename(&old_path, &target_path) {
+        if let Err(copy_err) = std::fs::copy(&old_path, &target_path) {
             eprintln!(
-                "Failed to move preferences {} -> {}: {rename_err}",
+                "Failed to copy preferences {} -> {}: {copy_err}",
                 old_path.display(),
                 target_path.display()
             );
-
-            if let Err(copy_err) = std::fs::copy(&old_path, &target_path) {
-                eprintln!(
-                    "Failed to copy preferences {} -> {}: {copy_err}",
-                    old_path.display(),
-                    target_path.display()
-                );
-                continue;
-            }
-
-            if let Err(remove_err) = std::fs::remove_file(&old_path) {
-                eprintln!(
-                    "Copied preferences but could not remove legacy file {}: {remove_err}",
-                    old_path.display()
-                );
-            }
+            continue;
         }
 
         break;
     }
 }
 
-/// Return the absolute path for the shared preferences store file.
+/// Return the absolute path for the Staged preferences store file.
 #[tauri::command]
 fn preferences_store_path() -> Result<String, String> {
     preferences_store_path_buf()

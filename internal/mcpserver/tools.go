@@ -154,7 +154,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// penpal_reply
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_reply",
-		Description: "Reply to an existing comment thread. The reply is attributed to the agent. Include suggestedReplies when asking for confirmation or presenting options.",
+		Description: "Reply to an existing comment thread. The reply is attributed to the agent. Include suggestedReplies when asking for confirmation or presenting options, but only for meaningful responses the human would type — not generic ones like \"yes\"/\"no\"/\"looks good\" that duplicate the reply/resolve buttons.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input replyInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" || input.Path == "" || input.ThreadID == "" || input.Body == "" {
 			return nil, nil, fmt.Errorf("project, path, threadId, and body are all required")

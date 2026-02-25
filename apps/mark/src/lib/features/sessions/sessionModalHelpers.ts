@@ -121,6 +121,50 @@ export function stripCodeFences(content: string): string {
   return m ? m[1].trimEnd() : content;
 }
 
+export interface ToolPairDisplay {
+  pair: { call: { id: number; content: string }; result: { content: string } | null };
+  verb: string;
+  detail: string;
+}
+
+export interface VerbGroup {
+  verb: string;
+  items: ToolPairDisplay[];
+}
+
+const VERB_NOUNS: Record<string, string> = {
+  Read: 'files',
+  Ran: 'commands',
+  Searched: 'searches',
+  Edited: 'files',
+  Wrote: 'files',
+  Listed: 'listings',
+  Deleted: 'files',
+  Explored: 'files',
+};
+
+export function groupByVerb(
+  pairs: { call: { id: number; content: string }; result: { content: string } | null }[]
+): VerbGroup[] {
+  const groups: VerbGroup[] = [];
+  for (const pair of pairs) {
+    const { verb, detail } = formatToolDisplay(pair.call.content);
+    const item: ToolPairDisplay = { pair, verb, detail };
+    const last = groups[groups.length - 1];
+    if (last && last.verb === verb) {
+      last.items.push(item);
+    } else {
+      groups.push({ verb, items: [item] });
+    }
+  }
+  return groups;
+}
+
+export function verbGroupSummary(group: VerbGroup): string {
+  const noun = VERB_NOUNS[group.verb] || 'items';
+  return `${group.items.length} ${noun}`;
+}
+
 export function formatToolDisplay(content: string): ToolDisplay {
   const parsed = parseToolCall(content);
   if (parsed) {

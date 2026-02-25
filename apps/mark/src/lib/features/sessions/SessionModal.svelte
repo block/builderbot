@@ -51,7 +51,13 @@
     resumeSession,
   } from '../../commands';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import { formatToolDisplay, hasXmlBlocks, stripCodeFences } from './sessionModalHelpers';
+  import {
+    formatToolDisplay,
+    groupByVerb,
+    verbGroupSummary,
+    hasXmlBlocks,
+    stripCodeFences,
+  } from './sessionModalHelpers';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
 
@@ -85,6 +91,7 @@
   let messageQueue = $state<string[]>([]);
   let copiedId = $state<number | string | null>(null);
   let expandedTools = $state<Set<number>>(new Set());
+  let expandedVerbGroups = $state<Set<string>>(new Set());
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
@@ -305,6 +312,16 @@
       next.add(msgId);
     }
     expandedTools = next;
+  }
+
+  function toggleVerbGroup(key: string) {
+    const next = new Set(expandedVerbGroups);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    expandedVerbGroups = next;
   }
 
   // =========================================================================
@@ -745,43 +762,95 @@
               </div>
             {:else}
               <div class="message-row tool-group">
-                {#each group.pairs as pair}
-                  {@const { verb: toolName, detail: toolArgs } = formatToolDisplay(
-                    pair.call.content
-                  )}
-                  {@const isExpanded = expandedTools.has(pair.call.id)}
-                  <div class="tool-card">
-                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                    <div
-                      class="tool-header"
-                      class:tool-header-expandable={!!pair.result}
-                      onclick={() => pair.result && toggleTool(pair.call.id)}
-                    >
-                      <span
-                        class="tool-caret"
-                        class:tool-caret-expanded={isExpanded}
-                        class:tool-caret-hidden={!pair.result}>›</span
+                {#each groupByVerb(group.pairs) as vg, vgIdx}
+                  {#if vg.items.length === 1}
+                    {@const item = vg.items[0]}
+                    {@const isExpanded = expandedTools.has(item.pair.call.id)}
+                    <div class="tool-card">
+                      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                      <div
+                        class="tool-header"
+                        class:tool-header-expandable={!!item.pair.result}
+                        onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
                       >
-                      <span class="tool-name">{toolName}</span>
-                      {#if toolArgs}
-                        <span class="tool-args-preview">{toolArgs}</span>
+                        <span
+                          class="tool-caret"
+                          class:tool-caret-expanded={isExpanded}
+                          class:tool-caret-hidden={!item.pair.result}>›</span
+                        >
+                        <span class="tool-name">{item.verb}</span>
+                        {#if item.detail}
+                          <span class="tool-args-preview">{item.detail}</span>
+                        {/if}
+                      </div>
+                      {#if isExpanded && item.pair.result}
+                        {@const resultContent = stripCodeFences(item.pair.result.content)}
+                        <div class="tool-code-block" transition:slide={{ duration: 150 }}>
+                          {#if item.verb === 'Ran' && item.detail}
+                            <div class="tool-code-command">$ {item.detail}</div>
+                          {/if}
+                          {#if resultContent}
+                            <pre class="tool-code-output">{resultContent}</pre>
+                          {/if}
+                          <div class="tool-code-status">
+                            <Check size={11} /> Success
+                          </div>
+                        </div>
                       {/if}
                     </div>
-                    {#if isExpanded && pair.result}
-                      {@const resultContent = stripCodeFences(pair.result.content)}
-                      <div class="tool-code-block" transition:slide={{ duration: 150 }}>
-                        {#if toolName === 'Ran' && toolArgs}
-                          <div class="tool-code-command">$ {toolArgs}</div>
-                        {/if}
-                        {#if resultContent}
-                          <pre class="tool-code-output">{resultContent}</pre>
-                        {/if}
-                        <div class="tool-code-status">
-                          <Check size={11} /> Success
-                        </div>
+                  {:else}
+                    {@const groupKey = `${vg.items[0].pair.call.id}-${vg.verb}`}
+                    {@const isGroupExpanded = expandedVerbGroups.has(groupKey)}
+                    <div class="tool-card">
+                      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                      <div
+                        class="tool-header tool-header-expandable"
+                        onclick={() => toggleVerbGroup(groupKey)}
+                      >
+                        <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}>›</span
+                        >
+                        <span class="tool-name">{vg.verb}</span>
+                        <span class="tool-args-preview">{verbGroupSummary(vg)}</span>
                       </div>
+                    </div>
+                    {#if isGroupExpanded}
+                      {#each vg.items as item}
+                        {@const isExpanded = expandedTools.has(item.pair.call.id)}
+                        <div class="tool-card">
+                          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                          <div
+                            class="tool-header"
+                            class:tool-header-expandable={!!item.pair.result}
+                            onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
+                          >
+                            <span
+                              class="tool-caret"
+                              class:tool-caret-expanded={isExpanded}
+                              class:tool-caret-hidden={!item.pair.result}>›</span
+                            >
+                            <span class="tool-name">{item.verb}</span>
+                            {#if item.detail}
+                              <span class="tool-args-preview">{item.detail}</span>
+                            {/if}
+                          </div>
+                          {#if isExpanded && item.pair.result}
+                            {@const resultContent = stripCodeFences(item.pair.result.content)}
+                            <div class="tool-code-block" transition:slide={{ duration: 150 }}>
+                              {#if item.verb === 'Ran' && item.detail}
+                                <div class="tool-code-command">$ {item.detail}</div>
+                              {/if}
+                              {#if resultContent}
+                                <pre class="tool-code-output">{resultContent}</pre>
+                              {/if}
+                              <div class="tool-code-status">
+                                <Check size={11} /> Success
+                              </div>
+                            </div>
+                          {/if}
+                        </div>
+                      {/each}
                     {/if}
-                  </div>
+                  {/if}
                 {/each}
               </div>
             {/if}

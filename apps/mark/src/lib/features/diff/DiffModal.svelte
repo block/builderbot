@@ -13,8 +13,10 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { X } from 'lucide-svelte';
+  import { X, ArrowLeft } from 'lucide-svelte';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import Spinner from '../../shared/Spinner.svelte';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
   import { DiffViewer } from '@builderbot/diff-viewer/components';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
@@ -48,6 +50,12 @@
     afterLabel?: string;
     /** When true, hides commenting, reference files, and review status. */
     readonly?: boolean;
+    /** Project name to display in title bar. */
+    projectName?: string;
+    /** GitHub repo (e.g., "owner/repo") to display in title bar. */
+    githubRepo?: string;
+    /** Subpath within the repo to display in title bar. */
+    subpath?: string | null;
     onClose: () => void;
   }
 
@@ -58,6 +66,9 @@
     beforeLabel = 'base',
     afterLabel = 'head',
     readonly = false,
+    projectName,
+    githubRepo,
+    subpath,
     onClose,
   }: Props = $props();
 
@@ -229,7 +240,8 @@
   // ==========================================================================
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
+    // Command+Left Arrow to go back
+    if (event.key === 'ArrowLeft' && event.metaKey) {
       event.preventDefault();
       event.stopPropagation();
       onClose();
@@ -261,14 +273,44 @@
       document.removeEventListener('keyup', handleKeyup);
     };
   });
+
+  // ==========================================================================
+  // Title bar drag support
+  // ==========================================================================
+
+  function startDrag(e: PointerEvent) {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    const isInteractive = target.closest('button, a, input, [role="button"]');
+    if (!isInteractive) {
+      e.preventDefault();
+      getCurrentWindow().startDragging();
+    }
+  }
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="diff-modal-backdrop" onkeydown={handleKeydown}>
   <div class="diff-modal">
-    <button class="close-btn" onclick={onClose} title="Close (Esc)">
-      <X size={18} />
-    </button>
+    <!-- Title bar -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="title-bar" onpointerdown={startDrag}>
+      <div class="traffic-light-spacer"></div>
+      <div class="left-actions">
+        <button class="icon-btn" onclick={onClose} title="Back (⌘←)">
+          <ArrowLeft size={14} />
+        </button>
+      </div>
+      <div class="title-content">
+        {#if projectName}
+          <span class="project-name">{projectName}</span>
+        {/if}
+        {#if githubRepo}
+          <RepoLabel {githubRepo} {subpath} />
+        {/if}
+      </div>
+      <div class="drag-spacer"></div>
+    </div>
 
     <div class="modal-body">
       <!-- Diff viewer -->
@@ -384,7 +426,6 @@
     display: flex;
     align-items: stretch;
     justify-content: center;
-    padding: 40px 0 0 0;
   }
 
   .diff-modal {
@@ -401,31 +442,72 @@
   }
 
   /* ========================================================================
-   * Close button (floating top-right)
+   * Title bar
    * ====================================================================== */
 
-  .close-btn {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    z-index: 10;
+  .title-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    background: var(--bg-chrome);
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .traffic-light-spacer {
+    width: 70px;
+    flex-shrink: 0;
+    align-self: stretch;
+  }
+
+  .left-actions {
+    display: flex;
+    align-items: center;
+  }
+
+  .title-content {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--size-sm);
+  }
+
+  .project-name {
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+
+  .drag-spacer {
+    flex: 1;
+    align-self: stretch;
+    min-width: 20px;
+  }
+
+  .icon-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 6px;
-    background: var(--bg-chrome);
+    padding: 5px;
+    background: transparent;
     border: none;
     border-radius: 6px;
     color: var(--text-muted);
     cursor: pointer;
+    -webkit-app-region: no-drag;
     transition:
       color 0.1s,
       background-color 0.1s;
   }
 
-  .close-btn:hover {
+  .icon-btn:hover:not(:disabled) {
     color: var(--text-primary);
     background-color: var(--bg-hover);
+  }
+
+  .icon-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
   }
 
   /* ========================================================================

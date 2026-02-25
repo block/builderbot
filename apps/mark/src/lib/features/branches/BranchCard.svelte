@@ -90,6 +90,7 @@
   interface Props {
     branch: Branch;
     repoLabel?: { githubRepo: string; subpath: string | null; reason?: string | null } | null;
+    projectName?: string;
     deleting?: boolean;
     worktreeError?: string;
     onDelete?: () => void;
@@ -100,6 +101,7 @@
   let {
     branch,
     repoLabel = null,
+    projectName,
     deleting = false,
     worktreeError,
     onDelete,
@@ -1640,6 +1642,9 @@
     scope="branch"
     beforeLabel={formatBaseBranch(branch.baseBranch)}
     afterLabel={branch.branchName}
+    {projectName}
+    githubRepo={repoLabel?.githubRepo}
+    subpath={repoLabel?.subpath}
     onClose={() => {
       showBranchDiff = false;
       loadTimeline();
@@ -1654,6 +1659,9 @@
     scope="commit"
     beforeLabel="parent"
     afterLabel={commitDiffSha.slice(0, 7)}
+    {projectName}
+    githubRepo={repoLabel?.githubRepo}
+    subpath={repoLabel?.subpath}
     readonly
     onClose={() => {
       commitDiffSha = null;

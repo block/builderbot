@@ -79,7 +79,10 @@ export function extractPrUrl(messages: { content: string; role: string }[]): str
   for (const msg of messages) {
     if (msg.role !== 'assistant' && msg.role !== 'tool_result') continue;
     const markerMatch = msg.content.match(/PR_URL:\s*(https?:\/\/\S+)/);
-    if (markerMatch) return markerMatch[1];
+    if (markerMatch) {
+      // Strip trailing markdown characters (*, ), ], etc.) from the URL
+      return markerMatch[1].replace(/[\*\)\]]+$/, '');
+    }
   }
 
   for (const msg of messages) {

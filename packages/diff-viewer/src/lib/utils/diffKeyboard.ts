@@ -7,6 +7,9 @@
  * - Ctrl+N: Scroll down
  * - Ctrl+P: Scroll up
  * - I: Add comment on current hunk
+ * - Cmd/Ctrl+F: Open search
+ * - Cmd/Ctrl+G: Next search result
+ * - Cmd/Ctrl+Shift+G: Previous search result
  *
  * Uses plain DOM event listeners (no external keyboard service dependency).
  */
@@ -24,6 +27,10 @@ export interface DiffNavConfig {
   startCommentOnHunk: (hunkIndex: number) => void;
   /** Called when keyboard navigation focuses a hunk */
   onHunkFocus?: (hunkIndex: number | null) => void;
+  /** Search callbacks */
+  onOpenSearch?: () => void;
+  onNextSearchResult?: () => void;
+  onPrevSearchResult?: () => void;
 }
 
 const DEFAULT_CONFIG: DiffNavConfig = {
@@ -192,6 +199,27 @@ export function setupDiffKeyboardNav(config: Partial<DiffNavConfig> = {}): () =>
     // I — add comment on current hunk (no modifiers)
     if (key === 'i' && !ctrl && !meta && !shift && !alt) {
       if (commentOnCurrentHunk(cfg)) event.preventDefault();
+      return;
+    }
+
+    // Cmd/Ctrl+F — open search
+    if (key === 'f' && (ctrl || meta) && !shift && !alt) {
+      event.preventDefault();
+      cfg.onOpenSearch?.();
+      return;
+    }
+
+    // Cmd/Ctrl+G — next search result
+    if (key === 'g' && (ctrl || meta) && !shift && !alt) {
+      event.preventDefault();
+      cfg.onNextSearchResult?.();
+      return;
+    }
+
+    // Cmd/Ctrl+Shift+G — previous search result
+    if (key === 'g' && (ctrl || meta) && shift && !alt) {
+      event.preventDefault();
+      cfg.onPrevSearchResult?.();
       return;
     }
   }

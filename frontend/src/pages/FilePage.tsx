@@ -35,6 +35,52 @@ export default function FilePage() {
   const contentRef = useRef<HTMLDivElement>(null);
   const mermaidDraggingRef = useRef(false);
   const agentPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [chatWidth, setChatWidth] = useState(() => {
+    const saved = localStorage.getItem('chatPanelWidth');
+    return saved ? parseInt(saved, 10) : 340;
+  });
+  const isResizing = useRef(false);
+  const resizeStartX = useRef(0);
+  const resizeStartWidth = useRef(0);
+  const chatWidthRef = useRef(chatWidth);
+
+  useEffect(() => {
+    chatWidthRef.current = chatWidth;
+  }, [chatWidth]);
+
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    isResizing.current = true;
+    resizeStartX.current = e.clientX;
+    resizeStartWidth.current = chatWidthRef.current;
+    e.preventDefault();
+  }, []);
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isResizing.current) return;
+      if (e.buttons === 0) {
+        isResizing.current = false;
+        localStorage.setItem('chatPanelWidth', String(chatWidthRef.current));
+        return;
+      }
+      const delta = resizeStartX.current - e.clientX;
+      const newWidth = Math.min(Math.max(resizeStartWidth.current + delta, 200), 700);
+      setChatWidth(newWidth);
+      chatWidthRef.current = newWidth;
+    };
+    const onMouseUp = () => {
+      if (isResizing.current) {
+        isResizing.current = false;
+        localStorage.setItem('chatPanelWidth', String(chatWidthRef.current));
+      }
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, []);
 
   // Compute highlights for the rehype plugin (text highlights only, not SVG)
   const threadHighlights = useMemo<ThreadHighlight[]>(() => {
@@ -288,7 +334,7 @@ export default function FilePage() {
   }
 
   return (
-    <div data-testid="file-page" className="file-page-layout">
+    <div data-testid="file-page" className="file-page-layout" style={{ gridTemplateColumns: `1fr 4px ${chatWidth}px` }}>
       <div className="file-main" id="file-main">
         <div className="file-toolbar">
           <FileTypeBadge type={fileType} />
@@ -325,6 +371,8 @@ export default function FilePage() {
           </div>
         </div>
       </div>
+
+      <div className="chat-resize-handle" onMouseDown={handleResizeMouseDown} />
 
       <CommentsPanel
         threads={threads}

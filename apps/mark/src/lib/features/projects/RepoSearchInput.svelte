@@ -10,7 +10,7 @@
   import { Search, Lock, Globe, Clock, Plus, Command } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
 
   interface Props {

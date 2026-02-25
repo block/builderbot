@@ -11,7 +11,7 @@
   import type { Project, Branch, WorkspaceStatus, ProjectNote } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome } from '../layout/navigation.svelte';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';

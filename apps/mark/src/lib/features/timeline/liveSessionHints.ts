@@ -1,4 +1,4 @@
-import * as commands from '../../commands';
+import * as commands from '../../api/commands';
 import type { BranchTimeline, SessionMessage } from '../../types';
 
 const HINT_POLL_INTERVAL_MS = 750;

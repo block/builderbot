@@ -1,4 +1,4 @@
-import type { ProjectAction } from '../../commands';
+import type { ProjectAction } from '../../api/commands';
 
 const TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.text', '.rst', '.org', '.adoc'];
 

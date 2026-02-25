@@ -13,7 +13,7 @@
 
 <script lang="ts">
   import { FolderOpen } from 'lucide-svelte';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
 
   interface Props {
     value: string;

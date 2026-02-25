@@ -8,7 +8,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { ArrowLeft, Search, Lock, Globe, Clock, Plus } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
 
   interface Props {

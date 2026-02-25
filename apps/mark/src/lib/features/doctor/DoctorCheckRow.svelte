@@ -7,8 +7,8 @@
 -->
 <script lang="ts">
   import { CheckCircle, AlertTriangle, XCircle, ExternalLink, Wrench } from 'lucide-svelte';
-  import { openUrl, runDoctorFix } from '../../commands';
-  import type { DoctorCheck } from '../../commands';
+  import { openUrl, runDoctorFix } from '../../api/commands';
+  import type { DoctorCheck } from '../../api/commands';
 
   let {
     check,

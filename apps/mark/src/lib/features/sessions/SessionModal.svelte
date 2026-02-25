@@ -49,7 +49,7 @@
     getSessionMessagesSince,
     handleExternalLinkClick,
     resumeSession,
-  } from '../../commands';
+  } from '../../api/commands';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import {
     formatToolDisplay,

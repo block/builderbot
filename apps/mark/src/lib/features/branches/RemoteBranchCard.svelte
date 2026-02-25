@@ -31,7 +31,7 @@
     WorkspaceInfo,
     WorkspaceStatus,
   } from '../../types';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
   import DropdownMenu, { type MenuItem } from '../../shared/DropdownMenu.svelte';
   import DiffModal from '../diff/DiffModal.svelte';

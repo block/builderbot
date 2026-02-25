@@ -8,7 +8,7 @@
   import { onMount } from 'svelte';
   import { GitBranch, Monitor, Cloud, X, Clock, Command } from 'lucide-svelte';
   import type { Project, RecentRepo } from '../../types';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
   import FormInput from '../../shared/FormInput.svelte';
   import FormButton from '../../shared/FormButton.svelte';
   import FormToggle from '../../shared/FormToggle.svelte';

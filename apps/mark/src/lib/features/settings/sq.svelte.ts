@@ -5,7 +5,7 @@
  * read the result synchronously without introducing a per-open delay.
  */
 
-import { isSqAvailable } from '../../commands';
+import { isSqAvailable } from '../../api/commands';
 
 /** Shared reactive state for sq CLI availability. */
 export const sqState = $state({

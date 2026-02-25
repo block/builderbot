@@ -15,7 +15,7 @@
     Plus,
   } from 'lucide-svelte';
   import type { Project, ProjectRepo, Branch } from '../../types';
-  import * as commands from '../../commands';
+  import * as commands from '../../api/commands';
   import {
     projectDisplayName,
     aggregateProjectPrStatus,

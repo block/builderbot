@@ -13,7 +13,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { Plus, X, CheckCircle, AlertCircle, Ban, Eye, Trash2 } from 'lucide-svelte';
   import type { Session, SessionStatus } from '../../types';
-  import { startSession, deleteSession } from '../../commands';
+  import { startSession, deleteSession } from '../../api/commands';
   import SessionModal from './SessionModal.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { agentState } from '../agents/agent.svelte';

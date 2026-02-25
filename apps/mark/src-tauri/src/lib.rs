@@ -94,6 +94,65 @@ fn migrate_db_path_prefixes(
     Ok(())
 }
 
+fn preferences_store_path_buf() -> Option<PathBuf> {
+    crate::paths::data_dir().map(|d| d.join("preferences.json"))
+}
+
+fn migrate_legacy_preferences_file(target_path: &Path, legacy_dirs: Vec<PathBuf>) {
+    if target_path.exists() {
+        return;
+    }
+
+    if let Some(parent) = target_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!(
+                "Cannot create preferences directory {}: {e}",
+                parent.display()
+            );
+            return;
+        }
+    }
+
+    for old_dir in legacy_dirs {
+        let old_path = old_dir.join("preferences.json");
+        if old_path == target_path || !old_path.exists() {
+            continue;
+        }
+
+        log::info!(
+            "Migrating preferences from {} to {}",
+            old_path.display(),
+            target_path.display()
+        );
+
+        if let Err(rename_err) = std::fs::rename(&old_path, target_path) {
+            log::warn!(
+                "Failed to move preferences {} -> {}: {rename_err}",
+                old_path.display(),
+                target_path.display()
+            );
+
+            if let Err(copy_err) = std::fs::copy(&old_path, target_path) {
+                log::warn!(
+                    "Failed to copy preferences {} -> {}: {copy_err}",
+                    old_path.display(),
+                    target_path.display()
+                );
+                continue;
+            }
+
+            if let Err(remove_err) = std::fs::remove_file(&old_path) {
+                log::warn!(
+                    "Copied preferences but could not remove legacy file {}: {remove_err}",
+                    old_path.display()
+                );
+            }
+        }
+
+        break;
+    }
+}
+
 /// Structured info about a database incompatibility, passed to the frontend.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2007,6 +2066,14 @@ fn read_text_file(file_path: String) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))
 }
 
+/// Return the absolute path for the shared preferences store file.
+#[tauri::command]
+fn preferences_store_path() -> Result<String, String> {
+    preferences_store_path_buf()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| "Cannot determine preferences store path".to_string())
+}
+
 /// Check whether the user is authenticated with Blox.
 ///
 /// Returns Ok(()) if authenticated, or an error string if not.
@@ -2333,6 +2400,29 @@ pub fn run() {
                 }
             }
 
+            // Keep frontend preferences alongside the rest of Mark data in ~/.mark.
+            // If the new file does not exist yet, migrate it from legacy locations.
+            if let Some(preferences_path) = preferences_store_path_buf() {
+                let mut legacy_preference_dirs: Vec<PathBuf> = Vec::new();
+                for candidate in [
+                    legacy_home_data_dir.clone(),
+                    legacy_platform_data_dir.clone(),
+                    app.path().app_data_dir().ok(),
+                    dirs::data_dir().map(|d| d.join("com.staged.app")),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if candidate != data_dir && !legacy_preference_dirs.contains(&candidate) {
+                        legacy_preference_dirs.push(candidate);
+                    }
+                }
+
+                migrate_legacy_preferences_file(&preferences_path, legacy_preference_dirs);
+            } else {
+                log::warn!("Cannot determine preferences path, skipping preferences migration");
+            }
+
             // Rewrite stored worktree paths from legacy prefixes and move local
             // worktrees from the legacy top-level `worktrees/` folder into the
             // workspace-scoped `workspaces/local/` folder.
@@ -2505,6 +2595,7 @@ pub fn run() {
             open_url,
             is_sq_available,
             read_text_file,
+            preferences_store_path,
             check_blox_auth,
             get_available_openers,
             open_in_app,

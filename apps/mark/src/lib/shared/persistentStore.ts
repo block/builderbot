@@ -5,13 +5,18 @@
  * that works reliably across dev server restarts (unlike localStorage
  * which is origin-scoped and breaks when the dev port changes).
  *
- * The store is saved to the app's data directory as a JSON file.
+ * The store is saved to `~/.mark/preferences.json`.
  */
 
+import { invoke } from '@tauri-apps/api/core';
 import { load, type Store } from '@tauri-apps/plugin-store';
 
 // Singleton store instance
 let store: Store | null = null;
+
+async function getPreferencesStorePath(): Promise<string> {
+  return invoke<string>('preferences_store_path');
+}
 
 /**
  * Initialize the persistent store.
@@ -20,7 +25,8 @@ let store: Store | null = null;
 export async function initPersistentStore(): Promise<void> {
   if (store) return;
 
-  store = await load('preferences.json', {
+  const storePath = await getPreferencesStorePath();
+  store = await load(storePath, {
     defaults: {},
     autoSave: true,
     overrideDefaults: true,

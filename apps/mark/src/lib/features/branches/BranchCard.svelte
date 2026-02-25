@@ -1475,6 +1475,7 @@
             class="running-action-container"
             class:fading={execution.fading}
             in:slide={{ duration: 300, axis: 'x' }}
+            in:fade={{ duration: 300 }}
             out:slide={{ duration: 300, axis: 'x' }}
           >
             <button

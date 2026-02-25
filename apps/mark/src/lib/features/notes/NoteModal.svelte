@@ -10,6 +10,8 @@
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { handleExternalLinkClick } from '../../commands';
+  import InContentSearch from '../../shared/InContentSearch.svelte';
+  import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -23,6 +25,14 @@
 
   let copied = $state(false);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
+
+  // Search state
+  let searchVisible = $state(false);
+  let searchQuery = $state('');
+  let matchCount = $state(0);
+  let currentMatchIndex = $state(0);
+  let matchElements: HTMLElement[] = [];
+  let contentEl: HTMLDivElement;
 
   function renderMarkdown(text: string): string {
     return sanitize(marked.parse(text) as string);
@@ -40,10 +50,102 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    const isMac = navigator.platform.toLowerCase().includes('mac');
+    const cmdKey = isMac ? e.metaKey : e.ctrlKey;
+
+    // Handle Escape key
     if (e.key === 'Escape') {
       e.preventDefault();
-      onClose();
+      if (searchVisible) {
+        closeSearch();
+      } else {
+        onClose();
+      }
+      return;
     }
+
+    // Handle search shortcuts
+    if (cmdKey && e.key === 'f') {
+      e.preventDefault();
+      openSearch();
+    } else if (cmdKey && e.key === 'g') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        previousMatch();
+      } else {
+        nextMatch();
+      }
+    }
+  }
+
+  function openSearch() {
+    searchVisible = true;
+  }
+
+  function closeSearch() {
+    searchVisible = false;
+    searchQuery = '';
+    if (contentEl) {
+      clearHighlights(contentEl);
+    }
+    matchCount = 0;
+    currentMatchIndex = 0;
+    matchElements = [];
+  }
+
+  function performSearch(query: string) {
+    if (!contentEl) return;
+
+    // Clear previous highlights
+    clearHighlights(contentEl);
+    matchElements = [];
+    matchCount = 0;
+    currentMatchIndex = 0;
+
+    // If query is empty, nothing to highlight
+    if (!query.trim()) return;
+
+    // Highlight matches
+    const result = highlightMatches(contentEl, query, currentMatchIndex);
+    matchElements = result.elements;
+    matchCount = result.total;
+
+    // Scroll to first match if any
+    if (matchElements.length > 0) {
+      scrollToMatch(matchElements[0]);
+    }
+  }
+
+  function nextMatch() {
+    if (matchElements.length === 0) return;
+
+    // Remove current class from old match
+    if (matchElements[currentMatchIndex]) {
+      matchElements[currentMatchIndex].classList.remove('search-match-current');
+    }
+
+    // Cycle to next match (wrap around)
+    currentMatchIndex = (currentMatchIndex + 1) % matchElements.length;
+
+    // Add current class to new match
+    matchElements[currentMatchIndex].classList.add('search-match-current');
+    scrollToMatch(matchElements[currentMatchIndex]);
+  }
+
+  function previousMatch() {
+    if (matchElements.length === 0) return;
+
+    // Remove current class from old match
+    if (matchElements[currentMatchIndex]) {
+      matchElements[currentMatchIndex].classList.remove('search-match-current');
+    }
+
+    // Cycle to previous match (wrap around)
+    currentMatchIndex = (currentMatchIndex - 1 + matchElements.length) % matchElements.length;
+
+    // Add current class to new match
+    matchElements[currentMatchIndex].classList.add('search-match-current');
+    scrollToMatch(matchElements[currentMatchIndex]);
   }
 </script>
 
@@ -63,6 +165,15 @@
   <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
     <header class="modal-header">
       <h2 class="modal-title">{title}</h2>
+      <InContentSearch
+        visible={searchVisible}
+        {matchCount}
+        currentIndex={currentMatchIndex}
+        onSearch={performSearch}
+        onNext={nextMatch}
+        onPrevious={previousMatch}
+        onClose={closeSearch}
+      />
       <div class="header-actions">
         <button
           class="share-btn"
@@ -82,7 +193,7 @@
       </div>
     </header>
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-content" onclick={handleExternalLinkClick}>
+    <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
       {#if content.trim()}
         <div class="markdown-content">
           {@html renderMarkdown(content)}
@@ -118,6 +229,7 @@
   }
 
   .modal-header {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: space-between;

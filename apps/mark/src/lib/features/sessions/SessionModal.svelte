@@ -1235,7 +1235,7 @@
   }
 
   .tool-code-block {
-    background: var(--bg-deepest);
+    background: color-mix(in srgb, var(--bg-chrome) 80%, black);
     border-radius: 8px;
     padding: 12px 14px;
     margin-top: 4px;

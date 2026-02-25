@@ -86,13 +86,20 @@
   async function detectActions() {
     if (!selectedContext) return;
 
+    // Capture context before the async gap so that switching repo contexts
+    // while detection is in-flight doesn't cause actions to be saved to
+    // the wrong context.
+    const contextId = selectedContextId;
+    const githubRepo = selectedContext.githubRepo;
+    const subpath = selectedContext.subpath ?? undefined;
+
     detecting = true;
     try {
-      const suggested = await detectRepoActions(
-        selectedContext.githubRepo,
-        selectedContext.subpath ?? undefined
-      );
+      const suggested = await detectRepoActions(githubRepo, subpath);
 
+      // After the await the user may have navigated away from this context.
+      // Only mutate local `actions` state when we're still viewing the same
+      // context; the backend writes are always scoped to the captured values.
       const existingCommands = new Set(actions.map((a) => a.command));
       let nextSortOrder = Math.max(...actions.map((a) => a.sortOrder), 0) + 1;
 
@@ -100,15 +107,17 @@
       for (const suggestion of suggested) {
         if (existingCommands.has(suggestion.command)) continue;
         const newAction = await commands.createRepoAction(
-          selectedContext.githubRepo,
-          selectedContext.subpath ?? undefined,
+          githubRepo,
+          subpath,
           suggestion.name,
           suggestion.command,
           suggestion.actionType,
           nextSortOrder++,
           suggestion.autoCommit
         );
-        actions = [...actions, newAction];
+        if (selectedContextId === contextId) {
+          actions = [...actions, newAction];
+        }
         actionsAdded = true;
       }
 
@@ -146,19 +155,27 @@
   async function saveAction() {
     if (!selectedContext || !editForm.name || !editForm.command) return;
 
+    // Capture context values before any await to avoid stale references
+    // if the user switches repo contexts while the save is in-flight.
+    const githubRepo = selectedContext.githubRepo;
+    const subpath = selectedContext.subpath ?? undefined;
+    const contextId = selectedContextId;
+
     try {
       if (!editingAction?.id) {
         const nextSortOrder = Math.max(...actions.map((a) => a.sortOrder), 0) + 1;
         const newAction = await commands.createRepoAction(
-          selectedContext.githubRepo,
-          selectedContext.subpath ?? undefined,
+          githubRepo,
+          subpath,
           editForm.name,
           editForm.command,
           editForm.actionType,
           nextSortOrder,
           editForm.autoCommit
         );
-        actions = [...actions, newAction];
+        if (selectedContextId === contextId) {
+          actions = [...actions, newAction];
+        }
       } else {
         const actionId = editingAction.id;
         await commands.updateProjectAction(
@@ -201,9 +218,17 @@
 
   async function deleteAllActions() {
     if (!selectedContext) return;
+
+    // Capture the context id before the await so a concurrent context
+    // switch doesn't clear the wrong context's actions from the UI.
+    const contextId = selectedContextId;
+    const repoContextId = selectedContext.id;
+
     try {
-      await commands.deleteAllRepoActions(selectedContext.id);
-      actions = [];
+      await commands.deleteAllRepoActions(repoContextId);
+      if (selectedContextId === contextId) {
+        actions = [];
+      }
       showDeleteAllConfirm = false;
       window.dispatchEvent(new CustomEvent('project-actions-changed'));
     } catch (e) {

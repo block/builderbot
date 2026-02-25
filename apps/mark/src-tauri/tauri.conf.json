@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "mark",
+  "productName": "Mark",
   "version": "0.3.0",
   "identifier": "com.mark.app",
   "build": {

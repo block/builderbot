@@ -28,7 +28,7 @@
   import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
   import {
     getActionOutputBuffer,
-    stopBranchAction,
+    stopBranchActionWithState,
     clearActionExecution,
     listenToActionOutput,
     listenToActionStatus,
@@ -58,7 +58,7 @@
   let outputChunks = $state<OutputChunk[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  let stopping = $state(false);
+  let stoppingExecutions = $state<Set<string>>(new Set());
   let outputEl: HTMLDivElement;
   let unlistenOutput: (() => void) | null = null;
   let unlistenStatus: (() => void) | null = null;
@@ -75,6 +75,7 @@
   });
 
   let isRunning = $derived(status === 'running');
+  let isStopping = $derived(stoppingExecutions.has(executionId));
 
   /**
    * Process raw output chunks into terminal lines, handling carriage returns.
@@ -195,9 +196,9 @@
           if (event.exitCode !== undefined) {
             exitCode = event.exitCode;
           }
-          // Reset stopping flag once the backend confirms a terminal state
+          // Clean up stopping state when action reaches terminal state
           if (status !== 'running') {
-            stopping = false;
+            stoppingExecutions.delete(executionId);
           }
         }
       });
@@ -222,17 +223,10 @@
   // =========================================================================
 
   async function handleStop() {
-    if (stopping) return;
-    stopping = true;
-    try {
-      await stopBranchAction(executionId);
-      // Don't set status here — the backend will emit a 'stopped' status
-      // event once the process actually exits, which our listener handles.
-    } catch (e: any) {
-      error = e?.message || 'Failed to stop action';
-      console.error('Failed to stop action:', e);
-      stopping = false;
-    }
+    await stopBranchActionWithState(executionId, stoppingExecutions, (err) => {
+      error = err.message || 'Failed to stop action';
+      console.error('Failed to stop action:', err);
+    });
   }
 
   function scrollToBottom() {
@@ -344,9 +338,9 @@
       </div>
       <div class="header-actions">
         {#if isRunning}
-          <button class="stop-btn" onclick={handleStop} disabled={stopping} title="Stop action">
+          <button class="stop-btn" onclick={handleStop} disabled={isStopping} title="Stop action">
             <CircleStop size={14} />
-            <span>{stopping ? 'Stopping…' : 'Stop'}</span>
+            <span>{isStopping ? 'Stopping…' : 'Stop'}</span>
           </button>
         {/if}
         {#if status === 'failed' && onRemove}

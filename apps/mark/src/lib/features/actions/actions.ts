@@ -110,6 +110,41 @@ export function stopBranchAction(executionId: string): Promise<void> {
 }
 
 /**
+ * Stop a running action with state management.
+ * Handles stopping flag to prevent duplicate requests and provides error handling.
+ *
+ * @param executionId - The execution ID of the action to stop
+ * @param stoppingSet - A Set to track which executions are currently stopping
+ * @param onError - Optional callback for error handling
+ * @returns Promise that resolves when the stop request completes
+ */
+export async function stopBranchActionWithState(
+  executionId: string,
+  stoppingSet: Set<string>,
+  onError?: (error: Error) => void
+): Promise<void> {
+  // Prevent duplicate stop requests
+  if (stoppingSet.has(executionId)) {
+    return;
+  }
+
+  stoppingSet.add(executionId);
+  try {
+    await stopBranchAction(executionId);
+    // Backend will emit 'stopped' status event
+  } catch (e) {
+    // Remove from stopping set on error so user can retry
+    stoppingSet.delete(executionId);
+    const error = e instanceof Error ? e : new Error(String(e));
+    if (onError) {
+      onError(error);
+    } else {
+      throw error;
+    }
+  }
+}
+
+/**
  * Get all currently running actions for a branch.
  * Returns an array of running action info with execution IDs, action details, and timestamps.
  */

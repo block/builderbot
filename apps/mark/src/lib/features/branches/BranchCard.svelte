@@ -62,7 +62,7 @@
     runBranchAction,
     getRunningBranchActions,
     clearActionExecution,
-    stopBranchAction,
+    stopBranchActionWithState,
     type ActionStatusEvent,
   } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
@@ -872,18 +872,10 @@
   }
 
   async function handleStopAction(executionId: string, actionName: string) {
-    if (stoppingExecutions.has(executionId)) return;
-
-    stoppingExecutions.add(executionId);
-    try {
-      await stopBranchAction(executionId);
-      // Backend will emit 'stopped' status event
-    } catch (e) {
-      console.error(`Failed to stop action ${actionName}:`, e);
-      // Remove from stopping set on error so user can retry
-      stoppingExecutions.delete(executionId);
-      notifyError(`Failed to stop action "${actionName}"`, e);
-    }
+    await stopBranchActionWithState(executionId, stoppingExecutions, (err) => {
+      console.error(`Failed to stop action ${actionName}:`, err);
+      notifyError(`Failed to stop action "${actionName}"`, err);
+    });
   }
 
   // Handle showing action output

@@ -21,7 +21,7 @@
   let { visible, matchCount, currentIndex, onSearch, onNext, onPrevious, onClose }: Props =
     $props();
 
-  let inputEl: HTMLInputElement;
+  let inputEl = $state<HTMLInputElement>();
   let query = $state('');
 
   // Auto-focus input when search becomes visible

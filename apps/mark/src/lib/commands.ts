@@ -424,6 +424,10 @@ export function deleteAllRepoActions(contextId: string): Promise<void> {
   return invoke('delete_all_repo_actions', { contextId });
 }
 
+export function deleteActionContext(contextId: string): Promise<void> {
+  return invoke('delete_action_context', { contextId });
+}
+
 // =============================================================================
 // Utilities
 // =============================================================================

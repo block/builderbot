@@ -541,13 +541,13 @@ impl ProjectToolsHandler {
             .await;
 
             match monorepo_result {
-                Ok(Ok(score)) if score >= 20 => {
+                Ok(Ok(module_count)) if module_count >= 20 => {
                     return format!(
-                        "Error: '{}' appears to be a monorepo (score: {}). \
+                        "Error: '{}' appears to be a monorepo ({} modules in MODULES.yaml). \
                          You must provide a `subpath` pointing to the root of the specific \
                          service or package you want to add (e.g. \"packages/api\" or \
                          \"services/auth\"). Re-call this tool with the appropriate subpath.",
-                        p.github_repo, score
+                        p.github_repo, module_count
                     );
                 }
                 Ok(Err(e)) => {
@@ -559,7 +559,7 @@ impl ProjectToolsHandler {
                 Err(e) => {
                     log::warn!("[project_mcp] monorepo check task panicked: {e}");
                 }
-                Ok(Ok(_)) => {} // score < 20, not a monorepo
+                Ok(Ok(_)) => {} // fewer than 20 modules, not a monorepo
             }
         }
 

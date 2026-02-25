@@ -562,11 +562,7 @@ func (s *Server) handleAPIOpen(w http.ResponseWriter, r *http.Request) {
 		s.pendingNav = url
 		s.pendingNavAt = time.Now()
 		s.navMu.Unlock()
-		if n := s.watcher.Broadcast(watcher.Event{Type: watcher.EventNavigate, Path: url}); n > 0 {
-			s.navMu.Lock()
-			s.pendingNav = ""
-			s.navMu.Unlock()
-		}
+		s.watcher.Broadcast(watcher.Event{Type: watcher.EventNavigate, Path: url})
 	}
 }
 

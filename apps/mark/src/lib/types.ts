@@ -23,6 +23,7 @@ export interface ProjectRepo {
   branchName: string;
   subpath: string | null;
   isPrimary: boolean;
+  reason: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -151,6 +152,25 @@ export interface Issue {
   author: string;
   updatedAt: string;
   labels: string[];
+}
+
+// =============================================================================
+// Project notes & sessions
+// =============================================================================
+
+export interface ProjectNote {
+  id: string;
+  projectId: string;
+  sessionId: string | null;
+  title: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ProjectSessionResponse {
+  sessionId: string;
+  noteId: string;
 }
 
 // =============================================================================

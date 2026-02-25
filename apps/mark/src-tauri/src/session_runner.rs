@@ -41,6 +41,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
+use acp_client::{McpServer, McpServerHttp};
+
+use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
 use crate::git::Span;
 use crate::store::{Comment, CommentAuthor, CommentType, MessageRole, SessionStatus, Store};
@@ -56,6 +59,11 @@ pub struct SessionStatusEvent {
     pub session_id: String,
     pub status: String,
     pub error_message: Option<String>,
+    /// Set on `"running"` events emitted when an MCP tool starts a repo session,
+    /// so the frontend can register the session and refresh the branch timeline.
+    pub branch_id: Option<String>,
+    pub project_id: Option<String>,
+    pub session_type: Option<String>,
 }
 
 // =============================================================================
@@ -135,6 +143,19 @@ pub struct SessionConfig {
     /// When set, the session runs via `blox acp <workspace_name>` instead
     /// of a local agent binary. Commit detection is skipped (no local git).
     pub workspace_name: Option<String>,
+    /// Extra environment variables to pass to the agent process.
+    pub extra_env: Vec<(String, String)>,
+    /// Project ID for MCP tool server (project sessions only).
+    /// When set, an MCP server is started and the agent is given access to
+    /// `start_repo_session` and `add_project_repo` tools. The MCP server URL
+    /// is injected into the ACP session via `NewSessionRequest`.
+    pub mcp_project_id: Option<String>,
+    /// Action executor for running setup actions in the MCP add_project_repo tool.
+    /// Required when `mcp_project_id` is set so the MCP server can run prerun actions.
+    pub action_executor: Option<Arc<ActionExecutor>>,
+    /// Action registry for tracking running actions in the MCP add_project_repo tool.
+    /// Required when `mcp_project_id` is set.
+    pub action_registry: Option<Arc<ActionRegistry>>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -181,6 +202,44 @@ pub fn start_session(
 
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&rt, async {
+            // Start MCP server for project sessions, injecting it via the ACP NewSessionRequest.
+            let (driver, _mcp_handle) = if let Some(ref proj_id) = config.mcp_project_id {
+                match crate::project_mcp::start_project_mcp_server(
+                    proj_id.clone(),
+                    Arc::clone(&store),
+                    Arc::clone(&registry),
+                    app_handle.clone(),
+                    config.action_executor.clone(),
+                    config.action_registry.clone(),
+                    cancel_token.clone(),
+                    config.workspace_name.is_some(),
+                )
+                .await
+                {
+                    Ok((port, handle)) => {
+                        log::info!(
+                            "Session {}: MCP server started on port {port}",
+                            config.session_id
+                        );
+                        let mcp_server = McpServer::Http(McpServerHttp::new(
+                            "builderbot",
+                            format!("http://127.0.0.1:{port}/mcp"),
+                        ));
+                        let driver = driver
+                            .with_extra_env(config.extra_env.clone())
+                            .with_mcp_servers(vec![mcp_server]);
+                        (driver, Some(handle))
+                    }
+                    Err(e) => {
+                        log::error!("Failed to start MCP server: {e}");
+                        return Err(format!("Failed to start MCP server: {e}"));
+                    }
+                }
+            } else {
+                let env = config.extra_env.clone();
+                (driver.with_extra_env(env), None)
+            };
+
             let writer = Arc::new(MessageWriter::new(
                 config.session_id.clone(),
                 Arc::clone(&store),
@@ -408,6 +467,47 @@ fn run_post_completion_hooks(
         }
     }
 
+    // --- Project note extraction ---
+    if let Ok(Some(empty_note)) = store.get_empty_project_note_by_session(session_id) {
+        if let Ok(messages) = store.get_session_messages(session_id) {
+            let full_text: String = messages
+                .iter()
+                .filter(|m| m.role == MessageRole::Assistant)
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if let Some(note_content) = extract_note_content(&full_text) {
+                let (title, body) = extract_note_title(&note_content);
+                let final_title = if title.is_empty() {
+                    store
+                        .get_session(session_id)
+                        .ok()
+                        .flatten()
+                        .map(|s| {
+                            let t: String = s.prompt.chars().take(80).collect();
+                            if s.prompt.len() > 80 {
+                                format!("{t}…")
+                            } else {
+                                t
+                            }
+                        })
+                        .unwrap_or_else(|| "Untitled Note".to_string())
+                } else {
+                    title
+                };
+                log::info!("Session {session_id}: extracted project note \"{final_title}\"");
+                if let Err(e) =
+                    store.update_project_note_title_and_content(&empty_note.id, &final_title, &body)
+                {
+                    log::error!("Failed to update project note content: {e}");
+                }
+            } else {
+                log::warn!("Session {session_id}: project note session completed but no --- found in assistant output");
+            }
+        }
+    }
+
     // --- Review comment extraction ---
     if let Ok(Some(review)) = store.get_review_by_session(session_id) {
         if review.comments.is_empty() {
@@ -624,9 +724,36 @@ fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Op
         session_id: session_id.to_string(),
         status: status.to_string(),
         error_message: error,
+        branch_id: None,
+        project_id: None,
+        session_type: None,
     };
     if let Err(e) = app_handle.emit("session-status-changed", &event) {
         log::warn!("Failed to emit session-status-changed: {e}");
+    }
+}
+
+/// Emit a `session-status-changed` event with `"running"` status and branch/project
+/// context. Called by the MCP tool when it starts a repo session on behalf of a project
+/// session, so the frontend can register the session in its state stores and refresh
+/// the branch card timeline immediately (without waiting for completion).
+pub fn emit_session_running(
+    app_handle: &AppHandle,
+    session_id: &str,
+    branch_id: &str,
+    project_id: &str,
+    session_type: &str,
+) {
+    let event = SessionStatusEvent {
+        session_id: session_id.to_string(),
+        status: "running".to_string(),
+        error_message: None,
+        branch_id: Some(branch_id.to_string()),
+        project_id: Some(project_id.to_string()),
+        session_type: Some(session_type.to_string()),
+    };
+    if let Err(e) = app_handle.emit("session-status-changed", &event) {
+        log::warn!("Failed to emit session-status-changed (running): {e}");
     }
 }
 

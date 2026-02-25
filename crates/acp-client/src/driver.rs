@@ -15,9 +15,10 @@ use std::time::Instant;
 
 use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, Implementation,
-    InitializeRequest, LoadSessionRequest, NewSessionRequest, PermissionOptionId, PromptRequest,
-    ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent,
+    InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOptionId,
+    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+    TextContent,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -95,6 +96,10 @@ pub struct AcpDriver {
     agent_label: String,
     /// When true, this driver proxies through a remote Blox workspace.
     is_remote: bool,
+    /// Extra environment variables to pass to the agent process.
+    extra_env: Vec<(String, String)>,
+    /// MCP servers to inject into the session via NewSessionRequest.
+    mcp_servers: Vec<McpServer>,
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
@@ -111,6 +116,8 @@ impl AcpDriver {
                 acp_args: agent.acp_args,
                 agent_label: agent.label,
                 is_remote: false,
+                extra_env: Vec::new(),
+                mcp_servers: Vec::new(),
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
     }
@@ -123,6 +130,8 @@ impl AcpDriver {
                 acp_args: agent.acp_args,
                 agent_label: agent.label,
                 is_remote: false,
+                extra_env: Vec::new(),
+                mcp_servers: Vec::new(),
             })
             .ok_or_else(|| {
                 "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
@@ -144,7 +153,21 @@ impl AcpDriver {
             acp_args: args,
             agent_label: "Blox".to_string(),
             is_remote: true,
+            extra_env: Vec::new(),
+            mcp_servers: Vec::new(),
         })
+    }
+
+    /// Set extra environment variables to pass to the agent process.
+    pub fn with_extra_env(mut self, vars: Vec<(String, String)>) -> Self {
+        self.extra_env = vars;
+        self
+    }
+
+    /// Set MCP servers to inject into the session via `NewSessionRequest`.
+    pub fn with_mcp_servers(mut self, servers: Vec<McpServer>) -> Self {
+        self.mcp_servers = servers;
+        self
     }
 }
 
@@ -160,13 +183,17 @@ impl AgentDriver for AcpDriver {
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
     ) -> Result<(), String> {
-        let mut child = Command::new(&self.binary_path)
-            .args(&self.acp_args)
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.args(&self.acp_args)
             .current_dir(working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        for (k, v) in &self.extra_env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn {}: {e}", self.agent_label))?;
 
@@ -224,7 +251,7 @@ impl AgentDriver for AcpDriver {
             }
             result = run_acp_protocol(
                 &connection, &acp_working_dir, prompt, store,
-                session_id, agent_session_id, &handler,
+                session_id, agent_session_id, &handler, &self.mcp_servers,
             ) => result,
         };
 
@@ -418,6 +445,7 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
 // Protocol helpers
 // =============================================================================
 
+#[allow(clippy::too_many_arguments)]
 async fn run_acp_protocol(
     connection: &ClientSideConnection,
     working_dir: &Path,
@@ -426,6 +454,7 @@ async fn run_acp_protocol(
     our_session_id: &str,
     acp_session_id: Option<&str>,
     handler: &Arc<AcpNotificationHandler>,
+    mcp_servers: &[McpServer],
 ) -> Result<(), String> {
     let agent_session_id = setup_acp_session(
         connection,
@@ -433,6 +462,7 @@ async fn run_acp_protocol(
         store,
         our_session_id,
         acp_session_id,
+        mcp_servers,
     )
     .await?;
 
@@ -457,6 +487,7 @@ async fn setup_acp_session(
     store: &Arc<dyn Store>,
     our_session_id: &str,
     acp_session_id: Option<&str>,
+    mcp_servers: &[McpServer],
 ) -> Result<String, String> {
     let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_info(client_info);
@@ -489,8 +520,10 @@ async fn setup_acp_session(
             Ok(existing_id.to_string())
         }
         None => {
+            let new_session_request =
+                NewSessionRequest::new(working_dir.to_path_buf()).mcp_servers(mcp_servers.to_vec());
             let session_response = connection
-                .new_session(NewSessionRequest::new(working_dir.to_path_buf()))
+                .new_session(new_session_request)
                 .await
                 .map_err(|e| format!("Failed to create ACP session: {e:?}"))?;
 

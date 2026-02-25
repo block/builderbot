@@ -82,13 +82,14 @@
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
+  import ReasonBanner from './ReasonBanner.svelte';
   import { alerts } from '../../shared/alerts.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
 
   interface Props {
     branch: Branch;
-    repoLabel?: { githubRepo: string; subpath: string | null } | null;
+    repoLabel?: { githubRepo: string; subpath: string | null; reason?: string | null } | null;
     deleting?: boolean;
     worktreeError?: string;
     onDelete?: () => void;
@@ -267,8 +268,9 @@
     listen<{
       sessionId: string;
       status: string;
+      branchId?: string;
     }>('session-status-changed', (event) => {
-      const { sessionId: eventSessionId, status } = event.payload;
+      const { sessionId: eventSessionId, status, branchId: eventBranchId } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         loadTimeline();
         // Handle PR session completion
@@ -279,6 +281,10 @@
         if (eventSessionId === pushSessionId) {
           handlePushSessionComplete(status);
         }
+      } else if (status === 'running' && eventBranchId === branchId) {
+        // An MCP-initiated session just started in this branch — refresh the
+        // timeline so the pending note/commit stub appears immediately.
+        loadTimeline();
       }
     }).then((unlisten) => {
       unlistenStatus = unlisten;
@@ -1217,6 +1223,20 @@
   }
 
   // =========================================================================
+  // Repo reason banner
+  // =========================================================================
+
+  async function handleDismissReason() {
+    if (branch.projectRepoId) {
+      try {
+        await commands.clearProjectRepoReason(branch.projectRepoId);
+      } catch (e) {
+        console.error('Failed to clear repo reason:', e);
+      }
+    }
+  }
+
+  // =========================================================================
   // Drag-and-drop text files → notes (via Tauri native drag-drop events)
   // =========================================================================
 
@@ -1508,6 +1528,7 @@
     </div>
 
     <div class="card-content">
+      <ReasonBanner reason={repoLabel?.reason} onDismiss={handleDismissReason} />
       {#if loading}
         <div class="loading">
           <Spinner size={14} />

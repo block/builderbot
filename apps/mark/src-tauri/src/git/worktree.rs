@@ -122,18 +122,13 @@ pub fn create_worktree_at_path(
     ensure_worktree_parent_exists(worktree_path)?;
     ensure_worktree_absent(worktree_path)?;
 
-    // Always branch from the remote tip on origin, not from a (potentially
-    // stale) local branch.  Normalise the start point to "origin/<branch>"
-    // form and fetch the latest before creating the worktree.
-    let (remote_start, fetch_ref) = if let Some(rest) = start_point.strip_prefix("origin/") {
-        (start_point.to_string(), rest.to_string())
+    // Normalise the start point to "origin/<branch>" form.
+    // The caller (setup_worktree) already fetched via fetch_for_worktree.
+    let remote_start = if start_point.starts_with("origin/") {
+        start_point.to_string()
     } else {
-        (format!("origin/{start_point}"), start_point.to_string())
+        format!("origin/{start_point}")
     };
-
-    // Best-effort fetch — if it fails (e.g. offline) we still use whatever
-    // the local remote-tracking ref currently points to.
-    let _ = cli::run(repo, &["fetch", "origin", &fetch_ref]);
 
     let worktree_str = worktree_path
         .to_str()

@@ -94,8 +94,31 @@
     unlistenSessionStatus = await listen<{
       sessionId: string;
       status: string;
+      branchId?: string;
+      projectId?: string;
+      sessionType?: string;
     }>('session-status-changed', async (event) => {
-      const { sessionId, status } = event.payload;
+      const {
+        sessionId,
+        status,
+        branchId: eventBranchId,
+        projectId: eventProjectId,
+        sessionType,
+      } = event.payload;
+
+      // MCP-initiated repo session just started — register it so the project
+      // spinner shows and the completion handler can clean it up correctly.
+      if (status === 'running' && eventProjectId) {
+        sessionRegistry.register(
+          sessionId,
+          eventProjectId,
+          (sessionType as import('./lib/stores/sessionRegistry.svelte').SessionType) ?? 'other',
+          eventBranchId
+        );
+        projectStateStore.addRunningSession(eventProjectId, sessionId);
+        return;
+      }
+
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         // Get session metadata from the unified registry
         const sessionProjectId = sessionRegistry.getProjectId(sessionId);

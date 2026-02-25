@@ -40,6 +40,7 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
+  import ReasonBanner from './ReasonBanner.svelte';
   import { formatBaseBranch } from './branchCardHelpers';
   import { alerts } from '../../shared/alerts.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
@@ -47,7 +48,7 @@
 
   interface Props {
     branch: Branch;
-    repoLabel?: { githubRepo: string; subpath: string | null } | null;
+    repoLabel?: { githubRepo: string; subpath: string | null; reason?: string | null } | null;
     deleting?: boolean;
     workspaceError?: string;
     onDelete?: () => void;
@@ -173,6 +174,20 @@
       await navigator.clipboard.writeText(text);
     } catch {
       // clipboard API may fail
+    }
+  }
+
+  // =========================================================================
+  // Repo reason banner
+  // =========================================================================
+
+  async function handleDismissReason() {
+    if (branch.projectRepoId) {
+      try {
+        await commands.clearProjectRepoReason(branch.projectRepoId);
+      } catch (e) {
+        console.error('Failed to clear repo reason:', e);
+      }
     }
   }
 
@@ -656,6 +671,7 @@
 
     <!-- Content area — varies by status -->
     <div class="card-content">
+      <ReasonBanner reason={repoLabel?.reason} onDismiss={handleDismissReason} />
       {#if status === 'starting'}
         <div class="status-view starting-view">
           <Spinner size={20} />

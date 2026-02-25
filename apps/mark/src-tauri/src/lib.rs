@@ -10,6 +10,8 @@ pub mod branches;
 pub mod doctor;
 pub mod git;
 pub mod paths;
+pub mod project_commands;
+pub mod project_mcp;
 pub mod prs;
 pub mod session_commands;
 pub mod session_runner;
@@ -240,6 +242,7 @@ fn list_projects(
 #[tauri::command(rename_all = "camelCase")]
 fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     name: String,
     github_repo: Option<String>,
     location: Option<String>,
@@ -264,6 +267,13 @@ fn create_project(
         project = project.with_subpath(sub);
     }
     store.create_project(&project).map_err(|e| e.to_string())?;
+
+    // Create the project-scoped worktree root so project sessions always
+    // have a real directory to run in, even before any repos are attached.
+    if let Ok(project_dir) = git::project_worktree_root_for(&project.id) {
+        let _ = std::fs::create_dir_all(&project_dir);
+    }
+
     if let Some(repo) = project.primary_repo() {
         store
             .get_or_create_action_context(repo, project.subpath.as_deref())
@@ -286,7 +296,6 @@ fn create_project(
 
         // Create the initial branch record for the first repo so each new
         // project starts with exactly one branch tracked for that repository.
-        // Worktree/workspace setup runs asynchronously from the frontend.
         let detected_base =
             git::detect_default_branch_for_repo(&repo).unwrap_or_else(|_| "main".to_string());
         let effective_base = if detected_base.starts_with("origin/") {
@@ -295,12 +304,13 @@ fn create_project(
             format!("origin/{detected_base}")
         };
 
-        match project.location {
+        let branch_id = match project.location {
             store::ProjectLocation::Local => {
                 let branch =
                     store::Branch::new(&project.id, &inferred_branch_name, &effective_base)
                         .with_project_repo(&project_repo.id);
                 store.create_branch(&branch).map_err(|e| e.to_string())?;
+                Some(branch.id)
             }
             store::ProjectLocation::Remote => {
                 let workspace_name = branches::infer_workspace_name(&inferred_branch_name);
@@ -312,7 +322,59 @@ fn create_project(
                 )
                 .with_project_repo(&project_repo.id);
                 store.create_branch(&branch).map_err(|e| e.to_string())?;
+                None // remote branches don't need worktree setup
             }
+        };
+
+        // Spawn background worktree + prerun-actions setup for local branches.
+        if let Some(branch_id) = branch_id {
+            let project_id = project.id.clone();
+            let store_bg = Arc::clone(&store);
+            tauri::async_runtime::spawn(async move {
+                let _ = app_handle.emit("project-setup-progress", project_id.clone());
+
+                let store_clone = Arc::clone(&store_bg);
+                let branch_id_clone = branch_id.clone();
+                let worktree_result = tauri::async_runtime::spawn_blocking(move || {
+                    branches::setup_worktree_sync(&store_clone, &branch_id_clone)
+                })
+                .await;
+
+                match worktree_result {
+                    Ok(Ok(path)) => {
+                        log::info!("[create_project] worktree ready at {path}");
+                        let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("[create_project] worktree setup failed: {e}");
+                        return;
+                    }
+                    Err(e) => {
+                        log::warn!("[create_project] worktree task panicked: {e}");
+                        return;
+                    }
+                }
+
+                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
+                let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
+                match branches::run_prerun_actions_for_branch(
+                    &store_bg,
+                    &app_handle,
+                    &branch_id,
+                    &executor,
+                    &act_registry,
+                )
+                .await
+                {
+                    Ok(count) => {
+                        log::info!("[create_project] ran {count} prerun actions");
+                        let _ = app_handle.emit("project-setup-progress", project_id);
+                    }
+                    Err(e) => {
+                        log::warn!("[create_project] prerun actions failed: {e}");
+                    }
+                }
+            });
         }
     }
 
@@ -345,6 +407,7 @@ fn list_recent_repos(
 #[tauri::command(rename_all = "camelCase")]
 async fn add_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     project_id: String,
     github_repo: String,
     branch_name: Option<String>,
@@ -352,123 +415,98 @@ async fn add_project_repo(
     set_as_primary: Option<bool>,
 ) -> Result<store::ProjectRepo, String> {
     let store = get_store(&store)?;
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
-    let resolved_branch_name = branch_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| branches::infer_branch_name(&project.name));
-    let repo_subpath = if project.location == store::ProjectLocation::Remote {
-        let requested = subpath
-            .as_deref()
-            .map(branches::validate_workspace_subpath)
-            .transpose()?;
-        Some(
-            requested
-                .map(|s| {
-                    if s.starts_with("repo:") || s.starts_with("repos/") {
-                        s
-                    } else {
-                        format!("repo:{s}")
-                    }
-                })
-                .unwrap_or_else(|| branches::infer_remote_repo_subpath(&github_repo)),
-        )
-    } else {
-        subpath.clone()
-    };
-    let mut repo = store::ProjectRepo::new(
-        &project_id,
-        &github_repo,
-        &resolved_branch_name,
-        repo_subpath,
-    );
-    if set_as_primary.unwrap_or(false) {
-        repo = repo.primary();
-    }
-    if project.location == store::ProjectLocation::Remote {
-        let ws_name = branches::resolve_project_workspace_name(&store, &project, None)?;
-        let ws_info = tauri::async_runtime::spawn_blocking({
-            let ws_name = ws_name.clone();
-            move || blox::ws_info(&ws_name)
-        })
-        .await
-        .map_err(|e| format!("Failed to query workspace '{ws_name}': {e}"))?
-        .map_err(|e| {
-            format!("Workspace '{ws_name}' must be running before adding another repo: {e}")
-        })?;
-        let ws_status = ws_info
-            .status
-            .as_deref()
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
-        if ws_status != "running" {
-            return Err(format!(
-                "Workspace '{ws_name}' is not ready (status: {}). Wait until it is running, then retry.",
-                if ws_status.is_empty() {
-                    "unknown"
-                } else {
-                    ws_status.as_str()
+    let repo = project_commands::add_project_repo_impl(
+        Arc::clone(&store),
+        project_id.clone(),
+        github_repo,
+        branch_name,
+        subpath,
+        set_as_primary,
+        None,
+    )
+    .await?;
+
+    // Spawn background worktree + prerun-actions setup — fire and forget.
+    tauri::async_runtime::spawn({
+        let repo_id = repo.id.clone();
+        async move {
+            let _ = app_handle.emit("project-setup-progress", project_id.clone());
+
+            let branch = match store.list_branches_for_project(&project_id) {
+                Ok(branches) => branches
+                    .into_iter()
+                    .find(|b| b.project_repo_id.as_deref() == Some(repo_id.as_str())),
+                Err(e) => {
+                    log::warn!("[add_project_repo] failed to list branches: {e}");
+                    return;
                 }
-            ));
+            };
+            let branch = match branch {
+                Some(b) => b,
+                None => {
+                    log::warn!("[add_project_repo] no branch found for repo {repo_id}");
+                    return;
+                }
+            };
+
+            if branch.workspace_name.is_none() {
+                let branch_id = branch.id.clone();
+                let store_clone = Arc::clone(&store);
+                let worktree_result = tauri::async_runtime::spawn_blocking(move || {
+                    branches::setup_worktree_sync(&store_clone, &branch_id)
+                })
+                .await;
+
+                match worktree_result {
+                    Ok(Ok(path)) => {
+                        log::info!("[add_project_repo] worktree ready at {path}");
+                        let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("[add_project_repo] worktree setup failed: {e}");
+                        return;
+                    }
+                    Err(e) => {
+                        log::warn!("[add_project_repo] worktree task panicked: {e}");
+                        return;
+                    }
+                }
+
+                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
+                let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
+                match branches::run_prerun_actions_for_branch(
+                    &store,
+                    &app_handle,
+                    &branch.id,
+                    &executor,
+                    &act_registry,
+                )
+                .await
+                {
+                    Ok(count) => {
+                        log::info!("[add_project_repo] ran {count} prerun actions");
+                        let _ = app_handle.emit("project-setup-progress", project_id);
+                    }
+                    Err(e) => {
+                        log::warn!("[add_project_repo] prerun actions failed: {e}");
+                    }
+                }
+            }
         }
-    }
+    });
 
-    store
-        .create_project_repo(&repo)
-        .map_err(|e| e.to_string())?;
-
-    // Record this repo as recently used
-    store
-        .record_recent_repo(&github_repo, subpath.clone())
-        .map_err(|e| e.to_string())?;
-
-    let should_be_primary = repo.is_primary
-        || store
-            .get_primary_project_repo(&project_id)
-            .map_err(|e| e.to_string())?
-            .is_none();
-    if should_be_primary {
-        store
-            .set_primary_project_repo(&project_id, &repo.id)
-            .map_err(|e| e.to_string())?;
-        store
-            .update_project(
-                &project_id,
-                &project.name,
-                Some(&repo.github_repo),
-                &project.location,
-                repo.subpath.as_deref(),
-            )
-            .map_err(|e| e.to_string())?;
-        repo.is_primary = true;
-    }
-
-    // Ensure each repo has one tracked branch record.
-    let detected_base = git::detect_default_branch_for_repo(&repo.github_repo)
-        .unwrap_or_else(|_| "main".to_string());
-    let effective_base = if detected_base.starts_with("origin/") {
-        detected_base
-    } else {
-        format!("origin/{detected_base}")
-    };
-    let branch = match project.location {
-        store::ProjectLocation::Local => {
-            store::Branch::new(&project_id, &repo.branch_name, &effective_base)
-                .with_project_repo(&repo.id)
-        }
-        store::ProjectLocation::Remote => {
-            let ws_name = branches::resolve_project_workspace_name(&store, &project, None)?;
-            store::Branch::new_remote(&project_id, &repo.branch_name, &effective_base, &ws_name)
-                .with_project_repo(&repo.id)
-        }
-    };
-    store.create_branch(&branch).map_err(|e| e.to_string())?;
     Ok(repo)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn clear_project_repo_reason(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_repo_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    store
+        .clear_project_repo_reason(&project_repo_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -861,6 +899,45 @@ fn delete_note(
         }
     }
     Ok(())
+}
+
+// =============================================================================
+// Project note commands
+// =============================================================================
+
+#[tauri::command]
+fn create_project_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    title: String,
+    content: String,
+) -> Result<store::ProjectNote, String> {
+    let store = get_store(&store)?;
+    let note = store::ProjectNote::new(&project_id, &title, &content);
+    store
+        .create_project_note(&note)
+        .map_err(|e| e.to_string())?;
+    Ok(note)
+}
+
+#[tauri::command]
+fn list_project_notes(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+) -> Result<Vec<store::ProjectNote>, String> {
+    get_store(&store)?
+        .list_project_notes(&project_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_project_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    note_id: String,
+) -> Result<(), String> {
+    get_store(&store)?
+        .delete_project_note(&note_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Delete a review and all its comments, optionally deleting its linked session.
@@ -2309,6 +2386,7 @@ pub fn run() {
             list_recent_repos,
             add_project_repo,
             update_project_repo_branch_name,
+            clear_project_repo_reason,
             remove_project_repo,
             set_primary_project_repo,
             delete_project,
@@ -2337,6 +2415,9 @@ pub fn run() {
             get_branch_timeline,
             create_note,
             delete_note,
+            create_project_note,
+            list_project_notes,
+            delete_project_note,
             delete_review,
             delete_commit,
             delete_pending_commit,
@@ -2368,6 +2449,7 @@ pub fn run() {
             session_commands::cancel_session,
             session_commands::delete_session,
             session_commands::start_branch_session,
+            session_commands::start_project_session,
             // Actions
             actions::commands::detect_repo_actions,
             actions::commands::run_branch_action,

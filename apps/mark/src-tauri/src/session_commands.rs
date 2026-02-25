@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
+use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{self, AcpProviderInfo};
 use crate::blox;
 use crate::git;
@@ -154,6 +155,10 @@ pub fn start_session(
             pre_head_sha: None,
             provider,
             workspace_name: None,
+            extra_env: vec![],
+            mcp_project_id: None,
+            action_executor: None,
+            action_registry: None,
         },
         store,
         app_handle,
@@ -206,6 +211,9 @@ pub fn resume_session(
             session_id: session_id.clone(),
             status: "running".to_string(),
             error_message: None,
+            branch_id: None,
+            project_id: None,
+            session_type: None,
         },
     );
 
@@ -218,6 +226,10 @@ pub fn resume_session(
             pre_head_sha: None,
             provider,
             workspace_name: None,
+            extra_env: vec![],
+            mcp_project_id: None,
+            action_executor: None,
+            action_registry: None,
         },
         store,
         app_handle,
@@ -247,6 +259,9 @@ pub fn cancel_session(
                         session_id: session_id.clone(),
                         status: "cancelled".to_string(),
                         error_message: None,
+                        branch_id: None,
+                        project_id: None,
+                        session_type: None,
                     },
                 );
             }
@@ -288,6 +303,113 @@ pub struct BranchSessionResponse {
     pub session_id: String,
     /// The ID of the artifact created (commit or note).
     pub artifact_id: String,
+}
+
+/// Response from starting a project session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSessionResponse {
+    pub session_id: String,
+    /// The ID of the project note created for this session.
+    pub note_id: String,
+}
+
+/// Start a project-level session.
+///
+/// Project sessions operate at the project level rather than a specific branch.
+/// The agent receives project context (all repos, existing project notes),
+/// and an MCP server with tools to start repo subagent sessions and add repos.
+/// Always creates a ProjectNote stub that is populated when the session completes.
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+pub async fn start_project_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    action_executor: tauri::State<'_, Arc<ActionExecutor>>,
+    action_registry: tauri::State<'_, Arc<ActionRegistry>>,
+    app_handle: tauri::AppHandle,
+    project_id: String,
+    prompt: String,
+    provider: Option<String>,
+) -> Result<ProjectSessionResponse, String> {
+    let store = get_store(&store)?;
+
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+
+    // Build project context for the prompt
+    let project_context = build_project_session_context(&store, &project);
+
+    // Build the full prompt
+    let action_instructions = "The user is requesting work at the project level. Investigate and \
+        fulfill the request below, then produce a project note summarizing what you found and any \
+        actions taken.\n\n\
+        You have access to the following tools:\n\n\
+        - start_repo_session: Use this to make changes or run tasks within one of the project's \
+        repositories. Pass the repo slug (e.g. \"org/repo\") and clear instructions for what to \
+        do there. This tool starts a subagent session and waits for it to complete before \
+        returning the outcome. Do not ask for both a note and a commit in a single start_repo_session \
+        request — choose one outcome per call. All reasoning specific to a repo should be done within \
+        a repo session rather in this project wide context.\n\n\
+        - add_project_repo: Use this when the task requires a repository that isn't yet in the \
+        project. Pass the GitHub repo slug to add it.\n\n\
+        To discover repositories that might be relevant, use `gh` to explore repos in the user's \
+        GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
+        To return the note, include a horizontal rule (---) followed by the note content. \
+        Begin the note with a markdown H1 heading as the title. \n\n\
+        ";
+
+    let full_prompt = format!(
+        "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
+    );
+
+    // Resolve working directory — use the primary repo's clone path, then the
+    // project-scoped worktree root (created at project creation time), then /tmp.
+    let working_dir = project.clone_path().unwrap_or_else(|| {
+        crate::git::project_worktree_root_for(&project.id)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+    });
+
+    // Create the session
+    let mut session = store::Session::new_running(&full_prompt, &working_dir);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
+    }
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    // Always create a project note stub with empty title and content so that the
+    // frontend can detect it as "generating" via the !title && !content check.
+    let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);
+    store
+        .create_project_note(&note)
+        .map_err(|e| e.to_string())?;
+    let note_id = note.id.clone();
+
+    session_runner::start_session(
+        SessionConfig {
+            session_id: session.id.clone(),
+            prompt: full_prompt,
+            working_dir,
+            agent_session_id: None,
+            pre_head_sha: None,
+            provider,
+            workspace_name: None,
+            extra_env: vec![],
+            mcp_project_id: Some(project_id.clone()),
+            action_executor: Some(Arc::clone(&action_executor)),
+            action_registry: Some(Arc::clone(&action_registry)),
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(ProjectSessionResponse {
+        session_id: session.id,
+        note_id,
+    })
 }
 
 /// Start a branch-scoped session (note or commit).
@@ -335,12 +457,14 @@ pub async fn start_branch_session(
         let base_branch = branch.base_branch.clone();
         let store_for_context = Arc::clone(&store);
         let branch_id_for_context = branch_id.clone();
+        let project_id_for_context = branch.project_id.clone();
         let ctx = tauri::async_runtime::spawn_blocking(move || {
             build_remote_branch_context(
                 &workspace_name,
                 &base_branch,
                 &store_for_context,
                 &branch_id_for_context,
+                &project_id_for_context,
             )
         })
         .await
@@ -369,7 +493,13 @@ pub async fn start_branch_session(
             worktree_path = worktree_path.join(subpath);
         }
 
-        let ctx = build_branch_context(&worktree_path, &branch.base_branch, &store, &branch_id);
+        let ctx = build_branch_context(
+            &worktree_path,
+            &branch.base_branch,
+            &store,
+            &branch_id,
+            &branch.project_id,
+        );
         (worktree_path, ctx)
     };
 
@@ -455,6 +585,10 @@ pub async fn start_branch_session(
             pre_head_sha,
             provider: effective_provider,
             workspace_name: branch.workspace_name.clone(),
+            extra_env: vec![],
+            mcp_project_id: None,
+            action_executor: None,
+            action_registry: None,
         },
         store,
         app_handle,
@@ -472,11 +606,12 @@ pub async fn start_branch_session(
 // =============================================================================
 
 /// Build the branch history context block for a local branch.
-fn build_branch_context(
+pub(crate) fn build_branch_context(
     worktree: &Path,
     base_branch: &str,
     store: &Arc<Store>,
     branch_id: &str,
+    project_id: &str,
 ) -> String {
     let mut parts = vec![context_preamble()];
     let mut timeline: Vec<TimelineEntry> = Vec::new();
@@ -498,6 +633,9 @@ fn build_branch_context(
     timeline.extend(note_timeline_entries(store, branch_id, false));
     timeline.extend(review_timeline_entries(store, branch_id));
 
+    // Project-level notes
+    timeline.extend(project_note_timeline_entries(store, project_id, false));
+
     parts.push(render_timeline(timeline, commit_error));
     parts.join("\n\n")
 }
@@ -506,11 +644,12 @@ fn build_branch_context(
 ///
 /// Uses `blox ws_exec` to run git commands inside the remote workspace,
 /// and reads notes from the DB (which works regardless of worktree location).
-fn build_remote_branch_context(
+pub(crate) fn build_remote_branch_context(
     workspace_name: &str,
     base_branch: &str,
     store: &Arc<Store>,
     branch_id: &str,
+    project_id: &str,
 ) -> String {
     let mut parts = vec![context_preamble()];
     let mut timeline: Vec<TimelineEntry> = Vec::new();
@@ -550,6 +689,9 @@ fn build_remote_branch_context(
     timeline.extend(note_timeline_entries(store, branch_id, true));
     timeline.extend(review_timeline_entries(store, branch_id));
 
+    // Project-level notes
+    timeline.extend(project_note_timeline_entries(store, project_id, true));
+
     parts.push(render_timeline(timeline, None));
     parts.join("\n\n")
 }
@@ -578,7 +720,7 @@ fn format_repo_label(repo_slug: &str, subpath: Option<&str>) -> String {
     }
 }
 
-fn build_project_context(
+pub(crate) fn build_project_context(
     store: &Arc<Store>,
     project: &store::Project,
     branch: &store::Branch,
@@ -672,6 +814,178 @@ fn build_project_context(
     lines.join("\n")
 }
 
+/// Build the context block for a project-level session.
+///
+/// Includes: project name, all attached repos (with reasons and per-repo
+/// branch timelines), and existing project notes.
+fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -> String {
+    let project_name = project.name.trim();
+    let project_name = if project_name.is_empty() {
+        "Unnamed Project"
+    } else {
+        project_name
+    };
+
+    let mut lines = vec![format!("You are working in project \"{project_name}\".")];
+
+    // List all repos
+    let repos = store.list_project_repos(&project.id).unwrap_or_default();
+    if repos.is_empty() {
+        if let Some(ref repo) = project.github_repo {
+            lines.push(format!("Primary repository: `{repo}`"));
+        } else {
+            lines.push("No repositories are attached to this project.".to_string());
+        }
+    } else {
+        lines.push("Repositories in this project:".to_string());
+        for repo in &repos {
+            let label = format_repo_label(&repo.github_repo, repo.subpath.as_deref());
+            let primary_tag = if repo.is_primary { " (primary)" } else { "" };
+            let reason_tag = repo
+                .reason
+                .as_deref()
+                .map(|r| format!(" — {r}"))
+                .unwrap_or_default();
+            lines.push(format!("- `{label}`{primary_tag}{reason_tag}"));
+        }
+    }
+
+    // Per-repo branch timelines — gives the project-level agent the same
+    // awareness of branch activity that branch-level agents receive.
+    let all_branches = store
+        .list_branches_for_project(&project.id)
+        .unwrap_or_default();
+
+    for repo in &repos {
+        let repo_branches: Vec<_> = all_branches
+            .iter()
+            .filter(|b| b.project_repo_id.as_deref() == Some(&repo.id))
+            .collect();
+
+        if repo_branches.is_empty() {
+            continue;
+        }
+
+        let repo_label = format_repo_label(&repo.github_repo, repo.subpath.as_deref());
+        lines.push(String::new());
+        lines.push(format!("## Repository: {repo_label}"));
+
+        for branch in &repo_branches {
+            lines.push(String::new());
+            lines.push(format!("### Branch: {}", branch.branch_name));
+
+            let timeline = build_branch_timeline_summary(store, branch);
+            if timeline.is_empty() {
+                lines.push("No activity on this branch yet.".to_string());
+            } else {
+                lines.push(timeline);
+            }
+        }
+    }
+
+    // Also include branches not associated with any repo (legacy or unlinked)
+    let unlinked_branches: Vec<_> = all_branches
+        .iter()
+        .filter(|b| b.project_repo_id.is_none())
+        .collect();
+    if !unlinked_branches.is_empty() {
+        lines.push(String::new());
+        lines.push("## Branches (no repo association)".to_string());
+        for branch in &unlinked_branches {
+            lines.push(String::new());
+            lines.push(format!("### Branch: {}", branch.branch_name));
+
+            let timeline = build_branch_timeline_summary(store, branch);
+            if timeline.is_empty() {
+                lines.push("No activity on this branch yet.".to_string());
+            } else {
+                lines.push(timeline);
+            }
+        }
+    }
+
+    // Include existing project notes
+    let notes = store.list_project_notes(&project.id).unwrap_or_default();
+    let non_empty_notes: Vec<_> = notes.iter().filter(|n| !n.content.is_empty()).collect();
+    if !non_empty_notes.is_empty() {
+        lines.push(String::new());
+        lines.push("## Existing Project Notes".to_string());
+        for note in &non_empty_notes {
+            let note_path = std::env::temp_dir().join(format!("mark-note-{}.md", note.id));
+            let formatted = match std::fs::write(&note_path, &note.content) {
+                Ok(()) => format!(
+                    "### Project Note: {}\n\nSee: `{}`",
+                    note.title,
+                    note_path.display()
+                ),
+                Err(e) => {
+                    log::warn!("Failed to write project note to temp file, inlining: {e}");
+                    format!("### Project Note: {}\n\n{}", note.title, note.content)
+                }
+            };
+            lines.push(formatted);
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Build a compact timeline summary for a single branch, suitable for
+/// inclusion in project-level context.
+///
+/// Includes commit log (when a local worktree is available), notes, and
+/// reviews — but omits project-level notes (those are rendered separately
+/// at the project level to avoid duplication).
+fn build_branch_timeline_summary(store: &Arc<Store>, branch: &store::Branch) -> String {
+    let mut timeline: Vec<TimelineEntry> = Vec::new();
+    let mut commit_error = None;
+
+    // Attempt to include commit log if we can resolve a local worktree
+    if let Ok(Some(workdir)) = store.get_workdir_for_branch(&branch.id) {
+        let worktree = std::path::Path::new(&workdir.path);
+        if worktree.exists() {
+            match git::get_full_commit_log(worktree, &branch.base_branch) {
+                Ok(log) if !log.trim().is_empty() => {
+                    timeline.extend(parse_timestamped_log(&log));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    log::warn!(
+                        "Failed to get commit log for branch {} in project context: {e}",
+                        branch.branch_name
+                    );
+                    commit_error = Some(format!("(Error retrieving commit log: {e})"));
+                }
+            }
+        }
+    }
+
+    // Notes (inlined for project context — the project agent may not have
+    // access to the branch's local temp files)
+    timeline.extend(note_timeline_entries(store, &branch.id, true));
+    timeline.extend(review_timeline_entries(store, &branch.id));
+
+    if timeline.is_empty() {
+        if let Some(err) = commit_error {
+            return err;
+        }
+        return String::new();
+    }
+
+    timeline.sort_by_key(|e| e.timestamp);
+
+    let mut section = String::new();
+    if let Some(err) = commit_error {
+        section.push_str(&err);
+        section.push('\n');
+    }
+    for entry in &timeline {
+        section.push_str(&entry.content);
+        section.push('\n');
+    }
+    section.trim_end().to_string()
+}
+
 // =============================================================================
 // Chronological timeline helpers
 // =============================================================================
@@ -731,6 +1045,34 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     entries
 }
 
+/// Format a single note's content for inclusion in an agent context string.
+///
+/// When `is_remote` is true, content is inlined directly because the remote
+/// agent cannot access local temp files. For local sessions, the content is
+/// written to a temp file and referenced by path so large notes don't bloat
+/// the context; falls back to inline if the write fails.
+pub(crate) fn format_note_for_context(
+    id: &str,
+    title: &str,
+    content: &str,
+    is_remote: bool,
+) -> Option<String> {
+    if is_remote {
+        Some(format!("### Note: {title}\n\n{content}"))
+    } else {
+        let note_path = std::env::temp_dir().join(format!("mark-note-{id}.md"));
+        if let Err(e) = std::fs::write(&note_path, content) {
+            log::warn!("Failed to write note to temp file: {e}");
+            None
+        } else {
+            Some(format!(
+                "### Note: {title}\n\nSee: `{}`",
+                note_path.display()
+            ))
+        }
+    }
+}
+
 /// Convert notes from the DB into timeline entries.
 ///
 /// When `is_remote` is true, note content is inlined directly because the
@@ -754,15 +1096,52 @@ fn note_timeline_entries(
         if note.content.is_empty() {
             continue; // skip notes still generating
         }
+        if let Some(content) =
+            format_note_for_context(&note.id, &note.title, &note.content, is_remote)
+        {
+            entries.push(TimelineEntry {
+                timestamp: note.created_at,
+                content,
+            });
+        }
+    }
+    entries
+}
+
+/// Convert project notes from the DB into timeline entries.
+fn project_note_timeline_entries(
+    store: &Arc<Store>,
+    project_id: &str,
+    is_remote: bool,
+) -> Vec<TimelineEntry> {
+    let notes = match store.list_project_notes(project_id) {
+        Ok(n) => n,
+        Err(e) => {
+            log::warn!("Failed to list project notes for branch context: {e}");
+            return Vec::new();
+        }
+    };
+
+    let mut entries = Vec::new();
+    for note in &notes {
+        if note.content.is_empty() {
+            continue; // skip notes still generating
+        }
         let content = if is_remote {
-            format!("### Note: {}\n\n{}", note.title, note.content)
+            format!("### Project Note: {}\n\n{}", note.title, note.content)
         } else {
             let note_path = std::env::temp_dir().join(format!("mark-note-{}.md", note.id));
-            if let Err(e) = std::fs::write(&note_path, &note.content) {
-                log::warn!("Failed to write note to temp file: {e}");
-                continue;
+            match std::fs::write(&note_path, &note.content) {
+                Ok(()) => format!(
+                    "### Project Note: {}\n\nSee: `{}`",
+                    note.title,
+                    note_path.display()
+                ),
+                Err(e) => {
+                    log::warn!("Failed to write project note to temp file, inlining: {e}");
+                    format!("### Project Note: {}\n\n{}", note.title, note.content)
+                }
             }
-            format!("### Note: {}\n\nSee: `{}`", note.title, note_path.display())
         };
         entries.push(TimelineEntry {
             timestamp: note.created_at,

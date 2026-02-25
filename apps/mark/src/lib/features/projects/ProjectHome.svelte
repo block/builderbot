@@ -31,7 +31,7 @@
   let projects = $state<Project[]>([]);
   let branchesByProject = $state<Map<string, Branch[]>>(new Map());
   let repoLabelsByProject = $state<
-    Map<string, Map<string, { githubRepo: string; subpath: string | null }>>
+    Map<string, Map<string, { githubRepo: string; subpath: string | null; reason: string | null }>>
   >(new Map());
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -90,6 +90,44 @@
       unlistenDetection = unlisten;
     });
 
+    // Listen for backend-driven setup progress events. The backend emits this
+    // after repo creation, after worktree setup, and after prerun actions.
+    // We only refresh display state here — setup itself is owned by the backend.
+    let unlistenProjectRepoAdded: UnlistenFn | undefined;
+    listen<string>('project-setup-progress', async (event) => {
+      const projectId = event.payload;
+      console.log('[ProjectHome] project-setup-progress event for project', projectId);
+      try {
+        const [projectsList, branches, repos] = await Promise.all([
+          commands.listProjects(),
+          commands.listBranchesForProject(projectId),
+          commands.listProjectRepos(projectId),
+        ]);
+        projects = projectsList;
+        branchesByProject = new Map(branchesByProject).set(projectId, branches);
+        repoLabelsByProject = new Map(repoLabelsByProject).set(
+          projectId,
+          new Map(
+            repos.map(
+              (repo) =>
+                [
+                  repo.id,
+                  {
+                    githubRepo: repo.githubRepo,
+                    subpath: repo.subpath ?? null,
+                    reason: repo.reason ?? null,
+                  },
+                ] as const
+            )
+          )
+        );
+      } catch (e) {
+        console.error('[ProjectHome] Failed to refresh project after setup progress:', e);
+      }
+    }).then((unlisten) => {
+      unlistenProjectRepoAdded = unlisten;
+    });
+
     // Listen for PR status changes to update branch state
     let unlistenPrStatus: UnlistenFn | undefined;
     listen<{
@@ -126,6 +164,7 @@
     return () => {
       window.removeEventListener('mark:new-project', onNewProject);
       unlistenDetection?.();
+      unlistenProjectRepoAdded?.();
       unlistenPrStatus?.();
       if (kickoffTimer) {
         clearTimeout(kickoffTimer);
@@ -184,7 +223,7 @@
       const branchMap = new Map<string, Branch[]>();
       const repoLabelMap = new Map<
         string,
-        Map<string, { githubRepo: string; subpath: string | null }>
+        Map<string, { githubRepo: string; subpath: string | null; reason: string | null }>
       >();
       for (const project of projectList) {
         branchMap.set(project.id, branchesByProject.get(project.id) || []);
@@ -209,7 +248,11 @@
                   (repo) =>
                     [
                       repo.id,
-                      { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null },
+                      {
+                        githubRepo: repo.githubRepo,
+                        subpath: repo.subpath ?? null,
+                        reason: repo.reason ?? null,
+                      },
                     ] as const
                 )
               )
@@ -341,11 +384,17 @@
       new Map(
         repos.map(
           (repo) =>
-            [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
+            [
+              repo.id,
+              {
+                githubRepo: repo.githubRepo,
+                subpath: repo.subpath ?? null,
+                reason: repo.reason ?? null,
+              },
+            ] as const
         )
       )
     );
-    startInitialBranchSetup(project.id, branches);
     showNewProjectModal = false;
     selectProject(project.id);
   }
@@ -450,11 +499,17 @@
         new Map(
           repos.map(
             (repo) =>
-              [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
+              [
+                repo.id,
+                {
+                  githubRepo: repo.githubRepo,
+                  subpath: repo.subpath ?? null,
+                  reason: repo.reason ?? null,
+                },
+              ] as const
           )
         )
       );
-      startInitialBranchSetup(projectId, branches);
     } catch (e) {
       console.error('Failed to add repo:', e);
       const message = e instanceof Error ? e.message : String(e);
@@ -676,7 +731,14 @@
           new Map(
             repos.map(
               (repo) =>
-                [repo.id, { githubRepo: repo.githubRepo, subpath: repo.subpath ?? null }] as const
+                [
+                  repo.id,
+                  {
+                    githubRepo: repo.githubRepo,
+                    subpath: repo.subpath ?? null,
+                    reason: repo.reason ?? null,
+                  },
+                ] as const
             )
           )
         );

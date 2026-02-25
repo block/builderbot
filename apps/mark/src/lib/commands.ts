@@ -104,6 +104,10 @@ export function setPrimaryProjectRepo(projectId: string, projectRepoId: string):
   return invoke('set_primary_project_repo', { projectId, projectRepoId });
 }
 
+export function clearProjectRepoReason(projectRepoId: string): Promise<void> {
+  return invoke('clear_project_repo_reason', { projectRepoId });
+}
+
 /** List the authenticated user's GitHub organization memberships. */
 export function listGithubOrgs(): Promise<string[]> {
   return invoke('list_github_orgs');
@@ -135,6 +139,38 @@ export function searchGithubRepos(query: string, owner?: string): Promise<GitHub
  *  Returns the module count (0 if file doesn't exist). */
 export function checkMonorepoModules(githubRepo: string): Promise<number> {
   return invoke('check_monorepo_modules', { githubRepo });
+}
+
+// =============================================================================
+// Project notes & sessions
+// =============================================================================
+
+export function listProjectNotes(projectId: string): Promise<import('./types').ProjectNote[]> {
+  return invoke('list_project_notes', { projectId });
+}
+
+export function createProjectNote(
+  projectId: string,
+  title: string,
+  content: string
+): Promise<import('./types').ProjectNote> {
+  return invoke('create_project_note', { projectId, title, content });
+}
+
+export function deleteProjectNote(noteId: string): Promise<void> {
+  return invoke('delete_project_note', { noteId });
+}
+
+export function startProjectSession(
+  projectId: string,
+  prompt: string,
+  provider?: string
+): Promise<import('./types').ProjectSessionResponse> {
+  return invoke('start_project_session', {
+    projectId,
+    prompt,
+    provider: provider ?? null,
+  });
 }
 
 // =============================================================================

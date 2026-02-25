@@ -1642,7 +1642,7 @@
     scope="branch"
     beforeLabel={formatBaseBranch(branch.baseBranch)}
     afterLabel={branch.branchName}
-    projectName={projectName}
+    {projectName}
     githubRepo={repoLabel?.githubRepo}
     subpath={repoLabel?.subpath}
     onClose={() => {
@@ -1659,7 +1659,7 @@
     scope="commit"
     beforeLabel="parent"
     afterLabel={commitDiffSha.slice(0, 7)}
-    projectName={projectName}
+    {projectName}
     githubRepo={repoLabel?.githubRepo}
     subpath={repoLabel?.subpath}
     readonly

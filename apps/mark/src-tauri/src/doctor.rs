@@ -222,8 +222,8 @@ struct AgentCheckInfo {
     id: &'static str,
     /// Human-readable label, e.g. "Goose".
     label: &'static str,
-    /// CLI command name to search for.
-    command: &'static str,
+    /// CLI command names to search for (first entry is preferred/current).
+    commands: &'static [&'static str],
     /// URL to open when the agent is not found (None if no install page).
     install_url: Option<&'static str>,
 }
@@ -234,34 +234,38 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
     AgentCheckInfo {
         id: "ai-agent-goose",
         label: "Goose",
-        command: "goose",
+        commands: &["goose"],
         install_url: Some("https://github.com/block/goose"),
     },
     AgentCheckInfo {
         id: "ai-agent-claude",
         label: "Claude Code",
-        command: "claude-code-acp",
+        commands: &["claude-agent-acp", "claude-code-acp"],
         install_url: Some("https://github.com/zed-industries/claude-agent-acp#installation"),
     },
     AgentCheckInfo {
         id: "ai-agent-codex",
         label: "Codex",
-        command: "codex-acp",
+        commands: &["codex-acp"],
         install_url: Some("https://github.com/openai/codex#getting-started"),
     },
     AgentCheckInfo {
         id: "ai-agent-pi",
         label: "Pi",
-        command: "pi-acp",
+        commands: &["pi-acp"],
         install_url: None,
     },
     AgentCheckInfo {
         id: "ai-agent-amp",
         label: "Amp",
-        command: "amp-acp",
+        commands: &["amp-acp"],
         install_url: Some("https://www.npmjs.com/package/amp-acp"),
     },
 ];
+
+fn agent_installed(info: &AgentCheckInfo) -> bool {
+    info.commands.iter().any(|cmd| find_command(cmd).is_some())
+}
 
 /// Check whether a single AI agent is installed.
 ///
@@ -269,7 +273,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
 /// agents get `Warn`; otherwise the first missing agent gets `Warn` too since
 /// only one agent is required overall.
 fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> DoctorCheck {
-    if find_command(info.command).is_some() {
+    if agent_installed(info) {
         // Special handling for Goose: verify ACP subcommand is available
         if info.id == "ai-agent-goose" {
             match Command::new("goose").arg("acp").arg("--help").output() {
@@ -326,10 +330,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
 /// functionality, but each individual missing agent is only a warning.
 fn check_ai_agents() -> Vec<DoctorCheck> {
     // First pass: determine which agents are installed.
-    let installed: Vec<bool> = AI_AGENT_CHECKS
-        .iter()
-        .map(|info| find_command(info.command).is_some())
-        .collect();
+    let installed: Vec<bool> = AI_AGENT_CHECKS.iter().map(agent_installed).collect();
     let any_found = installed.iter().any(|&b| b);
 
     // Second pass: build the checks with appropriate messaging.

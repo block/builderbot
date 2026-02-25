@@ -15,6 +15,8 @@ pub(crate) struct KnownAgent {
     pub label: &'static str,
     /// CLI command name to search for.
     pub command: &'static str,
+    /// Optional legacy command names accepted for backwards compatibility.
+    pub command_aliases: &'static [&'static str],
     /// Arguments to pass when spawning in ACP mode.
     pub acp_args: &'static [&'static str],
 }
@@ -25,6 +27,7 @@ pub(crate) const KNOWN_AGENTS: &[KnownAgent] = &[
         id: "goose",
         label: "Goose",
         command: "goose",
+        command_aliases: &[],
         acp_args: &[
             "acp",
             "--with-builtin",
@@ -36,28 +39,38 @@ pub(crate) const KNOWN_AGENTS: &[KnownAgent] = &[
     KnownAgent {
         id: "claude",
         label: "Claude Code",
-        command: "claude-code-acp",
+        command: "claude-agent-acp",
+        command_aliases: &["claude-code-acp"],
         acp_args: &[],
     },
     KnownAgent {
         id: "codex",
         label: "Codex",
         command: "codex-acp",
+        command_aliases: &[],
         acp_args: &[],
     },
     KnownAgent {
         id: "pi",
         label: "Pi",
         command: "pi-acp",
+        command_aliases: &[],
         acp_args: &[],
     },
     KnownAgent {
         id: "amp",
         label: "Amp",
         command: "amp-acp",
+        command_aliases: &[],
         acp_args: &[],
     },
 ];
+
+fn find_known_agent_binary(agent: &KnownAgent) -> Option<PathBuf> {
+    std::iter::once(agent.command)
+        .chain(agent.command_aliases.iter().copied())
+        .find_map(find_command)
+}
 
 // =============================================================================
 // Provider discovery — public API
@@ -77,7 +90,7 @@ pub struct AcpProviderInfo {
 pub fn discover_providers() -> Vec<AcpProviderInfo> {
     KNOWN_AGENTS
         .iter()
-        .filter(|agent| find_command(agent.command).is_some())
+        .filter(|agent| find_known_agent_binary(agent).is_some())
         .map(|agent| AcpProviderInfo {
             id: agent.id.to_string(),
             label: agent.label.to_string(),
@@ -91,7 +104,7 @@ pub fn find_acp_agent_by_id(provider_id: &str) -> Option<AcpAgent> {
         .iter()
         .find(|a| a.id == provider_id)
         .and_then(|agent| {
-            find_command(agent.command).map(|path| AcpAgent {
+            find_known_agent_binary(agent).map(|path| AcpAgent {
                 binary_path: path,
                 acp_args: agent.acp_args.iter().map(|s| s.to_string()).collect(),
                 label: agent.label.to_string(),
@@ -104,7 +117,7 @@ pub fn find_acp_agent_by_id(provider_id: &str) -> Option<AcpAgent> {
 /// Tries each known agent in order and returns the first one found.
 pub fn find_acp_agent() -> Option<AcpAgent> {
     for agent in KNOWN_AGENTS {
-        if let Some(path) = find_command(agent.command) {
+        if let Some(path) = find_known_agent_binary(agent) {
             return Some(AcpAgent {
                 binary_path: path,
                 acp_args: agent.acp_args.iter().map(|s| s.to_string()).collect(),

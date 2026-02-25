@@ -743,6 +743,7 @@ func computeProjectAge(p discovery.Project) string {
 
 type ProjectFile struct {
 	Name       string
+	Title      string // H1 heading from markdown file
 	Path       string
 	Dir        string // source-relative directory (empty for root files)
 	ShowDir    bool   // true on first file of each new directory
@@ -848,6 +849,7 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 					if f, ok := fileByPath[p]; ok {
 						gv.Files = append(gv.Files, ProjectFile{
 							Name:       f.Name,
+							Title:      f.Title,
 							Path:       f.FullPath,
 							Source:     f.Source,
 							SourceType: f.SourceType,
@@ -873,6 +875,7 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 			for _, f := range srcFiles {
 				pf := ProjectFile{
 					Name:       f.Name,
+					Title:      f.Title,
 					Path:       f.FullPath,
 					Source:     f.Source,
 					SourceType: f.SourceType,
@@ -915,6 +918,7 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 		for _, sf := range srcFiles {
 			gv.Files = append(gv.Files, ProjectFile{
 				Name:       sf.Name,
+				Title:      sf.Title,
 				Path:       sf.FullPath,
 				Source:     sf.Source,
 				SourceType: sf.SourceType,
@@ -1076,6 +1080,7 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 
 type APIFile struct {
 	Name         string `json:"name"`
+	Title        string `json:"title,omitempty"`
 	Path         string `json:"path"`
 	Dir          string `json:"dir,omitempty"`
 	Source       string `json:"source,omitempty"`
@@ -1118,6 +1123,9 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Ensure file titles are populated before serving
+	s.cache.EnrichTitles(qualifiedName)
+
 	cachedFiles := s.cache.ProjectFiles(qualifiedName)
 	fileGroups := buildFileGroups(project, cachedFiles)
 
@@ -1135,6 +1143,7 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 		for _, f := range g.Files {
 			apiGroup.Files = append(apiGroup.Files, APIFile{
 				Name:       f.Name,
+				Title:      f.Title,
 				Path:       f.Path,
 				Dir:        f.Dir,
 				Source:     f.Source,
@@ -1157,6 +1166,7 @@ func (s *Server) handleAPIRecent(w http.ResponseWriter, r *http.Request) {
 	for i, f := range files {
 		result[i] = APIFile{
 			Name:         f.DisplayName,
+			Title:        f.Title,
 			Path:         f.FilePath,
 			Project:      f.Project,
 			Age:          f.Age,

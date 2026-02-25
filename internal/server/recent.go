@@ -13,6 +13,7 @@ type RecentFile struct {
 	FilePath     string
 	FileName     string
 	DisplayName  string
+	Title        string // H1 heading from markdown file
 	ModTime      time.Time
 	Age          string
 	FileType     string
@@ -78,6 +79,7 @@ func (s *Server) mergeRecentFiles(limit int) []RecentFile {
 			rf.Age = formatAge(cf.ModTime)
 			rf.FileType = cf.FileType
 			rf.DisplayName = cf.Name
+			rf.Title = cf.Title
 		} else {
 			rf.ModTime = af.Timestamp
 			rf.Age = formatAge(af.Timestamp)
@@ -101,6 +103,7 @@ func (s *Server) mergeRecentFiles(limit int) []RecentFile {
 			FilePath:    f.FullPath,
 			FileName:    f.Name,
 			DisplayName: f.Name,
+			Title:       f.Title,
 			ModTime:     f.ModTime,
 			Age:         formatAge(f.ModTime),
 			FileType:    f.FileType,

@@ -1306,10 +1306,28 @@ a:hover { text-decoration: underline; }
 }
 .file-row .file-name {
   font-weight: 500;
+  min-width: 0;
+  height: 1.4em;
+  overflow: visible;
+}
+.file-row .file-name a {
+  display: block;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
 }
+.file-subtitle {
+  display: block;
+  font-size: 0.8em;
+  font-weight: 400;
+  color: var(--text-subtle);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-row { min-height: calc(1.4em + 0.8em * 1.3 + 24px); }
 .file-row .file-age {
   color: var(--text-subtle);
   font-size: 0.85em;
@@ -1574,6 +1592,10 @@ a:hover { text-decoration: underline; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.recent-file-name-text {
+  min-width: 0;
+  overflow: hidden;
 }
 .recent-file-project { color: var(--text-subtle); font-size: 0.85em; }
 .recent-file-meta {

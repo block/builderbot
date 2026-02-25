@@ -142,7 +142,7 @@ export default function FilePage() {
         for (const file of group.files) {
           if (file.path === path) {
             setFileType(file.fileType || '');
-            setDisplayName(file.name);
+            setDisplayName(file.title || file.name);
             setSourceType(group.sourceType);
             return;
           }

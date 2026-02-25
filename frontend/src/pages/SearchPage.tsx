@@ -75,7 +75,8 @@ export default function SearchPage() {
                         <FileTypeBadge type={f.fileType} />
                         {f.nameMatch && <span className="match-type">name</span>}
                         <span className="file-name">
-                          <Link to={`/file/${pr.qualifiedName}/${f.path}`}>{f.name}</Link>
+                          <Link to={`/file/${pr.qualifiedName}/${f.path}`}>{f.title || f.name}</Link>
+                          <span className="file-subtitle">{f.title ? f.name : '\u00A0'}</span>
                         </span>
                       </div>
                     </div>

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bufio"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +23,7 @@ type FileInfo struct {
 	Path        string // relative to source root
 	FullPath    string // relative to project root (e.g., "thoughts/plans/foo.md")
 	Name        string
+	Title       string // H1 heading extracted from markdown files
 	ModTime     time.Time
 	FileType    string // "research", "plan", or "other"
 }
@@ -263,6 +265,52 @@ func (c *Cache) RescanWith(projects []discovery.Project) {
 	c.RefreshAllProjects()
 }
 
+// EnrichTitles fills in missing Title fields for files in the given project.
+// This is called on demand when a user views a project, so titles appear
+// immediately without waiting for a full background rescan.
+func (c *Cache) EnrichTitles(projectName string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	files, ok := c.projectFiles[projectName]
+	if !ok {
+		return
+	}
+
+	changed := false
+	for i := range files {
+		if files[i].Title == "" {
+			absPath := filepath.Join(files[i].ProjectPath, files[i].FullPath)
+			if title := extractTitle(absPath); title != "" {
+				files[i].Title = title
+				changed = true
+			}
+		}
+	}
+	if changed {
+		c.projectFiles[projectName] = files
+	}
+}
+
+// extractTitle reads the first few lines of a markdown file and returns the
+// text of the first H1 heading (line starting with "# "), or empty string.
+func extractTitle(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for i := 0; i < 20 && scanner.Scan(); i++ {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "# ") {
+			return strings.TrimSpace(line[2:])
+		}
+	}
+	return ""
+}
+
 // scanProjectSources scans all sources of a project for markdown files.
 // Files are de-duplicated by project-relative path: if multiple sources cover
 // the same file, only the first source's entry is kept. This means auto-detected
@@ -289,7 +337,11 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				}
 
 				fileType := "other"
-				st := discovery.GetSourceType(source.Name)
+				stName := source.SourceTypeName
+				if stName == "" {
+					stName = source.Name
+				}
+				st := discovery.GetSourceType(stName)
 				if st != nil && st.ClassifyFile != nil {
 					fileType = st.ClassifyFile(relToSource)
 					if fileType == "" {
@@ -303,6 +355,8 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					}
 				}
 
+				title := extractTitle(path)
+
 				seen[relToProject] = true
 				files = append(files, FileInfo{
 					Project:     project.QualifiedName(),
@@ -314,6 +368,7 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					Path:        relToSource,
 					FullPath:    relToProject,
 					Name:        filepath.Base(path),
+					Title:       title,
 					ModTime:     info.ModTime(),
 					FileType:    fileType,
 				})

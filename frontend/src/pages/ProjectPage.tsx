@@ -369,8 +369,9 @@ export default function ProjectPage() {
           {review && (review.typingThreads ?? 0) > 0 && <TypingIndicator />}
           <span className="file-name">
             <Link to={`/file/${qn}/${file.path}`} onClick={(e) => e.stopPropagation()}>
-              {file.name}
+              {file.title || file.name}
             </Link>
+            <span className="file-subtitle">{file.title ? file.name : '\u00A0'}</span>
           </span>
         </div>
         <div className="file-right">

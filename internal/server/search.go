@@ -160,6 +160,7 @@ func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 	type apiMatchedFile struct {
 		Path      string `json:"path"`
 		Name      string `json:"name"`
+		Title     string `json:"title,omitempty"`
 		NameMatch bool   `json:"nameMatch,omitempty"`
 		FileType  string `json:"fileType"`
 	}
@@ -251,6 +252,9 @@ func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 		if len(fileMatches) > 0 {
 			pr := &apiProjectResults{Project: project.Name, Workspace: project.WorkspaceName, ProjectPath: project.Path, QualifiedName: qn}
 			for _, m := range fileMatches {
+				if cf := s.cache.FindFile(qn, m.Path); cf != nil && cf.Title != "" {
+					m.Title = cf.Title
+				}
 				pr.Files = append(pr.Files, *m)
 				totalFiles++
 			}

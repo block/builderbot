@@ -131,6 +131,13 @@ func init() {
 		Name:            "manual",
 		ShowDirHeadings: true,
 	})
+
+	RegisterSourceType(&SourceType{
+		Name: "claude-plans",
+		ClassifyFile: func(path string) string {
+			return "plan"
+		},
+	})
 }
 
 // classifyRP1Feature classifies a file under work/features/{id}/ by its filename.
@@ -527,7 +534,7 @@ func DiscoverClaudePlans() (Project, bool) {
 		Sources: []FileSource{{
 			Name:           "plans",
 			Type:           "tree",
-			SourceTypeName: "manual",
+			SourceTypeName: "claude-plans",
 			RootPath:       plansDir,
 			Auto:           true,
 		}},

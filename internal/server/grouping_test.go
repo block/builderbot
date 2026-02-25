@@ -188,6 +188,34 @@ func TestBuildFileGroups_ManualSourceDirHeadings(t *testing.T) {
 	}
 }
 
+func TestBuildFileGroups_TitleFlowsThrough(t *testing.T) {
+	project := &discovery.Project{
+		Name: "test-project",
+		Path: "/tmp/test",
+		Sources: []discovery.FileSource{
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
+		},
+	}
+
+	files := []cache.FileInfo{
+		{Source: "thoughts", Path: "plans/my-plan.md", FullPath: "thoughts/plans/my-plan.md", Name: "my-plan.md", Title: "Per-Tab Navigation", FileType: "plan", ModTime: time.Now()},
+		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", Title: "", FileType: "research", ModTime: time.Now()},
+	}
+
+	groups := buildFileGroups(project, files)
+
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+
+	if groups[0].Files[0].Title != "Per-Tab Navigation" {
+		t.Errorf("plan file Title = %q, want %q", groups[0].Files[0].Title, "Per-Tab Navigation")
+	}
+	if groups[0].Files[1].Title != "" {
+		t.Errorf("research file Title = %q, want empty", groups[0].Files[1].Title)
+	}
+}
+
 func TestBuildFileGroups_ThoughtsNoDirHeadings(t *testing.T) {
 	project := &discovery.Project{
 		Name: "test-project",

@@ -188,6 +188,129 @@ func TestScanProjectSources_DedupsOverlappingSources(t *testing.T) {
 	}
 }
 
+func TestExtractTitle(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"h1 on first line", "# My Plan Title\n\nSome content", "My Plan Title"},
+		{"h1 after blank lines", "\n\n# Plan After Blanks\n\nContent", "Plan After Blanks"},
+		{"no h1", "Some content\nMore content\n## H2 heading", ""},
+		{"h2 not extracted", "## Not an H1\n\nContent", ""},
+		{"empty file", "", ""},
+		{"h1 with extra spaces", "#   Spaced Title  \n", "Spaced Title"},
+		{"only hash no space", "#NoSpace\n", ""},
+		{"h1 deep in file", "line1\nline2\nline3\nline4\nline5\n# Deep Title\n", "Deep Title"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpFile := filepath.Join(t.TempDir(), "test.md")
+			os.WriteFile(tmpFile, []byte(tt.content), 0644)
+			got := extractTitle(tmpFile)
+			if got != tt.want {
+				t.Errorf("extractTitle() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractTitle_NonexistentFile(t *testing.T) {
+	got := extractTitle("/nonexistent/path/file.md")
+	if got != "" {
+		t.Errorf("extractTitle() for nonexistent file = %q, want empty", got)
+	}
+}
+
+func TestScanProjectSources_ExtractsTitleForAllFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	thoughtsPath := filepath.Join(tmpDir, "thoughts")
+	os.MkdirAll(filepath.Join(thoughtsPath, "plans"), 0755)
+	os.MkdirAll(filepath.Join(thoughtsPath, "research"), 0755)
+
+	os.WriteFile(filepath.Join(thoughtsPath, "plans", "my-plan.md"), []byte("# Per-Tab Navigation\n\nPlan content"), 0644)
+	os.WriteFile(filepath.Join(thoughtsPath, "research", "analysis.md"), []byte("# Research Analysis\n\nResearch content"), 0644)
+
+	project := &discovery.Project{
+		Name: "test-project",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{
+				Name:           "thoughts",
+				Type:           "tree",
+				SourceTypeName: "thoughts",
+				RootPath:       thoughtsPath,
+				Auto:           true,
+			},
+		},
+		LastModified: time.Now(),
+	}
+
+	files := scanProjectSources(project)
+
+	fileMap := make(map[string]FileInfo)
+	for _, f := range files {
+		fileMap[f.FullPath] = f
+	}
+
+	if f, ok := fileMap["thoughts/plans/my-plan.md"]; ok {
+		if f.Title != "Per-Tab Navigation" {
+			t.Errorf("plan file Title = %q, want %q", f.Title, "Per-Tab Navigation")
+		}
+	} else {
+		t.Error("plan file not found")
+	}
+
+	if f, ok := fileMap["thoughts/research/analysis.md"]; ok {
+		if f.Title != "Research Analysis" {
+			t.Errorf("research file Title = %q, want %q", f.Title, "Research Analysis")
+		}
+	} else {
+		t.Error("research file not found")
+	}
+}
+
+func TestCache_EnrichTitles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	planFile := filepath.Join(tmpDir, "my-plan.md")
+	os.WriteFile(planFile, []byte("# My Great Plan\n\nContent here"), 0644)
+
+	c := New()
+	projectName := "test/project"
+
+	files := []FileInfo{
+		{
+			Name:        "my-plan.md",
+			FullPath:    "my-plan.md",
+			ProjectPath: tmpDir,
+			FileType:    "plan",
+			Title:       "",
+		},
+		{
+			Name:        "notes.md",
+			FullPath:    "notes.md",
+			ProjectPath: tmpDir,
+			FileType:    "other",
+			Title:       "",
+		},
+	}
+	c.SetProjectFiles(projectName, files)
+
+	c.EnrichTitles(projectName)
+
+	enriched := c.ProjectFiles(projectName)
+	if enriched[0].Title != "My Great Plan" {
+		t.Errorf("plan file Title = %q, want %q", enriched[0].Title, "My Great Plan")
+	}
+	// notes.md doesn't exist on disk, so title stays empty
+	if enriched[1].Title != "" {
+		t.Errorf("missing file Title = %q, want empty", enriched[1].Title)
+	}
+}
+
 func TestCache_FindFile(t *testing.T) {
 	c := New()
 	projectName := "test/project"

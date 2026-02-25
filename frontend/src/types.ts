@@ -28,6 +28,7 @@ export interface APIProject {
 
 export interface APIFile {
   name: string;
+  title?: string;
   path: string;
   dir?: string;
   source?: string;
@@ -166,6 +167,7 @@ export interface SSEEvent {
 export interface SearchMatchedFile {
   path: string;
   name: string;
+  title?: string;
   nameMatch?: boolean;
   fileType: string;
 }

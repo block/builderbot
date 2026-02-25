@@ -43,9 +43,12 @@ export default function RecentPage() {
           <div className="recent-file-info">
             <div className="recent-file-name">
               <FileTypeBadge type={f.fileType} />
-              <Link to={`/file/${(f.project || '')}/${f.path}`}>
-                {f.name}
-              </Link>
+              <span className="recent-file-name-text">
+                <Link to={`/file/${(f.project || '')}/${f.path}`}>
+                  {f.title || f.name}
+                </Link>
+                <span className="file-subtitle">{f.title ? f.name : '\u00A0'}</span>
+              </span>
             </div>
             <div className="recent-file-project">{f.project}/{f.path}</div>
           </div>

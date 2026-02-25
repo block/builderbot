@@ -117,15 +117,15 @@
   }
 
   // =========================================================================
-  // Shift-key tracking (for draft PR creation)
+  // Option-key tracking (for draft PR creation)
   // =========================================================================
-  let shiftHeld = $state(false);
+  let optionHeld = $state(false);
 
-  function handleShiftDown(e: KeyboardEvent) {
-    if (e.key === 'Shift') shiftHeld = true;
+  function handleOptionDown(e: KeyboardEvent) {
+    if (e.key === 'Alt') optionHeld = true;
   }
-  function handleShiftUp(e: KeyboardEvent) {
-    if (e.key === 'Shift') shiftHeld = false;
+  function handleOptionUp(e: KeyboardEvent) {
+    if (e.key === 'Alt') optionHeld = false;
   }
 
   // =========================================================================
@@ -519,9 +519,9 @@
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
 
-    // Shift-key tracking for draft PR creation
-    window.addEventListener('keydown', handleShiftDown);
-    window.addEventListener('keyup', handleShiftUp);
+    // Option-key tracking for draft PR creation
+    window.addEventListener('keydown', handleOptionDown);
+    window.addEventListener('keyup', handleOptionUp);
 
     // Window focus tracking for smart polling
     handleFocus = () => {
@@ -562,9 +562,9 @@
     // Clean up window focus listeners
     if (handleFocus) window.removeEventListener('focus', handleFocus);
     if (handleBlur) window.removeEventListener('blur', handleBlur);
-    // Clean up shift-key listeners
-    window.removeEventListener('keydown', handleShiftDown);
-    window.removeEventListener('keyup', handleShiftUp);
+    // Clean up option-key listeners
+    window.removeEventListener('keydown', handleOptionDown);
+    window.removeEventListener('keyup', handleOptionUp);
   });
   async function loadTimeline() {
     // Only show the loading spinner on the initial load. Subsequent refreshes
@@ -1196,7 +1196,7 @@
       // Show error dialog
       showPrErrorDialog = true;
     } else if (prState === 'idle') {
-      handleCreatePr(shiftHeld);
+      handleCreatePr(optionHeld);
     } else if (prState === 'creating' && prSessionId) {
       // While creating, open the session chat so user can watch progress
       openSessionId = prSessionId;
@@ -1206,7 +1206,7 @@
   function handlePrErrorRetry() {
     showPrErrorDialog = false;
     prStateStore.clearPrState(branch.id);
-    handleCreatePr(shiftHeld);
+    handleCreatePr(optionHeld);
   }
 
   function handlePrErrorClose() {
@@ -1571,8 +1571,8 @@
                             ? 'PR creation failed — click for details'
                             : prState === 'creating'
                               ? 'Creating PR… (click to view)'
-                              : shiftHeld
-                                ? 'Create draft PR (⇧ held)'
+                              : optionHeld
+                                ? 'Create draft PR (⌥ held)'
                                 : 'Create PR'}
                 >
                   {#if pushState === 'pushing'}
@@ -1610,7 +1610,7 @@
                     {:else if prState === 'error'}
                       PR failed
                     {:else}
-                      {shiftHeld ? 'Create draft PR' : 'Create PR'}
+                      {optionHeld ? 'Create draft PR' : 'Create PR'}
                     {/if}
                   </span>
                   {#if prStatusIndicator}

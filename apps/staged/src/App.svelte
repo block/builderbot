@@ -27,7 +27,7 @@
     Trash2,
     ListChecks,
   } from 'lucide-svelte';
-  import { DiffViewer } from '@builderbot/diff-viewer/components';
+  import { DiffViewer, CrossFileSearchBar } from '@builderbot/diff-viewer/components';
   import {
     buildFileEntries,
     buildTree,
@@ -36,7 +36,9 @@
     truncateText,
     type FileEntry,
     type TreeNode,
+    setupDiffKeyboardNav,
   } from '@builderbot/diff-viewer/utils';
+  import { createSearchState } from '@builderbot/diff-viewer/state';
   import type { FileDiff, FileDiffSummary, Comment, Span } from '@builderbot/diff-viewer/types';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import * as commands from './lib/commands';
@@ -93,6 +95,13 @@
   let collapsedDirs = $state(new Set<string>());
 
   let selectionGeneration = 0;
+
+  // ==========================================================================
+  // State: Search
+  // ==========================================================================
+
+  // svelte-ignore state_referenced_locally
+  const searchState = createSearchState();
 
   // ==========================================================================
   // State: Modals
@@ -343,6 +352,12 @@
     selectFile(file.path);
   }
 
+  // Wrapper for search that returns the loaded diff
+  async function loadFileDiffForSearch(path: string) {
+    await selectFile(path);
+    return currentDiff;
+  }
+
   function toggleDir(path: string) {
     const newSet = new Set(collapsedDirs);
     if (newSet.has(path)) newSet.delete(path);
@@ -402,6 +417,33 @@
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
   }
+
+  // ==========================================================================
+  // Keyboard shortcuts
+  // ==========================================================================
+
+  // Set up keyboard navigation for diff viewer and search
+  $effect(() => {
+    const cleanup = setupDiffKeyboardNav({
+      onOpenSearch: () => searchState.openSearch(),
+      onNextSearchResult: async () => {
+        const result = await searchState.goToNextResult(files);
+        if (result) {
+          await selectFile(result.filePath);
+          // TODO: Scroll to the specific line (result.match.lineIndex)
+        }
+      },
+      onPrevSearchResult: async () => {
+        const result = await searchState.goToPrevResult(files);
+        if (result) {
+          await selectFile(result.filePath);
+          // TODO: Scroll to the specific line (result.match.lineIndex)
+        }
+      },
+    });
+
+    return cleanup;
+  });
 </script>
 
 {#if initialized}
@@ -559,6 +601,9 @@
       {#if files.length > 0}
         <div class="file-sidebar">
           <div class="sidebar-content">
+            <!-- Search bar -->
+            <CrossFileSearchBar {files} loadFileDiff={loadFileDiffForSearch} {searchState} />
+
             <div class="section-header">
               <div class="section-left"></div>
               <div class="section-divider">

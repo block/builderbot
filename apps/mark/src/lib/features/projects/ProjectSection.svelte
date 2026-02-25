@@ -414,7 +414,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 4px;
+    padding: 0;
   }
 
   .project-info {
@@ -572,18 +572,20 @@
   /* ── Project prompt ──────────────────────────────────────────────────── */
 
   .project-prompt-section {
-    padding: 0 4px;
+    padding: 0;
   }
 
   .prompt-input-wrapper {
     display: flex;
     align-items: flex-end;
     gap: 8px;
-    padding: 8px 12px;
+    padding: 6px 8px 6px 12px;
     border: 1px solid var(--border-muted);
-    border-radius: 10px;
+    border-radius: 8px;
     background-color: var(--bg-primary);
-    transition: border-color 0.15s ease;
+    transition:
+      border-color 0.15s ease,
+      background-color 0.15s ease;
   }
 
   .prompt-input-wrapper:focus-within {
@@ -592,6 +594,8 @@
 
   .prompt-input {
     flex: 1;
+    margin: 0;
+    padding: 4px 0;
     border: none;
     background: none;
     color: var(--text-primary);
@@ -600,7 +604,7 @@
     line-height: 1.5;
     resize: none;
     outline: none;
-    min-height: 20px;
+    min-height: 28px;
     max-height: 120px;
     overflow-y: auto;
   }
@@ -613,10 +617,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     background-color: var(--ui-accent);
     color: var(--bg-deepest);
     cursor: pointer;
@@ -639,7 +643,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 0 4px;
+    padding: 0;
   }
 
   .notes-header {
@@ -695,5 +699,21 @@
   .repo-picker-dropdown :global(.repo-picker) {
     min-height: 0;
     flex: 1;
+  }
+
+  @media (max-width: 720px) {
+    .prompt-input-wrapper {
+      padding: 6px;
+    }
+
+    .prompt-input {
+      padding: 4px 2px;
+      font-size: var(--size-xs);
+    }
+
+    .send-button {
+      width: 30px;
+      height: 30px;
+    }
   }
 </style>

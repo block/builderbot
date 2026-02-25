@@ -241,7 +241,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         id: "ai-agent-claude",
         label: "Claude Code",
         command: "claude-code-acp",
-        install_url: Some("https://github.com/anthropics/claude-code#getting-started"),
+        install_url: Some("https://github.com/zed-industries/claude-agent-acp#installation"),
     },
     AgentCheckInfo {
         id: "ai-agent-codex",

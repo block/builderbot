@@ -15,7 +15,11 @@
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import ToastHost from './lib/shared/ToastHost.svelte';
-  import { preferences, initPreferences } from './lib/features/settings/preferences.svelte';
+  import {
+    preferences,
+    initPreferences,
+    setAiAgent,
+  } from './lib/features/settings/preferences.svelte';
   import { refreshProviders } from './lib/features/agents/agent.svelte';
   import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
   import { navigation, initNavigation, openSettings } from './lib/navigation.svelte';
@@ -252,7 +256,13 @@
     }
 
     // Discover available agents in the background.
-    await refreshProviders();
+    const providers = await refreshProviders();
+
+    // First launch: default to the first discovered agent so commit/note actions
+    // don't run with an empty provider.
+    if (preferences.recentAgents.length === 0 && providers.length > 0) {
+      setAiAgent(providers[0].id);
+    }
 
     // Check for `sq` CLI in the background (non-blocking).
     refreshSqAvailability();

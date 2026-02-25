@@ -36,7 +36,8 @@ export const KNOWN_AGENTS: KnownAgent[] = [
     id: 'claude',
     label: 'Claude Code',
     description: 'AI coding assistant by Anthropic',
-    installUrl: 'https://github.com/zed-industries/claude-code-acp#installation',
+    installUrl:
+      'https://github.com/zed-industries/claude-agent-acp?tab=readme-ov-file#installation',
   },
   {
     id: 'codex',

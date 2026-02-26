@@ -2258,7 +2258,7 @@
 
   .primary-action-button.stopping {
     opacity: 0.6;
-    cursor: not-allowed;
+    cursor: pointer;
   }
 
   .primary-action-button.stopping:hover {
@@ -2325,7 +2325,7 @@
 
   .running-action-button.stopping {
     opacity: 0.6;
-    cursor: not-allowed;
+    cursor: pointer;
   }
 
   .running-action-button.stopping:hover {

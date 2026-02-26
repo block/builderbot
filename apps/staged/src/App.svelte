@@ -291,6 +291,16 @@
 
   async function selectFile(path: string | null) {
     const thisGeneration = ++selectionGeneration;
+
+    // If search is open and this file has results, expand and select the first result (before setting selectedFile)
+    if (path && searchState.state.isOpen) {
+      // Auto-expand search results if they are collapsed
+      if (searchState.areSearchResultsCollapsed(path)) {
+        searchState.toggleSearchResults(path);
+      }
+      searchState.selectFirstResultInFile(files, path);
+    }
+
     selectedFile = path;
 
     if (path && !diffCache.has(path)) {
@@ -306,15 +316,6 @@
       } finally {
         loadingFile = null;
       }
-    }
-
-    // If search is open and this file has results, select the first result and expand
-    if (path && searchState.state.isOpen) {
-      // Auto-expand search results if they are collapsed
-      if (searchState.areSearchResultsCollapsed(path)) {
-        searchState.toggleSearchResults(path);
-      }
-      searchState.selectFirstResultInFile(files, path);
     }
   }
 

@@ -35,6 +35,7 @@
     AlertCircle,
     StopCircle,
     CheckCircle,
+    Cloud,
     ChevronDown,
     Zap,
     Wand2,
@@ -48,6 +49,7 @@
     Branch,
     BranchTimeline as BranchTimelineData,
     BranchSessionType,
+    WorkspaceStatus,
   } from '../../types';
   import * as commands from '../../api/commands';
   import type { ProjectAction } from '../../api/commands';
@@ -86,6 +88,9 @@
   import { pushStateStore, type PushState } from '../../stores/pushState.svelte';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import ReasonBanner from './ReasonBanner.svelte';
+  import RemoteWorkspacePoller from './RemoteWorkspacePoller.svelte';
+  import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
+  import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { alerts } from '../../shared/alerts.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
@@ -96,9 +101,11 @@
     projectName?: string;
     deleting?: boolean;
     worktreeError?: string;
+    workspaceError?: string;
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
     onRetryWorktree?: () => void;
+    onWorkspaceStatusChange?: (status: WorkspaceStatus) => void;
   }
 
   let {
@@ -107,14 +114,17 @@
     projectName,
     deleting = false,
     worktreeError,
+    workspaceError,
     onDelete,
     onRename,
     onRetryWorktree,
+    onWorkspaceStatusChange,
   }: Props = $props();
 
   // Determine if this is a local or remote branch
   const isLocal = $derived(branch.branchType === 'local');
   const isRemote = $derived(branch.branchType === 'remote');
+  let remoteWorkspaceStatus = $state<WorkspaceStatus | null>(null);
 
   // Custom transition combining slide and fade effects
   function slideAndFade(
@@ -522,17 +532,17 @@
     }
   });
 
-  // Load timeline when a branch becomes timeline-ready, including when a local
-  // branch transitions from "creating worktree" to an attached worktree path.
-  // Remote branches are always ready (no worktree needed).
+  // Load timeline when a branch becomes timeline-ready.
+  // Local branches need a worktree path; remote branches need a running workspace.
   $effect(() => {
     if (isLocal && !branch.worktreePath) return;
+    if (isRemote && remoteWorkspaceStatus !== 'running') return;
 
     const timelineKey = isRemote ? `${branch.id}:<remote>` : `${branch.id}:${branch.worktreePath}`;
     if (timelineKey === loadedTimelineKey) return;
 
     loadedTimelineKey = timelineKey;
-    loadTimeline();
+    void loadTimeline();
   });
 
   // Track window focus for smart polling
@@ -1515,6 +1525,14 @@
 </script>
 
 <svelte:window onclick={handleClickOutside} />
+{#if isRemote}
+  <RemoteWorkspacePoller
+    branchId={branch.id}
+    incomingStatus={branch.workspaceStatus}
+    bind:status={remoteWorkspaceStatus}
+    onStatusChange={onWorkspaceStatusChange}
+  />
+{/if}
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
@@ -1563,12 +1581,20 @@
     </div>
   {:else}
     <div class="card-header">
+      {#if isRemote}
+        <Cloud size={14} class="header-icon cloud-icon" />
+      {/if}
       <BranchCardHeaderInfo
         branchName={branch.branchName}
         {repoLabel}
-        secondaryLabel={formatBaseBranch(branch.baseBranch)}
+        secondaryLabel={isRemote
+          ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
+          : formatBaseBranch(branch.baseBranch)}
       />
       <div class="header-actions">
+        {#if isRemote && remoteWorkspaceStatus !== 'running'}
+          <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
+        {/if}
         <!-- Running actions (excluding primary action) - local only -->
         {#if isLocal}
           {#each secondaryRunningActions as execution (execution.executionId)}
@@ -1803,7 +1829,13 @@
 
     <div class="card-content">
       <ReasonBanner reason={repoLabel?.reason} onDismiss={handleDismissReason} />
-      {#if loading}
+      {#if isRemote && (remoteWorkspaceStatus === 'starting' || remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'error')}
+        <RemoteWorkspaceStatusView
+          status={remoteWorkspaceStatus}
+          {workspaceError}
+          fallbackError={error}
+        />
+      {:else if loading}
         <div class="loading">
           <Spinner size={14} />
           <span>Loading...</span>
@@ -2110,6 +2142,15 @@
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
+  }
+
+  .card-header :global(svg.header-icon) {
+    flex-shrink: 0;
+    stroke: var(--text-faint);
+  }
+
+  .card-header :global(svg.cloud-icon) {
+    stroke: var(--ui-accent);
   }
 
   /* More menu */

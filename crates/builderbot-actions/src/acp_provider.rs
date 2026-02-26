@@ -26,9 +26,8 @@ impl AcpAiProvider {
     /// An ACP provider, or an error if no ACP agent is available
     pub fn new(working_dir: PathBuf) -> Result<Self> {
         // Verify an agent is available
-        acp_client::find_acp_agent().ok_or_else(|| {
-            anyhow::anyhow!("No ACP agent found (tried goose, claude-agent-acp, claude-code-acp)")
-        })?;
+        acp_client::find_acp_agent()
+            .ok_or_else(|| anyhow::anyhow!("No ACP agent found (tried goose, claude-agent-acp)"))?;
         Ok(Self { working_dir })
     }
 

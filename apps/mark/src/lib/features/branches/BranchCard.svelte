@@ -321,6 +321,7 @@
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenActionStatus: UnlistenFn | null = null;
   let unlistenPrStatus: UnlistenFn | null = null;
+  let unlistenPrStatusCleared: UnlistenFn | null = null;
 
   // Window focus handlers (stored for cleanup)
   let handleFocus: (() => void) | null = null;
@@ -456,10 +457,25 @@
       unlistenPrStatus = unlisten;
     });
 
+    // A push invalidates PR status (checks, mergeable, etc.). Clear local state
+    // immediately so the UI doesn't flash stale indicators like "Has conflicts".
+    listen<string>('pr-status-cleared', (event) => {
+      if (event.payload === branchId) {
+        prStatusState = null;
+        prStatusChecks = null;
+        prStatusReviewDecision = null;
+        prStatusMergeable = null;
+        prStatusDraft = null;
+      }
+    }).then((unlisten) => {
+      unlistenPrStatusCleared = unlisten;
+    });
+
     return () => {
       unlistenStatus?.();
       unlistenActionStatus?.();
       unlistenPrStatus?.();
+      unlistenPrStatusCleared?.();
     };
   });
 
@@ -638,6 +654,7 @@
     unlistenStatus?.();
     unlistenActionStatus?.();
     unlistenPrStatus?.();
+    unlistenPrStatusCleared?.();
     // Clean up PR status polling
     if (prStatusPollTimer) {
       clearInterval(prStatusPollTimer);

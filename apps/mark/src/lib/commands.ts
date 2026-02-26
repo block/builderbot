@@ -779,6 +779,12 @@ export function runDoctorFix(command: string): Promise<void> {
 // PR Status
 // =============================================================================
 
+/** Clear stale PR status fields for a branch (e.g. after a push invalidates them).
+ *  Emits 'pr-status-cleared' event so the UI drops stale indicators immediately. */
+export function clearBranchPrStatus(branchId: string): Promise<void> {
+  return invoke('clear_branch_pr_status', { branchId });
+}
+
 /** Refresh PR status for a specific branch. Emits 'pr-status-changed' event. */
 export function refreshPrStatus(branchId: string): Promise<void> {
   return invoke('refresh_pr_status', { branchId });

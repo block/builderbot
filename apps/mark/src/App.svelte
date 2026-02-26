@@ -233,7 +233,14 @@
                 // Go to error state — clicking the button will open the force push dialog.
                 pushStateStore.setPushError(branchId, '', true); // rejectedNonFastForward=true
               } else {
-                // Push completed successfully
+                // Push completed successfully — clear stale PR status (checks,
+                // mergeable, etc.) before marking done so the UI doesn't briefly
+                // flash outdated indicators like "Has conflicts".
+                try {
+                  await commands.clearBranchPrStatus(branchId);
+                } catch (e) {
+                  console.warn('[Mark] Failed to clear PR status after push:', e);
+                }
                 pushStateStore.setPushDone(branchId);
                 // Reset to idle after a brief moment so the button returns to "View PR"
                 setTimeout(() => {

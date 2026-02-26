@@ -333,6 +333,30 @@ pub async fn refresh_all_pr_statuses(
     Ok(refreshed_count)
 }
 
+/// Clear stale PR status fields for a branch (e.g. after a push invalidates them).
+///
+/// This nulls out checks, mergeable, review-decision, etc. in the DB and emits
+/// a `pr-status-cleared` event so the frontend can drop the stale indicators
+/// immediately instead of waiting for the next GitHub refresh.
+#[tauri::command(rename_all = "camelCase")]
+pub fn clear_branch_pr_status(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+
+    store
+        .update_branch_pr_status(&branch_id, None, None, None, None, None, None, None)
+        .map_err(|e| e.to_string())?;
+
+    app_handle
+        .emit("pr-status-cleared", &branch_id)
+        .map_err(|e| format!("Failed to emit event: {}", e))?;
+
+    Ok(())
+}
+
 /// Check if a branch has commits that haven't been pushed to the remote.
 #[tauri::command(rename_all = "camelCase")]
 pub fn has_unpushed_commits(

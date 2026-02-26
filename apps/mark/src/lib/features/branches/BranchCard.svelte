@@ -1585,7 +1585,7 @@
                         : execution.actionName}
             >
               {#if isStopping}
-                <Spinner size={12} />
+                <Spinner size={12} class="danger" />
               {:else if showStopIcon}
                 <StopCircle size={12} />
               {:else if isRunning}
@@ -1642,7 +1642,7 @@
                         : primaryRunAction.name}
             >
               {#if isStopping}
-                <Spinner size={14} />
+                <Spinner size={14} class="danger" />
               {:else if showStopIcon}
                 <StopCircle size={14} />
               {:else if isRunning}

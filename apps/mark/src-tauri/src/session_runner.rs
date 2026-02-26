@@ -156,6 +156,11 @@ pub struct SessionConfig {
     /// Action registry for tracking running actions in the MCP add_project_repo tool.
     /// Required when `mcp_project_id` is set.
     pub action_registry: Option<Arc<ActionRegistry>>,
+    /// Working directory on the remote workspace. When set, this path is sent
+    /// to the remote agent in the `NewSessionRequest` instead of `"."`, so
+    /// the agent operates in the correct repo directory (e.g.
+    /// `/home/bloxer/cash-server` instead of the workspace default).
+    pub remote_working_dir: Option<PathBuf>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -174,7 +179,11 @@ pub fn start_session(
 ) -> Result<(), String> {
     // Create the driver eagerly so we fail fast if the agent isn't found.
     let driver = if let Some(ref ws_name) = config.workspace_name {
-        AcpDriver::for_workspace(ws_name, config.provider.as_deref())?
+        let mut d = AcpDriver::for_workspace(ws_name, config.provider.as_deref())?;
+        if let Some(ref remote_dir) = config.remote_working_dir {
+            d = d.with_remote_working_dir(remote_dir.clone());
+        }
+        d
     } else {
         match &config.provider {
             Some(id) => AcpDriver::new(id)?,

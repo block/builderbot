@@ -136,6 +136,7 @@ This is critical - the application parses this to link the PR.
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
+            remote_working_dir: None,
         },
         store,
         app_handle,
@@ -441,6 +442,25 @@ The push must succeed before you finish (unless you output the non-fast-forward 
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
+    // Resolve the actual workspace path for remote branches so the remote
+    // agent starts in the correct repo directory.
+    let remote_working_dir = if is_remote {
+        branch
+            .workspace_name
+            .as_deref()
+            .and_then(|ws| {
+                crate::branches::resolve_branch_workspace_subpath(&store, &branch)
+                    .ok()
+                    .flatten()
+                    .and_then(|subpath| {
+                        crate::branches::resolve_workspace_repo_path(ws, &subpath).ok()
+                    })
+            })
+            .map(PathBuf::from)
+    } else {
+        None
+    };
+
     session_runner::start_session(
         session_runner::SessionConfig {
             session_id: session.id.clone(),
@@ -454,6 +474,7 @@ The push must succeed before you finish (unless you output the non-fast-forward 
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
+            remote_working_dir,
         },
         store,
         app_handle,

@@ -76,9 +76,40 @@ uninstall:
     claude plugin marketplace remove penpal 2>/dev/null || true
     echo "Penpal Claude Code plugin uninstalled."
 
+# ============================================================================
+# Code Quality
+# ============================================================================
+
+# Auto-format all code
+fmt:
+    gofmt -w .
+    cd frontend && npx eslint src/ --fix
+
+# Verify formatting without modifying files (used by CI/hooks)
+fmt-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -z "$(gofmt -l .)" || { gofmt -l . ; echo "Go files need formatting"; exit 1; }
+    cd frontend && npx eslint src/
+
+# Lint Rust code with clippy
+lint:
+    cd frontend/src-tauri && cargo clippy -- -D warnings
+
+# Type-check frontend (TypeScript)
+typecheck:
+    cd frontend && npm run typecheck
+
 # Run all tests
 test:
     go test ./... && cd frontend && npm run test:run
+
+# Verify everything without modifying files — for CI
+ci: fmt-check lint typecheck test
+
+# ============================================================================
+# Other
+# ============================================================================
 
 # Run Playwright e2e tests
 test-e2e:
@@ -90,7 +121,3 @@ clean:
     rm -rf frontend/dist
     rm -rf frontend/src-tauri/target
     rm -rf frontend/src-tauri/binaries
-
-# Format and tidy
-check:
-    go fmt ./... && go mod tidy

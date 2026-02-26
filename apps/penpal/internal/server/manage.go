@@ -275,6 +275,12 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 
 	// Check what the path points to
 	absPath := filepath.Join(project.Path, req.Path)
+	resolved, err := filepath.Abs(absPath)
+	if err != nil || !isSubpath(project.Path, resolved) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	absPath = resolved
 	info, err := os.Stat(absPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("path not found: %s", req.Path), http.StatusBadRequest)

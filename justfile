@@ -72,7 +72,10 @@ fmt:
     cargo fmt --all
     for dir in apps/*/; do
         [[ -f "$dir/justfile" ]] || continue
-        just -f "$dir/justfile" fmt
+        recipes="$(just -f "$dir/justfile" --summary)"
+        if echo "$recipes" | tr ' ' '\n' | grep -qx "fmt"; then
+            just -f "$dir/justfile" fmt
+        fi
     done
 
 # Lint everything
@@ -82,7 +85,10 @@ lint:
     cargo clippy --workspace -- -D warnings
     for dir in apps/*/; do
         [[ -f "$dir/justfile" ]] || continue
-        just -f "$dir/justfile" lint
+        recipes="$(just -f "$dir/justfile" --summary)"
+        if echo "$recipes" | tr ' ' '\n' | grep -qx "lint"; then
+            just -f "$dir/justfile" lint
+        fi
     done
 
 # Verify everything without modifying files (CI-friendly)
@@ -93,7 +99,12 @@ check:
     cargo clippy --workspace -- -D warnings
     for dir in apps/*/; do
         [[ -f "$dir/justfile" ]] || continue
-        just -f "$dir/justfile" ci
+        recipes="$(just -f "$dir/justfile" --summary)"
+        if echo "$recipes" | tr ' ' '\n' | grep -qx "ci"; then
+            just -f "$dir/justfile" ci
+        elif echo "$recipes" | tr ' ' '\n' | grep -qx "check"; then
+            just -f "$dir/justfile" check
+        fi
     done
     cargo test --workspace
 

@@ -323,6 +323,39 @@ fn sanitize_remote_acp_chunk(chunk: &str) -> String {
         .collect()
 }
 
+fn decode_remote_acp_line(raw_line: &[u8]) -> (String, bool) {
+    let mut decoded = String::with_capacity(raw_line.len());
+    let mut had_invalid_utf8 = false;
+    let mut cursor = raw_line;
+
+    while !cursor.is_empty() {
+        match std::str::from_utf8(cursor) {
+            Ok(valid) => {
+                decoded.push_str(valid);
+                break;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                if valid_up_to > 0 {
+                    if let Ok(valid) = std::str::from_utf8(&cursor[..valid_up_to]) {
+                        decoded.push_str(valid);
+                    }
+                }
+
+                had_invalid_utf8 = true;
+                cursor = if let Some(invalid_len) = error.error_len() {
+                    &cursor[valid_up_to + invalid_len..]
+                } else {
+                    // Incomplete sequence at EOF, which cannot be recovered.
+                    break;
+                };
+            }
+        }
+    }
+
+    (decoded, had_invalid_utf8)
+}
+
 fn consume_remote_acp_line(pending: &mut String, raw_line: &str) -> RemoteLineOutcome {
     let line = raw_line.trim_end_matches(['\r', '\n']);
     if line.is_empty() {
@@ -373,29 +406,34 @@ fn consume_remote_acp_line(pending: &mut String, raw_line: &str) -> RemoteLineOu
     }
 }
 
-async fn normalize_remote_acp_stdout(
-    stdout: tokio::process::ChildStdout,
+async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
+    stdout: R,
     mut writer: tokio::io::DuplexStream,
 ) -> Result<(), std::io::Error> {
     let mut reader = BufReader::new(stdout);
-    let mut raw_line = String::new();
+    let mut raw_line = Vec::new();
     let mut pending = String::new();
 
     loop {
         raw_line.clear();
-        let bytes_read = reader.read_line(&mut raw_line).await?;
+        let bytes_read = reader.read_until(b'\n', &mut raw_line).await?;
         if bytes_read == 0 {
             break;
         }
 
-        match consume_remote_acp_line(&mut pending, &raw_line) {
+        let (decoded_line, had_invalid_utf8) = decode_remote_acp_line(&raw_line);
+        if had_invalid_utf8 {
+            log::warn!("Dropped invalid UTF-8 bytes from remote ACP stdout");
+        }
+
+        match consume_remote_acp_line(&mut pending, &decoded_line) {
             RemoteLineOutcome::Emit(line) => {
                 writer.write_all(line.as_bytes()).await?;
                 writer.write_all(b"\n").await?;
             }
             RemoteLineOutcome::Pending => {}
             RemoteLineOutcome::Dropped => {
-                if !raw_line.trim().is_empty() {
+                if !decoded_line.trim().is_empty() {
                     log::warn!("Dropped malformed ACP proxy output line");
                 }
             }
@@ -675,8 +713,8 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_remote_acp_line, resolve_spawn_working_dir, sanitize_remote_acp_chunk,
-        RemoteLineOutcome,
+        consume_remote_acp_line, decode_remote_acp_line, resolve_spawn_working_dir,
+        sanitize_remote_acp_chunk, RemoteLineOutcome,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -721,6 +759,22 @@ mod tests {
             ),
             RemoteLineOutcome::Emit("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}".to_string())
         );
+    }
+
+    #[test]
+    fn remote_utf8_decoder_strips_invalid_bytes() {
+        let (decoded, had_invalid_utf8) =
+            decode_remote_acp_line(b"\xff{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\n");
+        assert!(had_invalid_utf8);
+        assert_eq!(decoded, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\n");
+    }
+
+    #[test]
+    fn remote_utf8_decoder_preserves_valid_replacement_character() {
+        let (decoded, had_invalid_utf8) =
+            decode_remote_acp_line("\u{FFFD}{\"jsonrpc\":\"2.0\",\"id\":1}\n".as_bytes());
+        assert!(!had_invalid_utf8);
+        assert_eq!(decoded, "\u{FFFD}{\"jsonrpc\":\"2.0\",\"id\":1}\n");
     }
 
     #[test]

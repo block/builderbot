@@ -103,6 +103,10 @@
 				value={localQuery}
 				oninput={handleInput}
 				onkeydown={handleKeydown}
+				autocorrect="off"
+				autocapitalize="off"
+				autocomplete="off"
+				spellcheck="false"
 			/>
 			{#if searchState.state.loading}
 				<Loader2 size={14} class="loading-icon" />

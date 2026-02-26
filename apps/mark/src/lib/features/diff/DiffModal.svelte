@@ -390,6 +390,7 @@
           {afterLabel}
           annotations={currentAnnotations}
           {annotationsRevealed}
+          searchState={searchState.state}
           onAddComment={readonly ? undefined : handleAddComment}
           onUpdateComment={readonly ? undefined : handleUpdateComment}
           onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}

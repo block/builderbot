@@ -657,6 +657,7 @@
             loading={loadingFile !== null}
             beforeLabel="before"
             afterLabel="after"
+            searchState={searchState.state}
             onAddComment={handleAddComment}
             onUpdateComment={handleUpdateComment}
             onDeleteComment={handleDeleteComment}

@@ -13,18 +13,19 @@
   import { FileSearchResults } from '@builderbot/diff-viewer/components';
   import { getMatchSnippet, getTextLines, type SearchMatch } from '@builderbot/diff-viewer/utils';
   import type { FileEntry, TreeNode } from './diffModalHelpers';
-  import type { FileDiff } from '@builderbot/diff-viewer/types';
+  import type { FileDiff, FileDiffSummary } from '@builderbot/diff-viewer/types';
+  import type { FileSearchResult } from '@builderbot/diff-viewer/state';
 
   interface SearchStateHandle {
     state: {
       isOpen: boolean;
-      fileResults: Map<string, { matches: SearchMatch[]; displayLimit: number }>;
+      fileResults: Map<string, FileSearchResult>;
       collapsedSearchResults: Set<string>;
     };
     toggleSearchResults: (filePath: string) => void;
     areSearchResultsCollapsed: (filePath: string) => boolean;
-    isCurrentResult: (filePath: string, localIndex: number) => boolean;
-    getGlobalIndex: (filePath: string, localIndex: number) => number;
+    isCurrentResult: (files: FileDiffSummary[], filePath: string, localIndex: number) => boolean;
+    getGlobalIndex: (files: FileDiffSummary[], filePath: string, localIndex: number) => number;
     setCurrentResult: (globalIndex: number) => void;
     expandFileResults: (filePath: string) => void;
     collapseFileResults: (filePath: string) => void;
@@ -73,6 +74,14 @@
     searchState,
     diffViewerState,
   }: Props = $props();
+
+  // Convert FileEntry[] to FileDiffSummary[] for search functions
+  const fileSummaries: FileDiffSummary[] = $derived(
+    fileEntries.map((entry) => ({
+      before: entry.status === 'added' ? null : entry.path,
+      after: entry.status === 'deleted' ? null : entry.path,
+    }))
+  );
 
   // Helper to get snippet for a search result
   function getSnippet(match: SearchMatch, filePath: string): string {
@@ -240,9 +249,9 @@
               filePath={node.file.path}
               {depth}
               {getSnippet}
-              isCurrentResult={(fp, idx) => searchState!.isCurrentResult(fp, idx)}
+              isCurrentResult={(fp, idx) => searchState!.isCurrentResult(fileSummaries, fp, idx)}
               onResultClick={handleSearchResultClick}
-              getGlobalIndex={(fp, idx) => searchState!.getGlobalIndex(fp, idx)}
+              getGlobalIndex={(fp, idx) => searchState!.getGlobalIndex(fileSummaries, fp, idx)}
               onExpandResults={(fp) => searchState!.expandFileResults(fp)}
               onCollapseResults={(fp) => searchState!.collapseFileResults(fp)}
             />

@@ -35,21 +35,13 @@ pub(crate) async fn add_project_repo_impl(
     }
 
     let repo_subpath = if project.location == store::ProjectLocation::Remote {
-        let requested = subpath
+        // For remote repos, store the user's subpath as-is (relative to repo
+        // root), or None when no subpath was provided. The workspace clone
+        // directory is derived from `github_repo` at read time.
+        subpath
             .as_deref()
             .map(branches::validate_workspace_subpath)
-            .transpose()?;
-        Some(
-            requested
-                .map(|s| {
-                    if s.starts_with("repo:") || s.starts_with("repos/") {
-                        s
-                    } else {
-                        format!("repo:{s}")
-                    }
-                })
-                .unwrap_or_else(|| branches::infer_remote_repo_subpath(&github_repo)),
-        )
+            .transpose()?
     } else {
         subpath.clone()
     };

@@ -118,13 +118,13 @@ pub(crate) fn validate_workspace_subpath(subpath: &str) -> Result<String, String
     Ok(trimmed.to_string())
 }
 
-pub(crate) fn infer_remote_repo_subpath(github_repo: &str) -> String {
-    let repo_name = github_repo
-        .rsplit('/')
-        .next()
-        .unwrap_or(github_repo)
-        .to_string();
-    let collapsed = repo_name
+/// Extract the repository name from a GitHub repo slug (e.g. `squareup/g2` → `g2`).
+///
+/// The name is sanitised so it is safe to use as a directory name on the
+/// workspace filesystem.
+fn repo_name_from_github_repo(github_repo: &str) -> String {
+    let raw = github_repo.rsplit('/').next().unwrap_or(github_repo);
+    let collapsed = raw
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
@@ -138,14 +138,11 @@ pub(crate) fn infer_remote_repo_subpath(github_repo: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    let suffix = if collapsed.is_empty() {
+    if collapsed.is_empty() {
         "repo".to_string()
     } else {
         collapsed
-    };
-    // Marker format for workspace repo roots. The actual folder path in the
-    // workspace is the value after `repo:` (e.g. `repo:builderbot` -> `~/builderbot`).
-    format!("repo:{suffix}")
+    }
 }
 
 pub(crate) fn run_workspace_git(
@@ -228,6 +225,14 @@ pub(crate) fn resolve_workspace_repo_path(
     Ok(repo_subpath.to_string())
 }
 
+/// Resolve the workspace-relative path for a branch's repository.
+///
+/// The workspace clone directory is derived from `github_repo` (e.g.
+/// `squareup/g2` → `~/g2`). If the repo has a subpath (a monorepo
+/// subdirectory like `apps/mark`), it is appended to the clone directory.
+///
+/// Returns a `home:<dir>` string suitable for `resolve_workspace_repo_path`,
+/// or `None` when the branch has no associated project repo.
 pub(crate) fn resolve_branch_workspace_subpath(
     store: &Arc<Store>,
     branch: &store::Branch,
@@ -238,21 +243,32 @@ pub(crate) fn resolve_branch_workspace_subpath(
     let Some(repo) = store.get_project_repo(repo_id).map_err(|e| e.to_string())? else {
         return Ok(None);
     };
-    let Some(subpath) = repo.subpath else {
-        return Ok(None);
+
+    // Backward compatibility: existing DB rows may still have the old
+    // `repo:` prefix or `repos/` path format.
+    if let Some(ref subpath) = repo.subpath {
+        let trimmed = subpath.trim().trim_matches('/');
+        if let Some(repo_dir) = trimmed.strip_prefix("repo:") {
+            let dir = validate_workspace_subpath(repo_dir)?;
+            return Ok(Some(format!("home:{dir}")));
+        }
+        if trimmed.starts_with("repos/") {
+            return Ok(Some(trimmed.to_string()));
+        }
+    }
+
+    // Current format: repo.subpath is None or a plain path relative to the
+    // repo root (e.g. "apps/mark"). Derive the workspace clone directory
+    // from github_repo.
+    let clone_dir = repo_name_from_github_repo(&repo.github_repo);
+    let workspace_path = match &repo.subpath {
+        Some(subpath) => {
+            let validated = validate_workspace_subpath(subpath)?;
+            format!("home:{clone_dir}/{validated}")
+        }
+        None => format!("home:{clone_dir}"),
     };
-    let validated = validate_workspace_subpath(&subpath)?;
-    if let Some(repo_dir) = validated.strip_prefix("repo:") {
-        let dir = validate_workspace_subpath(repo_dir)?;
-        return Ok(Some(format!("home:{dir}")));
-    }
-    // Backward compatibility for previously created repos under `repos/...`.
-    if validated.starts_with("repos/") {
-        return Ok(Some(validated));
-    }
-    // Existing plain subpaths (e.g. monorepo paths like `packages/web`) are
-    // project-internal paths, not repo roots in the shared workspace.
-    Ok(None)
+    Ok(Some(workspace_path))
 }
 
 fn normalize_branch_ref(branch: &str) -> String {

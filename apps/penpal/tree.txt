@@ -1,0 +1,419 @@
+.
+├── context
+│   ├── architecture.md
+│   ├── concept_map.md
+│   ├── dependencies.md
+│   ├── index.md
+│   ├── meta.json
+│   ├── modules.md
+│   ├── patterns.md
+│   ├── state.json
+│   └── technology-matrix.md
+└── work
+    ├── archives
+    │   └── features
+    │       ├── 01-28-display_drive-thru_details_in_fulfillment_dialog
+    │       │   └── collected_feedback.md
+    │       ├── 12-02
+    │       │   ├── collected_feedback.md
+    │       │   └── pr_responses.md
+    │       ├── 12-03-re-use_cdx_connectivity_section_in_kds_device_status_screen
+    │       │   └── collected_feedback.md
+    │       ├── 12-06-extract_hardware_hub
+    │       │   └── collected_feedback.md
+    │       ├── 12-06-extract_hardware_hub_s_test_connectivity_detail_page_into_workflow
+    │       │   └── collected_feedback.md
+    │       ├── 12-11-customize_connectivity_report_settings_button_visibility
+    │       │   └── collected_feedback.md
+    │       ├── 140348
+    │       │   └── collected_feedback.md
+    │       ├── category-v3-token-flag
+    │       │   ├── code_check_report.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verify_report.md
+    │       │   └── tasks.md
+    │       ├── connectivity-workflow-extraction
+    │       │   ├── code_check_report_1.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verification_1.md
+    │       │   └── tasks.md
+    │       ├── extract_hardware_hub_connectivity
+    │       │   └── collected_feedback.md
+    │       ├── extract_hardware_hub_test_connectivity
+    │       │   └── collected_feedback.md
+    │       ├── fix_marketscreencomposablefactory
+    │       │   └── collected_feedback.md
+    │       ├── hardware-hub-connectivity-section-workflow
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   └── tasks.md
+    │       ├── KDS-34
+    │       │   ├── code_check_report.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verification_report.md
+    │       │   ├── milestone-1.md
+    │       │   ├── milestone-2.md
+    │       │   ├── requirements.md
+    │       │   └── tracker.md
+    │       ├── kds-437
+    │       │   └── collected_feedback.md
+    │       ├── kds-450-chit-journey-cleanup
+    │       │   ├── code_check_report.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verify_report.md
+    │       │   └── tasks.md
+    │       ├── kds-connectivity-section-integration
+    │       │   ├── code_check_report_1.md
+    │       │   ├── code_check_report_2.md
+    │       │   ├── design-addendum.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verification_1.md
+    │       │   ├── feature_verify_report_2.md
+    │       │   ├── README.md
+    │       │   └── tasks.md
+    │       ├── kds-dark-mode-viewenv
+    │       │   ├── code_check_report_1.md
+    │       │   ├── code_check_report_2.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verify_report_1.md
+    │       │   ├── feature_verify_report_2.md
+    │       │   ├── milestone-1.md
+    │       │   ├── milestone-2.md
+    │       │   ├── milestone-3.md
+    │       │   ├── milestone-4.md
+    │       │   ├── milestone-5.md
+    │       │   ├── requirements.md
+    │       │   └── tracker.md
+    │       ├── kds-device-status-modal-overlay
+    │       │   └── collected_feedback.md
+    │       ├── kds-offline-status-bar
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── milestone-1.md
+    │       │   ├── milestone-2.md
+    │       │   ├── milestone-3.md
+    │       │   ├── requirements.md
+    │       │   └── tracker.md
+    │       ├── kds-robot-decomposition
+    │       │   ├── code_check_report_1.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verify_report_1.md
+    │       │   ├── milestone-1.md
+    │       │   ├── milestone-2.md
+    │       │   ├── milestone-3.md
+    │       │   ├── milestone-4.md
+    │       │   ├── milestone-5.md
+    │       │   ├── milestone-6.md
+    │       │   ├── milestone-7.md
+    │       │   └── tracker.md
+    │       ├── kds-vehicle-details
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── requirements.md
+    │       │   ├── research.md
+    │       │   └── tasks.md
+    │       ├── sync-hub-connectivity-module
+    │       │   ├── code_check_report_1.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verify_report_1.md
+    │       │   ├── requirements.md
+    │       │   └── tasks.md
+    │       ├── SYNCHUB-1010
+    │       │   ├── code_check_report_1.md
+    │       │   ├── code_check_report_2.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verify_report_1.md
+    │       │   ├── milestone-1.md
+    │       │   ├── milestone-2.md
+    │       │   ├── milestone-3.md
+    │       │   ├── milestone-4.md
+    │       │   ├── milestone-5.md
+    │       │   ├── milestone-6.md
+    │       │   └── tracker.md
+    │       ├── SYNCHUB-1115
+    │       │   ├── code_check_report_1.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verification_1.md
+    │       │   ├── requirements.md
+    │       │   └── tasks.md
+    │       ├── SYNCHUB-436
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── requirements.md
+    │       │   └── tasks.md
+    │       ├── SYNCHUB-968
+    │       │   ├── code_check_report_1.md
+    │       │   ├── code_check_report_2.md
+    │       │   ├── code_check_report_3.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verify_report_2.md
+    │       │   ├── feature_verify_report_3.md
+    │       │   ├── feature_verify_report.md
+    │       │   ├── milestone-1.md
+    │       │   ├── milestone-2.md
+    │       │   ├── milestone-3.md
+    │       │   ├── requirements.md
+    │       │   ├── tasks-overlay-list.md
+    │       │   └── tracker.md
+    │       ├── SYNCHUB-969
+    │       │   ├── code_check_report_1.md
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── feature_verification_1.md
+    │       │   ├── milestone-1.md
+    │       │   ├── milestone-2.md
+    │       │   ├── milestone-3.md
+    │       │   ├── milestone-4.md
+    │       │   ├── milestone-5.md
+    │       │   ├── requirements.md
+    │       │   └── tracker.md
+    │       ├── synchub-969-network-connectivity-detail
+    │       │   ├── design-decisions.md
+    │       │   ├── design.md
+    │       │   ├── milestone-1.md
+    │       │   ├── milestone-2.md
+    │       │   ├── milestone-3.md
+    │       │   ├── milestone-4.md
+    │       │   ├── milestone-5.md
+    │       │   ├── milestone-6.md
+    │       │   ├── requirements.md
+    │       │   └── tracker.md
+    │       └── v3-token-category-id
+    │           └── collected_feedback.md
+    ├── code_check_report_1.md
+    ├── code_check_report_10.md
+    ├── code_check_report_11.md
+    ├── code_check_report_2.md
+    ├── code_check_report_3.md
+    ├── code_check_report_4.md
+    ├── code_check_report_5.md
+    ├── code_check_report_6.md
+    ├── code_check_report_7.md
+    ├── code_check_report_8.md
+    ├── code_check_report_9.md
+    ├── content
+    │   └── kds-split-timestamp
+    ├── features
+    │   ├── kds-fire-by-prep-times
+    │   │   ├── code_check_report_1.md
+    │   │   ├── design-decisions.md
+    │   │   ├── design.md
+    │   │   ├── feature_verification_1.md
+    │   │   ├── hypotheses.md
+    │   │   ├── requirements.md
+    │   │   └── tasks.md
+    │   └── kds-flag-cleanup
+    │       ├── design-decisions.md
+    │       ├── design.md
+    │       ├── hypotheses.md
+    │       ├── requirements.md
+    │       └── tasks.md
+    ├── issues
+    │   ├── android-register-6.86-400-errors
+    │   │   ├── debug_changes.log
+    │   │   ├── evidence
+    │   │   │   ├── changed_files.txt
+    │   │   │   ├── commits.txt
+    │   │   │   ├── fault_injection_interceptor_diff.txt
+    │   │   │   ├── http_interceptor_diffs.txt
+    │   │   │   ├── network_related_commits.txt
+    │   │   │   ├── network_related_files.txt
+    │   │   │   └── okhttp_upgrade_analysis.md
+    │   │   └── investigation_report.md
+    │   ├── backstack-modal-height
+    │   │   └── investigation_report.md
+    │   ├── catalog-category-id-v3-token
+    │   │   └── investigation_report.md
+    │   ├── category-id-feature-flag-ui-tests
+    │   │   ├── debug_changes.log
+    │   │   └── investigation_report.md
+    │   ├── color-mode-legacy-kds
+    │   │   ├── evidence
+    │   │   └── investigation_report.md
+    │   ├── compose-sigsegv-001
+    │   │   ├── debug_changes.log
+    │   │   └── investigation_report.md
+    │   ├── connectivity-dark-theme
+    │   │   └── investigation_report.md
+    │   ├── course-firing-investigation
+    │   │   └── investigation_report.md
+    │   ├── dark-mode-preview-backgrounds
+    │   │   ├── debug_changes.log
+    │   │   ├── evidence
+    │   │   │   └── pattern_examples.md
+    │   │   ├── investigation_report.md
+    │   │   └── timeline.md
+    │   ├── default_course_name_bug
+    │   │   └── investigation_report.md
+    │   ├── drivethru-dialog-investigation
+    │   │   ├── debug_changes.log
+    │   │   ├── evidence
+    │   │   │   ├── current_structure.md
+    │   │   │   ├── data_mapping.md
+    │   │   │   └── key_files.md
+    │   │   └── investigation_report.md
+    │   ├── env-screen-merging
+    │   │   └── investigation_report.md
+    │   ├── environment-screen-pattern
+    │   │   ├── investigation_report.md
+    │   │   └── solution_guide.md
+    │   ├── heldChits-investigation
+    │   │   └── investigation_report.md
+    │   ├── itemizations-test-failure
+    │   │   └── investigation_report.md
+    │   ├── kds-400-session
+    │   │   └── investigation_report.md
+    │   ├── KDS-437
+    │   │   ├── implementation_plan.md
+    │   │   └── investigation_report.md
+    │   ├── KDS-450
+    │   │   ├── evidence
+    │   │   └── investigation_report.md
+    │   ├── kds-blank-screen
+    │   │   └── investigation_report.md
+    │   ├── kds-combo-quantity-bug
+    │   │   ├── debug_changes.log
+    │   │   ├── evidence
+    │   │   │   └── code_analysis.md
+    │   │   └── investigation_report.md
+    │   ├── kds-connectivity-dark-mode
+    │   │   ├── evidence
+    │   │   │   ├── composition-hierarchy.md
+    │   │   │   └── theme-override-locations.md
+    │   │   └── investigation_report.md
+    │   ├── kds-connectivity-dialog-theme
+    │   │   ├── debug_changes.log
+    │   │   └── investigation_report.md
+    │   ├── kds-dark-mode-device-code
+    │   │   └── investigation_report.md
+    │   ├── kds-device-status-modal-height
+    │   │   ├── debug_changes.log
+    │   │   ├── evidence
+    │   │   │   ├── comparison_with_working_examples.txt
+    │   │   │   ├── kds_presentation_layer.txt
+    │   │   │   ├── kds_screen_structure.txt
+    │   │   │   └── partial_modal_definition.txt
+    │   │   └── investigation_report.md
+    │   ├── kds-dual-fields
+    │   │   └── investigation_report.md
+    │   ├── kds-field-contamination
+    │   │   ├── evidence
+    │   │   │   ├── contamination_scenarios.md
+    │   │   │   └── key_code_snippets.md
+    │   │   └── investigation_report.md
+    │   ├── kds-login-light-theme
+    │   │   └── investigation_report.md
+    │   ├── kds-queue-service-crash
+    │   │   └── investigation_report.md
+    │   ├── kds-split-timestamp
+    │   │   ├── investigation_log.md
+    │   │   └── investigation_report.md
+    │   ├── kds-system-bars-not-persisting
+    │   │   ├── activity_recreation_scenarios.md
+    │   │   ├── evidence_code_comparison.md
+    │   │   └── investigation_report.md
+    │   ├── kds-test-helper-architecture
+    │   │   ├── evidence
+    │   │   │   └── investigation_notes.md
+    │   │   └── investigation_report.md
+    │   ├── kds-tombstone-bug
+    │   │   ├── debug_changes.log
+    │   │   ├── evidence
+    │   │   │   ├── key_code_flows.md
+    │   │   │   └── root_cause_summary.md
+    │   │   └── investigation_report.md
+    │   ├── market-overlay-tests
+    │   │   └── investigation_report.md
+    │   ├── market-overlay-theming
+    │   │   ├── debug_changes.log
+    │   │   ├── evidence
+    │   │   │   ├── key_findings.md
+    │   │   │   ├── root_cause_analysis.md
+    │   │   │   └── solution_code_example.md
+    │   │   ├── investigation_report.md
+    │   │   └── SUMMARY.md
+    │   ├── missing-strings-fe45471
+    │   │   ├── evidence
+    │   │   │   ├── connection_status_strings_before.txt
+    │   │   │   ├── connectivity_impl_strings_diff.txt
+    │   │   │   ├── connectivity_public_strings_added.txt
+    │   │   │   ├── hardwarehub_strings_diff.txt
+    │   │   │   ├── robot_before_commit.txt
+    │   │   │   ├── robot_diff.txt
+    │   │   │   └── strings_before_commit.txt
+    │   │   ├── investigation_report.md
+    │   │   └── string_mapping_final.md
+    │   ├── paparazzi-failure
+    │   │   ├── debug_changes.log
+    │   │   ├── evidence
+    │   │   │   ├── connectivity-strings.diff
+    │   │   │   ├── strings.diff
+    │   │   │   ├── ThisDeviceGateKeeper.diff
+    │   │   │   ├── ViewDetailsRendering.diff
+    │   │   │   ├── ViewDetailsScreen.diff
+    │   │   │   └── ViewDetailsStylesheet.diff
+    │   │   ├── investigation_report.md
+    │   │   └── logs
+    │   │       └── paparazzi-test-output.log
+    │   ├── per-overlay-theming-api
+    │   │   ├── debug_changes.log
+    │   │   └── investigation_report.md
+    │   ├── printers-flag-investigation
+    │   │   ├── debug_changes.log
+    │   │   └── investigation_report.md
+    │   ├── string-conflicts-investigation
+    │   │   ├── evidence
+    │   │   │   ├── conflict-analysis.txt
+    │   │   │   └── hardwarehub-strings-master.xml
+    │   │   ├── investigation_report.md
+    │   │   ├── RESOLUTION_GUIDE.md
+    │   │   └── summary.md
+    │   ├── sync-hub-connectivity-deps
+    │   │   └── investigation_report.md
+    │   ├── testingAndroid-validation-error
+    │   │   ├── evidence
+    │   │   │   └── example_build_files
+    │   │   └── investigation_report.md
+    │   ├── theming-granularity
+    │   │   ├── evidence
+    │   │   │   ├── key_findings.md
+    │   │   │   ├── RealLegacyItemAvailabilityWorkflow.kt
+    │   │   │   └── solution_example.kt
+    │   │   └── investigation_report.md
+    │   ├── viewenv-dialog-theme
+    │   │   ├── connectivity_report_implementation.kt
+    │   │   ├── investigation_report.md
+    │   │   └── working_code_example.kt
+    │   ├── viewenv-propagation
+    │   │   └── investigation_report.md
+    │   ├── viewenvironment-api-investigation
+    │   │   └── investigation_report.md
+    │   └── void-detection-alternatives
+    │       └── investigation_report.md
+    ├── pr-reviews
+    ├── quick-builds
+    │   ├── 2026-02-02-fix-isposquicksale-precedence-1.md
+    │   ├── 2026-02-03-add-order-rejection-logging-1.md
+    │   ├── 2026-02-03-kds-order-rejection-logging-1.md
+    │   └── 2026-02-09-commit-factory-move-actor-1.md
+    └── research
+        ├── 2026-02-02-kds-472-delivery-pickup-orders-are-rejected-by-kds-local.md
+        ├── 2026-02-02-kds-order-filtering-logic-comparison.md
+        ├── 2026-02-04-kds-fire-by-prep-time-implementation-research.md
+        ├── 2026-02-05-feasibility-of-implementing-kds-live-chits-in.md
+        ├── 2026-02-05-kds-live-chits-implementation-analysis-and-2.md
+        ├── 2026-02-05-kds-live-chits-implementation-analysis-and.md
+        ├── 2026-02-06-feasibility-of-visually-delaying-kds-items-within.md
+        ├── 2026-02-06-how-fulfillments-work-at-square.md
+        └── KDS_LOGGED_IN_FLAGS_AUDIT.md

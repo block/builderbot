@@ -1,0 +1,13 @@
+{
+  "name": "penpal",
+  "owner": {
+    "name": "Logan Johnson"
+  },
+  "plugins": [
+    {
+      "name": "penpal",
+      "source": "./plugin",
+      "description": "Document review tools for markdown files in thoughts/ directories."
+    }
+  ]
+}

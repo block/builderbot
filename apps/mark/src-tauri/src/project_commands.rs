@@ -108,13 +108,16 @@ pub(crate) async fn add_project_repo_impl(
         store
             .set_primary_project_repo(&project_id, &repo.id)
             .map_err(|e| e.to_string())?;
+        // Use the original user-provided subpath for the project display,
+        // not the repo's internal workspace subpath (e.g. "repo:g2") which
+        // is an implementation detail for remote workspace directory layout.
         store
             .update_project(
                 &project_id,
                 &project.name,
                 Some(&repo.github_repo),
                 &project.location,
-                repo.subpath.as_deref(),
+                subpath.as_deref(),
             )
             .map_err(|e| e.to_string())?;
         repo.is_primary = true;

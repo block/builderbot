@@ -155,8 +155,12 @@
   function selectFile(file: FileEntry) {
     selectedCommentId = null;
     diffViewer.selectFile(file.path);
-    // If search is open and this file has results, select the first result
+    // If search is open and this file has results, select the first result and expand
     if (searchState.state.isOpen) {
+      // Auto-expand search results if they are collapsed
+      if (searchState.areSearchResultsCollapsed(file.path)) {
+        searchState.toggleSearchResults(file.path);
+      }
       searchState.selectFirstResultInFile(diffViewer.state.files, file.path);
     }
   }

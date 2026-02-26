@@ -308,8 +308,12 @@
       }
     }
 
-    // If search is open and this file has results, select the first result
+    // If search is open and this file has results, select the first result and expand
     if (path && searchState.state.isOpen) {
+      // Auto-expand search results if they are collapsed
+      if (searchState.areSearchResultsCollapsed(path)) {
+        searchState.toggleSearchResults(path);
+      }
       searchState.selectFirstResultInFile(files, path);
     }
   }

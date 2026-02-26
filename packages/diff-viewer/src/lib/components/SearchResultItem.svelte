@@ -14,9 +14,19 @@
 	}
 
 	let { match, snippet, isCurrent, onclick }: Props = $props();
+
+	// Scroll into view when this result becomes current
+	let buttonRef: HTMLButtonElement | undefined = $state(undefined);
+
+	$effect(() => {
+		if (isCurrent && buttonRef) {
+			// Use scrollIntoView with smooth behavior and nearest block alignment
+			buttonRef.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+		}
+	});
 </script>
 
-<button class="search-result-item" class:current={isCurrent} {onclick}>
+<button class="search-result-item" class:current={isCurrent} {onclick} bind:this={buttonRef}>
 	<span class="result-snippet" title={snippet}>
 		{snippet}
 	</span>

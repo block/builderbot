@@ -1,5 +1,15 @@
 # Changelog
 
+## Feb 25, 2026
+
+- **CLI: `penpal open`** — New command opens files directly in the desktop app
+- **Back/forward buttons** — Each tab maintains its own navigation history, with toolbar buttons and keyboard shortcuts (`Cmd+[` / `Cmd+]`), just like your browser
+- **Resizable chat panel** — Drag to resize the comments panel ([thanks @donley!](https://github.com/squareup/personal-loganj-birdseye/pull/93))
+- **Show file titles** — Penpal now parses files for their titles, instead of just showing filenames
+- **Fix: agent reliability** — Agents now start reliably and SSE connections recover after disconnect
+- **Fix: comment anchoring** — Comment highlights are more stable
+- **Fix: open external links in browser** — Links to external sites open in your default browser instead of inside the app
+
 ## Feb 24, 2026
 
 - **Desktop app** — Penpal has a macOS app with tabs, multiple window support, and Cmd+F find-in-page. Run `just install` to put the app in /Applications and install the Claude plugin.

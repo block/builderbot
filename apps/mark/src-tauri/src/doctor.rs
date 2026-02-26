@@ -39,6 +39,8 @@ pub struct DoctorCheck {
     pub fix_url: Option<String>,
     /// If non-None, the UI shows a "Fix" button that runs this shell command.
     pub fix_command: Option<String>,
+    /// If non-None, the resolved path to the executable on disk.
+    pub path: Option<String>,
 }
 
 /// The full report returned to the frontend.
@@ -60,6 +62,7 @@ fn check_git() -> DoctorCheck {
     match Command::new("git").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path = find_command("git").map(|p| p.to_string_lossy().to_string());
             DoctorCheck {
                 id,
                 label,
@@ -67,6 +70,7 @@ fn check_git() -> DoctorCheck {
                 message: version,
                 fix_url: None,
                 fix_command: None,
+                path,
             }
         }
         _ => DoctorCheck {
@@ -76,6 +80,7 @@ fn check_git() -> DoctorCheck {
             message: "Git not found".to_string(),
             fix_url: Some("https://git-scm.com/downloads".to_string()),
             fix_command: None,
+            path: None,
         },
     }
 }
@@ -89,6 +94,7 @@ fn check_gh() -> DoctorCheck {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
             let first_line = version.lines().next().unwrap_or("gh").trim().to_string();
+            let path = find_command("gh").map(|p| p.to_string_lossy().to_string());
             DoctorCheck {
                 id,
                 label,
@@ -96,6 +102,7 @@ fn check_gh() -> DoctorCheck {
                 message: first_line,
                 fix_url: None,
                 fix_command: None,
+                path,
             }
         }
         _ => DoctorCheck {
@@ -105,6 +112,7 @@ fn check_gh() -> DoctorCheck {
             message: "GitHub CLI not found".to_string(),
             fix_url: Some("https://cli.github.com".to_string()),
             fix_command: None,
+            path: None,
         },
     }
 }
@@ -123,6 +131,7 @@ fn check_gh_auth() -> DoctorCheck {
             message: "Authenticated".to_string(),
             fix_url: None,
             fix_command: None,
+            path: None,
         }
     } else {
         DoctorCheck {
@@ -134,6 +143,7 @@ fn check_gh_auth() -> DoctorCheck {
                 .unwrap_or_else(|| "Not authenticated".to_string()),
             fix_url: Some("https://cli.github.com/manual/gh_auth_login".to_string()),
             fix_command: None,
+            path: None,
         }
     }
 }
@@ -146,6 +156,7 @@ fn check_git_lfs() -> DoctorCheck {
     match Command::new("git").args(["lfs", "version"]).output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let path = find_command("git-lfs").map(|p| p.to_string_lossy().to_string());
             DoctorCheck {
                 id,
                 label,
@@ -153,6 +164,7 @@ fn check_git_lfs() -> DoctorCheck {
                 message: version,
                 fix_url: None,
                 fix_command: None,
+                path,
             }
         }
         _ => DoctorCheck {
@@ -162,6 +174,7 @@ fn check_git_lfs() -> DoctorCheck {
             message: "Git LFS not installed (optional, needed for large files)".to_string(),
             fix_url: Some("https://git-lfs.com".to_string()),
             fix_command: None,
+            path: None,
         },
     }
 }
@@ -191,6 +204,7 @@ fn check_clonefile() -> DoctorCheck {
                     message: "Enabled — reduces disk space used by new worktrees".to_string(),
                     fix_url: None,
                     fix_command: None,
+                    path: None,
                 }
             } else {
                 DoctorCheck {
@@ -201,6 +215,7 @@ fn check_clonefile() -> DoctorCheck {
                         .to_string(),
                     fix_url: None,
                     fix_command: Some(fix_cmd),
+                    path: None,
                 }
             }
         }
@@ -212,6 +227,7 @@ fn check_clonefile() -> DoctorCheck {
             message: "Not set — enable to reduce disk space used by new worktrees".to_string(),
             fix_url: None,
             fix_command: Some(fix_cmd),
+            path: None,
         },
     }
 }
@@ -273,7 +289,14 @@ fn agent_installed(info: &AgentCheckInfo) -> bool {
 /// agents get `Warn`; otherwise the first missing agent gets `Warn` too since
 /// only one agent is required overall.
 fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> DoctorCheck {
-    if agent_installed(info) {
+    // Resolve the path for the first matching command.
+    let resolved_path = info
+        .commands
+        .iter()
+        .find_map(|cmd| find_command(cmd))
+        .map(|p| p.to_string_lossy().to_string());
+
+    if resolved_path.is_some() {
         // Special handling for Goose: verify ACP subcommand is available
         if info.id == "ai-agent-goose" {
             match Command::new("goose").arg("acp").arg("--help").output() {
@@ -284,6 +307,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                     message: "Installed".to_string(),
                     fix_url: None,
                     fix_command: None,
+                    path: resolved_path,
                 },
                 _ => {
                     // Goose is installed but ACP subcommand is not available
@@ -295,6 +319,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                             .to_string(),
                         fix_url: Some("https://github.com/block/goose".to_string()),
                         fix_command: None,
+                        path: resolved_path,
                     }
                 }
             }
@@ -306,6 +331,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                 message: "Installed".to_string(),
                 fix_url: None,
                 fix_command: None,
+                path: resolved_path,
             }
         }
     } else {
@@ -320,6 +346,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
             },
             fix_url: info.install_url.map(|s| s.to_string()),
             fix_command: None,
+            path: None,
         }
     }
 }

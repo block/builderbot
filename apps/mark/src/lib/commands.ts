@@ -759,6 +759,7 @@ export interface DoctorCheck {
   message: string;
   fixUrl: string | null;
   fixCommand: string | null;
+  path: string | null;
 }
 
 export interface DoctorReport {

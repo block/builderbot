@@ -55,6 +55,9 @@
   <div class="check-info">
     <span class="check-label">{check.label}</span>
     <span class="check-message">{check.message}</span>
+    {#if check.path}
+      <span class="check-path">{check.path}</span>
+    {/if}
     {#if fixError}
       <span class="fix-error">{fixError}</span>
     {/if}
@@ -120,6 +123,14 @@
   .check-message {
     font-size: var(--size-xs);
     color: var(--text-muted);
+    overflow-wrap: break-word;
+    word-wrap: break-word;
+  }
+
+  .check-path {
+    font-size: 10px;
+    color: var(--text-faint, rgba(255, 255, 255, 0.35));
+    font-family: monospace;
     overflow-wrap: break-word;
     word-wrap: break-word;
   }

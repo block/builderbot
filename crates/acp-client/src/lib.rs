@@ -23,7 +23,7 @@
 //! use acp_client::{find_acp_agent, run_acp_prompt};
 //! use std::path::Path;
 //!
-//! #[tokio::main]
+//! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> anyhow::Result<()> {
 //!     let agent = find_acp_agent().ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
 //!     let response = run_acp_prompt(&agent, Path::new("."), "Hello!").await?;

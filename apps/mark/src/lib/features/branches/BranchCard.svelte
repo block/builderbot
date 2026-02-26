@@ -62,7 +62,7 @@
     runBranchAction,
     getRunningBranchActions,
     clearActionExecution,
-    stopBranchActionWithState,
+    stopBranchAction,
     type ActionStatusEvent,
   } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
@@ -391,7 +391,9 @@
             payload.status === 'completed' ||
             payload.status === 'failed'
           ) {
-            stoppingExecutions.delete(payload.executionId);
+            const updated = new Set(stoppingExecutions);
+            updated.delete(payload.executionId);
+            stoppingExecutions = updated;
           }
 
           // Auto-remove terminal states after a delay
@@ -872,10 +874,25 @@
   }
 
   async function handleStopAction(executionId: string, actionName: string) {
-    await stopBranchActionWithState(executionId, stoppingExecutions, (err) => {
-      console.error(`Failed to stop action ${actionName}:`, err);
-      notifyError(`Failed to stop action "${actionName}"`, err);
-    });
+    // Prevent duplicate stop requests
+    if (stoppingExecutions.has(executionId)) {
+      return;
+    }
+
+    // Add to stopping set and trigger reactivity
+    stoppingExecutions = new Set(stoppingExecutions).add(executionId);
+
+    try {
+      await stopBranchAction(executionId);
+      // Backend will emit 'stopped' status event which will clean up the stopping state
+    } catch (e) {
+      // Remove from stopping set on error so user can retry
+      const updated = new Set(stoppingExecutions);
+      updated.delete(executionId);
+      stoppingExecutions = updated;
+      console.error(`Failed to stop action ${actionName}:`, e);
+      notifyError(`Failed to stop action "${actionName}"`, e);
+    }
   }
 
   // Handle showing action output

@@ -28,7 +28,7 @@
   import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
   import {
     getActionOutputBuffer,
-    stopBranchActionWithState,
+    stopBranchAction,
     clearActionExecution,
     listenToActionOutput,
     listenToActionStatus,
@@ -198,7 +198,9 @@
           }
           // Clean up stopping state when action reaches terminal state
           if (status !== 'running') {
-            stoppingExecutions.delete(executionId);
+            const updated = new Set(stoppingExecutions);
+            updated.delete(executionId);
+            stoppingExecutions = updated;
           }
         }
       });
@@ -223,10 +225,25 @@
   // =========================================================================
 
   async function handleStop() {
-    await stopBranchActionWithState(executionId, stoppingExecutions, (err) => {
-      error = err.message || 'Failed to stop action';
-      console.error('Failed to stop action:', err);
-    });
+    // Prevent duplicate stop requests
+    if (stoppingExecutions.has(executionId)) {
+      return;
+    }
+
+    // Add to stopping set and trigger reactivity
+    stoppingExecutions = new Set(stoppingExecutions).add(executionId);
+
+    try {
+      await stopBranchAction(executionId);
+      // Backend will emit 'stopped' status event which will clean up the stopping state
+    } catch (e: any) {
+      // Remove from stopping set on error so user can retry
+      const updated = new Set(stoppingExecutions);
+      updated.delete(executionId);
+      stoppingExecutions = updated;
+      error = e?.message || 'Failed to stop action';
+      console.error('Failed to stop action:', e);
+    }
   }
 
   function scrollToBottom() {

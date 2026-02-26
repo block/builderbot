@@ -15,8 +15,6 @@ pub(crate) struct KnownAgent {
     pub label: &'static str,
     /// CLI command name to search for.
     pub command: &'static str,
-    /// Optional legacy command names accepted for backwards compatibility.
-    pub command_aliases: &'static [&'static str],
     /// Arguments to pass when spawning in ACP mode.
     pub acp_args: &'static [&'static str],
 }
@@ -27,7 +25,6 @@ pub(crate) const KNOWN_AGENTS: &[KnownAgent] = &[
         id: "goose",
         label: "Goose",
         command: "goose",
-        command_aliases: &[],
         acp_args: &[
             "acp",
             "--with-builtin",
@@ -40,36 +37,30 @@ pub(crate) const KNOWN_AGENTS: &[KnownAgent] = &[
         id: "claude",
         label: "Claude Code",
         command: "claude-agent-acp",
-        command_aliases: &["claude-code-acp"],
         acp_args: &[],
     },
     KnownAgent {
         id: "codex",
         label: "Codex",
         command: "codex-acp",
-        command_aliases: &[],
         acp_args: &[],
     },
     KnownAgent {
         id: "pi",
         label: "Pi",
         command: "pi-acp",
-        command_aliases: &[],
         acp_args: &[],
     },
     KnownAgent {
         id: "amp",
         label: "Amp",
         command: "amp-acp",
-        command_aliases: &[],
         acp_args: &[],
     },
 ];
 
 fn find_known_agent_binary(agent: &KnownAgent) -> Option<PathBuf> {
-    std::iter::once(agent.command)
-        .chain(agent.command_aliases.iter().copied())
-        .find_map(find_command)
+    find_command(agent.command)
 }
 
 // =============================================================================
@@ -213,16 +204,9 @@ fn find_via_login_shell(cmd: &str) -> Option<PathBuf> {
 /// Map an agent ID to the `--command` value for `blox acp`.
 ///
 /// Returns `None` if the agent uses the workspace default (no flag needed).
-///
-/// When the agent has `command_aliases`, we prefer the first alias for the
-/// remote command because Blox workspaces may still have the older binary
-/// name installed (e.g. `claude-code-acp` rather than `claude-agent-acp`).
 pub(crate) fn blox_acp_command(agent_id: &str) -> Option<String> {
     KNOWN_AGENTS.iter().find(|a| a.id == agent_id).map(|a| {
-        // Prefer the first alias for remote — remote environments may not
-        // have the latest binary name yet.
-        let cmd = a.command_aliases.first().copied().unwrap_or(a.command);
-        let mut parts = vec![cmd];
+        let mut parts = vec![a.command];
         parts.extend(a.acp_args.iter().copied());
         parts.join(",")
     })

@@ -93,7 +93,7 @@ if let Some(agent) = find_acp_agent_by_id("goose") {
 | Agent | Command | Install |
 |-------|---------|---------|
 | Goose | `goose` | `pip install goose-ai` |
-| Claude Code | `claude-agent-acp` (also supports legacy `claude-code-acp`) | Install via Anthropic |
+| Claude Code | `claude-agent-acp` | Install via Anthropic |
 | Codex | `codex-acp` | Install via Codex |
 
 ## How It Works

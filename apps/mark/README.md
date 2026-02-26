@@ -54,10 +54,7 @@ Mark discovers ACP providers by CLI command name. For Claude Code ACP:
 npm install -g @zed-industries/claude-agent-acp
 ```
 
-This package installs the `claude-agent-acp` executable. Mark supports both:
-
-- `claude-agent-acp` (current)
-- `claude-code-acp` (legacy fallback)
+This package installs the `claude-agent-acp` executable.
 
 After installing, open Mark and run **Settings -> Doctor** to verify the Claude check is detected as installed.
 

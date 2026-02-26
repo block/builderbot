@@ -30,6 +30,9 @@
   import TimelineRow from '../timeline/TimelineRow.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
+  import AgentSelector from '../agents/AgentSelector.svelte';
+  import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
+  import { getPreferredAgent } from '../settings/preferences.svelte';
 
   interface Props {
     project: Project;
@@ -157,6 +160,11 @@
   // ── Project session input ──────────────────────────────────────────────
   let promptText = $state('');
   let promptTextarea = $state<HTMLTextAreaElement | null>(null);
+  let availableAgents = $derived(
+    project.location === 'remote' ? REMOTE_AGENTS : agentState.providers
+  );
+  let preferredProvider = $derived(getPreferredAgent(availableAgents) ?? undefined);
+  let canSubmitPrompt = $derived(!!promptText.trim() && !!preferredProvider);
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
 
@@ -167,14 +175,15 @@
 
   async function handleSubmitPrompt() {
     const text = promptText.trim();
-    if (!text) return;
+    const provider = preferredProvider;
+    if (!text || !provider) return;
 
     promptText = '';
     if (promptTextarea) {
       promptTextarea.style.height = 'auto';
     }
     try {
-      const response = await commands.startProjectSession(project.id, text);
+      const response = await commands.startProjectSession(project.id, text, provider);
       activeSessionIds = new Set([...activeSessionIds, response.sessionId]);
       sessionRegistry.register(response.sessionId, project.id, 'note');
       projectStateStore.addRunningSession(project.id, response.sessionId);
@@ -372,14 +381,17 @@
         oninput={(e) => autoResize(e.currentTarget)}
         rows={1}
       ></textarea>
-      <button
-        class="send-button"
-        onclick={handleSubmitPrompt}
-        disabled={!promptText.trim()}
-        title="Start project session"
-      >
-        <Send size={14} />
-      </button>
+      <div class="prompt-actions">
+        <AgentSelector remote={project.location === 'remote'} />
+        <button
+          class="send-button"
+          onclick={handleSubmitPrompt}
+          disabled={!canSubmitPrompt}
+          title={preferredProvider ? 'Start project session' : 'No AI agent available'}
+        >
+          <Send size={14} />
+        </button>
+      </div>
     </div>
   </div>
 
@@ -699,6 +711,13 @@
     color: var(--text-faint);
   }
 
+  .prompt-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
   .send-button {
     display: flex;
     align-items: center;
@@ -795,6 +814,10 @@
     .prompt-input {
       padding: 4px 2px;
       font-size: var(--size-xs);
+    }
+
+    .prompt-actions {
+      gap: 2px;
     }
 
     .send-button {

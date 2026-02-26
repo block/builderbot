@@ -119,13 +119,13 @@
   // Create search initialization tracker
   const checkSearchInitialization = createSearchInitializationTracker({
     searchState,
-    files,
+    getFiles: () => files,
   });
 
   // Create handler for search-aware file selection
   const handleSearchOnFileSelect = createFileSelectionWithSearch({
     searchState,
-    files,
+    getFiles: () => files,
   });
 
   // ==========================================================================
@@ -511,7 +511,7 @@
     const { onNextSearchResult, onPrevSearchResult } = createSearchNavigationHandlers({
       searchState,
       selectFile: (path: string) => selectFile(path),
-      files,
+      getFiles: () => files,
       onJumpToLine: (lineIndex: number) => {
         lineJumpToken += 1;
         jumpToLine = { lineIndex, token: lineJumpToken };

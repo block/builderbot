@@ -3,7 +3,7 @@ import type { FileDiffSummary } from '../types';
 
 export interface SearchInitializationConfig {
 	searchState: SearchStateHandle;
-	files: FileDiffSummary[];
+	getFiles: () => FileDiffSummary[];
 }
 
 /**
@@ -19,7 +19,7 @@ export interface SearchInitializationConfig {
  * let searchInitializedKey = $state<string>('');
  * const checkSearchInitialization = createSearchInitializationTracker({
  *   searchState,
- *   files
+ *   getFiles: () => files
  * });
  *
  * $effect(() => {
@@ -31,7 +31,7 @@ export interface SearchInitializationConfig {
  * ```
  */
 export function createSearchInitializationTracker(config: SearchInitializationConfig) {
-	const { searchState, files } = config;
+	const { searchState, getFiles } = config;
 	let lastInitializedKey = '';
 
 	/**
@@ -47,7 +47,7 @@ export function createSearchInitializationTracker(config: SearchInitializationCo
 			!searchState.state.loading &&
 			lastInitializedKey !== searchKey
 		) {
-			searchState.initializeCollapsedState(files);
+			searchState.initializeCollapsedState(getFiles());
 			lastInitializedKey = searchKey;
 			return searchKey;
 		}

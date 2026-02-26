@@ -4,7 +4,7 @@ import type { FileDiffSummary } from '../types';
 export interface SearchNavigationConfig {
 	searchState: SearchStateHandle;
 	selectFile: (path: string) => Promise<void>;
-	files: FileDiffSummary[];
+	getFiles: () => FileDiffSummary[];
 	onJumpToLine: (lineIndex: number) => void;
 }
 
@@ -13,10 +13,10 @@ export interface SearchNavigationConfig {
  * results and jump to the matched line.
  */
 export function createSearchNavigationHandlers(config: SearchNavigationConfig) {
-	const { searchState, selectFile, files, onJumpToLine } = config;
+	const { searchState, selectFile, getFiles, onJumpToLine } = config;
 
 	async function onNextSearchResult() {
-		const result = await searchState.goToNextResult(files);
+		const result = await searchState.goToNextResult(getFiles());
 		if (result) {
 			// Auto-expand search results for this file
 			if (searchState.areSearchResultsCollapsed(result.filePath)) {
@@ -29,7 +29,7 @@ export function createSearchNavigationHandlers(config: SearchNavigationConfig) {
 	}
 
 	async function onPrevSearchResult() {
-		const result = await searchState.goToPrevResult(files);
+		const result = await searchState.goToPrevResult(getFiles());
 		if (result) {
 			// Auto-expand search results for this file
 			if (searchState.areSearchResultsCollapsed(result.filePath)) {

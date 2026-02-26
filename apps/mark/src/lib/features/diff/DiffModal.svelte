@@ -120,7 +120,7 @@
   // Create tracker for search initialization
   const checkSearchInitialization = createSearchInitializationTracker({
     searchState,
-    files: diffViewer.state.files,
+    getFiles: () => diffViewer.state.files,
   });
 
   // ==========================================================================
@@ -166,7 +166,7 @@
   // Create handler for search-aware file selection
   const handleSearchOnFileSelect = createFileSelectionWithSearch({
     searchState,
-    files: diffViewer.state.files,
+    getFiles: () => diffViewer.state.files,
   });
 
   function selectFile(file: FileEntry) {
@@ -312,7 +312,7 @@
     const { onNextSearchResult, onPrevSearchResult } = createSearchNavigationHandlers({
       searchState,
       selectFile: (path: string) => diffViewer.selectFile(path),
-      files: diffViewer.state.files,
+      getFiles: () => diffViewer.state.files,
       onJumpToLine: (lineIndex: number) => {
         lineJumpToken += 1;
         jumpToLine = { lineIndex, token: lineJumpToken };

@@ -473,3 +473,5 @@ export function createSearchState() {
 		selectFirstResultInFile
 	};
 }
+
+export type SearchStateHandle = ReturnType<typeof createSearchState>;

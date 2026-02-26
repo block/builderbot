@@ -3,7 +3,7 @@ import type { FileDiffSummary } from '../types';
 
 export interface FileSelectionWithSearchConfig {
 	searchState: SearchStateHandle;
-	files: FileDiffSummary[];
+	getFiles: () => FileDiffSummary[];
 }
 
 /**
@@ -17,7 +17,7 @@ export interface FileSelectionWithSearchConfig {
  * ```ts
  * const handleSearchOnFileSelect = createFileSelectionWithSearch({
  *   searchState,
- *   files: diffViewer.state.files
+ *   getFiles: () => diffViewer.state.files
  * });
  *
  * function selectFile(path: string) {
@@ -29,7 +29,7 @@ export interface FileSelectionWithSearchConfig {
  * ```
  */
 export function createFileSelectionWithSearch(config: FileSelectionWithSearchConfig) {
-	const { searchState, files } = config;
+	const { searchState, getFiles } = config;
 
 	/**
 	 * Handles search-related logic when a file is selected.
@@ -46,6 +46,6 @@ export function createFileSelectionWithSearch(config: FileSelectionWithSearchCon
 		}
 
 		// Select the first search result in this file
-		searchState.selectFirstResultInFile(files, filePath);
+		searchState.selectFirstResultInFile(getFiles(), filePath);
 	};
 }

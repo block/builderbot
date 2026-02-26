@@ -16,6 +16,7 @@
     CircleCheck,
     CirclePause,
     AlertCircle,
+    Cloud,
   } from 'lucide-svelte';
   import type { Project, Branch, WorkspaceStatus, ProjectNote } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
@@ -89,7 +90,14 @@
   // For remote projects, derive workspace status from any branch (they all share the same workspace)
   let projectWorkspaceStatus = $derived<WorkspaceStatus | null>(
     project.location === 'remote'
-      ? branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null
+      ? (branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null)
+      : null
+  );
+
+  // For remote projects, derive workstation name from any branch (they all share the same workspace)
+  let projectWorkstationName = $derived<string | null>(
+    project.location === 'remote'
+      ? (branches.find((b) => b.workspaceName)?.workspaceName ?? null)
       : null
   );
 
@@ -300,17 +308,24 @@
           class:running={projectWorkspaceStatus === 'running'}
           class:stopped={projectWorkspaceStatus === 'stopped'}
           class:error={projectWorkspaceStatus === 'error'}
+          title={projectWorkspaceStatus === 'running' && projectWorkstationName
+            ? projectWorkstationName
+            : undefined}
         >
           {#if projectWorkspaceStatus === 'starting'}
             <Spinner size={12} />
           {:else if projectWorkspaceStatus === 'running'}
-            <CircleCheck size={12} />
+            <Cloud size={12} />
           {:else if projectWorkspaceStatus === 'stopped'}
             <CirclePause size={12} />
           {:else if projectWorkspaceStatus === 'error'}
             <AlertCircle size={12} />
           {/if}
-          <span>{statusLabel(projectWorkspaceStatus)}</span>
+          <span
+            >{projectWorkspaceStatus === 'running'
+              ? 'Remote'
+              : statusLabel(projectWorkspaceStatus)}</span
+          >
         </div>
       {/if}
     </div>
@@ -642,8 +657,8 @@
   }
 
   .workspace-status-badge.running {
-    border-color: var(--ui-success);
-    color: var(--ui-success);
+    border-color: var(--border-muted);
+    color: var(--text-primary);
   }
 
   .workspace-status-badge.stopped {

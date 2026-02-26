@@ -640,11 +640,7 @@
   {:else}
     <!-- Header -->
     <div class="card-header">
-      <BranchCardHeaderInfo
-        branchName={branch.branchName}
-        {repoLabel}
-        secondaryLabel={branch.workspaceName}
-      />
+      <BranchCardHeaderInfo branchName={branch.branchName} {repoLabel} />
       <div class="header-actions">
         <DropdownMenu items={menuItems} />
       </div>
@@ -886,5 +882,4 @@
     align-items: center;
     gap: 4px;
   }
-
 </style>

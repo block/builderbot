@@ -7,7 +7,17 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { ChevronLeft, Trash2, Plus, Send, FileText } from 'lucide-svelte';
+  import {
+    ChevronLeft,
+    Trash2,
+    Plus,
+    Send,
+    FileText,
+    CircleCheck,
+    CirclePause,
+    AlertCircle,
+    Cloud,
+  } from 'lucide-svelte';
   import type { Project, Branch, WorkspaceStatus, ProjectNote } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome } from '../layout/navigation.svelte';
@@ -15,7 +25,6 @@
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
-  import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import GitHubRepoPicker from './GitHubRepoPicker.svelte';
   import TimelineRow from '../timeline/TimelineRow.svelte';
@@ -77,6 +86,20 @@
         : 'Add repository to project'
   );
 
+  // For remote projects, derive workspace status from any branch (they all share the same workspace)
+  let projectWorkspaceStatus = $derived<WorkspaceStatus | null>(
+    project.location === 'remote'
+      ? (branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null)
+      : null
+  );
+
+  // For remote projects, derive workstation name from any branch (they all share the same workspace)
+  let projectWorkstationName = $derived<string | null>(
+    project.location === 'remote'
+      ? (branches.find((b) => b.workspaceName)?.workspaceName ?? null)
+      : null
+  );
+
   let dropdownOpen = $state(false);
   let wrapperRef: HTMLDivElement | undefined = $state();
 
@@ -86,6 +109,21 @@
 
   function closeDropdown() {
     dropdownOpen = false;
+  }
+
+  function statusLabel(status: WorkspaceStatus | null): string {
+    switch (status) {
+      case 'starting':
+        return 'Starting';
+      case 'running':
+        return 'Running';
+      case 'stopped':
+        return 'Stopped';
+      case 'error':
+        return 'Error';
+      default:
+        return '';
+    }
   }
 
   function handleRepoSelected(nameWithOwner: string, subpath?: string) {
@@ -262,6 +300,33 @@
           <span>Detecting actions</span>
         </div>
       {/if}
+      {#if projectWorkspaceStatus}
+        <div
+          class="workspace-status-badge"
+          class:starting={projectWorkspaceStatus === 'starting'}
+          class:running={projectWorkspaceStatus === 'running'}
+          class:stopped={projectWorkspaceStatus === 'stopped'}
+          class:error={projectWorkspaceStatus === 'error'}
+          title={projectWorkspaceStatus === 'running' && projectWorkstationName
+            ? projectWorkstationName
+            : undefined}
+        >
+          {#if projectWorkspaceStatus === 'starting'}
+            <Spinner size={12} />
+          {:else if projectWorkspaceStatus === 'running'}
+            <Cloud size={12} />
+          {:else if projectWorkspaceStatus === 'stopped'}
+            <CirclePause size={12} />
+          {:else if projectWorkspaceStatus === 'error'}
+            <AlertCircle size={12} />
+          {/if}
+          <span
+            >{projectWorkspaceStatus === 'running'
+              ? 'Remote'
+              : statusLabel(projectWorkspaceStatus)}</span
+          >
+        </div>
+      {/if}
     </div>
     {#if !deleting}
       <div class="header-actions">
@@ -362,29 +427,16 @@
 
   <div class="branches-list" class:deleting>
     {#each sortedBranches as branch (branch.id)}
-      {#if branch.branchType === 'remote'}
-        <RemoteBranchCard
-          {branch}
-          repoLabel={repoLabelForBranch(branch)}
-          projectName={project.name}
-          deleting={deletingBranches.has(branch.id)}
-          workspaceError={workspaceErrors.get(branch.id)}
-          onDelete={() => onDeleteBranch?.(branch.id)}
-          onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
-          onWorkspaceStatusChange={(status) => onWorkspaceStatusChange?.(branch.id, status)}
-        />
-      {:else}
-        <BranchCard
-          {branch}
-          repoLabel={repoLabelForBranch(branch)}
-          projectName={project.name}
-          deleting={deletingBranches.has(branch.id)}
-          worktreeError={worktreeErrors.get(branch.id)}
-          onDelete={() => onDeleteBranch?.(branch.id)}
-          onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
-          onRetryWorktree={() => onRetryWorktree?.(branch.id)}
-        />
-      {/if}
+      <BranchCard
+        {branch}
+        repoLabel={repoLabelForBranch(branch)}
+        projectName={project.name}
+        deleting={deletingBranches.has(branch.id)}
+        worktreeError={worktreeErrors.get(branch.id)}
+        onDelete={() => onDeleteBranch?.(branch.id)}
+        onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
+        onRetryWorktree={() => onRetryWorktree?.(branch.id)}
+      />
     {/each}
   </div>
 </div>
@@ -567,6 +619,42 @@
     font-weight: 500;
     line-height: 1;
     border: 1px solid var(--border-muted);
+  }
+
+  .workspace-status-badge {
+    height: 22px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 500;
+    line-height: 1;
+    border: 1px solid var(--border-muted);
+  }
+
+  .workspace-status-badge.starting {
+    border-color: var(--ui-info);
+    color: var(--ui-info);
+  }
+
+  .workspace-status-badge.running {
+    border-color: var(--border-muted);
+    color: var(--text-primary);
+  }
+
+  .workspace-status-badge.stopped {
+    border-color: var(--border-muted);
+    color: var(--text-muted);
+  }
+
+  .workspace-status-badge.error {
+    border-color: var(--ui-danger);
+    color: var(--ui-danger);
   }
 
   /* ── Project prompt ──────────────────────────────────────────────────── */

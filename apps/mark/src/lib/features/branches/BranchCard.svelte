@@ -112,6 +112,10 @@
     onRetryWorktree,
   }: Props = $props();
 
+  // Determine if this is a local or remote branch
+  const isLocal = $derived(branch.branchType === 'local');
+  const isRemote = $derived(branch.branchType === 'remote');
+
   // Custom transition combining slide and fade effects
   function slideAndFade(
     node: Element,
@@ -513,20 +517,18 @@
   // Re-check unpushed commits whenever the timeline refreshes and a PR exists
   $effect(() => {
     // Re-run when timeline changes (dependency) and PR exists
-    if (timeline && branch.prNumber && branch.branchType === 'local') {
+    if (timeline && branch.prNumber) {
       commands.hasUnpushedCommits(branch.id).then((v) => (hasUnpushed = v));
     }
   });
 
   // Load timeline when a branch becomes timeline-ready, including when a local
   // branch transitions from "creating worktree" to an attached worktree path.
+  // Remote branches are always ready (no worktree needed).
   $effect(() => {
-    if (branch.branchType === 'local' && !branch.worktreePath) return;
+    if (isLocal && !branch.worktreePath) return;
 
-    const timelineKey =
-      branch.branchType === 'remote'
-        ? `${branch.id}:<remote>`
-        : `${branch.id}:${branch.worktreePath}`;
+    const timelineKey = isRemote ? `${branch.id}:<remote>` : `${branch.id}:${branch.worktreePath}`;
     if (timelineKey === loadedTimelineKey) return;
 
     loadedTimelineKey = timelineKey;
@@ -1039,7 +1041,7 @@
   async function startReviewSessionImmediately() {
     try {
       newSessionMode = 'review'; // Set mode for handleNewSessionStarted
-      const agents = branch.branchType === 'remote' ? REMOTE_AGENTS : agentState.providers;
+      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const result = await commands.startBranchSession(
         branch.id,
         'Review the code changes on this branch.',
@@ -1230,8 +1232,7 @@
 
     try {
       // Pick the best available agent for this branch's location (local vs remote)
-      const remote = branch.branchType === 'remote';
-      const agents = remote ? REMOTE_AGENTS : agentState.providers;
+      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.createPr(branch.id, provider, draft);
       // Register session in the unified registry
@@ -1308,8 +1309,7 @@
     pushStateStore.setPushing(branch.id, '__pending__');
 
     try {
-      const remote = branch.branchType === 'remote';
-      const agents = remote ? REMOTE_AGENTS : agentState.providers;
+      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
       const sessionId = await commands.pushBranch(branch.id, provider, force);
       // Register session in the unified registry
@@ -1489,10 +1489,12 @@
     });
   }
 
-  // Subscribe to the shared drag-drop service. A single global Tauri listener
-  // is shared across all BranchCards, eliminating the O(N) listener storm that
-  // caused UI freezes during drag-over events.
+  // Subscribe to the shared drag-drop service (local branches only).
+  // A single global Tauri listener is shared across all BranchCards,
+  // eliminating the O(N) listener storm that caused UI freezes during drag-over events.
   $effect(() => {
+    if (!isLocal) return;
+
     const el = cardElement;
     if (!el) return;
 
@@ -1519,10 +1521,7 @@
   bind:this={cardElement}
   class="branch-card"
   class:deleting
-  class:creating-worktree={branch.branchType === 'local' &&
-    !branch.worktreePath &&
-    !worktreeError &&
-    !deleting}
+  class:creating-worktree={isLocal && !branch.worktreePath && !worktreeError && !deleting}
   data-branch-id={branch.id}
   class:drag-over={dragOver}
 >
@@ -1531,7 +1530,7 @@
       <Spinner size={16} />
       <span>Deleting…</span>
     </div>
-  {:else if branch.branchType === 'local' && !branch.worktreePath}
+  {:else if isLocal && !branch.worktreePath}
     <div class="card-header">
       <BranchCardHeaderInfo
         branchName={branch.branchName}
@@ -1570,115 +1569,117 @@
         secondaryLabel={formatBaseBranch(branch.baseBranch)}
       />
       <div class="header-actions">
-        <!-- Running actions (excluding primary action) -->
-        {#each secondaryRunningActions as execution (execution.executionId)}
-          {@const isRunning = execution.status === 'running'}
-          {@const isStopping = stoppingExecutions.has(execution.executionId)}
-          {@const showStopIcon = altHeld && isRunning && !isStopping}
-          <div
-            class="running-action-container"
-            class:fading={execution.fading}
-            transition:slideAndFade={{ duration: 300, axis: 'x' }}
-          >
-            <button
-              class="running-action-button"
-              class:running={isRunning}
-              class:stopping={isStopping}
-              class:completed={execution.status === 'completed'}
-              class:failed={execution.status === 'failed'}
-              class:show-stop={showStopIcon}
-              onclick={() => {
-                if (isRunning && altHeld && !isStopping) {
-                  handleStopAction(execution.executionId, execution.actionName);
-                } else {
-                  handleShowActionOutput(execution);
-                }
-              }}
-              title={isStopping
-                ? 'Stopping…'
-                : showStopIcon
-                  ? `Stop ${execution.actionName}`
-                  : isRunning
-                    ? `View output for ${execution.actionName}`
-                    : execution.status === 'completed'
-                      ? `${execution.actionName} completed`
-                      : execution.status === 'failed'
-                        ? `${execution.actionName} failed`
-                        : execution.actionName}
+        <!-- Running actions (excluding primary action) - local only -->
+        {#if isLocal}
+          {#each secondaryRunningActions as execution (execution.executionId)}
+            {@const isRunning = execution.status === 'running'}
+            {@const isStopping = stoppingExecutions.has(execution.executionId)}
+            {@const showStopIcon = altHeld && isRunning && !isStopping}
+            <div
+              class="running-action-container"
+              class:fading={execution.fading}
+              transition:slideAndFade={{ duration: 300, axis: 'x' }}
             >
-              {#if isStopping}
-                <Spinner size={12} class="danger" />
-              {:else if showStopIcon}
-                <StopCircle size={12} />
-              {:else if isRunning}
-                <Spinner size={12} />
-              {:else if execution.status === 'completed'}
-                <CheckCircle size={12} />
-              {:else if execution.status === 'failed'}
-                <AlertCircle size={12} />
-              {:else}
-                <StopCircle size={12} />
-              {/if}
-              {execution.actionName}
-            </button>
-          </div>
-        {/each}
-        <!-- Primary run action button -->
-        {#if primaryRunAction && branch.branchType === 'local'}
-          {@const execution = primaryActionExecution}
-          {@const isRunning = execution?.status === 'running'}
-          {@const isStopping = execution && stoppingExecutions.has(execution.executionId)}
-          {@const showStopIcon = altHeld && isRunning && !isStopping}
-          <div
-            class="primary-action-container"
-            in:slide={{ duration: 300, axis: 'x' }}
-            out:slide={{ duration: 300, axis: 'x' }}
-          >
-            <button
-              class="primary-action-button"
-              class:running={isRunning}
-              class:stopping={isStopping}
-              class:completed={execution?.status === 'completed'}
-              class:failed={execution?.status === 'failed'}
-              class:show-stop={showStopIcon}
-              onclick={() => {
-                if (isRunning && altHeld && !isStopping && execution) {
-                  handleStopAction(execution.executionId, primaryRunAction.name);
-                } else if (isRunning && execution) {
-                  handleShowActionOutput(execution);
-                } else if (isStopping && execution) {
-                  handleShowActionOutput(execution);
-                } else {
-                  handleRunAction(primaryRunAction);
-                }
-              }}
-              title={isStopping
-                ? 'Stopping…'
-                : showStopIcon
-                  ? `Stop ${primaryRunAction.name}`
-                  : isRunning
-                    ? `View output for ${primaryRunAction.name}`
-                    : execution?.status === 'completed'
-                      ? `${primaryRunAction.name} completed`
-                      : execution?.status === 'failed'
-                        ? `${primaryRunAction.name} failed`
-                        : primaryRunAction.name}
+              <button
+                class="running-action-button"
+                class:running={isRunning}
+                class:stopping={isStopping}
+                class:completed={execution.status === 'completed'}
+                class:failed={execution.status === 'failed'}
+                class:show-stop={showStopIcon}
+                onclick={() => {
+                  if (isRunning && altHeld && !isStopping) {
+                    handleStopAction(execution.executionId, execution.actionName);
+                  } else {
+                    handleShowActionOutput(execution);
+                  }
+                }}
+                title={isStopping
+                  ? 'Stopping…'
+                  : showStopIcon
+                    ? `Stop ${execution.actionName}`
+                    : isRunning
+                      ? `View output for ${execution.actionName}`
+                      : execution.status === 'completed'
+                        ? `${execution.actionName} completed`
+                        : execution.status === 'failed'
+                          ? `${execution.actionName} failed`
+                          : execution.actionName}
+              >
+                {#if isStopping}
+                  <Spinner size={12} class="danger" />
+                {:else if showStopIcon}
+                  <StopCircle size={12} />
+                {:else if isRunning}
+                  <Spinner size={12} />
+                {:else if execution.status === 'completed'}
+                  <CheckCircle size={12} />
+                {:else if execution.status === 'failed'}
+                  <AlertCircle size={12} />
+                {:else}
+                  <StopCircle size={12} />
+                {/if}
+                {execution.actionName}
+              </button>
+            </div>
+          {/each}
+          <!-- Primary run action button - local only -->
+          {#if primaryRunAction}
+            {@const execution = primaryActionExecution}
+            {@const isRunning = execution?.status === 'running'}
+            {@const isStopping = execution && stoppingExecutions.has(execution.executionId)}
+            {@const showStopIcon = altHeld && isRunning && !isStopping}
+            <div
+              class="primary-action-container"
+              in:slide={{ duration: 300, axis: 'x' }}
+              out:slide={{ duration: 300, axis: 'x' }}
             >
-              {#if isStopping}
-                <Spinner size={14} class="danger" />
-              {:else if showStopIcon}
-                <StopCircle size={14} />
-              {:else if isRunning}
-                <Spinner size={14} />
-              {:else if execution?.status === 'completed'}
-                <CheckCircle size={14} />
-              {:else if execution?.status === 'failed'}
-                <AlertCircle size={14} />
-              {:else}
-                <Play size={14} />
-              {/if}
-            </button>
-          </div>
+              <button
+                class="primary-action-button"
+                class:running={isRunning}
+                class:stopping={isStopping}
+                class:completed={execution?.status === 'completed'}
+                class:failed={execution?.status === 'failed'}
+                class:show-stop={showStopIcon}
+                onclick={() => {
+                  if (isRunning && altHeld && !isStopping && execution) {
+                    handleStopAction(execution.executionId, primaryRunAction.name);
+                  } else if (isRunning && execution) {
+                    handleShowActionOutput(execution);
+                  } else if (isStopping && execution) {
+                    handleShowActionOutput(execution);
+                  } else {
+                    handleRunAction(primaryRunAction);
+                  }
+                }}
+                title={isStopping
+                  ? 'Stopping…'
+                  : showStopIcon
+                    ? `Stop ${primaryRunAction.name}`
+                    : isRunning
+                      ? `View output for ${primaryRunAction.name}`
+                      : execution?.status === 'completed'
+                        ? `${primaryRunAction.name} completed`
+                        : execution?.status === 'failed'
+                          ? `${primaryRunAction.name} failed`
+                          : primaryRunAction.name}
+              >
+                {#if isStopping}
+                  <Spinner size={14} class="danger" />
+                {:else if showStopIcon}
+                  <StopCircle size={14} />
+                {:else if isRunning}
+                  <Spinner size={14} />
+                {:else if execution?.status === 'completed'}
+                  <CheckCircle size={14} />
+                {:else if execution?.status === 'failed'}
+                  <AlertCircle size={14} />
+                {:else}
+                  <Play size={14} />
+                {/if}
+              </button>
+            </div>
+          {/if}
         {/if}
         <div class="more-menu-container">
           <button class="more-button" onclick={toggleMoreMenu} title="More options">
@@ -1686,8 +1687,22 @@
           </button>
           {#if showMoreMenu}
             <div class="more-menu">
-              <!-- Actions submenu -->
-              {#if hasActionsForSubmenu && branch.branchType === 'local'}
+              <!-- Remote-only: Copy workspace name -->
+              {#if isRemote && branch.workspaceName}
+                <button
+                  class="more-menu-item"
+                  onclick={() => {
+                    showMoreMenu = false;
+                    navigator.clipboard.writeText(branch.workspaceName!);
+                  }}
+                >
+                  <Copy size={14} />
+                  Copy Workspace Name
+                </button>
+              {/if}
+
+              <!-- Local-only: Actions submenu -->
+              {#if isLocal && hasActionsForSubmenu}
                 <div class="submenu-container">
                   <button
                     class="more-menu-item submenu-trigger"
@@ -1728,8 +1743,8 @@
                 </div>
               {/if}
 
-              <!-- Open In submenu -->
-              {#if branch.worktreePath && openerApps.length > 0}
+              <!-- Local-only: Open In submenu -->
+              {#if isLocal && branch.worktreePath && openerApps.length > 0}
                 <div class="menu-separator"></div>
                 <div class="submenu-container">
                   <button
@@ -1761,7 +1776,7 @@
                     </div>
                   {/if}
                 </div>
-              {:else if branch.worktreePath}
+              {:else if isLocal && branch.worktreePath}
                 <div class="menu-separator"></div>
                 <button class="more-menu-item" onclick={handleCopyPath}>
                   <Copy size={14} />
@@ -1800,7 +1815,7 @@
       {:else if timeline}
         <BranchTimeline
           {timeline}
-          {pendingDropNotes}
+          pendingDropNotes={isLocal ? pendingDropNotes : undefined}
           reviewCommentBreakdown={timelineReviewDetailsById}
           onSessionClick={handleTimelineSessionClick}
           onCommitClick={handleCommitClick}
@@ -1818,73 +1833,75 @@
           {#snippet footerActions()}
             {#if hasCodeChanges}
               <div class="footer-right-actions">
-                <button
-                  class="pr-btn"
-                  class:creating={prState === 'creating'}
-                  class:error={prState === 'error' || pushState === 'error'}
-                  class:created={prState === 'created' && pushState !== 'error'}
-                  class:pushing={pushState === 'pushing'}
-                  class:merged={prState === 'created' && prStatusState === 'MERGED'}
-                  onclick={handlePrButtonClick}
-                  disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
-                  title={pushState === 'pushing'
-                    ? 'Pushing… (click to view)'
-                    : pushState === 'error'
-                      ? 'Push failed — click for details'
-                      : prState === 'created' && hasUnpushed
-                        ? 'Push changes to remote'
-                        : prState === 'created'
-                          ? 'View PR'
-                          : prState === 'error'
-                            ? 'PR creation failed — click for details'
-                            : prState === 'creating'
-                              ? 'Creating PR… (click to view)'
-                              : optionHeld
-                                ? 'Create draft PR (⌥ held)'
-                                : 'Create PR'}
-                >
-                  {#if pushState === 'pushing'}
-                    <Spinner size={13} />
-                  {:else if pushState === 'error'}
-                    <AlertCircle size={13} />
-                  {:else if prState === 'creating'}
-                    <Spinner size={13} />
-                  {:else if prState === 'error'}
-                    <AlertCircle size={13} />
-                  {:else if prState === 'created' && prStatusState === 'MERGED'}
-                    <GitMerge size={13} />
-                  {:else if prState === 'created' && hasUnpushed}
-                    <GitPullRequestDraft size={13} />
-                  {:else if prState === 'created'}
-                    <GitPullRequestArrow size={13} />
-                  {:else}
-                    <GitPullRequestCreateArrow size={13} />
-                  {/if}
-                  <span>
+                {#if isLocal}
+                  <button
+                    class="pr-btn"
+                    class:creating={prState === 'creating'}
+                    class:error={prState === 'error' || pushState === 'error'}
+                    class:created={prState === 'created' && pushState !== 'error'}
+                    class:pushing={pushState === 'pushing'}
+                    class:merged={prState === 'created' && prStatusState === 'MERGED'}
+                    onclick={handlePrButtonClick}
+                    disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
+                    title={pushState === 'pushing'
+                      ? 'Pushing… (click to view)'
+                      : pushState === 'error'
+                        ? 'Push failed — click for details'
+                        : prState === 'created' && hasUnpushed
+                          ? 'Push changes to remote'
+                          : prState === 'created'
+                            ? 'View PR'
+                            : prState === 'error'
+                              ? 'PR creation failed — click for details'
+                              : prState === 'creating'
+                                ? 'Creating PR… (click to view)'
+                                : optionHeld
+                                  ? 'Create draft PR (⌥ held)'
+                                  : 'Create PR'}
+                  >
                     {#if pushState === 'pushing'}
-                      Pushing…
+                      <Spinner size={13} />
                     {:else if pushState === 'error'}
-                      Push failed
-                    {:else if prState === 'created' && hasUnpushed}
-                      Push changes
-                    {:else if prState === 'created'}
-                      {#if prStatusText}
-                        {prStatusText}
-                      {:else}
-                        View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
-                      {/if}
+                      <AlertCircle size={13} />
                     {:else if prState === 'creating'}
-                      Creating PR…
+                      <Spinner size={13} />
                     {:else if prState === 'error'}
-                      PR failed
+                      <AlertCircle size={13} />
+                    {:else if prState === 'created' && prStatusState === 'MERGED'}
+                      <GitMerge size={13} />
+                    {:else if prState === 'created' && hasUnpushed}
+                      <GitPullRequestDraft size={13} />
+                    {:else if prState === 'created'}
+                      <GitPullRequestArrow size={13} />
                     {:else}
-                      {optionHeld ? 'Create draft PR' : 'Create PR'}
+                      <GitPullRequestCreateArrow size={13} />
                     {/if}
-                  </span>
-                  {#if prStatusIndicator}
-                    <span class="pr-status-indicator {prStatusIndicator}"></span>
-                  {/if}
-                </button>
+                    <span>
+                      {#if pushState === 'pushing'}
+                        Pushing…
+                      {:else if pushState === 'error'}
+                        Push failed
+                      {:else if prState === 'created' && hasUnpushed}
+                        Push changes
+                      {:else if prState === 'created'}
+                        {#if prStatusText}
+                          {prStatusText}
+                        {:else}
+                          View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                        {/if}
+                      {:else if prState === 'creating'}
+                        Creating PR…
+                      {:else if prState === 'error'}
+                        PR failed
+                      {:else}
+                        {optionHeld ? 'Create draft PR' : 'Create PR'}
+                      {/if}
+                    </span>
+                    {#if prStatusIndicator}
+                      <span class="pr-status-indicator {prStatusIndicator}"></span>
+                    {/if}
+                  </button>
+                {/if}
                 <button
                   class="pr-btn diff-btn"
                   onclick={() => {
@@ -1954,7 +1971,7 @@
     {branch}
     mode={newSessionMode}
     initialPrompt={draftPrompt}
-    remote={branch.branchType === 'remote'}
+    remote={isRemote}
     onClose={handleNewSessionClose}
     onStarted={handleNewSessionStarted}
   />

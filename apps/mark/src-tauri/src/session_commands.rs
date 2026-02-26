@@ -159,6 +159,7 @@ pub fn start_session(
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
+            remote_working_dir: None,
         },
         store,
         app_handle,
@@ -230,6 +231,7 @@ pub fn resume_session(
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
+            remote_working_dir: None,
         },
         store,
         app_handle,
@@ -400,6 +402,7 @@ pub async fn start_project_session(
             mcp_project_id: Some(project_id.clone()),
             action_executor: Some(Arc::clone(&action_executor)),
             action_registry: Some(Arc::clone(&action_registry)),
+            remote_working_dir: None,
         },
         store,
         app_handle,
@@ -576,6 +579,32 @@ pub async fn start_branch_session(
     // For remote branches, use the user's UI selection.
     let effective_provider = provider;
 
+    // Resolve the actual workspace path for remote branches so the remote agent
+    // starts in the correct repo directory (not the workspace default).
+    let remote_working_dir = if is_remote {
+        let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let store_for_resolve = Arc::clone(&store);
+        let branch_for_resolve = branch.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            crate::branches::resolve_branch_workspace_subpath(
+                &store_for_resolve,
+                &branch_for_resolve,
+            )
+            .ok()
+            .flatten()
+            .and_then(|subpath| {
+                crate::branches::resolve_workspace_repo_path(&ws_name, &subpath).ok()
+            })
+        })
+        .await
+        {
+            Ok(Some(path)) => Some(PathBuf::from(path)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     session_runner::start_session(
         SessionConfig {
             session_id: session.id.clone(),
@@ -589,6 +618,7 @@ pub async fn start_branch_session(
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
+            remote_working_dir,
         },
         store,
         app_handle,

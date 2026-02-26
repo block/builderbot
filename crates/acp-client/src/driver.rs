@@ -100,6 +100,12 @@ pub struct AcpDriver {
     extra_env: Vec<(String, String)>,
     /// MCP servers to inject into the session via NewSessionRequest.
     mcp_servers: Vec<McpServer>,
+    /// Override the working directory sent to the remote agent.
+    /// When set, this path is used in the `NewSessionRequest` instead of the
+    /// local `working_dir` passed to `run()`. This is needed because the
+    /// local `working_dir` is a fallback path on the host machine, while the
+    /// remote agent needs the actual workspace path (e.g. `/home/bloxer/cash-server`).
+    remote_working_dir: Option<PathBuf>,
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
@@ -118,6 +124,7 @@ impl AcpDriver {
                 is_remote: false,
                 extra_env: Vec::new(),
                 mcp_servers: Vec::new(),
+                remote_working_dir: None,
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
     }
@@ -132,6 +139,7 @@ impl AcpDriver {
                 is_remote: false,
                 extra_env: Vec::new(),
                 mcp_servers: Vec::new(),
+                remote_working_dir: None,
             })
             .ok_or_else(|| {
                 "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
@@ -155,6 +163,7 @@ impl AcpDriver {
             is_remote: true,
             extra_env: Vec::new(),
             mcp_servers: Vec::new(),
+            remote_working_dir: None,
         })
     }
 
@@ -167,6 +176,18 @@ impl AcpDriver {
     /// Set MCP servers to inject into the session via `NewSessionRequest`.
     pub fn with_mcp_servers(mut self, servers: Vec<McpServer>) -> Self {
         self.mcp_servers = servers;
+        self
+    }
+
+    /// Set the working directory for the remote agent.
+    ///
+    /// For remote sessions, the `working_dir` passed to `run()` is used as
+    /// `current_dir` for spawning the local proxy process. This field
+    /// overrides the directory sent to the remote agent in the
+    /// `NewSessionRequest`, so the agent operates in the correct repo
+    /// directory on the workspace.
+    pub fn with_remote_working_dir(mut self, dir: PathBuf) -> Self {
+        self.remote_working_dir = Some(dir);
         self
     }
 }
@@ -237,7 +258,9 @@ impl AgentDriver for AcpDriver {
             }
         });
 
-        let acp_working_dir = if self.is_remote {
+        let acp_working_dir = if let Some(ref remote_dir) = self.remote_working_dir {
+            remote_dir.clone()
+        } else if self.is_remote {
             PathBuf::from(".")
         } else {
             working_dir.to_path_buf()

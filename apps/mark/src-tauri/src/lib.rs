@@ -516,6 +516,7 @@ async fn add_project_repo(
             };
 
             if branch.workspace_name.is_none() {
+                // Local branch: set up git worktree and run prerun actions.
                 let branch_id = branch.id.clone();
                 let store_clone = Arc::clone(&store);
                 let worktree_result = tauri::async_runtime::spawn_blocking(move || {
@@ -557,6 +558,24 @@ async fn add_project_repo(
                         log::warn!("[add_project_repo] prerun actions failed: {e}");
                     }
                 }
+            } else {
+                // Remote branch: clone the repo into the running workspace,
+                // fetch the base branch, and create the feature branch.
+                match branches::setup_remote_repo_clone(&store, &branch.id).await {
+                    Ok(()) => {
+                        log::info!(
+                            "[add_project_repo] remote repo cloned for branch '{}'",
+                            branch.branch_name
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[add_project_repo] remote repo clone failed for branch '{}': {e}",
+                            branch.branch_name
+                        );
+                    }
+                }
+                let _ = app_handle.emit("project-setup-progress", project_id);
             }
         }
     });

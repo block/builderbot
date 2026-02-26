@@ -383,6 +383,25 @@ impl ProjectToolsHandler {
             RepoSessionOutcome::ReturnOutputOnly => (None, None),
         };
 
+        // Resolve the actual workspace path for remote branches so the remote
+        // agent starts in the correct repo directory.
+        let remote_working_dir = if workspace_name.is_some() {
+            branch
+                .as_ref()
+                .and_then(|br| {
+                    let ws = br.workspace_name.as_deref()?;
+                    crate::branches::resolve_branch_workspace_subpath(&self.store, br)
+                        .ok()
+                        .flatten()
+                        .and_then(|subpath| {
+                            crate::branches::resolve_workspace_repo_path(ws, &subpath).ok()
+                        })
+                })
+                .map(std::path::PathBuf::from)
+        } else {
+            None
+        };
+
         // Start the agent (returns immediately; work happens on background thread).
         let start_result = crate::session_runner::start_session(
             SessionConfig {
@@ -397,6 +416,7 @@ impl ProjectToolsHandler {
                 mcp_project_id: None,
                 action_executor: None,
                 action_registry: None,
+                remote_working_dir,
             },
             Arc::clone(&self.store),
             self.app_handle.clone(),

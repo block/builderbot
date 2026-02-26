@@ -798,9 +798,11 @@ async fn delete_project(
         let id = id.clone();
         let branches = branches.clone();
         move || {
-            for branch in &branches {
-                branches::cleanup_branch_resources_best_effort(&store, branch);
-            }
+            cleanup_project_branches_best_effort(
+                &branches,
+                |branch| branches::cleanup_branch_resources_best_effort(&store, branch),
+                |branch| store.delete_branch(&branch.id).map_err(|e| e.to_string()),
+            );
 
             // Best-effort cleanup for project-scoped local worktree roots.
             // Worktree-level cleanup removes individual directories; this removes any
@@ -821,6 +823,52 @@ async fn delete_project(
     .map_err(|e| format!("Failed to clean up project resources: {e}"))?;
 
     store.delete_project(&id).map_err(|e| e.to_string())
+}
+
+fn cleanup_project_branches_best_effort<F, G>(
+    branches: &[store::Branch],
+    mut cleanup_branch_resources: F,
+    mut delete_branch_row: G,
+) where
+    F: FnMut(&store::Branch),
+    G: FnMut(&store::Branch) -> Result<(), String>,
+{
+    let mut failed_branch_deletes: Vec<&store::Branch> = Vec::new();
+
+    for branch in branches {
+        cleanup_branch_resources(branch);
+        // Delete branch rows as we go so shared-workspace cleanup can
+        // converge on the final owner and remove the workspace once.
+        if let Err(e) = delete_branch_row(branch) {
+            log::warn!(
+                "failed to delete branch '{}' during project cleanup: {e}",
+                branch.id
+            );
+            failed_branch_deletes.push(branch);
+        }
+    }
+
+    if failed_branch_deletes.is_empty() {
+        return;
+    }
+
+    // One retry can unblock convergence when an early branch-row delete failed.
+    for branch in failed_branch_deletes {
+        if let Err(e) = delete_branch_row(branch) {
+            log::warn!(
+                "failed retry delete for branch '{}' during project cleanup: {e}",
+                branch.id
+            );
+        }
+    }
+
+    // Re-run remote cleanup once after retries so shared workspace deletion
+    // can converge when the first pass observed stale peer rows.
+    for branch in branches {
+        if branch.branch_type == store::BranchType::Remote {
+            cleanup_branch_resources(branch);
+        }
+    }
 }
 
 // =============================================================================
@@ -2722,4 +2770,99 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_project_branches_best_effort;
+    use crate::store::{Branch, BranchType};
+    use std::collections::HashMap;
+
+    fn remote_branch(
+        project_id: &str,
+        id: &str,
+        branch_name: &str,
+        workspace_name: &str,
+    ) -> Branch {
+        let mut branch = Branch::new_remote(project_id, branch_name, "main", workspace_name);
+        branch.id = id.to_string();
+        branch
+    }
+
+    #[test]
+    fn delete_project_cleanup_retries_branch_row_deletes_and_re_sweeps_remote_workspaces() {
+        let branches = vec![
+            remote_branch("project-1", "a", "feature-a", "ws-shared"),
+            remote_branch("project-1", "b", "feature-b", "ws-shared"),
+        ];
+
+        let mut cleanup_calls: Vec<String> = Vec::new();
+        let mut delete_attempts: HashMap<String, usize> = HashMap::new();
+
+        cleanup_project_branches_best_effort(
+            &branches,
+            |branch| cleanup_calls.push(branch.id.clone()),
+            |branch| {
+                let attempts = delete_attempts.entry(branch.id.clone()).or_insert(0);
+                *attempts += 1;
+                if branch.id == "a" && *attempts == 1 {
+                    Err("simulated transient delete failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert_eq!(delete_attempts.get("a"), Some(&2));
+        assert_eq!(delete_attempts.get("b"), Some(&1));
+        assert_eq!(
+            cleanup_calls,
+            vec![
+                "a".to_string(),
+                "b".to_string(),
+                "a".to_string(),
+                "b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn delete_project_cleanup_final_sweep_only_reprocesses_remote_branches() {
+        let mut local_branch = Branch::new("project-1", "feature-local", "main");
+        local_branch.id = "local".to_string();
+        let branches = vec![
+            remote_branch("project-1", "remote", "feature-remote", "ws-shared"),
+            local_branch,
+        ];
+
+        let mut cleanup_calls: Vec<String> = Vec::new();
+        let mut delete_attempts: HashMap<String, usize> = HashMap::new();
+
+        cleanup_project_branches_best_effort(
+            &branches,
+            |branch| cleanup_calls.push(branch.id.clone()),
+            |branch| {
+                let attempts = delete_attempts.entry(branch.id.clone()).or_insert(0);
+                *attempts += 1;
+                if branch.id == "remote" && *attempts == 1 {
+                    Err("simulated transient delete failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert_eq!(delete_attempts.get("remote"), Some(&2));
+        assert_eq!(delete_attempts.get("local"), Some(&1));
+        assert_eq!(
+            cleanup_calls,
+            vec![
+                "remote".to_string(),
+                "local".to_string(),
+                "remote".to_string()
+            ]
+        );
+        assert_eq!(branches[0].branch_type, BranchType::Remote);
+        assert_eq!(branches[1].branch_type, BranchType::Local);
+    }
 }

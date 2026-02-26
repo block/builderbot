@@ -28,7 +28,7 @@ func testServer(t *testing.T) (*Server, *cache.Cache, *comments.Store) {
 	cs := comments.NewStore(c, act)
 	am := agents.New(c, cs, 0)
 	cfg := &config.Config{}
-	s := New(c, w, cs, nil, am, act, "", cfg, "")
+	s := New(c, w, cs, nil, am, act, cfg, "")
 	// Trigger ensureLoaded so it doesn't interfere with tests
 	s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 	return s, c, cs

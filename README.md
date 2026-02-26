@@ -62,8 +62,6 @@ penpal open thoughts/shared/plans/my-doc.md   # Open file in Penpal desktop app
 
 ```bash
 ./penpal -port 3000              # Custom API port (default: 8080)
-./penpal -go-port 9000           # Custom Go template UI port (default: 8081)
-./penpal -root /path/to/projects # Custom root directory
 ```
 
 ## [Changelog](CHANGELOG.md) | [Roadmap](ROADMAP.md)

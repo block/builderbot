@@ -1,7 +1,6 @@
 package server
 
 import (
-	"net/http"
 	"sort"
 	"time"
 
@@ -19,19 +18,6 @@ type RecentFile struct {
 	FileType     string
 	ActivityType string // "viewed", "modified", "created", "comment", "published", or ""
 	ActivityAge  string // "2m ago", "just now", etc.
-}
-
-func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
-	files := s.mergeRecentFiles(50)
-
-	nav := s.buildNav(r, "")
-	nav.ActivePage = "recent"
-	pageData := struct {
-		Files []RecentFile
-	}{
-		Files: files,
-	}
-	s.renderPage(w, "recent.html", nav, pageData)
 }
 
 // mergeRecentFiles combines activity-tracked files with the filesystem file list.

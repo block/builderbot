@@ -39,11 +39,10 @@ pub fn run() {
 
             // Spawn Go server sidecar
             let port = std::env::var("PENPAL_PORT").unwrap_or_else(|_| "8080".to_string());
-            let go_port = std::env::var("PENPAL_GO_PORT").unwrap_or_else(|_| "8081".to_string());
             let sidecar = app.shell().sidecar("penpal-server")
                 .expect("failed to locate penpal-server sidecar");
             let (_rx, child) = sidecar
-                .args(["-port", &port, "-go-port", &go_port])
+                .args(["-port", &port])
                 .spawn()
                 .expect("failed to spawn penpal-server sidecar");
 

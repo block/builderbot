@@ -1,13 +1,10 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +21,6 @@ import (
 	"github.com/loganj/penpal/internal/config"
 	"github.com/loganj/penpal/internal/discovery"
 	"github.com/loganj/penpal/internal/watcher"
-	"github.com/loganj/penpal/templates"
 )
 
 type Server struct {
@@ -35,11 +31,7 @@ type Server struct {
 	activity    *activity.Tracker
 	mcpHandler  http.Handler
 	mux         *http.ServeMux
-	goMux       *http.ServeMux
-	tmpl        *template.Template
-	layoutTmpl  *template.Template // base layout for sidebar pages
 	loadOnce    sync.Once
-	templateDir string // if set, reload templates from disk on each request
 	frontendDir string // if set, serve React SPA from this directory at /app/
 	cfg         *config.Config
 	cfgPath     string
@@ -50,7 +42,7 @@ type Server struct {
 	navMu        sync.Mutex
 }
 
-func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, am *agents.Manager, act *activity.Tracker, templateDir string, cfg *config.Config, cfgPath string) *Server {
+func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, am *agents.Manager, act *activity.Tracker, cfg *config.Config, cfgPath string) *Server {
 	// Auto-detect frontend/dist directory for SPA serving
 	var frontendDir string
 	if dir := "frontend/dist"; dirExists(dir) {
@@ -65,17 +57,10 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 		activity:    act,
 		mcpHandler:  mcpHandler,
 		mux:         http.NewServeMux(),
-		goMux:       http.NewServeMux(),
-		templateDir: templateDir,
 		frontendDir: frontendDir,
 		cfg:         cfg,
 		cfgPath:     cfgPath,
 	}
-
-	// Parse templates from embedded filesystem
-	s.tmpl = template.Must(template.ParseFS(templates.FS, "*.html"))
-	// Parse layout template separately for clone-per-page rendering
-	s.layoutTmpl = template.Must(template.New("").ParseFS(templates.FS, "_layout.html"))
 
 	if am != nil {
 		am.SetOnChange(func(projectName string) {
@@ -89,39 +74,6 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 
 	s.routes()
 	return s
-}
-
-func (s *Server) getTemplate() *template.Template {
-	if s.templateDir != "" {
-		t, err := template.ParseGlob(filepath.Join(s.templateDir, "*.html"))
-		if err != nil {
-			log.Printf("Error reloading templates: %v", err)
-			return s.tmpl
-		}
-		return t
-	}
-	return s.tmpl
-}
-
-// getPageTemplate returns a template set with the layout + a specific page template.
-// Each page gets its own clone so block definitions (title, content, etc.) don't conflict.
-func (s *Server) getPageTemplate(pageName string) *template.Template {
-	if s.templateDir != "" {
-		layoutPath := filepath.Join(s.templateDir, "_layout.html")
-		pagePath := filepath.Join(s.templateDir, pageName)
-		t, err := template.ParseFiles(layoutPath, pagePath)
-		if err != nil {
-			log.Printf("Error loading page template %s: %v", pageName, err)
-			return s.tmpl
-		}
-		return t
-	}
-	t, err := template.Must(s.layoutTmpl.Clone()).ParseFS(templates.FS, pageName)
-	if err != nil {
-		log.Printf("Error cloning page template %s: %v", pageName, err)
-		return s.tmpl
-	}
-	return t
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -147,15 +99,6 @@ func isLocalOrigin(origin string) bool {
 		strings.HasPrefix(origin, "https://tauri.") ||
 		strings.HasPrefix(origin, "http://localhost") ||
 		strings.HasPrefix(origin, "http://127.0.0.1")
-}
-
-// GoHandler returns an http.Handler that serves the Go template UI.
-// This is used for the secondary server port.
-func (s *Server) GoHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.ensureLoaded()
-		s.goMux.ServeHTTP(w, r)
-	})
 }
 
 // discoverAllProjects discovers projects from all configured workspaces and standalone projects.
@@ -332,6 +275,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/agents/stop", s.handleAgentStop)
 	// Raw file content
 	s.mux.HandleFunc("/api/raw", s.handleRawFile)
+	// Activity tracking
+	s.mux.HandleFunc("/api/view", s.handleRecordView)
 	// Publish to Blockcell
 	s.mux.HandleFunc("/api/publish", s.handlePublish)
 	s.mux.HandleFunc("/api/publish-state", s.handlePublishState)
@@ -344,340 +289,6 @@ func (s *Server) routes() {
 		s.mux.Handle("/mcp/", s.mcpHandler)
 	}
 
-	// Go template mux (:8081) — Go template UI under /app/
-	// Routes are registered at /app/... and handlers receive rewritten paths
-	// (with /app stripped) so their existing TrimPrefix logic works unchanged.
-	// Redirects and template links are rewritten via appPrefixWriter.
-	s.goMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		http.Redirect(w, r, "/app/", http.StatusFound)
-	})
-	s.goMux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/app/", http.StatusMovedPermanently)
-	})
-	appHandler := func(h http.HandlerFunc) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			// Set base path in context so buildNav/handlers produce /app-prefixed links
-			ctx := context.WithValue(r.Context(), basePathKey, "/app")
-			r2 := r.WithContext(ctx)
-			r2.URL = new(url.URL)
-			*r2.URL = *r.URL
-			// Strip /app prefix so handlers see /workspace/... not /app/workspace/...
-			r2.URL.Path = strings.TrimPrefix(r.URL.Path, "/app")
-			if r2.URL.Path == "" {
-				r2.URL.Path = "/"
-			}
-			h(w, r2)
-		}
-	}
-	s.goMux.HandleFunc("/app/", appHandler(s.handleIndex))
-	s.goMux.HandleFunc("/app/workspace/", appHandler(s.handleWorkspace))
-	s.goMux.HandleFunc("/app/project/", appHandler(s.handleProject))
-	s.goMux.HandleFunc("/app/file/", appHandler(s.handleFile))
-	s.goMux.HandleFunc("/app/search", appHandler(s.handleSearch))
-	s.goMux.HandleFunc("/app/recent", appHandler(s.handleRecent))
-	s.goMux.HandleFunc("/app/in-review", appHandler(s.handleInReview))
-	s.goMux.HandleFunc("/app/static/", appHandler(s.handleStatic))
-	// API and SSE on goMux so the Go template JS (live updates, comments) works
-	s.goMux.HandleFunc("/events", s.handleEvents)
-	s.goMux.HandleFunc("/api/projects", s.handleAPIProjects)
-	s.goMux.HandleFunc("/api/project/", s.handleAPIProjectFiles)
-	s.goMux.HandleFunc("/api/recent", s.handleAPIRecent)
-	s.goMux.HandleFunc("/api/in-review", s.handleAPIInReview)
-	s.goMux.HandleFunc("/api/search", s.handleAPISearch)
-	s.goMux.HandleFunc("/api/copy-file", s.handleCopyFile)
-	s.goMux.HandleFunc("/api/project-info", s.handleProjectInfo)
-	s.goMux.HandleFunc("/api/delete-project", s.handleDeleteProject)
-	s.goMux.HandleFunc("/api/delete-file", s.handleDeleteFile)
-	s.goMux.HandleFunc("/api/workspaces", s.handleAPIWorkspaces)
-	s.goMux.HandleFunc("/api/sources", s.handleAPISources)
-	s.goMux.HandleFunc("/api/open", s.handleAPIOpen)
-	s.goMux.HandleFunc("/api/threads", s.handleAPIThreads)
-	s.goMux.HandleFunc("/api/threads/", s.handleAPIThreadAction)
-	s.goMux.HandleFunc("/api/reviews", s.handleAPIListReviews)
-	s.goMux.HandleFunc("/api/agents", s.handleAgentStatus)
-	s.goMux.HandleFunc("/api/agents/start", s.handleAgentStart)
-	s.goMux.HandleFunc("/api/agents/stop", s.handleAgentStop)
-	s.goMux.HandleFunc("/api/raw", s.handleRawFile)
-	s.goMux.HandleFunc("/api/publish", s.handlePublish)
-	s.goMux.HandleFunc("/api/publish-state", s.handlePublishState)
-}
-
-// handleStatic serves embedded static assets (JS, CSS) from the templates package.
-func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/static/")
-	if name == "" {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Sanitize: only allow a bare filename (no slashes, no traversal).
-	if strings.ContainsAny(name, "/\\") || name == "." || name == ".." || strings.Contains(name, "..") {
-		http.NotFound(w, r)
-		return
-	}
-
-	// In dev mode, serve from disk for live reload
-	if s.templateDir != "" {
-		http.ServeFile(w, r, filepath.Join(s.templateDir, name))
-		return
-	}
-
-	data, err := templates.FS.ReadFile(name)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	if strings.HasSuffix(name, ".js") {
-		w.Header().Set("Content-Type", "application/javascript")
-	}
-	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.Write(data)
-}
-
-// contextKey is an unexported type for context keys in this package.
-type contextKey string
-
-const basePathKey contextKey = "basePath"
-
-// basePath returns the URL path prefix from the request context (e.g. "/app" on goMux).
-func basePath(r *http.Request) string {
-	if v, ok := r.Context().Value(basePathKey).(string); ok {
-		return v
-	}
-	return ""
-}
-
-// NavData provides the sidebar with workspace/project links on every page.
-type NavData struct {
-	BasePath      string // URL prefix for all route links (e.g. "/app" on goMux, "" on main mux)
-	Workspaces    []NavWorkspace
-	Standalone    []NavProject
-	ActiveProject *NavProject // active workspace project (shown indented under workspace)
-	ActiveQN      string      // qualified name of the active project (for standalone highlighting)
-	ActiveWS      string      // workspace path of the active project (for workspace highlighting)
-	ActiveWSName  string      // display name of the active workspace (for URL construction)
-	InProject     bool        // true when viewing a project or file page (triggers focused sidebar)
-	SearchQuery   string      // pre-fill search box if on search page
-	ReviewCount   int         // total files with open comment threads across all projects
-	ActivePage    string      // "recent", "in-review", etc. for sidebar link highlighting
-}
-
-type NavWorkspace struct {
-	Name     string
-	Path     string
-	HasAgent bool // true if any project in this workspace has an MCP connection
-}
-
-type NavProject struct {
-	Name          string
-	QualifiedName string
-	Path          string // filesystem path (for removal API)
-	HasAgent      bool
-	Badges        []discovery.Badge
-	Branch        string
-	Dirty         bool
-}
-
-// buildNav builds NavData from current config and cache state.
-func (s *Server) buildNav(r *http.Request, activeQN string) NavData {
-	nav := NavData{ActiveQN: activeQN, BasePath: basePath(r)}
-
-	projects := s.cache.ProjectsSortedByModTime()
-
-	// Check which workspaces have active MCP connections
-	wsHasAgent := make(map[string]bool)
-	for _, p := range projects {
-		qn := p.QualifiedName()
-		hasAgent := s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running
-
-		if p.Origin == "standalone" {
-			np := NavProject{
-				Name:          p.Name,
-				QualifiedName: qn,
-				Path:          p.Path,
-				HasAgent:      hasAgent,
-				Badges:        p.Badges(),
-			}
-			if p.Git != nil {
-				np.Branch = p.Git.Branch
-				np.Dirty = p.Git.Dirty
-			}
-			nav.Standalone = append(nav.Standalone, np)
-			continue
-		}
-
-		if hasAgent {
-			wsHasAgent[p.WorkspacePath] = true
-		}
-
-		// Build active project details for workspace projects
-		if qn == activeQN {
-			nav.ActiveWS = p.WorkspacePath
-			nav.ActiveWSName = p.WorkspaceName
-			np := NavProject{
-				Name:          p.Name,
-				QualifiedName: qn,
-				HasAgent:      hasAgent,
-				Badges:        p.Badges(),
-			}
-			if p.Git != nil {
-				np.Branch = p.Git.Branch
-				np.Dirty = p.Git.Dirty
-			}
-			nav.ActiveProject = &np
-		}
-	}
-
-	for _, ws := range s.cfg.Workspaces {
-		nav.Workspaces = append(nav.Workspaces, NavWorkspace{
-			Name:     ws.DisplayName(),
-			Path:     ws.Path,
-			HasAgent: wsHasAgent[ws.Path],
-		})
-	}
-
-	// Count files in review across all projects
-	for _, p := range projects {
-		if reviews, err := s.comments.ListFilesInReview(p.QualifiedName()); err == nil {
-			nav.ReviewCount += len(reviews)
-		}
-	}
-
-	return nav
-}
-
-// PageData wraps nav data and page-specific data for the layout template.
-type PageData struct {
-	Nav  NavData
-	Page interface{}
-}
-
-// renderPage wraps page-specific data with NavData and executes the layout.
-// It clones the layout template and parses the page template into the clone,
-// so each page's block definitions (title, content, etc.) don't conflict.
-func (s *Server) renderPage(w http.ResponseWriter, tmplName string, nav NavData, pageData interface{}) {
-	data := PageData{Nav: nav, Page: pageData}
-	t := s.getPageTemplate(tmplName)
-	if err := t.ExecuteTemplate(w, tmplName, data); err != nil {
-		log.Printf("Template error (%s): %v", tmplName, err)
-	}
-}
-
-type IndexFile struct {
-	Project  string
-	FilePath string
-	FileName string
-	ModTime  time.Time
-	Age      string
-}
-
-// WorkspaceGroup groups projects discovered from a single workspace directory.
-type WorkspaceGroup struct {
-	Name     string
-	Path     string
-	Projects []discovery.Project
-}
-
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-
-	bp := basePath(r)
-
-	// Redirect to first workspace or standalone project
-	if len(s.cfg.Workspaces) > 0 {
-		http.Redirect(w, r, bp+"/workspace/"+s.cfg.Workspaces[0].DisplayName(), http.StatusFound)
-		return
-	}
-
-	projects := s.cache.ProjectsSortedByModTime()
-	for _, p := range projects {
-		if p.Origin == "standalone" {
-			http.Redirect(w, r, bp+"/project/"+p.QualifiedName(), http.StatusFound)
-			return
-		}
-	}
-
-	// Nothing configured
-	http.Redirect(w, r, bp+"/recent", http.StatusFound)
-}
-
-func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
-	wsName := strings.TrimPrefix(r.URL.Path, "/workspace/")
-	if wsName == "" {
-		http.Redirect(w, r, basePath(r)+"/", http.StatusFound)
-		return
-	}
-
-	// Find workspace config by display name
-	var wsConfig *config.Workspace
-	for i := range s.cfg.Workspaces {
-		if s.cfg.Workspaces[i].DisplayName() == wsName {
-			wsConfig = &s.cfg.Workspaces[i]
-			break
-		}
-	}
-	if wsConfig == nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Get projects for this workspace only
-	sortedProjects := s.cache.ProjectsSortedByModTime()
-
-	agentConnected := make(map[string]bool)
-	ages := make(map[string]string)
-	var wsProjects []discovery.Project
-
-	for _, p := range sortedProjects {
-		if p.Origin == "standalone" || p.WorkspaceName != wsConfig.DisplayName() {
-			continue
-		}
-		qn := p.QualifiedName()
-		if s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running {
-			agentConnected[qn] = true
-		}
-		ages[qn] = computeProjectAge(p)
-		wsProjects = append(wsProjects, p)
-	}
-
-	// Active projects first (by mod time), then empty (by name)
-	sort.SliceStable(wsProjects, func(i, j int) bool {
-		iActive := wsProjects[i].FileCount > 0
-		jActive := wsProjects[j].FileCount > 0
-		if iActive != jActive {
-			return iActive
-		}
-		if !iActive {
-			return wsProjects[i].Name < wsProjects[j].Name
-		}
-		return false
-	})
-
-	wg := WorkspaceGroup{Name: wsConfig.DisplayName(), Path: wsConfig.Path, Projects: wsProjects}
-
-	nav := s.buildNav(r, "")
-	nav.ActiveWS = wsConfig.Path
-	nav.ActiveWSName = wsConfig.DisplayName()
-	pageData := struct {
-		Workspaces     []WorkspaceGroup
-		Standalone     []discovery.Project
-		AgentConnected map[string]bool
-		Ages           map[string]string
-		WorkspacePath  string
-	}{
-		Workspaces:     []WorkspaceGroup{wg},
-		AgentConnected: agentConnected,
-		Ages:           ages,
-		WorkspacePath:  wsConfig.Path,
-	}
-	s.renderPage(w, "index.html", nav, pageData)
 }
 
 func formatAge(t time.Time) string {
@@ -936,37 +547,6 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 	}
 
 	return groups
-}
-
-func (s *Server) handleProject(w http.ResponseWriter, r *http.Request) {
-	// Parse /project/{qualifiedName} where qualifiedName is "workspace/project" or "project"
-	qualifiedName := strings.TrimPrefix(r.URL.Path, "/project/")
-	qualifiedName = strings.TrimSuffix(qualifiedName, "/")
-	if qualifiedName == "" {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Find project by qualified name
-	project := s.cache.FindProject(qualifiedName)
-	if project == nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	cachedFiles := s.cache.ProjectFiles(qualifiedName)
-	groups := buildFileGroups(project, cachedFiles)
-
-	nav := s.buildNav(r, project.QualifiedName())
-	nav.InProject = true
-	pageData := struct {
-		Project *discovery.Project
-		Groups  []FileGroupView
-	}{
-		Project: project,
-		Groups:  groups,
-	}
-	s.renderPage(w, "project.html", nav, pageData)
 }
 
 // handleEvents is the SSE endpoint for live updates

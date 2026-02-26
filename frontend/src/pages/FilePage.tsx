@@ -229,6 +229,7 @@ export default function FilePage() {
     fetchContent();
     fetchThreads();
     fetchAgentStatus();
+    if (project && path) api.recordView(project, path).catch(() => {});
     return () => {
       if (agentPollRef.current) clearInterval(agentPollRef.current);
     };

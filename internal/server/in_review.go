@@ -40,19 +40,6 @@ type ReviewGroup struct {
 	Files         []ReviewFileEntry `json:"files"`
 }
 
-func (s *Server) handleInReview(w http.ResponseWriter, r *http.Request) {
-	groups := s.listAllReviewGroups()
-
-	nav := s.buildNav(r, "")
-	nav.ActivePage = "in-review"
-	pageData := struct {
-		Groups []ReviewGroup
-	}{
-		Groups: groups,
-	}
-	s.renderPage(w, "in-review.html", nav, pageData)
-}
-
 func (s *Server) handleAPIInReview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.listAllReviewGroups())

@@ -28,15 +28,13 @@ import (
 
 func main() {
 	port := flag.Int("port", 8080, "port to listen on")
-	goPort := flag.Int("go-port", 8081, "port for Go template UI")
 	root := flag.String("root", "", "root directory (deprecated, use config file)")
-	dev := flag.Bool("dev", false, "development mode: reload templates from disk on each request")
 	flag.Parse()
 
 	args := flag.Args()
 	if len(args) == 0 {
 		// No subcommand: start server
-		runServe(*port, *goPort, *dev, *root)
+		runServe(*port, *root)
 		return
 	}
 
@@ -54,7 +52,7 @@ func main() {
 	}
 }
 
-func runServe(port int, goPort int, dev bool, rootOverride string) {
+func runServe(port int, rootOverride string) {
 	config.MigrateFromBirdseye()
 	config.EnsureGlobalGitignore()
 
@@ -82,14 +80,9 @@ func runServe(port int, goPort int, dev bool, rootOverride string) {
 	}
 	defer w.Stop()
 
-	var templateDir string
-	if dev {
-		templateDir = "templates"
-	}
-
 	am := agents.New(c, cs, port)
 	mcpHandler := mcpserver.NewHandler(cs, c)
-	srv := server.New(c, w, cs, mcpHandler, am, act, templateDir, cfg, cfgPath)
+	srv := server.New(c, w, cs, mcpHandler, am, act, cfg, cfgPath)
 	addr := fmt.Sprintf(":%d", port)
 
 	// Write .mcp.json for MCP client discovery
@@ -114,28 +107,15 @@ func runServe(port int, goPort int, dev bool, rootOverride string) {
 		Handler: srv,
 	}
 
-	goAddr := fmt.Sprintf(":%d", goPort)
-	goHTTPServer := &http.Server{
-		Addr:    goAddr,
-		Handler: srv.GoHandler(),
-	}
-
 	// Graceful shutdown on SIGINT/SIGTERM
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		fmt.Printf("\nStarting server at http://localhost%s\n", addr)
-		fmt.Printf("Go template UI:    http://localhost%s\n", goAddr)
 		fmt.Printf("penpal MCP server: http://localhost%s/mcp\n", addr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal(err)
-		}
-	}()
-
-	go func() {
-		if err := goHTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Go template server error: %v", err)
 		}
 	}()
 
@@ -147,7 +127,6 @@ func runServe(port int, goPort int, dev bool, rootOverride string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	httpServer.Shutdown(ctx)
-	goHTTPServer.Shutdown(ctx)
 }
 
 // runOpen opens paths in the Penpal desktop app, launching it if needed.

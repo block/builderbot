@@ -125,6 +125,10 @@ export const api = {
       `/api/publish-state?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`,
     ),
 
+  // Activity tracking
+  recordView: (project: string, path: string) =>
+    apiVoid(`/api/view?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`, { method: 'POST' }),
+
   // Search
   search: (query: string) =>
     apiFetch<SearchResponse>(`/api/search?q=${encodeURIComponent(query)}`),

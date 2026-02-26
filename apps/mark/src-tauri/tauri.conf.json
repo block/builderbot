@@ -41,7 +41,10 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "infoPlist": "./Info.plist"
+      "infoPlist": {
+        "CFBundleDisplayName": "Mark",
+        "CFBundleName": "Mark"
+      }
     }
   }
 }

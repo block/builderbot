@@ -98,7 +98,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 					store.RecordHeartbeat(input.Project, t.FilePath)
 					seen[t.FilePath] = true
 				}
-				if len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+				if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
 					store.SetTyping(input.Project, t.FilePath, t.ID)
 				}
 			}

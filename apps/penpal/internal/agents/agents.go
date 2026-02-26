@@ -27,7 +27,11 @@ func StartPolling() {
 	pollMu.Lock()
 	defer pollMu.Unlock()
 
+	if stopCh != nil {
+		close(stopCh)
+	}
 	stopCh = make(chan struct{})
+	ch := stopCh
 	// Do an initial poll synchronously so the first read has data.
 	result := poll()
 	mu.Lock()
@@ -39,7 +43,7 @@ func StartPolling() {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-stopCh:
+			case <-ch:
 				return
 			case <-ticker.C:
 				result := poll()

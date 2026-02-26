@@ -114,7 +114,7 @@
   function statusLabel(status: WorkspaceStatus | null): string {
     switch (status) {
       case 'starting':
-        return 'Starting';
+        return 'Provisioning';
       case 'running':
         return 'Running';
       case 'stopped':
@@ -320,11 +320,7 @@
           {:else if projectWorkspaceStatus === 'error'}
             <AlertCircle size={12} />
           {/if}
-          <span
-            >{projectWorkspaceStatus === 'running'
-              ? 'Remote'
-              : statusLabel(projectWorkspaceStatus)}</span
-          >
+          <span>{statusLabel(projectWorkspaceStatus)}</span>
         </div>
       {/if}
     </div>
@@ -433,9 +429,11 @@
         projectName={project.name}
         deleting={deletingBranches.has(branch.id)}
         worktreeError={worktreeErrors.get(branch.id)}
+        workspaceError={workspaceErrors.get(branch.id)}
         onDelete={() => onDeleteBranch?.(branch.id)}
         onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
         onRetryWorktree={() => onRetryWorktree?.(branch.id)}
+        onWorkspaceStatusChange={(status) => onWorkspaceStatusChange?.(branch.id, status)}
       />
     {/each}
   </div>

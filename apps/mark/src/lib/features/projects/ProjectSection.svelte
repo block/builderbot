@@ -25,7 +25,6 @@
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
-  import RemoteBranchCard from '../branches/RemoteBranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import GitHubRepoPicker from './GitHubRepoPicker.svelte';
   import TimelineRow from '../timeline/TimelineRow.svelte';
@@ -428,29 +427,16 @@
 
   <div class="branches-list" class:deleting>
     {#each sortedBranches as branch (branch.id)}
-      {#if branch.branchType === 'remote'}
-        <RemoteBranchCard
-          {branch}
-          repoLabel={repoLabelForBranch(branch)}
-          projectName={project.name}
-          deleting={deletingBranches.has(branch.id)}
-          workspaceError={workspaceErrors.get(branch.id)}
-          onDelete={() => onDeleteBranch?.(branch.id)}
-          onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
-          onWorkspaceStatusChange={(status) => onWorkspaceStatusChange?.(branch.id, status)}
-        />
-      {:else}
-        <BranchCard
-          {branch}
-          repoLabel={repoLabelForBranch(branch)}
-          projectName={project.name}
-          deleting={deletingBranches.has(branch.id)}
-          worktreeError={worktreeErrors.get(branch.id)}
-          onDelete={() => onDeleteBranch?.(branch.id)}
-          onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
-          onRetryWorktree={() => onRetryWorktree?.(branch.id)}
-        />
-      {/if}
+      <BranchCard
+        {branch}
+        repoLabel={repoLabelForBranch(branch)}
+        projectName={project.name}
+        deleting={deletingBranches.has(branch.id)}
+        worktreeError={worktreeErrors.get(branch.id)}
+        onDelete={() => onDeleteBranch?.(branch.id)}
+        onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
+        onRetryWorktree={() => onRetryWorktree?.(branch.id)}
+      />
     {/each}
   </div>
 </div>

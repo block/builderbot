@@ -320,6 +320,16 @@
   let showNewSession = $state(false);
   let newSessionMode = $state<BranchSessionType>('commit');
   let draftPrompt = $state('');
+  type PendingSessionItemType = 'pending-commit' | 'generating-note' | 'generating-review';
+  type PendingSessionItem = {
+    key: string;
+    type: PendingSessionItemType;
+    title: string;
+    secondaryMeta?: string;
+    sessionId?: string;
+  };
+  let pendingSessionItems = $state<PendingSessionItem[]>([]);
+  let isSessionStartPending = $derived(pendingSessionItems.some((item) => !item.sessionId));
 
   // Session modal (opened after starting a branch session, or from timeline)
   let openSessionId = $state<string | null>(null);
@@ -358,6 +368,9 @@
     }>('session-status-changed', (event) => {
       const { sessionId: eventSessionId, status, branchId: eventBranchId } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        pendingSessionItems = pendingSessionItems.filter(
+          (item) => item.sessionId !== eventSessionId
+        );
         loadTimeline();
         // Handle PR session completion
         if (eventSessionId === prSessionId) {
@@ -667,6 +680,24 @@
     window.removeEventListener('keydown', handleAltDown);
     window.removeEventListener('keyup', handleAltUp);
   });
+
+  function prunePendingSessionItems(nextTimeline: BranchTimelineData) {
+    const persistedSessionIds = new Set<string>();
+    for (const commit of nextTimeline.commits) {
+      if (commit.sessionId) persistedSessionIds.add(commit.sessionId);
+    }
+    for (const note of nextTimeline.notes) {
+      if (note.sessionId) persistedSessionIds.add(note.sessionId);
+    }
+    for (const review of nextTimeline.reviews) {
+      if (review.sessionId) persistedSessionIds.add(review.sessionId);
+    }
+
+    pendingSessionItems = pendingSessionItems.filter(
+      (item) => !item.sessionId || !persistedSessionIds.has(item.sessionId)
+    );
+  }
+
   async function loadTimeline() {
     // Only show the loading spinner on the initial load. Subsequent refreshes
     // keep the existing timeline visible to avoid a jarring flash/re-render
@@ -679,6 +710,7 @@
     try {
       const nextTimeline = await commands.getBranchTimeline(branch.id, { force: !isInitialLoad });
       timeline = nextTimeline;
+      prunePendingSessionItems(nextTimeline);
       void loadTimelineReviewDetails(nextTimeline.reviews);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -1038,28 +1070,77 @@
   // New session modal
   // =========================================================================
 
-  function openNewSession(mode: BranchSessionType, e?: MouseEvent) {
-    // If option-clicking "New code review", start immediately without showing the dialog
-    if (mode === 'review' && e?.altKey) {
-      startReviewSessionImmediately();
-      return;
+  function pendingSessionTypeForMode(mode: BranchSessionType): PendingSessionItemType {
+    switch (mode) {
+      case 'note':
+        return 'generating-note';
+      case 'review':
+        return 'generating-review';
+      default:
+        return 'pending-commit';
     }
-    newSessionMode = mode;
-    showNewSession = true;
   }
 
-  async function startReviewSessionImmediately() {
+  function pendingSessionTitleForMode(mode: BranchSessionType, prompt: string): string {
+    const trimmed = prompt.trim();
+    if (mode === 'review') return 'Code Review';
+    if (trimmed) return trimmed;
+    return mode === 'note' ? 'Untitled note' : 'Pending commit';
+  }
+
+  function pendingSessionMetaForMode(mode: BranchSessionType): string {
+    switch (mode) {
+      case 'note':
+        return 'Starting note session...';
+      case 'review':
+        return 'Starting review session...';
+      default:
+        return 'Starting commit session...';
+    }
+  }
+
+  async function startBranchSessionWithPendingItem(mode: BranchSessionType, prompt: string) {
+    const pendingKey = `session-start-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    pendingSessionItems = [
+      ...pendingSessionItems,
+      {
+        key: pendingKey,
+        type: pendingSessionTypeForMode(mode),
+        title: pendingSessionTitleForMode(mode, prompt),
+        secondaryMeta: pendingSessionMetaForMode(mode),
+      },
+    ];
+
     try {
-      newSessionMode = 'review'; // Set mode for handleNewSessionStarted
       const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const result = await commands.startBranchSession(
         branch.id,
-        'Review the code changes on this branch.',
-        'review',
+        prompt,
+        mode,
         getPreferredAgent(agents) ?? undefined
       );
-      handleNewSessionStarted({ sessionId: result.sessionId, artifactId: result.artifactId });
+
+      if (!result || !result.sessionId) {
+        throw new Error('Failed to start session: no session ID returned');
+      }
+
+      // Register session in the unified registry with the actual session type
+      sessionRegistry.register(result.sessionId, branch.projectId, mode, branch.id);
+      projectStateStore.addRunningSession(branch.projectId, result.sessionId);
+
+      pendingSessionItems = pendingSessionItems.map((item) =>
+        item.key === pendingKey
+          ? {
+              ...item,
+              sessionId: result.sessionId,
+              secondaryMeta: undefined,
+            }
+          : item
+      );
+
+      loadTimeline();
     } catch (e) {
+      pendingSessionItems = pendingSessionItems.filter((item) => item.key !== pendingKey);
       alerts.show({
         tone: 'error',
         title: 'Unable to start session',
@@ -1069,24 +1150,35 @@
     }
   }
 
+  function openNewSession(mode: BranchSessionType, e?: MouseEvent) {
+    // If option-clicking "New code review", start immediately without showing the dialog
+    if (mode === 'review' && e?.altKey) {
+      void startReviewSessionImmediately();
+      return;
+    }
+    newSessionMode = mode;
+    showNewSession = true;
+  }
+
+  async function startReviewSessionImmediately() {
+    const reviewPrompt = 'Review the code changes on this branch.';
+    newSessionMode = 'review';
+    showNewSession = false;
+    draftPrompt = '';
+    await startBranchSessionWithPendingItem('review', reviewPrompt);
+  }
+
   function handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType }) {
     draftPrompt = draft.prompt;
     newSessionMode = draft.mode;
     showNewSession = false;
   }
 
-  function handleNewSessionStarted(result: { sessionId: string; artifactId: string }) {
-    // Track the running session in the project state store
-    if (!result || !result.sessionId) {
-      notifyError('Session Error', 'Failed to start session: no session ID returned');
-      return;
-    }
-    // Register session in the unified registry with the actual session type
-    sessionRegistry.register(result.sessionId, branch.projectId, newSessionMode, branch.id);
-    projectStateStore.addRunningSession(branch.projectId, result.sessionId);
+  function handleNewSessionSubmit(data: { prompt: string; mode: BranchSessionType }) {
+    newSessionMode = data.mode;
     showNewSession = false;
     draftPrompt = '';
-    loadTimeline();
+    void startBranchSessionWithPendingItem(data.mode, data.prompt);
   }
 
   // =========================================================================
@@ -1848,6 +1940,7 @@
         <BranchTimeline
           {timeline}
           pendingDropNotes={isLocal ? pendingDropNotes : undefined}
+          pendingItems={pendingSessionItems}
           reviewCommentBreakdown={timelineReviewDetailsById}
           onSessionClick={handleTimelineSessionClick}
           onCommitClick={handleCommitClick}
@@ -1860,7 +1953,7 @@
           onNewNote={() => openNewSession('note')}
           onNewCommit={() => openNewSession('commit')}
           onNewReview={hasCodeChanges ? (e) => openNewSession('review', e) : undefined}
-          newSessionDisabled={showNewSession}
+          newSessionDisabled={showNewSession || isSessionStartPending}
         >
           {#snippet footerActions()}
             {#if hasCodeChanges}
@@ -2005,7 +2098,7 @@
     initialPrompt={draftPrompt}
     remote={isRemote}
     onClose={handleNewSessionClose}
-    onStarted={handleNewSessionStarted}
+    onSubmit={handleNewSessionSubmit}
   />
 {/if}
 

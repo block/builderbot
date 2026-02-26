@@ -1,27 +1,23 @@
 <!--
-  NewSessionModal.svelte — Start a new commit or note session on a branch
+  NewSessionModal.svelte — Start a new branch session on a branch
 
-  A focused modal with a prompt textarea. The mode (commit or note) is
+  A focused modal with a prompt textarea. The mode (commit/note/review) is
   determined by the caller and displayed as a static title in the header.
   On close, returns whatever text was typed and the current mode so the
   caller can restore state if the user re-opens the modal.
 
   Props:
     branch        — the branch to create a session on
-    mode          — 'commit' or 'note' (shown as title, not togglable)
+    mode          — 'commit', 'note', or 'review' (shown as title, not togglable)
     initialPrompt — pre-fill the textarea (e.g. from a previous close)
     onClose       — called with { prompt, mode } when dismissed
-    onStarted     — called with { sessionId, artifactId } on successful start
+    onSubmit      — called with { prompt, mode } when submit is pressed
 -->
 <script lang="ts">
   import { X, GitCommitVertical, FileText, FileSearch, GitBranch, Send } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import type { Branch, BranchSessionType } from '../../types';
-  import * as commands from '../../api/commands';
   import AgentSelector from '../agents/AgentSelector.svelte';
-  import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
-  import { getPreferredAgent } from '../settings/preferences.svelte';
-  import { alerts } from '../../shared/alerts.svelte';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
 
   interface Props {
@@ -30,10 +26,10 @@
     initialPrompt?: string;
     remote?: boolean;
     onClose: (draft: { prompt: string; mode: BranchSessionType }) => void;
-    onStarted: (result: { sessionId: string; artifactId: string }) => void;
+    onSubmit: (data: { prompt: string; mode: BranchSessionType }) => void;
   }
 
-  let { branch, mode, initialPrompt = '', remote = false, onClose, onStarted }: Props = $props();
+  let { branch, mode, initialPrompt = '', remote = false, onClose, onSubmit }: Props = $props();
 
   let prompt = $state('');
   let currentMode = $state<BranchSessionType>('commit');
@@ -66,35 +62,18 @@
     }
   });
 
-  async function handleSubmit(e?: Event) {
+  function handleSubmit(e?: Event) {
     e?.preventDefault();
     // Review mode allows empty prompts; other modes require text
     if (!isReview && !prompt.trim()) return;
     if (starting) return;
 
     starting = true;
-
-    try {
-      const agents = remote ? REMOTE_AGENTS : agentState.providers;
-      const finalPrompt =
-        prompt.trim() || (isReview ? 'Review the code changes on this branch.' : '');
-      const result = await commands.startBranchSession(
-        branch.id,
-        finalPrompt,
-        currentMode,
-        getPreferredAgent(agents) ?? undefined
-      );
-      onStarted({ sessionId: result.sessionId, artifactId: result.artifactId });
-    } catch (e) {
-      alerts.show({
-        tone: 'error',
-        title: 'Unable to start session',
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 0,
-      });
-    } finally {
-      starting = false;
-    }
+    const finalPrompt =
+      prompt.trim() || (isReview ? 'Review the code changes on this branch.' : '');
+    onSubmit({ prompt: finalPrompt, mode: currentMode });
+    // Close immediately; parent handles async start + optimistic timeline row.
+    onClose({ prompt: '', mode: currentMode });
   }
 
   function handleClose() {

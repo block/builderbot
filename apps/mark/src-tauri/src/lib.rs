@@ -388,6 +388,12 @@ fn create_project(
                 )
                 .with_project_repo(&project_repo.id);
                 store.create_branch(&branch).map_err(|e| e.to_string())?;
+                log::info!(
+                    "[create_project] created remote branch={} workspace={} status=starting project={}",
+                    branch.id,
+                    workspace_name,
+                    project.id
+                );
                 None // remote branches don't need worktree setup
             }
         };
@@ -442,6 +448,11 @@ fn create_project(
                 }
             });
         }
+    } else if project.location == store::ProjectLocation::Remote {
+        log::info!(
+            "[create_project] remote project '{}' created without a repo; workspace start will be deferred until a repo is added",
+            project.id
+        );
     }
 
     Ok(project)

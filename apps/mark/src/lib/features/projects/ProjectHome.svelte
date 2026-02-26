@@ -10,7 +10,7 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import type { Project, Branch, StoreIncompatibility, WorkspaceStatus } from '../../types';
   import * as commands from '../../api/commands';
-  import { listenToRepoActionsDetection, runPrerunActions } from '../actions/actions';
+  import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome, selectProject } from '../layout/navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
@@ -20,6 +20,7 @@
   import SplashScreen from './SplashScreen.svelte';
   import { alerts } from '../../shared/alerts.svelte';
   import { setHasProjects } from './projectsSidebarState.svelte';
+  import { workspaceLifecycle } from './workspaceLifecycle.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -50,21 +51,22 @@
   let deletingBranches = $state<Set<string>>(new Set());
   let deletingProjectNames = $state<Map<string, string>>(new Map());
 
-  // Worktree setup errors — maps branch ID → error message
-  let worktreeErrors = $state<Map<string, string>>(new Map());
-  // Remote workspace startup errors — maps branch ID → error message
-  let workspaceErrors = $state<Map<string, string>>(new Map());
-  let pendingSetupBranches = $state<Set<string>>(new Set());
-  let queuedSetupBranches = $state<Set<string>>(new Set());
-  let activeSetupCount = 0;
-  const MAX_SETUP_CONCURRENCY = 1;
-  const setupTaskQueue: Array<{ branchId: string; run: () => Promise<void> }> = [];
-  let kickoffTimer: ReturnType<typeof setTimeout> | null = null;
+  // Setup errors come from the shared workspace lifecycle orchestrator.
+  let worktreeErrors = $derived(workspaceLifecycle.getWorktreeErrors());
+  let workspaceErrors = $derived(workspaceLifecycle.getWorkspaceErrors());
 
   // Action detection state
   let detectingProjectIds = $state<Set<string>>(new Set());
 
   onMount(() => {
+    workspaceLifecycle.start({
+      getBranchesByProject: () => branchesByProject,
+      setBranchesByProject: (next) => {
+        branchesByProject = next;
+      },
+      getVisibleProjectIds: () => new Set(visibleProjects.map((project) => project.id)),
+      isProjectDeleting: (projectId) => deletingProjectNames.has(projectId),
+    });
     checkStoreAndLoad();
 
     const onNewProject = () => handleNewProject();
@@ -105,6 +107,7 @@
         ]);
         projects = projectsList;
         branchesByProject = new Map(branchesByProject).set(projectId, branches);
+        workspaceLifecycle.enqueueInitialSetup(projectId, branches);
         repoLabelsByProject = new Map(repoLabelsByProject).set(
           projectId,
           new Map(
@@ -166,10 +169,7 @@
       unlistenDetection?.();
       unlistenProjectRepoAdded?.();
       unlistenPrStatus?.();
-      if (kickoffTimer) {
-        clearTimeout(kickoffTimer);
-        kickoffTimer = null;
-      }
+      workspaceLifecycle.stop();
     };
   });
 
@@ -241,6 +241,7 @@
             ]);
             if (generation !== loadGeneration) return;
             branchesByProject = new Map(branchesByProject).set(project.id, branches);
+            workspaceLifecycle.enqueueInitialSetup(project.id, branches);
             repoLabelsByProject = new Map(repoLabelsByProject).set(
               project.id,
               new Map(
@@ -366,10 +367,6 @@
     showNewProjectModal = true;
   }
 
-  function errorMessage(err: unknown): string {
-    return err instanceof Error ? err.message : String(err);
-  }
-
   async function handleProjectCreated(project: Project) {
     if (!projects.some((p) => p.id === project.id)) {
       projects = [...projects, project];
@@ -379,6 +376,7 @@
       commands.listProjectRepos(project.id),
     ]);
     branchesByProject = new Map(branchesByProject).set(project.id, branches);
+    workspaceLifecycle.enqueueInitialSetup(project.id, branches);
     repoLabelsByProject = new Map(repoLabelsByProject).set(
       project.id,
       new Map(
@@ -444,6 +442,7 @@
     if (!projectToDelete) return;
     const id = projectToDelete.id;
     const name = projectDisplayName(projectToDelete);
+    const branchesToClear = branchesByProject.get(id) || [];
     projectToDelete = null;
     deletingProjectNames = new Map(deletingProjectNames).set(id, name);
     window.dispatchEvent(
@@ -462,6 +461,9 @@
       const nextRepoLabels = new Map(repoLabelsByProject);
       nextRepoLabels.delete(id);
       repoLabelsByProject = nextRepoLabels;
+      for (const branch of branchesToClear) {
+        workspaceLifecycle.clearBranchState(branch.id);
+      }
     } catch (e) {
       console.error('Failed to delete project:', e);
       const message = e instanceof Error ? e.message : String(e);
@@ -494,6 +496,7 @@
       ]);
       projects = projectsList;
       branchesByProject = new Map(branchesByProject).set(projectId, branches);
+      workspaceLifecycle.enqueueInitialSetup(projectId, branches);
       repoLabelsByProject = new Map(repoLabelsByProject).set(
         projectId,
         new Map(
@@ -545,159 +548,18 @@
     branchId: string,
     workspaceStatus: WorkspaceStatus
   ) {
-    const branches = branchesByProject.get(projectId);
-    if (!branches) return;
-    let changed = false;
-    const nextBranches = branches.map((branch) => {
-      if (branch.id !== branchId) return branch;
-      if (branch.workspaceStatus === workspaceStatus) return branch;
-      changed = true;
-      return { ...branch, workspaceStatus };
-    });
-    if (!changed) return;
-
-    branchesByProject = new Map(branchesByProject).set(projectId, nextBranches);
-
-    if (workspaceStatus !== 'error' && workspaceErrors.has(branchId)) {
-      const nextWorkspaceErrors = new Map(workspaceErrors);
-      nextWorkspaceErrors.delete(branchId);
-      workspaceErrors = nextWorkspaceErrors;
-    }
-  }
-
-  function startInitialBranchSetup(projectId: string, branches: Branch[]) {
-    for (const branch of branches) {
-      enqueueBranchSetup(projectId, branch);
-    }
-  }
-
-  function pumpSetupQueue() {
-    while (activeSetupCount < MAX_SETUP_CONCURRENCY && setupTaskQueue.length > 0) {
-      const task = setupTaskQueue.shift();
-      if (!task) break;
-
-      activeSetupCount += 1;
-      task
-        .run()
-        .catch((e) => {
-          console.error('[ProjectHome] Branch setup task failed:', e);
-        })
-        .finally(() => {
-          activeSetupCount = Math.max(0, activeSetupCount - 1);
-          const nextQueued = new Set(queuedSetupBranches);
-          nextQueued.delete(task.branchId);
-          queuedSetupBranches = nextQueued;
-          pumpSetupQueue();
-        });
-    }
-  }
-
-  function enqueueBranchSetup(projectId: string, branch: Branch) {
-    const branchId = branch.id;
-    if (pendingSetupBranches.has(branchId) || queuedSetupBranches.has(branchId)) return;
-
-    if (branch.branchType === 'local') {
-      if (branch.worktreePath || worktreeErrors.has(branchId)) return;
-      queuedSetupBranches = new Set([...queuedSetupBranches, branchId]);
-      setupTaskQueue.push({
-        branchId,
-        run: async () => {
-          await setupBranchWorktree(branchId, projectId);
-        },
-      });
-      pumpSetupQueue();
-      return;
-    }
-
-    if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
-      queuedSetupBranches = new Set([...queuedSetupBranches, branchId]);
-      setupTaskQueue.push({
-        branchId,
-        run: async () => {
-          pendingSetupBranches = new Set([...pendingSetupBranches, branchId]);
-          const nextWorkspaceErrors = new Map(workspaceErrors);
-          nextWorkspaceErrors.delete(branchId);
-          workspaceErrors = nextWorkspaceErrors;
-          try {
-            await commands.startWorkspace(branchId);
-          } catch (e) {
-            console.error('[ProjectHome] Failed to start workspace:', e);
-            const message = errorMessage(e);
-            workspaceErrors = new Map(workspaceErrors).set(branchId, message);
-            handleWorkspaceStatusChange(projectId, branchId, 'error');
-            alerts.show({
-              tone: 'error',
-              title: 'Unable to start workspace',
-              message,
-              durationMs: 0,
-            });
-          } finally {
-            const next = new Set(pendingSetupBranches);
-            next.delete(branchId);
-            pendingSetupBranches = next;
-          }
-        },
-      });
-      pumpSetupQueue();
-    }
-  }
-
-  function kickOffPendingBranchSetup(branchMap: Map<string, Branch[]>) {
-    for (const [projectId, branches] of branchMap.entries()) {
-      if (deletingProjectNames.has(projectId)) continue;
-      for (const branch of branches) {
-        enqueueBranchSetup(projectId, branch);
-      }
-    }
+    workspaceLifecycle.handleWorkspaceStatusChange(projectId, branchId, workspaceStatus);
   }
 
   $effect(() => {
-    // Ensure pending setup starts even when we navigated to a project page
-    // after creation and only loaded persisted branch records.
+    branchesByProject;
     if (!loading) {
-      if (kickoffTimer) clearTimeout(kickoffTimer);
-      kickoffTimer = setTimeout(() => {
-        kickoffTimer = null;
-        kickOffPendingBranchSetup(branchesByProject);
-      }, 50);
+      workspaceLifecycle.scheduleKickoff();
     }
   });
 
-  /** Set up a git worktree for a branch, updating the UI on success or error. */
   async function setupBranchWorktree(branchId: string, projectId: string): Promise<void> {
-    if (pendingSetupBranches.has(branchId)) return;
-    pendingSetupBranches = new Set([...pendingSetupBranches, branchId]);
-
-    // Clear any previous error for this branch
-    const nextErrors = new Map(worktreeErrors);
-    nextErrors.delete(branchId);
-    worktreeErrors = nextErrors;
-
-    try {
-      const updated = await commands.setupWorktree(branchId);
-      // Replace the branch record so the card picks up worktreePath
-      const branches = branchesByProject.get(projectId) || [];
-      branchesByProject = new Map(branchesByProject).set(
-        projectId,
-        branches.map((b) => (b.id === updated.id ? updated : b))
-      );
-
-      // Now that the worktree exists, run prerun actions
-      setTimeout(() => {
-        runPrerunActions(branchId).catch((e) => {
-          console.error('[ProjectHome] Failed to run prerun actions:', e);
-        });
-      }, 150);
-    } catch (e) {
-      console.error('[ProjectHome] Failed to setup worktree:', e);
-      const errMsg = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
-      worktreeErrors = new Map(worktreeErrors).set(branchId, errMsg);
-      throw e;
-    } finally {
-      const next = new Set(pendingSetupBranches);
-      next.delete(branchId);
-      pendingSetupBranches = next;
-    }
+    await workspaceLifecycle.retryWorktree(branchId, projectId);
   }
 
   function handleDeleteBranchRequest(branchId: string, project: Project) {
@@ -757,11 +619,7 @@
       const next = new Set(deletingBranches);
       next.delete(branch.id);
       deletingBranches = next;
-      if (workspaceErrors.has(branch.id)) {
-        const nextWorkspaceErrors = new Map(workspaceErrors);
-        nextWorkspaceErrors.delete(branch.id);
-        workspaceErrors = nextWorkspaceErrors;
-      }
+      workspaceLifecycle.clearBranchState(branch.id);
     }
   }
 

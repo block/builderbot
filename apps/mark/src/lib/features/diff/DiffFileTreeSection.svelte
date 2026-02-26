@@ -51,6 +51,7 @@
     onToggleDir: (path: string) => void;
     onSelectFile: (file: FileEntry) => void;
     onToggleReviewed: (event: MouseEvent | KeyboardEvent, file: FileEntry) => void | Promise<void>;
+    onJumpToLine?: (lineIndex: number) => void;
     searchState?: SearchStateHandle;
     diffViewerState?: DiffViewerStateHandle;
   }
@@ -68,6 +69,7 @@
     onToggleDir,
     onSelectFile,
     onToggleReviewed,
+    onJumpToLine,
     searchState,
     diffViewerState,
   }: Props = $props();
@@ -100,7 +102,10 @@
 
     // Select the file and scroll to the match
     await diffViewerState.selectFile(filePath);
-    // Note: Scrolling to the specific line would require additional integration
+    // Scroll to the specific line
+    if (onJumpToLine) {
+      onJumpToLine(match.lineIndex);
+    }
   }
 </script>
 

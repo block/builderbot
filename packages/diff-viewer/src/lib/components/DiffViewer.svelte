@@ -77,6 +77,8 @@
     comments?: Comment[];
     /** Request to jump to a specific comment in the current file. */
     jumpToComment?: { id: string; token: number } | null;
+    /** Request to jump to a specific line in the current file (for search results). */
+    jumpToLine?: { lineIndex: number; token: number } | null;
     /** Bumped when syntax theme changes to trigger re-highlight. */
     syntaxThemeVersion?: number;
     /** Whether a new file is loading (show subtle indicator, keep old content). */
@@ -102,6 +104,7 @@
     diff,
     comments = [],
     jumpToComment = null,
+    jumpToLine = null,
     syntaxThemeVersion = 0,
     loading = false,
     isReferenceFile = false,
@@ -202,6 +205,7 @@
   let lineCommentReadOnly = $state(false);
   let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
   let lastHandledJumpToken = $state<number | null>(null);
+  let lastHandledJumpLineToken = $state<number | null>(null);
   let lineCommentEditorRaf: number | null = null;
 
   // Markdown preview mode
@@ -919,6 +923,15 @@
     if (!comment) return;
     lastHandledJumpToken = request.token;
     focusCommentInViewer(comment);
+  });
+
+  // Jump to a line requested by search results.
+  $effect(() => {
+    const request = jumpToLine;
+    if (!request || !afterPane) return;
+    if (lastHandledJumpLineToken === request.token) return;
+    lastHandledJumpLineToken = request.token;
+    scrollController.scrollToRow(request.lineIndex, 'after');
   });
 
   // ==========================================================================

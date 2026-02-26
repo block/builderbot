@@ -102,6 +102,8 @@
   let selectedCommentId = $state<string | null>(null);
   let jumpToComment = $state<{ id: string; token: number } | null>(null);
   let commentJumpToken = 0;
+  let jumpToLine = $state<{ lineIndex: number; token: number } | null>(null);
+  let lineJumpToken = 0;
 
   // Confirmation dialog state
   let commentToDelete = $state<string | null>(null);
@@ -230,6 +232,12 @@
     return diffViewer.getCurrentDiff();
   }
 
+  // Jump to a specific line (for search results)
+  function handleJumpToLine(lineIndex: number) {
+    lineJumpToken += 1;
+    jumpToLine = { lineIndex, token: lineJumpToken };
+  }
+
   // ==========================================================================
   // Comment callbacks (wired to review state)
   // ==========================================================================
@@ -299,7 +307,9 @@
             searchState.toggleSearchResults(result.filePath);
           }
           await diffViewer.selectFile(result.filePath);
-          // TODO: Scroll to the specific line (result.match.lineIndex)
+          // Scroll to the specific line
+          lineJumpToken += 1;
+          jumpToLine = { lineIndex: result.match.lineIndex, token: lineJumpToken };
         }
       },
       onPrevSearchResult: async () => {
@@ -310,7 +320,9 @@
             searchState.toggleSearchResults(result.filePath);
           }
           await diffViewer.selectFile(result.filePath);
-          // TODO: Scroll to the specific line (result.match.lineIndex)
+          // Scroll to the specific line
+          lineJumpToken += 1;
+          jumpToLine = { lineIndex: result.match.lineIndex, token: lineJumpToken };
         }
       },
     });
@@ -372,6 +384,7 @@
           diff={currentDiff}
           comments={readonly ? [] : currentComments}
           {jumpToComment}
+          {jumpToLine}
           loading={diffViewer.state.loadingFile !== null}
           {beforeLabel}
           {afterLabel}
@@ -420,6 +433,7 @@
               onToggleDir={toggleDir}
               onSelectFile={selectFile}
               onToggleReviewed={toggleReviewed}
+              onJumpToLine={handleJumpToLine}
               {searchState}
               diffViewerState={diffViewer}
             />

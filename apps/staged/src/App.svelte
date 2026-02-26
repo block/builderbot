@@ -100,6 +100,8 @@
   let copiedFeedback = $state(false);
 
   let collapsedDirs = $state(new Set<string>());
+  let jumpToLine = $state<{ lineIndex: number; token: number } | null>(null);
+  let lineJumpToken = 0;
 
   let selectionGeneration = 0;
 
@@ -453,7 +455,9 @@
 
     // Select the file and scroll to the match
     await selectFile(filePath);
-    // Note: Scrolling to the specific line would require additional integration
+    // Scroll to the specific line
+    lineJumpToken += 1;
+    jumpToLine = { lineIndex: match.lineIndex, token: lineJumpToken };
   }
 
   // Initialize collapsed state when search results are ready
@@ -483,7 +487,9 @@
             searchState.toggleSearchResults(result.filePath);
           }
           await selectFile(result.filePath);
-          // TODO: Scroll to the specific line (result.match.lineIndex)
+          // Scroll to the specific line
+          lineJumpToken += 1;
+          jumpToLine = { lineIndex: result.match.lineIndex, token: lineJumpToken };
         }
       },
       onPrevSearchResult: async () => {
@@ -494,7 +500,9 @@
             searchState.toggleSearchResults(result.filePath);
           }
           await selectFile(result.filePath);
-          // TODO: Scroll to the specific line (result.match.lineIndex)
+          // Scroll to the specific line
+          lineJumpToken += 1;
+          jumpToLine = { lineIndex: result.match.lineIndex, token: lineJumpToken };
         }
       },
     });
@@ -645,6 +653,7 @@
           <DiffViewer
             diff={currentDiff}
             comments={localComments.filter((c) => c.path === selectedFile)}
+            {jumpToLine}
             loading={loadingFile !== null}
             beforeLabel="before"
             afterLabel="after"

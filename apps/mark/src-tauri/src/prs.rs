@@ -65,17 +65,27 @@ pub fn create_pr(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
-    let (_repo_slug, repo_subpath) = resolve_branch_repo_and_subpath(&store, &project, &branch)?;
+    let (repo_slug, repo_subpath) = resolve_branch_repo_and_subpath(&store, &project, &branch)?;
 
-    let workdir = store
-        .get_workdir_for_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+    let is_remote = branch.branch_type == store::BranchType::Remote;
 
-    let mut working_dir = PathBuf::from(&workdir.path);
-    if let Some(subpath) = repo_subpath {
-        working_dir = working_dir.join(subpath);
-    }
+    let (working_dir, workspace_name) = if is_remote {
+        let clone_path = crate::paths::repos_dir()
+            .map(|d| d.join(&repo_slug))
+            .ok_or_else(|| "Cannot determine clone path for remote branch".to_string())?;
+        (clone_path, branch.workspace_name.clone())
+    } else {
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+        let mut working_dir = PathBuf::from(&workdir.path);
+        if let Some(subpath) = repo_subpath {
+            working_dir = working_dir.join(subpath);
+        }
+        (working_dir, None)
+    };
 
     let base_branch = branch
         .base_branch
@@ -123,6 +133,25 @@ This is critical - the application parses this to link the PR.
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
+    // Resolve the actual workspace path for remote branches so the remote
+    // agent starts in the correct repo directory.
+    let remote_working_dir = if is_remote {
+        branch
+            .workspace_name
+            .as_deref()
+            .and_then(|ws| {
+                crate::branches::resolve_branch_workspace_subpath(&store, &branch)
+                    .ok()
+                    .flatten()
+                    .and_then(|subpath| {
+                        crate::branches::resolve_workspace_repo_path(ws, &subpath).ok()
+                    })
+            })
+            .map(PathBuf::from)
+    } else {
+        None
+    };
+
     session_runner::start_session(
         session_runner::SessionConfig {
             session_id: session.id.clone(),
@@ -131,12 +160,12 @@ This is critical - the application parses this to link the PR.
             agent_session_id: None,
             pre_head_sha: None,
             provider,
-            workspace_name: None,
+            workspace_name,
             extra_env: vec![],
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
-            remote_working_dir: None,
+            remote_working_dir,
         },
         store,
         app_handle,
@@ -346,6 +375,34 @@ pub fn has_unpushed_commits(
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    if branch.branch_type == store::BranchType::Remote {
+        let workspace_name = branch
+            .workspace_name
+            .as_deref()
+            .ok_or_else(|| format!("Branch has no workspace name: {branch_id}"))?;
+        let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)?;
+
+        let remote_ref = format!("origin/{}", branch.branch_name);
+        // Check that the remote tracking branch exists
+        if crate::branches::run_workspace_git(
+            workspace_name,
+            repo_subpath.as_deref(),
+            &["rev-parse", "--verify", &remote_ref],
+        )
+        .is_err()
+        {
+            return Ok(false);
+        }
+        let rev_range = format!("{remote_ref}..HEAD");
+        let output = crate::branches::run_workspace_git(
+            workspace_name,
+            repo_subpath.as_deref(),
+            &["rev-list", &rev_range],
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(!output.trim().is_empty());
+    }
 
     let workdir = store
         .get_workdir_for_branch(&branch_id)

@@ -81,9 +81,13 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		}
 
 		if input.Path == "" {
-			// List open threads across the entire project
+			// List threads across the entire project, filtered by status
 			store.RecordHeartbeat(input.Project, "")
-			threads, err := store.ListOpenThreads(input.Project)
+			status := input.Status
+			if status == "" {
+				status = "open"
+			}
+			threads, err := store.ListThreadsByStatus(input.Project, status)
 			if err != nil {
 				return nil, nil, err
 			}

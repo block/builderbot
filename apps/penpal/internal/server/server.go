@@ -778,14 +778,19 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fullPath := filepath.Join(project.Path, filePath)
+	resolved, err := filepath.Abs(fullPath)
+	if err != nil || !isSubpath(project.Path, resolved) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
 
-	// Verify the file exists and is under the project directory
-	if _, err := os.Stat(fullPath); err != nil {
+	// Verify the file exists
+	if _, err := os.Stat(resolved); err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
 
-	cmd := exec.Command("osascript", "-e", fmt.Sprintf(`set the clipboard to (POSIX file %q)`, fullPath))
+	cmd := exec.Command("osascript", "-e", fmt.Sprintf(`set the clipboard to (POSIX file %q)`, resolved))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		log.Printf("osascript error: %v, output: %s", err, out)
 		http.Error(w, fmt.Sprintf("failed to copy file: %v", err), http.StatusInternalServerError)
@@ -906,18 +911,17 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fullPath := filepath.Join(project.Path, filePath)
-
-	// Verify the file exists and is under the project directory
-	if !strings.HasPrefix(fullPath, project.Path+"/") {
+	resolved, err := filepath.Abs(fullPath)
+	if err != nil || !isSubpath(project.Path, resolved) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
-	if _, err := os.Stat(fullPath); err != nil {
+	if _, err := os.Stat(resolved); err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}
 
-	if err := os.Remove(fullPath); err != nil {
+	if err := os.Remove(resolved); err != nil {
 		log.Printf("Failed to delete file %s: %v", fullPath, err)
 		http.Error(w, fmt.Sprintf("failed to delete: %v", err), http.StatusInternalServerError)
 		return

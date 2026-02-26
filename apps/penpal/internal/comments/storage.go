@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // commentsPath returns the absolute path to the sidecar JSON file for the
@@ -18,7 +19,21 @@ func (s *Store) commentsPath(projectName, filePath string) (string, error) {
 	if project == nil {
 		return "", fmt.Errorf("project not found: %s", projectName)
 	}
-	return filepath.Join(project.Path, ".penpal", "comments", filePath+".json"), nil
+	commentsDir := filepath.Join(project.Path, ".penpal", "comments")
+	full := filepath.Join(commentsDir, filePath+".json")
+
+	// Prevent path traversal: resolved path must stay within the comments dir.
+	resolved, err := filepath.Abs(full)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	absDir, _ := filepath.Abs(commentsDir)
+	if !strings.HasPrefix(filepath.Clean(resolved)+string(filepath.Separator),
+		filepath.Clean(absDir)+string(filepath.Separator)) {
+		return "", fmt.Errorf("path traversal detected: %s", filePath)
+	}
+
+	return resolved, nil
 }
 
 // Load reads and parses the sidecar JSON for the given project and file.

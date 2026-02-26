@@ -834,7 +834,19 @@
   async function handleRunAction(action: ProjectAction) {
     showMoreMenu = false;
 
-    // Check if this action is currently running
+    // Remove any stale (stopped/failed/completed) entries for this action
+    // before checking if it's running, and clean up their backend buffers
+    const staleExecutions = runningActions.filter(
+      (a) => a.actionId === action.id && a.status !== 'running'
+    );
+    for (const stale of staleExecutions) {
+      clearActionExecution(stale.executionId).catch(() => {});
+    }
+    runningActions = runningActions.filter(
+      (a) => !(a.actionId === action.id && a.status !== 'running')
+    );
+
+    // Check if this action is currently running (after cleanup)
     const existingExecution = runningActions.find(
       (a) => a.actionId === action.id && a.status === 'running'
     );
@@ -847,18 +859,6 @@
       };
       return;
     }
-
-    // Remove any stale (stopped/failed/completed) entries for this action
-    // before starting a new run, and clean up their backend buffers
-    const staleExecutions = runningActions.filter(
-      (a) => a.actionId === action.id && a.status !== 'running'
-    );
-    for (const stale of staleExecutions) {
-      clearActionExecution(stale.executionId).catch(() => {});
-    }
-    runningActions = runningActions.filter(
-      (a) => !(a.actionId === action.id && a.status !== 'running')
-    );
 
     // Start the action silently (don't open modal)
     try {
@@ -1623,7 +1623,7 @@
                 if (isStopping) return;
                 if (isRunning && altHeld && execution) {
                   handleStopAction(execution.executionId, primaryRunAction.name);
-                } else if (execution) {
+                } else if (isRunning && execution) {
                   handleShowActionOutput(execution);
                 } else {
                   handleRunAction(primaryRunAction);

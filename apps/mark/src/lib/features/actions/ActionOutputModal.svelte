@@ -37,11 +37,12 @@
   interface Props {
     executionId: string;
     actionName: string;
+    isStopping?: boolean;
     onClose: () => void;
     onRemove?: (executionId: string) => void;
   }
 
-  let { executionId, actionName, onClose, onRemove }: Props = $props();
+  let { executionId, actionName, isStopping = false, onClose, onRemove }: Props = $props();
 
   // =========================================================================
   // State
@@ -58,7 +59,7 @@
   let outputChunks = $state<OutputChunk[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
-  let stopping = $state(false);
+  let stoppingExecutions = $state<Set<string>>(new Set());
   let outputEl: HTMLDivElement;
   let unlistenOutput: (() => void) | null = null;
   let unlistenStatus: (() => void) | null = null;
@@ -75,6 +76,7 @@
   });
 
   let isRunning = $derived(status === 'running');
+  let isStoppingDerived = $derived(stoppingExecutions.has(executionId));
 
   /**
    * Process raw output chunks into terminal lines, handling carriage returns.
@@ -195,9 +197,11 @@
           if (event.exitCode !== undefined) {
             exitCode = event.exitCode;
           }
-          // Reset stopping flag once the backend confirms a terminal state
+          // Clean up stopping state when action reaches terminal state
           if (status !== 'running') {
-            stopping = false;
+            const updated = new Set(stoppingExecutions);
+            updated.delete(executionId);
+            stoppingExecutions = updated;
           }
         }
       });
@@ -222,16 +226,24 @@
   // =========================================================================
 
   async function handleStop() {
-    if (stopping) return;
-    stopping = true;
+    // Prevent duplicate stop requests
+    if (isStoppingDerived) {
+      return;
+    }
+
+    // Add to stopping set and trigger reactivity
+    stoppingExecutions = new Set(stoppingExecutions).add(executionId);
+
     try {
       await stopBranchAction(executionId);
-      // Don't set status here — the backend will emit a 'stopped' status
-      // event once the process actually exits, which our listener handles.
+      // Backend will emit 'stopped' status event which will clean up the stopping state
     } catch (e: any) {
+      // Remove from stopping set on error so user can retry
+      const updated = new Set(stoppingExecutions);
+      updated.delete(executionId);
+      stoppingExecutions = updated;
       error = e?.message || 'Failed to stop action';
       console.error('Failed to stop action:', e);
-      stopping = false;
     }
   }
 
@@ -300,7 +312,10 @@
     }
   }
 
-  function getStatusLabel(s: ActionStatus): string {
+  function getStatusLabel(s: ActionStatus, stopping: boolean): string {
+    if (stopping && s === 'running') {
+      return 'Stopping';
+    }
     switch (s) {
       case 'running':
         return 'Running';
@@ -332,21 +347,30 @@
         <span class="header-title">{actionName}</span>
         {#if status}
           {@const StatusIcon = getStatusIcon(status)}
+          {@const isCurrentlyStopping = isStopping || isStoppingDerived}
           <div class="status-badge {getStatusClass(status)}">
-            {#if status === 'running'}
+            {#if status === 'running' && isCurrentlyStopping}
+              <Spinner size={12} class="danger" />
+            {:else if status === 'running'}
               <Spinner size={12} />
             {:else if StatusIcon}
               <StatusIcon size={12} />
             {/if}
-            <span>{getStatusLabel(status)}</span>
+            <span>{getStatusLabel(status, isCurrentlyStopping)}</span>
           </div>
         {/if}
       </div>
       <div class="header-actions">
         {#if isRunning}
-          <button class="stop-btn" onclick={handleStop} disabled={stopping} title="Stop action">
+          {@const isCurrentlyStopping = isStopping || isStoppingDerived}
+          <button
+            class="stop-btn"
+            onclick={handleStop}
+            disabled={isCurrentlyStopping}
+            title="Stop action"
+          >
             <CircleStop size={14} />
-            <span>{stopping ? 'Stopping…' : 'Stop'}</span>
+            <span>{isCurrentlyStopping ? 'Stopping…' : 'Stop'}</span>
           </button>
         {/if}
         {#if status === 'failed' && onRemove}

@@ -82,4 +82,8 @@
     transform-origin: 50% 50%;
     backface-visibility: hidden;
   }
+
+  .spinner.danger .spinner-svg {
+    color: var(--ui-danger);
+  }
 </style>

@@ -800,6 +800,14 @@ async fn delete_project(
         move || {
             for branch in &branches {
                 branches::cleanup_branch_resources_best_effort(&store, branch);
+                // Delete branch rows as we go so shared-workspace cleanup can
+                // converge on the final owner and remove the workspace once.
+                if let Err(e) = store.delete_branch(&branch.id) {
+                    log::warn!(
+                        "failed to delete branch '{}' during project cleanup: {e}",
+                        branch.id
+                    );
+                }
             }
 
             // Best-effort cleanup for project-scoped local worktree roots.

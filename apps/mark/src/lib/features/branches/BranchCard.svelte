@@ -1833,73 +1833,75 @@
           {#snippet footerActions()}
             {#if hasCodeChanges}
               <div class="footer-right-actions">
-                <button
-                  class="pr-btn"
-                  class:creating={prState === 'creating'}
-                  class:error={prState === 'error' || pushState === 'error'}
-                  class:created={prState === 'created' && pushState !== 'error'}
-                  class:pushing={pushState === 'pushing'}
-                  class:merged={prState === 'created' && prStatusState === 'MERGED'}
-                  onclick={handlePrButtonClick}
-                  disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
-                  title={pushState === 'pushing'
-                    ? 'Pushing… (click to view)'
-                    : pushState === 'error'
-                      ? 'Push failed — click for details'
-                      : prState === 'created' && hasUnpushed
-                        ? 'Push changes to remote'
-                        : prState === 'created'
-                          ? 'View PR'
-                          : prState === 'error'
-                            ? 'PR creation failed — click for details'
-                            : prState === 'creating'
-                              ? 'Creating PR… (click to view)'
-                              : optionHeld
-                                ? 'Create draft PR (⌥ held)'
-                                : 'Create PR'}
-                >
-                  {#if pushState === 'pushing'}
-                    <Spinner size={13} />
-                  {:else if pushState === 'error'}
-                    <AlertCircle size={13} />
-                  {:else if prState === 'creating'}
-                    <Spinner size={13} />
-                  {:else if prState === 'error'}
-                    <AlertCircle size={13} />
-                  {:else if prState === 'created' && prStatusState === 'MERGED'}
-                    <GitMerge size={13} />
-                  {:else if prState === 'created' && hasUnpushed}
-                    <GitPullRequestDraft size={13} />
-                  {:else if prState === 'created'}
-                    <GitPullRequestArrow size={13} />
-                  {:else}
-                    <GitPullRequestCreateArrow size={13} />
-                  {/if}
-                  <span>
+                {#if isLocal}
+                  <button
+                    class="pr-btn"
+                    class:creating={prState === 'creating'}
+                    class:error={prState === 'error' || pushState === 'error'}
+                    class:created={prState === 'created' && pushState !== 'error'}
+                    class:pushing={pushState === 'pushing'}
+                    class:merged={prState === 'created' && prStatusState === 'MERGED'}
+                    onclick={handlePrButtonClick}
+                    disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
+                    title={pushState === 'pushing'
+                      ? 'Pushing… (click to view)'
+                      : pushState === 'error'
+                        ? 'Push failed — click for details'
+                        : prState === 'created' && hasUnpushed
+                          ? 'Push changes to remote'
+                          : prState === 'created'
+                            ? 'View PR'
+                            : prState === 'error'
+                              ? 'PR creation failed — click for details'
+                              : prState === 'creating'
+                                ? 'Creating PR… (click to view)'
+                                : optionHeld
+                                  ? 'Create draft PR (⌥ held)'
+                                  : 'Create PR'}
+                  >
                     {#if pushState === 'pushing'}
-                      Pushing…
+                      <Spinner size={13} />
                     {:else if pushState === 'error'}
-                      Push failed
-                    {:else if prState === 'created' && hasUnpushed}
-                      Push changes
-                    {:else if prState === 'created'}
-                      {#if prStatusText}
-                        {prStatusText}
-                      {:else}
-                        View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
-                      {/if}
+                      <AlertCircle size={13} />
                     {:else if prState === 'creating'}
-                      Creating PR…
+                      <Spinner size={13} />
                     {:else if prState === 'error'}
-                      PR failed
+                      <AlertCircle size={13} />
+                    {:else if prState === 'created' && prStatusState === 'MERGED'}
+                      <GitMerge size={13} />
+                    {:else if prState === 'created' && hasUnpushed}
+                      <GitPullRequestDraft size={13} />
+                    {:else if prState === 'created'}
+                      <GitPullRequestArrow size={13} />
                     {:else}
-                      {optionHeld ? 'Create draft PR' : 'Create PR'}
+                      <GitPullRequestCreateArrow size={13} />
                     {/if}
-                  </span>
-                  {#if prStatusIndicator}
-                    <span class="pr-status-indicator {prStatusIndicator}"></span>
-                  {/if}
-                </button>
+                    <span>
+                      {#if pushState === 'pushing'}
+                        Pushing…
+                      {:else if pushState === 'error'}
+                        Push failed
+                      {:else if prState === 'created' && hasUnpushed}
+                        Push changes
+                      {:else if prState === 'created'}
+                        {#if prStatusText}
+                          {prStatusText}
+                        {:else}
+                          View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                        {/if}
+                      {:else if prState === 'creating'}
+                        Creating PR…
+                      {:else if prState === 'error'}
+                        PR failed
+                      {:else}
+                        {optionHeld ? 'Create draft PR' : 'Create PR'}
+                      {/if}
+                    </span>
+                    {#if prStatusIndicator}
+                      <span class="pr-status-indicator {prStatusIndicator}"></span>
+                    {/if}
+                  </button>
+                {/if}
                 <button
                   class="pr-btn diff-btn"
                   onclick={() => {

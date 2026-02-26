@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "penpal": {
+      "type": "http",
+      "url": "http://localhost:18923/mcp"
+    }
+  }
+}

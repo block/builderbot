@@ -29,6 +29,7 @@
     setCurrentResult: (globalIndex: number) => void;
     expandFileResults: (filePath: string) => void;
     collapseFileResults: (filePath: string) => void;
+    selectFirstResultInFile: (files: FileDiffSummary[], filePath: string) => boolean;
   }
 
   interface DiffViewerStateHandle {

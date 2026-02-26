@@ -155,6 +155,10 @@
   function selectFile(file: FileEntry) {
     selectedCommentId = null;
     diffViewer.selectFile(file.path);
+    // If search is open and this file has results, select the first result
+    if (searchState.state.isOpen) {
+      searchState.selectFirstResultInFile(fileEntries, file.path);
+    }
   }
 
   async function toggleReviewed(event: MouseEvent | KeyboardEvent, file: FileEntry) {

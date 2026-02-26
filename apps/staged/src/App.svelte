@@ -307,6 +307,11 @@
         loadingFile = null;
       }
     }
+
+    // If search is open and this file has results, select the first result
+    if (path && searchState.state.isOpen) {
+      searchState.selectFirstResultInFile(files, path);
+    }
   }
 
   // ==========================================================================

@@ -32,6 +32,7 @@ export interface SearchState {
 	searchedFileCount: number;
 	totalFileCount: number;
 	collapsedSearchResults: Set<string>; // File paths with collapsed search results
+	focusTrigger: number; // Increment to trigger input focus
 }
 
 // =============================================================================
@@ -103,7 +104,8 @@ export function createSearchState() {
 		loading: false,
 		searchedFileCount: 0,
 		totalFileCount: 0,
-		collapsedSearchResults: new Set()
+		collapsedSearchResults: new Set(),
+		focusTrigger: 0
 	});
 
 	// =============================================================================
@@ -111,10 +113,11 @@ export function createSearchState() {
 	// =============================================================================
 
 	/**
-	 * Open the search bar.
+	 * Open the search bar and trigger focus.
 	 */
 	function openSearch(): void {
 		state.isOpen = true;
+		state.focusTrigger++;
 	}
 
 	/**
@@ -429,6 +432,25 @@ export function createSearchState() {
 		state.collapsedSearchResults = newCollapsed;
 	}
 
+	/**
+	 * Select the first search result for a given file.
+	 * If the file has search results, sets the current result to the first match.
+	 * Returns true if a result was selected, false otherwise.
+	 */
+	function selectFirstResultInFile(files: FileDiffSummary[], filePath: string): boolean {
+		if (!state.isOpen || !state.fileResults.has(filePath)) return false;
+
+		const flattened = getFlattenedResults(files);
+		const firstResult = flattened.find((r) => r.filePath === filePath);
+
+		if (firstResult) {
+			state.currentResultIndex = firstResult.globalIndex;
+			return true;
+		}
+
+		return false;
+	}
+
 	return {
 		get state() {
 			return state;
@@ -447,6 +469,7 @@ export function createSearchState() {
 		setCurrentResult,
 		toggleSearchResults,
 		areSearchResultsCollapsed,
-		initializeCollapsedState
+		initializeCollapsedState,
+		selectFirstResultInFile
 	};
 }

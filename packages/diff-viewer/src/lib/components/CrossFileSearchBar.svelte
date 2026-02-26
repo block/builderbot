@@ -40,9 +40,10 @@
 		return `${searchState.state.totalMatches} result${searchState.state.totalMatches !== 1 ? 's' : ''} across ${fileCount} file${fileCount !== 1 ? 's' : ''}`;
 	});
 
-	// Auto-focus input when search opens
+	// Auto-focus input when search opens or when focus is requested
 	$effect(() => {
-		if (searchState.state.isOpen && inputElement) {
+		// Watch focusTrigger to detect when focus is requested (even if already open)
+		if (searchState.state.isOpen && inputElement && searchState.state.focusTrigger >= 0) {
 			inputElement.focus();
 		}
 	});

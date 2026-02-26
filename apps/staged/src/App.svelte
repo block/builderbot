@@ -105,6 +105,9 @@
 
   let selectionGeneration = 0;
 
+  // Track whether we've initialized collapsed state for the current search
+  let searchInitialized = $state<string>('');
+
   // ==========================================================================
   // State: Search
   // ==========================================================================
@@ -484,14 +487,17 @@
     jumpToLine = { lineIndex: match.lineIndex, token: lineJumpToken };
   }
 
-  // Initialize collapsed state when search results are ready
+  // Initialize collapsed state when search results are ready (only once per search)
   $effect(() => {
+    const searchKey = `${searchState.state.query}-${searchState.state.fileResults.size}`;
     if (
       searchState.state.isOpen &&
       searchState.state.fileResults.size > 0 &&
-      !searchState.state.loading
+      !searchState.state.loading &&
+      searchInitialized !== searchKey
     ) {
       searchState.initializeCollapsedState(files);
+      searchInitialized = searchKey;
     }
   });
 

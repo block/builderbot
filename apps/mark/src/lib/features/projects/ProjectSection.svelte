@@ -7,7 +7,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
-  import { ChevronLeft, Trash2, Plus, Send, FileText } from 'lucide-svelte';
+  import {
+    ChevronLeft,
+    Trash2,
+    Plus,
+    Send,
+    FileText,
+    CircleCheck,
+    CirclePause,
+    AlertCircle,
+  } from 'lucide-svelte';
   import type { Project, Branch, WorkspaceStatus, ProjectNote } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome } from '../layout/navigation.svelte';
@@ -77,6 +86,13 @@
         : 'Add repository to project'
   );
 
+  // For remote projects, derive workspace status from any branch (they all share the same workspace)
+  let projectWorkspaceStatus = $derived<WorkspaceStatus | null>(
+    project.location === 'remote'
+      ? branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null
+      : null
+  );
+
   let dropdownOpen = $state(false);
   let wrapperRef: HTMLDivElement | undefined = $state();
 
@@ -86,6 +102,21 @@
 
   function closeDropdown() {
     dropdownOpen = false;
+  }
+
+  function statusLabel(status: WorkspaceStatus | null): string {
+    switch (status) {
+      case 'starting':
+        return 'Starting';
+      case 'running':
+        return 'Running';
+      case 'stopped':
+        return 'Stopped';
+      case 'error':
+        return 'Error';
+      default:
+        return '';
+    }
   }
 
   function handleRepoSelected(nameWithOwner: string, subpath?: string) {
@@ -260,6 +291,26 @@
         <div class="detecting-status">
           <Spinner size={12} />
           <span>Detecting actions</span>
+        </div>
+      {/if}
+      {#if projectWorkspaceStatus}
+        <div
+          class="workspace-status-badge"
+          class:starting={projectWorkspaceStatus === 'starting'}
+          class:running={projectWorkspaceStatus === 'running'}
+          class:stopped={projectWorkspaceStatus === 'stopped'}
+          class:error={projectWorkspaceStatus === 'error'}
+        >
+          {#if projectWorkspaceStatus === 'starting'}
+            <Spinner size={12} />
+          {:else if projectWorkspaceStatus === 'running'}
+            <CircleCheck size={12} />
+          {:else if projectWorkspaceStatus === 'stopped'}
+            <CirclePause size={12} />
+          {:else if projectWorkspaceStatus === 'error'}
+            <AlertCircle size={12} />
+          {/if}
+          <span>{statusLabel(projectWorkspaceStatus)}</span>
         </div>
       {/if}
     </div>
@@ -567,6 +618,42 @@
     font-weight: 500;
     line-height: 1;
     border: 1px solid var(--border-muted);
+  }
+
+  .workspace-status-badge {
+    height: 22px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 500;
+    line-height: 1;
+    border: 1px solid var(--border-muted);
+  }
+
+  .workspace-status-badge.starting {
+    border-color: var(--ui-info);
+    color: var(--ui-info);
+  }
+
+  .workspace-status-badge.running {
+    border-color: var(--ui-success);
+    color: var(--ui-success);
+  }
+
+  .workspace-status-badge.stopped {
+    border-color: var(--border-muted);
+    color: var(--text-muted);
+  }
+
+  .workspace-status-badge.error {
+    border-color: var(--ui-danger);
+    color: var(--ui-danger);
   }
 
   /* ── Project prompt ──────────────────────────────────────────────────── */

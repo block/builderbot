@@ -12,16 +12,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    Cloud,
-    Trash2,
-    AlertCircle,
-    CircleCheck,
-    CirclePause,
-    Copy,
-    Pencil,
-    FileDiff,
-  } from 'lucide-svelte';
+  import { Trash2, Copy, Pencil, FileDiff } from 'lucide-svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Spinner from '../../shared/Spinner.svelte';
   import type {
@@ -81,12 +72,9 @@
   let polledStatus = $state<WorkspaceStatus | null>(null);
   let status = $derived<WorkspaceStatus | null>(polledStatus ?? branch.workspaceStatus);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
-  let pollStartedAt: number | null = null;
-  let longProvisioning = $state(false);
   let pollInFlight = false;
   let workspaceUrl = $state<string | null>(null);
   let workspaceInfoRequestId = 0;
-  const LONG_PROVISIONING_MS = 5 * 60 * 1000; // 5 minutes
 
   // Error state
   let error = $state<string | null>(null);
@@ -224,15 +212,9 @@
 
   function startPolling() {
     stopPolling();
-    pollStartedAt = Date.now();
-    longProvisioning = false;
     pollTimer = setInterval(async () => {
       if (pollInFlight) {
         return;
-      }
-
-      if (pollStartedAt && Date.now() - pollStartedAt > LONG_PROVISIONING_MS) {
-        longProvisioning = true;
       }
 
       pollInFlight = true;
@@ -242,12 +224,10 @@
         onWorkspaceStatusChange?.(newStatus);
         if (newStatus === 'running') {
           error = null;
-          longProvisioning = false;
           stopPolling();
           loadTimeline();
           loadWorkspaceUrl();
         } else if (newStatus !== 'starting') {
-          longProvisioning = false;
           stopPolling();
           workspaceUrl = null;
         }
@@ -308,29 +288,6 @@
       pollTimer = null;
     }
     pollInFlight = false;
-  }
-
-  let retrying = $state(false);
-
-  async function retryWorkspace() {
-    retrying = true;
-    error = null;
-    polledStatus = 'starting';
-    longProvisioning = false;
-    workspaceUrl = null;
-
-    try {
-      await commands.startWorkspace(branch.id);
-      // If startWorkspace succeeds (or returns Ok), start polling
-      startPolling();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      polledStatus = 'error';
-      onWorkspaceStatusChange?.('error');
-      error = msg;
-    } finally {
-      retrying = false;
-    }
   }
 
   // =========================================================================
@@ -672,30 +629,6 @@
       console.debug('Failed to resolve workspace URL:', e);
     }
   }
-
-  function handleStatusBadgeClick() {
-    if (status !== 'running' || !workspaceUrl) {
-      return;
-    }
-    commands.openUrl(workspaceUrl).catch((e) => {
-      console.error('Failed to open workspace URL:', e);
-    });
-  }
-
-  function statusLabel(s: WorkspaceStatus | null): string {
-    switch (s) {
-      case 'starting':
-        return 'Starting';
-      case 'running':
-        return 'Running';
-      case 'stopped':
-        return 'Stopped';
-      case 'error':
-        return 'Error';
-      default:
-        return 'Unknown';
-    }
-  }
 </script>
 
 <div class="branch-card remote" class:deleting data-branch-id={branch.id}>
@@ -707,66 +640,20 @@
   {:else}
     <!-- Header -->
     <div class="card-header">
-      <Cloud size={14} class="cloud-icon header-icon" />
       <BranchCardHeaderInfo
         branchName={branch.branchName}
         {repoLabel}
         secondaryLabel={branch.workspaceName}
       />
       <div class="header-actions">
-        {#if status === 'running' && workspaceUrl}
-          <button
-            class="status-badge running clickable"
-            onclick={handleStatusBadgeClick}
-            type="button"
-            title="Open workspace in browser"
-          >
-            <CircleCheck size={12} />
-            <span>{statusLabel(status)}</span>
-          </button>
-        {:else}
-          <div
-            class="status-badge"
-            class:starting={status === 'starting'}
-            class:running={status === 'running'}
-            class:stopped={status === 'stopped'}
-            class:error={status === 'error'}
-          >
-            {#if status === 'starting'}
-              <Spinner size={12} />
-            {:else if status === 'running'}
-              <CircleCheck size={12} />
-            {:else if status === 'stopped'}
-              <CirclePause size={12} />
-            {:else if status === 'error'}
-              <AlertCircle size={12} />
-            {/if}
-            <span>{statusLabel(status)}</span>
-          </div>
-        {/if}
         <DropdownMenu items={menuItems} />
       </div>
     </div>
 
-    <!-- Content area — varies by status -->
+    <!-- Content area -->
     <div class="card-content">
       <ReasonBanner reason={repoLabel?.reason} onDismiss={handleDismissReason} />
-      {#if status === 'starting'}
-        <div class="status-view starting-view">
-          <Spinner size={20} />
-          <span class="status-text">Provisioning workspace…</span>
-          {#if longProvisioning}
-            <span class="status-hint"
-              >Still provisioning. Large repositories can take several minutes. This view updates
-              automatically when ready.</span
-            >
-          {:else}
-            <span class="status-hint"
-              >This can take a few minutes, depending on repository size.</span
-            >
-          {/if}
-        </div>
-      {:else if status === 'running'}
+      {#if status === 'running'}
         <!-- Timeline UI (same pattern as BranchCard) -->
         {#if timelineLoading && !timeline}
           <div class="loading">
@@ -814,34 +701,6 @@
             {/snippet}
           </BranchTimeline>
         {/if}
-      {:else if status === 'stopped'}
-        <div class="status-view stopped-view">
-          <CirclePause size={20} />
-          <span class="status-text">Workspace stopped</span>
-          <span class="status-hint">Delete and recreate to start a new workspace</span>
-        </div>
-      {:else if status === 'error'}
-        <div class="status-view error-view">
-          <AlertCircle size={20} />
-          <span class="status-text">Workspace error</span>
-          {#if error}
-            <span class="status-hint">{error}</span>
-          {:else}
-            <span class="status-hint">Something went wrong. Try deleting and recreating.</span>
-          {/if}
-          <button class="retry-btn" onclick={retryWorkspace} disabled={retrying}>
-            {#if retrying}
-              <Spinner size={12} />
-              Retrying…
-            {:else}
-              Retry
-            {/if}
-          </button>
-        </div>
-      {:else}
-        <div class="status-view">
-          <span class="status-text">Unknown status</span>
-        </div>
       {/if}
     </div>
   {/if}
@@ -1000,50 +859,6 @@
     flex-shrink: 0;
   }
 
-  /* Status badge */
-  .status-badge {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 3px 10px;
-    border-radius: 12px;
-    font-size: var(--size-xs);
-    font-weight: 500;
-    white-space: nowrap;
-  }
-
-  .status-badge.clickable {
-    appearance: none;
-    border: none;
-    cursor: pointer;
-    font: inherit;
-  }
-
-  .status-badge.clickable:focus-visible {
-    outline: 2px solid var(--border-emphasis);
-    outline-offset: 2px;
-  }
-
-  .status-badge.starting {
-    background-color: rgba(210, 153, 34, 0.1);
-    color: rgb(210, 153, 34);
-  }
-
-  .status-badge.running {
-    background-color: rgba(63, 185, 80, 0.1);
-    color: var(--ui-accent);
-  }
-
-  .status-badge.stopped {
-    background-color: rgba(139, 148, 158, 0.1);
-    color: var(--text-muted);
-  }
-
-  .status-badge.error {
-    background-color: rgba(248, 81, 73, 0.1);
-    color: var(--ui-danger);
-  }
-
   /* Content */
   .card-content {
     display: flex;
@@ -1072,66 +887,4 @@
     gap: 4px;
   }
 
-  /* Status views (starting, stopped, error) */
-  .status-view {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 32px 16px;
-    text-align: center;
-  }
-
-  .status-view :global(svg) {
-    color: var(--text-faint);
-  }
-
-  .starting-view :global(svg) {
-    color: rgb(210, 153, 34);
-  }
-
-  .error-view :global(svg) {
-    color: var(--ui-danger);
-  }
-
-  .status-text {
-    font-size: var(--size-sm);
-    font-weight: 500;
-    color: var(--text-primary);
-  }
-
-  .status-hint {
-    font-size: var(--size-xs);
-    color: var(--text-muted);
-    max-width: 280px;
-  }
-
-  .retry-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 4px;
-    padding: 6px 16px;
-    background: none;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      border-color 0.15s,
-      background-color 0.15s;
-  }
-
-  .retry-btn:hover:not(:disabled) {
-    border-color: var(--border-emphasis);
-    background: var(--bg-hover);
-  }
-
-  .retry-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
 </style>

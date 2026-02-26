@@ -1454,8 +1454,6 @@
     padding-left: 4px;
   }
 
-  /* Search-related styles now imported from @builderbot/diff-viewer/components/search.css */
-
   .comments-section {
     margin-bottom: 8px;
   }

@@ -525,6 +525,4 @@
     margin-left: auto;
     padding-left: 4px;
   }
-
-  /* Search-related styles now imported from @builderbot/diff-viewer/components/search.css */
 </style>

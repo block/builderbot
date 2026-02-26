@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tauri::{AppHandle, Emitter};
 
@@ -1025,6 +1026,17 @@ pub async fn start_workspace(
         "https://github.com/{}.git?ref={}",
         repo_slug, ref_name
     ));
+    let start_command_preview = match resolved_source.as_deref() {
+        Some(source) => format!("sq blox ws start {} {}", ws_name, source),
+        None => format!("sq blox ws start {}", ws_name),
+    };
+    log::info!(
+        "[start_workspace] branch={} workspace={} invoking command=\"{}\"",
+        branch_id,
+        ws_name,
+        start_command_preview
+    );
+    let ws_start_started_at = Instant::now();
 
     match run_blox_blocking({
         let ws_name = ws_name.to_string();
@@ -1034,6 +1046,12 @@ pub async fn start_workspace(
     .await
     {
         Ok(_) => {
+            log::info!(
+                "[start_workspace] branch={} workspace={} ws_start completed elapsed_ms={}",
+                branch_id,
+                ws_name,
+                ws_start_started_at.elapsed().as_millis()
+            );
             // Create the feature branch inside the workspace so work happens
             // on `branch_name` rather than the detached base ref.
             if let Err(e) = run_workspace_git_async(
@@ -1052,6 +1070,12 @@ pub async fn start_workspace(
             Ok(())
         }
         Err(blox::BloxError::NotAuthenticated) => {
+            log::warn!(
+                "[start_workspace] branch={} workspace={} ws_start failed elapsed_ms={} error=NotAuthenticated",
+                branch_id,
+                ws_name,
+                ws_start_started_at.elapsed().as_millis()
+            );
             // Auth errors are definitive — mark as Error so the frontend
             // stops polling and shows an actionable message.
             store
@@ -1060,6 +1084,13 @@ pub async fn start_workspace(
             Err("Not authenticated with Blox. Run: sq login".to_string())
         }
         Err(e) => {
+            log::warn!(
+                "[start_workspace] branch={} workspace={} ws_start failed elapsed_ms={} error={}",
+                branch_id,
+                ws_name,
+                ws_start_started_at.elapsed().as_millis(),
+                e
+            );
             if is_blox_onboarding_precondition_error(&e) {
                 // Blox onboarding precondition failures are definitive.
                 // Keep the exact CLI error text so the user sees the

@@ -192,6 +192,16 @@ impl AcpDriver {
     }
 }
 
+fn resolve_spawn_working_dir(working_dir: &Path, is_remote: bool) -> PathBuf {
+    // Remote ACP sessions proxy through `sq blox acp` and don't execute against
+    // the local filesystem. Use a guaranteed-existing cwd when the recorded
+    // local fallback path doesn't exist, otherwise spawn fails with ENOENT.
+    if is_remote && !working_dir.is_dir() {
+        return std::env::temp_dir();
+    }
+    working_dir.to_path_buf()
+}
+
 #[async_trait(?Send)]
 impl AgentDriver for AcpDriver {
     async fn run(
@@ -204,9 +214,18 @@ impl AgentDriver for AcpDriver {
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
     ) -> Result<(), String> {
+        let spawn_working_dir = resolve_spawn_working_dir(working_dir, self.is_remote);
+        if self.is_remote && spawn_working_dir.as_path() != working_dir {
+            log::warn!(
+                "Remote ACP spawn cwd missing ({}); falling back to {}",
+                working_dir.display(),
+                spawn_working_dir.display()
+            );
+        }
+
         let mut cmd = Command::new(&self.binary_path);
         cmd.args(&self.acp_args)
-            .current_dir(working_dir)
+            .current_dir(&spawn_working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -214,9 +233,14 @@ impl AgentDriver for AcpDriver {
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to spawn {}: {e}", self.agent_label))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            format!(
+                "Failed to spawn {} (binary: {}, cwd: {}): {e}",
+                self.agent_label,
+                self.binary_path.display(),
+                spawn_working_dir.display()
+            )
+        })?;
 
         let stdin = child
             .stdin
@@ -650,7 +674,11 @@ impl MessageWriter for BasicMessageWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{consume_remote_acp_line, sanitize_remote_acp_chunk, RemoteLineOutcome};
+    use super::{
+        consume_remote_acp_line, resolve_spawn_working_dir, sanitize_remote_acp_chunk,
+        RemoteLineOutcome,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn consumes_wrapped_json_line_across_multiple_chunks() {
@@ -693,5 +721,31 @@ mod tests {
             ),
             RemoteLineOutcome::Emit("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}".to_string())
         );
+    }
+
+    #[test]
+    fn remote_spawn_dir_falls_back_when_working_dir_is_missing() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock must be after epoch")
+            .as_nanos();
+        let missing_path =
+            std::env::temp_dir().join(format!("acp-client-missing-{}-{nonce}", std::process::id()));
+        assert!(!missing_path.exists());
+
+        assert_eq!(
+            resolve_spawn_working_dir(&missing_path, true),
+            std::env::temp_dir()
+        );
+        assert_eq!(
+            resolve_spawn_working_dir(&missing_path, false),
+            missing_path
+        );
+    }
+
+    #[test]
+    fn remote_spawn_dir_uses_existing_working_dir() {
+        let existing = std::env::temp_dir();
+        assert_eq!(resolve_spawn_working_dir(&existing, true), existing);
     }
 }

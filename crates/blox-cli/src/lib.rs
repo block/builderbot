@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use wait_timeout::ChildExt;
 
@@ -251,7 +251,37 @@ pub fn ws_start(name: &str, source: Option<&str>) -> Result<String, BloxError> {
     if let Some(src) = source {
         args.push(src);
     }
-    run(&args, START_TIMEOUT)?;
+    let command_preview = match source {
+        Some(src) => format!("sq blox ws start {name} {src}"),
+        None => format!("sq blox ws start {name}"),
+    };
+    log::info!(
+        "[blox-cli] workspace start begin: workspace={} command=\"{}\"",
+        name,
+        command_preview
+    );
+    let started_at = Instant::now();
+    let result = run(&args, START_TIMEOUT);
+    match &result {
+        Ok(_) => {
+            log::info!(
+                "[blox-cli] workspace start complete: workspace={} elapsed_ms={} command=\"{}\"",
+                name,
+                started_at.elapsed().as_millis(),
+                command_preview
+            );
+        }
+        Err(e) => {
+            log::warn!(
+                "[blox-cli] workspace start failed: workspace={} elapsed_ms={} command=\"{}\" error={}",
+                name,
+                started_at.elapsed().as_millis(),
+                command_preview,
+                e
+            );
+        }
+    }
+    result?;
     Ok(name.to_string())
 }
 

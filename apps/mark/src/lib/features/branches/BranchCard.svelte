@@ -862,6 +862,7 @@
       actionOutputModal = {
         executionId: existingExecution.executionId,
         actionName: action.name,
+        isStopping: stoppingExecutions.has(existingExecution.executionId),
       };
       return;
     }

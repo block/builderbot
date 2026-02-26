@@ -15,6 +15,7 @@
   import type { FileEntry, TreeNode } from './diffModalHelpers';
   import type { FileDiff, FileDiffSummary } from '@builderbot/diff-viewer/types';
   import type { FileSearchResult } from '@builderbot/diff-viewer/state';
+  import '@builderbot/diff-viewer/components/search.css';
 
   interface SearchStateHandle {
     state: {
@@ -525,44 +526,5 @@
     padding-left: 4px;
   }
 
-  /* Search-related styles */
-  .search-chevron {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    width: 14px;
-    cursor: pointer;
-    color: var(--text-muted);
-    transition: color 0.1s;
-  }
-
-  .search-chevron:hover {
-    color: var(--text-primary);
-  }
-
-  .search-spacer {
-    width: 14px;
-    flex-shrink: 0;
-  }
-
-  .search-result-count {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 20px;
-    height: 16px;
-    padding: 0 4px;
-    margin-left: auto;
-    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.15));
-    color: var(--accent-primary);
-    border-radius: 8px;
-    font-size: var(--size-xs);
-    font-weight: 500;
-    flex-shrink: 0;
-  }
-
-  .has-search-results {
-    /* Optional: add subtle styling for files with search results */
-  }
+  /* Search-related styles now imported from @builderbot/diff-viewer/components/search.css */
 </style>

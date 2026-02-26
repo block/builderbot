@@ -67,3 +67,15 @@ export {
 	type SearchMatch,
 	type MatchLocation
 } from './diffSearch';
+
+export {
+	createSearchNavigationHandlers,
+	type SearchNavigationConfig
+} from './searchNavigation';
+
+export { createSearchInitializationTracker, type SearchInitializationConfig } from './searchInitialization';
+
+export {
+	createFileSelectionWithSearch,
+	type FileSelectionWithSearchConfig
+} from './fileSelection';

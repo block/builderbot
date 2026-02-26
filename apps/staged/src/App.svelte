@@ -44,8 +44,12 @@
     getMatchSnippet,
     getTextLines,
     type SearchMatch,
+    createSearchNavigationHandlers,
+    createSearchInitializationTracker,
+    createFileSelectionWithSearch,
   } from '@builderbot/diff-viewer/utils';
   import { createSearchState } from '@builderbot/diff-viewer/state';
+  import '@builderbot/diff-viewer/components/search.css';
   import type { FileDiff, FileDiffSummary, Comment, Span } from '@builderbot/diff-viewer/types';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import * as commands from './lib/commands';
@@ -105,15 +109,24 @@
 
   let selectionGeneration = 0;
 
-  // Track whether we've initialized collapsed state for the current search
-  let searchInitialized = $state<string>('');
-
   // ==========================================================================
   // State: Search
   // ==========================================================================
 
   // svelte-ignore state_referenced_locally
   const searchState = createSearchState();
+
+  // Create search initialization tracker
+  const checkSearchInitialization = createSearchInitializationTracker({
+    searchState,
+    files,
+  });
+
+  // Create handler for search-aware file selection
+  const handleSearchOnFileSelect = createFileSelectionWithSearch({
+    searchState,
+    files,
+  });
 
   // ==========================================================================
   // State: Modals
@@ -295,13 +308,9 @@
   async function selectFile(path: string | null) {
     const thisGeneration = ++selectionGeneration;
 
-    // If search is open and this file has results, expand and select the first result (before setting selectedFile)
-    if (path && searchState.state.isOpen) {
-      // Auto-expand search results if they are collapsed
-      if (searchState.areSearchResultsCollapsed(path)) {
-        searchState.toggleSearchResults(path);
-      }
-      searchState.selectFirstResultInFile(files, path);
+    // Handle search-related behavior (expand and select first result)
+    if (path) {
+      handleSearchOnFileSelect(path);
     }
 
     selectedFile = path;
@@ -489,16 +498,7 @@
 
   // Initialize collapsed state when search results are ready (only once per search)
   $effect(() => {
-    const searchKey = `${searchState.state.query}-${searchState.state.fileResults.size}`;
-    if (
-      searchState.state.isOpen &&
-      searchState.state.fileResults.size > 0 &&
-      !searchState.state.loading &&
-      searchInitialized !== searchKey
-    ) {
-      searchState.initializeCollapsedState(files);
-      searchInitialized = searchKey;
-    }
+    checkSearchInitialization();
   });
 
   // ==========================================================================
@@ -507,34 +507,21 @@
 
   // Set up keyboard navigation for diff viewer and search
   $effect(() => {
+    // Create search navigation handlers
+    const { onNextSearchResult, onPrevSearchResult } = createSearchNavigationHandlers({
+      searchState,
+      selectFile: (path: string) => selectFile(path),
+      files,
+      onJumpToLine: (lineIndex: number) => {
+        lineJumpToken += 1;
+        jumpToLine = { lineIndex, token: lineJumpToken };
+      },
+    });
+
     const cleanup = setupDiffKeyboardNav({
       onOpenSearch: () => searchState.openSearch(),
-      onNextSearchResult: async () => {
-        const result = await searchState.goToNextResult(files);
-        if (result) {
-          // Auto-expand search results for this file
-          if (searchState.areSearchResultsCollapsed(result.filePath)) {
-            searchState.toggleSearchResults(result.filePath);
-          }
-          await selectFile(result.filePath);
-          // Scroll to the specific line
-          lineJumpToken += 1;
-          jumpToLine = { lineIndex: result.match.lineIndex, token: lineJumpToken };
-        }
-      },
-      onPrevSearchResult: async () => {
-        const result = await searchState.goToPrevResult(files);
-        if (result) {
-          // Auto-expand search results for this file
-          if (searchState.areSearchResultsCollapsed(result.filePath)) {
-            searchState.toggleSearchResults(result.filePath);
-          }
-          await selectFile(result.filePath);
-          // Scroll to the specific line
-          lineJumpToken += 1;
-          jumpToLine = { lineIndex: result.match.lineIndex, token: lineJumpToken };
-        }
-      },
+      onNextSearchResult,
+      onPrevSearchResult,
     });
 
     return cleanup;
@@ -1467,46 +1454,7 @@
     padding-left: 4px;
   }
 
-  /* Search-related styles */
-  .search-chevron {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    width: 14px;
-    cursor: pointer;
-    color: var(--text-muted);
-    transition: color 0.1s;
-  }
-
-  .search-chevron:hover {
-    color: var(--text-primary);
-  }
-
-  .search-spacer {
-    width: 14px;
-    flex-shrink: 0;
-  }
-
-  .search-result-count {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 20px;
-    height: 16px;
-    padding: 0 4px;
-    margin-left: auto;
-    background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.15));
-    color: var(--accent-primary);
-    border-radius: 8px;
-    font-size: var(--size-xs);
-    font-weight: 500;
-    flex-shrink: 0;
-  }
-
-  .has-search-results {
-    /* Optional: add subtle styling for files with search results */
-  }
+  /* Search-related styles now imported from @builderbot/diff-viewer/components/search.css */
 
   .comments-section {
     margin-bottom: 8px;

@@ -25,7 +25,12 @@
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
   import { createSearchState } from '@builderbot/diff-viewer/state';
-  import { setupDiffKeyboardNav } from '@builderbot/diff-viewer/utils';
+  import {
+    setupDiffKeyboardNav,
+    createSearchNavigationHandlers,
+    createSearchInitializationTracker,
+    createFileSelectionWithSearch,
+  } from '@builderbot/diff-viewer/utils';
   import type { Comment, SmartDiffAnnotation, Span } from '../../types';
   import {
     buildFileEntries,
@@ -112,8 +117,11 @@
   // Annotation reveal state (hold A to reveal)
   let annotationsRevealed = $state(false);
 
-  // Track whether we've initialized collapsed state for the current search
-  let searchInitialized = $state<string>('');
+  // Create tracker for search initialization
+  const checkSearchInitialization = createSearchInitializationTracker({
+    searchState,
+    files: diffViewer.state.files,
+  });
 
   // ==========================================================================
   // Derived
@@ -155,16 +163,15 @@
   // Sidebar interactions
   // ==========================================================================
 
+  // Create handler for search-aware file selection
+  const handleSearchOnFileSelect = createFileSelectionWithSearch({
+    searchState,
+    files: diffViewer.state.files,
+  });
+
   function selectFile(file: FileEntry) {
     selectedCommentId = null;
-    // If search is open and this file has results, expand and select the first result
-    if (searchState.state.isOpen) {
-      // Auto-expand search results if they are collapsed (before selecting file)
-      if (searchState.areSearchResultsCollapsed(file.path)) {
-        searchState.toggleSearchResults(file.path);
-      }
-      searchState.selectFirstResultInFile(diffViewer.state.files, file.path);
-    }
+    handleSearchOnFileSelect(file.path);
     diffViewer.selectFile(file.path);
   }
 
@@ -296,48 +303,26 @@
 
   // Initialize collapsed state when search results are ready (only once per search)
   $effect(() => {
-    const searchKey = `${searchState.state.query}-${searchState.state.fileResults.size}`;
-    if (
-      searchState.state.isOpen &&
-      searchState.state.fileResults.size > 0 &&
-      !searchState.state.loading &&
-      searchInitialized !== searchKey
-    ) {
-      searchState.initializeCollapsedState(diffViewer.state.files);
-      searchInitialized = searchKey;
-    }
+    checkSearchInitialization();
   });
 
   // Set up keyboard navigation for diff viewer and search
   $effect(() => {
+    // Create search navigation handlers
+    const { onNextSearchResult, onPrevSearchResult } = createSearchNavigationHandlers({
+      searchState,
+      selectFile: (path: string) => diffViewer.selectFile(path),
+      files: diffViewer.state.files,
+      onJumpToLine: (lineIndex: number) => {
+        lineJumpToken += 1;
+        jumpToLine = { lineIndex, token: lineJumpToken };
+      },
+    });
+
     const cleanup = setupDiffKeyboardNav({
       onOpenSearch: () => searchState.openSearch(),
-      onNextSearchResult: async () => {
-        const result = await searchState.goToNextResult(diffViewer.state.files);
-        if (result) {
-          // Auto-expand search results for this file
-          if (searchState.areSearchResultsCollapsed(result.filePath)) {
-            searchState.toggleSearchResults(result.filePath);
-          }
-          await diffViewer.selectFile(result.filePath);
-          // Scroll to the specific line
-          lineJumpToken += 1;
-          jumpToLine = { lineIndex: result.match.lineIndex, token: lineJumpToken };
-        }
-      },
-      onPrevSearchResult: async () => {
-        const result = await searchState.goToPrevResult(diffViewer.state.files);
-        if (result) {
-          // Auto-expand search results for this file
-          if (searchState.areSearchResultsCollapsed(result.filePath)) {
-            searchState.toggleSearchResults(result.filePath);
-          }
-          await diffViewer.selectFile(result.filePath);
-          // Scroll to the specific line
-          lineJumpToken += 1;
-          jumpToLine = { lineIndex: result.match.lineIndex, token: lineJumpToken };
-        }
-      },
+      onNextSearchResult,
+      onPrevSearchResult,
     });
 
     return cleanup;

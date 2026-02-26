@@ -28,6 +28,9 @@
     "./types": {
       "types": "./src/lib/types.ts",
       "default": "./src/lib/types.ts"
+    },
+    "./components/search.css": {
+      "default": "./src/lib/components/search.css"
     }
   },
   "peerDependencies": {

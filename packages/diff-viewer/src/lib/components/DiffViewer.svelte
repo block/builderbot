@@ -40,6 +40,8 @@
     isBinaryDiff,
     getTextLines,
   } from '../utils/diffUtils';
+  import type { SearchState, FileSearchResult } from '../state/searchState.svelte';
+  import type { SearchMatch, MatchLocation } from '../utils/diffSearch';
   import {
     buildAfterMarkers,
     buildBeforeMarkers,
@@ -77,6 +79,8 @@
     comments?: Comment[];
     /** Request to jump to a specific comment in the current file. */
     jumpToComment?: { id: string; token: number } | null;
+    /** Request to jump to a specific line in the current file (for search results). */
+    jumpToLine?: { lineIndex: number; token: number } | null;
     /** Bumped when syntax theme changes to trigger re-highlight. */
     syntaxThemeVersion?: number;
     /** Whether a new file is loading (show subtle indicator, keep old content). */
@@ -91,6 +95,8 @@
     annotations?: SmartDiffAnnotation[];
     /** Whether AI annotation overlays are currently revealed. */
     annotationsRevealed?: boolean;
+    /** Search state for highlighting matches in the diff content. */
+    searchState?: SearchState;
 
     // -- Comment callbacks (all optional; without them commenting is disabled) --
     onAddComment?: (path: string, span: Span, content: string) => Promise<void>;
@@ -102,6 +108,7 @@
     diff,
     comments = [],
     jumpToComment = null,
+    jumpToLine = null,
     syntaxThemeVersion = 0,
     loading = false,
     isReferenceFile = false,
@@ -109,6 +116,7 @@
     afterLabel = 'after',
     annotations = [],
     annotationsRevealed = false,
+    searchState,
     onAddComment,
     onUpdateComment,
     onDeleteComment,
@@ -202,6 +210,7 @@
   let lineCommentReadOnly = $state(false);
   let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
   let lastHandledJumpToken = $state<number | null>(null);
+  let lastHandledJumpLineToken = $state<number | null>(null);
   let lineCommentEditorRaf: number | null = null;
 
   // Markdown preview mode
@@ -610,6 +619,163 @@
   }
 
   // ==========================================================================
+  // Search highlighting
+  // ==========================================================================
+
+  /** A token segment that may be part of a search match */
+  interface HighlightedSegment {
+    content: string;
+    color: string;
+    isMatch: boolean;
+    isCurrent: boolean;
+  }
+
+  /**
+   * Get search matches for a specific line, marking which is the current match.
+   * Returns empty array if no search is active or no matches on this line.
+   */
+  function getSearchMatchesForLine(
+    lineIndex: number,
+    side: 'before' | 'after'
+  ): Array<MatchLocation & { isCurrent: boolean }> {
+    if (!searchState || !diff || side === 'before') return [];
+
+    const filePath = getFilePath(diff);
+    if (!filePath) return [];
+
+    const fileResult = searchState.fileResults.get(filePath);
+    if (!fileResult) return [];
+
+    // Get all matches on this line
+    const lineMatches = fileResult.matches.filter((m) => m.lineIndex === lineIndex);
+    if (lineMatches.length === 0) return [];
+
+    // Flatten all results to find global current index
+    const flattened: Array<{ filePath: string; match: SearchMatch; globalIndex: number }> = [];
+    let globalIdx = 0;
+    for (const [path, result] of searchState.fileResults) {
+      for (const match of result.matches) {
+        flattened.push({ filePath: path, match, globalIndex: globalIdx });
+        globalIdx++;
+      }
+    }
+
+    const currentGlobal = flattened[searchState.currentResultIndex];
+    const currentMatch = currentGlobal?.match;
+
+    // Map matches to include isCurrent flag
+    return lineMatches.map((m) => {
+      const loc = m.right!;
+      return {
+        startCol: loc.startCol,
+        endCol: loc.endCol,
+        isCurrent:
+          currentGlobal?.filePath === filePath &&
+          currentMatch?.lineIndex === lineIndex &&
+          currentMatch?.right?.startCol === loc.startCol &&
+          currentMatch?.right?.endCol === loc.endCol,
+      };
+    });
+  }
+
+  /**
+   * Apply search highlights to syntax tokens by splitting them at match boundaries.
+   * This is the core algorithm that segments tokens character-by-character to create
+   * highlighted segments that exactly correspond to search matches.
+   */
+  function applySearchHighlights(
+    tokens: Token[],
+    matches: Array<MatchLocation & { isCurrent: boolean }>
+  ): HighlightedSegment[] {
+    if (matches.length === 0) {
+      // No matches - return tokens as non-matching segments
+      return tokens.map((t) => ({
+        content: t.content,
+        color: t.color,
+        isMatch: false,
+        isCurrent: false,
+      }));
+    }
+
+    const segments: HighlightedSegment[] = [];
+    let charIndex = 0; // Absolute position in the line
+
+    for (const token of tokens) {
+      const tokenStart = charIndex;
+      const tokenEnd = charIndex + token.content.length;
+
+      // Find matches that overlap with this token
+      const overlappingMatches = matches.filter(
+        (m) => m.startCol < tokenEnd && m.endCol > tokenStart
+      );
+
+      if (overlappingMatches.length === 0) {
+        // Token has no matches - add as single non-match segment
+        segments.push({
+          content: token.content,
+          color: token.color,
+          isMatch: false,
+          isCurrent: false,
+        });
+      } else {
+        // Token has matches - split at match boundaries
+        let pos = 0; // Position within token content
+
+        for (const match of overlappingMatches) {
+          const matchStart = Math.max(0, match.startCol - tokenStart);
+          const matchEnd = Math.min(token.content.length, match.endCol - tokenStart);
+
+          // Add any content before the match
+          if (pos < matchStart) {
+            segments.push({
+              content: token.content.slice(pos, matchStart),
+              color: token.color,
+              isMatch: false,
+              isCurrent: false,
+            });
+          }
+
+          // Add the match itself
+          segments.push({
+            content: token.content.slice(matchStart, matchEnd),
+            color: token.color,
+            isMatch: true,
+            isCurrent: match.isCurrent,
+          });
+
+          pos = matchEnd;
+        }
+
+        // Add any remaining content after all matches
+        if (pos < token.content.length) {
+          segments.push({
+            content: token.content.slice(pos),
+            color: token.color,
+            isMatch: false,
+            isCurrent: false,
+          });
+        }
+      }
+
+      charIndex = tokenEnd;
+    }
+
+    return segments;
+  }
+
+  /**
+   * Get highlighted token segments for a line, with search matches applied.
+   */
+  function getHighlightedTokens(
+    lineIndex: number,
+    side: 'before' | 'after'
+  ): HighlightedSegment[] {
+    const tokens = side === 'before' ? getBeforeTokens(lineIndex) : getAfterTokens(lineIndex);
+    const matches = getSearchMatchesForLine(lineIndex, side);
+    return applySearchHighlights(tokens, matches);
+  }
+
+  // ==========================================================================
   // Line state helpers
   // ==========================================================================
 
@@ -919,6 +1085,15 @@
     if (!comment) return;
     lastHandledJumpToken = request.token;
     focusCommentInViewer(comment);
+  });
+
+  // Jump to a line requested by search results.
+  $effect(() => {
+    const request = jumpToLine;
+    if (!request || !afterPane) return;
+    if (lastHandledJumpLineToken === request.token) return;
+    lastHandledJumpLineToken = request.token;
+    scrollController.scrollToRow(request.lineIndex, 'after');
   });
 
   // ==========================================================================
@@ -1522,8 +1697,14 @@
                       onmouseleave={handleLineMouseLeave}
                     >
                       <span class="line-content">
-                        {#each getBeforeTokens(i) as token}
-                          <span style="color: {token.color}">{token.content}</span>
+                        {#each getHighlightedTokens(i, 'before') as segment}
+                          <span
+                            style="color: {segment.color}"
+                            class:search-match={segment.isMatch && !segment.isCurrent}
+                            class:search-current={segment.isCurrent}
+                          >
+                            {segment.content}
+                          </span>
                         {/each}
                       </span>
                     </div>
@@ -1589,8 +1770,14 @@
                 {#each beforeLines as line, i}
                   <div class="line">
                     <span class="line-content">
-                      {#each getBeforeTokens(i) as token}
-                        <span style="color: {token.color}">{token.content}</span>
+                      {#each getHighlightedTokens(i, 'before') as segment}
+                        <span
+                          style="color: {segment.color}"
+                          class:search-match={segment.isMatch && !segment.isCurrent}
+                          class:search-current={segment.isCurrent}
+                        >
+                          {segment.content}
+                        </span>
                       {/each}
                     </span>
                   </div>
@@ -1680,8 +1867,14 @@
                       onmousedown={(e) => handleLineMouseDown('after', i, e)}
                     >
                       <span class="line-content">
-                        {#each getAfterTokens(i) as token}
-                          <span style="color: {token.color}">{token.content}</span>
+                        {#each getHighlightedTokens(i, 'after') as segment}
+                          <span
+                            style="color: {segment.color}"
+                            class:search-match={segment.isMatch && !segment.isCurrent}
+                            class:search-current={segment.isCurrent}
+                          >
+                            {segment.content}
+                          </span>
                         {/each}
                       </span>
                     </div>
@@ -2409,5 +2602,26 @@
     -webkit-backdrop-filter: blur(6px);
     background: rgba(var(--ui-accent-rgb, 59, 130, 246), 0.08);
     pointer-events: none;
+  }
+
+  /* Search result highlighting */
+  .search-match {
+    background-color: rgba(250, 200, 50, 0.35);
+    border-radius: 2px;
+  }
+
+  .search-current {
+    background-color: rgba(255, 150, 50, 0.5);
+    border-radius: 2px;
+  }
+
+  @media (prefers-color-scheme: light) {
+    .search-match {
+      background-color: rgba(250, 200, 50, 0.5);
+    }
+
+    .search-current {
+      background-color: rgba(255, 150, 50, 0.6);
+    }
   }
 </style>

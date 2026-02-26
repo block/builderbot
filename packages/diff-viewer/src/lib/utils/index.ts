@@ -58,3 +58,24 @@ export { ConnectorRendererCanvas, type CommentHighlightInfo } from './connectorR
 export { setupDiffKeyboardNav } from './diffKeyboard';
 export { setupMarkdownScrollSync } from './markdownScrollSync';
 export { sanitize } from './sanitize';
+
+export {
+	findMatches,
+	describeMatch,
+	getMatchSnippet,
+	MAX_MATCHES,
+	type SearchMatch,
+	type MatchLocation
+} from './diffSearch';
+
+export {
+	createSearchNavigationHandlers,
+	type SearchNavigationConfig
+} from './searchNavigation';
+
+export { createSearchInitializationTracker, type SearchInitializationConfig } from './searchInitialization';
+
+export {
+	createFileSelectionWithSearch,
+	type FileSelectionWithSearchConfig
+} from './fileSelection';

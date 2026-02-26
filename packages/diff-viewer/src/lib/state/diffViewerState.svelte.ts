@@ -162,6 +162,7 @@ export function createDiffViewerState(
   return {
     state,
     selectFile,
+    loadFileDiff,
     getCurrentDiff,
   };
 }

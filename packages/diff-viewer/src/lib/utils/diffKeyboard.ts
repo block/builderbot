@@ -7,6 +7,9 @@
  * - Ctrl+N: Scroll down
  * - Ctrl+P: Scroll up
  * - I: Add comment on current hunk
+ * - Cmd/Ctrl+F: Open search
+ * - Cmd/Ctrl+G: Next search result
+ * - Cmd/Ctrl+Shift+G: Previous search result
  *
  * Uses plain DOM event listeners (no external keyboard service dependency).
  */
@@ -24,6 +27,10 @@ export interface DiffNavConfig {
   startCommentOnHunk: (hunkIndex: number) => void;
   /** Called when keyboard navigation focuses a hunk */
   onHunkFocus?: (hunkIndex: number | null) => void;
+  /** Search callbacks */
+  onOpenSearch?: () => void;
+  onNextSearchResult?: () => void;
+  onPrevSearchResult?: () => void;
 }
 
 const DEFAULT_CONFIG: DiffNavConfig = {
@@ -153,15 +160,41 @@ export function setupDiffKeyboardNav(config: Partial<DiffNavConfig> = {}): () =>
   const cfg = { ...DEFAULT_CONFIG, ...config };
 
   function handleKeydown(event: KeyboardEvent): void {
-    // Skip when focus is in an input or textarea
     const target = event.target as HTMLElement;
-    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
+    const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
 
     const key = event.key.toLowerCase();
     const ctrl = event.ctrlKey;
     const meta = event.metaKey;
     const shift = event.shiftKey;
     const alt = event.altKey;
+
+    // Search shortcuts work even when focus is in an input/textarea
+    // (so you can navigate results while typing in the search box)
+
+    // Cmd/Ctrl+F — open search
+    if (key === 'f' && (ctrl || meta) && !shift && !alt) {
+      event.preventDefault();
+      cfg.onOpenSearch?.();
+      return;
+    }
+
+    // Cmd/Ctrl+G — next search result
+    if (key === 'g' && (ctrl || meta) && !shift && !alt) {
+      event.preventDefault();
+      cfg.onNextSearchResult?.();
+      return;
+    }
+
+    // Cmd/Ctrl+Shift+G — previous search result
+    if (key === 'g' && (ctrl || meta) && shift && !alt) {
+      event.preventDefault();
+      cfg.onPrevSearchResult?.();
+      return;
+    }
+
+    // Skip all other shortcuts when focus is in an input or textarea
+    if (inInput) return;
 
     // J or ArrowDown — next hunk (no modifiers)
     if ((key === 'j' || key === 'arrowdown') && !ctrl && !meta && !shift && !alt) {

@@ -17,13 +17,20 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import { DiffViewer } from '@builderbot/diff-viewer/components';
+  import { DiffViewer, CrossFileSearchBar } from '@builderbot/diff-viewer/components';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
+  import { createSearchState } from '@builderbot/diff-viewer/state';
+  import {
+    setupDiffKeyboardNav,
+    createSearchNavigationHandlers,
+    createSearchInitializationTracker,
+    createFileSelectionWithSearch,
+  } from '@builderbot/diff-viewer/utils';
   import type { Comment, SmartDiffAnnotation, Span } from '../../types';
   import {
     buildFileEntries,
@@ -79,6 +86,9 @@
   // svelte-ignore state_referenced_locally
   const diffViewer = createDiffViewerState(branchId, scope, commitSha);
 
+  // svelte-ignore state_referenced_locally
+  const searchState = createSearchState();
+
   type ReviewHandle = ReturnType<typeof createReviewState>;
   let reviewHandle = $state<ReviewHandle | null>(null);
 
@@ -97,6 +107,8 @@
   let selectedCommentId = $state<string | null>(null);
   let jumpToComment = $state<{ id: string; token: number } | null>(null);
   let commentJumpToken = 0;
+  let jumpToLine = $state<{ lineIndex: number; token: number } | null>(null);
+  let lineJumpToken = 0;
 
   // Confirmation dialog state
   let commentToDelete = $state<string | null>(null);
@@ -104,6 +116,12 @@
 
   // Annotation reveal state (hold A to reveal)
   let annotationsRevealed = $state(false);
+
+  // Create tracker for search initialization
+  const checkSearchInitialization = createSearchInitializationTracker({
+    searchState,
+    getFiles: () => diffViewer.state.files,
+  });
 
   // ==========================================================================
   // Derived
@@ -145,8 +163,15 @@
   // Sidebar interactions
   // ==========================================================================
 
+  // Create handler for search-aware file selection
+  const handleSearchOnFileSelect = createFileSelectionWithSearch({
+    searchState,
+    getFiles: () => diffViewer.state.files,
+  });
+
   function selectFile(file: FileEntry) {
     selectedCommentId = null;
+    handleSearchOnFileSelect(file.path);
     diffViewer.selectFile(file.path);
   }
 
@@ -219,6 +244,17 @@
     jumpToComment = { id: comment.id, token: commentJumpToken };
   }
 
+  // Wrapper for search that returns the loaded diff without changing selection
+  async function loadFileDiffForSearch(path: string) {
+    return await diffViewer.loadFileDiff(path);
+  }
+
+  // Jump to a specific line (for search results)
+  function handleJumpToLine(lineIndex: number) {
+    lineJumpToken += 1;
+    jumpToLine = { lineIndex, token: lineJumpToken };
+  }
+
   // ==========================================================================
   // Comment callbacks (wired to review state)
   // ==========================================================================
@@ -264,6 +300,33 @@
       annotationsRevealed = false;
     }
   }
+
+  // Initialize collapsed state when search results are ready (only once per search)
+  $effect(() => {
+    checkSearchInitialization();
+  });
+
+  // Set up keyboard navigation for diff viewer and search
+  $effect(() => {
+    // Create search navigation handlers
+    const { onNextSearchResult, onPrevSearchResult } = createSearchNavigationHandlers({
+      searchState,
+      selectFile: (path: string) => diffViewer.selectFile(path),
+      getFiles: () => diffViewer.state.files,
+      onJumpToLine: (lineIndex: number) => {
+        lineJumpToken += 1;
+        jumpToLine = { lineIndex, token: lineJumpToken };
+      },
+    });
+
+    const cleanup = setupDiffKeyboardNav({
+      onOpenSearch: () => searchState.openSearch(),
+      onNextSearchResult,
+      onPrevSearchResult,
+    });
+
+    return cleanup;
+  });
 
   onMount(() => {
     document.addEventListener('keydown', handleKeydown);
@@ -319,11 +382,13 @@
           diff={currentDiff}
           comments={readonly ? [] : currentComments}
           {jumpToComment}
+          {jumpToLine}
           loading={diffViewer.state.loadingFile !== null}
           {beforeLabel}
           {afterLabel}
           annotations={currentAnnotations}
           {annotationsRevealed}
+          searchState={searchState.state}
           onAddComment={readonly ? undefined : handleAddComment}
           onUpdateComment={readonly ? undefined : handleUpdateComment}
           onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}
@@ -347,6 +412,13 @@
           </div>
         {:else}
           <div class="sidebar-content">
+            <!-- Search bar -->
+            <CrossFileSearchBar
+              files={diffViewer.state.files}
+              loadFileDiff={loadFileDiffForSearch}
+              {searchState}
+            />
+
             <DiffFileTreeSection
               {readonly}
               {fileEntries}
@@ -360,6 +432,9 @@
               onToggleDir={toggleDir}
               onSelectFile={selectFile}
               onToggleReviewed={toggleReviewed}
+              onJumpToLine={handleJumpToLine}
+              {searchState}
+              diffViewerState={diffViewer}
             />
             {#if !readonly}
               <DiffReferenceSection

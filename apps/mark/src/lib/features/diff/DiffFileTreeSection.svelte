@@ -10,7 +10,36 @@
     CircleMinus,
     CircleArrowUp,
   } from 'lucide-svelte';
+  import { FileSearchResults } from '@builderbot/diff-viewer/components';
+  import { getMatchSnippet, getTextLines, type SearchMatch } from '@builderbot/diff-viewer/utils';
   import type { FileEntry, TreeNode } from './diffModalHelpers';
+  import type { FileDiff, FileDiffSummary } from '@builderbot/diff-viewer/types';
+  import type { FileSearchResult } from '@builderbot/diff-viewer/state';
+  import '@builderbot/diff-viewer/components/search.css';
+
+  interface SearchStateHandle {
+    state: {
+      isOpen: boolean;
+      fileResults: Map<string, FileSearchResult>;
+      collapsedSearchResults: Set<string>;
+    };
+    toggleSearchResults: (filePath: string) => void;
+    areSearchResultsCollapsed: (filePath: string) => boolean;
+    isCurrentResult: (files: FileDiffSummary[], filePath: string, localIndex: number) => boolean;
+    getGlobalIndex: (files: FileDiffSummary[], filePath: string, localIndex: number) => number;
+    setCurrentResult: (globalIndex: number) => void;
+    expandFileResults: (filePath: string) => void;
+    collapseFileResults: (filePath: string) => void;
+    selectFirstResultInFile: (files: FileDiffSummary[], filePath: string) => boolean;
+  }
+
+  interface DiffViewerStateHandle {
+    state: {
+      diffCache: Map<string, FileDiff>;
+    };
+    getCurrentDiff: () => FileDiff | null;
+    selectFile: (path: string) => Promise<void>;
+  }
 
   interface Props {
     readonly: boolean;
@@ -25,6 +54,9 @@
     onToggleDir: (path: string) => void;
     onSelectFile: (file: FileEntry) => void;
     onToggleReviewed: (event: MouseEvent | KeyboardEvent, file: FileEntry) => void | Promise<void>;
+    onJumpToLine?: (lineIndex: number) => void;
+    searchState?: SearchStateHandle;
+    diffViewerState?: DiffViewerStateHandle;
   }
 
   let {
@@ -40,7 +72,52 @@
     onToggleDir,
     onSelectFile,
     onToggleReviewed,
+    onJumpToLine,
+    searchState,
+    diffViewerState,
   }: Props = $props();
+
+  // Convert FileEntry[] to FileDiffSummary[] for search functions
+  const fileSummaries: FileDiffSummary[] = $derived(
+    fileEntries.map((entry) => ({
+      before: entry.status === 'added' ? null : entry.path,
+      after: entry.status === 'deleted' ? null : entry.path,
+    }))
+  );
+
+  // Helper to get snippet for a search result
+  function getSnippet(match: SearchMatch, filePath: string): string {
+    if (!diffViewerState) return '';
+    // Get the diff from the cache (search already loaded all diffs)
+    const diff = diffViewerState.state.diffCache.get(filePath);
+    if (!diff) return '';
+    const afterLines = getTextLines(diff, 'after');
+    return getMatchSnippet(match, afterLines);
+  }
+
+  // Handle clicking a search result
+  async function handleSearchResultClick(
+    filePath: string,
+    match: SearchMatch,
+    globalIndex: number
+  ) {
+    if (!searchState || !diffViewerState) return;
+
+    // Update current result index
+    searchState.setCurrentResult(globalIndex);
+
+    // Auto-expand search results for this file
+    if (searchState.areSearchResultsCollapsed(filePath)) {
+      searchState.toggleSearchResults(filePath);
+    }
+
+    // Select the file and scroll to the match
+    await diffViewerState.selectFile(filePath);
+    // Scroll to the specific line
+    if (onJumpToLine) {
+      onJumpToLine(match.lineIndex);
+    }
+  }
 </script>
 
 {#snippet fileIcon(file: FileEntry, showReviewedSection: boolean)}
@@ -115,15 +192,73 @@
         <button
           class="tree-item file-item"
           class:selected={selectedFile === node.file.path}
+          class:has-search-results={searchState?.state.isOpen &&
+            searchState?.state.fileResults.has(node.file.path)}
           style="padding-left: {8 + depth * 12}px"
           onclick={() => onSelectFile(node.file!)}
         >
+          {#if searchState?.state.isOpen}
+            {#if searchState.state.fileResults.has(node.file.path)}
+              <span
+                class="search-chevron"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  searchState?.toggleSearchResults(node.file!.path);
+                }}
+                role="button"
+                tabindex="0"
+                onkeydown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    searchState?.toggleSearchResults(node.file!.path);
+                  }
+                }}
+              >
+                {#if searchState.areSearchResultsCollapsed(node.file.path)}
+                  <ChevronRight size={14} />
+                {:else}
+                  <ChevronDown size={14} />
+                {/if}
+              </span>
+            {:else}
+              <span class="search-spacer"></span>
+            {/if}
+          {/if}
           {@render fileIcon(node.file, showReviewedSection)}
           <span class="file-name">{node.name}</span>
           {#if node.file.commentCount > 0}
             <span class="comment-indicator"><MessageSquare size={12} /></span>
           {/if}
+          {#if searchState?.state.isOpen && searchState.state.fileResults.has(node.file.path)}
+            {@const resultCount =
+              searchState.state.fileResults.get(node.file.path)?.matches.length ?? 0}
+            <span
+              class="search-result-count"
+              title="{resultCount} search result{resultCount !== 1 ? 's' : ''}"
+            >
+              {resultCount}
+            </span>
+          {/if}
         </button>
+
+        <!-- Search results (if search is active and this file has matches) -->
+        {#if searchState?.state.isOpen && searchState.state.fileResults.has(node.file.path) && !searchState.areSearchResultsCollapsed(node.file.path)}
+          {@const fileResult = searchState.state.fileResults.get(node.file.path)}
+          {#if fileResult}
+            <FileSearchResults
+              {fileResult}
+              filePath={node.file.path}
+              {depth}
+              {getSnippet}
+              isCurrentResult={(fp, idx) => searchState!.isCurrentResult(fileSummaries, fp, idx)}
+              onResultClick={handleSearchResultClick}
+              getGlobalIndex={(fp, idx) => searchState!.getGlobalIndex(fileSummaries, fp, idx)}
+              onExpandResults={(fp) => searchState!.expandFileResults(fp)}
+              onCollapseResults={(fp) => searchState!.collapseFileResults(fp)}
+            />
+          {/if}
+        {/if}
       </li>
     {/if}
   {/each}

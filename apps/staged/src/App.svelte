@@ -27,7 +27,11 @@
     Trash2,
     ListChecks,
   } from 'lucide-svelte';
-  import { DiffViewer } from '@builderbot/diff-viewer/components';
+  import {
+    DiffViewer,
+    CrossFileSearchBar,
+    FileSearchResults,
+  } from '@builderbot/diff-viewer/components';
   import {
     buildFileEntries,
     buildTree,
@@ -36,7 +40,16 @@
     truncateText,
     type FileEntry,
     type TreeNode,
+    setupDiffKeyboardNav,
+    getMatchSnippet,
+    getTextLines,
+    type SearchMatch,
+    createSearchNavigationHandlers,
+    createSearchInitializationTracker,
+    createFileSelectionWithSearch,
   } from '@builderbot/diff-viewer/utils';
+  import { createSearchState } from '@builderbot/diff-viewer/state';
+  import '@builderbot/diff-viewer/components/search.css';
   import type { FileDiff, FileDiffSummary, Comment, Span } from '@builderbot/diff-viewer/types';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import * as commands from './lib/commands';
@@ -91,8 +104,29 @@
   let copiedFeedback = $state(false);
 
   let collapsedDirs = $state(new Set<string>());
+  let jumpToLine = $state<{ lineIndex: number; token: number } | null>(null);
+  let lineJumpToken = 0;
 
   let selectionGeneration = 0;
+
+  // ==========================================================================
+  // State: Search
+  // ==========================================================================
+
+  // svelte-ignore state_referenced_locally
+  const searchState = createSearchState();
+
+  // Create search initialization tracker
+  const checkSearchInitialization = createSearchInitializationTracker({
+    searchState,
+    getFiles: () => files,
+  });
+
+  // Create handler for search-aware file selection
+  const handleSearchOnFileSelect = createFileSelectionWithSearch({
+    searchState,
+    getFiles: () => files,
+  });
 
   // ==========================================================================
   // State: Modals
@@ -273,6 +307,12 @@
 
   async function selectFile(path: string | null) {
     const thisGeneration = ++selectionGeneration;
+
+    // Handle search-related behavior (expand and select first result)
+    if (path) {
+      handleSearchOnFileSelect(path);
+    }
+
     selectedFile = path;
 
     if (path && !diffCache.has(path)) {
@@ -343,6 +383,26 @@
     selectFile(file.path);
   }
 
+  // Load a file's diff without changing the selection (for search)
+  async function loadFileDiffForSearch(path: string): Promise<FileDiff | null> {
+    // Return cached diff if available
+    if (diffCache.has(path)) {
+      return diffCache.get(path) ?? null;
+    }
+
+    // Load the diff without changing selectedFile
+    try {
+      const diff = await commands.getFileDiff(diffSpec, path);
+      const newCache = new Map(diffCache);
+      newCache.set(path, diff);
+      diffCache = newCache;
+      return diff;
+    } catch (e) {
+      console.error(`Failed to load diff for ${path}:`, e);
+      return null;
+    }
+  }
+
   function toggleDir(path: string) {
     const newSet = new Set(collapsedDirs);
     if (newSet.has(path)) newSet.delete(path);
@@ -402,6 +462,70 @@
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
   }
+
+  // ==========================================================================
+  // Search helpers
+  // ==========================================================================
+
+  // Helper to get snippet for a search result
+  function getSnippet(match: SearchMatch, filePath: string): string {
+    const diff = diffCache.get(filePath);
+    if (!diff) return '';
+    const afterLines = getTextLines(diff, 'after');
+    return getMatchSnippet(match, afterLines);
+  }
+
+  // Handle clicking a search result
+  async function handleSearchResultClick(
+    filePath: string,
+    match: SearchMatch,
+    globalIndex: number
+  ) {
+    // Update current result index
+    searchState.setCurrentResult(globalIndex);
+
+    // Auto-expand search results for this file
+    if (searchState.areSearchResultsCollapsed(filePath)) {
+      searchState.toggleSearchResults(filePath);
+    }
+
+    // Select the file and scroll to the match
+    await selectFile(filePath);
+    // Scroll to the specific line
+    lineJumpToken += 1;
+    jumpToLine = { lineIndex: match.lineIndex, token: lineJumpToken };
+  }
+
+  // Initialize collapsed state when search results are ready (only once per search)
+  $effect(() => {
+    checkSearchInitialization();
+  });
+
+  // ==========================================================================
+  // Keyboard shortcuts
+  // ==========================================================================
+
+  // Set up keyboard navigation for diff viewer and search
+  $effect(() => {
+    // Create search navigation handlers
+    const { onNextSearchResult, onPrevSearchResult } = createSearchNavigationHandlers({
+      searchState,
+      selectFile: (path: string) => selectFile(path),
+      getFiles: () => files,
+      onJumpToLine: (lineIndex: number) => {
+        lineJumpToken += 1;
+        jumpToLine = { lineIndex, token: lineJumpToken };
+      },
+    });
+
+    const cleanup = setupDiffKeyboardNav({
+      onOpenSearch: () => searchState.openSearch(),
+      onNextSearchResult,
+      onPrevSearchResult,
+    });
+
+    return cleanup;
+  });
 </script>
 
 {#if initialized}
@@ -546,9 +670,11 @@
           <DiffViewer
             diff={currentDiff}
             comments={localComments.filter((c) => c.path === selectedFile)}
+            {jumpToLine}
             loading={loadingFile !== null}
             beforeLabel="before"
             afterLabel="after"
+            searchState={searchState.state}
             onAddComment={handleAddComment}
             onUpdateComment={handleUpdateComment}
             onDeleteComment={handleDeleteComment}
@@ -559,6 +685,9 @@
       {#if files.length > 0}
         <div class="file-sidebar">
           <div class="sidebar-content">
+            <!-- Search bar -->
+            <CrossFileSearchBar {files} loadFileDiff={loadFileDiffForSearch} {searchState} />
+
             <div class="section-header">
               <div class="section-left"></div>
               <div class="section-divider">
@@ -598,9 +727,39 @@
                       <button
                         class="tree-item file-item"
                         class:selected={selectedFile === node.file.path}
+                        class:has-search-results={searchState.state.isOpen &&
+                          searchState.state.fileResults.has(node.file.path)}
                         style="padding-left: {8 + depth * 12}px"
                         onclick={() => handleSelectFile(node.file!)}
                       >
+                        {#if searchState.state.isOpen}
+                          {#if searchState.state.fileResults.has(node.file.path)}
+                            <span
+                              class="search-chevron"
+                              onclick={(e) => {
+                                e.stopPropagation();
+                                searchState.toggleSearchResults(node.file!.path);
+                              }}
+                              role="button"
+                              tabindex="0"
+                              onkeydown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  searchState.toggleSearchResults(node.file!.path);
+                                }
+                              }}
+                            >
+                              {#if searchState.areSearchResultsCollapsed(node.file.path)}
+                                <ChevronRight size={14} />
+                              {:else}
+                                <ChevronDown size={14} />
+                              {/if}
+                            </span>
+                          {:else}
+                            <span class="search-spacer"></span>
+                          {/if}
+                        {/if}
                         <span class="status-icon">
                           {#if node.file.status === 'added'}
                             <CirclePlus size={16} />
@@ -616,7 +775,36 @@
                             <MessageSquare size={12} />
                           </span>
                         {/if}
+                        {#if searchState.state.isOpen && searchState.state.fileResults.has(node.file.path)}
+                          {@const resultCount =
+                            searchState.state.fileResults.get(node.file.path)?.matches.length ?? 0}
+                          <span
+                            class="search-result-count"
+                            title="{resultCount} search result{resultCount !== 1 ? 's' : ''}"
+                          >
+                            {resultCount}
+                          </span>
+                        {/if}
                       </button>
+
+                      <!-- Search results (if search is active and this file has matches) -->
+                      {#if searchState.state.isOpen && searchState.state.fileResults.has(node.file.path) && !searchState.areSearchResultsCollapsed(node.file.path)}
+                        {@const fileResult = searchState.state.fileResults.get(node.file.path)}
+                        {#if fileResult}
+                          <FileSearchResults
+                            {fileResult}
+                            filePath={node.file.path}
+                            {depth}
+                            {getSnippet}
+                            isCurrentResult={(fp, idx) =>
+                              searchState.isCurrentResult(files, fp, idx)}
+                            onResultClick={handleSearchResultClick}
+                            getGlobalIndex={(fp, idx) => searchState.getGlobalIndex(files, fp, idx)}
+                            onExpandResults={(fp) => searchState.expandFileResults(fp)}
+                            onCollapseResults={(fp) => searchState.collapseFileResults(fp)}
+                          />
+                        {/if}
+                      {/if}
                     </li>
                   {/if}
                 {/each}

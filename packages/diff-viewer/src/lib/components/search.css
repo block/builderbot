@@ -1,0 +1,45 @@
+/* Shared search-related UI styles for file tree integration */
+
+/* Chevron icon for collapsing/expanding search results */
+.search-chevron {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	width: 14px;
+	cursor: pointer;
+	color: var(--text-muted);
+	transition: color 0.1s;
+}
+
+.search-chevron:hover {
+	color: var(--text-primary);
+}
+
+/* Spacer placeholder when no search results exist for a file */
+.search-spacer {
+	width: 14px;
+	flex-shrink: 0;
+}
+
+/* Badge showing count of search results in a file */
+.search-result-count {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 20px;
+	height: 16px;
+	padding: 0 4px;
+	margin-left: auto;
+	background-color: var(--accent-primary-muted, rgba(59, 130, 246, 0.15));
+	color: var(--accent-primary);
+	border-radius: 8px;
+	font-size: var(--size-xs);
+	font-weight: 500;
+	flex-shrink: 0;
+}
+
+/* Optional: add subtle styling for files with search results */
+.has-search-results {
+	/* Can be customized by apps if needed */
+}

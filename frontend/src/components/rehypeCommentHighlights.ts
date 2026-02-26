@@ -1,4 +1,4 @@
-import { visit } from 'unist-util-visit';
+import { visit, SKIP } from 'unist-util-visit';
 import type { Root, Element, Text, ElementContent } from 'hast';
 
 export interface ThreadHighlight {
@@ -38,10 +38,13 @@ export default function rehypeCommentHighlights(options: Options) {
       const lineHighlights = byLine.get(sourceLine);
       if (!lineHighlights) return;
 
-      // Process each highlight for this block
+      // Process each highlight for this block, then skip children
+      // to avoid double-applying when parent and child share a start line
+      // (e.g. <li> and its child <p> both start on the same line).
       for (const highlight of lineHighlights) {
         applyHighlight(node, highlight);
       }
+      return SKIP;
     });
   };
 }

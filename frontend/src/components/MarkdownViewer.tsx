@@ -6,6 +6,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { dracula as prismDracula } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Components } from 'react-markdown';
 import type { Heading } from './TableOfContents';
+import remarkSourceLine from './remarkSourceLine';
 import rehypeCommentHighlights from './rehypeCommentHighlights';
 import type { ThreadHighlight } from './rehypeCommentHighlights';
 
@@ -45,52 +46,11 @@ interface MarkdownViewerProps {
 }
 
 const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
-  function MarkdownViewer({ content, rawMarkdown, onHeadingsExtracted, className, highlights }, ref) {
+  function MarkdownViewer({ content, rawMarkdown: _rawMarkdown, onHeadingsExtracted, className, highlights }, ref) {
     const innerRef = useRef<HTMLDivElement>(null);
 
     // Expose the inner ref to the parent
     useImperativeHandle(ref, () => innerRef.current!, []);
-
-    // Pre-process raw markdown to compute source line mapping
-    const sourceLineData = useMemo(() => {
-      const lines = rawMarkdown.split('\n');
-      const blockLines: number[] = [];
-      let inFence = false;
-
-      for (let i = 0; i < lines.length; i++) {
-        const trimmed = lines[i].trim();
-        if (trimmed.startsWith('```')) {
-          if (!inFence) {
-            blockLines.push(i + 1);
-            inFence = true;
-          } else {
-            inFence = false;
-          }
-          continue;
-        }
-        if (inFence) continue;
-        if (/^#{1,6}\s/.test(trimmed)) {
-          blockLines.push(i + 1);
-          continue;
-        }
-        if (/^[-*+]\s|^\d+\.\s/.test(trimmed)) {
-          blockLines.push(i + 1);
-          continue;
-        }
-        if (trimmed.startsWith('>')) {
-          blockLines.push(i + 1);
-          continue;
-        }
-        if (/^[-*_]{3,}\s*$/.test(trimmed)) {
-          blockLines.push(i + 1);
-          continue;
-        }
-        if (trimmed.length > 0 && (i === 0 || lines[i - 1].trim() === '')) {
-          blockLines.push(i + 1);
-        }
-      }
-      return blockLines;
-    }, [rawMarkdown]);
 
     // Extract headings after render
     useEffect(() => {
@@ -105,24 +65,6 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
       });
       onHeadingsExtracted(headings);
     }, [content, onHeadingsExtracted]);
-
-    // After markdown renders, add data-source-line attributes to block elements
-    useEffect(() => {
-      if (!innerRef.current) return;
-      const el = innerRef.current;
-      let blockIdx = 0;
-
-      const blockElements = el.querySelectorAll(
-        ':scope > p, :scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6, :scope > ul > li, :scope > ol > li, :scope > blockquote, :scope > pre, :scope > hr, :scope > table, :scope > div[data-unwrap-pre]',
-      );
-
-      blockElements.forEach((blockEl) => {
-        if (blockIdx < sourceLineData.length) {
-          blockEl.setAttribute('data-source-line', String(sourceLineData[blockIdx]));
-          blockIdx++;
-        }
-      });
-    }, [content, sourceLineData]);
 
     // Build rehype plugins array, including comment highlights when provided
     const rehypePlugins = useMemo(() => {
@@ -169,8 +111,9 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
           }
           // Fenced code block (has language class) — use SyntaxHighlighter
           if (match) {
+            const sourceLine = node?.position?.start?.line;
             return (
-              <div data-unwrap-pre="">
+              <div data-unwrap-pre="" {...(sourceLine ? { 'data-source-line': String(sourceLine) } : {})}>
                 <SyntaxHighlighter
                   style={dracula}
                   language={match[1]}
@@ -211,7 +154,7 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
     return (
       <div ref={innerRef} className={`content ${className || ''}`} id="content">
         <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
+          remarkPlugins={[remarkGfm, remarkSourceLine]}
           rehypePlugins={rehypePlugins}
           components={components}
         >

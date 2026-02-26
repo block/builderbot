@@ -41,13 +41,18 @@ describe('MarkdownViewer', () => {
     expect(headings[2]).toMatchObject({ level: 3, text: 'Subsection' });
   });
 
-  it('adds data-source-line attributes to block elements', async () => {
+  it('adds data-source-line attributes to block elements from AST positions', () => {
     const md = '# Heading\n\nParagraph text here.\n\n- List item';
     const { container } = render(<MarkdownViewer content={md} rawMarkdown={md} />);
-    // Wait for useEffect
-    await new Promise((r) => setTimeout(r, 10));
     const withSourceLine = container.querySelectorAll('[data-source-line]');
     expect(withSourceLine.length).toBeGreaterThan(0);
+    // Verify specific line numbers match remark AST positions
+    const heading = container.querySelector('h1');
+    expect(heading?.getAttribute('data-source-line')).toBe('1');
+    const paragraph = container.querySelector('p');
+    expect(paragraph?.getAttribute('data-source-line')).toBe('3');
+    const listItem = container.querySelector('li');
+    expect(listItem?.getAttribute('data-source-line')).toBe('5');
   });
 
   it('renders GFM tables', () => {

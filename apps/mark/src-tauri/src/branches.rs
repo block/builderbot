@@ -311,11 +311,9 @@ async fn clone_repo_into_workspace(
 
     run_workspace_git_async(ws_name, Some(repo_subpath), &["fetch", "origin", base_ref])
         .await
-        .map_err(|e| {
-            format!(
-                "Failed to fetch base branch '{base_ref}' for '{repo_slug}' in workspace '{ws_name}': {e}"
-            )
-        })?;
+        .map_err(|e| format!(
+            "Failed to fetch base branch '{base_ref}' for '{repo_slug}' in workspace '{ws_name}': {e}"
+        ))?;
 
     run_workspace_git_async(
         ws_name,
@@ -325,8 +323,8 @@ async fn clone_repo_into_workspace(
     .await
     .map_err(|e| {
         format!(
-            "Failed to create branch '{branch_name}' for '{repo_slug}' in workspace '{ws_name}': {e}"
-        )
+        "Failed to create branch '{branch_name}' for '{repo_slug}' in workspace '{ws_name}': {e}"
+    )
     })?;
 
     Ok(())
@@ -1134,9 +1132,38 @@ pub async fn poll_workspace_status(
     // loading state while clone/fetch/checkout runs inside an already-running
     // shared workspace. Keep it in Starting until that setup command marks
     // this branch as Running.
-    if branch.workspace_status == Some(store::WorkspaceStatus::Starting)
+    //
+    // Important: this must apply only to "secondary clone" branches. Initial
+    // remote branches also have a workspace subpath, so keying only on
+    // `resolve_branch_workspace_subpath().is_some()` would pin them in
+    // Starting forever and block normal status polling.
+    let is_secondary_clone_setup = if branch.workspace_status
+        == Some(store::WorkspaceStatus::Starting)
         && resolve_branch_workspace_subpath(&store, &branch)?.is_some()
     {
+        if let Some(ws_name) = branch.workspace_name.as_deref() {
+            let peers = store
+                .list_branches_for_project(&branch.project_id)
+                .map_err(|e| e.to_string())?;
+            peers.into_iter().any(|peer| {
+                peer.id != branch.id
+                    && peer.branch_type == store::BranchType::Remote
+                    && peer.workspace_name.as_deref() == Some(ws_name)
+                    && peer.workspace_status == Some(store::WorkspaceStatus::Running)
+            })
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if is_secondary_clone_setup {
+        log::debug!(
+            "[poll_workspace_status] branch={} ws={} held at Starting for secondary clone setup",
+            branch_id,
+            ws_name
+        );
         return Ok(store::WorkspaceStatus::Starting.as_str().to_string());
     }
 
@@ -1171,30 +1198,52 @@ pub async fn poll_workspace_status(
         }
     };
 
+    log::debug!(
+        "[poll_workspace_status] branch={} ws={} db_status={:?} blox_status={:?}",
+        branch_id,
+        ws_name,
+        branch.workspace_status,
+        info.status
+    );
+
     // Map the CLI-reported status to our enum.
     // During initial startup, Blox may briefly report "stopped" before the
     // workspace transitions to "running". If the DB still says Starting,
     // treat a Blox "stopped" as still Starting so we keep polling.
-    let new_status = match info.status.as_deref() {
-        Some("running") | Some("Running") => store::WorkspaceStatus::Running,
-        Some("stopped") | Some("Stopped") => {
+    let normalized = info.status.as_deref().map(|s| s.to_ascii_lowercase());
+    let new_status = match normalized.as_deref() {
+        Some("running") | Some("ready") | Some("active") => store::WorkspaceStatus::Running,
+        Some("stopped") => {
             if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
                 store::WorkspaceStatus::Starting
             } else {
                 store::WorkspaceStatus::Stopped
             }
         }
-        Some("starting") | Some("Starting") | Some("provisioning") | Some("Provisioning") => {
+        Some("starting") | Some("provisioning") | Some("creating") => {
             store::WorkspaceStatus::Starting
         }
-        Some("error") | Some("Error") | Some("failed") | Some("Failed") => {
-            store::WorkspaceStatus::Error
-        }
+        Some("error") | Some("failed") => store::WorkspaceStatus::Error,
         // If the CLI returns an unrecognized status, keep it as Starting
         // (optimistic — the workspace may still be booting)
         _ => store::WorkspaceStatus::Starting,
     };
 
+    let previous = branch
+        .workspace_status
+        .as_ref()
+        .map(|s| s.as_str())
+        .unwrap_or("none");
+    if previous != new_status.as_str() {
+        log::debug!(
+            "[poll_workspace_status] branch={} ws={} transition {} -> {} (raw={:?})",
+            branch_id,
+            ws_name,
+            previous,
+            new_status.as_str(),
+            info.status
+        );
+    }
     store
         .update_branch_workspace_status(&branch_id, &new_status)
         .map_err(|e| e.to_string())?;

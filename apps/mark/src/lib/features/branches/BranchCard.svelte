@@ -289,7 +289,11 @@
     fading?: boolean;
   };
   let runningActions = $state<RunningAction[]>([]);
-  let actionOutputModal = $state<{ executionId: string; actionName: string } | null>(null);
+  let actionOutputModal = $state<{
+    executionId: string;
+    actionName: string;
+    isStopping: boolean;
+  } | null>(null);
   let stoppingExecutions = $state<Set<string>>(new Set());
 
   // Commit diff modal (opened by clicking a commit in the timeline)
@@ -900,6 +904,7 @@
     actionOutputModal = {
       executionId: execution.executionId,
       actionName: execution.actionName,
+      isStopping: stoppingExecutions.has(execution.executionId),
     };
   }
 
@@ -1582,8 +1587,7 @@
               class:failed={execution.status === 'failed'}
               class:show-stop={showStopIcon}
               onclick={() => {
-                if (isStopping) return;
-                if (isRunning && altHeld) {
+                if (isRunning && altHeld && !isStopping) {
                   handleStopAction(execution.executionId, execution.actionName);
                 } else {
                   handleShowActionOutput(execution);
@@ -1637,10 +1641,11 @@
               class:failed={execution?.status === 'failed'}
               class:show-stop={showStopIcon}
               onclick={() => {
-                if (isStopping) return;
-                if (isRunning && altHeld && execution) {
+                if (isRunning && altHeld && !isStopping && execution) {
                   handleStopAction(execution.executionId, primaryRunAction.name);
                 } else if (isRunning && execution) {
+                  handleShowActionOutput(execution);
+                } else if (isStopping && execution) {
                   handleShowActionOutput(execution);
                 } else {
                   handleRunAction(primaryRunAction);
@@ -2002,6 +2007,7 @@
   <ActionOutputModal
     executionId={actionOutputModal.executionId}
     actionName={actionOutputModal.actionName}
+    isStopping={actionOutputModal.isStopping}
     onClose={() => (actionOutputModal = null)}
   />
 {/if}

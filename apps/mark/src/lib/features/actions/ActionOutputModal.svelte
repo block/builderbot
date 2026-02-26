@@ -37,11 +37,12 @@
   interface Props {
     executionId: string;
     actionName: string;
+    isStopping?: boolean;
     onClose: () => void;
     onRemove?: (executionId: string) => void;
   }
 
-  let { executionId, actionName, onClose, onRemove }: Props = $props();
+  let { executionId, actionName, isStopping = false, onClose, onRemove }: Props = $props();
 
   // =========================================================================
   // State
@@ -75,7 +76,7 @@
   });
 
   let isRunning = $derived(status === 'running');
-  let isStopping = $derived(stoppingExecutions.has(executionId));
+  let isStoppingDerived = $derived(stoppingExecutions.has(executionId));
 
   /**
    * Process raw output chunks into terminal lines, handling carriage returns.
@@ -226,7 +227,7 @@
 
   async function handleStop() {
     // Prevent duplicate stop requests
-    if (stoppingExecutions.has(executionId)) {
+    if (isStoppingDerived) {
       return;
     }
 
@@ -311,7 +312,10 @@
     }
   }
 
-  function getStatusLabel(s: ActionStatus): string {
+  function getStatusLabel(s: ActionStatus, stopping: boolean): string {
+    if (stopping && s === 'running') {
+      return 'Stopping';
+    }
     switch (s) {
       case 'running':
         return 'Running';
@@ -343,21 +347,30 @@
         <span class="header-title">{actionName}</span>
         {#if status}
           {@const StatusIcon = getStatusIcon(status)}
+          {@const isCurrentlyStopping = isStopping || isStoppingDerived}
           <div class="status-badge {getStatusClass(status)}">
-            {#if status === 'running'}
+            {#if status === 'running' && isCurrentlyStopping}
+              <Spinner size={12} class="danger" />
+            {:else if status === 'running'}
               <Spinner size={12} />
             {:else if StatusIcon}
               <StatusIcon size={12} />
             {/if}
-            <span>{getStatusLabel(status)}</span>
+            <span>{getStatusLabel(status, isCurrentlyStopping)}</span>
           </div>
         {/if}
       </div>
       <div class="header-actions">
         {#if isRunning}
-          <button class="stop-btn" onclick={handleStop} disabled={isStopping} title="Stop action">
+          {@const isCurrentlyStopping = isStopping || isStoppingDerived}
+          <button
+            class="stop-btn"
+            onclick={handleStop}
+            disabled={isCurrentlyStopping}
+            title="Stop action"
+          >
             <CircleStop size={14} />
-            <span>{isStopping ? 'Stopping…' : 'Stop'}</span>
+            <span>{isCurrentlyStopping ? 'Stopping…' : 'Stop'}</span>
           </button>
         {/if}
         {#if status === 'failed' && onRemove}

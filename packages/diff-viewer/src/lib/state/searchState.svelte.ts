@@ -206,7 +206,7 @@ export function createSearchState() {
 			}
 		}
 
-		// Assign new Map to trigger reactivity
+		// Update state once at the end to avoid UI flashing during search
 		state.fileResults = newResults;
 		state.totalMatches = totalMatches;
 

@@ -157,7 +157,7 @@
     diffViewer.selectFile(file.path);
     // If search is open and this file has results, select the first result
     if (searchState.state.isOpen) {
-      searchState.selectFirstResultInFile(fileEntries, file.path);
+      searchState.selectFirstResultInFile(diffViewer.state.files, file.path);
     }
   }
 
@@ -230,10 +230,9 @@
     jumpToComment = { id: comment.id, token: commentJumpToken };
   }
 
-  // Wrapper for search that returns the loaded diff
+  // Wrapper for search that returns the loaded diff without changing selection
   async function loadFileDiffForSearch(path: string) {
-    await diffViewer.selectFile(path);
-    return diffViewer.getCurrentDiff();
+    return await diffViewer.loadFileDiff(path);
   }
 
   // Jump to a specific line (for search results)

@@ -366,10 +366,24 @@
     selectFile(file.path);
   }
 
-  // Wrapper for search that returns the loaded diff
-  async function loadFileDiffForSearch(path: string) {
-    await selectFile(path);
-    return currentDiff;
+  // Load a file's diff without changing the selection (for search)
+  async function loadFileDiffForSearch(path: string): Promise<FileDiff | null> {
+    // Return cached diff if available
+    if (diffCache.has(path)) {
+      return diffCache.get(path) ?? null;
+    }
+
+    // Load the diff without changing selectedFile
+    try {
+      const diff = await commands.getFileDiff(diffSpec, path);
+      const newCache = new Map(diffCache);
+      newCache.set(path, diff);
+      diffCache = newCache;
+      return diff;
+    } catch (e) {
+      console.error(`Failed to load diff for ${path}:`, e);
+      return null;
+    }
   }
 
   function toggleDir(path: string) {

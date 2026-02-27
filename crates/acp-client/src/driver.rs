@@ -109,7 +109,7 @@ pub struct AcpDriver {
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
-const ACP_PROTOCOL_START_TIMEOUT: Duration = Duration::from_secs(90);
+const ACP_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
 
 impl AcpDriver {
     /// Create a driver for the given provider ID (e.g. "goose", "claude").
@@ -297,21 +297,10 @@ impl AgentDriver for AcpDriver {
                 writer.finalize().await;
                 return Ok(());
             }
-            result = tokio::time::timeout(
-                ACP_PROTOCOL_START_TIMEOUT,
-                run_acp_protocol(
-                    &connection, &acp_working_dir, prompt, store,
-                    session_id, agent_session_id, &handler, &self.mcp_servers,
-                )
-            ) => {
-                match result {
-                    Ok(protocol_result) => protocol_result,
-                    Err(_) => Err(format!(
-                        "Timed out waiting for ACP protocol startup after {}s",
-                        ACP_PROTOCOL_START_TIMEOUT.as_secs()
-                    )),
-                }
-            },
+            result = run_acp_protocol(
+                &connection, &acp_working_dir, prompt, store,
+                session_id, agent_session_id, &handler, &self.mcp_servers,
+            ) => result,
         };
 
         writer.finalize().await;
@@ -565,15 +554,24 @@ async fn run_acp_protocol(
     handler: &Arc<AcpNotificationHandler>,
     mcp_servers: &[McpServer],
 ) -> Result<(), String> {
-    let agent_session_id = setup_acp_session(
-        connection,
-        working_dir,
-        store,
-        our_session_id,
-        acp_session_id,
-        mcp_servers,
+    let agent_session_id = tokio::time::timeout(
+        ACP_SETUP_TIMEOUT,
+        setup_acp_session(
+            connection,
+            working_dir,
+            store,
+            our_session_id,
+            acp_session_id,
+            mcp_servers,
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| {
+        format!(
+            "Timed out waiting for ACP protocol startup after {}s",
+            ACP_SETUP_TIMEOUT.as_secs()
+        )
+    })??;
 
     handler.set_live();
 
@@ -605,6 +603,26 @@ async fn setup_acp_session(
         .initialize(init_request)
         .await
         .map_err(|e| format!("ACP init failed: {e:?}"))?;
+
+    if !mcp_servers.is_empty() {
+        let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
+        let requires_http = mcp_servers
+            .iter()
+            .any(|server| matches!(server, McpServer::Http(_)));
+        let requires_sse = mcp_servers
+            .iter()
+            .any(|server| matches!(server, McpServer::Sse(_)));
+
+        if (requires_http && !mcp_caps.http) || (requires_sse && !mcp_caps.sse) {
+            return Err(format!(
+                "Agent does not support required MCP transports (required: http={}, sse={}; agent: http={}, sse={}). Select a provider with MCP support for project tools.",
+                requires_http,
+                requires_sse,
+                mcp_caps.http,
+                mcp_caps.sse
+            ));
+        }
+    }
 
     match acp_session_id {
         Some(existing_id) => {

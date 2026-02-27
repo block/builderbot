@@ -55,38 +55,6 @@ fn resolve_branch_repo_slug(
     project.primary_repo().map(|s| s.to_string())
 }
 
-/// Resolve the workspace name to use for a project-level session.
-///
-/// Local projects return `None` (use local ACP binaries).
-/// Remote projects must have at least one branch with a workspace name so we
-/// can route through `blox acp` instead of local clients.
-fn resolve_project_session_workspace_name(
-    store: &Arc<Store>,
-    project: &store::Project,
-) -> Result<Option<String>, String> {
-    if project.location != store::ProjectLocation::Remote {
-        return Ok(None);
-    }
-
-    let branches = store
-        .list_branches_for_project(&project.id)
-        .map_err(|e| e.to_string())?;
-
-    let workspace_name = branches
-        .iter()
-        .find(|b| b.workspace_status == Some(store::WorkspaceStatus::Running))
-        .and_then(|b| b.workspace_name.clone())
-        .or_else(|| branches.iter().find_map(|b| b.workspace_name.clone()));
-
-    if workspace_name.is_none() {
-        return Err(
-            "Remote project has no workspace yet. Add a repository and start its workspace before starting a project session.".to_string(),
-        );
-    }
-
-    Ok(workspace_name)
-}
-
 async fn run_blox_blocking<T, F>(op: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -352,8 +320,8 @@ pub struct ProjectSessionResponse {
 ///
 /// Project sessions operate at the project level rather than a specific branch.
 /// The agent receives project context (all repos, existing project notes).
-/// Local sessions also receive an MCP server with tools to start repo subagent
-/// sessions and add repos.
+/// Sessions receive an MCP server with tools to start repo subagent sessions
+/// and add repos.
 /// Always creates a ProjectNote stub that is populated when the session completes.
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
@@ -374,21 +342,31 @@ pub async fn start_project_session(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
-    let workspace_name = resolve_project_session_workspace_name(&store, &project)?;
-    let is_remote_project_session = workspace_name.is_some();
-
     // Build project context for the prompt
-    let project_context =
-        build_project_session_context(&store, &project, workspace_name.as_deref());
+    let project_context = build_project_session_context(&store, &project, None);
 
     // Build the full prompt
-    let action_instructions = if is_remote_project_session {
+    let action_instructions = if project.location == store::ProjectLocation::Remote {
         "The user is requesting work at the project level. Investigate and \
         fulfill the request below, then produce a project note summarizing what you found and any \
         actions taken.\n\n\
-        This is a remote workspace session. The project MCP tools (`start_repo_session`, \
-        `add_project_repo`) are not available in this mode. Work directly with the repository \
-        available in the remote workspace and the provided project context.\n\n\
+        This top-level project session runs locally and acts as a coordinator. \
+        For repository-specific execution, use MCP subagent tools.\n\n\
+        This is a remote-workspace project. Use the project MCP tools to orchestrate work:\n\n\
+        - start_repo_session: Use this to make changes or run tasks in one of the project's \
+        repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
+        `expected_outcome=\"commit\"` for code changes/commits. For remote branches this subagent \
+        runs on the remote workspace, where file access, notes, and commits must happen.\n\n\
+        - add_project_repo: Use this when the task requires a repository that isn't yet in the \
+        project. Pass the GitHub repo slug to add it.\n\n\
+        IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
+        Do not run `which`/`type` for these names and do not ask the user to add repos manually \
+        unless the MCP tool call itself returns an error. If the tool call fails, report the exact \
+        error and the next action needed.\n\n\
+        Keep this project session focused on coordination and synthesis. Do not perform \
+        repository edits directly here; use `start_repo_session` for implementation work.\n\n\
+        To discover repositories that might be relevant, use `gh` to explore repos in the user's \
+        GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
         To return the note, include a horizontal rule (---) followed by the note content. \
         Begin the note with a markdown H1 heading as the title. \n\n\
         "
@@ -400,11 +378,16 @@ pub async fn start_project_session(
         - start_repo_session: Use this to make changes or run tasks within one of the project's \
         repositories. Pass the repo slug (e.g. \"org/repo\") and clear instructions for what to \
         do there. This tool starts a subagent session and waits for it to complete before \
-        returning the outcome. Do not ask for both a note and a commit in a single start_repo_session \
+        returning the outcome. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
+        `expected_outcome=\"commit\"` for code changes/commits. Do not ask for both a note and a commit in a single start_repo_session \
         request — choose one outcome per call. All reasoning specific to a repo should be done within \
         a repo session rather in this project wide context.\n\n\
         - add_project_repo: Use this when the task requires a repository that isn't yet in the \
         project. Pass the GitHub repo slug to add it.\n\n\
+        IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
+        Do not run `which`/`type` for these names and do not ask the user to add repos manually \
+        unless the MCP tool call itself returns an error. If the tool call fails, report the exact \
+        error and the next action needed.\n\n\
         To discover repositories that might be relevant, use `gh` to explore repos in the user's \
         GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
         To return the note, include a horizontal rule (---) followed by the note content. \
@@ -446,23 +429,11 @@ pub async fn start_project_session(
             agent_session_id: None,
             pre_head_sha: None,
             provider,
-            workspace_name,
+            workspace_name: None,
             extra_env: vec![],
-            mcp_project_id: if is_remote_project_session {
-                None
-            } else {
-                Some(project_id.clone())
-            },
-            action_executor: if is_remote_project_session {
-                None
-            } else {
-                Some(Arc::clone(&action_executor))
-            },
-            action_registry: if is_remote_project_session {
-                None
-            } else {
-                Some(Arc::clone(&action_registry))
-            },
+            mcp_project_id: Some(project_id.clone()),
+            action_executor: Some(Arc::clone(&action_executor)),
+            action_registry: Some(Arc::clone(&action_registry)),
             remote_working_dir: None,
         },
         store,

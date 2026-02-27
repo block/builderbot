@@ -319,8 +319,9 @@ pub struct ProjectSessionResponse {
 /// Start a project-level session.
 ///
 /// Project sessions operate at the project level rather than a specific branch.
-/// The agent receives project context (all repos, existing project notes),
-/// and an MCP server with tools to start repo subagent sessions and add repos.
+/// The agent receives project context (all repos, existing project notes).
+/// Sessions receive an MCP server with tools to start repo subagent sessions
+/// and add repos.
 /// Always creates a ProjectNote stub that is populated when the session completes.
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
@@ -342,26 +343,57 @@ pub async fn start_project_session(
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
     // Build project context for the prompt
-    let project_context = build_project_session_context(&store, &project);
+    let project_context = build_project_session_context(&store, &project, None);
 
     // Build the full prompt
-    let action_instructions = "The user is requesting work at the project level. Investigate and \
+    let action_instructions = if project.location == store::ProjectLocation::Remote {
+        "The user is requesting work at the project level. Investigate and \
+        fulfill the request below, then produce a project note summarizing what you found and any \
+        actions taken.\n\n\
+        This top-level project session runs locally and acts as a coordinator. \
+        For repository-specific execution, use MCP subagent tools.\n\n\
+        This is a remote-workspace project. Use the project MCP tools to orchestrate work:\n\n\
+        - start_repo_session: Use this to make changes or run tasks in one of the project's \
+        repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
+        `expected_outcome=\"commit\"` for code changes/commits. For remote branches this subagent \
+        runs on the remote workspace, where file access, notes, and commits must happen.\n\n\
+        - add_project_repo: Use this when the task requires a repository that isn't yet in the \
+        project. Pass the GitHub repo slug to add it.\n\n\
+        IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
+        Do not run `which`/`type` for these names and do not ask the user to add repos manually \
+        unless the MCP tool call itself returns an error. If the tool call fails, report the exact \
+        error and the next action needed.\n\n\
+        Keep this project session focused on coordination and synthesis. Do not perform \
+        repository edits directly here; use `start_repo_session` for implementation work.\n\n\
+        To discover repositories that might be relevant, use `gh` to explore repos in the user's \
+        GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
+        To return the note, include a horizontal rule (---) followed by the note content. \
+        Begin the note with a markdown H1 heading as the title. \n\n\
+        "
+    } else {
+        "The user is requesting work at the project level. Investigate and \
         fulfill the request below, then produce a project note summarizing what you found and any \
         actions taken.\n\n\
         You have access to the following tools:\n\n\
         - start_repo_session: Use this to make changes or run tasks within one of the project's \
         repositories. Pass the repo slug (e.g. \"org/repo\") and clear instructions for what to \
         do there. This tool starts a subagent session and waits for it to complete before \
-        returning the outcome. Do not ask for both a note and a commit in a single start_repo_session \
+        returning the outcome. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
+        `expected_outcome=\"commit\"` for code changes/commits. Do not ask for both a note and a commit in a single start_repo_session \
         request — choose one outcome per call. All reasoning specific to a repo should be done within \
         a repo session rather in this project wide context.\n\n\
         - add_project_repo: Use this when the task requires a repository that isn't yet in the \
         project. Pass the GitHub repo slug to add it.\n\n\
+        IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
+        Do not run `which`/`type` for these names and do not ask the user to add repos manually \
+        unless the MCP tool call itself returns an error. If the tool call fails, report the exact \
+        error and the next action needed.\n\n\
         To discover repositories that might be relevant, use `gh` to explore repos in the user's \
         GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
         To return the note, include a horizontal rule (---) followed by the note content. \
         Begin the note with a markdown H1 heading as the title. \n\n\
-        ";
+        "
+    };
 
     let full_prompt = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
@@ -856,7 +888,11 @@ pub(crate) fn build_project_context(
 ///
 /// Includes: project name, all attached repos (with reasons and per-repo
 /// branch timelines), and existing project notes.
-fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -> String {
+fn build_project_session_context(
+    store: &Arc<Store>,
+    project: &store::Project,
+    workspace_name: Option<&str>,
+) -> String {
     let project_name = project.name.trim();
     let project_name = if project_name.is_empty() {
         "Unnamed Project"
@@ -912,7 +948,8 @@ fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -
             lines.push(String::new());
             lines.push(format!("### Branch: {}", branch.branch_name));
 
-            let timeline = build_branch_timeline_summary(store, branch);
+            let timeline =
+                build_branch_timeline_summary(store, branch, branch.workspace_name.as_deref());
             if timeline.is_empty() {
                 lines.push("No activity on this branch yet.".to_string());
             } else {
@@ -933,7 +970,8 @@ fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -
             lines.push(String::new());
             lines.push(format!("### Branch: {}", branch.branch_name));
 
-            let timeline = build_branch_timeline_summary(store, branch);
+            let timeline =
+                build_branch_timeline_summary(store, branch, branch.workspace_name.as_deref());
             if timeline.is_empty() {
                 lines.push("No activity on this branch yet.".to_string());
             } else {
@@ -949,18 +987,12 @@ fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -
         lines.push(String::new());
         lines.push("## Existing Project Notes".to_string());
         for note in &non_empty_notes {
-            let note_path = std::env::temp_dir().join(format!("mark-note-{}.md", note.id));
-            let formatted = match std::fs::write(&note_path, &note.content) {
-                Ok(()) => format!(
-                    "### Project Note: {}\n\nSee: `{}`",
-                    note.title,
-                    note_path.display()
-                ),
-                Err(e) => {
-                    log::warn!("Failed to write project note to temp file, inlining: {e}");
-                    format!("### Project Note: {}\n\n{}", note.title, note.content)
-                }
-            };
+            let formatted = format_project_note_for_context(
+                &note.id,
+                &note.title,
+                &note.content,
+                workspace_name,
+            );
             lines.push(formatted);
         }
     }
@@ -974,7 +1006,11 @@ fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -
 /// Includes commit log (when a local worktree is available), notes, and
 /// reviews — but omits project-level notes (those are rendered separately
 /// at the project level to avoid duplication).
-fn build_branch_timeline_summary(store: &Arc<Store>, branch: &store::Branch) -> String {
+fn build_branch_timeline_summary(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+    workspace_name: Option<&str>,
+) -> String {
     let mut timeline: Vec<TimelineEntry> = Vec::new();
     let mut commit_error = None;
 
@@ -998,8 +1034,9 @@ fn build_branch_timeline_summary(store: &Arc<Store>, branch: &store::Branch) -> 
         }
     }
 
-    // Notes written to local temp files — project sessions run locally
-    timeline.extend(note_timeline_entries(store, &branch.id, None));
+    // Notes are written to temp files in the matching execution environment:
+    // remote workspace when available, otherwise local temp files.
+    timeline.extend(note_timeline_entries(store, &branch.id, workspace_name));
     timeline.extend(review_timeline_entries(store, &branch.id));
 
     if timeline.is_empty() {

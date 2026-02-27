@@ -31,8 +31,8 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import AgentSelector from '../agents/AgentSelector.svelte';
-  import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
-  import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { agentState } from '../agents/agent.svelte';
+  import { getPreferredAgentForProject } from '../settings/preferences.svelte';
 
   interface Props {
     project: Project;
@@ -160,11 +160,14 @@
   // ── Project session input ──────────────────────────────────────────────
   let promptText = $state('');
   let promptTextarea = $state<HTMLTextAreaElement | null>(null);
-  let availableAgents = $derived(
-    project.location === 'remote' ? REMOTE_AGENTS : agentState.providers
+  let availableAgents = $derived(agentState.providers);
+  let preferredProvider = $derived(
+    getPreferredAgentForProject(project.id, availableAgents) ?? undefined
   );
-  let preferredProvider = $derived(getPreferredAgent(availableAgents) ?? undefined);
   let canSubmitPrompt = $derived(!!promptText.trim() && !!preferredProvider);
+  let sendButtonTitle = $derived(
+    preferredProvider ? 'Start project session' : 'No AI agent available'
+  );
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
 
@@ -382,12 +385,12 @@
         rows={1}
       ></textarea>
       <div class="prompt-actions">
-        <AgentSelector remote={project.location === 'remote'} />
+        <AgentSelector projectId={project.id} />
         <button
           class="send-button"
           onclick={handleSubmitPrompt}
           disabled={!canSubmitPrompt}
-          title={preferredProvider ? 'Start project session' : 'No AI agent available'}
+          title={sendButtonTitle}
         >
           <Send size={14} />
         </button>

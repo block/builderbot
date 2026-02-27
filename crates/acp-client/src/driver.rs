@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, Implementation,
@@ -109,6 +109,7 @@ pub struct AcpDriver {
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
+const ACP_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
 
 impl AcpDriver {
     /// Create a driver for the given provider ID (e.g. "goose", "claude").
@@ -406,6 +407,16 @@ fn consume_remote_acp_line(pending: &mut String, raw_line: &str) -> RemoteLineOu
     }
 }
 
+fn remote_acp_segments(decoded_line: &str) -> impl Iterator<Item = &str> {
+    // `sq blox acp` can emit JSON Text Sequences where records are delimited by
+    // U+001E (record separator). Keep line-based handling for normal JSON-RPC
+    // output, but split RS-delimited frames so concatenated messages are not
+    // treated as malformed JSON.
+    decoded_line
+        .split('\u{1e}')
+        .filter(|segment| !segment.trim().is_empty())
+}
+
 async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
     stdout: R,
     mut writer: tokio::io::DuplexStream,
@@ -426,15 +437,17 @@ async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
             log::warn!("Dropped invalid UTF-8 bytes from remote ACP stdout");
         }
 
-        match consume_remote_acp_line(&mut pending, &decoded_line) {
-            RemoteLineOutcome::Emit(line) => {
-                writer.write_all(line.as_bytes()).await?;
-                writer.write_all(b"\n").await?;
-            }
-            RemoteLineOutcome::Pending => {}
-            RemoteLineOutcome::Dropped => {
-                if !decoded_line.trim().is_empty() {
-                    log::warn!("Dropped malformed ACP proxy output line");
+        for segment in remote_acp_segments(&decoded_line) {
+            match consume_remote_acp_line(&mut pending, segment) {
+                RemoteLineOutcome::Emit(line) => {
+                    writer.write_all(line.as_bytes()).await?;
+                    writer.write_all(b"\n").await?;
+                }
+                RemoteLineOutcome::Pending => {}
+                RemoteLineOutcome::Dropped => {
+                    if !segment.trim().is_empty() {
+                        log::warn!("Dropped malformed ACP proxy output line");
+                    }
                 }
             }
         }
@@ -541,15 +554,24 @@ async fn run_acp_protocol(
     handler: &Arc<AcpNotificationHandler>,
     mcp_servers: &[McpServer],
 ) -> Result<(), String> {
-    let agent_session_id = setup_acp_session(
-        connection,
-        working_dir,
-        store,
-        our_session_id,
-        acp_session_id,
-        mcp_servers,
+    let agent_session_id = tokio::time::timeout(
+        ACP_SETUP_TIMEOUT,
+        setup_acp_session(
+            connection,
+            working_dir,
+            store,
+            our_session_id,
+            acp_session_id,
+            mcp_servers,
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| {
+        format!(
+            "Timed out waiting for ACP protocol startup after {}s",
+            ACP_SETUP_TIMEOUT.as_secs()
+        )
+    })??;
 
     handler.set_live();
 
@@ -581,6 +603,26 @@ async fn setup_acp_session(
         .initialize(init_request)
         .await
         .map_err(|e| format!("ACP init failed: {e:?}"))?;
+
+    if !mcp_servers.is_empty() {
+        let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
+        let requires_http = mcp_servers
+            .iter()
+            .any(|server| matches!(server, McpServer::Http(_)));
+        let requires_sse = mcp_servers
+            .iter()
+            .any(|server| matches!(server, McpServer::Sse(_)));
+
+        if (requires_http && !mcp_caps.http) || (requires_sse && !mcp_caps.sse) {
+            return Err(format!(
+                "Agent does not support required MCP transports (required: http={}, sse={}; agent: http={}, sse={}). Select a provider with MCP support for project tools.",
+                requires_http,
+                requires_sse,
+                mcp_caps.http,
+                mcp_caps.sse
+            ));
+        }
+    }
 
     match acp_session_id {
         Some(existing_id) => {
@@ -713,8 +755,8 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_remote_acp_line, decode_remote_acp_line, resolve_spawn_working_dir,
-        sanitize_remote_acp_chunk, RemoteLineOutcome,
+        consume_remote_acp_line, decode_remote_acp_line, remote_acp_segments,
+        resolve_spawn_working_dir, sanitize_remote_acp_chunk, RemoteLineOutcome,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -758,6 +800,28 @@ mod tests {
                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"
             ),
             RemoteLineOutcome::Emit("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}".to_string())
+        );
+    }
+
+    #[test]
+    fn splits_record_separator_delimited_messages_in_one_stdout_line() {
+        let mut pending = String::new();
+        let line = "\u{1e}{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\u{1e}{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}\n";
+
+        let outcomes: Vec<RemoteLineOutcome> = remote_acp_segments(line)
+            .map(|segment| consume_remote_acp_line(&mut pending, segment))
+            .collect();
+
+        assert_eq!(
+            outcomes,
+            vec![
+                RemoteLineOutcome::Emit(
+                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}".to_string()
+                ),
+                RemoteLineOutcome::Emit(
+                    "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}".to_string()
+                ),
+            ]
         );
     }
 

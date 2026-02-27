@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, Implementation,
@@ -109,6 +109,7 @@ pub struct AcpDriver {
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
+const ACP_PROTOCOL_START_TIMEOUT: Duration = Duration::from_secs(90);
 
 impl AcpDriver {
     /// Create a driver for the given provider ID (e.g. "goose", "claude").
@@ -296,10 +297,21 @@ impl AgentDriver for AcpDriver {
                 writer.finalize().await;
                 return Ok(());
             }
-            result = run_acp_protocol(
-                &connection, &acp_working_dir, prompt, store,
-                session_id, agent_session_id, &handler, &self.mcp_servers,
-            ) => result,
+            result = tokio::time::timeout(
+                ACP_PROTOCOL_START_TIMEOUT,
+                run_acp_protocol(
+                    &connection, &acp_working_dir, prompt, store,
+                    session_id, agent_session_id, &handler, &self.mcp_servers,
+                )
+            ) => {
+                match result {
+                    Ok(protocol_result) => protocol_result,
+                    Err(_) => Err(format!(
+                        "Timed out waiting for ACP protocol startup after {}s",
+                        ACP_PROTOCOL_START_TIMEOUT.as_secs()
+                    )),
+                }
+            },
         };
 
         writer.finalize().await;
@@ -406,6 +418,16 @@ fn consume_remote_acp_line(pending: &mut String, raw_line: &str) -> RemoteLineOu
     }
 }
 
+fn remote_acp_segments(decoded_line: &str) -> impl Iterator<Item = &str> {
+    // `sq blox acp` can emit JSON Text Sequences where records are delimited by
+    // U+001E (record separator). Keep line-based handling for normal JSON-RPC
+    // output, but split RS-delimited frames so concatenated messages are not
+    // treated as malformed JSON.
+    decoded_line
+        .split('\u{1e}')
+        .filter(|segment| !segment.trim().is_empty())
+}
+
 async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
     stdout: R,
     mut writer: tokio::io::DuplexStream,
@@ -426,15 +448,17 @@ async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
             log::warn!("Dropped invalid UTF-8 bytes from remote ACP stdout");
         }
 
-        match consume_remote_acp_line(&mut pending, &decoded_line) {
-            RemoteLineOutcome::Emit(line) => {
-                writer.write_all(line.as_bytes()).await?;
-                writer.write_all(b"\n").await?;
-            }
-            RemoteLineOutcome::Pending => {}
-            RemoteLineOutcome::Dropped => {
-                if !decoded_line.trim().is_empty() {
-                    log::warn!("Dropped malformed ACP proxy output line");
+        for segment in remote_acp_segments(&decoded_line) {
+            match consume_remote_acp_line(&mut pending, segment) {
+                RemoteLineOutcome::Emit(line) => {
+                    writer.write_all(line.as_bytes()).await?;
+                    writer.write_all(b"\n").await?;
+                }
+                RemoteLineOutcome::Pending => {}
+                RemoteLineOutcome::Dropped => {
+                    if !segment.trim().is_empty() {
+                        log::warn!("Dropped malformed ACP proxy output line");
+                    }
                 }
             }
         }
@@ -713,8 +737,8 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_remote_acp_line, decode_remote_acp_line, resolve_spawn_working_dir,
-        sanitize_remote_acp_chunk, RemoteLineOutcome,
+        consume_remote_acp_line, decode_remote_acp_line, remote_acp_segments,
+        resolve_spawn_working_dir, sanitize_remote_acp_chunk, RemoteLineOutcome,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -758,6 +782,28 @@ mod tests {
                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}"
             ),
             RemoteLineOutcome::Emit("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}".to_string())
+        );
+    }
+
+    #[test]
+    fn splits_record_separator_delimited_messages_in_one_stdout_line() {
+        let mut pending = String::new();
+        let line = "\u{1e}{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\u{1e}{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}\n";
+
+        let outcomes: Vec<RemoteLineOutcome> = remote_acp_segments(line)
+            .map(|segment| consume_remote_acp_line(&mut pending, segment))
+            .collect();
+
+        assert_eq!(
+            outcomes,
+            vec![
+                RemoteLineOutcome::Emit(
+                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}".to_string()
+                ),
+                RemoteLineOutcome::Emit(
+                    "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}".to_string()
+                ),
+            ]
         );
     }
 

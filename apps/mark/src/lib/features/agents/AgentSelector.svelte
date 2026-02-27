@@ -14,20 +14,28 @@
   import { onMount, onDestroy } from 'svelte';
   import { ChevronDown, Check, Bot } from 'lucide-svelte';
   import { agentState, REMOTE_AGENTS } from './agent.svelte';
-  import { setAiAgent, getPreferredAgent } from '../settings/preferences.svelte';
+  import {
+    setAiAgent,
+    getPreferredAgent,
+    setProjectAiAgent,
+    getPreferredAgentForProject,
+  } from '../settings/preferences.svelte';
 
   interface Props {
     disabled?: boolean;
     remote?: boolean;
+    projectId?: string | null;
   }
 
-  let { disabled = false, remote = false }: Props = $props();
+  let { disabled = false, remote = false, projectId = null }: Props = $props();
 
   let showDropdown = $state(false);
 
   let agents = $derived(remote ? REMOTE_AGENTS : agentState.providers);
 
-  let preferredId = $derived(getPreferredAgent(agents));
+  let preferredId = $derived(
+    projectId ? getPreferredAgentForProject(projectId, agents) : getPreferredAgent(agents)
+  );
 
   let currentLabel = $derived(agents.find((p) => p.id === preferredId)?.label ?? 'Agent');
 
@@ -47,7 +55,11 @@
   }
 
   function select(id: string) {
-    setAiAgent(id);
+    if (projectId) {
+      setProjectAiAgent(projectId, id);
+    } else {
+      setAiAgent(id);
+    }
     showDropdown = false;
   }
 

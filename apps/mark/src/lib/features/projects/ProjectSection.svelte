@@ -32,7 +32,7 @@
   import SessionModal from '../sessions/SessionModal.svelte';
   import AgentSelector from '../agents/AgentSelector.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
-  import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { getPreferredAgentForProject } from '../settings/preferences.svelte';
 
   interface Props {
     project: Project;
@@ -163,8 +163,23 @@
   let availableAgents = $derived(
     project.location === 'remote' ? REMOTE_AGENTS : agentState.providers
   );
-  let preferredProvider = $derived(getPreferredAgent(availableAgents) ?? undefined);
-  let canSubmitPrompt = $derived(!!promptText.trim() && !!preferredProvider);
+  let preferredProvider = $derived(
+    getPreferredAgentForProject(project.id, availableAgents) ?? undefined
+  );
+  let remoteWorkspaceReady = $derived(
+    project.location !== 'remote' ||
+      branches.some((b) => b.workspaceStatus === 'running' && !!b.workspaceName)
+  );
+  let canSubmitPrompt = $derived(
+    !!promptText.trim() && !!preferredProvider && remoteWorkspaceReady
+  );
+  let sendButtonTitle = $derived(
+    !preferredProvider
+      ? 'No AI agent available'
+      : !remoteWorkspaceReady
+        ? 'Start the remote workspace before starting a project session'
+        : 'Start project session'
+  );
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
 
@@ -374,7 +389,9 @@
     <div class="prompt-input-wrapper">
       <textarea
         class="prompt-input"
-        placeholder="Ask about this project…"
+        placeholder={project.location === 'remote' && !remoteWorkspaceReady
+          ? 'Start the remote workspace to chat about this project…'
+          : 'Ask about this project…'}
         bind:value={promptText}
         bind:this={promptTextarea}
         onkeydown={handleKeydown}
@@ -382,12 +399,12 @@
         rows={1}
       ></textarea>
       <div class="prompt-actions">
-        <AgentSelector remote={project.location === 'remote'} />
+        <AgentSelector remote={project.location === 'remote'} projectId={project.id} />
         <button
           class="send-button"
           onclick={handleSubmitPrompt}
           disabled={!canSubmitPrompt}
-          title={preferredProvider ? 'Start project session' : 'No AI agent available'}
+          title={sendButtonTitle}
         >
           <Send size={14} />
         </button>

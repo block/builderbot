@@ -55,6 +55,38 @@ fn resolve_branch_repo_slug(
     project.primary_repo().map(|s| s.to_string())
 }
 
+/// Resolve the workspace name to use for a project-level session.
+///
+/// Local projects return `None` (use local ACP binaries).
+/// Remote projects must have at least one branch with a workspace name so we
+/// can route through `blox acp` instead of local clients.
+fn resolve_project_session_workspace_name(
+    store: &Arc<Store>,
+    project: &store::Project,
+) -> Result<Option<String>, String> {
+    if project.location != store::ProjectLocation::Remote {
+        return Ok(None);
+    }
+
+    let branches = store
+        .list_branches_for_project(&project.id)
+        .map_err(|e| e.to_string())?;
+
+    let workspace_name = branches
+        .iter()
+        .find(|b| b.workspace_status == Some(store::WorkspaceStatus::Running))
+        .and_then(|b| b.workspace_name.clone())
+        .or_else(|| branches.iter().find_map(|b| b.workspace_name.clone()));
+
+    if workspace_name.is_none() {
+        return Err(
+            "Remote project has no workspace yet. Add a repository and start its workspace before starting a project session.".to_string(),
+        );
+    }
+
+    Ok(workspace_name)
+}
+
 async fn run_blox_blocking<T, F>(op: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -319,8 +351,9 @@ pub struct ProjectSessionResponse {
 /// Start a project-level session.
 ///
 /// Project sessions operate at the project level rather than a specific branch.
-/// The agent receives project context (all repos, existing project notes),
-/// and an MCP server with tools to start repo subagent sessions and add repos.
+/// The agent receives project context (all repos, existing project notes).
+/// Local sessions also receive an MCP server with tools to start repo subagent
+/// sessions and add repos.
 /// Always creates a ProjectNote stub that is populated when the session completes.
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
@@ -341,11 +374,26 @@ pub async fn start_project_session(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
+    let workspace_name = resolve_project_session_workspace_name(&store, &project)?;
+    let is_remote_project_session = workspace_name.is_some();
+
     // Build project context for the prompt
-    let project_context = build_project_session_context(&store, &project);
+    let project_context =
+        build_project_session_context(&store, &project, workspace_name.as_deref());
 
     // Build the full prompt
-    let action_instructions = "The user is requesting work at the project level. Investigate and \
+    let action_instructions = if is_remote_project_session {
+        "The user is requesting work at the project level. Investigate and \
+        fulfill the request below, then produce a project note summarizing what you found and any \
+        actions taken.\n\n\
+        This is a remote workspace session. The project MCP tools (`start_repo_session`, \
+        `add_project_repo`) are not available in this mode. Work directly with the repository \
+        available in the remote workspace and the provided project context.\n\n\
+        To return the note, include a horizontal rule (---) followed by the note content. \
+        Begin the note with a markdown H1 heading as the title. \n\n\
+        "
+    } else {
+        "The user is requesting work at the project level. Investigate and \
         fulfill the request below, then produce a project note summarizing what you found and any \
         actions taken.\n\n\
         You have access to the following tools:\n\n\
@@ -361,7 +409,8 @@ pub async fn start_project_session(
         GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
         To return the note, include a horizontal rule (---) followed by the note content. \
         Begin the note with a markdown H1 heading as the title. \n\n\
-        ";
+        "
+    };
 
     let full_prompt = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
@@ -397,11 +446,23 @@ pub async fn start_project_session(
             agent_session_id: None,
             pre_head_sha: None,
             provider,
-            workspace_name: None,
+            workspace_name,
             extra_env: vec![],
-            mcp_project_id: Some(project_id.clone()),
-            action_executor: Some(Arc::clone(&action_executor)),
-            action_registry: Some(Arc::clone(&action_registry)),
+            mcp_project_id: if is_remote_project_session {
+                None
+            } else {
+                Some(project_id.clone())
+            },
+            action_executor: if is_remote_project_session {
+                None
+            } else {
+                Some(Arc::clone(&action_executor))
+            },
+            action_registry: if is_remote_project_session {
+                None
+            } else {
+                Some(Arc::clone(&action_registry))
+            },
             remote_working_dir: None,
         },
         store,
@@ -856,7 +917,11 @@ pub(crate) fn build_project_context(
 ///
 /// Includes: project name, all attached repos (with reasons and per-repo
 /// branch timelines), and existing project notes.
-fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -> String {
+fn build_project_session_context(
+    store: &Arc<Store>,
+    project: &store::Project,
+    workspace_name: Option<&str>,
+) -> String {
     let project_name = project.name.trim();
     let project_name = if project_name.is_empty() {
         "Unnamed Project"
@@ -912,7 +977,8 @@ fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -
             lines.push(String::new());
             lines.push(format!("### Branch: {}", branch.branch_name));
 
-            let timeline = build_branch_timeline_summary(store, branch);
+            let timeline =
+                build_branch_timeline_summary(store, branch, branch.workspace_name.as_deref());
             if timeline.is_empty() {
                 lines.push("No activity on this branch yet.".to_string());
             } else {
@@ -933,7 +999,8 @@ fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -
             lines.push(String::new());
             lines.push(format!("### Branch: {}", branch.branch_name));
 
-            let timeline = build_branch_timeline_summary(store, branch);
+            let timeline =
+                build_branch_timeline_summary(store, branch, branch.workspace_name.as_deref());
             if timeline.is_empty() {
                 lines.push("No activity on this branch yet.".to_string());
             } else {
@@ -949,18 +1016,12 @@ fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -
         lines.push(String::new());
         lines.push("## Existing Project Notes".to_string());
         for note in &non_empty_notes {
-            let note_path = std::env::temp_dir().join(format!("mark-note-{}.md", note.id));
-            let formatted = match std::fs::write(&note_path, &note.content) {
-                Ok(()) => format!(
-                    "### Project Note: {}\n\nSee: `{}`",
-                    note.title,
-                    note_path.display()
-                ),
-                Err(e) => {
-                    log::warn!("Failed to write project note to temp file, inlining: {e}");
-                    format!("### Project Note: {}\n\n{}", note.title, note.content)
-                }
-            };
+            let formatted = format_project_note_for_context(
+                &note.id,
+                &note.title,
+                &note.content,
+                workspace_name,
+            );
             lines.push(formatted);
         }
     }
@@ -974,7 +1035,11 @@ fn build_project_session_context(store: &Arc<Store>, project: &store::Project) -
 /// Includes commit log (when a local worktree is available), notes, and
 /// reviews — but omits project-level notes (those are rendered separately
 /// at the project level to avoid duplication).
-fn build_branch_timeline_summary(store: &Arc<Store>, branch: &store::Branch) -> String {
+fn build_branch_timeline_summary(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+    workspace_name: Option<&str>,
+) -> String {
     let mut timeline: Vec<TimelineEntry> = Vec::new();
     let mut commit_error = None;
 
@@ -998,8 +1063,9 @@ fn build_branch_timeline_summary(store: &Arc<Store>, branch: &store::Branch) -> 
         }
     }
 
-    // Notes written to local temp files — project sessions run locally
-    timeline.extend(note_timeline_entries(store, &branch.id, None));
+    // Notes are written to temp files in the matching execution environment:
+    // remote workspace when available, otherwise local temp files.
+    timeline.extend(note_timeline_entries(store, &branch.id, workspace_name));
     timeline.extend(review_timeline_entries(store, &branch.id));
 
     if timeline.is_empty() {

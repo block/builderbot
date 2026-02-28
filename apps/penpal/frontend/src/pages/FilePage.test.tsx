@@ -18,6 +18,7 @@ vi.mock('../api', () => ({
     listProjects: vi.fn().mockResolvedValue([]),
     startAgent: vi.fn().mockResolvedValue({ running: true, project: 'ws/proj' }),
     getPublishState: vi.fn().mockResolvedValue({}),
+    recordView: vi.fn().mockResolvedValue(undefined),
   },
 }));
 

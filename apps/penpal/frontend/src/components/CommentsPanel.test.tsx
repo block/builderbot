@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import CommentsPanel from './CommentsPanel';
 import type { ThreadResponse } from '../types';
@@ -149,7 +149,7 @@ describe('CommentsPanel', () => {
           project="test/project"
           filePath="thoughts/test.md"
           onRefresh={vi.fn()}
-          agentStatus={{ running: true, contextPercent: 45, project: 'test/project', pid: 1, startedAt: '', contextWindow: 0, contextUsed: 0, totalCostUSD: 0, numTurns: 0 }}
+          agentStatus={{ running: true, contextPercent: 45 }}
         />
       </MemoryRouter>,
     );

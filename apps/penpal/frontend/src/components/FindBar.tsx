@@ -5,8 +5,9 @@ interface FindBarProps {
 }
 
 // Persistent Highlight objects — reuse them to avoid stale references
-const matchesHighlight = new Highlight();
-const activeHighlight = new Highlight();
+// Guard for environments where CSS Custom Highlight API is unavailable (e.g. test runners)
+const matchesHighlight = typeof Highlight !== 'undefined' ? new Highlight() : (new Set() as unknown as Highlight);
+const activeHighlight = typeof Highlight !== 'undefined' ? new Highlight() : (new Set() as unknown as Highlight);
 
 function findAllRanges(root: Element, query: string, exclude: Element | null): Range[] {
   const ranges: Range[] = [];
@@ -49,6 +50,7 @@ export default function FindBar({ onClose }: FindBarProps) {
 
   // Register highlight objects once on mount, clean up on unmount
   useEffect(() => {
+    if (typeof CSS === 'undefined' || !CSS.highlights) return;
     CSS.highlights.set('find-matches', matchesHighlight);
     CSS.highlights.set('find-active', activeHighlight);
     return () => {

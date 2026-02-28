@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/loganj/penpal/internal/activity"
-	"github.com/loganj/penpal/internal/agents"
 	"github.com/loganj/penpal/internal/cache"
 	"github.com/loganj/penpal/internal/comments"
 	"github.com/loganj/penpal/internal/config"
@@ -26,9 +25,8 @@ func testServer(t *testing.T) (*Server, *cache.Cache, *comments.Store) {
 		t.Fatalf("watcher: %v", err)
 	}
 	cs := comments.NewStore(c, act)
-	am := agents.New(c, cs, 0)
 	cfg := &config.Config{}
-	s := New(c, w, cs, nil, am, act, cfg, "")
+	s := New(c, w, cs, nil, nil, act, cfg, "")
 	// Trigger ensureLoaded so it doesn't interfere with tests
 	s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 	return s, c, cs

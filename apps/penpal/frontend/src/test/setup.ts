@@ -4,7 +4,6 @@ import '@testing-library/jest-dom';
 // Node 24+ (undici v7) rejects jsdom's AbortSignal polyfill as not a "real" instance.
 // See: https://github.com/vitest-dev/vitest/issues/8374
 // This will be unnecessary once we upgrade to Vitest 4.
-const _origListeners = process.listeners('unhandledRejection');
 process.removeAllListeners('unhandledRejection');
 process.on('unhandledRejection', (reason: unknown) => {
   if (reason instanceof TypeError && String(reason).includes('AbortSignal')) return;

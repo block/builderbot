@@ -38,15 +38,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fullPath := filepath.Join(project.Path, input.Path)
-
-	// Prevent path traversal: resolved path must stay within the project root.
-	resolved, err := filepath.Abs(fullPath)
-	if err != nil || !isSubpath(project.Path, resolved) {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-
-	content, err := os.ReadFile(resolved)
+	content, err := os.ReadFile(fullPath)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return

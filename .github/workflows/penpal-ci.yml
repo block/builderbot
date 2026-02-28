@@ -5,11 +5,17 @@ on:
     branches: [main]
     paths:
       - "apps/penpal/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
       - ".github/workflows/penpal-ci.yml"
   push:
     branches: [main]
     paths:
       - "apps/penpal/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
       - ".github/workflows/penpal-ci.yml"
   workflow_dispatch:
 
@@ -52,10 +58,13 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      # Enable pnpm via corepack (node ships with corepack; version comes from packageManager in package.json)
+      - run: corepack enable pnpm
+
       # Install dependencies
       - name: Install dependencies
         run: |
-          cd apps/penpal/frontend && npm ci
+          pnpm install --frozen-lockfile
           cd apps/penpal/frontend/src-tauri && cargo fetch
 
       # Run all checks via the app justfile

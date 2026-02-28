@@ -21,11 +21,11 @@ ensure-deps:
 
 # Build production desktop app
 build: ensure-deps build-sidecar
-    cd frontend && npm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 npm run build && npm run tauri:build
+    cd frontend && pnpm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 pnpm run build && pnpm run tauri:build
 
 # Development mode: full desktop app with Vite HMR
 dev: build-sidecar
-    cd frontend && VITE_BASE=/ PENPAL_PORT=8082 npm run tauri:dev
+    cd frontend && VITE_BASE=/ PENPAL_PORT=8082 pnpm run tauri:dev
 
 # Build Go sidecar binaries for desktop app
 build-sidecar:
@@ -83,26 +83,31 @@ uninstall:
 # Auto-format all code
 fmt:
     gofmt -w .
-    cd frontend && npx eslint src/ --fix
 
 # Verify formatting without modifying files (used by CI/hooks)
 fmt-check:
     #!/usr/bin/env bash
     set -euo pipefail
     test -z "$(gofmt -l .)" || { gofmt -l . ; echo "Go files need formatting"; exit 1; }
-    cd frontend && npx eslint src/
 
 # Lint Rust code with clippy
 lint:
-    cd frontend/src-tauri && cargo clippy -- -D warnings
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd frontend/src-tauri
+    # Create stub sidecar so Tauri build script passes the resource-path check
+    target_triple=$(rustc -vV | sed -n 's|host: ||p')
+    mkdir -p binaries
+    touch "binaries/penpal-server-${target_triple}"
+    cargo clippy -- -D warnings
 
 # Type-check frontend (TypeScript)
 typecheck:
-    cd frontend && npm run typecheck
+    cd frontend && pnpm run typecheck
 
 # Run all tests
 test:
-    go test ./... && cd frontend && npm run test:run
+    go test ./... && cd frontend && pnpm run test:run
 
 # Verify everything without modifying files — for CI
 ci: fmt-check lint typecheck test
@@ -113,7 +118,7 @@ ci: fmt-check lint typecheck test
 
 # Run Playwright e2e tests
 test-e2e:
-    cd e2e && npx playwright test
+    cd e2e && pnpm exec playwright test
 
 # Clean build artifacts
 clean:

@@ -83,7 +83,7 @@ func runServe(port int, rootOverride string) {
 	am := agents.New(c, cs, port)
 	mcpHandler := mcpserver.NewHandler(cs, c)
 	srv := server.New(c, w, cs, mcpHandler, am, act, cfg, cfgPath)
-	addr := fmt.Sprintf(":%d", port)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
 	// Write .mcp.json for MCP client discovery
 	mcpConfig := map[string]interface{}{

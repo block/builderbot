@@ -121,10 +121,8 @@ func TestAPIAgentStatus_NeedsAgent_AfterAgentFinished(t *testing.T) {
 	dir := t.TempDir()
 	seedProject(c, "test-proj", dir, nil)
 
-	// Start an agent, then stop it (simulates a finished agent).
-	// Start will fail (no claude binary in CI) but that's OK for this test.
-	s.agents.Start("test-proj")
-	s.agents.Stop("test-proj")
+	// Insert a synthetic agent entry that has already finished.
+	s.agents.SimulateFinished("test-proj")
 
 	// Create a pending human comment
 	anchor := comments.Anchor{SelectedText: "review me"}

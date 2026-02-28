@@ -1,4 +1,5 @@
 packages:
   - 'apps/*'
   - 'apps/penpal/frontend'
+  - 'apps/penpal/e2e'
   - 'packages/*'

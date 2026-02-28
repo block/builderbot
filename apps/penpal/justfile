@@ -18,6 +18,10 @@ ensure-deps:
         echo "Installing Claude Code..."
         brew install claude-code
     fi
+    if ! command -v pnpm &> /dev/null; then
+        echo "Installing pnpm via corepack..."
+        corepack enable pnpm
+    fi
 
 # Build production desktop app
 build: ensure-deps build-sidecar

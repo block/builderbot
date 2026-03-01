@@ -6,6 +6,10 @@ export PATH := env_var_or_default("CARGO_HOME", env_var("HOME") + "/.cargo") + "
 # Ensure required tools are installed
 ensure-deps:
     #!/usr/bin/env bash
+    if ! command -v node &> /dev/null; then
+        echo "Installing Node.js..."
+        brew install node
+    fi
     if ! command -v go &> /dev/null; then
         echo "Installing Go..."
         brew install go
@@ -24,7 +28,7 @@ build: ensure-deps build-sidecar
     cd frontend && npm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 npm run build && npm run tauri:build
 
 # Development mode: full desktop app with Vite HMR
-dev: build-sidecar
+dev: ensure-deps build-sidecar
     cd frontend && VITE_BASE=/ PENPAL_PORT=8082 npm run tauri:dev
 
 # Build Go sidecar binaries for desktop app

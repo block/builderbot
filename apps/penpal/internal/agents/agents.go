@@ -17,12 +17,21 @@ type Info struct {
 var (
 	mu     sync.RWMutex
 	cached map[string][]Info
+
+	pollMu sync.Mutex
 	stopCh chan struct{}
 )
 
 // StartPolling begins background polling for active agents every 5 seconds.
 func StartPolling() {
+	pollMu.Lock()
+	defer pollMu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
+	}
 	stopCh = make(chan struct{})
+	ch := stopCh
 	// Do an initial poll synchronously so the first read has data.
 	result := poll()
 	mu.Lock()
@@ -34,7 +43,7 @@ func StartPolling() {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-stopCh:
+			case <-ch:
 				return
 			case <-ticker.C:
 				result := poll()
@@ -48,8 +57,12 @@ func StartPolling() {
 
 // StopPolling stops the background polling goroutine.
 func StopPolling() {
+	pollMu.Lock()
+	defer pollMu.Unlock()
+
 	if stopCh != nil {
 		close(stopCh)
+		stopCh = nil
 	}
 }
 

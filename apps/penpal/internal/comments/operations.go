@@ -135,6 +135,13 @@ func (s *Store) ReopenThread(projectName, filePath, threadID string) error {
 // project and returns all threads with status "open" across all files.
 // Returned file paths are relative to the project root (e.g., "thoughts/shared/plans/foo.md").
 func (s *Store) ListOpenThreads(projectName string) ([]ThreadWithFile, error) {
+	return s.ListThreadsByStatus(projectName, "open")
+}
+
+// ListThreadsByStatus walks the .penpal/comments/ directory for the given
+// project and returns threads matching the given status filter.
+// An empty status returns all threads regardless of status.
+func (s *Store) ListThreadsByStatus(projectName, status string) ([]ThreadWithFile, error) {
 	project := s.cache.FindProject(projectName)
 	if project == nil {
 		return nil, fmt.Errorf("project not found: %s", projectName)
@@ -172,7 +179,7 @@ func (s *Store) ListOpenThreads(projectName string) ([]ThreadWithFile, error) {
 		filePath := strings.TrimSuffix(rel, ".json")
 
 		for _, t := range fc.Threads {
-			if t.Status == "open" {
+			if status == "" || t.Status == status {
 				results = append(results, ThreadWithFile{
 					Thread:   t,
 					FilePath: filePath,

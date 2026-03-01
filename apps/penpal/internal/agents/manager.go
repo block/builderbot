@@ -127,8 +127,14 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 		contextWindow: 200000, // default for opus, refined when result arrives
 	}
 
-	// Parse NDJSON stream in background, writing through to log file
-	go agent.parseStream(stdout, logFile)
+	// Parse NDJSON stream in background, writing through to log file.
+	// streamDone is closed when parseStream finishes so we can safely
+	// close logFile only after all writes complete.
+	streamDone := make(chan struct{})
+	go func() {
+		agent.parseStream(stdout, logFile)
+		close(streamDone)
+	}()
 	m.agents[projectName] = agent
 
 	log.Printf("Agent started for %s (PID %d)", projectName, agent.PID)
@@ -136,6 +142,7 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 	// Monitor process exit in background
 	go func() {
 		agent.exitErr = cmd.Wait()
+		<-streamDone // wait for parseStream to finish before closing log
 		logFile.Close()
 		os.Remove(mcpConfigPath)
 		close(agent.done)

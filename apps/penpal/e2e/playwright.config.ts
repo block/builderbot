@@ -14,7 +14,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: `cd .. && go build -o penpal . && PENPAL_CONFIG=${e2eConfig} ./penpal -port 18923`,
+      command: `cd .. && go build -o penpal-server ./cmd/penpal-server && PENPAL_CONFIG=${e2eConfig} ./penpal-server -port 18923`,
       port: 18923,
       reuseExistingServer: !process.env.CI,
     },

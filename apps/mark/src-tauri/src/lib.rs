@@ -2724,6 +2724,7 @@ pub fn run() {
             prs::refresh_all_pr_statuses,
             prs::has_unpushed_commits,
             prs::push_branch,
+            prs::clear_branch_pr_status,
             open_url,
             is_sq_available,
             read_text_file,

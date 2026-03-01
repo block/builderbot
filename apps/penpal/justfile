@@ -28,16 +28,16 @@ ensure-deps:
     fi
 
 # Build production desktop app
-build: ensure-deps build-sidecar
+build: ensure-deps build-go
     cd frontend && pnpm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 pnpm run build && pnpm run tauri:build
 
 # Development mode: full desktop app with Vite HMR
-dev: ensure-deps build-sidecar
+dev: ensure-deps build-go
     cd frontend && VITE_BASE=/ PENPAL_PORT=8082 pnpm run tauri:dev
 
-# Build Go sidecar binaries for desktop app
-build-sidecar: ensure-deps
-    ./scripts/build-sidecar.sh
+# Build Go binaries (server sidecar + CLI) for desktop app
+build-go: ensure-deps
+    ./scripts/build-go.sh
 
 # Install Penpal: build desktop app + install Claude Code plugin
 install: build
@@ -72,12 +72,19 @@ install: build
     claude plugin install penpal
     echo "Penpal Claude Code plugin installed."
 
+    # Expose CLI on PATH via /etc/paths.d
+    sudo mkdir -p /Applications/Penpal.app/Contents/Resources/bin
+    sudo ln -sf ../../MacOS/penpal /Applications/Penpal.app/Contents/Resources/bin/penpal
+    echo '/Applications/Penpal.app/Contents/Resources/bin' | sudo tee /etc/paths.d/penpal > /dev/null
+    echo "penpal CLI added to PATH (open a new shell to use it)."
+
     # Launch the app
     open /Applications/Penpal.app
 
 # Uninstall Penpal
 uninstall:
     #!/usr/bin/env bash
+    sudo rm -f /etc/paths.d/penpal
     rm -rf /Applications/Penpal.app 2>/dev/null || true
     echo "Penpal.app removed from /Applications."
     claude plugin uninstall penpal 2>/dev/null || true
@@ -107,6 +114,7 @@ lint: ensure-deps
     target_triple=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p binaries
     touch "binaries/penpal-server-${target_triple}"
+    touch "binaries/penpal-${target_triple}"
     cargo clippy -- -D warnings
 
 # Type-check frontend (TypeScript)

@@ -40,7 +40,8 @@
       "icons/Assets.car": "Assets.car"
     },
     "externalBin": [
-      "binaries/penpal-server"
+      "binaries/penpal-server",
+      "binaries/penpal"
     ]
   }
 }

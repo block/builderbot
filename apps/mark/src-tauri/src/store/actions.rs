@@ -2,7 +2,7 @@
 
 use rusqlite::{params, OptionalExtension};
 
-use super::models::{ActionContext, ActionType, RepoAction};
+use super::models::{ActionContext, ActionType, RepoAction, RunDetectionMode};
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
@@ -89,9 +89,13 @@ impl Store {
 
     pub fn create_repo_action(&self, action: &RepoAction) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let run_detection_mode_json = action
+            .run_detection_mode
+            .as_ref()
+            .map(|m| serde_json::to_string(m).unwrap());
         conn.execute(
-            "INSERT INTO repo_actions (id, context_id, name, command, action_type, sort_order, auto_commit, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO repo_actions (id, context_id, name, command, action_type, sort_order, auto_commit, run_detection_mode, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 action.id,
                 action.context_id,
@@ -100,6 +104,7 @@ impl Store {
                 action.action_type.as_str(),
                 action.sort_order,
                 action.auto_commit as i32,
+                run_detection_mode_json,
                 action.created_at,
                 action.updated_at,
             ],
@@ -110,7 +115,7 @@ impl Store {
     pub fn get_repo_action(&self, id: &str) -> Result<Option<RepoAction>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, context_id, name, command, action_type, sort_order, auto_commit, created_at, updated_at
+            "SELECT id, context_id, name, command, action_type, sort_order, auto_commit, run_detection_mode, created_at, updated_at
              FROM repo_actions WHERE id = ?1",
             params![id],
             Self::row_to_repo_action,
@@ -122,7 +127,7 @@ impl Store {
     pub fn list_repo_actions(&self, context_id: &str) -> Result<Vec<RepoAction>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, context_id, name, command, action_type, sort_order, auto_commit, created_at, updated_at
+            "SELECT id, context_id, name, command, action_type, sort_order, auto_commit, run_detection_mode, created_at, updated_at
              FROM repo_actions WHERE context_id = ?1 ORDER BY sort_order ASC",
         )?;
         let rows = stmt.query_map(params![context_id], Self::row_to_repo_action)?;
@@ -131,14 +136,19 @@ impl Store {
 
     pub fn update_repo_action(&self, action: &RepoAction) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let run_detection_mode_json = action
+            .run_detection_mode
+            .as_ref()
+            .map(|m| serde_json::to_string(m).unwrap());
         conn.execute(
-            "UPDATE repo_actions SET name = ?1, command = ?2, action_type = ?3, sort_order = ?4, auto_commit = ?5, updated_at = ?6 WHERE id = ?7",
+            "UPDATE repo_actions SET name = ?1, command = ?2, action_type = ?3, sort_order = ?4, auto_commit = ?5, run_detection_mode = ?6, updated_at = ?7 WHERE id = ?8",
             params![
                 action.name,
                 action.command,
                 action.action_type.as_str(),
                 action.sort_order,
                 action.auto_commit as i32,
+                run_detection_mode_json,
                 now_timestamp(),
                 action.id,
             ],
@@ -199,6 +209,10 @@ impl Store {
     fn row_to_repo_action(row: &rusqlite::Row) -> rusqlite::Result<RepoAction> {
         let action_type_str: String = row.get(4)?;
         let auto_commit: i32 = row.get(6)?;
+        let run_detection_mode_str: Option<String> = row.get(7)?;
+        let run_detection_mode: Option<RunDetectionMode> = run_detection_mode_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
         Ok(RepoAction {
             id: row.get(0)?,
             context_id: row.get(1)?,
@@ -207,8 +221,9 @@ impl Store {
             action_type: ActionType::parse(&action_type_str).unwrap_or(ActionType::Run),
             sort_order: row.get(5)?,
             auto_commit: auto_commit != 0,
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
+            run_detection_mode,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
         })
     }
 }

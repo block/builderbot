@@ -72,6 +72,16 @@ pub struct SuggestedAction {
     pub source: String, // e.g., "justfile", "Makefile", "package.json"
 }
 
+/// How a "run" action detects whether the process is running and/or its endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum RunDetectionMode {
+    Autodetect,
+    EndpointRegex { pattern: String },
+    RunningRegex { pattern: String },
+    NoDetection,
+}
+
 /// Events emitted during action execution
 #[derive(Debug, Clone)]
 pub enum ExecutionEvent {

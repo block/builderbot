@@ -939,6 +939,7 @@ fn update_project_action(
             .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
         sort_order,
         auto_commit,
+        run_detection_mode: action.run_detection_mode,
         created_at: action.created_at,
         updated_at: store::now_timestamp(),
     };

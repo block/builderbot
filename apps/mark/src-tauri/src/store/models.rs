@@ -701,8 +701,9 @@ impl RecentRepo {
 // Project Actions
 // =============================================================================
 
-/// Re-export ActionType from builderbot-actions crate as the single source of truth.
+/// Re-export ActionType and RunDetectionMode from builderbot-actions crate as the single source of truth.
 pub use builderbot_actions::ActionType;
+pub use builderbot_actions::RunDetectionMode;
 
 /// Durable action context keyed by GitHub repo + optional subpath.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -743,6 +744,7 @@ pub struct RepoAction {
     pub action_type: ActionType,
     pub sort_order: i32,
     pub auto_commit: bool,
+    pub run_detection_mode: Option<RunDetectionMode>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -764,6 +766,7 @@ impl RepoAction {
             action_type,
             sort_order,
             auto_commit: false,
+            run_detection_mode: None,
             created_at: now,
             updated_at: now,
         }

@@ -15,6 +15,13 @@ export type ActionType = 'build' | 'test' | 'format' | 'check' | 'prerun' | 'run
 /** Status of a running action. */
 export type ActionStatus = 'running' | 'completed' | 'failed' | 'stopped';
 
+/** How a "run" action detects whether the process is running and/or its endpoint. */
+export type RunDetectionMode =
+  | { type: 'autodetect' }
+  | { type: 'endpointRegex'; pattern: string }
+  | { type: 'runningRegex'; pattern: string }
+  | { type: 'noDetection' };
+
 /** A configured project action. */
 export interface ProjectAction {
   id: string;
@@ -24,6 +31,7 @@ export interface ProjectAction {
   actionType: ActionType;
   sortOrder: number;
   autoCommit: boolean;
+  runDetectionMode?: RunDetectionMode;
   createdAt: number;
   updatedAt: number;
 }

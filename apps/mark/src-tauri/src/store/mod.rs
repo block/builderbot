@@ -62,7 +62,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes in an incompatible way.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -399,15 +399,16 @@ impl Store {
                 ON action_contexts(github_repo, COALESCE(subpath, ''));
 
             CREATE TABLE IF NOT EXISTS repo_actions (
-                id              TEXT PRIMARY KEY,
-                context_id      TEXT NOT NULL REFERENCES action_contexts(id) ON DELETE CASCADE,
-                name            TEXT NOT NULL,
-                command         TEXT NOT NULL,
-                action_type     TEXT NOT NULL,
-                sort_order      INTEGER NOT NULL,
-                auto_commit     INTEGER NOT NULL DEFAULT 0,
-                created_at      INTEGER NOT NULL,
-                updated_at      INTEGER NOT NULL
+                id                  TEXT PRIMARY KEY,
+                context_id          TEXT NOT NULL REFERENCES action_contexts(id) ON DELETE CASCADE,
+                name                TEXT NOT NULL,
+                command             TEXT NOT NULL,
+                action_type         TEXT NOT NULL,
+                sort_order          INTEGER NOT NULL,
+                auto_commit         INTEGER NOT NULL DEFAULT 0,
+                run_detection_mode  TEXT DEFAULT NULL,
+                created_at          INTEGER NOT NULL,
+                updated_at          INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_repo_actions_context
                 ON repo_actions(context_id);
@@ -481,6 +482,30 @@ impl Store {
             END;
             ",
         )?;
+
+        // -- Incremental migrations ----------------------------------------
+        // Read current schema version from database. For fresh databases this
+        // will equal SCHEMA_VERSION. For existing databases it may be older.
+        let db_version: i64 = conn
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(SCHEMA_VERSION);
+
+        if db_version < 15 {
+            // v14 → v15: add run_detection_mode column to repo_actions
+            conn.execute_batch(
+                "ALTER TABLE repo_actions ADD COLUMN run_detection_mode TEXT DEFAULT NULL;",
+            )
+            .ok(); // Ignore error if column already exists (fresh DB)
+        }
+
+        // Stamp the current schema version so future opens skip applied migrations.
+        conn.execute(
+            "UPDATE schema_version SET version = ?1",
+            rusqlite::params![SCHEMA_VERSION],
+        )?;
+
         Ok(())
     }
 }

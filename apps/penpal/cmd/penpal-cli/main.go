@@ -48,13 +48,11 @@ func runOpen(paths []string) {
 	// No running server — launch the desktop app, which starts its own sidecar
 	openApp()
 
-	// Default port to check when no port file exists
+	// Wait for the app's sidecar server to become ready.
+	// Re-read the port file each iteration so we pick up the fresh port the
+	// new server writes, instead of polling a stale value from a prior run.
+	port = waitForServerStart(10 * time.Second)
 	if port <= 0 {
-		port = 8080
-	}
-
-	// Wait for the app's sidecar server to become ready
-	if !waitForServer(port, 10*time.Second) {
 		fmt.Fprintf(os.Stderr, "Error: server did not start within timeout\n")
 		os.Exit(1)
 	}
@@ -109,16 +107,23 @@ func isServerRunning(port int) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// waitForServer polls the server until it responds or the timeout expires.
-func waitForServer(port int, timeout time.Duration) bool {
+// waitForServerStart polls for a newly launched server by re-reading the port
+// file each iteration. This avoids polling a stale port left behind by a prior
+// crash or dev run. Returns the port the server is running on, or 0 on timeout.
+func waitForServerStart(timeout time.Duration) int {
+	const defaultPort = 8080
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		port := config.ReadPortFile()
+		if port <= 0 {
+			port = defaultPort
+		}
 		if isServerRunning(port) {
-			return true
+			return port
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return false
+	return 0
 }
 
 // openApp opens (or focuses) the Penpal desktop app.

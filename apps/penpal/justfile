@@ -72,11 +72,9 @@ install: build
     claude plugin install penpal
     echo "Penpal Claude Code plugin installed."
 
-    # Expose CLI on PATH via /etc/paths.d
-    sudo mkdir -p /Applications/Penpal.app/Contents/Resources/bin
-    sudo ln -sf ../../MacOS/penpal-cli /Applications/Penpal.app/Contents/Resources/bin/penpal
-    echo '/Applications/Penpal.app/Contents/Resources/bin' | sudo tee /etc/paths.d/penpal > /dev/null
-    echo "penpal CLI added to PATH (open a new shell to use it)."
+    # Expose CLI on PATH via Homebrew's bin directory (user-writable, no sudo)
+    ln -sf /Applications/Penpal.app/Contents/MacOS/penpal-cli "$(brew --prefix)/bin/penpal"
+    echo "penpal CLI linked to $(brew --prefix)/bin/penpal."
 
     # Launch the app
     open /Applications/Penpal.app
@@ -84,7 +82,7 @@ install: build
 # Uninstall Penpal
 uninstall:
     #!/usr/bin/env bash
-    sudo rm -f /etc/paths.d/penpal
+    rm -f "$(brew --prefix)/bin/penpal" 2>/dev/null || true
     rm -rf /Applications/Penpal.app 2>/dev/null || true
     echo "Penpal.app removed from /Applications."
     claude plugin uninstall penpal 2>/dev/null || true

@@ -41,7 +41,7 @@
     },
     "externalBin": [
       "binaries/penpal-server",
-      "binaries/penpal"
+      "binaries/penpal-cli"
     ]
   }
 }

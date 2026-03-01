@@ -13,11 +13,11 @@ GOOS=darwin GOARCH=arm64 go build -o "$OUT_DIR/penpal-server-aarch64-apple-darwi
 echo "Building penpal-server for darwin/amd64..."
 GOOS=darwin GOARCH=amd64 go build -o "$OUT_DIR/penpal-server-x86_64-apple-darwin" "$ROOT_DIR/cmd/penpal-server"
 
-echo "Building penpal CLI for darwin/arm64..."
-GOOS=darwin GOARCH=arm64 go build -o "$OUT_DIR/penpal-aarch64-apple-darwin" "$ROOT_DIR/cmd/penpal"
+echo "Building penpal-cli for darwin/arm64..."
+GOOS=darwin GOARCH=arm64 go build -o "$OUT_DIR/penpal-cli-aarch64-apple-darwin" "$ROOT_DIR/cmd/penpal-cli"
 
-echo "Building penpal CLI for darwin/amd64..."
-GOOS=darwin GOARCH=amd64 go build -o "$OUT_DIR/penpal-x86_64-apple-darwin" "$ROOT_DIR/cmd/penpal"
+echo "Building penpal-cli for darwin/amd64..."
+GOOS=darwin GOARCH=amd64 go build -o "$OUT_DIR/penpal-cli-x86_64-apple-darwin" "$ROOT_DIR/cmd/penpal-cli"
 
 echo "Done. Binaries:"
 ls -la "$OUT_DIR"/penpal-*

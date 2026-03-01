@@ -74,7 +74,7 @@ install: build
 
     # Expose CLI on PATH via /etc/paths.d
     sudo mkdir -p /Applications/Penpal.app/Contents/Resources/bin
-    sudo ln -sf ../../MacOS/penpal /Applications/Penpal.app/Contents/Resources/bin/penpal
+    sudo ln -sf ../../MacOS/penpal-cli /Applications/Penpal.app/Contents/Resources/bin/penpal
     echo '/Applications/Penpal.app/Contents/Resources/bin' | sudo tee /etc/paths.d/penpal > /dev/null
     echo "penpal CLI added to PATH (open a new shell to use it)."
 
@@ -114,7 +114,7 @@ lint: ensure-deps
     target_triple=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p binaries
     touch "binaries/penpal-server-${target_triple}"
-    touch "binaries/penpal-${target_triple}"
+    touch "binaries/penpal-cli-${target_triple}"
     cargo clippy -- -D warnings
 
 # Type-check frontend (TypeScript)

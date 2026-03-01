@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::menu::*;
@@ -10,6 +11,7 @@ struct Sidecar(Mutex<Option<CommandChild>>);
 
 /// Tracks whether a window was just destroyed, so we can distinguish
 /// "last window closed" from "user quit" in ExitRequested.
+#[cfg(target_os = "macos")]
 static WINDOW_CLOSED: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
@@ -23,11 +25,10 @@ pub fn run() {
         .plugin(tauri_plugin_decorum::init())
         .manage(Sidecar(Mutex::new(None)))
         .setup(|app| {
-            let win = app.get_webview_window("main").unwrap();
-
             // macOS traffic light positioning
             #[cfg(target_os = "macos")]
             {
+                let win = app.get_webview_window("main").unwrap();
                 use tauri_plugin_decorum::WebviewWindowExt;
                 win.set_traffic_lights_inset(15.0, 18.0).ok();
             }

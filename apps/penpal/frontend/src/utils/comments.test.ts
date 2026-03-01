@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { orderComments, formatTime, truncateText } from './comments';
 import type { Comment } from '../types';
 

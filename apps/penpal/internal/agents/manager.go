@@ -253,6 +253,22 @@ func (m *Manager) Status(projectName string) *AgentStatus {
 	}
 }
 
+// SimulateFinished inserts a synthetic agent entry that appears to have
+// already exited. This is intended for testing the "agent finished" status
+// path without requiring an external binary.
+func (m *Manager) SimulateFinished(projectName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	done := make(chan struct{})
+	close(done)
+	m.agents[projectName] = &Agent{
+		Project:       projectName,
+		StartedAt:     time.Now(),
+		done:          done,
+		contextWindow: 200000,
+	}
+}
+
 // StopAll terminates all running agents (for server shutdown).
 func (m *Manager) StopAll() {
 	m.mu.Lock()

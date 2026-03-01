@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/loganj/penpal/internal/agents"
 	"github.com/loganj/penpal/internal/comments"
 )
 
@@ -116,12 +117,12 @@ func TestAPIAgentStatus_NoNeedsAgent_WhenAgentReplied(t *testing.T) {
 
 func TestAPIAgentStatus_NeedsAgent_AfterAgentFinished(t *testing.T) {
 	s, c, cs := testServer(t)
+	s.agents = agents.New(c, cs, 0)
 	dir := t.TempDir()
 	seedProject(c, "test-proj", dir, nil)
 
-	// Start an agent, then stop it (simulates a finished agent)
-	s.agents.Start("test-proj")
-	s.agents.Stop("test-proj")
+	// Insert a synthetic agent entry that has already finished.
+	s.agents.SimulateFinished("test-proj")
 
 	// Create a pending human comment
 	anchor := comments.Anchor{SelectedText: "review me"}

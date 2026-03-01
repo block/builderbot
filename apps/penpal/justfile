@@ -18,9 +18,13 @@ ensure-deps:
         echo "Installing Claude Code..."
         brew install claude-code
     fi
+    if ! command -v node &> /dev/null; then
+        echo "Installing Node.js..."
+        brew install node
+    fi
     if ! command -v pnpm &> /dev/null; then
-        echo "Installing pnpm via corepack..."
-        corepack enable pnpm
+        echo "Installing pnpm..."
+        brew install pnpm
     fi
 
 # Build production desktop app
@@ -28,11 +32,11 @@ build: ensure-deps build-sidecar
     cd frontend && pnpm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 pnpm run build && pnpm run tauri:build
 
 # Development mode: full desktop app with Vite HMR
-dev: build-sidecar
+dev: ensure-deps build-sidecar
     cd frontend && VITE_BASE=/ PENPAL_PORT=8082 pnpm run tauri:dev
 
 # Build Go sidecar binaries for desktop app
-build-sidecar:
+build-sidecar: ensure-deps
     ./scripts/build-sidecar.sh
 
 # Install Penpal: build desktop app + install Claude Code plugin
@@ -85,17 +89,17 @@ uninstall:
 # ============================================================================
 
 # Auto-format all code
-fmt:
+fmt: ensure-deps
     gofmt -w .
 
 # Verify formatting without modifying files (used by CI/hooks)
-fmt-check:
+fmt-check: ensure-deps
     #!/usr/bin/env bash
     set -euo pipefail
     test -z "$(gofmt -l .)" || { gofmt -l . ; echo "Go files need formatting"; exit 1; }
 
 # Lint Rust code with clippy
-lint:
+lint: ensure-deps
     #!/usr/bin/env bash
     set -euo pipefail
     cd frontend/src-tauri
@@ -106,22 +110,22 @@ lint:
     cargo clippy -- -D warnings
 
 # Type-check frontend (TypeScript)
-typecheck:
+typecheck: ensure-deps
     cd frontend && pnpm run typecheck
 
 # Run all tests
-test:
+test: ensure-deps
     go test ./... && cd frontend && pnpm run test:run
 
 # Verify everything without modifying files — for CI
-ci: fmt-check lint typecheck test
+ci: ensure-deps fmt-check lint typecheck test
 
 # ============================================================================
 # Other
 # ============================================================================
 
 # Run Playwright e2e tests
-test-e2e:
+test-e2e: ensure-deps
     cd e2e && pnpm exec playwright test
 
 # Clean build artifacts

@@ -23,8 +23,8 @@ ensure-deps:
         brew install node
     fi
     if ! command -v pnpm &> /dev/null; then
-        echo "Installing pnpm via corepack..."
-        corepack enable pnpm
+        echo "Installing pnpm..."
+        brew install pnpm
     fi
 
 # Build production desktop app
@@ -76,7 +76,7 @@ install: build
     open /Applications/Penpal.app
 
 # Uninstall Penpal
-uninstall: ensure-deps
+uninstall:
     #!/usr/bin/env bash
     rm -rf /Applications/Penpal.app 2>/dev/null || true
     echo "Penpal.app removed from /Applications."

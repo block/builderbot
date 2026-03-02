@@ -31,6 +31,7 @@ use crate::store::Store;
 ///   named capture group `endpoint` whose value is extracted as the service URL.
 /// * `cancel_rx` — the task stops when this receiver yields `true` or the
 ///   sender is dropped.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_regex_matcher(
     app_handle: AppHandle,
     registry: Arc<ActionRegistry>,
@@ -147,15 +148,8 @@ struct AutodetectResponse {
 /// * 0–150 s → every 30 s (5 polls)
 /// * 150–1200 s → every 120 s (~9 more polls)
 fn build_poll_schedule() -> Vec<u64> {
-    let mut schedule = Vec::new();
-    // 5 polls at 30s intervals (covers 0–150s)
-    for _ in 0..5 {
-        schedule.push(30);
-    }
-    // ~9 polls at 120s intervals (covers 150–1200s → 150+120*9 = 1230s)
-    for _ in 0..9 {
-        schedule.push(120);
-    }
+    let mut schedule = vec![30; 5]; // 5 polls at 30s intervals (covers 0–150s)
+    schedule.resize(5 + 9, 120); // ~9 polls at 120s intervals (covers 150–1200s → 150+120*9 = 1230s)
     schedule
 }
 

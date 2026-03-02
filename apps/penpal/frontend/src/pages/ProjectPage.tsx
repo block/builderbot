@@ -14,11 +14,11 @@ function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
   }) as T;
 }
 
-function TypingIndicator() {
+function WorkingIndicator() {
   return (
-    <span className="file-typing">
+    <span className="file-working">
       <span className="agent-dot" />
-      <span className="typing-dots"><span>.</span><span>.</span><span>.</span></span>
+      <span className="working-dots"><span>.</span><span>.</span><span>.</span></span>
     </span>
   );
 }
@@ -366,7 +366,7 @@ export default function ProjectPage() {
           {review && (
             <span className={`review-badge${review.agentActive ? ' agent-active' : ''}`}>in review</span>
           )}
-          {review && (review.typingThreads ?? 0) > 0 && <TypingIndicator />}
+          {review && (review.workingThreads ?? 0) > 0 && <WorkingIndicator />}
           <span className="file-name">
             <Link to={`/file/${qn}/${file.path}`} onClick={(e) => e.stopPropagation()}>
               {file.title || file.name}
@@ -437,7 +437,7 @@ export default function ProjectPage() {
           <div className="source-header">
             <span className="source-badge" style={{ color: 'var(--file-type-research-color)', background: 'var(--file-type-research-bg)' }}>Review</span>
             <span className="source-header-label">In Review</span>
-            {hasAgent && <span style={{ marginLeft: 'auto' }}><TypingIndicator /></span>}
+            {hasAgent && <span style={{ marginLeft: 'auto' }}><WorkingIndicator /></span>}
           </div>
           <ul className="files-list">
             {reviewPaths.map((path) => {
@@ -451,7 +451,7 @@ export default function ProjectPage() {
                   <div className="file-left">
                     <FileTypeBadge type={fileType} />
                     <span className={`review-badge${reviewData[path].agentActive ? ' agent-active' : ''}`}>in review</span>
-                    {(reviewData[path].typingThreads ?? 0) > 0 && <TypingIndicator />}
+                    {(reviewData[path].workingThreads ?? 0) > 0 && <WorkingIndicator />}
                     <span className="file-name">
                       <Link to={`/file/${qn}/${path}`}>{title || name}</Link>
                       <span className="file-subtitle">{title ? name : '\u00A0'}</span>

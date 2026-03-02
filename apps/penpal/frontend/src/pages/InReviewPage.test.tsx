@@ -17,7 +17,7 @@ vi.mock('../api', () => ({
         badgeColor: '#333',
         badgeBg: '#eee',
         agentActive: true,
-        typingThreads: 1,
+        workingThreads: 1,
         files: [
           { name: 'plan.md', path: 'thoughts/plan.md', project: 'ws/my-proj', projectPath: '/tmp', openThreads: 3, agentActive: true, fileType: 'plan', age: '1h ago' },
         ],

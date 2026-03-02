@@ -21,9 +21,9 @@ type Store struct {
 	changed    chan struct{} // closed on every Save, then replaced
 	changedMu  sync.Mutex
 	changeSeq  uint64 // monotonic counter incremented on each change
-	typingMu   sync.RWMutex
-	typing     map[string]time.Time // key: "project:path:threadId" -> when typing started
-	onTyping   func(project string) // called when typing state changes
+	workingMu  sync.RWMutex
+	working    map[string]time.Time // key: "project:path:threadId" -> when agent started working
+	onWorking  func(project string) // called when working state changes
 }
 
 // FileComments holds all comment threads for a single file.
@@ -91,7 +91,7 @@ func NewStore(c *cache.Cache, act *activity.Tracker) *Store {
 		activity:   act,
 		heartbeats: make(map[string]time.Time),
 		changed:    make(chan struct{}),
-		typing:     make(map[string]time.Time),
+		working:    make(map[string]time.Time),
 	}
 }
 
@@ -190,67 +190,66 @@ func (s *Store) IsProjectActive(projectName string) bool {
 	return false
 }
 
-// SetOnTyping sets a callback invoked when typing state changes.
-func (s *Store) SetOnTyping(fn func(project string)) {
-	s.typingMu.Lock()
-	defer s.typingMu.Unlock()
-	s.onTyping = fn
+// SetOnWorking sets a callback invoked when working state changes.
+func (s *Store) SetOnWorking(fn func(project string)) {
+	s.workingMu.Lock()
+	defer s.workingMu.Unlock()
+	s.onWorking = fn
 }
 
-// SetTyping marks a thread as having an agent actively composing a reply.
-func (s *Store) SetTyping(project, path, threadID string) {
+// SetWorking marks a thread as having an agent actively working on it.
+func (s *Store) SetWorking(project, path, threadID string) {
 	key := project + ":" + path + ":" + threadID
-	s.typingMu.Lock()
-	s.typing[key] = time.Now()
-	fn := s.onTyping
-	s.typingMu.Unlock()
+	s.workingMu.Lock()
+	s.working[key] = time.Now()
+	fn := s.onWorking
+	s.workingMu.Unlock()
 	if fn != nil {
 		fn(project)
 	}
 }
 
-// ClearTyping removes the typing indicator for a specific thread.
+// ClearWorking removes the working indicator for a specific thread.
 // Broadcasts a change event if the indicator was actually cleared.
-func (s *Store) ClearTyping(project, path, threadID string) {
+func (s *Store) ClearWorking(project, path, threadID string) {
 	key := project + ":" + path + ":" + threadID
-	s.typingMu.Lock()
-	_, cleared := s.typing[key]
-	delete(s.typing, key)
-	fn := s.onTyping
-	s.typingMu.Unlock()
+	s.workingMu.Lock()
+	_, cleared := s.working[key]
+	delete(s.working, key)
+	fn := s.onWorking
+	s.workingMu.Unlock()
 	if cleared && fn != nil {
 		fn(project)
 	}
 }
 
-// ClearProjectTyping removes all typing indicators for a project.
+// ClearProjectWorking removes all working indicators for a project.
 // Broadcasts a change event if any indicators were actually cleared.
-func (s *Store) ClearProjectTyping(project string) {
+func (s *Store) ClearProjectWorking(project string) {
 	prefix := project + ":"
-	s.typingMu.Lock()
+	s.workingMu.Lock()
 	cleared := false
-	for key := range s.typing {
+	for key := range s.working {
 		if strings.HasPrefix(key, prefix) {
-			delete(s.typing, key)
+			delete(s.working, key)
 			cleared = true
 		}
 	}
-	fn := s.onTyping
-	s.typingMu.Unlock()
+	fn := s.onWorking
+	s.workingMu.Unlock()
 	if cleared && fn != nil {
 		fn(project)
 	}
 }
 
-// TypingCount returns the number of threads with active typing indicators
-// for the given project and file path. Like IsTyping, indicators auto-expire
-// after 60 seconds.
-func (s *Store) TypingCount(project, path string) int {
+// WorkingCount returns the number of threads with active working indicators
+// for the given project and file path. Indicators auto-expire after 60 seconds.
+func (s *Store) WorkingCount(project, path string) int {
 	prefix := project + ":" + path + ":"
-	s.typingMu.RLock()
-	defer s.typingMu.RUnlock()
+	s.workingMu.RLock()
+	defer s.workingMu.RUnlock()
 	count := 0
-	for key, t := range s.typing {
+	for key, t := range s.working {
 		if strings.HasPrefix(key, prefix) && time.Since(t) < 60*time.Second {
 			count++
 		}
@@ -258,40 +257,40 @@ func (s *Store) TypingCount(project, path string) int {
 	return count
 }
 
-// IsTyping returns true if an agent is actively composing a reply to the given thread.
-// Typing state auto-expires after 60 seconds.
-func (s *Store) IsTyping(project, path, threadID string) bool {
+// IsWorking returns true if an agent is actively working on the given thread.
+// Working state auto-expires after 60 seconds.
+func (s *Store) IsWorking(project, path, threadID string) bool {
 	key := project + ":" + path + ":" + threadID
-	s.typingMu.RLock()
-	defer s.typingMu.RUnlock()
-	t, ok := s.typing[key]
+	s.workingMu.RLock()
+	defer s.workingMu.RUnlock()
+	t, ok := s.working[key]
 	if !ok {
 		return false
 	}
 	return time.Since(t) < 60*time.Second
 }
 
-// HasTypingEntry returns true if a typing entry exists for the given thread,
+// HasWorkingEntry returns true if a working entry exists for the given thread,
 // regardless of when it was set. Use this when the agent process is known to
-// be running—explicit cleanup (ClearTyping on reply, ClearProjectTyping on
+// be running—explicit cleanup (ClearWorking on reply, ClearProjectWorking on
 // exit) handles staleness.
-func (s *Store) HasTypingEntry(project, path, threadID string) bool {
+func (s *Store) HasWorkingEntry(project, path, threadID string) bool {
 	key := project + ":" + path + ":" + threadID
-	s.typingMu.RLock()
-	defer s.typingMu.RUnlock()
-	_, ok := s.typing[key]
+	s.workingMu.RLock()
+	defer s.workingMu.RUnlock()
+	_, ok := s.working[key]
 	return ok
 }
 
-// TypingCountNoExpiry returns the number of threads with typing indicators
+// WorkingCountNoExpiry returns the number of threads with working indicators
 // for the given project and file path, without checking the 60-second expiry.
 // Use this when the agent process is known to be running.
-func (s *Store) TypingCountNoExpiry(project, path string) int {
+func (s *Store) WorkingCountNoExpiry(project, path string) int {
 	prefix := project + ":" + path + ":"
-	s.typingMu.RLock()
-	defer s.typingMu.RUnlock()
+	s.workingMu.RLock()
+	defer s.workingMu.RUnlock()
 	count := 0
-	for key := range s.typing {
+	for key := range s.working {
 		if strings.HasPrefix(key, prefix) {
 			count++
 		}

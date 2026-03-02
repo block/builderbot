@@ -59,10 +59,10 @@ func (s *Server) handleAPIThreadAction(w http.ResponseWriter, r *http.Request) {
 
 // APIFileInReview extends FileInReview with agent activity status.
 type APIFileInReview struct {
-	FilePath      string `json:"filePath"`
-	OpenThreads   int    `json:"openThreads"`
-	AgentActive   bool   `json:"agentActive"`
-	TypingThreads int    `json:"typingThreads,omitempty"`
+	FilePath       string `json:"filePath"`
+	OpenThreads    int    `json:"openThreads"`
+	AgentActive    bool   `json:"agentActive"`
+	WorkingThreads int    `json:"workingThreads,omitempty"`
 }
 
 // handleAPIListReviews handles GET /api/reviews?project=X[&agent=true].
@@ -96,16 +96,16 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 	agentActive := s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running
 	result := make([]APIFileInReview, len(files))
 	for i, f := range files {
-		typingThreads := s.comments.TypingCount(projectName, f.FilePath)
-		if agentActive && typingThreads == 0 {
-			// Agent is running—typing entries survive beyond 60s timeout
-			typingThreads = s.comments.TypingCountNoExpiry(projectName, f.FilePath)
+		workingThreads := s.comments.WorkingCount(projectName, f.FilePath)
+		if agentActive && workingThreads == 0 {
+			// Agent is running—working entries survive beyond 60s timeout
+			workingThreads = s.comments.WorkingCountNoExpiry(projectName, f.FilePath)
 		}
 		result[i] = APIFileInReview{
-			FilePath:      f.FilePath,
-			OpenThreads:   f.OpenThreads,
-			AgentActive:   agentActive,
-			TypingThreads: typingThreads,
+			FilePath:       f.FilePath,
+			OpenThreads:    f.OpenThreads,
+			AgentActive:    agentActive,
+			WorkingThreads: workingThreads,
 		}
 	}
 
@@ -116,7 +116,7 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 // threadResponse wraps a Thread with ephemeral UI state.
 type threadResponse struct {
 	comments.Thread
-	AgentTyping bool `json:"agentTyping,omitempty"`
+	AgentWorking bool `json:"agentWorking,omitempty"`
 }
 
 // handleListThreads handles GET /api/threads?project=X&path=Y[&status=open][&agent=true].
@@ -173,11 +173,11 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 	var result []threadResponse
 	for _, t := range threads {
 		tr := threadResponse{Thread: t}
-		if s.comments.IsTyping(projectName, filePath, t.ID) {
-			tr.AgentTyping = true
-		} else if agentRunning && s.comments.HasTypingEntry(projectName, filePath, t.ID) {
+		if s.comments.IsWorking(projectName, filePath, t.ID) {
+			tr.AgentWorking = true
+		} else if agentRunning && s.comments.HasWorkingEntry(projectName, filePath, t.ID) {
 			// Agent is running—don't let the 60s timeout hide the indicator
-			tr.AgentTyping = true
+			tr.AgentWorking = true
 		}
 		result = append(result, tr)
 	}

@@ -134,10 +134,10 @@ describe('CommentsPanel', () => {
     expect(screen.getByText('Anchor text not found in document')).toBeDefined();
   });
 
-  it('renders agent typing indicator', () => {
-    const typingThread: ThreadResponse = { ...mockThread, agentTyping: true };
-    const { container } = renderPanel([typingThread]);
-    expect(container.querySelector('.thread-typing')).toBeDefined();
+  it('renders agent working indicator', () => {
+    const workingThread: ThreadResponse = { ...mockThread, agentWorking: true };
+    const { container } = renderPanel([workingThread]);
+    expect(container.querySelector('.thread-working')).toBeDefined();
   });
 
   it('renders agent status indicator when running', () => {

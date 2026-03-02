@@ -91,7 +91,7 @@ export interface Thread {
 }
 
 export interface ThreadResponse extends Thread {
-  agentTyping?: boolean;
+  agentWorking?: boolean;
 }
 
 export interface ThreadWithFile extends Thread {
@@ -102,7 +102,7 @@ export interface APIFileInReview {
   filePath: string;
   openThreads: number;
   agentActive: boolean;
-  typingThreads?: number;
+  workingThreads?: number;
 }
 
 export interface ReviewFileEntry {
@@ -113,7 +113,7 @@ export interface ReviewFileEntry {
   projectPath: string;
   openThreads: number;
   agentActive: boolean;
-  typingThreads?: number;
+  workingThreads?: number;
   fileType?: string;
   age?: string;
   source?: string;
@@ -131,7 +131,7 @@ export interface ReviewGroup {
   badgeColor?: string;
   badgeBg?: string;
   agentActive: boolean;
-  typingThreads?: number;
+  workingThreads?: number;
   files: ReviewFileEntry[];
 }
 

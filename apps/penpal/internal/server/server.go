@@ -70,7 +70,7 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 		})
 	}
 
-	cs.SetOnTyping(func(project string) {
+	cs.SetOnWorking(func(project string) {
 		w.Broadcast(watcher.Event{Type: watcher.EventCommentsChanged, Project: project})
 	})
 

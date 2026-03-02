@@ -446,11 +446,11 @@ function ThreadCard({
         </div>
       )}
 
-      {/* Typing indicator */}
-      {thread.agentTyping && (
-        <div className="thread-typing">
+      {/* Working indicator */}
+      {thread.agentWorking && (
+        <div className="thread-working">
           <span className="agent-dot" />
-          <span className="typing-dots">
+          <span className="working-dots">
             <span>.</span>
             <span>.</span>
             <span>.</span>

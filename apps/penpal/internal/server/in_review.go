@@ -10,34 +10,34 @@ import (
 
 // ReviewFileEntry is a single file within a review group.
 type ReviewFileEntry struct {
-	Name          string `json:"name"`
-	Title         string `json:"title,omitempty"`
-	Path          string `json:"path"`
-	Project       string `json:"project"`
-	ProjectPath   string `json:"projectPath"`
-	OpenThreads   int    `json:"openThreads"`
-	AgentActive   bool   `json:"agentActive"`
-	TypingThreads int    `json:"typingThreads,omitempty"`
-	FileType      string `json:"fileType,omitempty"`
-	Age           string `json:"age,omitempty"`
-	Source        string `json:"source,omitempty"`
-	SourceType    string `json:"sourceType,omitempty"`
+	Name           string `json:"name"`
+	Title          string `json:"title,omitempty"`
+	Path           string `json:"path"`
+	Project        string `json:"project"`
+	ProjectPath    string `json:"projectPath"`
+	OpenThreads    int    `json:"openThreads"`
+	AgentActive    bool   `json:"agentActive"`
+	WorkingThreads int    `json:"workingThreads,omitempty"`
+	FileType       string `json:"fileType,omitempty"`
+	Age            string `json:"age,omitempty"`
+	Source         string `json:"source,omitempty"`
+	SourceType     string `json:"sourceType,omitempty"`
 }
 
 // ReviewGroup groups files in review by project and source, with breadcrumb info.
 type ReviewGroup struct {
-	Workspace     string            `json:"workspace,omitempty"`
-	WorkspaceURL  string            `json:"workspaceURL,omitempty"`
-	ProjectName   string            `json:"projectName"`
-	ProjectQN     string            `json:"projectQN"`
-	SourceName    string            `json:"sourceName"`
-	SourceAnchor  string            `json:"sourceAnchor"`
-	BadgeText     string            `json:"badgeText,omitempty"`
-	BadgeColor    string            `json:"badgeColor,omitempty"`
-	BadgeBg       string            `json:"badgeBg,omitempty"`
-	AgentActive   bool              `json:"agentActive"`
-	TypingThreads int               `json:"typingThreads,omitempty"`
-	Files         []ReviewFileEntry `json:"files"`
+	Workspace      string            `json:"workspace,omitempty"`
+	WorkspaceURL   string            `json:"workspaceURL,omitempty"`
+	ProjectName    string            `json:"projectName"`
+	ProjectQN      string            `json:"projectQN"`
+	SourceName     string            `json:"sourceName"`
+	SourceAnchor   string            `json:"sourceAnchor"`
+	BadgeText      string            `json:"badgeText,omitempty"`
+	BadgeColor     string            `json:"badgeColor,omitempty"`
+	BadgeBg        string            `json:"badgeBg,omitempty"`
+	AgentActive    bool              `json:"agentActive"`
+	WorkingThreads int               `json:"workingThreads,omitempty"`
+	Files          []ReviewFileEntry `json:"files"`
 }
 
 func (s *Server) handleAPIInReview(w http.ResponseWriter, r *http.Request) {
@@ -73,9 +73,9 @@ func (s *Server) listAllReviewGroups() []ReviewGroup {
 		}
 
 		for _, f := range reviews {
-			typingThreads := s.comments.TypingCount(qn, f.FilePath)
-			if agentActive && typingThreads == 0 {
-				typingThreads = s.comments.TypingCountNoExpiry(qn, f.FilePath)
+			workingThreads := s.comments.WorkingCount(qn, f.FilePath)
+			if agentActive && workingThreads == 0 {
+				workingThreads = s.comments.WorkingCountNoExpiry(qn, f.FilePath)
 			}
 
 			// Look up source from cache
@@ -130,20 +130,20 @@ func (s *Server) listAllReviewGroups() []ReviewGroup {
 			name := filepath.Base(f.FilePath)
 
 			g.Files = append(g.Files, ReviewFileEntry{
-				Name:          name,
-				Title:         title,
-				Path:          f.FilePath,
-				Project:       qn,
-				ProjectPath:   p.Path,
-				OpenThreads:   f.OpenThreads,
-				AgentActive:   agentActive,
-				TypingThreads: typingThreads,
-				FileType:      fileType,
-				Age:           age,
-				Source:        sourceName,
-				SourceType:    sourceType,
+				Name:           name,
+				Title:          title,
+				Path:           f.FilePath,
+				Project:        qn,
+				ProjectPath:    p.Path,
+				OpenThreads:    f.OpenThreads,
+				AgentActive:    agentActive,
+				WorkingThreads: workingThreads,
+				FileType:       fileType,
+				Age:            age,
+				Source:         sourceName,
+				SourceType:     sourceType,
 			})
-			g.TypingThreads += typingThreads
+			g.WorkingThreads += workingThreads
 		}
 	}
 

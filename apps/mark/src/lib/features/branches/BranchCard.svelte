@@ -2114,7 +2114,7 @@
                         ? 'Push failed — click for details'
                         : prState === 'created' && hasUnpushed
                           ? optionHeld
-                            ? 'Force push to remote (⌥ held)'
+                            ? 'Force push to remote'
                             : 'Push changes to remote'
                           : prState === 'created'
                             ? 'View PR'
@@ -2123,7 +2123,7 @@
                               : prState === 'creating'
                                 ? 'Creating PR… (click to view)'
                                 : optionHeld
-                                  ? 'Create draft PR (⌥ held)'
+                                  ? 'Create draft PR'
                                   : 'Create PR'}
                   >
                     {#if pushState === 'pushing'}

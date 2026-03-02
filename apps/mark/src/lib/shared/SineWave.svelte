@@ -29,9 +29,10 @@
 <style>
   .sine-wave-container {
     overflow: hidden;
-    clip-path: inset(0);
     display: inline-flex;
     align-items: center;
+    -webkit-mask-image: linear-gradient(to right, transparent, black 12%, black 88%, transparent);
+    mask-image: linear-gradient(to right, transparent, black 12%, black 88%, transparent);
   }
 
   .sine-wave {

@@ -64,7 +64,7 @@ export default function Layout() {
 
   const refreshReviewCount = useCallback(() => {
     api.getInReview().then((groups) => {
-      const count = groups.reduce((sum, g) => sum + g.files.length, 0);
+      const count = groups.reduce((sum, g) => sum + (g.files?.length ?? 0), 0);
       setReviewCount(count);
     }).catch(() => {});
   }, []);

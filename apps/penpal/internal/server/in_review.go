@@ -118,6 +118,7 @@ func (s *Server) listAllReviewGroups() []ReviewGroup {
 					BadgeColor:   badgeColor,
 					BadgeBg:      badgeBg,
 					AgentActive:  agentActive,
+					Files:        make([]ReviewFileEntry, 0),
 				}
 				if p.WorkspaceName != "" {
 					g.WorkspaceURL = "/workspace/" + p.WorkspaceName

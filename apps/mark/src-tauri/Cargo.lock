@@ -16,6 +16,7 @@ dependencies = [
  "dirs",
  "git-diff",
  "log",
+ "regex",
  "reqwest",
  "rmcp",
  "rusqlite",

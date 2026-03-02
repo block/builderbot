@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
-use super::registry::ActionRegistry;
+use super::registry::{ActionRegistry, RunPhase};
 
 /// Event emitted when action output is produced
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +98,11 @@ impl ExecutionListener for TauriExecutionListener {
                 stream,
                 ..
             } => {
+                // Feed output lines into the shared buffer for regex matching.
+                for line in chunk.lines() {
+                    self.registry.append_output(&execution_id, line);
+                }
+
                 let _ = self.app.emit(
                     "action_output",
                     ActionOutputEvent {
@@ -155,4 +160,23 @@ impl ExecutionListener for TauriExecutionListener {
             }
         }
     }
+}
+
+// =============================================================================
+// Run-phase change event
+// =============================================================================
+
+/// Event emitted when an action's run phase changes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPhaseChangedEvent {
+    pub execution_id: String,
+    pub branch_id: String,
+    pub action_name: String,
+    pub phase: RunPhase,
+}
+
+/// Emit an `action:run-phase-changed` event to the frontend.
+pub fn emit_run_phase_changed(app_handle: &AppHandle, event: RunPhaseChangedEvent) {
+    let _ = app_handle.emit("action:run-phase-changed", event);
 }

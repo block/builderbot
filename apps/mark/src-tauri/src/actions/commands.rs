@@ -2,16 +2,19 @@
 
 use anyhow::Result;
 use builderbot_actions::{
-    ActionDetector, ActionExecutor, ActionMetadata, FileExplorationMode, SuggestedAction,
+    ActionDetector, ActionExecutor, ActionMetadata, ActionType, FileExplorationMode,
+    RunDetectionMode, SuggestedAction,
 };
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
+use tokio::sync::watch;
 
 use crate::store::Store;
 
 use super::ai_provider::AcpAiProvider;
-use super::events::TauriExecutionListener;
-use super::registry::{ActionRegistry, RunningActionInfo};
+use super::events::{emit_run_phase_changed, RunPhaseChangedEvent, TauriExecutionListener};
+use super::registry::{ActionRegistry, RunPhase, RunningActionInfo};
+use super::run_detector;
 
 /// Helper to get store from Mutex<Option<Arc<Store>>>
 fn get_store(store: &State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
@@ -191,13 +194,15 @@ pub async fn run_branch_action(
         workdir.path
     };
 
+    let reg = registry.inner().clone();
+
     // Create event listener
     let listener = Arc::new(TauriExecutionListener::new(
-        app,
+        app.clone(),
         branch_id.clone(),
         action_id.clone(),
         action.name.clone(),
-        registry.inner().clone(),
+        reg.clone(),
     ));
 
     // Create metadata
@@ -208,10 +213,77 @@ pub async fn run_branch_action(
     };
 
     // Execute the action
-    executor
+    let execution_id = executor
         .execute(action.command, working_dir, metadata, listener)
         .await
-        .map_err(|e| format!("Failed to execute action: {e}"))
+        .map_err(|e| format!("Failed to execute action: {e}"))?;
+
+    // --- Run detection wiring (only for Run actions) ---
+    if matches!(action.action_type, ActionType::Run) {
+        // Ensure the output buffer for this execution_id exists so the
+        // regex matcher can obtain a reference to it.
+        reg.register_output_buffer(&execution_id);
+
+        let detection_mode = action.run_detection_mode.clone();
+
+        match detection_mode {
+            Some(RunDetectionMode::EndpointRegex { pattern }) => {
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                reg.store_cancel_sender(&execution_id, cancel_tx);
+                run_detector::spawn_regex_matcher(
+                    app,
+                    reg,
+                    execution_id.clone(),
+                    branch_id,
+                    action.name.clone(),
+                    pattern,
+                    true,
+                    cancel_rx,
+                );
+            }
+            Some(RunDetectionMode::RunningRegex { pattern }) => {
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                reg.store_cancel_sender(&execution_id, cancel_tx);
+                run_detector::spawn_regex_matcher(
+                    app,
+                    reg,
+                    execution_id.clone(),
+                    branch_id,
+                    action.name.clone(),
+                    pattern,
+                    false,
+                    cancel_rx,
+                );
+            }
+            Some(RunDetectionMode::NoDetection) => {
+                reg.set_run_phase(&execution_id, RunPhase::NoDetection);
+                emit_run_phase_changed(
+                    &app,
+                    RunPhaseChangedEvent {
+                        execution_id: execution_id.clone(),
+                        branch_id,
+                        action_name: action.name.clone(),
+                        phase: RunPhase::NoDetection,
+                    },
+                );
+            }
+            Some(RunDetectionMode::Autodetect) | None => {
+                // AI autodetect will be implemented in Phase 3.
+                reg.set_run_phase(&execution_id, RunPhase::AutodetectPending);
+                emit_run_phase_changed(
+                    &app,
+                    RunPhaseChangedEvent {
+                        execution_id: execution_id.clone(),
+                        branch_id,
+                        action_name: action.name.clone(),
+                        phase: RunPhase::AutodetectPending,
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(execution_id)
 }
 
 /// Stop a running action
@@ -405,4 +477,36 @@ pub async fn run_prerun_actions(
     }
 
     Ok(execution_ids)
+}
+
+// =============================================================================
+// Run detection commands
+// =============================================================================
+
+/// Get the current run phase for an execution.
+#[tauri::command]
+pub async fn get_run_phase(
+    registry: State<'_, Arc<ActionRegistry>>,
+    execution_id: String,
+) -> Result<Option<RunPhase>, String> {
+    Ok(registry.get_run_phase(&execution_id))
+}
+
+/// Update the run detection mode for a repo action.
+#[tauri::command]
+pub async fn update_run_detection_mode(
+    store: State<'_, Mutex<Option<Arc<Store>>>>,
+    action_id: String,
+    mode: RunDetectionMode,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    let mut action = store
+        .get_repo_action(&action_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Action not found".to_string())?;
+    action.run_detection_mode = Some(mode);
+    store
+        .update_repo_action(&action)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }

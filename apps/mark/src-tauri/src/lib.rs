@@ -2751,6 +2751,8 @@ pub fn run() {
             actions::commands::get_action_output_buffer,
             actions::commands::clear_action_execution,
             actions::commands::run_prerun_actions,
+            actions::commands::get_run_phase,
+            actions::commands::update_run_detection_mode,
             // Diff
             get_diff_files,
             get_file_diff,

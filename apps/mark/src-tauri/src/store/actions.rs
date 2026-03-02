@@ -92,7 +92,7 @@ impl Store {
         let run_detection_mode_json = action
             .run_detection_mode
             .as_ref()
-            .map(|m| serde_json::to_string(m))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| StoreError(format!("Failed to serialize run_detection_mode: {e}")))?;
         conn.execute(
@@ -141,7 +141,7 @@ impl Store {
         let run_detection_mode_json = action
             .run_detection_mode
             .as_ref()
-            .map(|m| serde_json::to_string(m))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| StoreError(format!("Failed to serialize run_detection_mode: {e}")))?;
         conn.execute(

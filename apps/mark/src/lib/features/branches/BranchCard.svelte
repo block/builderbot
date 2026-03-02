@@ -833,11 +833,20 @@
           });
         }
 
-        // Query initial run phase for each running action
+        // Query initial run phase for each running action.
+        // On app restart, RunPhase state is ephemeral and lost — default
+        // to Running so the UI shows a sine wave for actions that are still
+        // alive but whose detection tasks are gone.
         try {
           const phase = await getRunPhase(info.executionId);
           if (phase) {
             runPhases.set(info.executionId, phase);
+          } else {
+            // No persisted phase — the action is running but detection state
+            // was lost (app restart). Default to Running with no endpoint so
+            // the sine wave is shown. This is safe for non-Run actions too
+            // since phases are only rendered for Run-type action buttons.
+            runPhases.set(info.executionId, { type: 'running', endpoint: null });
           }
         } catch {
           // Phase not available for this execution (e.g., not a run action)

@@ -3,6 +3,12 @@ name: Penpal Release
 on:
   push:
     tags: ['penpal/v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build only — skip release creation and Homebrew trigger'
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,13 +30,14 @@ jobs:
           - arch: x86_64
             target: x86_64-apple-darwin
             goarch: amd64
-            runner: macos-13
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       # Validate that the git tag version matches Cargo.toml to prevent
       # mismatched artifact names vs Homebrew URLs (see package.sh line 9).
       - name: Validate tag matches Cargo.toml version
+        if: github.event_name == 'push'
         run: |
           TAG_VERSION="${GITHUB_REF#refs/tags/penpal/v}"
           CARGO_VERSION=$(grep '^version' apps/penpal/frontend/src-tauri/Cargo.toml | head -1 | sed 's/version = "//;s/"//')
@@ -93,6 +100,7 @@ jobs:
   release:
     name: Create Release
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -128,13 +136,13 @@ jobs:
           TAG_NAME: penpal/v${{ steps.version.outputs.version }}
         run: |
           PREV_TAG=$(git describe --tags --match 'penpal/v*' --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          NOTES_ARGS="--generate-notes"
+          ARGS=(--generate-notes)
           if [ -n "$PREV_TAG" ]; then
-            NOTES_ARGS="$NOTES_ARGS --notes-start-tag $PREV_TAG"
+            ARGS+=(--notes-start-tag "$PREV_TAG")
           fi
           gh release create "$TAG_NAME" \
             --title "Penpal v${VERSION}" \
-            $NOTES_ARGS \
+            "${ARGS[@]}" \
             artifacts/*.zip
 
       # Trigger cask bump on block/homebrew-tap.

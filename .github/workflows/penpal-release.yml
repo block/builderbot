@@ -3,11 +3,6 @@ name: Penpal Release
 on:
   push:
     tags: ['penpal/v*']
-  workflow_dispatch:
-
-permissions:
-  contents: write
-  actions: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,16 +10,21 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.arch }})
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: arm64
             target: aarch64-apple-darwin
             goarch: arm64
+            runner: macos-latest
           - arch: x86_64
             target: x86_64-apple-darwin
             goarch: amd64
+            runner: macos-13
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -37,15 +37,10 @@ jobs:
           workspaces: apps/penpal/frontend/src-tauri
           key: ${{ matrix.target }}
 
-      # Add cross-compilation target if needed
-      - name: Add Rust target
-        if: matrix.arch == 'x86_64'
-        run: rustup target add ${{ matrix.target }}
-
       # Enable pnpm via corepack
       - run: corepack enable pnpm
 
-      # Install frontend dependencies
+      # Install dependencies
       - name: Install dependencies
         run: |
           pnpm install --frozen-lockfile
@@ -66,7 +61,7 @@ jobs:
       # Build frontend (architecture-independent)
       - name: Build frontend
         working-directory: apps/penpal/frontend
-        run: pnpm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 pnpm run build
+        run: VITE_BASE=/ VITE_API_URL=http://localhost:8080 pnpm run build
 
       # Build Tauri app for the target architecture
       - name: Build Tauri app
@@ -88,6 +83,9 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -122,7 +120,9 @@ jobs:
             $NOTES_ARGS \
             artifacts/*.zip
 
-      # Trigger cask bump on block/homebrew-tap
+      # Trigger cask bump on block/homebrew-tap.
+      # Uses GITHUB_TOKEN with actions:write — block org allows cross-repo
+      # workflow_dispatch (same pattern as block/qrgo → block/homebrew-tap).
       - name: Trigger Homebrew cask bump
         env:
           GH_TOKEN: ${{ github.token }}

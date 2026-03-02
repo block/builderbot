@@ -216,3 +216,14 @@ export interface PatchThreadReq {
   status: 'resolved' | 'open';
   resolvedBy?: string;
 }
+
+export interface InstallComponentStatus {
+  installed: boolean;
+  path?: string;
+  error?: string;
+}
+
+export interface InstallToolsStatus {
+  cli: InstallComponentStatus;
+  plugin: InstallComponentStatus;
+}

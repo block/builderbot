@@ -8,6 +8,7 @@ vi.mock('./api', () => ({
   isDesktopApp: false,
   api: {
     listProjects: vi.fn().mockResolvedValue([]),
+    getRecentFiles: vi.fn().mockResolvedValue([]),
     getInReview: vi.fn().mockResolvedValue([]),
   },
 }));
@@ -19,7 +20,7 @@ vi.mock('./hooks/useSSE', () => ({
 describe('App', () => {
   it('renders the layout', async () => {
     render(<App />);
-    // The router redirects / to /workspace/default
+    // With no projects, IndexRedirect falls back to /recent
     expect(await screen.findByTestId('app-layout')).toBeInTheDocument();
   });
 

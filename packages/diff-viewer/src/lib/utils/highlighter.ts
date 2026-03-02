@@ -11,7 +11,14 @@
  * with the same exports. No other files need to change.
  */
 
-import { createHighlighter, type Highlighter, type ThemedToken, type BundledLanguage } from 'shiki';
+import {
+  createHighlighter,
+  type Highlighter,
+  type ThemedToken,
+  type BundledLanguage,
+  type ThemeRegistrationRaw,
+  type ThemeRegistrationResolved,
+} from 'shiki';
 
 /** Compute relative luminance of a hex color (WCAG formula). */
 function luminance(hex: string): number {
@@ -148,8 +155,7 @@ export function isLightTheme(themeName: string): boolean {
 }
 
 // Static theme imports (Vite can't handle dynamic imports for these)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const themeImports: Record<SyntaxThemeName, () => Promise<any>> = {
+const themeImports: Record<SyntaxThemeName, () => Promise<{ default: ThemeRegistrationRaw }>> = {
   andromeeda: () => import('shiki/themes/andromeeda.mjs'),
   'aurora-x': () => import('shiki/themes/aurora-x.mjs'),
   'ayu-dark': () => import('shiki/themes/ayu-dark.mjs'),
@@ -557,7 +563,10 @@ interface ThemeSetting {
  * Extract the comment color from a theme's token settings.
  * Falls back to the provided fallback color if not found.
  */
-function extractCommentColor(settings: ThemeSetting[] | undefined, fallback: string): string {
+function extractCommentColor(
+  settings: ReadonlyArray<ThemeSetting> | undefined,
+  fallback: string
+): string {
   if (!settings) return fallback;
 
   for (const setting of settings) {
@@ -630,20 +639,16 @@ function extractGitColors(colors: Record<string, string> | undefined): {
 /**
  * Extract theme info from a loaded Shiki theme.
  */
-function extractThemeInfo(
-  themeName: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  theme: any
-): HighlighterTheme {
+function extractThemeInfo(themeName: string, theme: ThemeRegistrationResolved): HighlighterTheme {
   const bg = theme.bg || '#1e1e1e';
   const fg = theme.fg || '#d4d4d4';
-  const gitColors = extractGitColors(theme.colors as Record<string, string> | undefined);
+  const gitColors = extractGitColors(theme.colors);
   return {
     name: themeName,
     isDark: luminance(bg) < 0.5,
     bg,
     fg,
-    comment: extractCommentColor(theme.settings as ThemeSetting[], fg),
+    comment: extractCommentColor(theme.settings, fg),
     ...gitColors,
   };
 }
@@ -825,7 +830,8 @@ export async function setSyntaxTheme(themeName: SyntaxThemeName): Promise<void> 
   if (!loadedThemes.includes(themeName)) {
     const themeImport = themeImports[themeName];
     if (themeImport) {
-      await highlighter.loadTheme(themeImport());
+      const { default: themeDefinition } = await themeImport();
+      await highlighter.loadTheme(themeDefinition);
     }
   }
 

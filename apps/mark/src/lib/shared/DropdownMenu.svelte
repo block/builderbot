@@ -12,11 +12,12 @@
 <script lang="ts">
   import { EllipsisVertical } from 'lucide-svelte';
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type IconComponent = typeof EllipsisVertical;
+
   export interface MenuItem {
     label: string;
     /** A Svelte component (e.g. a lucide-svelte icon) rendered at size 14. */
-    icon?: any;
+    icon?: IconComponent;
     danger?: boolean;
     action: () => void;
   }

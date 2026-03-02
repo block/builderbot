@@ -1,7 +1,8 @@
 <script lang="ts" generics="T extends string">
+  type IconComponent = typeof import('lucide-svelte').Monitor;
+
   interface Props {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    options: { value: T; label: string; description?: string; icon?: any }[];
+    options: { value: T; label: string; description?: string; icon?: IconComponent }[];
     value: T;
     disabled?: boolean;
   }

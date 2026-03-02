@@ -212,6 +212,10 @@ pub async fn run_branch_action(
         auto_commit: action.auto_commit,
     };
 
+    // Clone values needed after execute() moves them.
+    let command_for_detection = action.command.clone();
+    let working_dir_for_detection = working_dir.clone();
+
     // Execute the action
     let execution_id = executor
         .execute(action.command, working_dir, metadata, listener)
@@ -268,16 +272,30 @@ pub async fn run_branch_action(
                 );
             }
             Some(RunDetectionMode::Autodetect) | None => {
-                // AI autodetect will be implemented in Phase 3.
                 reg.set_run_phase(&execution_id, RunPhase::AutodetectPending);
                 emit_run_phase_changed(
                     &app,
                     RunPhaseChangedEvent {
                         execution_id: execution_id.clone(),
-                        branch_id,
+                        branch_id: branch_id.clone(),
                         action_name: action.name.clone(),
                         phase: RunPhase::AutodetectPending,
                     },
+                );
+
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                reg.store_cancel_sender(&execution_id, cancel_tx);
+                run_detector::spawn_autodetect_poller(
+                    app,
+                    store,
+                    reg,
+                    execution_id.clone(),
+                    branch_id,
+                    action_id,
+                    action.name.clone(),
+                    command_for_detection,
+                    std::path::PathBuf::from(&working_dir_for_detection),
+                    cancel_rx,
                 );
             }
         }

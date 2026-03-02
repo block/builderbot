@@ -202,27 +202,23 @@ export default function Layout() {
   }, []);
 
   // On startup, check install status to decide whether to show the modal.
-  // We use "penpal-cli-tools-installed" in localStorage — its value is the
-  // build ID that last successfully installed/updated tools.
-  //
-  // - Tools installed + key matches BUILD_ID → current, don't show
-  // - Tools installed + key missing/mismatched → outdated, always show
-  // - No tools + dismissed key matches BUILD_ID → don't show
-  // - No tools + dismissed key missing/mismatched → show (first-time install offer)
+  // - Not yet dismissed this build + tools present → show (update prompt, nag until updated)
+  // - Not yet dismissed this build + no tools → show (first-time install offer)
+  // - Already dismissed this build → don't show
   const [toolsInstalled, setToolsInstalled] = useState(false);
   useEffect(() => {
     if (!isDesktopApp) return;
-    const installedKey = 'penpal-cli-tools-installed';
-    const dismissedKey = 'penpal-cli-tools-dismissed';
+    const dismissKey = `penpal-install-dismissed-${__BUILD_ID__}`;
     api.checkInstallStatus()
       .then((status) => {
         const hasTools = status.cli.installed || status.plugin.installed;
         setToolsInstalled(hasTools);
-        if (hasTools) {
-          if (localStorage.getItem(installedKey) !== __BUILD_ID__) {
-            setShowInstallModal(true);
-          }
-        } else if (localStorage.getItem(dismissedKey) !== __BUILD_ID__) {
+        // Show modal unless already dismissed for this build.
+        // The dismiss key is set after a successful install/update, or when
+        // the user opts out with no tools installed.  When tools are present
+        // but outdated and the user closes without updating, the key is NOT
+        // written — so they'll be prompted again on next launch.
+        if (!localStorage.getItem(dismissKey)) {
           setShowInstallModal(true);
         }
       })
@@ -230,17 +226,13 @@ export default function Layout() {
   }, []);
 
   function handleInstallModalClose(installed: boolean) {
-    if (installed) {
-      // Tools successfully installed/updated — record this build as current
-      localStorage.setItem('penpal-cli-tools-installed', __BUILD_ID__);
-    } else if (!toolsInstalled) {
-      // User opted out with no tools installed — dismiss for this build
-      localStorage.setItem('penpal-cli-tools-dismissed', __BUILD_ID__);
+    if (installed || !toolsInstalled) {
+      // Persist dismiss: tools are up to date, or user opted out with nothing installed
+      localStorage.setItem(`penpal-install-dismissed-${__BUILD_ID__}`, '1');
     }
-    // Tools exist but user clicked "Not Now" without updating → write nothing,
-    // they'll be prompted again on next launch.
     setShowInstallModal(false);
   }
+
 
   // Keyboard shortcuts for back/forward in browser mode
   useEffect(() => {

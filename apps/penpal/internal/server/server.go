@@ -714,7 +714,7 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 	cachedFiles := s.cache.ProjectFiles(qualifiedName)
 	fileGroups := buildFileGroups(project, cachedFiles)
 
-	var result []APIFileGroupView
+	result := make([]APIFileGroupView, 0, len(fileGroups))
 	for _, g := range fileGroups {
 		apiGroup := APIFileGroupView{
 			Name:       g.Name,
@@ -724,6 +724,7 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 			BadgeText:  g.BadgeText,
 			BadgeColor: g.BadgeColor,
 			BadgeBg:    g.BadgeBg,
+			Files:      make([]APIFile, 0, len(g.Files)),
 		}
 		for _, f := range g.Files {
 			apiGroup.Files = append(apiGroup.Files, APIFile{

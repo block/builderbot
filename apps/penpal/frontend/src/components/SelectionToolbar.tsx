@@ -38,23 +38,25 @@ function computeAnchor(
     startLine: 0,
   };
 
-  const startLine = findSourceLine(sel.anchorNode!, contentEl);
-  const endLine = findSourceLine(sel.focusNode!, contentEl);
+  // Use range.startContainer/endContainer (always document order) instead of
+  // sel.anchorNode/focusNode, which swap for backwards selections.
+  const range = sel.getRangeAt(0);
+  const startLine = findSourceLine(range.startContainer, contentEl);
+  const endLine = findSourceLine(range.endContainer, contentEl);
 
   if (startLine > 0) anchor.startLine = startLine;
 
   // Compute occurrence index within the block
   let occurrenceIndex = 0;
   let blockEl: HTMLElement | null =
-    sel.anchorNode!.nodeType === 3
-      ? (sel.anchorNode as Text).parentElement
-      : (sel.anchorNode as HTMLElement);
+    range.startContainer.nodeType === 3
+      ? (range.startContainer as Text).parentElement
+      : (range.startContainer as HTMLElement);
   while (blockEl && blockEl !== contentEl && !blockEl.hasAttribute?.('data-source-line')) {
     blockEl = blockEl.parentElement;
   }
   if (blockEl && blockEl !== contentEl) {
     try {
-      const range = sel.getRangeAt(0);
       const preRange = document.createRange();
       preRange.setStart(blockEl, 0);
       preRange.setEnd(range.startContainer, range.startOffset);
@@ -110,7 +112,7 @@ function computeAnchor(
   // Build heading path
   if (contentEl) {
     let headings: string[] = [];
-    let el: HTMLElement | null = blockEl || (sel.anchorNode!.nodeType === 3 ? (sel.anchorNode as Text).parentElement : (sel.anchorNode as HTMLElement));
+    let el: HTMLElement | null = blockEl || (range.startContainer.nodeType === 3 ? (range.startContainer as Text).parentElement : (range.startContainer as HTMLElement));
     // Walk backwards through siblings to find preceding headings
     while (el && el !== contentEl) {
       el = el.previousElementSibling as HTMLElement | null;

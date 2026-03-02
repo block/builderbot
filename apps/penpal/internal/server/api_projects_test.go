@@ -89,6 +89,31 @@ func TestAPIProjectFiles_NotFound(t *testing.T) {
 	}
 }
 
+func TestAPIProjectFiles_NoFilesReturnsEmptyArray(t *testing.T) {
+	// Regression: Go nil slices encode as JSON null. When a project has no
+	// files, the response must be [] not null, or the frontend crashes.
+	s, c, _ := testServer(t)
+
+	dir := t.TempDir()
+	seedProject(c, "empty-proj", dir, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/project/empty-proj", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var groups []APIFileGroupView
+	if err := json.Unmarshal(rec.Body.Bytes(), &groups); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+	if groups == nil {
+		t.Error("expected [] but got null: nil slice would crash frontend accessing groups.length")
+	}
+}
+
 func TestAPIProjectInfo_ReturnsInfo(t *testing.T) {
 	s, c, _ := testServer(t)
 

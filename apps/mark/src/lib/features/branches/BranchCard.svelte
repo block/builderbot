@@ -1869,9 +1869,21 @@
                     title="Copy endpoint: {phase.endpoint}"
                   >
                     {#if execution && endpointCopied[execution.executionId]}
-                      <Check size={12} />
+                      <span
+                        class="copy-icon-wrapper"
+                        in:fade={{ duration: 150 }}
+                        out:fade={{ duration: 150 }}
+                      >
+                        <Check size={12} />
+                      </span>
                     {:else}
-                      <Copy size={12} />
+                      <span
+                        class="copy-icon-wrapper"
+                        in:fade={{ duration: 150 }}
+                        out:fade={{ duration: 150 }}
+                      >
+                        <Copy size={12} />
+                      </span>
                     {/if}
                   </button>
                 </div>
@@ -2601,6 +2613,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    position: relative;
     width: 28px;
     height: 28px;
     padding: 0;
@@ -2610,6 +2623,13 @@
     color: var(--text-muted);
     cursor: pointer;
     transition: all 0.15s ease;
+  }
+
+  .copy-icon-wrapper {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .primary-action-pill-copy:hover {

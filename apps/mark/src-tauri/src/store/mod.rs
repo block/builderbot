@@ -1,9 +1,9 @@
 //! SQLite storage for Mark.
 //!
-//! Fresh schema — no migrations. A `schema_version` table tracks
-//! compatibility. If the database is missing that table or has an
-//! incompatible version, it is deleted and recreated after user
-//! confirmation.
+//! A `schema_version` table tracks compatibility. Databases within the
+//! migratable range ([`MIN_MIGRATABLE_VERSION`]..=[`SCHEMA_VERSION`]) are
+//! upgraded incrementally in [`Store::init_schema`]. Older databases trigger
+//! a reset-and-recreate dialog.
 //!
 //! Tables: schema_version, projects, project_repos, branches, workdirs, commits,
 //! sessions, session_messages, notes, project_notes, reviews, action_contexts, repo_actions.
@@ -60,9 +60,20 @@ impl From<rusqlite::Error> for StoreError {
 
 /// The schema version written by this build.
 ///
-/// Bump this whenever the schema changes in an incompatible way.
+/// Bump this whenever the schema changes.
 /// Many app versions may share the same schema version.
 pub const SCHEMA_VERSION: i64 = 15;
+
+/// Oldest schema version we can migrate forward from.
+///
+/// Databases with a version in `MIN_MIGRATABLE_VERSION..SCHEMA_VERSION` are
+/// upgraded incrementally by [`Store::init_schema`]. Databases older than
+/// this require a full wipe (the user sees a reset dialog).
+///
+/// When adding a new migration, keep this value unchanged. Only bump it when
+/// a migration is too destructive to express incrementally (e.g. a table
+/// redesign) — in that case set it equal to the new `SCHEMA_VERSION`.
+pub const MIN_MIGRATABLE_VERSION: i64 = 14;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -87,9 +98,11 @@ pub enum DbCompatibility {
 
 /// Check whether an existing database file is compatible with this build.
 ///
-/// Returns [`DbCompatibility::Ok`] if the file doesn't exist (fresh DB) or has a
-/// matching schema version. Returns [`DbCompatibility::NeedsReset`] or
-/// [`DbCompatibility::TooNew`] when the schema version doesn't match.
+/// Returns [`DbCompatibility::Ok`] if the file doesn't exist (fresh DB),
+/// has a matching schema version, or has a version within the migratable
+/// range ([`MIN_MIGRATABLE_VERSION`]..`SCHEMA_VERSION`). Returns
+/// [`DbCompatibility::NeedsReset`] for older versions or
+/// [`DbCompatibility::TooNew`] for newer ones.
 ///
 /// This opens a temporary read-only connection and closes it before
 /// returning — it does **not** create a `Store`.
@@ -134,6 +147,10 @@ pub fn check_db_compatibility(path: &Path) -> Result<DbCompatibility, String> {
 
     if version > SCHEMA_VERSION {
         Ok(DbCompatibility::TooNew { db_app_version })
+    } else if version >= MIN_MIGRATABLE_VERSION {
+        // We have incremental migrations for this range — let Store::new()
+        // apply them.
+        Ok(DbCompatibility::Ok)
     } else {
         Ok(DbCompatibility::NeedsReset { db_app_version })
     }

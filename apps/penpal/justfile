@@ -172,6 +172,12 @@ release version:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    if [ "$current_branch" != "main" ]; then
+        echo "Error: release must be run from the main branch (currently on '$current_branch')" >&2
+        exit 1
+    fi
+
     git add frontend/src-tauri/Cargo.toml frontend/package.json CHANGELOG.md
     git commit -m "release: penpal v{{version}}"
     git tag "penpal/v{{version}}"

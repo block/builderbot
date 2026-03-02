@@ -1,0 +1,162 @@
+name: Penpal Release
+
+on:
+  push:
+    tags: ['penpal/v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build only — skip release creation and Homebrew trigger'
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+            goarch: arm64
+            runner: macos-latest
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            goarch: amd64
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # Validate that the git tag version matches Cargo.toml to prevent
+      # mismatched artifact names vs Homebrew URLs (see package.sh line 9).
+      - name: Validate tag matches Cargo.toml version
+        if: github.event_name == 'push'
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/penpal/v}"
+          CARGO_VERSION=$(grep '^version' apps/penpal/frontend/src-tauri/Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+
+      # Install hermit (manages node, rust, just, go)
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+
+      # Cache Cargo dependencies
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          workspaces: apps/penpal/frontend/src-tauri
+          key: ${{ matrix.target }}
+
+      # Enable pnpm via corepack
+      - run: corepack enable pnpm
+
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          cd apps/penpal/frontend/src-tauri && cargo fetch
+
+      # Build Go sidecar binaries for the target architecture
+      - name: Build Go sidecar
+        working-directory: apps/penpal
+        run: |
+          mkdir -p frontend/src-tauri/binaries
+          GOOS=darwin GOARCH=${{ matrix.goarch }} go build \
+            -o "frontend/src-tauri/binaries/penpal-server-${{ matrix.target }}" \
+            ./cmd/penpal-server
+          GOOS=darwin GOARCH=${{ matrix.goarch }} go build \
+            -o "frontend/src-tauri/binaries/penpal-cli-${{ matrix.target }}" \
+            ./cmd/penpal-cli
+
+      # Build frontend (architecture-independent)
+      - name: Build frontend
+        working-directory: apps/penpal/frontend
+        run: VITE_BASE=/ VITE_API_URL=http://localhost:8080 pnpm run build
+
+      # Build Tauri app for the target architecture
+      - name: Build Tauri app
+        working-directory: apps/penpal/frontend
+        run: pnpm run tauri:build -- --target ${{ matrix.target }}
+
+      # Package into distributable zip
+      - name: Package
+        working-directory: apps/penpal
+        run: ./scripts/package.sh ${{ matrix.arch }} ${{ matrix.target }}
+
+      # Upload artifact for the release job
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: penpal-${{ matrix.arch }}
+          path: apps/penpal/dist/*.zip
+
+  release:
+    name: Create Release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Download all build artifacts
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # Extract version from tag and validate semver format
+      - name: Extract version
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/penpal/v}"
+          if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Tag version '$TAG' does not match semver format"
+            exit 1
+          fi
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
+      # Create GitHub Release with both zips
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG_NAME: penpal/v${{ steps.version.outputs.version }}
+        run: |
+          PREV_TAG=$(git describe --tags --match 'penpal/v*' --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          ARGS=(--generate-notes)
+          if [ -n "$PREV_TAG" ]; then
+            ARGS+=(--notes-start-tag "$PREV_TAG")
+          fi
+          gh release create "$TAG_NAME" \
+            --title "Penpal v${VERSION}" \
+            "${ARGS[@]}" \
+            artifacts/*.zip
+
+      # Trigger cask bump on block/homebrew-tap.
+      # Uses GITHUB_TOKEN with actions:write — block org allows cross-repo
+      # workflow_dispatch (same pattern as block/qrgo → block/homebrew-tap).
+      - name: Trigger Homebrew cask bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          BASE_URL="https://github.com/block/builderbot/releases/download/penpal/v${VERSION}"
+          gh workflow run bump-cask.yaml \
+            -R block/homebrew-tap \
+            -f cask=penpal \
+            -f tag="penpal/v${VERSION}" \
+            -f arm64_url="${BASE_URL}/Penpal-${VERSION}-arm64.zip" \
+            -f intel_url="${BASE_URL}/Penpal-${VERSION}-x86_64.zip"

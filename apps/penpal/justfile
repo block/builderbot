@@ -134,9 +134,9 @@ changelog version:
 
     LAST_TAG=$(git describe --tags --match "penpal/v*" --abbrev=0 2>/dev/null || echo "")
     if [ -n "$LAST_TAG" ]; then
-        COMMITS=$(git log --oneline "$LAST_TAG"..HEAD -- apps/penpal/)
+        COMMITS=$(git log --oneline "$LAST_TAG"..HEAD -- .)
     else
-        COMMITS=$(git log --oneline -- apps/penpal/)
+        COMMITS=$(git log --oneline -- .)
     fi
 
     if [ -z "$COMMITS" ]; then
@@ -145,9 +145,9 @@ changelog version:
     fi
 
     echo "$COMMITS" | claude -p --dangerously-skip-permissions \
-        "These are commits since the last release. Prepend a new changelog section to apps/penpal/CHANGELOG.md using v{{version}} as the heading. Group changes by theme and write human-readable descriptions, not raw commit messages. Match the existing style."
+        "These are commits since the last release. Prepend a new changelog section to CHANGELOG.md using v{{version}} as the heading. Group changes by theme and write human-readable descriptions, not raw commit messages. Match the existing style."
 
-    penpal open apps/penpal/CHANGELOG.md
+    penpal open CHANGELOG.md
     read -p "Press enter when done editing changelog..."
 
 # Bump version and generate changelog for review

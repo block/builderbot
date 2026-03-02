@@ -7,7 +7,7 @@
   let { size = 20, color = 'currentColor' }: Props = $props();
 </script>
 
-<div class="sine-wave-container" style="width: {size}px; height: {size}px;">
+<div class="sine-wave-container" style="width: {size * 2}px; height: {size}px;">
   <svg
     width={size * 3}
     height={size}
@@ -17,7 +17,7 @@
     class="sine-wave"
   >
     <path
-      d="M0 12 C4 6, 8 6, 12 12 S20 18, 24 12 C28 6, 32 6, 36 12 S44 18, 48 12 C52 6, 56 6, 60 12 S68 18, 72 12"
+      d="M0 12 C3 2, 9 2, 12 12 S21 22, 24 12 C27 2, 33 2, 36 12 S45 22, 48 12 C51 2, 57 2, 60 12 S69 22, 72 12"
       stroke={color}
       stroke-width="2"
       stroke-linecap="round"
@@ -34,7 +34,7 @@
   }
 
   .sine-wave {
-    animation: scroll-wave 1s linear infinite;
+    animation: scroll-wave 1.5s linear infinite;
   }
 
   @keyframes scroll-wave {

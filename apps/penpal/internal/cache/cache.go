@@ -88,10 +88,11 @@ func (c *Cache) FindProject(qualifiedName string) *discovery.Project {
 func (c *Cache) FindProjectByPath(absPath string) *discovery.Project {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	absPath = filepath.Clean(absPath)
 	var best *discovery.Project
 	bestLen := -1
 	for i := range c.projects {
-		projPath := c.projects[i].Path
+		projPath := filepath.Clean(c.projects[i].Path)
 		if (strings.HasPrefix(absPath, projPath+"/") || absPath == projPath) && len(projPath) > bestLen {
 			p := c.projects[i]
 			best = &p

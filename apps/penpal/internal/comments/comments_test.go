@@ -341,6 +341,14 @@ func TestListOpenThreadsEmptyProject(t *testing.T) {
 func TestListFilesInReview(t *testing.T) {
 	store := newTestStore(t)
 
+	// Create source files on disk so ListFilesInReview finds them
+	project := store.cache.FindProject(testProject)
+	for _, name := range []string{"file1.md", "file2.md", "file3.md"} {
+		if err := os.WriteFile(filepath.Join(project.Path, name), []byte("content"), 0644); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+
 	anchor := Anchor{SelectedText: "text"}
 
 	// File 1: one open thread → in review
@@ -408,6 +416,14 @@ func TestListFilesInReview(t *testing.T) {
 func TestFilesInReviewDerivedFromOpenThreads(t *testing.T) {
 	store := newTestStore(t)
 
+	// Create source files on disk so ListFilesInReview finds them
+	project := store.cache.FindProject(testProject)
+	for _, name := range []string{"doc1.md", "doc2.md"} {
+		if err := os.WriteFile(filepath.Join(project.Path, name), []byte("content"), 0644); err != nil {
+			t.Fatalf("WriteFile %s: %v", name, err)
+		}
+	}
+
 	anchor := Anchor{SelectedText: "text"}
 
 	// Create threads on two files
@@ -462,6 +478,63 @@ func TestFilesInReviewDerivedFromOpenThreads(t *testing.T) {
 	}
 	if len(files) != 2 {
 		t.Fatalf("expected 2 files in review after reopen, got %d", len(files))
+	}
+}
+
+func TestListFilesInReview_SkipsDeletedFiles(t *testing.T) {
+	store := newTestStore(t)
+
+	anchor := Anchor{SelectedText: "text"}
+
+	// Create threads on two files
+	_, err := store.CreateThread(testProject, "exists.md", anchor, Comment{
+		Author: "alice", Role: "human", Body: "Comment on existing file",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread exists.md: %v", err)
+	}
+	_, err = store.CreateThread(testProject, "deleted.md", anchor, Comment{
+		Author: "alice", Role: "human", Body: "Comment on deleted file",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread deleted.md: %v", err)
+	}
+
+	// Create the actual source files on disk
+	project := store.cache.FindProject(testProject)
+	existsPath := filepath.Join(project.Path, "exists.md")
+	deletedPath := filepath.Join(project.Path, "deleted.md")
+	if err := os.WriteFile(existsPath, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile exists.md: %v", err)
+	}
+	if err := os.WriteFile(deletedPath, []byte("content"), 0644); err != nil {
+		t.Fatalf("WriteFile deleted.md: %v", err)
+	}
+
+	// Both files should be in review
+	files, err := store.ListFilesInReview(testProject)
+	if err != nil {
+		t.Fatalf("ListFilesInReview: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files in review, got %d", len(files))
+	}
+
+	// Delete one source file (leaving the sidecar orphaned)
+	if err := os.Remove(deletedPath); err != nil {
+		t.Fatalf("Remove deleted.md: %v", err)
+	}
+
+	// Only the existing file should be in review now
+	files, err = store.ListFilesInReview(testProject)
+	if err != nil {
+		t.Fatalf("ListFilesInReview after delete: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file in review, got %d", len(files))
+	}
+	if files[0].FilePath != "exists.md" {
+		t.Errorf("expected exists.md, got %q", files[0].FilePath)
 	}
 }
 

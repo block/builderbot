@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/loganj/penpal/internal/comments"
@@ -195,6 +197,14 @@ func TestAPIReviews_ListFilesInReview(t *testing.T) {
 
 	dir := t.TempDir()
 	seedProject(c, "test-proj", dir, nil)
+
+	// Create the actual source file so ListFilesInReview finds it
+	if err := os.MkdirAll(filepath.Join(dir, "thoughts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "thoughts", "plan.md"), []byte("text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create a thread to put a file "in review"
 	createBody, _ := json.Marshal(map[string]interface{}{

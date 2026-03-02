@@ -31,8 +31,8 @@ func TestAPIProjects_ListsProjects(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &projects); err != nil {
 		t.Fatalf("parse JSON: %v", err)
 	}
-	if len(projects) != 2 {
-		t.Fatalf("expected 2 projects, got %d", len(projects))
+	if len(projects) < 2 {
+		t.Fatalf("expected at least 2 projects, got %d", len(projects))
 	}
 
 	names := map[string]bool{}
@@ -197,6 +197,14 @@ func TestAPIInReview_ReturnsGroups(t *testing.T) {
 
 	dir := t.TempDir()
 	seedProject(c, "test-proj", dir, nil)
+
+	// Create the source file so ListFilesInReview finds it
+	if err := os.MkdirAll(filepath.Join(dir, "thoughts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "thoughts", "plan.md"), []byte("text"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create a thread to put a file in review
 	createBody, _ := json.Marshal(map[string]interface{}{

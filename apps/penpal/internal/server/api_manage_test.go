@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/loganj/penpal/internal/cache"
+	"github.com/loganj/penpal/internal/comments"
 	"github.com/loganj/penpal/internal/config"
 )
 
@@ -209,5 +211,104 @@ func TestAPIDeleteProject_Success(t *testing.T) {
 
 	if _, err := os.Stat(projDir); !os.IsNotExist(err) {
 		t.Error("expected project directory to be deleted")
+	}
+}
+
+func TestAPIOpen_PrefersSubProjectOverRoot(t *testing.T) {
+	s, c, _ := testServer(t)
+
+	// Create a workspace directory structure with (root) and a sub-project
+	wsDir := t.TempDir()
+	subDir := filepath.Join(wsDir, "subproj")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a .md file under the sub-project
+	filePath := filepath.Join(subDir, "doc.md")
+	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed both (root) (workspace root) and subproj (more specific path).
+	// (root) is seeded first to simulate the alphabetical ordering bug.
+	seedProject(c, "ws/(root)", wsDir, nil)
+	seedProject(c, "ws/subproj", subDir, []cache.FileInfo{{FullPath: "doc.md"}})
+
+	body, _ := json.Marshal(map[string]string{"path": filePath})
+	req := httptest.NewRequest(http.MethodPost, "/api/open", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+	// Should route to the sub-project, not (root)
+	expected := "/file/ws/subproj/doc.md"
+	if resp["url"] != expected {
+		t.Errorf("expected url %q, got %q", expected, resp["url"])
+	}
+}
+
+func TestAPIDeleteFile_CleansUpCommentSidecar(t *testing.T) {
+	s, c, cs := testServer(t)
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "reviewed.md")
+	if err := os.WriteFile(filePath, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedProject(c, "test-proj", dir, nil)
+
+	// Create a comment thread on the file
+	_, err := cs.CreateThread("test-proj", "reviewed.md", comments.Anchor{
+		SelectedText: "content",
+	}, comments.Comment{
+		Author: "alice",
+		Role:   "human",
+		Body:   "Needs work",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	// Verify the sidecar exists
+	sidecarPath := filepath.Join(dir, ".penpal", "comments", "reviewed.md.json")
+	if _, err := os.Stat(sidecarPath); err != nil {
+		t.Fatalf("expected sidecar to exist: %v", err)
+	}
+
+	// Delete the file via API
+	req := httptest.NewRequest(http.MethodPost, "/api/delete-file?project=test-proj&path=reviewed.md", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The .md file should be gone
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Error("expected file to be deleted")
+	}
+
+	// The sidecar should also be gone
+	if _, err := os.Stat(sidecarPath); !os.IsNotExist(err) {
+		t.Error("expected comment sidecar to be deleted")
+	}
+
+	// ListFilesInReview should return empty
+	files, err := cs.ListFilesInReview("test-proj")
+	if err != nil {
+		t.Fatalf("ListFilesInReview: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("expected 0 files in review, got %d", len(files))
 	}
 }

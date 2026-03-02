@@ -250,6 +250,12 @@ func (s *Store) ListFilesInReview(projectName string) ([]FileInReview, error) {
 		}
 		filePath := strings.TrimSuffix(rel, ".json")
 
+		// Skip sidecars whose source file no longer exists on disk.
+		sourceFile := filepath.Join(project.Path, filePath)
+		if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
+			return nil
+		}
+
 		openCount := 0
 		for _, t := range fc.Threads {
 			if t.Status == "open" {

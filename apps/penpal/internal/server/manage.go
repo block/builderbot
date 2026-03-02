@@ -646,43 +646,42 @@ func (s *Server) resolveOpenDirectory(w http.ResponseWriter, absPath string) str
 // source to the appropriate project or creates a new standalone project.
 // Returns the resolved URL path.
 func (s *Server) resolveOpenFile(w http.ResponseWriter, absPath string) string {
-	// Check if this file is already in an existing project
-	for _, p := range s.cache.Projects() {
-		cleanProjectPath := filepath.Clean(p.Path)
-		if strings.HasPrefix(absPath, cleanProjectPath+"/") {
-			relPath, _ := filepath.Rel(cleanProjectPath, absPath)
-			// Check if the file is in the cache (already being tracked)
-			for _, f := range s.cache.ProjectFiles(p.QualifiedName()) {
-				if f.FullPath == relPath {
-					url := "/file/" + p.QualifiedName() + "/" + relPath
-					json.NewEncoder(w).Encode(map[string]string{"url": url})
-					return url
-				}
-			}
-			// File is under a known project but not tracked.
-			// If it's a .md file, add it as a file source.
-			if strings.HasSuffix(absPath, ".md") {
-				s.cfgMu.Lock()
-				added := s.addFileToConfig(&p, relPath)
-				if !added {
-					s.addSourceToConfig(&p, config.SourceConfig{
-						Type:  "files",
-						Files: []string{relPath},
-					})
-				}
-				s.refreshAfterConfigChange()
-				s.cfgMu.Unlock()
-
+	// Find the best matching project using longest-prefix matching.
+	// This ensures a file under a sub-project matches the sub-project
+	// rather than a parent workspace root like "(root)".
+	if p := s.cache.FindProjectByPath(absPath); p != nil {
+		relPath, _ := filepath.Rel(p.Path, absPath)
+		// Check if the file is in the cache (already being tracked)
+		for _, f := range s.cache.ProjectFiles(p.QualifiedName()) {
+			if f.FullPath == relPath {
 				url := "/file/" + p.QualifiedName() + "/" + relPath
-				log.Printf("Added file %s to project %s", relPath, p.QualifiedName())
 				json.NewEncoder(w).Encode(map[string]string{"url": url})
 				return url
 			}
-			// Non-markdown file in known project - just navigate to project
-			url := "/project/" + p.QualifiedName()
+		}
+		// File is under a known project but not tracked.
+		// If it's a .md file, add it as a file source.
+		if strings.HasSuffix(absPath, ".md") {
+			s.cfgMu.Lock()
+			added := s.addFileToConfig(p, relPath)
+			if !added {
+				s.addSourceToConfig(p, config.SourceConfig{
+					Type:  "files",
+					Files: []string{relPath},
+				})
+			}
+			s.refreshAfterConfigChange()
+			s.cfgMu.Unlock()
+
+			url := "/file/" + p.QualifiedName() + "/" + relPath
+			log.Printf("Added file %s to project %s", relPath, p.QualifiedName())
 			json.NewEncoder(w).Encode(map[string]string{"url": url})
 			return url
 		}
+		// Non-markdown file in known project - just navigate to project
+		url := "/project/" + p.QualifiedName()
+		json.NewEncoder(w).Encode(map[string]string{"url": url})
+		return url
 	}
 
 	// File is not under any known project. Create a standalone project from its

@@ -294,6 +294,17 @@ func TestFilesInReview(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
 
+	// Create source files so ListFilesInReview finds them
+	for _, name := range []string{"thoughts/review-a.md", "thoughts/review-b.md"} {
+		p := filepath.Join(env.projDir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	createTestThread(t, env, "thoughts/review-a.md", "Comment")
 	createTestThread(t, env, "thoughts/review-b.md", "Comment")
 

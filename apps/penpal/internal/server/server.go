@@ -937,6 +937,14 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	// Clean up empty parent directories, stopping at the project root
 	removeEmptyParents(filepath.Dir(fullPath), project.Path)
 
+	// Clean up the comment sidecar file if it exists
+	sidecarPath := filepath.Join(project.Path, ".penpal", "comments", filePath+".json")
+	if err := os.Remove(sidecarPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("Warning: could not remove comment sidecar %s: %v", sidecarPath, err)
+	}
+	commentsDir := filepath.Join(project.Path, ".penpal", "comments")
+	removeEmptyParents(filepath.Dir(sidecarPath), commentsDir)
+
 	// If this was an individually-added file, also remove from config
 	s.cfgMu.Lock()
 	s.removeFileFromConfig(project, filePath)

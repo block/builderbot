@@ -108,6 +108,17 @@ func TestMCPOverHTTP_FilesInReview(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
 
+	// Create source files so ListFilesInReview finds them
+	for _, name := range []string{"thoughts/a.md", "thoughts/b.md"} {
+		p := filepath.Join(env.projDir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("content"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	// Create threads on two files
 	createTestThread(t, env, "thoughts/a.md", "Comment A")
 	createTestThread(t, env, "thoughts/b.md", "Comment B")

@@ -1560,7 +1560,7 @@
       return;
     }
     if (prState === 'created' && hasUnpushed && pushState === 'idle') {
-      handlePush();
+      handlePush(optionHeld);
     } else if (prState === 'created') {
       // View PR - open in browser
       const url = prUrl ?? cachedPrUrl;
@@ -2113,7 +2113,9 @@
                       : pushState === 'error'
                         ? 'Push failed — click for details'
                         : prState === 'created' && hasUnpushed
-                          ? 'Push changes to remote'
+                          ? optionHeld
+                            ? 'Force push to remote (⌥ held)'
+                            : 'Push changes to remote'
                           : prState === 'created'
                             ? 'View PR'
                             : prState === 'error'
@@ -2147,7 +2149,7 @@
                       {:else if pushState === 'error'}
                         Push failed
                       {:else if prState === 'created' && hasUnpushed}
-                        Push changes
+                        {optionHeld ? 'Force push' : 'Push changes'}
                       {:else if prState === 'created'}
                         {#if prStatusText}
                           {prStatusText}

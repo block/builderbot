@@ -119,6 +119,16 @@ func callToolExpectError(t *testing.T, env *testEnv, name string, args map[strin
 
 func createTestThread(t *testing.T, env *testEnv, filePath, body string) *comments.Thread {
 	t.Helper()
+
+	// Ensure the source file exists on disk so ListFilesInReview doesn't skip it.
+	srcPath := filepath.Join(env.projDir, filePath)
+	if err := os.MkdirAll(filepath.Dir(srcPath), 0755); err != nil {
+		t.Fatalf("creating parent dir for %s: %v", filePath, err)
+	}
+	if err := os.WriteFile(srcPath, []byte("test content"), 0644); err != nil {
+		t.Fatalf("creating source file %s: %v", filePath, err)
+	}
+
 	anchor := comments.Anchor{SelectedText: "some text"}
 	comment := comments.Comment{Author: "human", Role: "human", Body: body}
 	thread, err := env.store.CreateThread(env.projName, filePath, anchor, comment)

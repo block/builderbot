@@ -81,7 +81,7 @@ export default function InReviewPage() {
               )}
             </div>
             <ul className="files-list">
-              {group.files.map((file) => (
+              {(group.files || []).map((file) => (
                 <li key={file.path} className="file-row">
                   <div className="file-left">
                     <FileTypeBadge type={file.fileType} />

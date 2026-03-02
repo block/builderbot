@@ -18,6 +18,9 @@
 # Test artifacts
 test-results/
 
+# Package output
+dist/
+
 # Tauri build artifacts
 frontend/src-tauri/target/
 frontend/src-tauri/binaries/

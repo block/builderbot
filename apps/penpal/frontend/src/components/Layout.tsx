@@ -202,9 +202,8 @@ export default function Layout() {
   }, []);
 
   // On startup, check install status to decide whether to show the modal.
-  // - Not yet dismissed this build + tools present → show (update prompt, nag until updated)
-  // - Not yet dismissed this build + no tools → show (first-time install offer)
-  // - Already dismissed this build → don't show
+  // The dismiss key is only written after a successful install for this build,
+  // so the modal keeps prompting until tools are actually installed and current.
   const [toolsInstalled, setToolsInstalled] = useState(false);
   useEffect(() => {
     if (!isDesktopApp) return;
@@ -213,11 +212,6 @@ export default function Layout() {
       .then((status) => {
         const hasTools = status.cli.installed || status.plugin.installed;
         setToolsInstalled(hasTools);
-        // Show modal unless already dismissed for this build.
-        // The dismiss key is set after a successful install/update, or when
-        // the user opts out with no tools installed.  When tools are present
-        // but outdated and the user closes without updating, the key is NOT
-        // written — so they'll be prompted again on next launch.
         if (!localStorage.getItem(dismissKey)) {
           setShowInstallModal(true);
         }
@@ -226,11 +220,18 @@ export default function Layout() {
   }, []);
 
   function handleInstallModalClose(installed: boolean) {
-    if (installed || !toolsInstalled) {
-      // Persist dismiss: tools are up to date, or user opted out with nothing installed
-      localStorage.setItem(`penpal-install-dismissed-${__BUILD_ID__}`, '1');
-    }
     setShowInstallModal(false);
+    if (installed) {
+      // Only persist dismiss when tools were confirmed installed for this build.
+      // This means the modal keeps prompting on startup until tools are actually
+      // installed and up-to-date — no stale opt-out dismiss path.
+      localStorage.setItem(`penpal-install-dismissed-${__BUILD_ID__}`, '1');
+      api.checkInstallStatus()
+        .then((status) => {
+          setToolsInstalled(status.cli.installed || status.plugin.installed);
+        })
+        .catch(() => {});
+    }
   }
 
 

@@ -103,25 +103,7 @@ describe('Install startup behavior', () => {
     expect(overlay).toBeNull();
   });
 
-  it('still shows modal when tools installed even if previously dismissed', async () => {
-    localStorage.setItem(`penpal-install-dismissed-${__BUILD_ID__}`, '1');
-    vi.mocked(api.checkInstallStatus).mockResolvedValue({
-      cli: { installed: true, path: '/usr/local/bin/penpal' },
-      plugin: { installed: false },
-    });
-
-    render(
-      <MemoryRouter>
-        <Layout />
-      </MemoryRouter>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText('Update Command Line Tools')).toBeInTheDocument();
-    });
-  });
-
-  it('persists dismiss when user closes without tools installed', async () => {
+  it('does not persist dismiss when user closes without tools installed', async () => {
     vi.mocked(api.checkInstallStatus).mockResolvedValue({
       cli: { installed: false },
       plugin: { installed: false },
@@ -139,7 +121,7 @@ describe('Install startup behavior', () => {
 
     fireEvent.click(screen.getByText('Not Now'));
 
-    expect(localStorage.getItem(`penpal-install-dismissed-${__BUILD_ID__}`)).toBe('1');
+    expect(localStorage.getItem(`penpal-install-dismissed-${__BUILD_ID__}`)).toBeNull();
   });
 
   it('does not persist dismiss when user closes with outdated tools installed', async () => {

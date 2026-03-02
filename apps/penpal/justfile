@@ -39,33 +39,42 @@ dev: ensure-deps build-go
 build-go: ensure-deps
     ./scripts/build-go.sh
 
-# Install Penpal: build desktop app and copy to /Applications
-install: build
+# Install Penpal: build dev-branded desktop app and copy to /Applications
+install: ensure-deps build-go
     #!/usr/bin/env bash
     set -euo pipefail
+
+    # Build with "Penpal Dev" product name so devs can distinguish from Homebrew installs
+    cd frontend && pnpm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 pnpm run build \
+        && npx tauri build --config '{"productName":"Penpal Dev"}'
+
+    cd ..
 
     # Quit running Penpal if present
     if pgrep -x Penpal >/dev/null 2>&1; then
         echo "Quitting Penpal..."
         osascript -e 'quit app "Penpal"' 2>/dev/null || true
         sleep 1
-        # Force kill if it didn't quit gracefully
         pkill -x Penpal 2>/dev/null || true
     fi
 
-    # Copy .app to /Applications
-    APP_SRC="frontend/src-tauri/target/release/bundle/macos/Penpal.app"
+    # The dev build bundles as "Penpal Dev.app"
+    APP_SRC="frontend/src-tauri/target/release/bundle/macos/Penpal Dev.app"
     if [ -d "$APP_SRC" ]; then
         echo "Installing Penpal.app to /Applications..."
         rm -rf /Applications/Penpal.app
         cp -R "$APP_SRC" /Applications/Penpal.app
-        echo "Penpal.app installed."
+        echo "Penpal.app installed (dev build)."
     else
         echo "Warning: $APP_SRC not found, skipping app install."
     fi
 
     # Launch the app — CLI + plugin are installed via in-app menu
     open /Applications/Penpal.app
+
+# Package .app into a distributable zip
+package: build
+    ./scripts/package.sh
 
 # Uninstall Penpal
 uninstall:
@@ -125,6 +134,7 @@ test-e2e: ensure-deps
 # Clean build artifacts
 clean:
     rm -f penpal
+    rm -rf dist
     rm -rf frontend/dist
     rm -rf frontend/src-tauri/target
     rm -rf frontend/src-tauri/binaries

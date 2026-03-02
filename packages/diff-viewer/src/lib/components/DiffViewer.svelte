@@ -322,8 +322,17 @@
   // Scroll to first diff when file changes
   $effect(() => {
     const filePath = diff ? getFilePath(diff) : null;
+    // Skip auto-scroll if a comment or line jump is pending – explicit navigation takes priority
+    const hasCommentJump = jumpToComment && jumpToComment.token !== lastHandledJumpToken;
+    const hasLineJump = jumpToLine && jumpToLine.token !== lastHandledJumpLineToken;
     // Wait for next frame to ensure dimensions are set
-    if (filePath && changedAlignments.length > 0 && (afterPane || beforePane)) {
+    if (
+      filePath &&
+      changedAlignments.length > 0 &&
+      (afterPane || beforePane) &&
+      !hasCommentJump &&
+      !hasLineJump
+    ) {
       requestAnimationFrame(() => {
         const firstHunk = changedAlignments[0].alignment;
         // Scroll to first change in the after pane (or before pane for deleted files)

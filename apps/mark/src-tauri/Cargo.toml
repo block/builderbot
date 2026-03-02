@@ -52,7 +52,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 tauri-plugin-store = "2.4.2"
 
 # MCP server for project sessions
-rmcp = { version = "0.9", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
 axum = { version = "0.8" }
 
 # Debug binaries archived — uncomment when needed

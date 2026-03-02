@@ -223,16 +223,6 @@ pub fn spawn_autodetect_poller(
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            // Short pause to let the buffer settle.
-            tokio::select! {
-                _ = time::sleep(Duration::from_secs(3)) => {}
-                result = cancel_rx.changed() => {
-                    if result.is_err() || *cancel_rx.borrow() {
-                        return;
-                    }
-                }
-            }
-
             // ---- Build and send the AI prompt ----
             let prompt = format!(
                 r#"I'm running a development command and need to determine a regex pattern

@@ -92,7 +92,9 @@ impl Store {
         let run_detection_mode_json = action
             .run_detection_mode
             .as_ref()
-            .map(|m| serde_json::to_string(m).unwrap());
+            .map(|m| serde_json::to_string(m))
+            .transpose()
+            .map_err(|e| StoreError(format!("Failed to serialize run_detection_mode: {e}")))?;
         conn.execute(
             "INSERT INTO repo_actions (id, context_id, name, command, action_type, sort_order, auto_commit, run_detection_mode, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -139,7 +141,9 @@ impl Store {
         let run_detection_mode_json = action
             .run_detection_mode
             .as_ref()
-            .map(|m| serde_json::to_string(m).unwrap());
+            .map(|m| serde_json::to_string(m))
+            .transpose()
+            .map_err(|e| StoreError(format!("Failed to serialize run_detection_mode: {e}")))?;
         conn.execute(
             "UPDATE repo_actions SET name = ?1, command = ?2, action_type = ?3, sort_order = ?4, auto_commit = ?5, run_detection_mode = ?6, updated_at = ?7 WHERE id = ?8",
             params![

@@ -143,20 +143,26 @@ impl ActionRegistry {
     /// Append a line to the output buffer for the given execution.
     /// Creates the buffer lazily if it does not yet exist.
     pub fn append_output(&self, execution_id: &str, line: &str) {
-        let mut buffers = self.output_buffers.lock().unwrap();
-        let buf = buffers
-            .entry(execution_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
+        let buf = {
+            let mut buffers = self.output_buffers.lock().unwrap();
+            buffers
+                .entry(execution_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+                .clone()
+        };
         let mut buf = buf.lock().unwrap();
         buf.push(line.to_string());
     }
 
     /// Get a snapshot of all output lines for an execution.
     pub fn get_output_lines(&self, execution_id: &str) -> Option<Vec<String>> {
-        let buffers = self.output_buffers.lock().unwrap();
-        buffers.get(execution_id).map(|buf| {
-            let buf = buf.lock().unwrap();
-            buf.clone()
+        let buf = {
+            let buffers = self.output_buffers.lock().unwrap();
+            buffers.get(execution_id).cloned()
+        };
+        buf.map(|b| {
+            let b = b.lock().unwrap();
+            b.clone()
         })
     }
 

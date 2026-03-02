@@ -1856,7 +1856,7 @@
                     onclick={(e) => {
                       e.stopPropagation();
                       if (phase?.type === 'running' && phase.endpoint && execution) {
-                        navigator.clipboard.writeText(phase.endpoint);
+                        navigator.clipboard.writeText(phase.endpoint).catch(() => {});
                         const id = execution.executionId;
                         if (endpointCopiedTimers[id]) clearTimeout(endpointCopiedTimers[id]);
                         endpointCopied[id] = true;

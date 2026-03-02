@@ -51,6 +51,8 @@
     /** Optional — for branch scope, resolved automatically. */
     commitSha?: string;
     scope?: 'branch' | 'commit';
+    /** When set, opens a specific existing review by ID instead of searching by triple. */
+    reviewId?: string;
     /** Label for the before pane header. */
     beforeLabel?: string;
     /** Label for the after pane header. */
@@ -70,6 +72,7 @@
     branchId,
     commitSha,
     scope = 'branch',
+    reviewId,
     beforeLabel = 'base',
     afterLabel = 'head',
     readonly = false,
@@ -97,7 +100,7 @@
     const sha = diffViewer.state.commitSha;
     if (sha && !reviewHandle && !readonly) {
       // svelte-ignore state_referenced_locally
-      reviewHandle = createReviewState(branchId, sha, scope);
+      reviewHandle = createReviewState(branchId, sha, scope, reviewId);
     }
   });
 
@@ -239,9 +242,9 @@
 
   async function handleSelectComment(comment: Comment) {
     selectedCommentId = comment.id;
-    await diffViewer.selectFile(comment.path);
     commentJumpToken += 1;
     jumpToComment = { id: comment.id, token: commentJumpToken };
+    await diffViewer.selectFile(comment.path);
   }
 
   // Wrapper for search that returns the loaded diff without changing selection

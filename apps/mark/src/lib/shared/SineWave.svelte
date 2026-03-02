@@ -29,6 +29,7 @@
 <style>
   .sine-wave-container {
     overflow: hidden;
+    clip-path: inset(0);
     display: inline-flex;
     align-items: center;
   }

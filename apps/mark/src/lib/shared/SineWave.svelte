@@ -24,13 +24,13 @@
 
   let pathD = $derived.by(() => {
     const segments = 64;
-    const startX = 5;
-    const endX = 95;
+    const startX = 10;
+    const endX = 90;
     const range = endX - startX;
     let d = '';
     for (let i = 0; i <= segments; i++) {
       const x = startX + (i / segments) * range;
-      const y = 50 - 42 * Math.sin((2 * Math.PI * x) / 100 + phase);
+      const y = 50 - 42 * Math.sin((3 * Math.PI * x) / 100 + phase);
       d += i === 0 ? `M${x.toFixed(1)} ${y.toFixed(1)}` : `L${x.toFixed(1)} ${y.toFixed(1)}`;
     }
     return d;
@@ -42,7 +42,7 @@
     <path
       d={pathD}
       stroke={color}
-      stroke-width="2"
+      stroke-width="0.67"
       vector-effect="non-scaling-stroke"
       stroke-linecap="round"
       stroke-linejoin="round"

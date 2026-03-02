@@ -319,8 +319,8 @@
   let runPhases = $state(new Map<string, RunPhase>());
 
   // Tracks which endpoint copy buttons are showing the "copied" tick
-  let endpointCopied = $state(new Map<string, boolean>());
-  let endpointCopiedTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  let endpointCopied = $state<Record<string, boolean>>({});
+  let endpointCopiedTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
   // Commit diff modal (opened by clicking a commit in the timeline)
   let commitDiffSha = $state<string | null>(null);
@@ -724,7 +724,7 @@
     window.removeEventListener('keydown', handleAltDown);
     window.removeEventListener('keyup', handleAltUp);
     // Clean up endpoint copied timers
-    for (const timer of endpointCopiedTimers.values()) clearTimeout(timer);
+    for (const timer of Object.values(endpointCopiedTimers)) clearTimeout(timer);
   });
 
   function prunePendingSessionItems(nextTimeline: BranchTimelineData) {
@@ -1858,23 +1858,17 @@
                       if (phase?.type === 'running' && phase.endpoint && execution) {
                         navigator.clipboard.writeText(phase.endpoint);
                         const id = execution.executionId;
-                        const prev = endpointCopiedTimers.get(id);
-                        if (prev) clearTimeout(prev);
-                        endpointCopied.set(id, true);
-                        endpointCopied = endpointCopied;
-                        endpointCopiedTimers.set(
-                          id,
-                          setTimeout(() => {
-                            endpointCopied.delete(id);
-                            endpointCopied = endpointCopied;
-                            endpointCopiedTimers.delete(id);
-                          }, 1500)
-                        );
+                        if (endpointCopiedTimers[id]) clearTimeout(endpointCopiedTimers[id]);
+                        endpointCopied[id] = true;
+                        endpointCopiedTimers[id] = setTimeout(() => {
+                          delete endpointCopied[id];
+                          delete endpointCopiedTimers[id];
+                        }, 1500);
                       }
                     }}
                     title="Copy endpoint: {phase.endpoint}"
                   >
-                    {#if execution && endpointCopied.get(execution.executionId)}
+                    {#if execution && endpointCopied[execution.executionId]}
                       <Check size={12} />
                     {:else}
                       <Copy size={12} />

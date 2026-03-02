@@ -42,7 +42,7 @@
     <path
       d={pathD}
       stroke={color}
-      stroke-width="0.67"
+      stroke-width="1.2"
       vector-effect="non-scaling-stroke"
       stroke-linecap="round"
       stroke-linejoin="round"

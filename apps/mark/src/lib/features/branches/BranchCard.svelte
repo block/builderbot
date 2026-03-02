@@ -1752,6 +1752,7 @@
             {@const isRunning = execution.status === 'running'}
             {@const isStopping = stoppingExecutions.has(execution.executionId)}
             {@const showStopIcon = altHeld && isRunning && !isStopping}
+            {@const phase = runPhases.get(execution.executionId)}
             <div
               class="running-action-container"
               class:fading={execution.fading}
@@ -1787,6 +1788,8 @@
                   <Spinner size={12} class="danger" />
                 {:else if showStopIcon}
                   <StopCircle size={12} />
+                {:else if isRunning && phase && phase.type !== 'building'}
+                  <SineWave size={12} />
                 {:else if isRunning}
                   <Spinner size={12} />
                 {:else if execution.status === 'completed'}
@@ -2580,7 +2583,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 24px;
+    width: 28px;
     height: 28px;
     padding: 0;
     background: none;

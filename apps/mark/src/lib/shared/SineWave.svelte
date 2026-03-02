@@ -55,6 +55,5 @@
   .sine-wave-container {
     display: inline-flex;
     align-items: center;
-    overflow: hidden;
   }
 </style>

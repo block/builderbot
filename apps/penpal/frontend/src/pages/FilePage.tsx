@@ -201,8 +201,8 @@ export default function FilePage() {
     if (!project || !path) return;
     // Get file metadata from project files list
     api.getProjectFiles(project).then((groups) => {
-      for (const group of groups) {
-        for (const file of group.files) {
+      for (const group of (groups || [])) {
+        for (const file of (group.files || [])) {
           if (file.path === path) {
             setFileType(file.fileType || '');
             setDisplayName(file.title || file.name);

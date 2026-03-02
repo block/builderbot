@@ -85,4 +85,30 @@ describe('api', () => {
       expect.objectContaining({ method: 'PATCH' }),
     );
   });
+
+  it('checkInstallStatus calls GET /api/install-tools', async () => {
+    const status = { cli: { installed: false }, plugin: { installed: false } };
+    mockFetch.mockReturnValueOnce(jsonResponse(status));
+
+    const result = await api.checkInstallStatus();
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      `${API_BASE}/api/install-tools`,
+      expect.objectContaining({ headers: expect.objectContaining({ 'Content-Type': 'application/json' }) }),
+    );
+    expect(result).toEqual(status);
+  });
+
+  it('installTools calls POST /api/install-tools', async () => {
+    const status = { cli: { installed: true, path: '/usr/local/bin/penpal' }, plugin: { installed: true } };
+    mockFetch.mockReturnValueOnce(jsonResponse(status));
+
+    const result = await api.installTools();
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      `${API_BASE}/api/install-tools`,
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(result).toEqual(status);
+  });
 });

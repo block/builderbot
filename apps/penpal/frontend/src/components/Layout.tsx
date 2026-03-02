@@ -7,6 +7,7 @@ import { useTabs, deriveTitleFromPath } from '../hooks/useTabs';
 import { openInNewWindow } from '../utils/window';
 import TableOfContents from './TableOfContents';
 import FindBar from './FindBar';
+import InstallToolsModal from './InstallToolsModal';
 import type { Heading } from './TableOfContents';
 import type { APIProject, SSEEvent } from '../types';
 
@@ -41,6 +42,9 @@ export default function Layout() {
   const [addPath, setAddPath] = useState('');
   const [addError, setAddError] = useState('');
   const [addLoading, setAddLoading] = useState(false);
+
+  // Install tools modal state
+  const [showInstallModal, setShowInstallModal] = useState(false);
 
   // Find bar state
   const [showFindBar, setShowFindBar] = useState(false);
@@ -184,6 +188,59 @@ export default function Layout() {
       window.removeEventListener('menu-find', handleMenuFind);
     };
   }, []);
+
+  // Listen for install tools menu event
+  useEffect(() => {
+    if (!isDesktopApp) return;
+    function handleMenuInstallTools() {
+      setShowInstallModal(true);
+    }
+    window.addEventListener('menu-install-tools', handleMenuInstallTools);
+    return () => {
+      window.removeEventListener('menu-install-tools', handleMenuInstallTools);
+    };
+  }, []);
+
+  // On startup, check install status to decide whether to show the modal.
+  // We use "penpal-cli-tools-installed" in localStorage — its value is the
+  // build ID that last successfully installed/updated tools.
+  //
+  // - Tools installed + key matches BUILD_ID → current, don't show
+  // - Tools installed + key missing/mismatched → outdated, always show
+  // - No tools + dismissed key matches BUILD_ID → don't show
+  // - No tools + dismissed key missing/mismatched → show (first-time install offer)
+  const [toolsInstalled, setToolsInstalled] = useState(false);
+  useEffect(() => {
+    if (!isDesktopApp) return;
+    const installedKey = 'penpal-cli-tools-installed';
+    const dismissedKey = 'penpal-cli-tools-dismissed';
+    api.checkInstallStatus()
+      .then((status) => {
+        const hasTools = status.cli.installed || status.plugin.installed;
+        setToolsInstalled(hasTools);
+        if (hasTools) {
+          if (localStorage.getItem(installedKey) !== __BUILD_ID__) {
+            setShowInstallModal(true);
+          }
+        } else if (localStorage.getItem(dismissedKey) !== __BUILD_ID__) {
+          setShowInstallModal(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  function handleInstallModalClose(installed: boolean) {
+    if (installed) {
+      // Tools successfully installed/updated — record this build as current
+      localStorage.setItem('penpal-cli-tools-installed', __BUILD_ID__);
+    } else if (!toolsInstalled) {
+      // User opted out with no tools installed — dismiss for this build
+      localStorage.setItem('penpal-cli-tools-dismissed', __BUILD_ID__);
+    }
+    // Tools exist but user clicked "Not Now" without updating → write nothing,
+    // they'll be prompted again on next launch.
+    setShowInstallModal(false);
+  }
 
   // Keyboard shortcuts for back/forward in browser mode
   useEffect(() => {
@@ -518,6 +575,10 @@ export default function Layout() {
         {isDesktopApp && showFindBar && <FindBar onClose={() => setShowFindBar(false)} />}
         <Outlet context={outletContext} />
       </div>
+
+      {isDesktopApp && (
+        <InstallToolsModal open={showInstallModal} isUpdate={toolsInstalled} onClose={handleInstallModalClose} />
+      )}
 
       {/* Add workspace/project modal */}
       <div className={`modal-overlay${showAddModal ? ' open' : ''}`} onClick={() => setShowAddModal(false)}>

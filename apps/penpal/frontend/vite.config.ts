@@ -5,6 +5,9 @@ export default defineConfig(({ command }) => ({
   // In dev (Vite serves at /), base is '/'. For builds served by Go at /app/,
   // default to '/app/'. Tauri builds override with VITE_BASE='/'.
   base: command === 'serve' ? '/' : (process.env.VITE_BASE ?? '/app/'),
+  define: {
+    __BUILD_ID__: JSON.stringify(String(Date.now())),
+  },
   plugins: [react()],
   server: {
     port: 5173,

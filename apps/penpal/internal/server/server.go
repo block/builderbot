@@ -40,6 +40,8 @@ type Server struct {
 	pendingNav   string    // URL path set by /api/open, consumed by /api/navigate
 	pendingNavAt time.Time // when it was set
 	navMu        sync.Mutex
+
+	installCfg *installConfig // injectable for testing; nil uses defaults
 }
 
 func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http.Handler, am *agents.Manager, act *activity.Tracker, cfg *config.Config, cfgPath string) *Server {
@@ -280,6 +282,8 @@ func (s *Server) routes() {
 	// Publish to Blockcell
 	s.mux.HandleFunc("/api/publish", s.handlePublish)
 	s.mux.HandleFunc("/api/publish-state", s.handlePublishState)
+	// Install tools (CLI symlink + Claude Code plugin)
+	s.mux.HandleFunc("/api/install-tools", s.handleInstallTools)
 	// React SPA at /app/ (served from frontend/dist/ when it exists)
 	s.mux.Handle("/app/", newSPAHandler(s.frontendDir, "/app"))
 	s.mux.Handle("/app", http.RedirectHandler("/app/", http.StatusMovedPermanently))

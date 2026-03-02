@@ -37,7 +37,9 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "icons/Assets.car": "Assets.car"
+      "icons/Assets.car": "Assets.car",
+      "../../.claude-plugin": ".claude-plugin",
+      "../../plugin": "plugin"
     },
     "externalBin": [
       "binaries/penpal-server",

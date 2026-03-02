@@ -121,6 +121,9 @@ pub fn run() {
                     "go_forward" => {
                         let _ = win.eval("window.dispatchEvent(new CustomEvent('menu-go-forward'))");
                     }
+                    "install_tools" => {
+                        let _ = win.eval("window.dispatchEvent(new CustomEvent('menu-install-tools'))");
+                    }
                     _ => {}
                 }
             });
@@ -184,6 +187,8 @@ fn build_menu(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> 
                 &PredefinedMenuItem::about(app, Some("About Penpal"), None)?,
                 &PredefinedMenuItem::separator(app)?,
                 &PredefinedMenuItem::services(app, None)?,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "install_tools", "Manage Command Line Tools\u{2026}", true, None::<&str>)?,
                 &PredefinedMenuItem::separator(app)?,
                 &PredefinedMenuItem::hide(app, None)?,
                 &PredefinedMenuItem::hide_others(app, None)?,

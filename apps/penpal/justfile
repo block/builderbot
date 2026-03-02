@@ -39,7 +39,7 @@ dev: ensure-deps build-go
 build-go: ensure-deps
     ./scripts/build-go.sh
 
-# Install Penpal: build desktop app + install Claude Code plugin
+# Install Penpal: build desktop app and copy to /Applications
 install: build
     #!/usr/bin/env bash
     set -euo pipefail
@@ -64,30 +64,18 @@ install: build
         echo "Warning: $APP_SRC not found, skipping app install."
     fi
 
-    # Install Claude Code plugin
-    claude plugin uninstall birdseye 2>/dev/null || true
-    claude plugin marketplace remove birdseye 2>/dev/null || true
-    rm -f ~/.claude/skills/monitor-reviews
-    claude plugin marketplace add "$(pwd)" 2>/dev/null || true
-    claude plugin install penpal
-    echo "Penpal Claude Code plugin installed."
-
-    # Expose CLI on PATH via Homebrew's bin directory (user-writable, no sudo)
-    ln -sf /Applications/Penpal.app/Contents/MacOS/penpal-cli "$(brew --prefix)/bin/penpal"
-    echo "penpal CLI linked to $(brew --prefix)/bin/penpal."
-
-    # Launch the app
+    # Launch the app — CLI + plugin are installed via in-app menu
     open /Applications/Penpal.app
 
 # Uninstall Penpal
 uninstall:
     #!/usr/bin/env bash
-    rm -f "$(brew --prefix)/bin/penpal" 2>/dev/null || true
     rm -rf /Applications/Penpal.app 2>/dev/null || true
     echo "Penpal.app removed from /Applications."
+    rm -f "$(brew --prefix 2>/dev/null)/bin/penpal" 2>/dev/null || rm -f /usr/local/bin/penpal 2>/dev/null || true
     claude plugin uninstall penpal 2>/dev/null || true
     claude plugin marketplace remove penpal 2>/dev/null || true
-    echo "Penpal Claude Code plugin uninstalled."
+    echo "Penpal uninstalled."
 
 # ============================================================================
 # Code Quality

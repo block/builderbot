@@ -14,6 +14,7 @@ import type {
   AgentStatus,
   PublishState,
   SearchResponse,
+  InstallToolsStatus,
 } from './types';
 
 export const API_BASE = import.meta.env.VITE_API_URL || '';
@@ -136,6 +137,11 @@ export const api = {
   // File operations
   copyFile: (project: string, path: string) =>
     apiVoid(`/api/copy-file?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`),
+
+  // Install tools
+  checkInstallStatus: () => apiFetch<InstallToolsStatus>('/api/install-tools'),
+  installTools: () =>
+    apiFetch<InstallToolsStatus>('/api/install-tools', { method: 'POST' }),
 
   // Misc
   open: (path: string) =>

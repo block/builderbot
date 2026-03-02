@@ -253,12 +253,11 @@ Recent terminal output (last ~200 lines):
 
 Analyze this output and determine:
 1. Is the application still building/compiling, or has it reached a running/ready state?
-2. If running: identify the specific output line that indicates readiness (e.g.,
-   "Listening on http://0.0.0.0:3000", "Server started on port 8080", "ready in 300ms").
-3. Provide a regex pattern that would match that line in this and future runs.
+2. If running: identify the specific output that indicates readiness (e.g.,
+   "Listening on http://0.0.0.0:3000", "Server started on port 8080", "ready in 300ms", "Local: http://localhost:1234/").
+3. Provide a regex pattern that would match for this and future runs. Be careful to avoid volatile values like timestamps, PIDs, version numbers or build durations.
    - If the line contains a URL/endpoint, include a named capture group `(?P<endpoint>...)` for it.
-   - The regex should be general enough to work across restarts (don't hardcode timestamps,
-     PIDs, or other volatile values).
+   - The regex should be general enough to work across restarts
 
 Respond ONLY with JSON, no other text:
 {{

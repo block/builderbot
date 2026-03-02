@@ -16,29 +16,25 @@ A desktop app and local web server that **only** operates on markdown files insi
 - **MCP server** at `/mcp` for AI agents to participate in document review programmatically
 - **Agent presence** -- shows when an agent is actively monitoring a file
 
-## Quick Start
+## Install
 
-### Prerequisites
-
-**just** - Command runner ([install guide](https://github.com/casey/just))
-```bash
-brew install just
-```
-
-Building requires Go, Node.js, and Rust.
-
-### Develop
+### Homebrew (recommended)
 
 ```bash
-just dev           # Desktop app with Vite HMR + Go sidecar
+brew install --cask block/tap/penpal
 ```
 
-### Install
+On first launch, Penpal will prompt you to install the CLI and Claude Code plugin.
+
+### Build from source
+
+For development, you can build and install locally. Requires Go, Node.js, Rust, and [just](https://github.com/casey/just).
 
 ```bash
-just install       # Build .app, copy to /Applications, install Claude Code plugin
-just uninstall     # Remove .app and Claude Code plugin
+just install       # Build dev-branded .app and copy to /Applications
 ```
+
+Dev builds show "Penpal Dev" in the menu bar so you can distinguish them from Homebrew installs.
 
 ### CLI
 
@@ -52,11 +48,21 @@ penpal open thoughts/shared/plans/my-doc.md   # Open file in Penpal desktop app
 |---|---|
 | `just dev` | Desktop app with Vite HMR + Go sidecar |
 | `just build` | Build sidecar + frontend + desktop `.app` bundle |
-| `just build-sidecar` | Build Go sidecar binaries for desktop app |
+| `just build-go` | Build Go sidecar binaries for desktop app |
+| `just package` | Build + zip `.app` for distribution |
 | `just test` | Run all tests (Go + React) |
 | `just test-e2e` | Playwright end-to-end tests |
-| `just check` | Format Go code + tidy dependencies |
+| `just fmt` | Format Go code |
 | `just clean` | Remove build artifacts |
+
+### Releasing
+
+```bash
+just prepare 0.2.0   # Bump version, generate changelog for review
+just release 0.2.0   # Commit, tag, push → CI builds and publishes
+```
+
+`just prepare` updates the version in `Cargo.toml` and `package.json`, generates a changelog entry using Claude, and opens it in Penpal for review. `just release` commits the version bump, creates a `penpal/v*` tag, and pushes to trigger the CI release pipeline.
 
 ### Server options
 

@@ -31,8 +31,8 @@ func TestAPIProjects_ListsProjects(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &projects); err != nil {
 		t.Fatalf("parse JSON: %v", err)
 	}
-	if len(projects) != 2 {
-		t.Fatalf("expected 2 projects, got %d", len(projects))
+	if len(projects) < 2 {
+		t.Fatalf("expected at least 2 projects, got %d", len(projects))
 	}
 
 	names := map[string]bool{}

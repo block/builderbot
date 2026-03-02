@@ -91,7 +91,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			if err != nil {
 				return nil, nil, err
 			}
-			// Record heartbeat and set typing for each thread awaiting response
+			// Record heartbeat and set working for each thread awaiting response
 			seen := make(map[string]bool)
 			for _, t := range threads {
 				if !seen[t.FilePath] {
@@ -99,7 +99,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 					seen[t.FilePath] = true
 				}
 				if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-					store.SetTyping(input.Project, t.FilePath, t.ID)
+					store.SetWorking(input.Project, t.FilePath, t.ID)
 				}
 			}
 			res, err := textResult(threads)
@@ -119,7 +119,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				filtered = append(filtered, t)
 			}
 			if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-				store.SetTyping(input.Project, input.Path, t.ID)
+				store.SetWorking(input.Project, input.Path, t.ID)
 			}
 		}
 		res, err := textResult(filtered)
@@ -144,9 +144,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 		for _, t := range fc.Threads {
 			if t.ID == input.ThreadID {
-				// Set typing indicator if last comment is from a human
+				// Set working indicator if last comment is from a human
 				if len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-					store.SetTyping(input.Project, input.Path, input.ThreadID)
+					store.SetWorking(input.Project, input.Path, input.ThreadID)
 				}
 				res, err := textResult(t)
 				return res, nil, err
@@ -164,7 +164,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project, path, threadId, and body are all required")
 		}
 
-		store.ClearTyping(input.Project, input.Path, input.ThreadID)
+		store.ClearWorking(input.Project, input.Path, input.ThreadID)
 
 		comment := comments.Comment{
 			Author:           "claude",
@@ -253,7 +253,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// penpal_files_in_review
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_files_in_review",
-		Description: "List all documentation files currently in review for a project. File paths are relative to the project root (e.g., thoughts/plans/foo.md). Records a heartbeat for each file to signal agent presence in the penpal UI.",
+		Description: "List all documentation files currently in review for a project. File paths are relative to the project root (e.g., thoughts/plans/foo.md). Records a heartbeat for each file to signal agent presence in the penpal UI. For each file, includes all open threads and the full content of the oldest pending thread (where the last comment is from a human). The working indicator is set for the oldest pending thread so the UI shows the agent is working on it.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input filesInReviewInput) (*mcp.CallToolResult, any, error) {
 		if input.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")
@@ -264,12 +264,50 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, err
 		}
 
-		// Record heartbeat for each file in review
-		for _, f := range files {
-			store.RecordHeartbeat(input.Project, f.FilePath)
+		type fileWithThreads struct {
+			FilePath      string            `json:"filePath"`
+			OpenThreads   int               `json:"openThreads"`
+			Threads       []comments.Thread `json:"threads,omitempty"`
+			OldestPending *comments.Thread  `json:"oldestPending,omitempty"`
 		}
 
-		res, err := textResult(files)
+		enrichedFiles := make([]fileWithThreads, 0, len(files))
+		for _, f := range files {
+			store.RecordHeartbeat(input.Project, f.FilePath)
+
+			ef := fileWithThreads{
+				FilePath:    f.FilePath,
+				OpenThreads: f.OpenThreads,
+			}
+
+			fc, loadErr := store.Load(input.Project, f.FilePath)
+			if loadErr == nil {
+				var oldestPending *comments.Thread
+				var oldestTime time.Time
+
+				for _, t := range fc.Threads {
+					if t.Status == "open" {
+						ef.Threads = append(ef.Threads, t)
+						if len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
+							if oldestPending == nil || t.Comments[len(t.Comments)-1].CreatedAt.Before(oldestTime) {
+								tCopy := t
+								oldestPending = &tCopy
+								oldestTime = t.Comments[len(t.Comments)-1].CreatedAt
+							}
+						}
+					}
+				}
+
+				if oldestPending != nil {
+					ef.OldestPending = oldestPending
+					store.SetWorking(input.Project, f.FilePath, oldestPending.ID)
+				}
+			}
+
+			enrichedFiles = append(enrichedFiles, ef)
+		}
+
+		res, err := textResult(enrichedFiles)
 		return res, nil, err
 	})
 
@@ -303,8 +341,8 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			store.RecordHeartbeat(input.Project, f.FilePath)
 		}
 
-		// When changed, enrich response with threads needing agent response.
-		// Set typing indicators first so the UI shows dots before the agent
+		// When changed, enrich response with pending threads.
+		// Set working indicators first so the UI shows dots before the agent
 		// receives the response and potentially replies quickly.
 		if changed {
 			type fileWithThreads struct {
@@ -313,7 +351,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				Threads     []comments.Thread `json:"threads,omitempty"`
 			}
 
-			// First pass: set typing indicators for all threads awaiting a response
+			// First pass: set working indicators for all threads awaiting a response
 			type pendingThread struct {
 				filePath string
 				thread   comments.Thread
@@ -324,7 +362,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				if loadErr == nil {
 					for _, t := range fc.Threads {
 						if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-							store.SetTyping(input.Project, f.FilePath, t.ID)
+							store.SetWorking(input.Project, f.FilePath, t.ID)
 							pending = append(pending, pendingThread{filePath: f.FilePath, thread: t})
 						}
 					}
@@ -355,14 +393,14 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return res, nil, err
 		}
 
-		// Refresh typing timestamps for threads still awaiting a response
+		// Refresh working timestamps for threads still awaiting a response
 		// so they survive across 30s wait cycles.
 		for _, f := range files {
 			fc, loadErr := store.Load(input.Project, f.FilePath)
 			if loadErr == nil {
 				for _, t := range fc.Threads {
 					if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-						store.SetTyping(input.Project, f.FilePath, t.ID)
+						store.SetWorking(input.Project, f.FilePath, t.ID)
 					}
 				}
 			}

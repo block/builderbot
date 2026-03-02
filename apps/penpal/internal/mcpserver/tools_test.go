@@ -290,6 +290,14 @@ func TestReply(t *testing.T) {
 	}
 }
 
+// fileWithThreadsResponse matches the enriched response from penpal_files_in_review.
+type fileWithThreadsResponse struct {
+	FilePath      string            `json:"filePath"`
+	OpenThreads   int               `json:"openThreads"`
+	Threads       []comments.Thread `json:"threads,omitempty"`
+	OldestPending *comments.Thread  `json:"oldestPending,omitempty"`
+}
+
 func TestFilesInReview(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -301,12 +309,138 @@ func TestFilesInReview(t *testing.T) {
 		"project": env.projName,
 	})
 
-	var files []comments.FileInReview
+	var files []fileWithThreadsResponse
 	if err := json.Unmarshal([]byte(text), &files); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(files) != 2 {
 		t.Fatalf("files = %d, want 2", len(files))
+	}
+}
+
+func TestFilesInReview_IncludesThreads(t *testing.T) {
+	env, cleanup := setup(t)
+	defer cleanup()
+
+	thread := createTestThread(t, env, "thoughts/enriched.md", "Please review this")
+
+	text := callTool(t, env, "penpal_files_in_review", map[string]any{
+		"project": env.projName,
+	})
+
+	var files []fileWithThreadsResponse
+	if err := json.Unmarshal([]byte(text), &files); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("files = %d, want 1", len(files))
+	}
+	if len(files[0].Threads) != 1 {
+		t.Fatalf("threads = %d, want 1", len(files[0].Threads))
+	}
+	if files[0].Threads[0].ID != thread.ID {
+		t.Errorf("thread ID = %q, want %q", files[0].Threads[0].ID, thread.ID)
+	}
+}
+
+func TestFilesInReview_OldestPending(t *testing.T) {
+	env, cleanup := setup(t)
+	defer cleanup()
+
+	// Create two threads with human comments — oldest should be selected
+	thread1 := createTestThread(t, env, "thoughts/pending.md", "First comment")
+	time.Sleep(10 * time.Millisecond) // ensure different timestamps
+	createTestThread(t, env, "thoughts/pending.md", "Second comment")
+
+	text := callTool(t, env, "penpal_files_in_review", map[string]any{
+		"project": env.projName,
+	})
+
+	var files []fileWithThreadsResponse
+	if err := json.Unmarshal([]byte(text), &files); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("files = %d, want 1", len(files))
+	}
+	if files[0].OldestPending == nil {
+		t.Fatal("oldestPending is nil")
+	}
+	if files[0].OldestPending.ID != thread1.ID {
+		t.Errorf("oldestPending ID = %q, want %q (oldest)", files[0].OldestPending.ID, thread1.ID)
+	}
+}
+
+func TestFilesInReview_SetsWorkingIndicator(t *testing.T) {
+	env, cleanup := setup(t)
+	defer cleanup()
+
+	thread := createTestThread(t, env, "thoughts/working.md", "Review this")
+
+	// Before calling files_in_review, no working indicator
+	if env.store.IsWorking(env.projName, "thoughts/working.md", thread.ID) {
+		t.Fatal("expected no working indicator before files_in_review")
+	}
+
+	callTool(t, env, "penpal_files_in_review", map[string]any{
+		"project": env.projName,
+	})
+
+	// After calling files_in_review, working indicator should be set
+	if !env.store.IsWorking(env.projName, "thoughts/working.md", thread.ID) {
+		t.Error("expected working indicator to be set after files_in_review")
+	}
+}
+
+func TestReply_ClearsWorkingIndicator(t *testing.T) {
+	env, cleanup := setup(t)
+	defer cleanup()
+
+	thread := createTestThread(t, env, "thoughts/clear-working.md", "Review")
+
+	// Set working indicator via files_in_review
+	callTool(t, env, "penpal_files_in_review", map[string]any{
+		"project": env.projName,
+	})
+	if !env.store.IsWorking(env.projName, "thoughts/clear-working.md", thread.ID) {
+		t.Fatal("expected working indicator to be set")
+	}
+
+	// Reply should clear it
+	callTool(t, env, "penpal_reply", map[string]any{
+		"project":  env.projName,
+		"path":     "thoughts/clear-working.md",
+		"threadId": thread.ID,
+		"body":     "Done",
+	})
+
+	if env.store.IsWorking(env.projName, "thoughts/clear-working.md", thread.ID) {
+		t.Error("expected working indicator to be cleared after reply")
+	}
+}
+
+func TestFilesInReview_NoOldestPendingWhenAgentReplied(t *testing.T) {
+	env, cleanup := setup(t)
+	defer cleanup()
+
+	// Create a thread and have the agent reply — no pending thread
+	thread := createTestThread(t, env, "thoughts/replied.md", "Please check")
+	agentComment := comments.Comment{Author: "claude", Role: "agent", Body: "Done"}
+	env.store.AddComment(env.projName, "thoughts/replied.md", thread.ID, agentComment)
+
+	text := callTool(t, env, "penpal_files_in_review", map[string]any{
+		"project": env.projName,
+	})
+
+	var files []fileWithThreadsResponse
+	if err := json.Unmarshal([]byte(text), &files); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("files = %d, want 1", len(files))
+	}
+	if files[0].OldestPending != nil {
+		t.Error("expected no oldestPending when agent already replied")
 	}
 }
 

@@ -25,14 +25,15 @@ in review. Resolving all threads on a file removes it from review.
    with your working directory to get it. Use this name for all subsequent
    penpal tool calls.
 2. Call `penpal_files_in_review` for the project to discover files with open
-   comment threads.
+   comment threads. The response includes all open threads per file and the
+   oldest pending thread (where the last comment is from a human) with its full
+   content.
 3. For each file in review:
    a. Read the file content (the markdown file under `thoughts/`) so you have
       full context.
-   b. Call `penpal_list_threads` with status "open" to find unaddressed
-      threads.
-   c. Read each thread with `penpal_read_thread`.
-   d. Reply thoughtfully to comments you haven't yet responded to.
+   b. Reply to the `oldestPending` thread first -- no need to call
+      `penpal_list_threads` or `penpal_read_thread` for it.
+   c. Then process any remaining threads where the last comment is from a human.
 4. Call `penpal_wait_for_changes` in a loop to wait for new activity. This
    tool blocks for up to 30 seconds and returns immediately when a comment is
    created, replied to, resolved, or reopened. It also maintains your agent
@@ -49,7 +50,7 @@ in review. Resolving all threads on a file removes it from review.
 - Be concise in replies -- the human is reading these in a narrow side panel
 - ALWAYS reply to every thread you work on. When a comment asks for changes,
   make the changes and then reply confirming what you did. When you investigate
-  something, reply with what you found. The human sees a "typing" indicator
+  something, reply with what you found. The human sees a working indicator
   while you work -- the reply is what tells them you're done.
 - If you disagree with feedback, explain your reasoning rather than silently
   ignoring it
@@ -66,7 +67,7 @@ in review. Resolving all threads on a file removes it from review.
 |------|---------|
 | `penpal_find_project` | Get the project name for your working directory. Call first if you don't know it. |
 | `penpal_wait_for_changes` | Block until comments change (or 30s timeout). Returns files in review. Use in a loop. |
-| `penpal_files_in_review` | List all files with open comment threads for a project |
+| `penpal_files_in_review` | List all files with open threads, including thread details and oldest pending thread content |
 | `penpal_list_threads` | List comment threads on a file (optionally filter by status) |
 | `penpal_read_thread` | Read a full comment thread with all replies |
 | `penpal_create_thread` | Create a new comment thread anchored to text |

@@ -979,8 +979,8 @@ a:hover { text-decoration: underline; }
 .agent-context-label.warning { color: var(--accent-warning); }
 .agent-context-label.critical { color: var(--accent-danger); }
 
-/* Typing indicator */
-.thread-typing {
+/* Working indicator */
+.thread-working {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -988,7 +988,7 @@ a:hover { text-decoration: underline; }
   color: var(--accent-success);
   font-size: 0.85em;
 }
-.thread-typing .agent-dot {
+.thread-working .agent-dot {
   display: inline-block;
   width: 7px;
   height: 7px;
@@ -997,10 +997,10 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
   animation: sidebar-pulse 2s infinite;
 }
-.typing-dots span { animation: typing-blink 1.4s infinite both; }
-.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
-.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
-@keyframes typing-blink {
+.working-dots span { animation: working-blink 1.4s infinite both; }
+.working-dots span:nth-child(2) { animation-delay: 0.2s; }
+.working-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes working-blink {
   0%, 80%, 100% { opacity: 0.3; }
   40% { opacity: 1; }
 }
@@ -1384,8 +1384,8 @@ a:hover { text-decoration: underline; }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
 
-/* Typing indicator for file rows */
-.file-typing {
+/* Working indicator for file rows */
+.file-working {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1394,9 +1394,9 @@ a:hover { text-decoration: underline; }
   font-weight: 500;
   flex-shrink: 0;
 }
-.file-typing .typing-dots span { animation: typing-blink 1.4s infinite both; }
-.file-typing .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
-.file-typing .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+.file-working .working-dots span { animation: working-blink 1.4s infinite both; }
+.file-working .working-dots span:nth-child(2) { animation-delay: 0.2s; }
+.file-working .working-dots span:nth-child(3) { animation-delay: 0.4s; }
 
 /* Dir heading within file lists */
 .dir-heading {

@@ -149,7 +149,7 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 		log.Printf("Agent exited for %s (PID %d): %v", projectName, agent.PID, agent.exitErr)
 
 		m.comments.ClearProjectHeartbeats(projectName)
-		m.comments.ClearProjectTyping(projectName)
+		m.comments.ClearProjectWorking(projectName)
 
 		m.mu.Lock()
 		// Only delete if it's still the same agent (not replaced)

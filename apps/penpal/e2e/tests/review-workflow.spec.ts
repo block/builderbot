@@ -106,16 +106,16 @@ test.describe('review workflow', () => {
     const threadId = await threadCard.getAttribute('data-thread-id');
     expect(threadId).toBeTruthy();
 
-    // ---- Step 3: Simulate agent reading threads (typing indicator) ----
+    // ---- Step 3: Simulate agent reading threads (working indicator) ----
     const mcp = new MCPClient();
     await mcp.initialize();
 
-    // Call penpal_list_threads — this triggers typing state for threads with human as last commenter
+    // Call penpal_list_threads — this triggers working state for threads with human as last commenter
     await mcp.callTool('penpal_list_threads', { project: projectName });
 
-    // Wait for the typing indicator to appear via SSE update
-    const typingIndicator = threadCard.locator('.thread-typing');
-    await expect(typingIndicator).toBeVisible({ timeout: 10000 });
+    // Wait for the working indicator to appear via SSE update
+    const workingIndicator = threadCard.locator('.thread-working');
+    await expect(workingIndicator).toBeVisible({ timeout: 10000 });
 
     // ---- Step 4: Simulate agent replying ----
     await mcp.callTool('penpal_reply', {
@@ -126,10 +126,10 @@ test.describe('review workflow', () => {
       suggestedReplies: ['Looks good', 'Let me check'],
     });
 
-    // Wait for SSE update — typing should disappear, agent comment should appear
+    // Wait for SSE update — working indicator should disappear, agent comment should appear
     // Use a fresh locator for the thread card (DOM may have been replaced)
     const updatedCard = page.locator(`.thread-card[data-thread-id="${threadId}"]`);
-    await expect(updatedCard.locator('.thread-typing')).toBeHidden({ timeout: 10000 });
+    await expect(updatedCard.locator('.thread-working')).toBeHidden({ timeout: 10000 });
 
     // Agent comment appears
     const agentComment = updatedCard.locator('.comment-role.agent');

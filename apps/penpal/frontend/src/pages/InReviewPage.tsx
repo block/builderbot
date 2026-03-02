@@ -13,11 +13,11 @@ function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
   }) as T;
 }
 
-function TypingIndicator() {
+function WorkingIndicator() {
   return (
-    <span className="file-typing">
+    <span className="file-working">
       <span className="agent-dot" />
-      <span className="typing-dots"><span>.</span><span>.</span><span>.</span></span>
+      <span className="working-dots"><span>.</span><span>.</span><span>.</span></span>
     </span>
   );
 }
@@ -76,8 +76,8 @@ export default function InReviewPage() {
                   {group.sourceName}
                 </Link>
               </span>
-              {(group.typingThreads ?? 0) > 0 && (
-                <span style={{ marginLeft: 'auto' }}><TypingIndicator /></span>
+              {(group.workingThreads ?? 0) > 0 && (
+                <span style={{ marginLeft: 'auto' }}><WorkingIndicator /></span>
               )}
             </div>
             <ul className="files-list">

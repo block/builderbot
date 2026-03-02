@@ -30,6 +30,7 @@
     Hammer,
     FlaskConical,
     Sparkles,
+    Check,
     CheckCircle2,
     Wrench,
     AlertCircle,
@@ -316,6 +317,10 @@
 
   // Run phase tracking for run actions (building, running, endpoint detection)
   let runPhases = $state(new Map<string, RunPhase>());
+
+  // Tracks which endpoint copy buttons are showing the "copied" tick
+  let endpointCopied = $state(new Map<string, boolean>());
+  let endpointCopiedTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   // Commit diff modal (opened by clicking a commit in the timeline)
   let commitDiffSha = $state<string | null>(null);
@@ -718,6 +723,8 @@
     // Clean up alt-key listeners
     window.removeEventListener('keydown', handleAltDown);
     window.removeEventListener('keyup', handleAltUp);
+    // Clean up endpoint copied timers
+    for (const timer of endpointCopiedTimers.values()) clearTimeout(timer);
   });
 
   function prunePendingSessionItems(nextTimeline: BranchTimelineData) {
@@ -1848,13 +1855,30 @@
                     class="primary-action-pill-copy"
                     onclick={(e) => {
                       e.stopPropagation();
-                      if (phase?.type === 'running' && phase.endpoint) {
+                      if (phase?.type === 'running' && phase.endpoint && execution) {
                         navigator.clipboard.writeText(phase.endpoint);
+                        const id = execution.executionId;
+                        const prev = endpointCopiedTimers.get(id);
+                        if (prev) clearTimeout(prev);
+                        endpointCopied.set(id, true);
+                        endpointCopied = endpointCopied;
+                        endpointCopiedTimers.set(
+                          id,
+                          setTimeout(() => {
+                            endpointCopied.delete(id);
+                            endpointCopied = endpointCopied;
+                            endpointCopiedTimers.delete(id);
+                          }, 1500)
+                        );
                       }
                     }}
                     title="Copy endpoint: {phase.endpoint}"
                   >
-                    <Copy size={12} />
+                    {#if execution && endpointCopied.get(execution.executionId)}
+                      <Check size={12} />
+                    {:else}
+                      <Copy size={12} />
+                    {/if}
                   </button>
                 </div>
               {:else}

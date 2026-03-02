@@ -808,7 +808,7 @@
                     {#if isGroupExpanded}
                       {#each vg.items as item}
                         {@const isExpanded = expandedTools.has(item.pair.call.id)}
-                        <div class="tool-card">
+                        <div class="tool-card tool-card-nested">
                           <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                           <div
                             class="tool-header"
@@ -1238,6 +1238,10 @@
   .tool-card {
     overflow: visible;
     min-width: 0;
+  }
+
+  .tool-card-nested {
+    padding-left: 16px;
   }
 
   .tool-header {

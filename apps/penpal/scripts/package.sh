@@ -16,7 +16,14 @@ case "$ARCH" in
     *)              echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
-APP_SRC="$ROOT_DIR/frontend/src-tauri/target/release/bundle/macos/Penpal.app"
+# Optional Cargo build target triple (e.g. aarch64-apple-darwin).
+# When set, Tauri outputs to target/<triple>/release/ instead of target/release/.
+TARGET_TRIPLE="${2:-}"
+if [ -n "$TARGET_TRIPLE" ]; then
+    APP_SRC="$ROOT_DIR/frontend/src-tauri/target/$TARGET_TRIPLE/release/bundle/macos/Penpal.app"
+else
+    APP_SRC="$ROOT_DIR/frontend/src-tauri/target/release/bundle/macos/Penpal.app"
+fi
 if [ ! -d "$APP_SRC" ]; then
     echo "Error: $APP_SRC not found. Run 'just build' first." >&2
     exit 1

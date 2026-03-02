@@ -32,6 +32,9 @@ impl Store {
     /// If a review already exists with that unique key, returns it (with
     /// all child data loaded). Otherwise creates a new empty review and
     /// returns it.
+    ///
+    /// When multiple reviews share the same triple, returns the most
+    /// recently created one.
     pub fn ensure_review(
         &self,
         branch_id: &str,
@@ -40,12 +43,14 @@ impl Store {
     ) -> Result<Review, StoreError> {
         let conn = self.conn.lock().unwrap();
 
-        // Try to find existing
+        // Try to find existing — ORDER BY created_at DESC so we get the latest
+        // when multiple reviews share the same (branch, commit, scope) triple.
         let existing: Option<Review> = conn
             .query_row(
                 "SELECT id, branch_id, commit_sha, scope, session_id, created_at, updated_at
                  FROM reviews
-                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3",
+                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3
+                 ORDER BY created_at DESC LIMIT 1",
                 params![branch_id, commit_sha, scope.as_str()],
                 Self::row_to_review_header,
             )
@@ -75,6 +80,9 @@ impl Store {
     }
 
     /// Find a review by (branch, commit, scope) without creating one.
+    ///
+    /// When multiple reviews share the same triple, returns the most
+    /// recently created one.
     pub fn find_review(
         &self,
         branch_id: &str,
@@ -82,11 +90,14 @@ impl Store {
         scope: ReviewScope,
     ) -> Result<Option<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        // ORDER BY created_at DESC so we get the latest when multiple
+        // reviews share the same (branch, commit, scope) triple.
         let existing: Option<Review> = conn
             .query_row(
                 "SELECT id, branch_id, commit_sha, scope, session_id, created_at, updated_at
                  FROM reviews
-                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3",
+                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3
+                 ORDER BY created_at DESC LIMIT 1",
                 params![branch_id, commit_sha, scope.as_str()],
                 Self::row_to_review_header,
             )

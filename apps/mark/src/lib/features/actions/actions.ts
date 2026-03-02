@@ -15,6 +15,28 @@ export type ActionType = 'build' | 'test' | 'format' | 'check' | 'prerun' | 'run
 /** Status of a running action. */
 export type ActionStatus = 'running' | 'completed' | 'failed' | 'stopped';
 
+/** How a "run" action detects whether the process is running and/or its endpoint. */
+export type RunDetectionMode =
+  | { type: 'autodetect' }
+  | { type: 'endpointRegex'; pattern: string }
+  | { type: 'runningRegex'; pattern: string }
+  | { type: 'noDetection' };
+
+/** Current phase of a running "run" action. */
+export type RunPhase =
+  | { type: 'building' }
+  | { type: 'running'; endpoint: string | null }
+  | { type: 'autodetectPending' }
+  | { type: 'noDetection' };
+
+/** Event payload for run phase changes. */
+export interface RunPhaseChangedEvent {
+  executionId: string;
+  branchId: string;
+  actionName: string;
+  phase: RunPhase;
+}
+
 /** A configured project action. */
 export interface ProjectAction {
   id: string;
@@ -24,6 +46,7 @@ export interface ProjectAction {
   actionType: ActionType;
   sortOrder: number;
   autoCommit: boolean;
+  runDetectionMode?: RunDetectionMode;
   createdAt: number;
   updatedAt: number;
 }
@@ -219,4 +242,29 @@ export function listenToRepoActionsDetection(
   return listen<RepoActionsDetectionEvent>('repo-actions-detection', (event) => {
     callback(event.payload);
   });
+}
+
+/**
+ * Get the current run phase for a running action execution.
+ * Returns null if the execution is not found or has no phase.
+ */
+export function getRunPhase(executionId: string): Promise<RunPhase | null> {
+  return invoke<RunPhase | null>('get_run_phase', { executionId });
+}
+
+/**
+ * Update the run detection mode for an action.
+ */
+export function updateRunDetectionMode(actionId: string, mode: RunDetectionMode): Promise<void> {
+  return invoke('update_run_detection_mode', { actionId, mode });
+}
+
+/**
+ * Listen for run phase change events.
+ * Returns an unlisten function to stop listening.
+ */
+export function listenToRunPhaseChanged(
+  callback: (event: { payload: RunPhaseChangedEvent }) => void
+): Promise<UnlistenFn> {
+  return listen<RunPhaseChangedEvent>('action:run-phase-changed', callback);
 }

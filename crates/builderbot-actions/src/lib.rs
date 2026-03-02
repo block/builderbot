@@ -68,4 +68,4 @@ pub mod models;
 pub use acp_provider::AcpAiProvider;
 pub use detector::{ActionDetector, AiProvider, FileExplorationMode, SuggestedAction};
 pub use executor::{ActionExecutor, ActionMetadata, ExecutionListener};
-pub use models::{ActionStatus, ActionType, ExecutionEvent, OutputChunk};
+pub use models::{ActionStatus, ActionType, ExecutionEvent, OutputChunk, RunDetectionMode};

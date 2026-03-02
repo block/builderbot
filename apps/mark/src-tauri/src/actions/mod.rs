@@ -8,10 +8,11 @@ pub mod ai_provider;
 pub mod commands;
 pub mod events;
 pub mod registry;
+pub mod run_detector;
 
 // Re-export types for convenience
 pub use builderbot_actions::{
     ActionDetector, ActionExecutor, ActionMetadata, ActionStatus, ActionType, OutputChunk,
     SuggestedAction,
 };
-pub use registry::{ActionRegistry, RunningActionInfo};
+pub use registry::{ActionRegistry, RunPhase, RunningActionInfo};

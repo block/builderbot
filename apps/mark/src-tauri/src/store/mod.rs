@@ -1,9 +1,9 @@
 //! SQLite storage for Mark.
 //!
-//! Fresh schema — no migrations. A `schema_version` table tracks
-//! compatibility. If the database is missing that table or has an
-//! incompatible version, it is deleted and recreated after user
-//! confirmation.
+//! A `schema_version` table tracks compatibility. Databases within the
+//! migratable range ([`MIN_MIGRATABLE_VERSION`]..=[`SCHEMA_VERSION`]) are
+//! upgraded incrementally in [`Store::init_schema`]. Older databases trigger
+//! a reset-and-recreate dialog.
 //!
 //! Tables: schema_version, projects, project_repos, branches, workdirs, commits,
 //! sessions, session_messages, notes, project_notes, reviews, action_contexts, repo_actions.
@@ -60,9 +60,20 @@ impl From<rusqlite::Error> for StoreError {
 
 /// The schema version written by this build.
 ///
-/// Bump this whenever the schema changes in an incompatible way.
+/// Bump this whenever the schema changes.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
+
+/// Oldest schema version we can migrate forward from.
+///
+/// Databases with a version in `MIN_MIGRATABLE_VERSION..SCHEMA_VERSION` are
+/// upgraded incrementally by [`Store::init_schema`]. Databases older than
+/// this require a full wipe (the user sees a reset dialog).
+///
+/// When adding a new migration, keep this value unchanged. Only bump it when
+/// a migration is too destructive to express incrementally (e.g. a table
+/// redesign) — in that case set it equal to the new `SCHEMA_VERSION`.
+pub const MIN_MIGRATABLE_VERSION: i64 = 14;
 
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -87,9 +98,11 @@ pub enum DbCompatibility {
 
 /// Check whether an existing database file is compatible with this build.
 ///
-/// Returns [`DbCompatibility::Ok`] if the file doesn't exist (fresh DB) or has a
-/// matching schema version. Returns [`DbCompatibility::NeedsReset`] or
-/// [`DbCompatibility::TooNew`] when the schema version doesn't match.
+/// Returns [`DbCompatibility::Ok`] if the file doesn't exist (fresh DB),
+/// has a matching schema version, or has a version within the migratable
+/// range ([`MIN_MIGRATABLE_VERSION`]..`SCHEMA_VERSION`). Returns
+/// [`DbCompatibility::NeedsReset`] for older versions or
+/// [`DbCompatibility::TooNew`] for newer ones.
 ///
 /// This opens a temporary read-only connection and closes it before
 /// returning — it does **not** create a `Store`.
@@ -134,6 +147,10 @@ pub fn check_db_compatibility(path: &Path) -> Result<DbCompatibility, String> {
 
     if version > SCHEMA_VERSION {
         Ok(DbCompatibility::TooNew { db_app_version })
+    } else if version >= MIN_MIGRATABLE_VERSION {
+        // We have incremental migrations for this range — let Store::new()
+        // apply them.
+        Ok(DbCompatibility::Ok)
     } else {
         Ok(DbCompatibility::NeedsReset { db_app_version })
     }
@@ -399,15 +416,16 @@ impl Store {
                 ON action_contexts(github_repo, COALESCE(subpath, ''));
 
             CREATE TABLE IF NOT EXISTS repo_actions (
-                id              TEXT PRIMARY KEY,
-                context_id      TEXT NOT NULL REFERENCES action_contexts(id) ON DELETE CASCADE,
-                name            TEXT NOT NULL,
-                command         TEXT NOT NULL,
-                action_type     TEXT NOT NULL,
-                sort_order      INTEGER NOT NULL,
-                auto_commit     INTEGER NOT NULL DEFAULT 0,
-                created_at      INTEGER NOT NULL,
-                updated_at      INTEGER NOT NULL
+                id                  TEXT PRIMARY KEY,
+                context_id          TEXT NOT NULL REFERENCES action_contexts(id) ON DELETE CASCADE,
+                name                TEXT NOT NULL,
+                command             TEXT NOT NULL,
+                action_type         TEXT NOT NULL,
+                sort_order          INTEGER NOT NULL,
+                auto_commit         INTEGER NOT NULL DEFAULT 0,
+                run_detection_mode  TEXT DEFAULT NULL,
+                created_at          INTEGER NOT NULL,
+                updated_at          INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_repo_actions_context
                 ON repo_actions(context_id);
@@ -481,6 +499,30 @@ impl Store {
             END;
             ",
         )?;
+
+        // -- Incremental migrations ----------------------------------------
+        // Read current schema version from database. For fresh databases this
+        // will equal SCHEMA_VERSION. For existing databases it may be older.
+        let db_version: i64 = conn
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(SCHEMA_VERSION);
+
+        if db_version < 15 {
+            // v14 → v15: add run_detection_mode column to repo_actions
+            conn.execute_batch(
+                "ALTER TABLE repo_actions ADD COLUMN run_detection_mode TEXT DEFAULT NULL;",
+            )
+            .ok(); // Ignore error if column already exists (fresh DB)
+        }
+
+        // Stamp the current schema version so future opens skip applied migrations.
+        conn.execute(
+            "UPDATE schema_version SET version = ?1",
+            rusqlite::params![SCHEMA_VERSION],
+        )?;
+
         Ok(())
     }
 }

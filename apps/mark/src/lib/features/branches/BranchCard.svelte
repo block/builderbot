@@ -30,6 +30,7 @@
     Hammer,
     FlaskConical,
     Sparkles,
+    Check,
     CheckCircle2,
     Wrench,
     AlertCircle,
@@ -43,6 +44,7 @@
     ExternalLink,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import SineWave from '../../shared/SineWave.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { subscribeDragDrop } from './dragDrop';
   import type {
@@ -65,7 +67,10 @@
     getRunningBranchActions,
     clearActionExecution,
     stopBranchAction,
+    getRunPhase,
+    listenToRunPhaseChanged,
     type ActionStatusEvent,
+    type RunPhase,
   } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
   import {
@@ -310,6 +315,13 @@
   } | null>(null);
   let stoppingExecutions = $state<Set<string>>(new Set());
 
+  // Run phase tracking for run actions (building, running, endpoint detection)
+  let runPhases = $state(new Map<string, RunPhase>());
+
+  // Tracks which endpoint copy buttons are showing the "copied" tick
+  let endpointCopied = $state<Record<string, boolean>>({});
+  let endpointCopiedTimers: Record<string, ReturnType<typeof setTimeout>> = {};
+
   // Commit diff modal (opened by clicking a commit in the timeline)
   let commitDiffSha = $state<string | null>(null);
 
@@ -346,6 +358,7 @@
   let unlistenActionStatus: UnlistenFn | null = null;
   let unlistenPrStatus: UnlistenFn | null = null;
   let unlistenPrStatusCleared: UnlistenFn | null = null;
+  let unlistenRunPhaseChanged: UnlistenFn | null = null;
 
   // Window focus handlers (stored for cleanup)
   let handleFocus: (() => void) | null = null;
@@ -417,7 +430,7 @@
           runningActions[existingIndex].exitCode = payload.exitCode;
           runningActions[existingIndex].completedAt = payload.completedAt;
 
-          // Clean up stopping state when action reaches terminal state
+          // Clean up stopping state and run phase when action reaches terminal state
           if (
             payload.status === 'stopped' ||
             payload.status === 'completed' ||
@@ -426,6 +439,9 @@
             const updated = new Set(stoppingExecutions);
             updated.delete(payload.executionId);
             stoppingExecutions = updated;
+
+            runPhases.delete(payload.executionId);
+            runPhases = new Map(runPhases);
           }
 
           // Auto-remove terminal states after a delay
@@ -498,11 +514,21 @@
       unlistenPrStatusCleared = unlisten;
     });
 
+    listenToRunPhaseChanged((event) => {
+      if (event.payload.branchId === branchId) {
+        runPhases.set(event.payload.executionId, event.payload.phase);
+        runPhases = new Map(runPhases);
+      }
+    }).then((unlisten) => {
+      unlistenRunPhaseChanged = unlisten;
+    });
+
     return () => {
       unlistenStatus?.();
       unlistenActionStatus?.();
       unlistenPrStatus?.();
       unlistenPrStatusCleared?.();
+      unlistenRunPhaseChanged?.();
     };
   });
 
@@ -680,6 +706,7 @@
     unlistenActionStatus?.();
     unlistenPrStatus?.();
     unlistenPrStatusCleared?.();
+    unlistenRunPhaseChanged?.();
     // Clean up PR status polling
     if (prStatusPollTimer) {
       clearInterval(prStatusPollTimer);
@@ -696,6 +723,8 @@
     // Clean up alt-key listeners
     window.removeEventListener('keydown', handleAltDown);
     window.removeEventListener('keyup', handleAltUp);
+    // Clean up endpoint copied timers
+    for (const timer of Object.values(endpointCopiedTimers)) clearTimeout(timer);
   });
 
   function prunePendingSessionItems(nextTimeline: BranchTimelineData) {
@@ -798,7 +827,7 @@
       // Restore running actions that were started before component mounted
       const running = await getRunningBranchActions(branch.id);
 
-      // Add each running action to state
+      // Add each running action to state and query run phases
       for (const info of running) {
         const existingIndex = runningActions.findIndex((a) => a.executionId === info.executionId);
         if (existingIndex === -1) {
@@ -810,7 +839,27 @@
             startedAt: info.startedAt,
           });
         }
+
+        // Query initial run phase for each running action.
+        // On app restart, RunPhase state is ephemeral and lost — default
+        // to Running so the UI shows a sine wave for actions that are still
+        // alive but whose detection tasks are gone.
+        try {
+          const phase = await getRunPhase(info.executionId);
+          if (phase) {
+            runPhases.set(info.executionId, phase);
+          } else {
+            // No persisted phase — the action is running but detection state
+            // was lost (app restart). Default to Running with no endpoint so
+            // the sine wave is shown. This is safe for non-Run actions too
+            // since phases are only rendered for Run-type action buttons.
+            runPhases.set(info.executionId, { type: 'running', endpoint: null });
+          }
+        } catch {
+          // Phase not available for this execution (e.g., not a run action)
+        }
       }
+      runPhases = new Map(runPhases);
     } catch (e) {
       console.error('Failed to load running actions:', e);
     }
@@ -1710,6 +1759,7 @@
             {@const isRunning = execution.status === 'running'}
             {@const isStopping = stoppingExecutions.has(execution.executionId)}
             {@const showStopIcon = altHeld && isRunning && !isStopping}
+            {@const phase = runPhases.get(execution.executionId)}
             <div
               class="running-action-container"
               class:fading={execution.fading}
@@ -1745,6 +1795,8 @@
                   <Spinner size={12} class="danger" />
                 {:else if showStopIcon}
                   <StopCircle size={12} />
+                {:else if isRunning && phase && phase.type !== 'building'}
+                  <SineWave size={12} />
                 {:else if isRunning}
                   <Spinner size={12} />
                 {:else if execution.status === 'completed'}
@@ -1764,55 +1816,126 @@
             {@const isRunning = execution?.status === 'running'}
             {@const isStopping = execution && stoppingExecutions.has(execution.executionId)}
             {@const showStopIcon = altHeld && isRunning && !isStopping}
+            {@const phase = execution ? runPhases.get(execution.executionId) : undefined}
+            {@const hasEndpoint = phase?.type === 'running' && !!phase.endpoint}
             <div
               class="primary-action-container"
               in:slide={{ duration: 300, axis: 'x' }}
               out:slide={{ duration: 300, axis: 'x' }}
             >
-              <button
-                class="primary-action-button"
-                class:running={isRunning}
-                class:stopping={isStopping}
-                class:completed={execution?.status === 'completed'}
-                class:failed={execution?.status === 'failed'}
-                class:show-stop={showStopIcon}
-                onclick={() => {
-                  if (isRunning && altHeld && !isStopping && execution) {
-                    handleStopAction(execution.executionId, primaryRunAction.name);
-                  } else if (isRunning && execution) {
-                    handleShowActionOutput(execution);
-                  } else if (isStopping && execution) {
-                    handleShowActionOutput(execution);
-                  } else {
-                    handleRunAction(primaryRunAction);
-                  }
-                }}
-                title={isStopping
-                  ? 'Stopping…'
-                  : showStopIcon
-                    ? `Stop ${primaryRunAction.name}`
-                    : isRunning
-                      ? `View output for ${primaryRunAction.name}`
-                      : execution?.status === 'completed'
-                        ? `${primaryRunAction.name} completed`
-                        : execution?.status === 'failed'
-                          ? `${primaryRunAction.name} failed`
-                          : primaryRunAction.name}
-              >
-                {#if isStopping}
-                  <Spinner size={14} class="danger" />
-                {:else if showStopIcon}
-                  <StopCircle size={14} />
-                {:else if isRunning}
-                  <Spinner size={14} />
-                {:else if execution?.status === 'completed'}
-                  <CheckCircle size={14} />
-                {:else if execution?.status === 'failed'}
-                  <AlertCircle size={14} />
-                {:else}
-                  <Play size={14} />
-                {/if}
-              </button>
+              {#if isRunning && hasEndpoint && phase?.type === 'running' && phase.endpoint}
+                <!-- Pill-shaped button when running with endpoint -->
+                <div class="primary-action-pill">
+                  <button
+                    class="primary-action-pill-main"
+                    class:stopping={isStopping}
+                    class:show-stop={showStopIcon}
+                    onclick={() => {
+                      if (altHeld && !isStopping && execution) {
+                        handleStopAction(execution.executionId, primaryRunAction.name);
+                      } else if (execution) {
+                        handleShowActionOutput(execution);
+                      }
+                    }}
+                    title={isStopping
+                      ? 'Stopping…'
+                      : showStopIcon
+                        ? `Stop ${primaryRunAction.name}`
+                        : `View output for ${primaryRunAction.name}`}
+                  >
+                    {#if isStopping}
+                      <Spinner size={14} class="danger" />
+                    {:else if showStopIcon}
+                      <StopCircle size={14} />
+                    {:else}
+                      <SineWave size={14} />
+                    {/if}
+                  </button>
+                  <button
+                    class="primary-action-pill-copy"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      if (phase?.type === 'running' && phase.endpoint && execution) {
+                        navigator.clipboard.writeText(phase.endpoint).catch(() => {});
+                        const id = execution.executionId;
+                        if (endpointCopiedTimers[id]) clearTimeout(endpointCopiedTimers[id]);
+                        endpointCopied[id] = true;
+                        endpointCopiedTimers[id] = setTimeout(() => {
+                          delete endpointCopied[id];
+                          delete endpointCopiedTimers[id];
+                        }, 1500);
+                      }
+                    }}
+                    title="Copy endpoint: {phase.endpoint}"
+                  >
+                    {#if execution && endpointCopied[execution.executionId]}
+                      <span
+                        class="copy-icon-wrapper"
+                        in:fade={{ duration: 150 }}
+                        out:fade={{ duration: 150 }}
+                      >
+                        <Check size={12} />
+                      </span>
+                    {:else}
+                      <span
+                        class="copy-icon-wrapper"
+                        in:fade={{ duration: 150 }}
+                        out:fade={{ duration: 150 }}
+                      >
+                        <Copy size={12} />
+                      </span>
+                    {/if}
+                  </button>
+                </div>
+              {:else}
+                <!-- Standard circular button -->
+                <button
+                  class="primary-action-button"
+                  class:running={isRunning}
+                  class:stopping={isStopping}
+                  class:completed={execution?.status === 'completed'}
+                  class:failed={execution?.status === 'failed'}
+                  class:show-stop={showStopIcon}
+                  onclick={() => {
+                    if (isRunning && altHeld && !isStopping && execution) {
+                      handleStopAction(execution.executionId, primaryRunAction.name);
+                    } else if (isRunning && execution) {
+                      handleShowActionOutput(execution);
+                    } else if (isStopping && execution) {
+                      handleShowActionOutput(execution);
+                    } else {
+                      handleRunAction(primaryRunAction);
+                    }
+                  }}
+                  title={isStopping
+                    ? 'Stopping…'
+                    : showStopIcon
+                      ? `Stop ${primaryRunAction.name}`
+                      : isRunning
+                        ? `View output for ${primaryRunAction.name}`
+                        : execution?.status === 'completed'
+                          ? `${primaryRunAction.name} completed`
+                          : execution?.status === 'failed'
+                            ? `${primaryRunAction.name} failed`
+                            : primaryRunAction.name}
+                >
+                  {#if isStopping}
+                    <Spinner size={14} class="danger" />
+                  {:else if showStopIcon}
+                    <StopCircle size={14} />
+                  {:else if isRunning && phase?.type === 'building'}
+                    <Spinner size={14} />
+                  {:else if isRunning}
+                    <SineWave size={14} />
+                  {:else if execution?.status === 'completed'}
+                    <CheckCircle size={14} />
+                  {:else if execution?.status === 'failed'}
+                    <AlertCircle size={14} />
+                  {:else}
+                    <Play size={14} />
+                  {/if}
+                </button>
+              {/if}
             </div>
           {/if}
         {/if}
@@ -2442,6 +2565,80 @@
     flex-shrink: 0;
     width: 14px;
     height: 14px;
+  }
+
+  /* Primary action pill (endpoint running state) */
+  .primary-action-pill {
+    display: flex;
+    align-items: center;
+    height: 28px;
+    background: var(--bg-hover);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .primary-action-pill-main {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .primary-action-pill-main:hover {
+    color: var(--text-base);
+  }
+
+  .primary-action-pill-main.stopping {
+    opacity: 0.6;
+  }
+
+  .primary-action-pill-main.show-stop {
+    color: var(--ui-danger);
+  }
+
+  .primary-action-pill-main :global(svg) {
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+  }
+
+  .primary-action-pill-copy {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: none;
+    border: none;
+    border-left: 1px solid var(--border-muted);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .copy-icon-wrapper {
+    position: absolute;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .primary-action-pill-copy:hover {
+    color: var(--text-base);
+    background: var(--bg-elevated);
+  }
+
+  .primary-action-pill-copy :global(svg) {
+    flex-shrink: 0;
   }
 
   /* Running actions */

@@ -939,6 +939,7 @@ fn update_project_action(
             .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
         sort_order,
         auto_commit,
+        run_detection_mode: action.run_detection_mode,
         created_at: action.created_at,
         updated_at: store::now_timestamp(),
     };
@@ -2750,6 +2751,8 @@ pub fn run() {
             actions::commands::get_action_output_buffer,
             actions::commands::clear_action_execution,
             actions::commands::run_prerun_actions,
+            actions::commands::get_run_phase,
+            actions::commands::update_run_detection_mode,
             // Diff
             get_diff_files,
             get_file_diff,

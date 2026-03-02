@@ -7,7 +7,15 @@ import { createReviewState as _create } from '@builderbot/diff-viewer/state';
 
 /**
  * Create a reactive review state instance, pre-bound to Mark's Tauri commands.
+ *
+ * When `reviewId` is provided (e.g. clicking a specific review in the timeline),
+ * the state loads that exact review by ID instead of searching by triple.
  */
-export function createReviewState(branchId: string, commitSha: string, scope: 'branch' | 'commit') {
-  return _create(commands, branchId, commitSha, scope);
+export function createReviewState(
+  branchId: string,
+  commitSha: string,
+  scope: 'branch' | 'commit',
+  reviewId?: string
+) {
+  return _create(commands, branchId, commitSha, scope, reviewId);
 }

@@ -289,7 +289,11 @@
   };
   let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
   let reviewDetailsLoadVersion = 0;
-  let reviewDiffTarget = $state<{ commitSha: string; scope: 'branch' | 'commit' } | null>(null);
+  let reviewDiffTarget = $state<{
+    commitSha: string;
+    scope: 'branch' | 'commit';
+    reviewId: string;
+  } | null>(null);
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
@@ -1266,7 +1270,7 @@
   async function handleReviewClick(reviewId: string) {
     const cached = timelineReviewDetailsById[reviewId];
     if (cached) {
-      reviewDiffTarget = { commitSha: cached.commitSha, scope: cached.scope };
+      reviewDiffTarget = { commitSha: cached.commitSha, scope: cached.scope, reviewId };
       showBranchDiff = true;
       return;
     }
@@ -1278,7 +1282,7 @@
         await loadTimeline();
         return;
       }
-      reviewDiffTarget = { commitSha: review.commitSha, scope: review.scope };
+      reviewDiffTarget = { commitSha: review.commitSha, scope: review.scope, reviewId };
       showBranchDiff = true;
     } catch (e) {
       console.error('Failed to open review:', e);
@@ -2194,6 +2198,7 @@
     branchId={branch.id}
     commitSha={reviewDiffTarget?.commitSha}
     scope={reviewDiffTarget?.scope ?? 'branch'}
+    reviewId={reviewDiffTarget?.reviewId}
     beforeLabel={reviewDiffTarget?.scope === 'commit'
       ? 'parent'
       : formatBaseBranch(branch.baseBranch)}

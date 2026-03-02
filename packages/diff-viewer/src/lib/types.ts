@@ -157,6 +157,9 @@ export interface ReviewCommands {
     scope: 'branch' | 'commit'
   ): Promise<Review | null>;
 
+  /** Get a review by its primary key. */
+  getReview(reviewId: string): Promise<Review | null>;
+
   addComment(
     reviewId: string,
     path: string,

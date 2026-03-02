@@ -46,12 +46,18 @@ export interface ReviewState {
  * Create a reactive review state instance scoped to a branch + commit + scope.
  *
  * Does NOT create a review immediately — waits until the first persistent action.
+ *
+ * When `reviewId` is provided, the initial load fetches that exact review by
+ * primary key instead of searching by the (branch, commit, scope) triple.
+ * This is critical when multiple reviews share the same triple — without the
+ * ID the lookup would return an arbitrary match.
  */
 export function createReviewState(
   commands: ReviewCommands & Pick<DiffCommands, 'getFileAtRef'>,
   branchId: string,
   commitSha: string,
-  scope: 'branch' | 'commit'
+  scope: 'branch' | 'commit',
+  reviewId?: string,
 ) {
   const state: ReviewState = $state({
     review: null,
@@ -100,7 +106,12 @@ export function createReviewState(
   async function loadExistingReview(): Promise<void> {
     state.loading = true;
     try {
-      const review = await commands.findReview(branchId, commitSha, scope);
+      // When a specific reviewId was provided, fetch by primary key so we
+      // always get the exact review the user clicked — even when multiple
+      // reviews share the same (branch, commit, scope) triple.
+      const review = reviewId
+        ? await commands.getReview(reviewId)
+        : await commands.findReview(branchId, commitSha, scope);
       if (review) {
         state.review = review;
         state.comments = review.comments;

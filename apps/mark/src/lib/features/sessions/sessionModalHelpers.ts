@@ -27,6 +27,16 @@ export function parseToolCall(content: string): ParsedToolCall | null {
   return null;
 }
 
+/**
+ * Replace absolute paths that fall within `repoDir` with relative paths.
+ * If repoDir is empty/null, returns the text unchanged.
+ */
+export function makePathsRelative(text: string, repoDir: string | null | undefined): string {
+  if (!repoDir) return text;
+  const prefix = repoDir.endsWith('/') ? repoDir : repoDir + '/';
+  return text.replaceAll(prefix, '');
+}
+
 const TOOL_VERBS: Record<string, string> = {
   Shell: 'Ran',
   Bash: 'Ran',
@@ -144,11 +154,12 @@ const VERB_NOUNS: Record<string, string> = {
 };
 
 export function groupByVerb(
-  pairs: { call: { id: number; content: string }; result: { content: string } | null }[]
+  pairs: { call: { id: number; content: string }; result: { content: string } | null }[],
+  repoDir?: string | null
 ): VerbGroup[] {
   const groups: VerbGroup[] = [];
   for (const pair of pairs) {
-    const { verb, detail } = formatToolDisplay(pair.call.content);
+    const { verb, detail } = formatToolDisplay(pair.call.content, repoDir);
     const item: ToolPairDisplay = { pair, verb, detail };
     const last = groups[groups.length - 1];
     if (last && last.verb === verb) {
@@ -165,22 +176,22 @@ export function verbGroupSummary(group: VerbGroup): string {
   return `${group.items.length} ${noun}`;
 }
 
-export function formatToolDisplay(content: string): ToolDisplay {
+export function formatToolDisplay(content: string, repoDir?: string | null): ToolDisplay {
   const parsed = parseToolCall(content);
   if (parsed) {
     const verb = TOOL_VERBS[parsed.name] || parsed.name;
-    return { verb, detail: formatArgs(parsed.args) };
+    return { verb, detail: makePathsRelative(formatArgs(parsed.args), repoDir) };
   }
 
   const spaceIdx = content.indexOf(' ');
   if (spaceIdx > 0) {
     const firstWord = content.slice(0, spaceIdx);
     if (TITLE_VERBS.has(firstWord)) {
-      return { verb: firstWord, detail: content.slice(spaceIdx + 1) };
+      return { verb: firstWord, detail: makePathsRelative(content.slice(spaceIdx + 1), repoDir) };
     }
   } else if (TITLE_VERBS.has(content)) {
     return { verb: content, detail: '' };
   }
 
-  return { verb: 'Ran', detail: content };
+  return { verb: 'Ran', detail: makePathsRelative(content, repoDir) };
 }

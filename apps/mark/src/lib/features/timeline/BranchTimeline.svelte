@@ -29,6 +29,8 @@
 
   interface Props {
     timeline: BranchTimelineData;
+    /** Repo base directory — tool call paths within it are shown as relative in hints. */
+    repoDir?: string | null;
     /** Placeholder items for notes being created from drag-and-drop. */
     pendingDropNotes?: { key: string; title: string }[];
     /** Placeholder items for newly started sessions before timeline persistence catches up. */
@@ -54,6 +56,7 @@
 
   let {
     timeline,
+    repoDir,
     pendingDropNotes = [],
     pendingItems = [],
     deletingItems = [],
@@ -81,9 +84,12 @@
   );
   let disableNewSessionActions = $derived(newSessionDisabled || hasRunningSessionGeneration);
   let liveSessionHints = $state<Record<string, string>>({});
-  const liveSessionHintPoller = createLiveSessionHints((nextHints) => {
-    liveSessionHints = nextHints;
-  });
+  const liveSessionHintPoller = createLiveSessionHints(
+    (nextHints) => {
+      liveSessionHints = nextHints;
+    },
+    () => repoDir
+  );
 
   // Unified timeline item for display
   type DisplayItem = {

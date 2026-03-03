@@ -68,9 +68,11 @@
   interface Props {
     sessionId: string;
     onClose: () => void;
+    /** Repo base directory — tool call paths within it are shown as relative. */
+    repoDir?: string | null;
   }
 
-  let { sessionId, onClose }: Props = $props();
+  let { sessionId, onClose, repoDir }: Props = $props();
 
   // =========================================================================
   // State
@@ -754,7 +756,7 @@
               </div>
             {:else}
               <div class="message-row tool-group">
-                {#each groupByVerb(group.pairs) as vg, vgIdx}
+                {#each groupByVerb(group.pairs, repoDir) as vg, vgIdx}
                   {#if vg.items.length === 1}
                     {@const item = vg.items[0]}
                     {@const isExpanded = expandedTools.has(item.pair.call.id)}

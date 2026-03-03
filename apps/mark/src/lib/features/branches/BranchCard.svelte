@@ -2083,6 +2083,7 @@
       {:else if timeline}
         <BranchTimeline
           {timeline}
+          repoDir={branch.worktreePath}
           pendingDropNotes={isLocal ? pendingDropNotes : undefined}
           pendingItems={pendingSessionItems}
           reviewCommentBreakdown={timelineReviewDetailsById}
@@ -2252,6 +2253,7 @@
 {#if openSessionId}
   <SessionModal
     sessionId={openSessionId}
+    repoDir={branch.worktreePath}
     onClose={async () => {
       const closedSessionId = openSessionId;
       openSessionId = null;

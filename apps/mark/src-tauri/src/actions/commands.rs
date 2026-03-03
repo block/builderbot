@@ -191,6 +191,7 @@ pub async fn run_branch_action(
         branch_id.clone(),
         action_id.clone(),
         action.name.clone(),
+        action.action_type.as_str().to_string(),
         reg.clone(),
     ));
 
@@ -603,6 +604,7 @@ pub async fn run_prerun_actions(
             branch_id.clone(),
             action.id.clone(),
             action.name.clone(),
+            action.action_type.as_str().to_string(),
             registry.inner().clone(),
         ));
 

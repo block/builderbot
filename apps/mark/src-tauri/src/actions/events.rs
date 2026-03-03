@@ -39,6 +39,7 @@ pub struct TauriExecutionListener {
     branch_id: String,
     action_id: String,
     action_name: String,
+    action_type: String,
     registry: Arc<ActionRegistry>,
 }
 
@@ -48,6 +49,7 @@ impl TauriExecutionListener {
         branch_id: String,
         action_id: String,
         action_name: String,
+        action_type: String,
         registry: Arc<ActionRegistry>,
     ) -> Self {
         Self {
@@ -55,6 +57,7 @@ impl TauriExecutionListener {
             branch_id,
             action_id,
             action_name,
+            action_type,
             registry,
         }
     }
@@ -74,6 +77,7 @@ impl ExecutionListener for TauriExecutionListener {
                     self.branch_id.clone(),
                     self.action_id.clone(),
                     self.action_name.clone(),
+                    self.action_type.clone(),
                     started_at,
                 );
 

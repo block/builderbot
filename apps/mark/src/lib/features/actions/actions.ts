@@ -106,6 +106,7 @@ export interface RunningActionInfo {
   branchId: string;
   actionId: string;
   actionName: string;
+  actionType: string;
   startedAt: number;
 }
 

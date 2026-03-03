@@ -1744,6 +1744,7 @@ pub(crate) async fn run_prerun_actions_for_branch(
             branch_id.to_string(),
             action.id.clone(),
             action.name.clone(),
+            action.action_type.as_str().to_string(),
             Arc::clone(act_registry),
         ));
 

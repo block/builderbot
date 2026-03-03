@@ -882,11 +882,10 @@
           const phase = await getRunPhase(info.executionId);
           if (phase) {
             runPhases.set(info.executionId, phase);
-          } else {
-            // No persisted phase — the action is running but detection state
-            // was lost (app restart). Default to Running with no endpoint so
-            // the sine wave is shown. This is safe for non-Run actions too
-            // since phases are only rendered for Run-type action buttons.
+          } else if (info.actionType === 'run') {
+            // No persisted phase — the run action is running but detection
+            // state was lost (app restart). Default to Running with no
+            // endpoint so the sine wave is shown.
             runPhases.set(info.executionId, { type: 'running', endpoint: null });
           }
         } catch {
@@ -1794,6 +1793,7 @@
             {@const isStopping = stoppingExecutions.has(execution.executionId)}
             {@const showStopIcon = altHeld && isRunning && !isStopping}
             {@const phase = runPhases.get(execution.executionId)}
+            {@const actionDef = actions.find((a) => a.id === execution.actionId)}
             <div
               class="running-action-container"
               class:fading={execution.fading}
@@ -1829,7 +1829,7 @@
                   <Spinner size={12} class="danger" />
                 {:else if showStopIcon}
                   <StopCircle size={12} />
-                {:else if isRunning && phase && phase.type !== 'building'}
+                {:else if isRunning && phase && phase.type !== 'building' && actionDef?.actionType === 'run'}
                   <SineWave size={12} />
                 {:else if isRunning}
                   <Spinner size={12} />

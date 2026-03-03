@@ -193,6 +193,22 @@ impl AcpDriver {
     }
 }
 
+/// Build a shell command string that `exec`s into the given binary with args.
+///
+/// Each component is single-quoted to avoid shell interpretation. Single
+/// quotes inside values are escaped with the standard `'\''` trick.
+fn build_shell_exec_command(binary: &Path, args: &[String]) -> String {
+    fn shell_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+
+    let mut parts = vec!["exec".to_string(), shell_quote(&binary.to_string_lossy())];
+    for arg in args {
+        parts.push(shell_quote(arg));
+    }
+    parts.join(" ")
+}
+
 fn resolve_spawn_working_dir(working_dir: &Path, is_remote: bool) -> PathBuf {
     // Remote ACP sessions proxy through `sq blox acp` and don't execute against
     // the local filesystem. Use a guaranteed-existing cwd when the recorded
@@ -224,9 +240,30 @@ impl AgentDriver for AcpDriver {
             );
         }
 
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.args(&self.acp_args)
-            .current_dir(&spawn_working_dir)
+        let mut cmd = if self.is_remote {
+            let mut c = Command::new(&self.binary_path);
+            c.args(&self.acp_args);
+            c
+        } else {
+            // For local sessions, wrap the agent binary in an interactive login
+            // shell so that directory-based shell hooks (e.g. Hermit's
+            // chpwd/precmd) fire during shell initialisation. The shell loads
+            // its init files (.zshrc / .bashrc), which activates Hermit, then
+            // `exec` replaces the shell with the agent binary so that
+            // stdin/stdout pass through directly for the JSON-RPC protocol.
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+
+            let exec_cmd = build_shell_exec_command(&self.binary_path, &self.acp_args);
+
+            let mut c = Command::new(&shell);
+            c.arg("-i") // interactive: triggers hooks like chpwd for Hermit
+                .arg("-l") // login: loads full profile / environment
+                .arg("-c") // run the exec command after init
+                .arg(&exec_cmd);
+            c
+        };
+
+        cmd.current_dir(&spawn_working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -755,8 +792,9 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_remote_acp_line, decode_remote_acp_line, remote_acp_segments,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, RemoteLineOutcome,
+        build_shell_exec_command, consume_remote_acp_line, decode_remote_acp_line,
+        remote_acp_segments, resolve_spawn_working_dir, sanitize_remote_acp_chunk,
+        RemoteLineOutcome,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -865,5 +903,38 @@ mod tests {
     fn remote_spawn_dir_uses_existing_working_dir() {
         let existing = std::env::temp_dir();
         assert_eq!(resolve_spawn_working_dir(&existing, true), existing);
+    }
+
+    #[test]
+    fn build_shell_exec_command_simple() {
+        use std::path::PathBuf;
+        let binary = PathBuf::from("/usr/local/bin/goose");
+        let args = vec!["--acp".to_string(), "run".to_string()];
+        assert_eq!(
+            build_shell_exec_command(&binary, &args),
+            "exec '/usr/local/bin/goose' '--acp' 'run'"
+        );
+    }
+
+    #[test]
+    fn build_shell_exec_command_escapes_single_quotes() {
+        use std::path::PathBuf;
+        let binary = PathBuf::from("/path/with space/it's-here");
+        let args = vec!["--msg=it's".to_string()];
+        assert_eq!(
+            build_shell_exec_command(&binary, &args),
+            "exec '/path/with space/it'\\''s-here' '--msg=it'\\''s'"
+        );
+    }
+
+    #[test]
+    fn build_shell_exec_command_no_args() {
+        use std::path::PathBuf;
+        let binary = PathBuf::from("/usr/bin/claude");
+        let args: Vec<String> = vec![];
+        assert_eq!(
+            build_shell_exec_command(&binary, &args),
+            "exec '/usr/bin/claude'"
+        );
     }
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.0
+
+- **In-app CLI and plugin installer** — Install the Claude Code plugin and penpal CLI tool directly from the app
+- **Fix: files disappearing or duplicating in review lists** — Review lists now stay accurate as you add and remove files
+- **Fix: backwards selection anchoring** — Comment anchors now work correctly when selecting text from bottom to top ([thanks @LindsayV!](https://github.com/block/builderbot/pull/314))
+
 ## Feb 25, 2026
 
 - **CLI: `penpal open`** — New command opens files directly in the desktop app

@@ -69,6 +69,7 @@
     stopBranchAction,
     getRunPhase,
     listenToRunPhaseChanged,
+    listenToRepoActionsDetection,
     type ActionStatusEvent,
     type RunPhase,
   } from '../actions/actions';
@@ -381,6 +382,7 @@
   let unlistenPrStatus: UnlistenFn | null = null;
   let unlistenPrStatusCleared: UnlistenFn | null = null;
   let unlistenRunPhaseChanged: UnlistenFn | null = null;
+  let unlistenRepoActionsDetection: UnlistenFn | null = null;
 
   // Window focus handlers (stored for cleanup)
   let handleFocus: (() => void) | null = null;
@@ -690,6 +692,15 @@
     // Listen for actions changes
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
 
+    // Listen for backend-driven action detection completing (e.g. auto-detect on repo add)
+    listenToRepoActionsDetection((event) => {
+      if (!event.detecting) {
+        loadActions();
+      }
+    }).then((unlisten) => {
+      unlistenRepoActionsDetection = unlisten;
+    });
+
     // Option-key tracking for draft PR creation
     window.addEventListener('keydown', handleOptionDown);
     window.addEventListener('keyup', handleOptionUp);
@@ -729,6 +740,7 @@
     unlistenPrStatus?.();
     unlistenPrStatusCleared?.();
     unlistenRunPhaseChanged?.();
+    unlistenRepoActionsDetection?.();
     // Clean up PR status polling
     if (prStatusPollTimer) {
       clearInterval(prStatusPollTimer);

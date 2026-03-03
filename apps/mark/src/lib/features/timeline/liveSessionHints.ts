@@ -1,5 +1,6 @@
 import * as commands from '../../api/commands';
 import type { BranchTimeline, SessionMessage } from '../../types';
+import { makePathsRelative } from '../sessions/sessionModalHelpers';
 
 const HINT_POLL_INTERVAL_MS = 750;
 const MAX_HINT_LENGTH = 72;
@@ -43,8 +44,8 @@ function withTrailingEllipsis(text: string): string {
   return `${text}…`;
 }
 
-function formatToolCallHint(content: string): string | undefined {
-  const normalized = normalizeHintText(content);
+function formatToolCallHint(content: string, repoDir?: string | null): string | undefined {
+  const normalized = normalizeHintText(makePathsRelative(content, repoDir));
   if (!normalized) return undefined;
 
   const withProgressVerb = normalized
@@ -86,14 +87,14 @@ function formatAssistantHint(content: string): string | undefined {
   return undefined;
 }
 
-function deriveHint(messages: SessionMessage[]): string | undefined {
+function deriveHint(messages: SessionMessage[], repoDir?: string | null): string | undefined {
   let latestToolHint: { id: number; text: string } | null = null;
   let latestAssistantHint: { id: number; text: string } | null = null;
 
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!latestToolHint && message.role === 'tool_call') {
-      const hint = formatToolCallHint(message.content);
+      const hint = formatToolCallHint(message.content, repoDir);
       if (hint) {
         latestToolHint = { id: message.id, text: hint };
       }
@@ -167,7 +168,10 @@ export function collectRunningSessionIds(
   return Array.from(ids);
 }
 
-export function createLiveSessionHints(onHintsChange: (hints: Record<string, string>) => void) {
+export function createLiveSessionHints(
+  onHintsChange: (hints: Record<string, string>) => void,
+  repoDir?: string | null
+) {
   const hintTrackers = new Map<string, HintTracker>();
   let hints: Record<string, string> = {};
   let hintPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -218,7 +222,7 @@ export function createLiveSessionHints(onHintsChange: (hints: Record<string, str
         tracker.lastMessageId = latestMessage?.id ?? tracker.lastMessageId;
       }
 
-      const nextHint = deriveHint(tracker.messages);
+      const nextHint = deriveHint(tracker.messages, repoDir);
       if (nextHint) {
         setHint(sessionId, nextHint);
       } else {

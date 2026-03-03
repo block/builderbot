@@ -84,9 +84,12 @@
   );
   let disableNewSessionActions = $derived(newSessionDisabled || hasRunningSessionGeneration);
   let liveSessionHints = $state<Record<string, string>>({});
-  const liveSessionHintPoller = createLiveSessionHints((nextHints) => {
-    liveSessionHints = nextHints;
-  }, repoDir);
+  const liveSessionHintPoller = createLiveSessionHints(
+    (nextHints) => {
+      liveSessionHints = nextHints;
+    },
+    () => repoDir
+  );
 
   // Unified timeline item for display
   type DisplayItem = {

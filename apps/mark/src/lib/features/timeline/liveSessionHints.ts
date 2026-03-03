@@ -170,7 +170,7 @@ export function collectRunningSessionIds(
 
 export function createLiveSessionHints(
   onHintsChange: (hints: Record<string, string>) => void,
-  repoDir?: string | null
+  getRepoDir?: () => string | null | undefined
 ) {
   const hintTrackers = new Map<string, HintTracker>();
   let hints: Record<string, string> = {};
@@ -222,7 +222,7 @@ export function createLiveSessionHints(
         tracker.lastMessageId = latestMessage?.id ?? tracker.lastMessageId;
       }
 
-      const nextHint = deriveHint(tracker.messages, repoDir);
+      const nextHint = deriveHint(tracker.messages, getRepoDir?.());
       if (nextHint) {
         setHint(sessionId, nextHint);
       } else {

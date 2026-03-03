@@ -84,7 +84,7 @@ jobs:
       # Build Tauri app for the target architecture
       - name: Build Tauri app
         working-directory: apps/penpal/frontend
-        run: pnpm run tauri:build -- --target ${{ matrix.target }}
+        run: pnpm tauri build --target ${{ matrix.target }}
 
       # Package into distributable zip
       - name: Package

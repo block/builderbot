@@ -172,6 +172,21 @@
   }
 
   // =========================================================================
+  // Remote endpoint URL rewriting
+  // =========================================================================
+  function getEndpointCopyUrl(endpoint: string): string {
+    if (!isRemote || !branch.workspaceName) return endpoint;
+    try {
+      const parsed = new URL(endpoint);
+      const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+      const path = parsed.pathname + parsed.search + parsed.hash;
+      return `https://workstation-${branch.workspaceName}-${port}--blox.blox.sqprod.co${path}`;
+    } catch {
+      return endpoint;
+    }
+  }
+
+  // =========================================================================
   // Option-key tracking (for draft PR creation)
   // =========================================================================
   let optionHeld = $state(false);
@@ -1822,6 +1837,10 @@
             {@const showStopIcon = altHeld && isRunning && !isStopping}
             {@const phase = execution ? runPhases.get(execution.executionId) : undefined}
             {@const hasEndpoint = phase?.type === 'running' && !!phase.endpoint}
+            {@const copyUrl =
+              hasEndpoint && phase?.type === 'running' && phase.endpoint
+                ? getEndpointCopyUrl(phase.endpoint)
+                : ''}
             <div
               class="primary-action-container"
               in:slide={{ duration: 300, axis: 'x' }}
@@ -1859,8 +1878,8 @@
                     class="primary-action-pill-copy"
                     onclick={(e) => {
                       e.stopPropagation();
-                      if (phase?.type === 'running' && phase.endpoint && execution) {
-                        navigator.clipboard.writeText(phase.endpoint).catch(() => {});
+                      if (phase?.type === 'running' && phase.endpoint && execution && copyUrl) {
+                        navigator.clipboard.writeText(copyUrl).catch(() => {});
                         const id = execution.executionId;
                         if (endpointCopiedTimers[id]) clearTimeout(endpointCopiedTimers[id]);
                         endpointCopied[id] = true;
@@ -1870,7 +1889,7 @@
                         }, 1500);
                       }
                     }}
-                    title="Copy endpoint: {phase.endpoint}"
+                    title="Copy endpoint: {copyUrl}"
                   >
                     {#if execution && endpointCopied[execution.executionId]}
                       <span

@@ -261,6 +261,11 @@ impl AgentDriver for AcpDriver {
 
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            // NOTE: stderr is discarded for both local and remote spawns. For local
+            // shells this means shell init errors (e.g. Hermit activation failures,
+            // .zshrc syntax errors) are silently swallowed. The agent will still run
+            // but without the hermit-managed toolchain. Consider piping stderr (as
+            // the actions executor does) and logging it to aid debugging.
             .stderr(Stdio::null())
             .kill_on_drop(true);
         // For local shells extra_env is set on the clean environment; for
@@ -323,6 +328,12 @@ impl AgentDriver for AcpDriver {
             });
             Box::new(normalized_stdout_reader)
         } else {
+            // NOTE: local shell init (.zshrc, plugin banners, motd) may write to
+            // stdout before `exec` replaces the shell. Any such output will appear
+            // as invalid JSON-RPC framing and likely crash the session. This works
+            // in practice because well-behaved configs don't echo to stdout, but if
+            // it becomes a problem, `normalize_remote_acp_stdout` (or similar
+            // filtering) could be applied here too.
             Box::new(stdout)
         };
         let stdout_compat = incoming_reader.compat();

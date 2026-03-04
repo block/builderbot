@@ -275,8 +275,15 @@ impl AgentDriver for AcpDriver {
             c
         };
 
-        cmd.current_dir(&spawn_working_dir)
-            .stdin(Stdio::piped())
+        // For local sessions the shell must start in a *different* directory
+        // from the target working dir so that the explicit `cd` inside the `-c`
+        // command is a real directory change, triggering `chpwd` hooks (Hermit).
+        // Remote sessions and direct-binary spawns still use the original cwd.
+        if self.is_remote {
+            cmd.current_dir(&spawn_working_dir);
+        }
+
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);

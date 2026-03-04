@@ -149,12 +149,18 @@ pub fn is_sq_available() -> bool {
 }
 
 /// Build args for `sq blox acp <workspace_name> [--command=...]`.
+///
+/// When the `BLOX_ENV` environment variable is set, `--env <value>` is
+/// inserted after `blox` so that ACP proxy connections target the specified
+/// environment.
 pub fn acp_proxy_args(workspace_name: &str, command: Option<&str>) -> Vec<String> {
-    let mut args = vec![
-        "blox".to_string(),
-        "acp".to_string(),
-        workspace_name.to_string(),
-    ];
+    let mut args = vec!["blox".to_string()];
+    if let Ok(env) = std::env::var("BLOX_ENV") {
+        args.push("--env".to_string());
+        args.push(env);
+    }
+    args.push("acp".to_string());
+    args.push(workspace_name.to_string());
 
     if let Some(command) = command.map(str::trim).filter(|s| !s.is_empty()) {
         args.push(format!("--command={command}"));
@@ -177,10 +183,19 @@ fn is_auth_error(stderr: &str) -> bool {
 }
 
 /// Run `sq blox <args…>` and return stdout as a string.
+///
+/// When the `BLOX_ENV` environment variable is set, `--env <value>` is
+/// automatically inserted after `blox` so that all commands target the
+/// specified environment.
 fn run(args: &[&str], timeout: Duration) -> Result<String, BloxError> {
     let sq = sq_binary()?;
 
     let mut full_args = vec!["blox"];
+    let env_value = std::env::var("BLOX_ENV").ok();
+    if let Some(ref env) = env_value {
+        full_args.push("--env");
+        full_args.push(env);
+    }
     full_args.extend_from_slice(args);
 
     let mut child = Command::new(&sq)

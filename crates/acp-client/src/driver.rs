@@ -251,37 +251,28 @@ impl AgentDriver for AcpDriver {
             );
         }
 
-        let mut cmd = if self.is_remote {
-            let mut c = Command::new(&self.binary_path);
-            c.args(&self.acp_args);
+        // For local sessions we need Hermit (and similar directory-based shell
+        // hooks) to activate before the agent binary runs. We achieve this by
+        // spawning an interactive login shell with `-s` (read commands from
+        // stdin). The shell initialises fully (`.zshrc` installs hooks,
+        // `precmd` fires, etc.), then we write a `cd <dir> && exec <binary>`
+        // line to stdin. The `cd` triggers `chpwd`, activating Hermit, and
+        // `exec` replaces the shell with the agent binary so that all
+        // subsequent stdin/stdout traffic is the JSON-RPC protocol.
+        let is_local_shell = !self.is_remote;
+
+        let mut cmd = if is_local_shell {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            let mut c = Command::new(&shell);
+            c.arg("-i") // interactive: ensures hooks like chpwd are installed
+                .arg("-l") // login: loads full profile / environment
+                .arg("-s"); // read commands from stdin (after init completes)
             c
         } else {
-            // For local sessions, wrap the agent binary in an interactive login
-            // shell so that directory-based shell hooks (e.g. Hermit's
-            // chpwd/precmd) fire during shell initialisation. The shell loads
-            // its init files (.zshrc / .bashrc), which activates Hermit, then
-            // `exec` replaces the shell with the agent binary so that
-            // stdin/stdout pass through directly for the JSON-RPC protocol.
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-
-            let exec_cmd =
-                build_shell_exec_command(&spawn_working_dir, &self.binary_path, &self.acp_args);
-
-            let mut c = Command::new(&shell);
-            c.arg("-i") // interactive: triggers hooks like chpwd for Hermit
-                .arg("-l") // login: loads full profile / environment
-                .arg("-c") // run the exec command after init
-                .arg(&exec_cmd);
+            let mut c = Command::new(&self.binary_path);
+            c.args(&self.acp_args).current_dir(&spawn_working_dir);
             c
         };
-
-        // For local sessions the shell must start in a *different* directory
-        // from the target working dir so that the explicit `cd` inside the `-c`
-        // command is a real directory change, triggering `chpwd` hooks (Hermit).
-        // Remote sessions and direct-binary spawns still use the original cwd.
-        if self.is_remote {
-            cmd.current_dir(&spawn_working_dir);
-        }
 
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -299,10 +290,29 @@ impl AgentDriver for AcpDriver {
             )
         })?;
 
-        let stdin = child
+        let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| "Failed to get stdin".to_string())?;
+
+        // For local shells, write the cd+exec command to stdin. The shell has
+        // finished init by the time it reads from stdin, so hooks are active.
+        // `exec` replaces the shell process with the agent binary — from this
+        // point on, stdin belongs to the agent's JSON-RPC transport.
+        if is_local_shell {
+            let exec_line = format!(
+                "{}\n",
+                build_shell_exec_command(&spawn_working_dir, &self.binary_path, &self.acp_args)
+            );
+            stdin
+                .write_all(exec_line.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write exec command to shell stdin: {e}"))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| format!("Failed to flush shell stdin: {e}"))?;
+        }
         let stdout = child
             .stdout
             .take()

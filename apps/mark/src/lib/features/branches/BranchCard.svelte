@@ -1757,8 +1757,8 @@
         {#if isRemote && remoteWorkspaceStatus !== 'running'}
           <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
         {/if}
-        <!-- Running actions (excluding primary action) - local only -->
-        {#if isLocal}
+        <!-- Running actions (excluding primary action) -->
+        {#if isLocal || (isRemote && remoteWorkspaceStatus === 'running')}
           {#each secondaryRunningActions as execution (execution.executionId)}
             {@const isRunning = execution.status === 'running'}
             {@const isStopping = stoppingExecutions.has(execution.executionId)}

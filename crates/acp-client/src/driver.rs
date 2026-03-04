@@ -199,27 +199,6 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Build a shell command string that `cd`s into `working_dir` (triggering
-/// directory hooks like Hermit's `chpwd`) and then `exec`s the given binary.
-///
-/// Using an explicit `cd` inside `-c` is necessary because `current_dir` on
-/// the spawned process sets the cwd *before* shell init, but `precmd` /
-/// `chpwd` hooks may not fire for `-c` commands. The `cd` ensures the hook
-/// fires after `.zshrc` / `.bashrc` have installed it.
-fn build_shell_exec_command(working_dir: &Path, binary: &Path, args: &[String]) -> String {
-    let mut parts = vec![
-        format!("cd {}", shell_quote(&working_dir.to_string_lossy())),
-        format!("exec {}", shell_quote(&binary.to_string_lossy())),
-    ];
-    // Append remaining args to the `exec` fragment (last element).
-    for arg in args {
-        let last = parts.last_mut().unwrap();
-        last.push(' ');
-        last.push_str(&shell_quote(arg));
-    }
-    parts.join(" && ")
-}
-
 fn resolve_spawn_working_dir(working_dir: &Path, is_remote: bool) -> PathBuf {
     // Remote ACP sessions proxy through `sq blox acp` and don't execute against
     // the local filesystem. Use a guaranteed-existing cwd when the recorded
@@ -252,19 +231,25 @@ impl AgentDriver for AcpDriver {
         }
 
         // For local sessions we need Hermit (and similar directory-based shell
-        // hooks) to activate before the agent binary runs. We achieve this by
-        // spawning an interactive login shell with `-s` (read commands from
-        // stdin). The shell initialises fully (`.zshrc` installs hooks,
-        // `precmd` fires, etc.), then we write a `cd <dir> && exec <binary>`
-        // line to stdin. The `cd` triggers `chpwd`, activating Hermit, and
-        // `exec` replaces the shell with the agent binary so that all
-        // subsequent stdin/stdout traffic is the JSON-RPC protocol.
+        // hooks) to activate before the agent binary runs. We match the
+        // approach used by the actions executor: spawn an interactive login
+        // shell with `-s` (stdin mode) in the working directory with a clean
+        // environment. The shell initialises fully (`.zshrc` installs hooks),
+        // `precmd` fires in the working directory (activating Hermit), then we
+        // write an `exec <binary>` command to stdin. `exec` replaces the shell
+        // with the agent binary so all subsequent stdin/stdout traffic is the
+        // JSON-RPC protocol.
         let is_local_shell = !self.is_remote;
 
         let mut cmd = if is_local_shell {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             let mut c = Command::new(&shell);
-            c.arg("-i") // interactive: ensures hooks like chpwd are installed
+            c.current_dir(&spawn_working_dir) // start in project dir so precmd sees hermit config
+                .env_clear() // clean slate — shell init rebuilds the environment
+                .env("HOME", std::env::var("HOME").unwrap_or_default())
+                .env("USER", std::env::var("USER").unwrap_or_default())
+                .env("SHELL", &shell)
+                .arg("-i") // interactive: ensures hooks like precmd/chpwd are installed
                 .arg("-l") // login: loads full profile / environment
                 .arg("-s"); // read commands from stdin (after init completes)
             c
@@ -278,6 +263,8 @@ impl AgentDriver for AcpDriver {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        // For local shells extra_env is set on the clean environment; for
+        // remote spawns it augments the inherited environment.
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
@@ -295,14 +282,20 @@ impl AgentDriver for AcpDriver {
             .take()
             .ok_or_else(|| "Failed to get stdin".to_string())?;
 
-        // For local shells, write the cd+exec command to stdin. The shell has
-        // finished init by the time it reads from stdin, so hooks are active.
-        // `exec` replaces the shell process with the agent binary — from this
-        // point on, stdin belongs to the agent's JSON-RPC transport.
+        // For local shells, write the exec command to stdin. By the time the
+        // shell reads from stdin, init is complete and `precmd` has fired in
+        // the working directory (activating Hermit). `exec` replaces the shell
+        // with the agent binary — from this point on, stdin belongs to the
+        // agent's JSON-RPC transport.
         if is_local_shell {
             let exec_line = format!(
-                "{}\n",
-                build_shell_exec_command(&spawn_working_dir, &self.binary_path, &self.acp_args)
+                "exec {} {}\n",
+                shell_quote(&self.binary_path.to_string_lossy()),
+                self.acp_args
+                    .iter()
+                    .map(|a| shell_quote(a))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
             stdin
                 .write_all(exec_line.as_bytes())
@@ -821,9 +814,8 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_shell_exec_command, consume_remote_acp_line, decode_remote_acp_line,
-        remote_acp_segments, resolve_spawn_working_dir, sanitize_remote_acp_chunk,
-        RemoteLineOutcome,
+        consume_remote_acp_line, decode_remote_acp_line, remote_acp_segments,
+        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_quote, RemoteLineOutcome,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -935,38 +927,20 @@ mod tests {
     }
 
     #[test]
-    fn build_shell_exec_command_cds_then_execs() {
-        use std::path::PathBuf;
-        let dir = PathBuf::from("/home/user/project");
-        let binary = PathBuf::from("/usr/local/bin/goose");
-        let args = vec!["--acp".to_string(), "run".to_string()];
+    fn shell_quote_simple_value() {
         assert_eq!(
-            build_shell_exec_command(&dir, &binary, &args),
-            "cd '/home/user/project' && exec '/usr/local/bin/goose' '--acp' 'run'"
+            shell_quote("/usr/local/bin/goose"),
+            "'/usr/local/bin/goose'"
         );
     }
 
     #[test]
-    fn build_shell_exec_command_escapes_single_quotes() {
-        use std::path::PathBuf;
-        let dir = PathBuf::from("/path/it's here");
-        let binary = PathBuf::from("/path/with space/it's-here");
-        let args = vec!["--msg=it's".to_string()];
-        assert_eq!(
-            build_shell_exec_command(&dir, &binary, &args),
-            "cd '/path/it'\\''s here' && exec '/path/with space/it'\\''s-here' '--msg=it'\\''s'"
-        );
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("it's here"), "'it'\\''s here'");
     }
 
     #[test]
-    fn build_shell_exec_command_no_args() {
-        use std::path::PathBuf;
-        let dir = PathBuf::from("/tmp");
-        let binary = PathBuf::from("/usr/bin/claude");
-        let args: Vec<String> = vec![];
-        assert_eq!(
-            build_shell_exec_command(&dir, &binary, &args),
-            "cd '/tmp' && exec '/usr/bin/claude'"
-        );
+    fn shell_quote_preserves_spaces() {
+        assert_eq!(shell_quote("/path/with space"), "'/path/with space'");
     }
 }

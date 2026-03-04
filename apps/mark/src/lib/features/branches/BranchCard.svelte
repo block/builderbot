@@ -1814,7 +1814,7 @@
               </button>
             </div>
           {/each}
-          <!-- Primary run action button - local only -->
+          <!-- Primary run action button -->
           {#if primaryRunAction}
             {@const execution = primaryActionExecution}
             {@const isRunning = execution?.status === 'running'}
@@ -1963,8 +1963,8 @@
                 </button>
               {/if}
 
-              <!-- Local-only: Actions submenu -->
-              {#if isLocal && hasActionsForSubmenu}
+              <!-- Actions submenu -->
+              {#if hasActionsForSubmenu}
                 <div class="submenu-container">
                   <button
                     class="more-menu-item submenu-trigger"

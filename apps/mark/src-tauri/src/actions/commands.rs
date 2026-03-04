@@ -181,18 +181,7 @@ pub async fn run_branch_action(
         return Err("Action does not belong to this repo/subpath context".to_string());
     }
 
-    // Get the worktree path for this branch, then apply the repo subpath
-    let workdir = store
-        .get_workdir_for_branch(&branch_id)
-        .map_err(|e| format!("Failed to get workdir: {e}"))?
-        .ok_or_else(|| "No worktree found for branch".to_string())?;
-
-    let working_dir = if let Some(subpath) = &subpath {
-        let path = std::path::PathBuf::from(&workdir.path).join(subpath);
-        path.to_string_lossy().to_string()
-    } else {
-        workdir.path
-    };
+    let is_remote = branch.branch_type == crate::store::BranchType::Remote;
 
     let reg = registry.inner().clone();
 
@@ -214,13 +203,102 @@ pub async fn run_branch_action(
 
     // Clone values needed after execute() moves them.
     let command_for_detection = action.command.clone();
-    let working_dir_for_detection = working_dir.clone();
 
-    // Execute the action
-    let execution_id = executor
-        .execute(action.command, working_dir, metadata, listener)
-        .await
-        .map_err(|e| format!("Failed to execute action: {e}"))?;
+    // Execute the action — local vs remote paths
+    let (execution_id, working_dir_for_detection) = if is_remote {
+        // Remote branch: execute via `sq blox ws exec`
+        let workspace_name = branch
+            .workspace_name
+            .as_deref()
+            .ok_or_else(|| "Remote branch has no workspace name".to_string())?;
+
+        // Check workspace status before running
+        if let Some(ref status) = branch.workspace_status {
+            match status {
+                crate::store::WorkspaceStatus::Running => {} // OK
+                crate::store::WorkspaceStatus::Starting => {
+                    return Err(
+                        "Workspace is still starting. Please wait until it is running.".to_string(),
+                    );
+                }
+                crate::store::WorkspaceStatus::Stopped => {
+                    return Err(
+                        "Workspace is stopped. Please restart it before running actions."
+                            .to_string(),
+                    );
+                }
+                crate::store::WorkspaceStatus::Error => {
+                    return Err("Workspace is in an error state.".to_string());
+                }
+            }
+        }
+
+        let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)
+            .map_err(|e| format!("Failed to resolve workspace subpath: {e}"))?;
+
+        // Build the shell command to run inside the workspace.
+        // If there's a subpath, cd into it first.
+        let shell_command = match &repo_subpath {
+            Some(subpath) => {
+                let resolved =
+                    crate::branches::resolve_workspace_repo_path(workspace_name, subpath)
+                        .map_err(|e| format!("Failed to resolve workspace repo path: {e}"))?;
+                format!(
+                    "cd '{}' && {}",
+                    resolved.replace('\'', "'\\''"),
+                    action.command
+                )
+            }
+            None => action.command.clone(),
+        };
+
+        // Find the sq binary and build args for `sq blox ws exec`
+        let sq_binary = blox_cli::find_sq_binary().ok_or_else(|| {
+            "Could not find `sq` binary. Is it installed and on your PATH?".to_string()
+        })?;
+
+        let args = vec![
+            "blox".to_string(),
+            "ws".to_string(),
+            "exec".to_string(),
+            workspace_name.to_string(),
+            "--".to_string(),
+            "sh".to_string(),
+            "-lc".to_string(),
+            shell_command,
+        ];
+
+        let eid = executor
+            .execute_remote(sq_binary, args, metadata, listener)
+            .await
+            .map_err(|e| format!("Failed to execute remote action: {e}"))?;
+
+        // Remote actions don't have a local working dir for autodetect polling.
+        // Use an empty string as a placeholder — Run detection that needs a
+        // local path will gracefully degrade.
+        (eid, String::new())
+    } else {
+        // Local branch: resolve worktree path
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| format!("Failed to get workdir: {e}"))?
+            .ok_or_else(|| "No worktree found for branch".to_string())?;
+
+        let working_dir = if let Some(subpath) = &subpath {
+            let path = std::path::PathBuf::from(&workdir.path).join(subpath);
+            path.to_string_lossy().to_string()
+        } else {
+            workdir.path
+        };
+
+        let wd = working_dir.clone();
+        let eid = executor
+            .execute(action.command, working_dir, metadata, listener)
+            .await
+            .map_err(|e| format!("Failed to execute action: {e}"))?;
+
+        (eid, wd)
+    };
 
     // --- Run detection wiring (only for Run actions) ---
     if matches!(action.action_type, ActionType::Run) {

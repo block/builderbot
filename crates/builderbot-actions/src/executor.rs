@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -378,6 +379,240 @@ impl ActionExecutor {
         let _ = completion_rx.await;
 
         Ok(execution_id)
+    }
+
+    /// Execute a pre-built command (e.g. for remote workspace execution via
+    /// `sq blox ws exec`). Instead of wrapping the command in an interactive
+    /// login shell, the given `program` is spawned directly with `args`.
+    ///
+    /// Streaming output, stop, and completion tracking work identically to
+    /// local execution since it is still a local child process under the hood.
+    ///
+    /// Returns a unique execution ID. The action runs in the background.
+    pub async fn execute_remote(
+        &self,
+        program: PathBuf,
+        args: Vec<String>,
+        metadata: ActionMetadata,
+        listener: Arc<dyn ExecutionListener>,
+    ) -> Result<String> {
+        let (execution_id, _completion_rx) = self
+            .execute_remote_inner(program, args, metadata, listener)
+            .await?;
+        Ok(execution_id)
+    }
+
+    /// Internal implementation for remote execution.
+    async fn execute_remote_inner(
+        &self,
+        program: PathBuf,
+        args: Vec<String>,
+        _metadata: ActionMetadata,
+        listener: Arc<dyn ExecutionListener>,
+    ) -> Result<(String, oneshot::Receiver<()>)> {
+        let execution_id = uuid::Uuid::new_v4().to_string();
+        let (completion_tx, completion_rx) = oneshot::channel();
+
+        let mut cmd = Command::new(&program);
+        cmd.args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // Create a new process group so we can kill the proxy AND all its
+        // children together, same as local execution.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: `setsid()` is async-signal-safe.
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+
+        let mut child = cmd
+            .spawn()
+            .context("Failed to spawn remote action process")?;
+
+        let child_pid = child.id();
+
+        // Create output buffer
+        let output_buffer = Arc::new(Mutex::new(Vec::new()));
+        let started_at = now_timestamp();
+
+        // Record the running action
+        {
+            let mut running = self.running.lock().unwrap();
+            running.insert(
+                execution_id.clone(),
+                RunningActionState {
+                    child_pid: Some(child_pid),
+                    output_buffer: output_buffer.clone(),
+                },
+            );
+        }
+
+        // Emit initial started event
+        listener
+            .on_event(ExecutionEvent::Started {
+                execution_id: execution_id.clone(),
+                started_at,
+            })
+            .await;
+
+        // Spawn threads to read stdout and stderr (identical to local execution)
+        let exec_id = execution_id.clone();
+        let listener_clone = listener.clone();
+        let buffer_clone = output_buffer.clone();
+        if let Some(mut stdout) = child.stdout.take() {
+            thread::spawn(move || {
+                let mut buffer = [0u8; 1024];
+                loop {
+                    match stdout.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let chunk = String::from_utf8_lossy(&buffer[..n]).to_string();
+                            let timestamp = now_timestamp();
+
+                            {
+                                let mut buf = buffer_clone.lock().unwrap();
+                                buf.push(OutputChunk {
+                                    chunk: chunk.clone(),
+                                    stream: "stdout".to_string(),
+                                    timestamp,
+                                });
+                            }
+
+                            let listener_clone = listener_clone.clone();
+                            let exec_id_clone = exec_id.clone();
+                            let chunk_clone = chunk.clone();
+                            tokio::runtime::Handle::try_current()
+                                .unwrap_or_else(|_| {
+                                    tokio::runtime::Runtime::new().unwrap().handle().clone()
+                                })
+                                .block_on(async move {
+                                    listener_clone
+                                        .on_event(ExecutionEvent::Output {
+                                            execution_id: exec_id_clone,
+                                            chunk: chunk_clone,
+                                            stream: "stdout".to_string(),
+                                            timestamp,
+                                        })
+                                        .await;
+                                });
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        let exec_id = execution_id.clone();
+        let listener_clone = listener.clone();
+        let buffer_clone = output_buffer.clone();
+        if let Some(mut stderr) = child.stderr.take() {
+            thread::spawn(move || {
+                let mut buffer = [0u8; 1024];
+                loop {
+                    match stderr.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let chunk = String::from_utf8_lossy(&buffer[..n]).to_string();
+                            let timestamp = now_timestamp();
+
+                            {
+                                let mut buf = buffer_clone.lock().unwrap();
+                                buf.push(OutputChunk {
+                                    chunk: chunk.clone(),
+                                    stream: "stderr".to_string(),
+                                    timestamp,
+                                });
+                            }
+
+                            let listener_clone = listener_clone.clone();
+                            let exec_id_clone = exec_id.clone();
+                            let chunk_clone = chunk.clone();
+                            tokio::runtime::Handle::try_current()
+                                .unwrap_or_else(|_| {
+                                    tokio::runtime::Runtime::new().unwrap().handle().clone()
+                                })
+                                .block_on(async move {
+                                    listener_clone
+                                        .on_event(ExecutionEvent::Output {
+                                            execution_id: exec_id_clone,
+                                            chunk: chunk_clone,
+                                            stream: "stderr".to_string(),
+                                            timestamp,
+                                        })
+                                        .await;
+                                });
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        // Spawn thread to wait for completion
+        let exec_id = execution_id.clone();
+        let running_clone = self.running.clone();
+        let completed_clone = self.completed.clone();
+        let stopped_clone = self.stopped.clone();
+        let action_started_at = started_at;
+
+        thread::spawn(move || {
+            let exit_status = child.wait();
+            let exit_code = exit_status.as_ref().ok().and_then(|s| s.code());
+            let completed_at = now_timestamp();
+
+            let was_stopped = {
+                let mut stopped = stopped_clone.lock().unwrap();
+                stopped.remove(&exec_id)
+            };
+
+            {
+                let mut running = running_clone.lock().unwrap();
+                if let Some(state) = running.remove(&exec_id) {
+                    let output = state.output_buffer.lock().unwrap().clone();
+                    let mut completed = completed_clone.lock().unwrap();
+                    completed.insert(exec_id.clone(), output);
+                }
+            }
+
+            let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
+
+            let status = if was_stopped {
+                ActionStatus::Stopped
+            } else if success {
+                ActionStatus::Completed
+            } else {
+                ActionStatus::Failed
+            };
+
+            tokio::runtime::Handle::try_current()
+                .unwrap_or_else(|_| tokio::runtime::Runtime::new().unwrap().handle().clone())
+                .block_on(async {
+                    listener
+                        .on_event(ExecutionEvent::StatusChanged {
+                            execution_id: exec_id.clone(),
+                            status,
+                            exit_code,
+                            started_at: Some(action_started_at),
+                            completed_at: Some(completed_at),
+                        })
+                        .await;
+
+                    // Note: auto_commit is not supported for remote execution
+                    // since the working directory is on the remote workspace.
+                });
+
+            let _ = completion_tx.send(());
+        });
+
+        Ok((execution_id, completion_rx))
     }
 
     /// Stop a running action by execution ID.

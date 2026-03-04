@@ -193,20 +193,31 @@ impl AcpDriver {
     }
 }
 
-/// Build a shell command string that `exec`s into the given binary with args.
-///
-/// Each component is single-quoted to avoid shell interpretation. Single
-/// quotes inside values are escaped with the standard `'\''` trick.
-fn build_shell_exec_command(binary: &Path, args: &[String]) -> String {
-    fn shell_quote(s: &str) -> String {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
+/// Shell-escape a value by wrapping it in single quotes with interior quotes
+/// escaped via the standard `'\''` trick.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
 
-    let mut parts = vec!["exec".to_string(), shell_quote(&binary.to_string_lossy())];
+/// Build a shell command string that `cd`s into `working_dir` (triggering
+/// directory hooks like Hermit's `chpwd`) and then `exec`s the given binary.
+///
+/// Using an explicit `cd` inside `-c` is necessary because `current_dir` on
+/// the spawned process sets the cwd *before* shell init, but `precmd` /
+/// `chpwd` hooks may not fire for `-c` commands. The `cd` ensures the hook
+/// fires after `.zshrc` / `.bashrc` have installed it.
+fn build_shell_exec_command(working_dir: &Path, binary: &Path, args: &[String]) -> String {
+    let mut parts = vec![
+        format!("cd {}", shell_quote(&working_dir.to_string_lossy())),
+        format!("exec {}", shell_quote(&binary.to_string_lossy())),
+    ];
+    // Append remaining args to the `exec` fragment (last element).
     for arg in args {
-        parts.push(shell_quote(arg));
+        let last = parts.last_mut().unwrap();
+        last.push(' ');
+        last.push_str(&shell_quote(arg));
     }
-    parts.join(" ")
+    parts.join(" && ")
 }
 
 fn resolve_spawn_working_dir(working_dir: &Path, is_remote: bool) -> PathBuf {
@@ -253,7 +264,8 @@ impl AgentDriver for AcpDriver {
             // stdin/stdout pass through directly for the JSON-RPC protocol.
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
 
-            let exec_cmd = build_shell_exec_command(&self.binary_path, &self.acp_args);
+            let exec_cmd =
+                build_shell_exec_command(&spawn_working_dir, &self.binary_path, &self.acp_args);
 
             let mut c = Command::new(&shell);
             c.arg("-i") // interactive: triggers hooks like chpwd for Hermit
@@ -906,35 +918,38 @@ mod tests {
     }
 
     #[test]
-    fn build_shell_exec_command_simple() {
+    fn build_shell_exec_command_cds_then_execs() {
         use std::path::PathBuf;
+        let dir = PathBuf::from("/home/user/project");
         let binary = PathBuf::from("/usr/local/bin/goose");
         let args = vec!["--acp".to_string(), "run".to_string()];
         assert_eq!(
-            build_shell_exec_command(&binary, &args),
-            "exec '/usr/local/bin/goose' '--acp' 'run'"
+            build_shell_exec_command(&dir, &binary, &args),
+            "cd '/home/user/project' && exec '/usr/local/bin/goose' '--acp' 'run'"
         );
     }
 
     #[test]
     fn build_shell_exec_command_escapes_single_quotes() {
         use std::path::PathBuf;
+        let dir = PathBuf::from("/path/it's here");
         let binary = PathBuf::from("/path/with space/it's-here");
         let args = vec!["--msg=it's".to_string()];
         assert_eq!(
-            build_shell_exec_command(&binary, &args),
-            "exec '/path/with space/it'\\''s-here' '--msg=it'\\''s'"
+            build_shell_exec_command(&dir, &binary, &args),
+            "cd '/path/it'\\''s here' && exec '/path/with space/it'\\''s-here' '--msg=it'\\''s'"
         );
     }
 
     #[test]
     fn build_shell_exec_command_no_args() {
         use std::path::PathBuf;
+        let dir = PathBuf::from("/tmp");
         let binary = PathBuf::from("/usr/bin/claude");
         let args: Vec<String> = vec![];
         assert_eq!(
-            build_shell_exec_command(&binary, &args),
-            "exec '/usr/bin/claude'"
+            build_shell_exec_command(&dir, &binary, &args),
+            "cd '/tmp' && exec '/usr/bin/claude'"
         );
     }
 }

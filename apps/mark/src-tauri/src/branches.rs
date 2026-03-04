@@ -32,6 +32,7 @@ fn to_branch_with_workdir(
         pr_number: branch.pr_number,
         branch_type: branch.branch_type,
         workspace_name: branch.workspace_name,
+        workstation_id: branch.workstation_id,
         workspace_status: branch.workspace_status,
         pr_state: branch.pr_state,
         pr_checks_status: branch.pr_checks_status,
@@ -1004,6 +1005,9 @@ pub async fn start_workspace(
                 .as_deref()
                 .map(|s| s.to_ascii_lowercase())
                 .unwrap_or_default();
+            if let Some(ws_id) = info.id {
+                store.update_branch_workstation_id(&branch_id, ws_id).ok();
+            }
             if ws_status == "running" {
                 clone_repo_into_workspace(
                     ws_name,
@@ -1112,6 +1116,12 @@ pub async fn start_workspace(
             Ok(())
         }
     }
+}
+
+/// Return the value of the `BLOX_ENV` environment variable, if set.
+#[tauri::command]
+pub fn get_blox_env() -> Option<String> {
+    std::env::var("BLOX_ENV").ok()
 }
 
 /// Get info about a remote branch's Blox workspace.
@@ -1275,6 +1285,13 @@ pub async fn poll_workspace_status(
             info.status
         );
     }
+    // Persist the numeric workstation ID if available and not yet stored.
+    if let Some(ws_id) = info.id {
+        if branch.workstation_id.is_none() {
+            store.update_branch_workstation_id(&branch_id, ws_id).ok();
+        }
+    }
+
     store
         .update_branch_workspace_status(&branch_id, &new_status)
         .map_err(|e| e.to_string())?;

@@ -55,6 +55,7 @@ export interface Branch {
   prNumber: number | null;
   branchType: BranchType;
   workspaceName: string | null;
+  workstationId: number | null;
   workspaceStatus: WorkspaceStatus | null;
   worktreePath: string | null;
   createdAt: number;

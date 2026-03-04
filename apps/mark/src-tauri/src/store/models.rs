@@ -257,6 +257,8 @@ pub struct Branch {
     pub branch_type: BranchType,
     /// The Blox workspace name (remote branches only).
     pub workspace_name: Option<String>,
+    /// Numeric workstation ID used in proxy URLs (remote branches only).
+    pub workstation_id: Option<u64>,
     /// Current lifecycle status of the workspace (remote branches only).
     pub workspace_status: Option<WorkspaceStatus>,
     /// PR state: "OPEN", "CLOSED", "MERGED", etc.
@@ -292,6 +294,7 @@ impl Branch {
             pr_number: None,
             branch_type: BranchType::Local,
             workspace_name: None,
+            workstation_id: None,
             workspace_status: None,
             pr_state: None,
             pr_checks_status: None,
@@ -323,6 +326,7 @@ impl Branch {
             pr_number: None,
             branch_type: BranchType::Remote,
             workspace_name: Some(workspace_name.to_string()),
+            workstation_id: None,
             workspace_status: Some(WorkspaceStatus::Starting),
             pr_state: None,
             pr_checks_status: None,

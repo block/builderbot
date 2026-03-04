@@ -45,6 +45,9 @@ pub enum BloxError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
     pub name: String,
+    /// Numeric workstation ID used in proxy URLs.
+    #[serde(default)]
+    pub id: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_status")]
     pub status: Option<String>,
     /// Catch-all for any other fields the CLI returns.

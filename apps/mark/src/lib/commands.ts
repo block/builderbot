@@ -252,6 +252,11 @@ export function renameBranch(branchId: string, branchName: string): Promise<Bran
   return invoke('rename_branch', { branchId, branchName });
 }
 
+/** Return the BLOX_ENV environment variable value, or null if unset. */
+export function getBloxEnv(): Promise<string | null> {
+  return invoke('get_blox_env');
+}
+
 /** Get info about a remote branch's Blox workspace. */
 export function getWorkspaceInfo(branchId: string): Promise<WorkspaceInfo> {
   return invoke('get_workspace_info', { branchId });

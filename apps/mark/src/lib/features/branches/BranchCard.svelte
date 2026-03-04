@@ -174,13 +174,21 @@
   // =========================================================================
   // Remote endpoint URL rewriting
   // =========================================================================
+  let bloxEnv = $state<string | null>(null);
+  if (isRemote) {
+    commands.getBloxEnv().then((env) => {
+      bloxEnv = env;
+    });
+  }
+
   function getEndpointCopyUrl(endpoint: string): string {
-    if (!isRemote || !branch.workspaceName) return endpoint;
+    if (!isRemote || !branch.workstationId) return endpoint;
     try {
       const parsed = new URL(endpoint);
       const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
       const path = parsed.pathname + parsed.search + parsed.hash;
-      return `https://workstation-${branch.workspaceName}-${port}--blox.blox.sqprod.co${path}`;
+      const domain = bloxEnv === 'staging' ? 'blox.stage.blox.sqprod.co' : 'blox.blox.sqprod.co';
+      return `https://workstation-${branch.workstationId}-${port}--${domain}${path}`;
     } catch {
       return endpoint;
     }

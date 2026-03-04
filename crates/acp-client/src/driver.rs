@@ -193,6 +193,12 @@ impl AcpDriver {
     }
 }
 
+/// Shell-escape a value by wrapping it in single quotes with interior quotes
+/// escaped via the standard `'\''` trick.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 fn resolve_spawn_working_dir(working_dir: &Path, is_remote: bool) -> PathBuf {
     // Remote ACP sessions proxy through `sq blox acp` and don't execute against
     // the local filesystem. Use a guaranteed-existing cwd when the recorded
@@ -224,13 +230,46 @@ impl AgentDriver for AcpDriver {
             );
         }
 
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.args(&self.acp_args)
-            .current_dir(&spawn_working_dir)
-            .stdin(Stdio::piped())
+        // For local sessions we need Hermit (and similar directory-based shell
+        // hooks) to activate before the agent binary runs. We match the
+        // approach used by the actions executor: spawn an interactive login
+        // shell with `-s` (stdin mode) in the working directory with a clean
+        // environment. The shell initialises fully (`.zshrc` installs hooks),
+        // `precmd` fires in the working directory (activating Hermit), then we
+        // write an `exec <binary>` command to stdin. `exec` replaces the shell
+        // with the agent binary so all subsequent stdin/stdout traffic is the
+        // JSON-RPC protocol.
+        let is_local_shell = !self.is_remote;
+
+        let mut cmd = if is_local_shell {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            let mut c = Command::new(&shell);
+            c.current_dir(&spawn_working_dir) // start in project dir so precmd sees hermit config
+                .env_clear() // clean slate — shell init rebuilds the environment
+                .env("HOME", std::env::var("HOME").unwrap_or_default())
+                .env("USER", std::env::var("USER").unwrap_or_default())
+                .env("SHELL", &shell)
+                .arg("-i") // interactive: ensures hooks like precmd/chpwd are installed
+                .arg("-l") // login: loads full profile / environment
+                .arg("-s"); // read commands from stdin (after init completes)
+            c
+        } else {
+            let mut c = Command::new(&self.binary_path);
+            c.args(&self.acp_args).current_dir(&spawn_working_dir);
+            c
+        };
+
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            // NOTE: stderr is discarded for both local and remote spawns. For local
+            // shells this means shell init errors (e.g. Hermit activation failures,
+            // .zshrc syntax errors) are silently swallowed. The agent will still run
+            // but without the hermit-managed toolchain. Consider piping stderr (as
+            // the actions executor does) and logging it to aid debugging.
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        // For local shells extra_env is set on the clean environment; for
+        // remote spawns it augments the inherited environment.
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
@@ -243,10 +282,35 @@ impl AgentDriver for AcpDriver {
             )
         })?;
 
-        let stdin = child
+        let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| "Failed to get stdin".to_string())?;
+
+        // For local shells, write the exec command to stdin. By the time the
+        // shell reads from stdin, init is complete and `precmd` has fired in
+        // the working directory (activating Hermit). `exec` replaces the shell
+        // with the agent binary — from this point on, stdin belongs to the
+        // agent's JSON-RPC transport.
+        if is_local_shell {
+            let exec_line = format!(
+                "exec {} {}\n",
+                shell_quote(&self.binary_path.to_string_lossy()),
+                self.acp_args
+                    .iter()
+                    .map(|a| shell_quote(a))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            stdin
+                .write_all(exec_line.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write exec command to shell stdin: {e}"))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| format!("Failed to flush shell stdin: {e}"))?;
+        }
         let stdout = child
             .stdout
             .take()
@@ -264,6 +328,12 @@ impl AgentDriver for AcpDriver {
             });
             Box::new(normalized_stdout_reader)
         } else {
+            // NOTE: local shell init (.zshrc, plugin banners, motd) may write to
+            // stdout before `exec` replaces the shell. Any such output will appear
+            // as invalid JSON-RPC framing and likely crash the session. This works
+            // in practice because well-behaved configs don't echo to stdout, but if
+            // it becomes a problem, `normalize_remote_acp_stdout` (or similar
+            // filtering) could be applied here too.
             Box::new(stdout)
         };
         let stdout_compat = incoming_reader.compat();
@@ -756,7 +826,7 @@ impl MessageWriter for BasicMessageWriter {
 mod tests {
     use super::{
         consume_remote_acp_line, decode_remote_acp_line, remote_acp_segments,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, RemoteLineOutcome,
+        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_quote, RemoteLineOutcome,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -865,5 +935,23 @@ mod tests {
     fn remote_spawn_dir_uses_existing_working_dir() {
         let existing = std::env::temp_dir();
         assert_eq!(resolve_spawn_working_dir(&existing, true), existing);
+    }
+
+    #[test]
+    fn shell_quote_simple_value() {
+        assert_eq!(
+            shell_quote("/usr/local/bin/goose"),
+            "'/usr/local/bin/goose'"
+        );
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("it's here"), "'it'\\''s here'");
+    }
+
+    #[test]
+    fn shell_quote_preserves_spaces() {
+        assert_eq!(shell_quote("/path/with space"), "'/path/with space'");
     }
 }

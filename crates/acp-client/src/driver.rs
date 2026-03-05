@@ -328,13 +328,18 @@ impl AgentDriver for AcpDriver {
             });
             Box::new(normalized_stdout_reader)
         } else {
-            // NOTE: local shell init (.zshrc, plugin banners, motd) may write to
-            // stdout before `exec` replaces the shell. Any such output will appear
-            // as invalid JSON-RPC framing and likely crash the session. This works
-            // in practice because well-behaved configs don't echo to stdout, but if
-            // it becomes a problem, `normalize_remote_acp_stdout` (or similar
-            // filtering) could be applied here too.
-            Box::new(stdout)
+            // Local shell init (.zshrc, plugin banners, Hermit activation) may
+            // write to stdout before `exec` replaces the shell. Filter out any
+            // non-JSON lines so they don't reach the JSON-RPC parser.
+            let (normalized_stdout_writer, normalized_stdout_reader) = tokio::io::duplex(64 * 1024);
+            tokio::task::spawn_local(async move {
+                if let Err(error) =
+                    normalize_local_acp_stdout(stdout, normalized_stdout_writer).await
+                {
+                    log::error!("local ACP stdout normalization failed: {error}");
+                }
+            });
+            Box::new(normalized_stdout_reader)
         };
         let stdout_compat = incoming_reader.compat();
 
@@ -525,6 +530,42 @@ async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
 
     if !pending.is_empty() {
         log::warn!("Dropped incomplete ACP proxy output at EOF");
+    }
+
+    writer.shutdown().await
+}
+
+/// Filter local ACP stdout, forwarding only valid JSON lines.
+///
+/// Local shell initialization (`.zshrc`, Hermit activation, plugin banners)
+/// may write non-JSON text to stdout before `exec` replaces the shell with
+/// the agent binary. This function reads lines from the child's stdout and
+/// only forwards those that parse as valid JSON, discarding everything else.
+async fn normalize_local_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
+    stdout: R,
+    mut writer: tokio::io::DuplexStream,
+) -> Result<(), std::io::Error> {
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).await?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+            writer.write_all(trimmed.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+        } else {
+            log::debug!("Dropped non-JSON line from local ACP stdout: {trimmed}");
+        }
     }
 
     writer.shutdown().await
@@ -953,5 +994,56 @@ mod tests {
     #[test]
     fn shell_quote_preserves_spaces() {
         assert_eq!(shell_quote("/path/with space"), "'/path/with space'");
+    }
+
+    #[tokio::test]
+    async fn local_stdout_normalization_filters_non_json() {
+        use super::normalize_local_acp_stdout;
+        use tokio::io::AsyncReadExt;
+
+        let input = b"Hermit environment /home/user/.hermit activated\n\
+                       {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\n\
+                       some banner text\n\
+                       {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}\n";
+
+        let (writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let input_reader = &input[..];
+
+        normalize_local_acp_stdout(input_reader, writer)
+            .await
+            .expect("normalization should succeed");
+
+        let mut output = String::new();
+        reader
+            .read_to_string(&mut output)
+            .await
+            .expect("read should succeed");
+
+        assert_eq!(
+            output,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}\n\
+             {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_stdout_normalization_passes_empty_input() {
+        use super::normalize_local_acp_stdout;
+        use tokio::io::AsyncReadExt;
+
+        let input = b"";
+        let (writer, mut reader) = tokio::io::duplex(64 * 1024);
+
+        normalize_local_acp_stdout(&input[..], writer)
+            .await
+            .expect("normalization should succeed");
+
+        let mut output = String::new();
+        reader
+            .read_to_string(&mut output)
+            .await
+            .expect("read should succeed");
+
+        assert!(output.is_empty());
     }
 }

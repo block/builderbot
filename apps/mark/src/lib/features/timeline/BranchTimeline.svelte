@@ -245,7 +245,7 @@
       all.push({
         key: `review-${review.id}`,
         type,
-        title: `Code Review`,
+        title: review.title || 'Code Review',
         meta: countParts.length > 0 ? countParts.join(' + ') : undefined,
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,

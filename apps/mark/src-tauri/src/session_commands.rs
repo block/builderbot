@@ -1316,11 +1316,20 @@ fn review_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineE
             continue;
         }
         let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];
-        let mut content = format!(
-            "### Code Review of {} ({} scope)\n",
-            short_sha,
-            review.scope.as_str(),
-        );
+        let heading = match review.title.as_deref() {
+            Some(title) => format!(
+                "### {} — {} ({} scope)\n",
+                title,
+                short_sha,
+                review.scope.as_str(),
+            ),
+            None => format!(
+                "### Code Review of {} ({} scope)\n",
+                short_sha,
+                review.scope.as_str(),
+            ),
+        };
+        let mut content = heading;
 
         // Group comments by file path
         let mut by_path: std::collections::BTreeMap<&str, Vec<&crate::store::models::Comment>> =
@@ -1425,7 +1434,18 @@ Reserve `\"warning\"` and `\"issue\"` for genuine concerns.
 
 ## Output format
 
-Return your review as exactly one fenced JSON block with this structure:
+Your response must start directly with the review-title fenced block below — \
+do not output any preamble, commentary, or thinking before it.
+
+Provide a single-sentence title (max 15 words) that conveys your overall \
+confidence level in the changes. Do not describe what the changes do — instead focus on \
+how confident you are that they are correct and safe. Wrap it in a fenced block:
+
+```review-title
+Looks solid overall with one minor edge case worth checking
+```
+
+Then return your review comments as exactly one fenced JSON block:
 
 ```review-comments
 [
@@ -1445,10 +1465,12 @@ Return your review as exactly one fenced JSON block with this structure:
 ```
 
 Formatting requirements:
-- The opening fence line must be exactly: ```review-comments
-- The closing fence line must be exactly: ```
-- Put only the JSON array between the fences (no prose or markdown inside).
-- Do not wrap this block in any additional code fences.
+- The opening fence line for the title must be exactly: ```review-title
+- The opening fence line for comments must be exactly: ```review-comments
+- Each closing fence line must be exactly: ```
+- Put only plain text (no markdown) inside the review-title block.
+- Put only the JSON array inside the review-comments block (no prose or markdown).
+- Do not wrap these blocks in any additional code fences.
 
 Rules:
 - `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end).
@@ -1483,11 +1505,17 @@ mod tests {
             &BranchSessionType::Review,
         );
 
+        assert!(
+            prompt.contains("Then return your review comments as exactly one fenced JSON block:")
+        );
         assert!(prompt
-            .contains("Return your review as exactly one fenced JSON block with this structure:"));
-        assert!(prompt.contains("The opening fence line must be exactly: ```review-comments"));
-        assert!(prompt.contains("The closing fence line must be exactly: ```"));
+            .contains("The opening fence line for the title must be exactly: ```review-title"));
         assert!(prompt
-            .contains("Put only the JSON array between the fences (no prose or markdown inside)."));
+            .contains("The opening fence line for comments must be exactly: ```review-comments"));
+        assert!(prompt.contains("Each closing fence line must be exactly: ```"));
+        assert!(prompt.contains(
+            "Put only the JSON array inside the review-comments block (no prose or markdown)."
+        ));
+        assert!(prompt.contains("do not output any preamble, commentary, or thinking before it"));
     }
 }

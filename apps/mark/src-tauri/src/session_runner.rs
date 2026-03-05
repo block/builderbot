@@ -518,17 +518,30 @@ fn run_post_completion_hooks(
         }
     }
 
-    // --- Review comment extraction ---
+    // --- Review comment and title extraction ---
     if let Ok(Some(review)) = store.get_review_by_session(session_id) {
-        if review.comments.is_empty() {
-            if let Ok(messages) = store.get_session_messages(session_id) {
-                let full_text: String = messages
-                    .iter()
-                    .filter(|m| m.role == MessageRole::Assistant)
-                    .map(|m| m.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
+        if let Ok(messages) = store.get_session_messages(session_id) {
+            let full_text: String = messages
+                .iter()
+                .filter(|m| m.role == MessageRole::Assistant)
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
 
+            // Extract and save review title (always attempt, even if comments exist)
+            if review.title.is_none() {
+                if let Some(title) = extract_review_title(&full_text) {
+                    log::info!("Session {session_id}: extracted review title: {title}");
+                    if let Err(e) = store.update_review_title(&review.id, &title) {
+                        log::error!("Failed to update review title: {e}");
+                    }
+                } else {
+                    log::warn!("Session {session_id}: review session completed but no review-title block found");
+                }
+            }
+
+            // Extract and save review comments
+            if review.comments.is_empty() {
                 let comments = extract_review_comments(&full_text);
                 if comments.is_empty() {
                     log::warn!("Session {session_id}: review session completed but no review-comments block found");
@@ -715,8 +728,9 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
     let marker_start = "```review-comments";
 
     let mut search_from = 0;
-    while let Some(start_pos) = text[search_from..].find(marker_start) {
-        let block_start = search_from + start_pos + marker_start.len();
+    while let Some(rel_pos) = find_opening_fence(&text[search_from..], marker_start) {
+        let start_pos = search_from + rel_pos;
+        let block_start = start_pos + marker_start.len();
         // Skip to the next line after the opening marker
         let json_start = match text[block_start..].find('\n') {
             Some(pos) => block_start + pos + 1,
@@ -766,6 +780,42 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
     }
 
     comments
+}
+
+/// Extract the review title from assistant output.
+///
+/// Looks for a ```review-title fenced block and returns the trimmed text inside.
+/// The opening fence must appear at the start of a line to avoid matching the
+/// marker when it appears inside regular prose (e.g. the LLM discussing the
+/// extraction logic itself).
+fn extract_review_title(text: &str) -> Option<String> {
+    let marker = "```review-title";
+    let start_pos = find_opening_fence(text, marker)?;
+    let block_start = start_pos + marker.len();
+    let content_start = block_start + text[block_start..].find('\n')? + 1;
+    let end_pos = find_closing_fence(&text[content_start..])?;
+    let title = text[content_start..content_start + end_pos].trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    }
+}
+
+/// Find an opening fence marker (e.g. ` ```review-title `) that appears at the
+/// start of a line (position 0 or immediately after `\n`).  Returns the byte
+/// offset of the marker within `text`, or `None` if no line-start match exists.
+fn find_opening_fence(text: &str, marker: &str) -> Option<usize> {
+    let mut pos = 0;
+    while pos < text.len() {
+        let candidate = text[pos..].find(marker)?;
+        let abs = pos + candidate;
+        if abs == 0 || text.as_bytes()[abs - 1] == b'\n' {
+            return Some(abs);
+        }
+        pos = abs + marker.len();
+    }
+    None
 }
 
 /// Find the closing ``` fence for a code block.
@@ -886,6 +936,111 @@ mod tests {
     fn closing_fence_with_trailing_whitespace() {
         let text = "json\n```  \nmore";
         assert_eq!(find_closing_fence(text), Some(5));
+    }
+
+    // ── extract_review_title ──────────────────────────────────────────
+
+    #[test]
+    fn extract_title_simple() {
+        let text = "Here is my review:\n\n```review-title\nSolid refactor with one edge case\n```\n\nAnd comments...";
+        assert_eq!(
+            extract_review_title(text),
+            Some("Solid refactor with one edge case".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_title_trims_whitespace() {
+        let text = "```review-title\n  Clean changes, no concerns  \n```\n";
+        assert_eq!(
+            extract_review_title(text),
+            Some("Clean changes, no concerns".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_title_none_when_missing() {
+        let text = "Just a normal message with no review title.";
+        assert_eq!(extract_review_title(text), None);
+    }
+
+    #[test]
+    fn extract_title_none_when_empty() {
+        let text = "```review-title\n\n```\n";
+        assert_eq!(extract_review_title(text), None);
+    }
+
+    #[test]
+    fn extract_title_with_review_comments() {
+        let text = r#"Here is my review:
+
+```review-title
+Risky changes to auth flow need closer look
+```
+
+```review-comments
+[
+  {
+    "path": "src/auth.rs",
+    "span": { "start": 10, "end": 15 },
+    "content": "Missing validation."
+  }
+]
+```
+"#;
+        assert_eq!(
+            extract_review_title(text),
+            Some("Risky changes to auth flow need closer look".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_title_ignores_llm_preamble() {
+        let text = r#"I now have a complete picture of the changes. Let me produce the review.
+
+```review-title
+Clean, well-tested feature addition with good backward compatibility
+```
+
+```review-comments
+[
+  {
+    "path": "src/foo.rs",
+    "span": { "start": 10, "end": 15 },
+    "type": "suggestion",
+    "content": "Consider adding a test."
+  }
+]
+```
+"#;
+        assert_eq!(
+            extract_review_title(text),
+            Some(
+                "Clean, well-tested feature addition with good backward compatibility".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn extract_title_marker_mentioned_in_preamble() {
+        // The LLM discusses the ```review-title marker in its preamble before
+        // actually producing the fenced block.  The extractor must skip the
+        // mid-line mention and find the real opening fence.
+        let text = r#"Let me check whether `"```review-title"` would match inside `"```review-title-v2"`:
+I now have a complete picture. Let me produce the review.
+
+```review-title
+Solid changes with minor nit
+```
+
+```review-comments
+[]
+```
+"#;
+        assert_eq!(
+            extract_review_title(text),
+            Some("Solid changes with minor nit".to_string())
+        );
     }
 
     // ── extract_review_comments ─────────────────────────────────────────

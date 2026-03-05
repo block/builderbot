@@ -822,6 +822,8 @@ pub struct Review {
     pub commit_sha: String,
     pub scope: ReviewScope,
     pub session_id: Option<String>,
+    /// AI-generated one-sentence title summarising the review's confidence.
+    pub title: Option<String>,
     /// Paths that have been marked as reviewed.
     pub reviewed: Vec<String>,
     /// Comments attached to specific locations.
@@ -841,6 +843,7 @@ impl Review {
             commit_sha: commit_sha.to_string(),
             scope,
             session_id: None,
+            title: None,
             reviewed: Vec::new(),
             comments: Vec::new(),
             reference_files: Vec::new(),

@@ -1436,8 +1436,7 @@ Reserve `\"warning\"` and `\"issue\"` for genuine concerns.
 
 First, provide a single-sentence title (max 15 words) that conveys your overall \
 confidence level in the changes. Do not describe what the changes do — instead focus on \
-how confident you are that they are correct and safe. This title will be shown in the \
-branch timeline. Wrap it in a fenced block:
+how confident you are that they are correct and safe. Wrap it in a fenced block:
 
 ```review-title
 Looks solid overall with one minor edge case worth checking

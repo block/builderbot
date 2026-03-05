@@ -54,6 +54,7 @@ impl AgentDriver for SimpleDriverWrapper {
         &self,
         session_id: &str,
         prompt: &str,
+        _images: &[(String, String)],
         working_dir: &Path,
         store: &Arc<dyn crate::driver::Store>,
         writer: &Arc<dyn MessageWriter>,

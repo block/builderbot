@@ -181,7 +181,8 @@
       const parsed = new URL(endpoint);
       const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
       const path = parsed.pathname + parsed.search + parsed.hash;
-      const domain = bloxEnv === 'staging' ? 'blox.stage.blox.sqprod.co' : 'blox.blox.sqprod.co';
+      const domain =
+        bloxEnv.value === 'staging' ? 'blox.stage.blox.sqprod.co' : 'blox.blox.sqprod.co';
       return `https://workstation-${branch.workstationId}-${port}--${domain}${path}`;
     } catch {
       return endpoint;

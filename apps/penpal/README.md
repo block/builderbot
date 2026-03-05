@@ -58,11 +58,37 @@ penpal open thoughts/shared/plans/my-doc.md   # Open file in Penpal desktop app
 ### Releasing
 
 ```bash
-just prepare 0.2.0   # Bump version, generate changelog for review
-just release 0.2.0   # Commit, tag, push → CI builds and publishes
+just prepare 0.2.0   # Bump version, generate changelog, open release PR
+# Merge the PR on GitHub
+git pull
+just release 0.2.0   # Tag and push → CI builds and publishes
 ```
 
-`just prepare` updates the version in `Cargo.toml` and `package.json`, generates a changelog entry using Claude, and opens it in Penpal for review. `just release` commits the version bump, creates a `penpal/v*` tag, and pushes to trigger the CI release pipeline.
+`just prepare` creates a release branch, updates the version in `Cargo.toml` and `package.json`, generates a changelog entry using Claude, and opens a PR. After the PR is merged, `just release` creates a `penpal/v*` tag and pushes it to trigger the CI release pipeline.
+
+```mermaid
+flowchart TB
+    subgraph prepare ["just prepare"]
+        direction LR
+        A[Create release branch] --> B[Bump versions] --> C[Generate changelog] --> D[Commit & open PR]
+    end
+
+    prepare --> E[Merge PR on GitHub]
+
+    subgraph release ["just release"]
+        direction LR
+        F[git pull main] --> G[Create tag] --> H[Push tag]
+    end
+
+    E --> release
+
+    subgraph ci [CI]
+        direction LR
+        I[Build arm64 + x86_64] --> J[Create GitHub Release] --> K[Bump Homebrew cask]
+    end
+
+    release --> ci
+```
 
 ### Server options
 

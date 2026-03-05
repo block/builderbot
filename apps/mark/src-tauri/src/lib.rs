@@ -617,6 +617,8 @@ fn clear_project_repo_reason(
 #[tauri::command(rename_all = "camelCase")]
 async fn remove_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    executor: tauri::State<'_, Arc<actions::ActionExecutor>>,
+    registry: tauri::State<'_, Arc<actions::ActionRegistry>>,
     project_id: String,
     project_repo_id: String,
 ) -> Result<(), String> {
@@ -631,6 +633,10 @@ async fn remove_project_repo(
         .into_iter()
         .filter(|b| b.project_repo_id.as_deref() == Some(project_repo_id.as_str()))
         .collect::<Vec<_>>();
+
+    // Stop running actions for branches being removed.
+    let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
+    actions::commands::stop_actions_for_branches(&executor, &registry, &branch_ids);
 
     // Run heavy cleanup (worktree removal, remote workspace deletion) off the
     // main thread so the UI stays responsive for large repos.
@@ -790,6 +796,8 @@ async fn list_repo_directories(github_repo: String, path: String) -> Result<Vec<
 #[tauri::command]
 async fn delete_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    executor: tauri::State<'_, Arc<actions::ActionExecutor>>,
+    registry: tauri::State<'_, Arc<actions::ActionRegistry>>,
     id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
@@ -799,6 +807,10 @@ async fn delete_project(
     let branches = store
         .list_branches_for_project(&id)
         .map_err(|e| e.to_string())?;
+
+    // Stop all running actions for branches in this project before cleanup.
+    let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
+    actions::commands::stop_actions_for_branches(&executor, &registry, &branch_ids);
 
     // Run heavy cleanup (worktree removal, remote workspace deletion, directory
     // cleanup) off the main thread so the UI stays responsive for large repos.
@@ -2782,8 +2794,18 @@ pub fn run() {
             doctor::run_doctor,
             doctor::run_doctor_fix,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Stop all running actions on quit (fire-and-forget).
+                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
+                let registry = app_handle.state::<Arc<actions::ActionRegistry>>();
+                actions::commands::stop_all_actions(&executor, &registry);
+                // Brief grace period for processes to receive SIGTERM.
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        });
 }
 
 #[cfg(test)]

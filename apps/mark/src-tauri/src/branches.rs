@@ -1369,9 +1369,14 @@ pub async fn poll_workspace_status(
 #[tauri::command]
 pub async fn delete_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    executor: tauri::State<'_, Arc<ActionExecutor>>,
+    registry: tauri::State<'_, Arc<ActionRegistry>>,
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+
+    // Stop any running actions for this branch before cleanup.
+    crate::actions::commands::stop_actions_for_branches(&executor, &registry, &[&branch_id]);
 
     // Get the branch
     let branch = store

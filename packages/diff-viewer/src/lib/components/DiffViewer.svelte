@@ -269,14 +269,20 @@
   // AI annotations for after pane (only informational ones with after_span)
   let currentFileAnnotations = $derived(
     annotations.filter(
-      (a) => a.after_span && (a.category === 'explanation' || a.category === 'context')
+      (a) =>
+        a.file_path === currentFilePath &&
+        a.after_span &&
+        (a.category === 'explanation' || a.category === 'context')
     )
   );
 
   // AI annotations with before_span for the left pane
   let beforeFileAnnotations = $derived(
     annotations.filter(
-      (a) => a.before_span && (a.category === 'explanation' || a.category === 'context')
+      (a) =>
+        a.file_path === currentFilePath &&
+        a.before_span &&
+        (a.category === 'explanation' || a.category === 'context')
     )
   );
 

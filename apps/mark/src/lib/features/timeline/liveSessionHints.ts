@@ -65,7 +65,13 @@ function formatToolCallHint(content: string, repoDir?: string | null): string | 
 }
 
 function formatAssistantHint(content: string): string | undefined {
-  const lines = stripXmlTags(content)
+  const stripped = stripXmlTags(content);
+
+  // When the response contains review fenced blocks, the surrounding text is just
+  // LLM preamble (e.g. "I now have a complete picture…") — not a useful hint.
+  if (/```review-(?:title|comments)/.test(stripped)) return undefined;
+
+  const lines = stripped
     .replace(/```[\s\S]*?```/g, ' ')
     .split(/\r?\n/)
     .map((line) =>

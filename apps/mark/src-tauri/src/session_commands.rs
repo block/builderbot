@@ -1468,6 +1468,7 @@ Formatting requirements:
 - Put only plain text (no markdown) inside the review-title block.
 - Put only the JSON array inside the review-comments block (no prose or markdown).
 - Do not wrap these blocks in any additional code fences.
+- Do not include any text outside the two fenced blocks (no preamble, commentary, or explanation).
 
 Rules:
 - `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end).

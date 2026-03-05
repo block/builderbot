@@ -728,8 +728,9 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
     let marker_start = "```review-comments";
 
     let mut search_from = 0;
-    while let Some(start_pos) = text[search_from..].find(marker_start) {
-        let block_start = search_from + start_pos + marker_start.len();
+    while let Some(rel_pos) = find_opening_fence(&text[search_from..], marker_start) {
+        let start_pos = search_from + rel_pos;
+        let block_start = start_pos + marker_start.len();
         // Skip to the next line after the opening marker
         let json_start = match text[block_start..].find('\n') {
             Some(pos) => block_start + pos + 1,
@@ -784,9 +785,12 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
 /// Extract the review title from assistant output.
 ///
 /// Looks for a ```review-title fenced block and returns the trimmed text inside.
+/// The opening fence must appear at the start of a line to avoid matching the
+/// marker when it appears inside regular prose (e.g. the LLM discussing the
+/// extraction logic itself).
 fn extract_review_title(text: &str) -> Option<String> {
     let marker = "```review-title";
-    let start_pos = text.find(marker)?;
+    let start_pos = find_opening_fence(text, marker)?;
     let block_start = start_pos + marker.len();
     let content_start = block_start + text[block_start..].find('\n')? + 1;
     let end_pos = find_closing_fence(&text[content_start..])?;
@@ -796,6 +800,22 @@ fn extract_review_title(text: &str) -> Option<String> {
     } else {
         Some(title.to_string())
     }
+}
+
+/// Find an opening fence marker (e.g. ` ```review-title `) that appears at the
+/// start of a line (position 0 or immediately after `\n`).  Returns the byte
+/// offset of the marker within `text`, or `None` if no line-start match exists.
+fn find_opening_fence(text: &str, marker: &str) -> Option<usize> {
+    let mut pos = 0;
+    while pos < text.len() {
+        let candidate = text[pos..].find(marker)?;
+        let abs = pos + candidate;
+        if abs == 0 || text.as_bytes()[abs - 1] == b'\n' {
+            return Some(abs);
+        }
+        pos = abs + marker.len();
+    }
+    None
 }
 
 /// Find the closing ``` fence for a code block.
@@ -971,6 +991,55 @@ Risky changes to auth flow need closer look
         assert_eq!(
             extract_review_title(text),
             Some("Risky changes to auth flow need closer look".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_title_ignores_llm_preamble() {
+        let text = r#"I now have a complete picture of the changes. Let me produce the review.
+
+```review-title
+Clean, well-tested feature addition with good backward compatibility
+```
+
+```review-comments
+[
+  {
+    "path": "src/foo.rs",
+    "span": { "start": 10, "end": 15 },
+    "type": "suggestion",
+    "content": "Consider adding a test."
+  }
+]
+```
+"#;
+        assert_eq!(
+            extract_review_title(text),
+            Some(
+                "Clean, well-tested feature addition with good backward compatibility".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn extract_title_marker_mentioned_in_preamble() {
+        // The LLM discusses the ```review-title marker in its preamble before
+        // actually producing the fenced block.  The extractor must skip the
+        // mid-line mention and find the real opening fence.
+        let text = r#"Let me check whether `"```review-title"` would match inside `"```review-title-v2"`:
+I now have a complete picture. Let me produce the review.
+
+```review-title
+Solid changes with minor nit
+```
+
+```review-comments
+[]
+```
+"#;
+        assert_eq!(
+            extract_review_title(text),
+            Some("Solid changes with minor nit".to_string())
         );
     }
 

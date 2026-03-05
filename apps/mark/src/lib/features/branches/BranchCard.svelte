@@ -99,6 +99,7 @@
   import { alerts } from '../../shared/alerts.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
+  import { bloxEnv } from '../../stores/bloxEnv.svelte';
 
   interface Props {
     branch: Branch;
@@ -174,13 +175,6 @@
   // =========================================================================
   // Remote endpoint URL rewriting
   // =========================================================================
-  let bloxEnv = $state<string | null>(null);
-  if (isRemote) {
-    commands.getBloxEnv().then((env) => {
-      bloxEnv = env;
-    });
-  }
-
   function getEndpointCopyUrl(endpoint: string): string {
     if (!isRemote || !branch.workstationId) return endpoint;
     try {

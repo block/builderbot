@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use crate::git::auto_commit_if_changes;
@@ -37,6 +38,11 @@ struct RunningActionState {
     output_buffer: Arc<Mutex<Vec<OutputChunk>>>,
 }
 
+/// Optional auto-commit context for local executions.
+struct AutoCommitContext {
+    working_dir: String,
+}
+
 /// Manages action execution with real-time output streaming
 pub struct ActionExecutor {
     running: Arc<Mutex<HashMap<String, RunningActionState>>>,
@@ -52,6 +58,56 @@ impl Default for ActionExecutor {
     }
 }
 
+/// Spawn a thread that reads from `stream` and emits output events via `listener`.
+///
+/// Each chunk is also appended to `buffer` for later retrieval.
+fn spawn_stream_reader(
+    mut stream: impl Read + Send + 'static,
+    stream_name: &'static str,
+    exec_id: String,
+    listener: Arc<dyn ExecutionListener>,
+    buffer: Arc<Mutex<Vec<OutputChunk>>>,
+    handle: Handle,
+) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let timestamp = now_timestamp();
+
+                    // Store in buffer
+                    {
+                        let mut b = buffer.lock().unwrap();
+                        b.push(OutputChunk {
+                            chunk: chunk.clone(),
+                            stream: stream_name.to_string(),
+                            timestamp,
+                        });
+                    }
+
+                    // Emit event
+                    let listener = listener.clone();
+                    let exec_id = exec_id.clone();
+                    handle.block_on(async move {
+                        listener
+                            .on_event(ExecutionEvent::Output {
+                                execution_id: exec_id,
+                                chunk,
+                                stream: stream_name.to_string(),
+                                timestamp,
+                            })
+                            .await;
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
 impl ActionExecutor {
     /// Create a new action executor
     pub fn new() -> Self {
@@ -60,6 +116,156 @@ impl ActionExecutor {
             completed: Arc::new(Mutex::new(HashMap::new())),
             stopped: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Manage a spawned child process: track it, stream its output, and emit
+    /// completion events. This is the shared implementation used by both local
+    /// and remote execution paths.
+    ///
+    /// If `auto_commit_ctx` is `Some`, auto-commit will be attempted after a
+    /// successful execution (local only).
+    async fn manage_child_process(
+        &self,
+        mut child: Child,
+        metadata: ActionMetadata,
+        listener: Arc<dyn ExecutionListener>,
+        auto_commit_ctx: Option<AutoCommitContext>,
+    ) -> Result<(String, oneshot::Receiver<()>)> {
+        let execution_id = uuid::Uuid::new_v4().to_string();
+        let (completion_tx, completion_rx) = oneshot::channel();
+
+        let child_pid = child.id();
+
+        // Create output buffer
+        let output_buffer = Arc::new(Mutex::new(Vec::new()));
+        let started_at = now_timestamp();
+
+        // Record the running action
+        {
+            let mut running = self.running.lock().unwrap();
+            running.insert(
+                execution_id.clone(),
+                RunningActionState {
+                    child_pid: Some(child_pid),
+                    output_buffer: output_buffer.clone(),
+                },
+            );
+        }
+
+        // Emit initial started event
+        listener
+            .on_event(ExecutionEvent::Started {
+                execution_id: execution_id.clone(),
+                started_at,
+            })
+            .await;
+
+        // Capture the current Tokio runtime handle for use in background threads.
+        // These threads are always spawned from within a Tokio context (a Tauri
+        // command handler), so `Handle::current()` is guaranteed to succeed.
+        let handle = Handle::current();
+
+        // Spawn threads to read stdout and stderr
+        if let Some(stdout) = child.stdout.take() {
+            spawn_stream_reader(
+                stdout,
+                "stdout",
+                execution_id.clone(),
+                listener.clone(),
+                output_buffer.clone(),
+                handle.clone(),
+            );
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            spawn_stream_reader(
+                stderr,
+                "stderr",
+                execution_id.clone(),
+                listener.clone(),
+                output_buffer.clone(),
+                handle.clone(),
+            );
+        }
+
+        // Spawn thread to wait for completion
+        let exec_id = execution_id.clone();
+        let running_clone = self.running.clone();
+        let completed_clone = self.completed.clone();
+        let stopped_clone = self.stopped.clone();
+        let auto_commit = metadata.auto_commit;
+        let action_name = metadata.action_name.clone();
+        let action_started_at = started_at;
+
+        thread::spawn(move || {
+            let exit_status = child.wait();
+            let exit_code = exit_status.as_ref().ok().and_then(|s| s.code());
+            let completed_at = now_timestamp();
+
+            // Check whether this execution was explicitly stopped by the user
+            let was_stopped = {
+                let mut stopped = stopped_clone.lock().unwrap();
+                stopped.remove(&exec_id)
+            };
+
+            // Move output buffer to completed actions map and remove from running
+            {
+                let mut running = running_clone.lock().unwrap();
+                if let Some(state) = running.remove(&exec_id) {
+                    let output = state.output_buffer.lock().unwrap().clone();
+                    let mut completed = completed_clone.lock().unwrap();
+                    completed.insert(exec_id.clone(), output);
+                }
+            }
+
+            let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
+
+            // Determine the correct status:
+            // - If explicitly stopped by the user → Stopped
+            // - If exited successfully → Completed
+            // - Otherwise → Failed
+            let status = if was_stopped {
+                ActionStatus::Stopped
+            } else if success {
+                ActionStatus::Completed
+            } else {
+                ActionStatus::Failed
+            };
+
+            handle.block_on(async {
+                listener
+                    .on_event(ExecutionEvent::StatusChanged {
+                        execution_id: exec_id.clone(),
+                        status,
+                        exit_code,
+                        started_at: Some(action_started_at),
+                        completed_at: Some(completed_at),
+                    })
+                    .await;
+
+                // If auto_commit is enabled and action succeeded, commit changes
+                if auto_commit && success && !was_stopped {
+                    if let Some(ctx) = &auto_commit_ctx {
+                        if let Err(e) = auto_commit_if_changes(&ctx.working_dir, &action_name) {
+                            eprintln!("Failed to auto-commit changes: {}", e);
+                        } else {
+                            // Emit auto-commit event
+                            listener
+                                .on_event(ExecutionEvent::AutoCommit {
+                                    execution_id: exec_id.clone(),
+                                    action_name: action_name.clone(),
+                                })
+                                .await;
+                        }
+                    }
+                }
+            });
+
+            // Signal completion (ignore error if receiver was dropped)
+            let _ = completion_tx.send(());
+        });
+
+        Ok((execution_id, completion_rx))
     }
 
     /// Internal implementation that spawns the command and returns both the
@@ -71,9 +277,6 @@ impl ActionExecutor {
         metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
     ) -> Result<(String, oneshot::Receiver<()>)> {
-        let execution_id = uuid::Uuid::new_v4().to_string();
-        let (completion_tx, completion_rx) = oneshot::channel();
-
         // Determine which shell to use
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
 
@@ -120,8 +323,6 @@ impl ActionExecutor {
 
         let mut child = cmd.spawn().context("Failed to spawn action process")?;
 
-        let child_pid = child.id();
-
         // Write commands to stdin, flush, and close it
         if let Some(mut stdin) = child.stdin.take() {
             let commands_clone = commands.clone();
@@ -139,208 +340,10 @@ impl ActionExecutor {
             });
         }
 
-        // Create output buffer
-        let output_buffer = Arc::new(Mutex::new(Vec::new()));
-        let started_at = now_timestamp();
+        let auto_commit_ctx = AutoCommitContext { working_dir };
 
-        // Record the running action
-        {
-            let mut running = self.running.lock().unwrap();
-            running.insert(
-                execution_id.clone(),
-                RunningActionState {
-                    child_pid: Some(child_pid),
-                    output_buffer: output_buffer.clone(),
-                },
-            );
-        }
-
-        // Emit initial started event
-        listener
-            .on_event(ExecutionEvent::Started {
-                execution_id: execution_id.clone(),
-                started_at,
-            })
-            .await;
-
-        // Spawn threads to read stdout and stderr
-        let exec_id = execution_id.clone();
-        let listener_clone = listener.clone();
-        let buffer_clone = output_buffer.clone();
-        if let Some(mut stdout) = child.stdout.take() {
-            thread::spawn(move || {
-                let mut buffer = [0u8; 1024];
-                loop {
-                    match stdout.read(&mut buffer) {
-                        Ok(0) => break, // EOF
-                        Ok(n) => {
-                            // Convert bytes to string, preserving all control characters
-                            let chunk = String::from_utf8_lossy(&buffer[..n]).to_string();
-                            let timestamp = now_timestamp();
-
-                            // Store in buffer
-                            {
-                                let mut buf = buffer_clone.lock().unwrap();
-                                buf.push(OutputChunk {
-                                    chunk: chunk.clone(),
-                                    stream: "stdout".to_string(),
-                                    timestamp,
-                                });
-                            }
-
-                            // Emit event (blocking call in thread is OK)
-                            let listener_clone = listener_clone.clone();
-                            let exec_id_clone = exec_id.clone();
-                            let chunk_clone = chunk.clone();
-                            tokio::runtime::Handle::try_current()
-                                .unwrap_or_else(|_| {
-                                    tokio::runtime::Runtime::new().unwrap().handle().clone()
-                                })
-                                .block_on(async move {
-                                    listener_clone
-                                        .on_event(ExecutionEvent::Output {
-                                            execution_id: exec_id_clone,
-                                            chunk: chunk_clone,
-                                            stream: "stdout".to_string(),
-                                            timestamp,
-                                        })
-                                        .await;
-                                });
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-
-        let exec_id = execution_id.clone();
-        let listener_clone = listener.clone();
-        let buffer_clone = output_buffer.clone();
-        if let Some(mut stderr) = child.stderr.take() {
-            thread::spawn(move || {
-                let mut buffer = [0u8; 1024];
-                loop {
-                    match stderr.read(&mut buffer) {
-                        Ok(0) => break, // EOF
-                        Ok(n) => {
-                            // Convert bytes to string, preserving all control characters
-                            let chunk = String::from_utf8_lossy(&buffer[..n]).to_string();
-                            let timestamp = now_timestamp();
-
-                            // Store in buffer
-                            {
-                                let mut buf = buffer_clone.lock().unwrap();
-                                buf.push(OutputChunk {
-                                    chunk: chunk.clone(),
-                                    stream: "stderr".to_string(),
-                                    timestamp,
-                                });
-                            }
-
-                            // Emit event (blocking call in thread is OK)
-                            let listener_clone = listener_clone.clone();
-                            let exec_id_clone = exec_id.clone();
-                            let chunk_clone = chunk.clone();
-                            tokio::runtime::Handle::try_current()
-                                .unwrap_or_else(|_| {
-                                    tokio::runtime::Runtime::new().unwrap().handle().clone()
-                                })
-                                .block_on(async move {
-                                    listener_clone
-                                        .on_event(ExecutionEvent::Output {
-                                            execution_id: exec_id_clone,
-                                            chunk: chunk_clone,
-                                            stream: "stderr".to_string(),
-                                            timestamp,
-                                        })
-                                        .await;
-                                });
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-
-        // Spawn thread to wait for completion
-        let exec_id = execution_id.clone();
-        let running_clone = self.running.clone();
-        let completed_clone = self.completed.clone();
-        let stopped_clone = self.stopped.clone();
-        let working_dir_clone = working_dir.clone();
-        let auto_commit = metadata.auto_commit;
-        let action_name = metadata.action_name.clone();
-        let action_started_at = started_at;
-
-        thread::spawn(move || {
-            let exit_status = child.wait();
-            let exit_code = exit_status.as_ref().ok().and_then(|s| s.code());
-            let completed_at = now_timestamp();
-
-            // Check whether this execution was explicitly stopped by the user
-            let was_stopped = {
-                let mut stopped = stopped_clone.lock().unwrap();
-                stopped.remove(&exec_id)
-            };
-
-            // Move output buffer to completed actions map and remove from running
-            {
-                let mut running = running_clone.lock().unwrap();
-                if let Some(state) = running.remove(&exec_id) {
-                    let output = state.output_buffer.lock().unwrap().clone();
-                    let mut completed = completed_clone.lock().unwrap();
-                    completed.insert(exec_id.clone(), output);
-                }
-            }
-
-            let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
-
-            // Determine the correct status:
-            // - If explicitly stopped by the user → Stopped
-            // - If exited successfully → Completed
-            // - Otherwise → Failed
-            let status = if was_stopped {
-                ActionStatus::Stopped
-            } else if success {
-                ActionStatus::Completed
-            } else {
-                ActionStatus::Failed
-            };
-
-            tokio::runtime::Handle::try_current()
-                .unwrap_or_else(|_| tokio::runtime::Runtime::new().unwrap().handle().clone())
-                .block_on(async {
-                    listener
-                        .on_event(ExecutionEvent::StatusChanged {
-                            execution_id: exec_id.clone(),
-                            status,
-                            exit_code,
-                            started_at: Some(action_started_at),
-                            completed_at: Some(completed_at),
-                        })
-                        .await;
-
-                    // If auto_commit is enabled and action succeeded, commit changes
-                    if auto_commit && success && !was_stopped {
-                        if let Err(e) = auto_commit_if_changes(&working_dir_clone, &action_name) {
-                            eprintln!("Failed to auto-commit changes: {}", e);
-                        } else {
-                            // Emit auto-commit event
-                            listener
-                                .on_event(ExecutionEvent::AutoCommit {
-                                    execution_id: exec_id.clone(),
-                                    action_name: action_name.clone(),
-                                })
-                                .await;
-                        }
-                    }
-                });
-
-            // Signal completion (ignore error if receiver was dropped)
-            let _ = completion_tx.send(());
-        });
-
-        Ok((execution_id, completion_rx))
+        self.manage_child_process(child, metadata, listener, Some(auto_commit_ctx))
+            .await
     }
 
     /// Execute a shell command in the specified working directory
@@ -396,23 +399,6 @@ impl ActionExecutor {
         metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
     ) -> Result<String> {
-        let (execution_id, _completion_rx) = self
-            .execute_remote_inner(program, args, metadata, listener)
-            .await?;
-        Ok(execution_id)
-    }
-
-    /// Internal implementation for remote execution.
-    async fn execute_remote_inner(
-        &self,
-        program: PathBuf,
-        args: Vec<String>,
-        _metadata: ActionMetadata,
-        listener: Arc<dyn ExecutionListener>,
-    ) -> Result<(String, oneshot::Receiver<()>)> {
-        let execution_id = uuid::Uuid::new_v4().to_string();
-        let (completion_tx, completion_rx) = oneshot::channel();
-
         let mut cmd = Command::new(&program);
         cmd.args(&args)
             .stdin(Stdio::null())
@@ -433,186 +419,16 @@ impl ActionExecutor {
             }
         }
 
-        let mut child = cmd
+        let child = cmd
             .spawn()
             .context("Failed to spawn remote action process")?;
 
-        let child_pid = child.id();
-
-        // Create output buffer
-        let output_buffer = Arc::new(Mutex::new(Vec::new()));
-        let started_at = now_timestamp();
-
-        // Record the running action
-        {
-            let mut running = self.running.lock().unwrap();
-            running.insert(
-                execution_id.clone(),
-                RunningActionState {
-                    child_pid: Some(child_pid),
-                    output_buffer: output_buffer.clone(),
-                },
-            );
-        }
-
-        // Emit initial started event
-        listener
-            .on_event(ExecutionEvent::Started {
-                execution_id: execution_id.clone(),
-                started_at,
-            })
-            .await;
-
-        // Spawn threads to read stdout and stderr (identical to local execution)
-        let exec_id = execution_id.clone();
-        let listener_clone = listener.clone();
-        let buffer_clone = output_buffer.clone();
-        if let Some(mut stdout) = child.stdout.take() {
-            thread::spawn(move || {
-                let mut buffer = [0u8; 1024];
-                loop {
-                    match stdout.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let chunk = String::from_utf8_lossy(&buffer[..n]).to_string();
-                            let timestamp = now_timestamp();
-
-                            {
-                                let mut buf = buffer_clone.lock().unwrap();
-                                buf.push(OutputChunk {
-                                    chunk: chunk.clone(),
-                                    stream: "stdout".to_string(),
-                                    timestamp,
-                                });
-                            }
-
-                            let listener_clone = listener_clone.clone();
-                            let exec_id_clone = exec_id.clone();
-                            let chunk_clone = chunk.clone();
-                            tokio::runtime::Handle::try_current()
-                                .unwrap_or_else(|_| {
-                                    tokio::runtime::Runtime::new().unwrap().handle().clone()
-                                })
-                                .block_on(async move {
-                                    listener_clone
-                                        .on_event(ExecutionEvent::Output {
-                                            execution_id: exec_id_clone,
-                                            chunk: chunk_clone,
-                                            stream: "stdout".to_string(),
-                                            timestamp,
-                                        })
-                                        .await;
-                                });
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-
-        let exec_id = execution_id.clone();
-        let listener_clone = listener.clone();
-        let buffer_clone = output_buffer.clone();
-        if let Some(mut stderr) = child.stderr.take() {
-            thread::spawn(move || {
-                let mut buffer = [0u8; 1024];
-                loop {
-                    match stderr.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            let chunk = String::from_utf8_lossy(&buffer[..n]).to_string();
-                            let timestamp = now_timestamp();
-
-                            {
-                                let mut buf = buffer_clone.lock().unwrap();
-                                buf.push(OutputChunk {
-                                    chunk: chunk.clone(),
-                                    stream: "stderr".to_string(),
-                                    timestamp,
-                                });
-                            }
-
-                            let listener_clone = listener_clone.clone();
-                            let exec_id_clone = exec_id.clone();
-                            let chunk_clone = chunk.clone();
-                            tokio::runtime::Handle::try_current()
-                                .unwrap_or_else(|_| {
-                                    tokio::runtime::Runtime::new().unwrap().handle().clone()
-                                })
-                                .block_on(async move {
-                                    listener_clone
-                                        .on_event(ExecutionEvent::Output {
-                                            execution_id: exec_id_clone,
-                                            chunk: chunk_clone,
-                                            stream: "stderr".to_string(),
-                                            timestamp,
-                                        })
-                                        .await;
-                                });
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-
-        // Spawn thread to wait for completion
-        let exec_id = execution_id.clone();
-        let running_clone = self.running.clone();
-        let completed_clone = self.completed.clone();
-        let stopped_clone = self.stopped.clone();
-        let action_started_at = started_at;
-
-        thread::spawn(move || {
-            let exit_status = child.wait();
-            let exit_code = exit_status.as_ref().ok().and_then(|s| s.code());
-            let completed_at = now_timestamp();
-
-            let was_stopped = {
-                let mut stopped = stopped_clone.lock().unwrap();
-                stopped.remove(&exec_id)
-            };
-
-            {
-                let mut running = running_clone.lock().unwrap();
-                if let Some(state) = running.remove(&exec_id) {
-                    let output = state.output_buffer.lock().unwrap().clone();
-                    let mut completed = completed_clone.lock().unwrap();
-                    completed.insert(exec_id.clone(), output);
-                }
-            }
-
-            let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
-
-            let status = if was_stopped {
-                ActionStatus::Stopped
-            } else if success {
-                ActionStatus::Completed
-            } else {
-                ActionStatus::Failed
-            };
-
-            tokio::runtime::Handle::try_current()
-                .unwrap_or_else(|_| tokio::runtime::Runtime::new().unwrap().handle().clone())
-                .block_on(async {
-                    listener
-                        .on_event(ExecutionEvent::StatusChanged {
-                            execution_id: exec_id.clone(),
-                            status,
-                            exit_code,
-                            started_at: Some(action_started_at),
-                            completed_at: Some(completed_at),
-                        })
-                        .await;
-
-                    // Note: auto_commit is not supported for remote execution
-                    // since the working directory is on the remote workspace.
-                });
-
-            let _ = completion_tx.send(());
-        });
-
-        Ok((execution_id, completion_rx))
+        // No auto-commit for remote execution — working directory is on the
+        // remote workspace.
+        let (execution_id, _completion_rx) = self
+            .manage_child_process(child, metadata, listener, None)
+            .await?;
+        Ok(execution_id)
     }
 
     /// Stop a running action by execution ID.

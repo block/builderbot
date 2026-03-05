@@ -1006,7 +1006,9 @@ pub async fn start_workspace(
                 .map(|s| s.to_ascii_lowercase())
                 .unwrap_or_default();
             if let Some(ws_id) = info.id {
-                store.update_branch_workstation_id(&branch_id, ws_id).ok();
+                if branch.workstation_id.is_none() {
+                    store.update_branch_workstation_id(&branch_id, ws_id).ok();
+                }
             }
             if ws_status == "running" {
                 clone_repo_into_workspace(

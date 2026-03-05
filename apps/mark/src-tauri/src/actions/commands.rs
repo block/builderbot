@@ -212,24 +212,29 @@ pub async fn run_branch_action(
             .as_deref()
             .ok_or_else(|| "Remote branch has no workspace name".to_string())?;
 
-        // Check workspace status before running
-        if let Some(ref status) = branch.workspace_status {
-            match status {
-                crate::store::WorkspaceStatus::Running => {} // OK
-                crate::store::WorkspaceStatus::Starting => {
-                    return Err(
-                        "Workspace is still starting. Please wait until it is running.".to_string(),
-                    );
-                }
-                crate::store::WorkspaceStatus::Stopped => {
-                    return Err(
-                        "Workspace is stopped. Please restart it before running actions."
-                            .to_string(),
-                    );
-                }
-                crate::store::WorkspaceStatus::Error => {
-                    return Err("Workspace is in an error state.".to_string());
-                }
+        // Check workspace status before running. A `None` status means
+        // the workspace hasn't been polled yet — treat it as an error to
+        // avoid a confusing `sq blox ws exec` failure.
+        match branch.workspace_status {
+            Some(crate::store::WorkspaceStatus::Running) => {} // OK
+            Some(crate::store::WorkspaceStatus::Starting) => {
+                return Err(
+                    "Workspace is still starting. Please wait until it is running.".to_string(),
+                );
+            }
+            Some(crate::store::WorkspaceStatus::Stopped) => {
+                return Err(
+                    "Workspace is stopped. Please restart it before running actions.".to_string(),
+                );
+            }
+            Some(crate::store::WorkspaceStatus::Error) => {
+                return Err("Workspace is in an error state.".to_string());
+            }
+            None => {
+                return Err(
+                    "Workspace status is unknown. Please wait for status to be determined."
+                        .to_string(),
+                );
             }
         }
 
@@ -238,6 +243,8 @@ pub async fn run_branch_action(
 
         // Build the shell command to run inside the workspace.
         // If there's a subpath, cd into it first.
+        // Note: `action.command` comes from the action config (not user input)
+        // so it is trusted. The `resolved` path is shell-escaped for safety.
         let shell_command = match &repo_subpath {
             Some(subpath) => {
                 let resolved =

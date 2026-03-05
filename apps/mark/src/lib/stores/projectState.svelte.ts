@@ -220,7 +220,7 @@ class ProjectStateStore {
     }
     setStoreValue(UNREAD_PROJECTS_STORE_KEY, ids);
     getCurrentWindow()
-      .setBadgeCount(ids.length || null)
+      .setBadgeCount(ids.length || undefined)
       .catch(() => {
         // setBadgeCount may be unsupported on some platforms — ignore
       });

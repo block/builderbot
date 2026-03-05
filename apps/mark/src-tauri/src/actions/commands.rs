@@ -413,6 +413,34 @@ pub fn stop_branch_action(
         .map_err(|e| format!("Failed to stop action: {e}"))
 }
 
+/// Stop all running actions for the given branch IDs (best-effort).
+pub fn stop_actions_for_branches(
+    executor: &ActionExecutor,
+    registry: &ActionRegistry,
+    branch_ids: &[&str],
+) {
+    for branch_id in branch_ids {
+        for info in registry.get_running_for_branch(branch_id) {
+            if executor.is_running(&info.execution_id) {
+                if let Err(e) = executor.stop(&info.execution_id) {
+                    log::warn!("Failed to stop action {}: {e}", info.execution_id);
+                }
+            }
+        }
+    }
+}
+
+/// Stop all running actions across all branches (best-effort).
+pub fn stop_all_actions(executor: &ActionExecutor, registry: &ActionRegistry) {
+    for info in registry.get_all_running() {
+        if executor.is_running(&info.execution_id) {
+            if let Err(e) = executor.stop(&info.execution_id) {
+                log::warn!("Failed to stop action {}: {e}", info.execution_id);
+            }
+        }
+    }
+}
+
 /// Get all currently running actions for a branch
 #[tauri::command]
 pub fn get_running_branch_actions(

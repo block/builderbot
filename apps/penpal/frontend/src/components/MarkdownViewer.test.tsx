@@ -76,4 +76,31 @@ describe('MarkdownViewer', () => {
     expect(mermaidContainer).toBeDefined();
     expect(mermaidContainer?.getAttribute('data-mermaid-source')).toContain('graph TD');
   });
+
+  it('renders comment highlights via rehype plugin', () => {
+    const md = 'Hello world';
+    const highlights = [
+      { threadId: 't1', selectedText: 'world', startLine: 1 },
+    ];
+    const { container } = render(
+      <MarkdownViewer content={md} rawMarkdown={md} highlights={highlights} />,
+    );
+    const mark = container.querySelector('mark.comment-highlight');
+    expect(mark).not.toBeNull();
+    expect(mark?.textContent).toBe('world');
+    expect(mark?.getAttribute('data-thread-id')).toBe('t1');
+  });
+
+  it('renders pending highlights with pending-highlight class', () => {
+    const md = 'Hello world';
+    const highlights = [
+      { threadId: 'pending', selectedText: 'world', startLine: 1, pending: true },
+    ];
+    const { container } = render(
+      <MarkdownViewer content={md} rawMarkdown={md} highlights={highlights} />,
+    );
+    const mark = container.querySelector('mark.pending-highlight');
+    expect(mark).not.toBeNull();
+    expect(mark?.classList.contains('comment-highlight')).toBe(true);
+  });
 });

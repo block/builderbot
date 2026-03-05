@@ -66,6 +66,7 @@ export interface Anchor {
   after?: string;
   headingPath?: string;
   startLine?: number;
+  occurrenceIndex?: number;
   svgSnippet?: string;
   svgRect?: SvgRect;
 }

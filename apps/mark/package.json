@@ -28,6 +28,7 @@
     "@builderbot/diff-viewer": "workspace:*",
     "@tauri-apps/api": "^2.10.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-store": "^2.4.2",
     "ansi-to-html": "^0.7.2",
     "lucide-svelte": "^0.575.0",

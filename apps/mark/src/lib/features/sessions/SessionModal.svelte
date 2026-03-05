@@ -51,6 +51,7 @@
     resumeSession,
   } from '../../api/commands';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import ImageAttachment from './ImageAttachment.svelte';
   import {
     formatToolDisplay,
     groupByVerb,
@@ -70,9 +71,13 @@
     onClose: () => void;
     /** Repo base directory — tool call paths within it are shown as relative. */
     repoDir?: string | null;
+    /** Branch ID — when provided, enables image attachment on replies. */
+    branchId?: string | null;
+    /** Project ID — when provided, enables image attachment on replies. */
+    projectId?: string | null;
   }
 
-  let { sessionId, onClose, repoDir }: Props = $props();
+  let { sessionId, onClose, repoDir, branchId, projectId }: Props = $props();
 
   // =========================================================================
   // State
@@ -98,6 +103,10 @@
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
+
+  // Image attachment state (only available when branch context is provided)
+  let canAttachImages = $derived(!!branchId && !!projectId);
+  let replyImageIds = $state<string[]>([]);
 
   // Search state
   let searchVisible = $state(false);
@@ -228,6 +237,8 @@
     const text = inputText.trim();
     if (!text) return;
     inputText = '';
+    const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
+    replyImageIds = [];
     // Reset textarea height after clearing (oninput won't fire for programmatic changes)
     tick().then(() => autoResize());
 
@@ -238,16 +249,16 @@
     }
 
     // Session is idle — send immediately
-    await sendMessage(text);
+    await sendMessage(text, imageIdsToSend);
   }
 
   /** Actually send a message to the backend and start the agent. */
-  async function sendMessage(text: string) {
+  async function sendMessage(text: string, imageIds?: string[]) {
     if (!session || sending) return;
     sending = true;
     error = null;
     try {
-      await resumeSession(session.id, text);
+      await resumeSession(session.id, text, imageIds);
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = { ...session, status: 'running' };
@@ -887,6 +898,15 @@
             </div>
           {/each}
         </div>
+      {/if}
+      {#if canAttachImages && branchId && projectId}
+        <ImageAttachment
+          {branchId}
+          {projectId}
+          disabled={isLive}
+          imageIds={replyImageIds}
+          onImageIdsChange={(ids) => (replyImageIds = ids)}
+        />
       {/if}
       <div class="input-area">
         <textarea

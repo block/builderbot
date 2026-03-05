@@ -10,26 +10,36 @@
     branch        — the branch to create a session on
     mode          — 'commit', 'note', or 'review' (shown as title, not togglable)
     initialPrompt — pre-fill the textarea (e.g. from a previous close)
-    onClose       — called with { prompt, mode } when dismissed
-    onSubmit      — called with { prompt, mode } when submit is pressed
+    onClose       — called with { prompt, mode, imageIds } when dismissed
+    onSubmit      — called with { prompt, mode, imageIds } when submit is pressed
 -->
 <script lang="ts">
   import { X, GitCommitVertical, FileText, FileSearch, GitBranch, Send } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import type { Branch, BranchSessionType } from '../../types';
   import AgentSelector from '../agents/AgentSelector.svelte';
+  import ImageAttachment from './ImageAttachment.svelte';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
 
   interface Props {
     branch: Branch;
     mode: BranchSessionType;
     initialPrompt?: string;
+    initialImageIds?: string[];
     remote?: boolean;
-    onClose: (draft: { prompt: string; mode: BranchSessionType }) => void;
-    onSubmit: (data: { prompt: string; mode: BranchSessionType }) => void;
+    onClose: (draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
+    onSubmit: (data: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
   }
 
-  let { branch, mode, initialPrompt = '', remote = false, onClose, onSubmit }: Props = $props();
+  let {
+    branch,
+    mode,
+    initialPrompt = '',
+    initialImageIds = [],
+    remote = false,
+    onClose,
+    onSubmit,
+  }: Props = $props();
 
   let prompt = $state('');
   let currentMode = $state<BranchSessionType>('commit');
@@ -41,12 +51,16 @@
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
 
+  // Image attachment state
+  let imageIds = $state<string[]>([]);
+
   // Seed prompt and mode from props once; caller preserves draft across open/close.
   $effect(() => {
     if (!initialized) {
       initialized = true;
       prompt = initialPrompt;
       currentMode = mode;
+      imageIds = [...initialImageIds];
     }
   });
 
@@ -71,13 +85,13 @@
     starting = true;
     const finalPrompt =
       prompt.trim() || (isReview ? 'Review the code changes on this branch.' : '');
-    onSubmit({ prompt: finalPrompt, mode: currentMode });
+    onSubmit({ prompt: finalPrompt, mode: currentMode, imageIds });
     // Close immediately; parent handles async start + optimistic timeline row.
-    onClose({ prompt: '', mode: currentMode });
+    onClose({ prompt: '', mode: currentMode, imageIds: [] });
   }
 
   function handleClose() {
-    onClose({ prompt, mode: currentMode });
+    onClose({ prompt, mode: currentMode, imageIds });
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -153,6 +167,14 @@
         ></textarea>
         <span class="hint">⌘ Enter to start</span>
       </div>
+
+      <ImageAttachment
+        branchId={branch.id}
+        projectId={branch.projectId}
+        disabled={starting}
+        {imageIds}
+        onImageIdsChange={(ids) => (imageIds = ids)}
+      />
 
       <div class="form-actions">
         <AgentSelector disabled={starting} {remote} />

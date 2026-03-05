@@ -1291,6 +1291,86 @@ fn list_branch_images(
         .map_err(|e| e.to_string())
 }
 
+/// Read an image file and return its data as a base64-encoded data URL.
+#[tauri::command(rename_all = "camelCase")]
+fn get_image_data(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    image_id: String,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    let image = store
+        .get_image(&image_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Image not found: {image_id}"))?;
+    let path = crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+        .map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{};base64,{}", image.mime_type, encoded))
+}
+
+/// Create an image from base64-encoded data (for browser file input / clipboard paste).
+#[tauri::command(rename_all = "camelCase")]
+fn create_image_from_data(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    project_id: String,
+    filename: String,
+    mime_type: String,
+    data: String,
+) -> Result<store::Image, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&data)
+        .map_err(|e| format!("Invalid base64 data: {e}"))?;
+
+    // Validate size
+    if bytes.len() as u64 > MAX_IMAGE_SIZE {
+        return Err(format!(
+            "Image too large: {} bytes (max {})",
+            bytes.len(),
+            MAX_IMAGE_SIZE
+        ));
+    }
+
+    // Validate extension
+    let ext = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if !ALLOWED_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!("Unsupported image format: .{ext}"));
+    }
+
+    let store = get_store(&store)?;
+    let mime = if mime_type.is_empty() {
+        mime_type_for_extension(&ext).to_string()
+    } else {
+        mime_type
+    };
+
+    let image = store::Image::new(
+        &branch_id,
+        &project_id,
+        &filename,
+        &mime,
+        bytes.len() as i64,
+    );
+    let path = crate::store::images::image_file_path(&project_id, &image.id, &filename)
+        .map_err(|e| e.to_string())?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create images directory: {e}"))?;
+    }
+    std::fs::write(&path, &bytes).map_err(|e| format!("Failed to save image: {e}"))?;
+
+    store.create_image(&image).map_err(|e| e.to_string())?;
+    Ok(image)
+}
+
 /// Delete a review and all its comments, optionally deleting its linked session.
 #[tauri::command(rename_all = "camelCase")]
 fn delete_review(
@@ -2530,6 +2610,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(
@@ -2906,8 +2987,10 @@ pub fn run() {
             delete_project_note,
             create_image,
             get_image_path,
+            get_image_data,
             delete_image,
             list_branch_images,
+            create_image_from_data,
             delete_review,
             delete_commit,
             delete_pending_commit,

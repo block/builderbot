@@ -37,6 +37,7 @@ tauri-plugin-window-state = "2.4.1"
 reqwest = { version = "0.13.1", features = ["json"] }
 tokio = { version = "1.49.0", features = ["sync", "process", "io-util", "macros", "rt-multi-thread", "time"] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 
 # Shared crates
 git-diff = { path = "../../../crates/git-diff" }

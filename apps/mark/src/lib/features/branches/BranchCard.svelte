@@ -357,6 +357,7 @@
   let showNewSession = $state(false);
   let newSessionMode = $state<BranchSessionType>('commit');
   let draftPrompt = $state('');
+  let draftImageIds = $state<string[]>([]);
   type PendingSessionItemType = 'pending-commit' | 'generating-note' | 'generating-review';
   type PendingSessionItem = {
     key: string;
@@ -1202,7 +1203,11 @@
     }
   }
 
-  async function startBranchSessionWithPendingItem(mode: BranchSessionType, prompt: string) {
+  async function startBranchSessionWithPendingItem(
+    mode: BranchSessionType,
+    prompt: string,
+    imageIds: string[] = []
+  ) {
     const pendingKey = `session-start-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     pendingSessionItems = [
       ...pendingSessionItems,
@@ -1220,7 +1225,8 @@
         branch.id,
         prompt,
         mode,
-        getPreferredAgent(agents) ?? undefined
+        getPreferredAgent(agents) ?? undefined,
+        imageIds.length > 0 ? imageIds : undefined
       );
 
       if (!result || !result.sessionId) {
@@ -1268,20 +1274,31 @@
     newSessionMode = 'review';
     showNewSession = false;
     draftPrompt = '';
+    draftImageIds = [];
     await startBranchSessionWithPendingItem('review', reviewPrompt);
   }
 
-  function handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType }) {
+  function handleNewSessionClose(draft: {
+    prompt: string;
+    mode: BranchSessionType;
+    imageIds: string[];
+  }) {
     draftPrompt = draft.prompt;
     newSessionMode = draft.mode;
+    draftImageIds = draft.imageIds;
     showNewSession = false;
   }
 
-  function handleNewSessionSubmit(data: { prompt: string; mode: BranchSessionType }) {
+  function handleNewSessionSubmit(data: {
+    prompt: string;
+    mode: BranchSessionType;
+    imageIds: string[];
+  }) {
     newSessionMode = data.mode;
     showNewSession = false;
     draftPrompt = '';
-    void startBranchSessionWithPendingItem(data.mode, data.prompt);
+    draftImageIds = [];
+    void startBranchSessionWithPendingItem(data.mode, data.prompt, data.imageIds);
   }
 
   // =========================================================================
@@ -2281,6 +2298,7 @@
     {branch}
     mode={newSessionMode}
     initialPrompt={draftPrompt}
+    initialImageIds={draftImageIds}
     remote={isRemote}
     onClose={handleNewSessionClose}
     onSubmit={handleNewSessionSubmit}
@@ -2291,6 +2309,8 @@
   <SessionModal
     sessionId={openSessionId}
     repoDir={branch.worktreePath}
+    branchId={branch.id}
+    projectId={branch.projectId}
     onClose={async () => {
       const closedSessionId = openSessionId;
       openSessionId = null;

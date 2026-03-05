@@ -28,6 +28,7 @@ import type {
   Issue,
   PrStatus,
   PollWorkspaceResult,
+  Image,
 } from './types';
 
 // =============================================================================
@@ -503,8 +504,12 @@ export function startSession(
 
 /** Send a follow-up message to an existing session.
  *  The backend uses the provider that originally created the session. */
-export function resumeSession(sessionId: string, prompt: string): Promise<void> {
-  return invoke('resume_session', { sessionId, prompt });
+export function resumeSession(
+  sessionId: string,
+  prompt: string,
+  imageIds?: string[]
+): Promise<void> {
+  return invoke('resume_session', { sessionId, prompt, imageIds: imageIds ?? null });
 }
 
 export function cancelSession(sessionId: string): Promise<void> {
@@ -520,13 +525,15 @@ export function startBranchSession(
   branchId: string,
   prompt: string,
   sessionType: BranchSessionType,
-  provider?: string
+  provider?: string,
+  imageIds?: string[]
 ): Promise<BranchSessionResponse> {
   return invoke('start_branch_session', {
     branchId,
     prompt,
     sessionType,
     provider: provider ?? null,
+    imageIds: imageIds ?? null,
   });
 }
 
@@ -800,4 +807,44 @@ export function refreshPrStatus(branchId: string): Promise<void> {
 /** Refresh PR status for all branches with PRs. */
 export function refreshAllPrStatuses(projectId: string): Promise<void> {
   return invoke('refresh_all_pr_statuses', { projectId });
+}
+
+// =============================================================================
+// Images
+// =============================================================================
+
+/** Upload a local image file and create a DB record for it. */
+export function createImage(branchId: string, projectId: string, filePath: string): Promise<Image> {
+  return invoke('create_image', { branchId, projectId, filePath });
+}
+
+/** Get the filesystem path for a stored image. */
+export function getImagePath(imageId: string): Promise<string> {
+  return invoke('get_image_path', { imageId });
+}
+
+/** Delete an image record and its stored file. */
+export function deleteImage(imageId: string): Promise<void> {
+  return invoke('delete_image', { imageId });
+}
+
+/** List all images for a branch. */
+export function listBranchImages(branchId: string): Promise<Image[]> {
+  return invoke('list_branch_images', { branchId });
+}
+
+/** Get the base64-encoded data URL for an image. */
+export function getImageData(imageId: string): Promise<string> {
+  return invoke('get_image_data', { imageId });
+}
+
+/** Create an image from base64-encoded data (browser file input / clipboard paste). */
+export function createImageFromData(
+  branchId: string,
+  projectId: string,
+  filename: string,
+  mimeType: string,
+  data: string
+): Promise<Image> {
+  return invoke('create_image_from_data', { branchId, projectId, filename, mimeType, data });
 }

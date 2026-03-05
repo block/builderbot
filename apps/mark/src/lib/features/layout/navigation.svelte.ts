@@ -58,7 +58,7 @@ export async function initNavigation(): Promise<void> {
       await setStoreValue(LAST_PROJECT_STORE_KEY, null);
     }
     // Remove unread entries for projects that no longer exist
-    projectStateStore.pruneDeletedProjects(existingIds);
+    await projectStateStore.pruneDeletedProjects(existingIds);
   } catch {
     // If we can't list projects (e.g. store error), stay on home
     console.warn('[Navigation] Could not verify last project, falling back to home');

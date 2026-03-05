@@ -246,20 +246,29 @@ class ProjectStateStore {
 
   /**
    * Remove unread entries for projects that no longer exist.
-   * Called during navigation init after the project list is fetched.
+   * Operates directly on persisted data so it works regardless of
+   * whether initFromStore() has run yet.
    */
-  pruneDeletedProjects(existingProjectIds: Set<string>): void {
-    let pruned = false;
-    for (const [id, state] of this.states) {
-      if (state.unread && !existingProjectIds.has(id)) {
-        state.unread = false;
-        pruned = true;
+  async pruneDeletedProjects(existingProjectIds: Set<string>): Promise<void> {
+    const ids = await getStoreValue<string[]>(UNREAD_PROJECTS_STORE_KEY);
+    if (!ids || ids.length === 0) return;
+
+    const kept = ids.filter((id) => existingProjectIds.has(id));
+    if (kept.length === ids.length) return;
+
+    await setStoreValue(UNREAD_PROJECTS_STORE_KEY, kept);
+
+    // Also update in-memory state if it has been initialized
+    for (const id of ids) {
+      if (!existingProjectIds.has(id)) {
+        const state = this.states.get(id);
+        if (state) state.unread = false;
       }
     }
-    if (pruned) {
-      this.version++;
-      this.persistAndBadge();
-    }
+    this.version++;
+    getCurrentWindow()
+      .setBadgeCount(kept.length || undefined)
+      .catch(() => {});
   }
 }
 

@@ -459,6 +459,7 @@ pub async fn start_project_session(
 /// For remote branches (those with a `workspace_name`), the session runs via
 /// `blox acp` instead of a local agent binary. Branch context and commit
 /// detection are skipped since there is no local worktree.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,

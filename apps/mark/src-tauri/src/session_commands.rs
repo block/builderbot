@@ -1434,7 +1434,10 @@ Reserve `\"warning\"` and `\"issue\"` for genuine concerns.
 
 ## Output format
 
-First, provide a single-sentence title (max 15 words) that conveys your overall \
+Your response must start directly with the review-title fenced block below — \
+do not output any preamble, commentary, or thinking before it.
+
+Provide a single-sentence title (max 15 words) that conveys your overall \
 confidence level in the changes. Do not describe what the changes do — instead focus on \
 how confident you are that they are correct and safe. Wrap it in a fenced block:
 
@@ -1468,7 +1471,6 @@ Formatting requirements:
 - Put only plain text (no markdown) inside the review-title block.
 - Put only the JSON array inside the review-comments block (no prose or markdown).
 - Do not wrap these blocks in any additional code fences.
-- Do not include any text outside the two fenced blocks (no preamble, commentary, or explanation).
 
 Rules:
 - `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end).
@@ -1514,5 +1516,6 @@ mod tests {
         assert!(prompt.contains(
             "Put only the JSON array inside the review-comments block (no prose or markdown)."
         ));
+        assert!(prompt.contains("do not output any preamble, commentary, or thinking before it"));
     }
 }

@@ -36,15 +36,17 @@
     /** Placeholder items for newly started sessions before timeline persistence catches up. */
     pendingItems?: PendingItem[];
     /** Existing timeline rows currently being deleted (rendered in-place as deleting). */
-    deletingItems?: { type: 'commit' | 'note' | 'review'; id: string }[];
+    deletingItems?: { type: 'commit' | 'note' | 'review' | 'image'; id: string }[];
     onSessionClick?: (sessionId: string) => void;
     onCommitClick?: (sha: string) => void;
     onNoteClick?: (noteId: string, title: string, content: string) => void;
     onReviewClick?: (reviewId: string) => void;
+    onImageClick?: (imageId: string) => void;
     onDeleteCommit?: (sha: string, sessionId?: string) => void;
     onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
     onDeleteNote?: (noteId: string, sessionId?: string) => void;
     onDeleteReview?: (reviewId: string, sessionId?: string) => void;
+    onDeleteImage?: (imageId: string) => void;
     /** Optional per-review breakdown of visible comments vs hold-to-reveal annotations. */
     reviewCommentBreakdown?: Record<string, { comments: number; annotations: number }>;
     onNewNote?: () => void;
@@ -64,10 +66,12 @@
     onCommitClick,
     onNoteClick,
     onReviewClick,
+    onImageClick,
     onDeleteCommit,
     onDeletePendingCommit,
     onDeleteNote,
     onDeleteReview,
+    onDeleteImage,
     reviewCommentBreakdown = {},
     onNewNote,
     onNewCommit,
@@ -107,6 +111,8 @@
     noteTitle?: string;
     noteContent?: string;
     reviewId?: string;
+    imageId?: string;
+    imageFilename?: string;
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
   };
@@ -141,6 +147,9 @@
     );
     const deletingReviewIds = new Set(
       deletingItems.filter((item) => item.type === 'review').map((item) => item.id)
+    );
+    const deletingImageIds = new Set(
+      deletingItems.filter((item) => item.type === 'image').map((item) => item.id)
     );
 
     for (const commit of timeline.commits) {
@@ -256,6 +265,24 @@
       });
     }
 
+    for (const image of timeline.images) {
+      const isDeleting = deletingImageIds.has(image.id);
+
+      all.push({
+        key: `image-${image.id}`,
+        type: 'image' as TimelineItemType,
+        title: image.filename,
+        meta: formatFileSize(image.sizeBytes),
+        secondaryMeta: isDeleting ? 'Deleting...' : formatRelativeTimeMs(image.createdAt),
+        deleting: isDeleting,
+        timestamp: Math.floor(image.createdAt / 1000),
+        sessionId: image.sessionId ?? undefined,
+        imageId: image.id,
+        imageFilename: image.filename,
+        deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
+      });
+    }
+
     // Sort by timestamp ascending; pending/generating items at bottom
     all.sort((a, b) => {
       const aIsTransient =
@@ -294,6 +321,8 @@
       onNoteClick(item.noteId, item.noteTitle ?? '', item.noteContent ?? '');
     } else if (item.type === 'review' && item.reviewId && onReviewClick) {
       onReviewClick(item.reviewId);
+    } else if (item.type === 'image' && item.imageId && onImageClick) {
+      onImageClick(item.imageId);
     }
   }
 
@@ -320,6 +349,8 @@
       onDeleteReview
     ) {
       onDeleteReview(item.reviewId, item.sessionId);
+    } else if (item.type === 'image' && item.imageId && onDeleteImage) {
+      onDeleteImage(item.imageId);
     }
   }
 
@@ -340,6 +371,12 @@
 
   function formatRelativeTimeMs(timestamp: number): string {
     return formatRelativeTime(Math.floor(timestamp / 1000));
+  }
+
+  function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 </script>
 

@@ -9,6 +9,7 @@
     GitCommitVertical,
     FileText,
     FileSearch,
+    Image as ImageLucide,
     MessageSquare,
     Trash2,
     AlertTriangle,
@@ -24,7 +25,8 @@
     | 'failed-note'
     | 'review'
     | 'generating-review'
-    | 'failed-review';
+    | 'failed-review'
+    | 'image';
 
   interface Props {
     type: TimelineItemType;
@@ -59,6 +61,7 @@
   let isReview = $derived(
     type === 'review' || type === 'generating-review' || type === 'failed-review'
   );
+  let isImage = $derived(type === 'image');
   let isPending = $derived(
     deleting ||
       type === 'pending-commit' ||
@@ -105,6 +108,7 @@
       class:commit-icon={type === 'commit' || type === 'pending-commit'}
       class:note-icon={type === 'note' || type === 'generating-note'}
       class:review-icon={type === 'review' || type === 'generating-review'}
+      class:image-icon={isImage}
       class:failed-icon={isFailed}
     >
       {#if isPending}
@@ -117,6 +121,8 @@
         <FileText size={12} />
       {:else if isReview}
         <FileSearch size={12} />
+      {:else if isImage}
+        <ImageLucide size={12} />
       {/if}
     </div>
     {#if !isLast}
@@ -239,6 +245,12 @@
   .timeline-icon.review-icon {
     color: var(--review-color);
     background-color: var(--review-bg);
+    border-color: transparent;
+  }
+
+  .timeline-icon.image-icon {
+    color: #0891b2;
+    background-color: rgba(8, 145, 178, 0.1);
     border-color: transparent;
   }
 

@@ -150,10 +150,21 @@ changelog version:
     penpal open CHANGELOG.md
     read -p "Press enter when done editing changelog..."
 
-# Bump version and generate changelog for review
+# Bump version, generate changelog, and open a release PR
 prepare version:
     #!/usr/bin/env bash
     set -euo pipefail
+
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    if [ "$current_branch" != "main" ]; then
+        echo "Error: prepare must be run from the main branch (currently on '$current_branch')" >&2
+        exit 1
+    fi
+
+    branch="release/penpal-v{{version}}"
+
+    # Create release branch from main
+    git checkout -b "$branch"
 
     # Update version in Cargo.toml (source of truth)
     sed -i '' 's/^version = ".*"/version = "{{version}}"/' frontend/src-tauri/Cargo.toml
@@ -163,11 +174,21 @@ prepare version:
     # Generate and review changelog
     just changelog {{version}}
 
-    echo ""
-    echo "Version bumped to {{version}} and changelog updated."
-    echo "Review the changes, then run 'just release {{version}}' to ship."
+    # Commit and push the release branch
+    git add frontend/src-tauri/Cargo.toml frontend/package.json CHANGELOG.md
+    git commit -m "release: penpal v{{version}}"
+    git push origin "$branch"
 
-# Commit, tag, and push to trigger the release build
+    # Open a PR
+    gh pr create \
+        --title "release: penpal v{{version}}" \
+        --body "Release penpal v{{version}}. Merge this PR, then run \`just release {{version}}\` from main to tag and publish." \
+        --base main
+
+    echo ""
+    echo "Release PR created. Once merged, run 'just release {{version}}' from main."
+
+# Tag and push to trigger the release build (run after the release PR is merged)
 release version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -178,12 +199,19 @@ release version:
         exit 1
     fi
 
-    git add frontend/src-tauri/Cargo.toml frontend/package.json CHANGELOG.md
-    git commit -m "release: penpal v{{version}}"
-    git tag "penpal/v{{version}}"
-    git push origin main "penpal/v{{version}}"
+    # Find the exact release commit on main and tag it (not HEAD)
+    expected_msg="release: penpal v{{version}}"
+    release_sha=$(git log --format="%H %s" main | grep -F "$expected_msg" | head -1 | cut -d' ' -f1 || true)
+    if [ -z "$release_sha" ]; then
+        echo "Error: could not find commit '$expected_msg' on main." >&2
+        echo "Make sure the release PR has been merged and you've pulled latest main." >&2
+        exit 1
+    fi
 
-    echo "Pushed penpal/v{{version}} — CI will build and publish the release."
+    git tag "penpal/v{{version}}" "$release_sha"
+    git push origin "penpal/v{{version}}"
+
+    echo "Pushed tag penpal/v{{version}} — CI will build and publish the release."
 
 # ============================================================================
 # Other

@@ -10,10 +10,10 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         if let Err(e) = conn.execute(
             "INSERT INTO branches (id, project_id, project_repo_id, branch_name, base_branch, pr_number,
-                branch_type, workspace_name, workstation_id, workspace_status,
+                branch_type, workspace_name, workspace_status,
                 pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
                 pr_url, pr_updated_at, pr_fetched_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 branch.id,
                 branch.project_id,
@@ -23,7 +23,6 @@ impl Store {
                 branch.pr_number.map(|n| n as i64),
                 branch.branch_type.as_str(),
                 branch.workspace_name,
-                branch.workstation_id.map(|n| n as i64),
                 branch.workspace_status.as_ref().map(|s| s.as_str()),
                 branch.pr_state,
                 branch.pr_checks_status,
@@ -58,7 +57,7 @@ impl Store {
         Self::row_to_branch_query(
             &conn,
             "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
-                    branch_type, workspace_name, workstation_id, workspace_status,
+                    branch_type, workspace_name, workspace_status,
                     pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
                     pr_url, pr_updated_at, pr_fetched_at,
                     created_at, updated_at
@@ -71,7 +70,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
-                    branch_type, workspace_name, workstation_id, workspace_status,
+                    branch_type, workspace_name, workspace_status,
                     pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
                     pr_url, pr_updated_at, pr_fetched_at,
                     created_at, updated_at
@@ -95,20 +94,6 @@ impl Store {
         conn.execute(
             "UPDATE branches SET branch_name = ?1, updated_at = ?2 WHERE id = ?3",
             params![branch_name, now_timestamp(), id],
-        )?;
-        Ok(())
-    }
-
-    /// Update the numeric workstation ID for a remote branch.
-    pub fn update_branch_workstation_id(
-        &self,
-        id: &str,
-        workstation_id: u64,
-    ) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE branches SET workstation_id = ?1, updated_at = ?2 WHERE id = ?3",
-            params![workstation_id as i64, now_timestamp(), id],
         )?;
         Ok(())
     }
@@ -193,10 +178,9 @@ impl Store {
     fn row_to_branch(row: &rusqlite::Row) -> rusqlite::Result<Branch> {
         let pr_number: Option<i64> = row.get(5)?;
         let branch_type_str: String = row.get(6)?;
-        let workstation_id: Option<i64> = row.get(8)?;
-        let workspace_status_str: Option<String> = row.get(9)?;
-        let pr_mergeable: Option<i64> = row.get(13)?;
-        let pr_draft: Option<i64> = row.get(14)?;
+        let workspace_status_str: Option<String> = row.get(8)?;
+        let pr_mergeable: Option<i64> = row.get(12)?;
+        let pr_draft: Option<i64> = row.get(13)?;
         Ok(Branch {
             id: row.get(0)?,
             project_id: row.get(1)?,
@@ -206,18 +190,17 @@ impl Store {
             pr_number: pr_number.map(|n| n as u64),
             branch_type: branch_type_str.parse().unwrap_or(BranchType::Local),
             workspace_name: row.get(7)?,
-            workstation_id: workstation_id.map(|n| n as u64),
             workspace_status: workspace_status_str.and_then(|s| s.parse().ok()),
-            pr_state: row.get(10)?,
-            pr_checks_status: row.get(11)?,
-            pr_review_decision: row.get(12)?,
+            pr_state: row.get(9)?,
+            pr_checks_status: row.get(10)?,
+            pr_review_decision: row.get(11)?,
             pr_mergeable: pr_mergeable.map(|b| b != 0),
             pr_draft: pr_draft.map(|b| b != 0),
-            pr_url: row.get(15)?,
-            pr_updated_at: row.get(16)?,
-            pr_fetched_at: row.get(17)?,
-            created_at: row.get(18)?,
-            updated_at: row.get(19)?,
+            pr_url: row.get(14)?,
+            pr_updated_at: row.get(15)?,
+            pr_fetched_at: row.get(16)?,
+            created_at: row.get(17)?,
+            updated_at: row.get(18)?,
         })
     }
 

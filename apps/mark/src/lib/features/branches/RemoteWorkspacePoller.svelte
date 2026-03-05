@@ -7,7 +7,7 @@
     branchId: string;
     incomingStatus: WorkspaceStatus | null;
     status?: WorkspaceStatus | null;
-    onStatusChange?: (status: WorkspaceStatus) => void;
+    onStatusChange?: (status: WorkspaceStatus, workstationId?: number | null) => void;
   }
 
   let {
@@ -29,11 +29,15 @@
       : null;
   }
 
-  function setStatus(next: WorkspaceStatus, source: 'incoming' | 'poll') {
-    if (status === next) return;
+  function setStatus(
+    next: WorkspaceStatus,
+    source: 'incoming' | 'poll',
+    workstationId?: number | null
+  ) {
+    if (status === next && !workstationId) return;
     status = next;
     if (source === 'poll') {
-      onStatusChange?.(next);
+      onStatusChange?.(next, workstationId);
     }
     console.debug(`[RemoteWorkspacePoller] branch=${branchId} source=${source} status=${next}`);
   }
@@ -49,11 +53,11 @@
 
     pollInFlight = true;
     try {
-      const raw = await commands.pollWorkspaceStatus(branchId);
-      const next = toWorkspaceStatus(raw);
-      console.debug(`[RemoteWorkspacePoller] branch=${branchId} poll result=${raw}`);
+      const result = await commands.pollWorkspaceStatus(branchId);
+      const next = toWorkspaceStatus(result.status);
+      console.debug(`[RemoteWorkspacePoller] branch=${branchId} poll result=${result.status}`);
       if (!next) return;
-      setStatus(next, 'poll');
+      setStatus(next, 'poll', result.workstationId);
       if (next !== 'starting') {
         stopPolling();
       }

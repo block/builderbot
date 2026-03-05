@@ -197,6 +197,14 @@ pub struct BranchWithWorkdir {
     pub updated_at: i64,
 }
 
+/// Result of polling a remote workspace's status.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PollWorkspaceResult {
+    pub status: String,
+    pub workstation_id: Option<u64>,
+}
+
 /// Commit info combining git data with our metadata.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

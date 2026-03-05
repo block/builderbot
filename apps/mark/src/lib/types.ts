@@ -252,6 +252,12 @@ export type {
 // Blox workspace types
 // =============================================================================
 
+/** Result of polling a remote workspace's status. */
+export interface PollWorkspaceResult {
+  status: string;
+  workstationId: number | null;
+}
+
 /** Workspace info returned from `blox ws info`. */
 export interface WorkspaceInfo {
   name: string;

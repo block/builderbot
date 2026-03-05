@@ -111,7 +111,7 @@
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
     onRetryWorktree?: () => void;
-    onWorkspaceStatusChange?: (status: WorkspaceStatus) => void;
+    onWorkspaceStatusChange?: (status: WorkspaceStatus, workstationId?: number | null) => void;
   }
 
   let {
@@ -1710,7 +1710,7 @@
     branchId={branch.id}
     incomingStatus={branch.workspaceStatus}
     bind:status={remoteWorkspaceStatus}
-    onStatusChange={onWorkspaceStatusChange}
+    onStatusChange={(status, workstationId) => onWorkspaceStatusChange?.(status, workstationId)}
   />
 {/if}
 

@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use tauri::{AppHandle, Emitter};
@@ -9,7 +10,22 @@ use crate::actions::{ActionExecutor, ActionMetadata, ActionRegistry, ActionType}
 use crate::blox;
 use crate::git;
 use crate::store::{self, Store};
-use crate::BranchWithWorkdir;
+use crate::{BranchWithWorkdir, PollWorkspaceResult};
+
+// In-memory cache: workspace name → numeric workstation ID.
+// Populated by `poll_workspace_status` and `start_workspace` when `blox ws info`
+// returns an ID; read by `to_branch_with_workdir` when serializing for the frontend.
+fn workstation_id_cache() -> &'static Mutex<HashMap<String, u64>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_workstation_id(workspace_name: &str) -> Option<u64> {
+    workstation_id_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(workspace_name).copied())
+}
 
 fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
     store
@@ -23,6 +39,10 @@ fn to_branch_with_workdir(
     branch: store::Branch,
     workdir_path: Option<String>,
 ) -> BranchWithWorkdir {
+    let workstation_id = branch
+        .workspace_name
+        .as_deref()
+        .and_then(|name| workstation_id_cache().lock().ok()?.get(name).copied());
     BranchWithWorkdir {
         id: branch.id,
         project_id: branch.project_id,
@@ -32,7 +52,7 @@ fn to_branch_with_workdir(
         pr_number: branch.pr_number,
         branch_type: branch.branch_type,
         workspace_name: branch.workspace_name,
-        workstation_id: branch.workstation_id,
+        workstation_id,
         workspace_status: branch.workspace_status,
         pr_state: branch.pr_state,
         pr_checks_status: branch.pr_checks_status,
@@ -638,6 +658,30 @@ pub fn list_branches_for_project(
         .list_branches_for_project(&project_id)
         .map_err(|e| e.to_string())?;
 
+    // Eagerly populate the workstation ID cache for any remote workspace
+    // names we haven't seen yet, so the frontend has IDs on first load.
+    {
+        let cache = workstation_id_cache().lock().unwrap();
+        let missing: Vec<String> = branches
+            .iter()
+            .filter(|b| b.branch_type == store::BranchType::Remote)
+            .filter_map(|b| b.workspace_name.clone())
+            .filter(|name| !cache.contains_key(name))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        drop(cache);
+        for name in missing {
+            if let Ok(info) = blox::ws_info(&name) {
+                if let Some(ws_id) = info.id {
+                    if let Ok(mut cache) = workstation_id_cache().lock() {
+                        cache.insert(name, ws_id);
+                    }
+                }
+            }
+        }
+    }
+
     let mut result = Vec::with_capacity(branches.len());
     for branch in branches {
         let workdir = store
@@ -1006,8 +1050,8 @@ pub async fn start_workspace(
                 .map(|s| s.to_ascii_lowercase())
                 .unwrap_or_default();
             if let Some(ws_id) = info.id {
-                if branch.workstation_id.is_none() {
-                    store.update_branch_workstation_id(&branch_id, ws_id).ok();
+                if let Ok(mut cache) = workstation_id_cache().lock() {
+                    cache.insert(ws_name.to_string(), ws_id);
                 }
             }
             if ws_status == "running" {
@@ -1158,7 +1202,7 @@ pub async fn get_workspace_info(
 pub async fn poll_workspace_status(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
-) -> Result<String, String> {
+) -> Result<PollWorkspaceResult, String> {
     let store = get_store(&store)?;
 
     let branch = store
@@ -1207,7 +1251,10 @@ pub async fn poll_workspace_status(
             branch_id,
             ws_name
         );
-        return Ok(store::WorkspaceStatus::Starting.as_str().to_string());
+        return Ok(PollWorkspaceResult {
+            status: store::WorkspaceStatus::Starting.as_str().to_string(),
+            workstation_id: cached_workstation_id(ws_name),
+        });
     }
 
     let info = match run_blox_blocking({
@@ -1235,7 +1282,10 @@ pub async fn poll_workspace_status(
                     "blox ws info failed for '{}' while still Starting, treating as Starting: {e}",
                     ws_name
                 );
-                return Ok(store::WorkspaceStatus::Starting.as_str().to_string());
+                return Ok(PollWorkspaceResult {
+                    status: store::WorkspaceStatus::Starting.as_str().to_string(),
+                    workstation_id: cached_workstation_id(ws_name),
+                });
             }
             return Err(e.to_string());
         }
@@ -1287,10 +1337,12 @@ pub async fn poll_workspace_status(
             info.status
         );
     }
-    // Persist the numeric workstation ID if available and not yet stored.
+    // Cache the numeric workstation ID for proxy URL construction.
     if let Some(ws_id) = info.id {
-        if branch.workstation_id.is_none() {
-            store.update_branch_workstation_id(&branch_id, ws_id).ok();
+        if let Some(name) = branch.workspace_name.as_deref() {
+            if let Ok(mut cache) = workstation_id_cache().lock() {
+                cache.insert(name.to_string(), ws_id);
+            }
         }
     }
 
@@ -1298,7 +1350,10 @@ pub async fn poll_workspace_status(
         .update_branch_workspace_status(&branch_id, &new_status)
         .map_err(|e| e.to_string())?;
 
-    Ok(new_status.as_str().to_string())
+    Ok(PollWorkspaceResult {
+        status: new_status.as_str().to_string(),
+        workstation_id: cached_workstation_id(ws_name),
+    })
 }
 
 #[tauri::command]

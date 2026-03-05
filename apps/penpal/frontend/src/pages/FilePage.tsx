@@ -122,14 +122,16 @@ export default function FilePage() {
   }, [location.pathname, projects]);
 
   // Fetch raw file content
-  const fetchContent = useCallback(async () => {
+  const fetchContent = useCallback(async (opts?: { silent?: boolean }) => {
     if (!project || !path) return;
     try {
       const content = await api.getRawFile(project, path);
       setRawMarkdown(content);
       setError(null);
     } catch (err) {
-      setError('Failed to load file');
+      if (!opts?.silent) {
+        setError('Failed to load file');
+      }
       console.error(err);
     } finally {
       setLoading(false);
@@ -262,7 +264,7 @@ export default function FilePage() {
       [project, fetchThreads, fetchContent, fetchAgentStatus],
     ),
     useCallback(() => {
-      fetchContent();
+      fetchContent({ silent: true });
       fetchAgentStatus();
       fetchThreads();
     }, [fetchContent, fetchAgentStatus, fetchThreads]),

@@ -46,8 +46,9 @@ pub enum BloxError {
 pub struct WorkspaceInfo {
     pub name: String,
     /// Numeric workstation ID used in proxy URLs.
-    #[serde(default)]
-    pub id: Option<u64>,
+    /// The CLI returns this as a string field called `workstation_id`.
+    #[serde(default, deserialize_with = "deserialize_string_u64")]
+    pub workstation_id: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_status")]
     pub status: Option<String>,
     /// Catch-all for any other fields the CLI returns.
@@ -91,6 +92,20 @@ where
             Ok(Some(status_code_to_string(n.as_u64().unwrap_or(0))))
         }
         Some(other) => Ok(Some(other.to_string())),
+    }
+}
+
+/// Deserialize a numeric ID that the CLI may return as a JSON string (e.g. `"21889"`).
+fn deserialize_string_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match val {
+        None => Ok(None),
+        Some(serde_json::Value::Number(n)) => Ok(n.as_u64()),
+        Some(serde_json::Value::String(s)) => Ok(s.parse::<u64>().ok()),
+        _ => Ok(None),
     }
 }
 

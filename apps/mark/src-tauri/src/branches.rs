@@ -672,11 +672,21 @@ pub fn list_branches_for_project(
             .collect();
         drop(cache);
         for name in missing {
-            if let Ok(info) = blox::ws_info(&name) {
-                if let Some(ws_id) = info.id {
-                    if let Ok(mut cache) = workstation_id_cache().lock() {
-                        cache.insert(name, ws_id);
+            match blox::ws_info(&name) {
+                Ok(info) => {
+                    log::debug!(
+                        "[list_branches] ws_info({}) returned workstation_id={:?}",
+                        name,
+                        info.workstation_id,
+                    );
+                    if let Some(ws_id) = info.workstation_id {
+                        if let Ok(mut cache) = workstation_id_cache().lock() {
+                            cache.insert(name, ws_id);
+                        }
                     }
+                }
+                Err(e) => {
+                    log::debug!("[list_branches] ws_info({}) failed: {}", name, e);
                 }
             }
         }
@@ -1049,7 +1059,7 @@ pub async fn start_workspace(
                 .as_deref()
                 .map(|s| s.to_ascii_lowercase())
                 .unwrap_or_default();
-            if let Some(ws_id) = info.id {
+            if let Some(ws_id) = info.workstation_id {
                 if let Ok(mut cache) = workstation_id_cache().lock() {
                     cache.insert(ws_name.to_string(), ws_id);
                 }
@@ -1338,7 +1348,7 @@ pub async fn poll_workspace_status(
         );
     }
     // Cache the numeric workstation ID for proxy URL construction.
-    if let Some(ws_id) = info.id {
+    if let Some(ws_id) = info.workstation_id {
         if let Some(name) = branch.workspace_name.as_deref() {
             if let Ok(mut cache) = workstation_id_cache().lock() {
                 cache.insert(name.to_string(), ws_id);

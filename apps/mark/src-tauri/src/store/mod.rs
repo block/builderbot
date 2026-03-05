@@ -62,7 +62,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 /// Oldest schema version we can migrate forward from.
 ///
@@ -373,6 +373,7 @@ impl Store {
                 commit_sha      TEXT NOT NULL,
                 scope           TEXT NOT NULL,
                 session_id      TEXT,
+                title           TEXT,
                 created_at      INTEGER NOT NULL,
                 updated_at      INTEGER NOT NULL
             );
@@ -518,8 +519,13 @@ impl Store {
         }
 
         // v15→v16 and v16→v17 previously added a workstation_id column that
-        // has been removed. The migrations are no-ops now; SCHEMA_VERSION stays
-        // at 17 so existing databases are simply stamped forward.
+        // has been removed. The migrations are no-ops now.
+
+        if db_version < 18 {
+            // v17 → v18: add title column to reviews
+            conn.execute_batch("ALTER TABLE reviews ADD COLUMN title TEXT DEFAULT NULL;")
+                .ok(); // Ignore error if column already exists (fresh DB)
+        }
 
         // Stamp the current schema version so future opens skip applied migrations.
         conn.execute(

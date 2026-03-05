@@ -518,17 +518,30 @@ fn run_post_completion_hooks(
         }
     }
 
-    // --- Review comment extraction ---
+    // --- Review comment and title extraction ---
     if let Ok(Some(review)) = store.get_review_by_session(session_id) {
-        if review.comments.is_empty() {
-            if let Ok(messages) = store.get_session_messages(session_id) {
-                let full_text: String = messages
-                    .iter()
-                    .filter(|m| m.role == MessageRole::Assistant)
-                    .map(|m| m.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
+        if let Ok(messages) = store.get_session_messages(session_id) {
+            let full_text: String = messages
+                .iter()
+                .filter(|m| m.role == MessageRole::Assistant)
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
 
+            // Extract and save review title (always attempt, even if comments exist)
+            if review.title.is_none() {
+                if let Some(title) = extract_review_title(&full_text) {
+                    log::info!("Session {session_id}: extracted review title: {title}");
+                    if let Err(e) = store.update_review_title(&review.id, &title) {
+                        log::error!("Failed to update review title: {e}");
+                    }
+                } else {
+                    log::warn!("Session {session_id}: review session completed but no review-title block found");
+                }
+            }
+
+            // Extract and save review comments
+            if review.comments.is_empty() {
                 let comments = extract_review_comments(&full_text);
                 if comments.is_empty() {
                     log::warn!("Session {session_id}: review session completed but no review-comments block found");
@@ -768,6 +781,23 @@ fn extract_review_comments(text: &str) -> Vec<Comment> {
     comments
 }
 
+/// Extract the review title from assistant output.
+///
+/// Looks for a ```review-title fenced block and returns the trimmed text inside.
+fn extract_review_title(text: &str) -> Option<String> {
+    let marker = "```review-title";
+    let start_pos = text.find(marker)?;
+    let block_start = start_pos + marker.len();
+    let content_start = block_start + text[block_start..].find('\n')? + 1;
+    let end_pos = find_closing_fence(&text[content_start..])?;
+    let title = text[content_start..content_start + end_pos].trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    }
+}
+
 /// Find the closing ``` fence for a code block.
 ///
 /// A closing fence must appear at the start of a line (after a newline) and
@@ -886,6 +916,62 @@ mod tests {
     fn closing_fence_with_trailing_whitespace() {
         let text = "json\n```  \nmore";
         assert_eq!(find_closing_fence(text), Some(5));
+    }
+
+    // ── extract_review_title ──────────────────────────────────────────
+
+    #[test]
+    fn extract_title_simple() {
+        let text = "Here is my review:\n\n```review-title\nSolid refactor with one edge case\n```\n\nAnd comments...";
+        assert_eq!(
+            extract_review_title(text),
+            Some("Solid refactor with one edge case".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_title_trims_whitespace() {
+        let text = "```review-title\n  Clean changes, no concerns  \n```\n";
+        assert_eq!(
+            extract_review_title(text),
+            Some("Clean changes, no concerns".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_title_none_when_missing() {
+        let text = "Just a normal message with no review title.";
+        assert_eq!(extract_review_title(text), None);
+    }
+
+    #[test]
+    fn extract_title_none_when_empty() {
+        let text = "```review-title\n\n```\n";
+        assert_eq!(extract_review_title(text), None);
+    }
+
+    #[test]
+    fn extract_title_with_review_comments() {
+        let text = r#"Here is my review:
+
+```review-title
+Risky changes to auth flow need closer look
+```
+
+```review-comments
+[
+  {
+    "path": "src/auth.rs",
+    "span": { "start": 10, "end": 15 },
+    "content": "Missing validation."
+  }
+]
+```
+"#;
+        assert_eq!(
+            extract_review_title(text),
+            Some("Risky changes to auth flow need closer look".to_string())
+        );
     }
 
     // ── extract_review_comments ─────────────────────────────────────────

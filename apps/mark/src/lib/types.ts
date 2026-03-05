@@ -115,6 +115,7 @@ export interface ReviewTimelineItem {
   scope: string;
   sessionId: string | null;
   sessionStatus: string | null;
+  title: string | null;
   commentCount: number;
   createdAt: number;
   updatedAt: number;

@@ -80,6 +80,7 @@ export interface ActionStatusEvent {
   branchId: string;
   actionId: string;
   actionName: string;
+  actionType: ActionType;
   status: ActionStatus;
   exitCode?: number;
   startedAt?: number;
@@ -106,7 +107,7 @@ export interface RunningActionInfo {
   branchId: string;
   actionId: string;
   actionName: string;
-  actionType: string;
+  actionType: ActionType;
   startedAt: number;
 }
 

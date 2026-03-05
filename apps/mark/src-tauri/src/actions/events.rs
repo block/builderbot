@@ -27,6 +27,7 @@ pub struct ActionStatusEvent {
     pub branch_id: String,
     pub action_id: String,
     pub action_name: String,
+    pub action_type: String,
     pub status: String, // "running", "completed", "failed", "stopped"
     pub exit_code: Option<i32>,
     pub started_at: Option<i64>,
@@ -89,6 +90,7 @@ impl ExecutionListener for TauriExecutionListener {
                         branch_id: self.branch_id.clone(),
                         action_id: self.action_id.clone(),
                         action_name: self.action_name.clone(),
+                        action_type: self.action_type.clone(),
                         status: "running".to_string(),
                         exit_code: None,
                         started_at: Some(started_at),
@@ -142,6 +144,7 @@ impl ExecutionListener for TauriExecutionListener {
                         branch_id: self.branch_id.clone(),
                         action_id: self.action_id.clone(),
                         action_name: self.action_name.clone(),
+                        action_type: self.action_type.clone(),
                         status: status_str.to_string(),
                         exit_code,
                         started_at,

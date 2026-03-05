@@ -71,6 +71,7 @@
     listenToRunPhaseChanged,
     listenToRepoActionsDetection,
     type ActionStatusEvent,
+    type ActionType,
     type RunPhase,
   } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
@@ -324,6 +325,7 @@
     executionId: string;
     actionId: string;
     actionName: string;
+    actionType: ActionType;
     status: 'running' | 'completed' | 'failed' | 'stopped';
     exitCode?: number | null;
     startedAt?: number;
@@ -443,6 +445,7 @@
             executionId: payload.executionId,
             actionId: payload.actionId,
             actionName: payload.actionName,
+            actionType: payload.actionType,
             status: 'running',
             startedAt: payload.startedAt ?? Date.now(),
           });
@@ -869,6 +872,7 @@
             executionId: info.executionId,
             actionId: info.actionId,
             actionName: info.actionName,
+            actionType: info.actionType,
             status: 'running',
             startedAt: info.startedAt,
           });
@@ -1793,7 +1797,6 @@
             {@const isStopping = stoppingExecutions.has(execution.executionId)}
             {@const showStopIcon = altHeld && isRunning && !isStopping}
             {@const phase = runPhases.get(execution.executionId)}
-            {@const actionDef = actions.find((a) => a.id === execution.actionId)}
             <div
               class="running-action-container"
               class:fading={execution.fading}
@@ -1829,7 +1832,7 @@
                   <Spinner size={12} class="danger" />
                 {:else if showStopIcon}
                   <StopCircle size={12} />
-                {:else if isRunning && phase && phase.type !== 'building' && actionDef?.actionType === 'run'}
+                {:else if isRunning && phase && phase.type !== 'building' && execution.actionType === 'run'}
                   <SineWave size={12} />
                 {:else if isRunning}
                   <Spinner size={12} />

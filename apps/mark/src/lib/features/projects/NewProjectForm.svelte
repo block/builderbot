@@ -146,9 +146,7 @@
 
   function handleRepoSelected(nameWithOwner: string, selectedSubpath?: string) {
     selectedRepo = nameWithOwner;
-    if (selectedSubpath) {
-      subpath = selectedSubpath;
-    }
+    subpath = selectedSubpath ?? '';
   }
 </script>
 
@@ -200,7 +198,13 @@
         <div class="repo-details">
           <span class="repo-name">{selectedRepo}</span>
         </div>
-        <button class="clear-button" onclick={() => (selectedRepo = null)}>
+        <button
+          class="clear-button"
+          onclick={() => {
+            selectedRepo = null;
+            subpath = '';
+          }}
+        >
           <X size={14} />
         </button>
       </div>

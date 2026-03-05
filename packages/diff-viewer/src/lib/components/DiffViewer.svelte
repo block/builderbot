@@ -211,6 +211,7 @@
   let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
   let lastHandledJumpToken = $state<number | null>(null);
   let lastHandledJumpLineToken = $state<number | null>(null);
+  let lastAutoScrolledFile: string | null = null;
   let lineCommentEditorRaf: number | null = null;
 
   // Markdown preview mode
@@ -322,25 +323,22 @@
   // Scroll to first diff when file changes
   $effect(() => {
     const filePath = diff ? getFilePath(diff) : null;
+    // Only auto-scroll once per file – not when jump tokens or other deps change
+    if (!filePath || filePath === lastAutoScrolledFile) return;
+    if (changedAlignments.length === 0) return;
+    if (!afterPane && !beforePane) return;
     // Skip auto-scroll if a comment or line jump is pending – explicit navigation takes priority
-    const hasCommentJump = jumpToComment && jumpToComment.token !== lastHandledJumpToken;
-    const hasLineJump = jumpToLine && jumpToLine.token !== lastHandledJumpLineToken;
+    if (jumpToComment && jumpToComment.token !== lastHandledJumpToken) return;
+    if (jumpToLine && jumpToLine.token !== lastHandledJumpLineToken) return;
+    lastAutoScrolledFile = filePath;
     // Wait for next frame to ensure dimensions are set
-    if (
-      filePath &&
-      changedAlignments.length > 0 &&
-      (afterPane || beforePane) &&
-      !hasCommentJump &&
-      !hasLineJump
-    ) {
-      requestAnimationFrame(() => {
-        const firstHunk = changedAlignments[0].alignment;
-        // Scroll to first change in the after pane (or before pane for deleted files)
-        const side = isDeletedFile ? 'before' : 'after';
-        const startRow = side === 'before' ? firstHunk.before.start : firstHunk.after.start;
-        scrollController.scrollToRow(startRow, side);
-      });
-    }
+    requestAnimationFrame(() => {
+      const firstHunk = changedAlignments[0].alignment;
+      // Scroll to first change in the after pane (or before pane for deleted files)
+      const side = isDeletedFile ? 'before' : 'after';
+      const startRow = side === 'before' ? firstHunk.before.start : firstHunk.after.start;
+      scrollController.scrollToRow(startRow, side);
+    });
   });
 
   // Update dimensions when panes are available or content changes

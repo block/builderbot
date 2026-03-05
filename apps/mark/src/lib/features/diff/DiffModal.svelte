@@ -242,9 +242,9 @@
 
   async function handleSelectComment(comment: Comment) {
     selectedCommentId = comment.id;
+    await diffViewer.selectFile(comment.path);
     commentJumpToken += 1;
     jumpToComment = { id: comment.id, token: commentJumpToken };
-    await diffViewer.selectFile(comment.path);
   }
 
   // Wrapper for search that returns the loaded diff without changing selection

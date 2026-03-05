@@ -248,6 +248,19 @@ pub struct ReviewTimelineItem {
     pub updated_at: i64,
 }
 
+/// Image with session status resolved.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageTimelineItem {
+    pub id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: i64,
+    pub session_id: Option<String>,
+    pub session_status: Option<String>,
+    pub created_at: i64,
+}
+
 /// Composite timeline for a branch.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -255,6 +268,7 @@ pub struct BranchTimeline {
     pub commits: Vec<CommitTimelineItem>,
     pub notes: Vec<NoteTimelineItem>,
     pub reviews: Vec<ReviewTimelineItem>,
+    pub images: Vec<ImageTimelineItem>,
 }
 
 // =============================================================================
@@ -1142,6 +1156,141 @@ fn delete_project_note(
         .map_err(|e| e.to_string())
 }
 
+// =============================================================================
+// Image commands
+// =============================================================================
+
+const MAX_IMAGE_SIZE: u64 = 10_485_760; // 10 MB
+
+const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
+
+fn mime_type_for_extension(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Create an image record and copy the file to the project images directory.
+#[tauri::command(rename_all = "camelCase")]
+fn create_image(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    project_id: String,
+    file_path: String,
+) -> Result<store::Image, String> {
+    let store = get_store(&store)?;
+
+    let src = Path::new(&file_path);
+    if !src.exists() {
+        return Err(format!("File not found: {file_path}"));
+    }
+
+    let filename = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid filename".to_string())?
+        .to_string();
+
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    if !ALLOWED_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!(
+            "Unsupported image format: .{ext}. Allowed: {}",
+            ALLOWED_IMAGE_EXTENSIONS.join(", ")
+        ));
+    }
+
+    let metadata = std::fs::metadata(src).map_err(|e| format!("Cannot read file metadata: {e}"))?;
+    if metadata.len() > MAX_IMAGE_SIZE {
+        return Err(format!(
+            "File too large ({} bytes). Maximum is {} bytes.",
+            metadata.len(),
+            MAX_IMAGE_SIZE
+        ));
+    }
+
+    let mime_type = mime_type_for_extension(&ext).to_string();
+    let size_bytes = metadata.len() as i64;
+
+    let image = store::Image::new(&branch_id, &project_id, &filename, &mime_type, size_bytes);
+
+    // Compute destination path and ensure the images directory exists.
+    let dest = store::images::image_file_path(&project_id, &image.id, &filename)?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create images directory: {e}"))?;
+    }
+
+    // Copy the file to the images directory.
+    std::fs::copy(src, &dest).map_err(|e| format!("Cannot copy image file: {e}"))?;
+
+    // Persist the DB record.
+    store.create_image(&image).map_err(|e| e.to_string())?;
+
+    Ok(image)
+}
+
+/// Return the filesystem path for an image (the frontend uses convertFileSrc).
+#[tauri::command(rename_all = "camelCase")]
+fn get_image_path(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    image_id: String,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    let image = store
+        .get_image(&image_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Image not found: {image_id}"))?;
+    let path = store::images::image_file_path(&image.project_id, &image.id, &image.filename)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Delete an image record and its file on disk.
+#[tauri::command(rename_all = "camelCase")]
+fn delete_image(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    image_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    let image = store
+        .get_image(&image_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Image not found: {image_id}"))?;
+
+    // Delete the DB record first (triggers session cleanup).
+    store.delete_image(&image_id).map_err(|e| e.to_string())?;
+
+    // Best-effort file removal.
+    if let Ok(path) = store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+    {
+        if let Err(e) = std::fs::remove_file(&path) {
+            log::warn!("Failed to remove image file {}: {e}", path.display());
+        }
+    }
+
+    Ok(())
+}
+
+/// List all images for a branch.
+#[tauri::command(rename_all = "camelCase")]
+fn list_branch_images(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<Vec<store::Image>, String> {
+    get_store(&store)?
+        .list_images_for_branch(&branch_id)
+        .map_err(|e| e.to_string())
+}
+
 /// Delete a review and all its comments, optionally deleting its linked session.
 #[tauri::command(rename_all = "camelCase")]
 fn delete_review(
@@ -1422,10 +1571,32 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         })
         .collect();
 
+    // Get images
+    let db_images = store
+        .list_images_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+    let images: Vec<ImageTimelineItem> = db_images
+        .into_iter()
+        .map(|img| {
+            let (session_id, session_status) =
+                store.resolve_session_status(img.session_id.as_deref());
+            ImageTimelineItem {
+                id: img.id,
+                filename: img.filename,
+                mime_type: img.mime_type,
+                size_bytes: img.size_bytes,
+                session_id,
+                session_status,
+                created_at: img.created_at,
+            }
+        })
+        .collect();
+
     Ok(BranchTimeline {
         commits,
         notes,
         reviews,
+        images,
     })
 }
 
@@ -2733,6 +2904,10 @@ pub fn run() {
             create_project_note,
             list_project_notes,
             delete_project_note,
+            create_image,
+            get_image_path,
+            delete_image,
+            list_branch_images,
             delete_review,
             delete_commit,
             delete_pending_commit,

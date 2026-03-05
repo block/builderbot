@@ -6,13 +6,14 @@
 //! a reset-and-recreate dialog.
 //!
 //! Tables: schema_version, projects, project_repos, branches, workdirs, commits,
-//! sessions, session_messages, notes, project_notes, reviews, action_contexts, repo_actions.
+//! sessions, session_messages, notes, project_notes, reviews, images, action_contexts, repo_actions.
 
 pub mod models;
 
 mod actions;
 mod branches;
 mod commits;
+pub mod images;
 mod messages;
 mod notes;
 mod project_notes;
@@ -62,7 +63,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 
 /// Oldest schema version we can migrate forward from.
 ///
@@ -442,6 +443,18 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_recent_repos_last_used
                 ON recent_repos(last_used_at DESC);
 
+            CREATE TABLE IF NOT EXISTS images (
+                id          TEXT PRIMARY KEY,
+                branch_id   TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+                project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                session_id  TEXT,
+                filename    TEXT NOT NULL,
+                mime_type   TEXT NOT NULL,
+                size_bytes  INTEGER NOT NULL,
+                created_at  INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_images_branch ON images(branch_id);
+
             -- Session cleanup triggers: when a commit, note, project note, or
             -- review is deleted (directly or via cascade from branch/project
             -- deletion), delete the referenced session if no other row still
@@ -457,7 +470,8 @@ impl Store {
                   AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
                   AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
                   AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id);
+                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
             END;
 
             CREATE TRIGGER IF NOT EXISTS trg_cleanup_session_after_note_delete
@@ -470,7 +484,8 @@ impl Store {
                   AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
                   AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
                   AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id);
+                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
             END;
 
             CREATE TRIGGER IF NOT EXISTS trg_cleanup_session_after_review_delete
@@ -483,7 +498,8 @@ impl Store {
                   AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
                   AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
                   AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id);
+                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
             END;
 
             CREATE TRIGGER IF NOT EXISTS trg_cleanup_session_after_project_note_delete
@@ -496,7 +512,22 @@ impl Store {
                   AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
                   AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
                   AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
-                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id);
+                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_cleanup_session_after_image_delete
+            AFTER DELETE ON images
+            WHEN OLD.session_id IS NOT NULL
+            BEGIN
+                DELETE FROM sessions
+                WHERE id = OLD.session_id
+                  AND status != 'running'
+                  AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                  AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
             END;
             ",
         )?;
@@ -525,6 +556,103 @@ impl Store {
             // v17 → v18: add title column to reviews
             conn.execute_batch("ALTER TABLE reviews ADD COLUMN title TEXT DEFAULT NULL;")
                 .ok(); // Ignore error if column already exists (fresh DB)
+        }
+
+        if db_version < 19 {
+            // v18 → v19: add images table and update session cleanup triggers
+            // to account for the new images table.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS images (
+                    id          TEXT PRIMARY KEY,
+                    branch_id   TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+                    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    session_id  TEXT,
+                    filename    TEXT NOT NULL,
+                    mime_type   TEXT NOT NULL,
+                    size_bytes  INTEGER NOT NULL,
+                    created_at  INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_images_branch ON images(branch_id);",
+            )?;
+
+            // Drop and recreate all session cleanup triggers so they include
+            // the new `images` table in the NOT EXISTS checks.
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS trg_cleanup_session_after_commit_delete;
+                DROP TRIGGER IF EXISTS trg_cleanup_session_after_note_delete;
+                DROP TRIGGER IF EXISTS trg_cleanup_session_after_review_delete;
+                DROP TRIGGER IF EXISTS trg_cleanup_session_after_project_note_delete;
+
+                CREATE TRIGGER trg_cleanup_session_after_commit_delete
+                AFTER DELETE ON commits
+                WHEN OLD.session_id IS NOT NULL
+                BEGIN
+                    DELETE FROM sessions
+                    WHERE id = OLD.session_id
+                      AND status != 'running'
+                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
+                END;
+
+                CREATE TRIGGER trg_cleanup_session_after_note_delete
+                AFTER DELETE ON notes
+                WHEN OLD.session_id IS NOT NULL
+                BEGIN
+                    DELETE FROM sessions
+                    WHERE id = OLD.session_id
+                      AND status != 'running'
+                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
+                END;
+
+                CREATE TRIGGER trg_cleanup_session_after_review_delete
+                AFTER DELETE ON reviews
+                WHEN OLD.session_id IS NOT NULL
+                BEGIN
+                    DELETE FROM sessions
+                    WHERE id = OLD.session_id
+                      AND status != 'running'
+                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
+                END;
+
+                CREATE TRIGGER trg_cleanup_session_after_project_note_delete
+                AFTER DELETE ON project_notes
+                WHEN OLD.session_id IS NOT NULL
+                BEGIN
+                    DELETE FROM sessions
+                    WHERE id = OLD.session_id
+                      AND status != 'running'
+                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
+                END;
+
+                CREATE TRIGGER trg_cleanup_session_after_image_delete
+                AFTER DELETE ON images
+                WHEN OLD.session_id IS NOT NULL
+                BEGIN
+                    DELETE FROM sessions
+                    WHERE id = OLD.session_id
+                      AND status != 'running'
+                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
+                END;",
+            )?;
         }
 
         // Stamp the current schema version so future opens skip applied migrations.

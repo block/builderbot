@@ -672,6 +672,55 @@ impl ProjectNote {
 }
 
 // =============================================================================
+// Images
+// =============================================================================
+
+/// An image attached to a branch.
+///
+/// The image file is stored on disk at
+/// `<project_worktree_root>/images/<id>.<ext>`. The `project_id` field
+/// determines the filesystem location; the `filename` field preserves the
+/// original upload name (and its extension).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Image {
+    pub id: String,
+    pub branch_id: String,
+    pub project_id: String,
+    pub session_id: Option<String>,
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: i64,
+    pub created_at: i64,
+}
+
+impl Image {
+    pub fn new(
+        branch_id: &str,
+        project_id: &str,
+        filename: &str,
+        mime_type: &str,
+        size_bytes: i64,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            branch_id: branch_id.to_string(),
+            project_id: project_id.to_string(),
+            session_id: None,
+            filename: filename.to_string(),
+            mime_type: mime_type.to_string(),
+            size_bytes,
+            created_at: now_timestamp(),
+        }
+    }
+
+    pub fn with_session(mut self, session_id: &str) -> Self {
+        self.session_id = Some(session_id.to_string());
+        self
+    }
+}
+
+// =============================================================================
 // Recent Repos
 // =============================================================================
 

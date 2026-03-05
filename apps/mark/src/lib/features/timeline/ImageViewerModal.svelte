@@ -19,7 +19,7 @@
   let { imageId, filename, onClose, onDelete }: Props = $props();
   let dataUrl = $state<string | null>(null);
   let loading = $state(true);
-  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: onClose });
+  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
 
   $effect(() => {
     loading = true;
@@ -44,7 +44,7 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
 <div
   class="modal-backdrop"
   role="dialog"

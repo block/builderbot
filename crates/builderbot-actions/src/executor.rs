@@ -14,7 +14,7 @@ use std::thread;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
-use crate::git::auto_commit_if_changes;
+use crate::git::{auto_commit_if_changes, auto_commit_if_changes_remote};
 use crate::models::{ActionStatus, ExecutionEvent, OutputChunk};
 
 /// Trait for receiving execution events
@@ -38,9 +38,16 @@ struct RunningActionState {
     output_buffer: Arc<Mutex<Vec<OutputChunk>>>,
 }
 
-/// Optional auto-commit context for local executions.
-struct AutoCommitContext {
-    working_dir: String,
+/// Context for auto-committing changes after a successful action execution.
+enum AutoCommitContext {
+    /// Local execution: run git commands directly against the worktree.
+    Local { working_dir: String },
+    /// Remote execution: run git commands via `sq blox ws exec`.
+    Remote {
+        sq_binary: PathBuf,
+        workspace_name: String,
+        working_dir: String,
+    },
 }
 
 /// Manages action execution with real-time output streaming
@@ -246,16 +253,35 @@ impl ActionExecutor {
                 // If auto_commit is enabled and action succeeded, commit changes
                 if auto_commit && success && !was_stopped {
                     if let Some(ctx) = &auto_commit_ctx {
-                        if let Err(e) = auto_commit_if_changes(&ctx.working_dir, &action_name) {
-                            eprintln!("Failed to auto-commit changes: {}", e);
-                        } else {
-                            // Emit auto-commit event
-                            listener
-                                .on_event(ExecutionEvent::AutoCommit {
-                                    execution_id: exec_id.clone(),
-                                    action_name: action_name.clone(),
-                                })
-                                .await;
+                        let result = match ctx {
+                            AutoCommitContext::Local { working_dir } => {
+                                auto_commit_if_changes(working_dir, &action_name)
+                            }
+                            AutoCommitContext::Remote {
+                                sq_binary,
+                                workspace_name,
+                                working_dir,
+                            } => auto_commit_if_changes_remote(
+                                sq_binary,
+                                workspace_name,
+                                working_dir,
+                                &action_name,
+                            ),
+                        };
+                        match result {
+                            Ok(true) => {
+                                // Emit auto-commit event
+                                listener
+                                    .on_event(ExecutionEvent::AutoCommit {
+                                        execution_id: exec_id.clone(),
+                                        action_name: action_name.clone(),
+                                    })
+                                    .await;
+                            }
+                            Ok(false) => {} // No changes to commit
+                            Err(e) => {
+                                eprintln!("Failed to auto-commit changes: {}", e);
+                            }
                         }
                     }
                 }
@@ -340,7 +366,7 @@ impl ActionExecutor {
             });
         }
 
-        let auto_commit_ctx = AutoCommitContext { working_dir };
+        let auto_commit_ctx = AutoCommitContext::Local { working_dir };
 
         self.manage_child_process(child, metadata, listener, Some(auto_commit_ctx))
             .await
@@ -391,6 +417,10 @@ impl ActionExecutor {
     /// Streaming output, stop, and completion tracking work identically to
     /// local execution since it is still a local child process under the hood.
     ///
+    /// If `auto_commit_info` is provided (sq binary path, workspace name,
+    /// working dir), auto-commit will be attempted after a successful
+    /// execution by running git commands on the remote workspace.
+    ///
     /// Returns a unique execution ID. The action runs in the background.
     pub async fn execute_remote(
         &self,
@@ -398,6 +428,7 @@ impl ActionExecutor {
         args: Vec<String>,
         metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
+        auto_commit_info: Option<(PathBuf, String, String)>,
     ) -> Result<String> {
         let mut cmd = Command::new(&program);
         cmd.args(&args)
@@ -423,10 +454,16 @@ impl ActionExecutor {
             .spawn()
             .context("Failed to spawn remote action process")?;
 
-        // No auto-commit for remote execution — working directory is on the
-        // remote workspace.
+        let auto_commit_ctx = auto_commit_info.map(|(sq_binary, workspace_name, working_dir)| {
+            AutoCommitContext::Remote {
+                sq_binary,
+                workspace_name,
+                working_dir,
+            }
+        });
+
         let (execution_id, _completion_rx) = self
-            .manage_child_process(child, metadata, listener, None)
+            .manage_child_process(child, metadata, listener, auto_commit_ctx)
             .await?;
         Ok(execution_id)
     }

@@ -241,15 +241,21 @@ pub async fn run_branch_action(
         let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)
             .map_err(|e| format!("Failed to resolve workspace subpath: {e}"))?;
 
+        // Resolve the full path inside the workspace for this repo+subpath.
+        let resolved_repo_path = match &repo_subpath {
+            Some(subpath) => Some(
+                crate::branches::resolve_workspace_repo_path(workspace_name, subpath)
+                    .map_err(|e| format!("Failed to resolve workspace repo path: {e}"))?,
+            ),
+            None => None,
+        };
+
         // Build the shell command to run inside the workspace.
         // If there's a subpath, cd into it first.
         // Note: `action.command` comes from the action config (not user input)
         // so it is trusted. The `resolved` path is shell-escaped for safety.
-        let shell_command = match &repo_subpath {
-            Some(subpath) => {
-                let resolved =
-                    crate::branches::resolve_workspace_repo_path(workspace_name, subpath)
-                        .map_err(|e| format!("Failed to resolve workspace repo path: {e}"))?;
+        let shell_command = match &resolved_repo_path {
+            Some(resolved) => {
                 format!(
                     "cd '{}' && {}",
                     resolved.replace('\'', "'\\''"),
@@ -275,8 +281,15 @@ pub async fn run_branch_action(
             shell_command,
         ];
 
+        // Provide auto-commit context so that after a successful action,
+        // git commands run on the remote workspace via `sq blox ws exec`.
+        // When there's no resolved path we can't determine the git working
+        // directory, so auto-commit is skipped (unlikely for remote branches).
+        let auto_commit_info = resolved_repo_path
+            .map(|resolved| (sq_binary.clone(), workspace_name.to_string(), resolved));
+
         let eid = executor
-            .execute_remote(sq_binary, args, metadata, listener)
+            .execute_remote(sq_binary, args, metadata, listener, auto_commit_info)
             .await
             .map_err(|e| format!("Failed to execute remote action: {e}"))?;
 

@@ -161,6 +161,9 @@ pub struct SessionConfig {
     /// the agent operates in the correct repo directory (e.g.
     /// `/home/bloxer/cash-server` instead of the workspace default).
     pub remote_working_dir: Option<PathBuf>,
+    /// Image IDs to include in the prompt. The runner reads the image files,
+    /// base64-encodes them, and passes them as content blocks to the driver.
+    pub image_ids: Vec<String>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -254,6 +257,29 @@ pub fn start_session(
                 Arc::clone(&store),
             ));
 
+            // Read and base64-encode images for the prompt content blocks.
+            let mut image_data: Vec<(String, String)> = Vec::new();
+            for image_id in &config.image_ids {
+                if let Ok(Some(image)) = store.get_image(image_id) {
+                    if let Ok(path) = crate::store::images::image_file_path(
+                        &image.project_id,
+                        &image.id,
+                        &image.filename,
+                    ) {
+                        if let Ok(bytes) = std::fs::read(&path) {
+                            use base64::Engine;
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            image_data.push((encoded, image.mime_type.clone()));
+                        } else {
+                            log::warn!(
+                                "Failed to read image file for image {image_id}: {}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+            }
+
             // Cast to trait objects for the driver
             let store_trait: Arc<dyn acp_client::Store> = store;
             let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
@@ -262,6 +288,7 @@ pub fn start_session(
                 .run(
                     &config.session_id,
                     &config.prompt,
+                    &image_data,
                     &config.working_dir,
                     &store_trait,
                     &writer_trait,

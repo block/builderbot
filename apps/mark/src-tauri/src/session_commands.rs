@@ -160,6 +160,7 @@ pub fn start_session(
             action_executor: None,
             action_registry: None,
             remote_working_dir: None,
+            image_ids: vec![],
         },
         store,
         app_handle,
@@ -185,6 +186,7 @@ pub fn resume_session(
     app_handle: tauri::AppHandle,
     session_id: String,
     prompt: String,
+    image_ids: Option<Vec<String>>,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
 
@@ -232,6 +234,7 @@ pub fn resume_session(
             action_executor: None,
             action_registry: None,
             remote_working_dir: None,
+            image_ids: image_ids.unwrap_or_default(),
         },
         store,
         app_handle,
@@ -435,6 +438,7 @@ pub async fn start_project_session(
             action_executor: Some(Arc::clone(&action_executor)),
             action_registry: Some(Arc::clone(&action_registry)),
             remote_working_dir: None,
+            image_ids: vec![],
         },
         store,
         app_handle,
@@ -464,6 +468,7 @@ pub async fn start_branch_session(
     prompt: String,
     session_type: BranchSessionType,
     provider: Option<String>,
+    image_ids: Option<Vec<String>>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
 
@@ -651,6 +656,7 @@ pub async fn start_branch_session(
             action_executor: None,
             action_registry: None,
             remote_working_dir,
+            image_ids: image_ids.unwrap_or_default(),
         },
         store,
         app_handle,

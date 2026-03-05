@@ -178,6 +178,7 @@ fn main() -> Result<()> {
             .run(
                 "probe-session",
                 &prompt,
+                &[],
                 &workdir,
                 &store,
                 &writer,

@@ -270,6 +270,7 @@ pub async fn run_acp_prompt(agent: &AcpAgent, working_dir: &Path, prompt: &str) 
                 .run(
                     "simple-session",
                     &prompt,
+                    &[],
                     &working_dir,
                     &store,
                     &writer,

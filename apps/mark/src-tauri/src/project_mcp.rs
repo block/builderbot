@@ -417,6 +417,7 @@ impl ProjectToolsHandler {
                 action_executor: None,
                 action_registry: None,
                 remote_working_dir,
+                image_ids: vec![],
             },
             Arc::clone(&self.store),
             self.app_handle.clone(),

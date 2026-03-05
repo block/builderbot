@@ -53,7 +53,11 @@
     onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void;
-    onWorkspaceStatusChange?: (branchId: string, status: WorkspaceStatus) => void;
+    onWorkspaceStatusChange?: (
+      branchId: string,
+      status: WorkspaceStatus,
+      workstationId?: number | null
+    ) => void;
     onRepoSelected?: (nameWithOwner: string, subpath?: string) => void;
     onRetryWorktree?: (branchId: string) => void;
   }
@@ -448,7 +452,8 @@
         onDelete={() => onDeleteBranch?.(branch.id)}
         onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
         onRetryWorktree={() => onRetryWorktree?.(branch.id)}
-        onWorkspaceStatusChange={(status) => onWorkspaceStatusChange?.(branch.id, status)}
+        onWorkspaceStatusChange={(status, workstationId) =>
+          onWorkspaceStatusChange?.(branch.id, status, workstationId)}
       />
     {/each}
   </div>

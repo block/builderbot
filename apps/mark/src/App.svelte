@@ -40,6 +40,7 @@
   import { prStateStore } from './lib/stores/prState.svelte';
   import { pushStateStore } from './lib/stores/pushState.svelte';
   import { sessionRegistry } from './lib/stores/sessionRegistry.svelte';
+  import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import {
     extractPrUrl,
     extractPrNumber,
@@ -282,6 +283,9 @@
     } catch (e) {
       console.error('Failed to restore last viewed project:', e);
     }
+
+    // Cache the BLOX_ENV value once at startup (process-level, never changes).
+    initBloxEnv();
 
     try {
       await initializeShortcutBindings();

@@ -99,6 +99,7 @@
   import { alerts } from '../../shared/alerts.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
+  import { bloxEnv } from '../../stores/bloxEnv.svelte';
 
   interface Props {
     branch: Branch;
@@ -110,7 +111,7 @@
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
     onRetryWorktree?: () => void;
-    onWorkspaceStatusChange?: (status: WorkspaceStatus) => void;
+    onWorkspaceStatusChange?: (status: WorkspaceStatus, workstationId?: number | null) => void;
   }
 
   let {
@@ -169,6 +170,23 @@
       message: e instanceof Error ? e.message : String(e),
       durationMs: 0,
     });
+  }
+
+  // =========================================================================
+  // Remote endpoint URL rewriting
+  // =========================================================================
+  function getEndpointCopyUrl(endpoint: string): string {
+    if (!isRemote || !branch.workstationId) return endpoint;
+    try {
+      const parsed = new URL(endpoint);
+      const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+      const path = parsed.pathname + parsed.search + parsed.hash;
+      const domain =
+        bloxEnv.value === 'staging' ? 'blox.stage.blox.sqprod.co' : 'blox.blox.sqprod.co';
+      return `https://workstation-${branch.workstationId}-${port}--${domain}${path}`;
+    } catch {
+      return endpoint;
+    }
   }
 
   // =========================================================================
@@ -1692,7 +1710,7 @@
     branchId={branch.id}
     incomingStatus={branch.workspaceStatus}
     bind:status={remoteWorkspaceStatus}
-    onStatusChange={onWorkspaceStatusChange}
+    onStatusChange={(status, workstationId) => onWorkspaceStatusChange?.(status, workstationId)}
   />
 {/if}
 
@@ -1757,8 +1775,8 @@
         {#if isRemote && remoteWorkspaceStatus !== 'running'}
           <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
         {/if}
-        <!-- Running actions (excluding primary action) - local only -->
-        {#if isLocal}
+        <!-- Running actions (excluding primary action) -->
+        {#if isLocal || (isRemote && remoteWorkspaceStatus === 'running')}
           {#each secondaryRunningActions as execution (execution.executionId)}
             {@const isRunning = execution.status === 'running'}
             {@const isStopping = stoppingExecutions.has(execution.executionId)}
@@ -1814,7 +1832,7 @@
               </button>
             </div>
           {/each}
-          <!-- Primary run action button - local only -->
+          <!-- Primary run action button -->
           {#if primaryRunAction}
             {@const execution = primaryActionExecution}
             {@const isRunning = execution?.status === 'running'}
@@ -1822,6 +1840,10 @@
             {@const showStopIcon = altHeld && isRunning && !isStopping}
             {@const phase = execution ? runPhases.get(execution.executionId) : undefined}
             {@const hasEndpoint = phase?.type === 'running' && !!phase.endpoint}
+            {@const copyUrl =
+              hasEndpoint && phase?.type === 'running' && phase.endpoint
+                ? getEndpointCopyUrl(phase.endpoint)
+                : ''}
             <div
               class="primary-action-container"
               in:slide={{ duration: 300, axis: 'x' }}
@@ -1859,8 +1881,8 @@
                     class="primary-action-pill-copy"
                     onclick={(e) => {
                       e.stopPropagation();
-                      if (phase?.type === 'running' && phase.endpoint && execution) {
-                        navigator.clipboard.writeText(phase.endpoint).catch(() => {});
+                      if (phase?.type === 'running' && phase.endpoint && execution && copyUrl) {
+                        navigator.clipboard.writeText(copyUrl).catch(() => {});
                         const id = execution.executionId;
                         if (endpointCopiedTimers[id]) clearTimeout(endpointCopiedTimers[id]);
                         endpointCopied[id] = true;
@@ -1870,7 +1892,7 @@
                         }, 1500);
                       }
                     }}
-                    title="Copy endpoint: {phase.endpoint}"
+                    title="Copy endpoint: {copyUrl}"
                   >
                     {#if execution && endpointCopied[execution.executionId]}
                       <span
@@ -1963,8 +1985,8 @@
                 </button>
               {/if}
 
-              <!-- Local-only: Actions submenu -->
-              {#if isLocal && hasActionsForSubmenu}
+              <!-- Actions submenu -->
+              {#if hasActionsForSubmenu}
                 <div class="submenu-container">
                   <button
                     class="more-menu-item submenu-trigger"

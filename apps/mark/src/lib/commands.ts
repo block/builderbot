@@ -27,6 +27,7 @@ import type {
   PullRequest,
   Issue,
   PrStatus,
+  PollWorkspaceResult,
 } from './types';
 
 // =============================================================================
@@ -252,13 +253,18 @@ export function renameBranch(branchId: string, branchName: string): Promise<Bran
   return invoke('rename_branch', { branchId, branchName });
 }
 
+/** Return the BLOX_ENV environment variable value, or null if unset. */
+export function getBloxEnv(): Promise<string | null> {
+  return invoke('get_blox_env');
+}
+
 /** Get info about a remote branch's Blox workspace. */
 export function getWorkspaceInfo(branchId: string): Promise<WorkspaceInfo> {
   return invoke('get_workspace_info', { branchId });
 }
 
-/** Poll a remote branch's workspace status, update the DB, and return the new status string. */
-export function pollWorkspaceStatus(branchId: string): Promise<string> {
+/** Poll a remote branch's workspace status and return updated status + workstation ID. */
+export function pollWorkspaceStatus(branchId: string): Promise<PollWorkspaceResult> {
   return invoke('poll_workspace_status', { branchId });
 }
 

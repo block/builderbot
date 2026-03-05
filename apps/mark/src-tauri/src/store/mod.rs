@@ -62,7 +62,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// Oldest schema version we can migrate forward from.
 ///
@@ -516,6 +516,10 @@ impl Store {
             )
             .ok(); // Ignore error if column already exists (fresh DB)
         }
+
+        // v15→v16 and v16→v17 previously added a workstation_id column that
+        // has been removed. The migrations are no-ops now; SCHEMA_VERSION stays
+        // at 17 so existing databases are simply stamped forward.
 
         // Stamp the current schema version so future opens skip applied migrations.
         conn.execute(

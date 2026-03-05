@@ -182,6 +182,7 @@ pub struct BranchWithWorkdir {
     pub pr_number: Option<u64>,
     pub branch_type: store::BranchType,
     pub workspace_name: Option<String>,
+    pub workstation_id: Option<u64>,
     pub workspace_status: Option<store::WorkspaceStatus>,
     pub pr_state: Option<String>,
     pub pr_checks_status: Option<String>,
@@ -194,6 +195,14 @@ pub struct BranchWithWorkdir {
     pub worktree_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// Result of polling a remote workspace's status.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PollWorkspaceResult {
+    pub status: String,
+    pub workstation_id: Option<u64>,
 }
 
 /// Commit info combining git data with our metadata.
@@ -2693,6 +2702,7 @@ pub fn run() {
             branches::start_workspace,
             branches::delete_branch,
             branches::rename_branch,
+            branches::get_blox_env,
             branches::get_workspace_info,
             branches::poll_workspace_status,
             list_project_actions,

@@ -95,7 +95,8 @@ class WorkspaceLifecycleController {
   handleWorkspaceStatusChange(
     projectId: string,
     branchId: string,
-    workspaceStatus: WorkspaceStatus
+    workspaceStatus: WorkspaceStatus,
+    workstationId?: number | null
   ): void {
     const hooks = this.hooks;
     if (!hooks) return;
@@ -107,9 +108,15 @@ class WorkspaceLifecycleController {
     let changed = false;
     const nextBranches = branches.map((branch) => {
       if (branch.id !== branchId) return branch;
-      if (branch.workspaceStatus === workspaceStatus) return branch;
+      const statusChanged = branch.workspaceStatus !== workspaceStatus;
+      const idChanged = workstationId != null && branch.workstationId !== workstationId;
+      if (!statusChanged && !idChanged) return branch;
       changed = true;
-      return { ...branch, workspaceStatus };
+      return {
+        ...branch,
+        workspaceStatus,
+        ...(workstationId != null ? { workstationId } : {}),
+      };
     });
 
     if (changed) {
@@ -203,10 +210,15 @@ class WorkspaceLifecycleController {
         const result = results[i];
         if (result.status !== 'fulfilled') continue;
 
-        const nextStatus = this.toWorkspaceStatus(result.value);
+        const nextStatus = this.toWorkspaceStatus(result.value.status);
         if (!nextStatus) continue;
 
-        this.handleWorkspaceStatusChange(targets[i].projectId, targets[i].branchId, nextStatus);
+        this.handleWorkspaceStatusChange(
+          targets[i].projectId,
+          targets[i].branchId,
+          nextStatus,
+          result.value.workstationId
+        );
       }
     } finally {
       this.workspaceStatusBackgroundPollInFlight = false;

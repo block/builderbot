@@ -546,9 +546,15 @@
   function handleWorkspaceStatusChange(
     projectId: string,
     branchId: string,
-    workspaceStatus: WorkspaceStatus
+    workspaceStatus: WorkspaceStatus,
+    workstationId?: number | null
   ) {
-    workspaceLifecycle.handleWorkspaceStatusChange(projectId, branchId, workspaceStatus);
+    workspaceLifecycle.handleWorkspaceStatusChange(
+      projectId,
+      branchId,
+      workspaceStatus,
+      workstationId
+    );
   }
 
   $effect(() => {
@@ -722,8 +728,8 @@
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onRenameBranch={(branchId, branchName) =>
               handleRenameBranch(branchId, project.id, branchName)}
-            onWorkspaceStatusChange={(branchId, workspaceStatus) =>
-              handleWorkspaceStatusChange(project.id, branchId, workspaceStatus)}
+            onWorkspaceStatusChange={(branchId, workspaceStatus, workstationId) =>
+              handleWorkspaceStatusChange(project.id, branchId, workspaceStatus, workstationId)}
             excludeRepos={new Set(
               [...(repoLabelsByProject.get(project.id)?.values() ?? [])].map((r) => r.githubRepo)
             )}

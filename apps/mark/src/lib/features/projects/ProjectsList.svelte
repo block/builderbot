@@ -227,19 +227,27 @@
   function withUpdatedWorkspaceStatus(
     branchesByProject: Map<string, Branch[]>,
     branchId: string,
-    workspaceStatus: Branch['workspaceStatus']
+    workspaceStatus: Branch['workspaceStatus'],
+    workstationId?: number | null
   ): Map<string, Branch[]> {
     for (const [projectId, branches] of branchesByProject.entries()) {
       const branchIndex = branches.findIndex((branch) => branch.id === branchId);
       if (branchIndex === -1) continue;
 
       const current = branches[branchIndex];
-      if (current.workspaceStatus === workspaceStatus) {
+      if (
+        current.workspaceStatus === workspaceStatus &&
+        (workstationId == null || current.workstationId === workstationId)
+      ) {
         return branchesByProject;
       }
 
       const nextBranches = [...branches];
-      nextBranches[branchIndex] = { ...current, workspaceStatus };
+      nextBranches[branchIndex] = {
+        ...current,
+        workspaceStatus,
+        ...(workstationId != null ? { workstationId } : {}),
+      };
       return new Map(branchesByProject).set(projectId, nextBranches);
     }
 
@@ -263,13 +271,14 @@
         const result = results[i];
         if (result.status !== 'fulfilled') continue;
 
-        const nextStatus = toWorkspaceStatus(result.value);
+        const nextStatus = toWorkspaceStatus(result.value.status);
         if (!nextStatus) continue;
 
         nextProjectBranches = withUpdatedWorkspaceStatus(
           nextProjectBranches,
           startingBranchIds[i],
-          nextStatus
+          nextStatus,
+          result.value.workstationId
         );
       }
 

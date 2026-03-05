@@ -287,6 +287,20 @@
     // Cache the BLOX_ENV value once at startup (process-level, never changes).
     initBloxEnv();
 
+    // Restore persisted unread state and sync the dock badge.
+    try {
+      await projectStateStore.initFromStore();
+      // If we restored into a project that was unread, mark it as read now
+      if (
+        navigation.selectedProjectId &&
+        projectStateStore.isUnread(navigation.selectedProjectId)
+      ) {
+        projectStateStore.markAsRead(navigation.selectedProjectId);
+      }
+    } catch (e) {
+      console.error('Failed to restore unread state:', e);
+    }
+
     try {
       await initializeShortcutBindings();
     } catch (e) {

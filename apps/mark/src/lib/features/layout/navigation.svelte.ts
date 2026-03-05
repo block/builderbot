@@ -50,13 +50,15 @@ export async function initNavigation(): Promise<void> {
   // Validate the project still exists before navigating to it
   try {
     const projects = await commands.listProjects();
-    const exists = projects.some((p) => p.id === lastProjectId);
-    if (exists) {
+    const existingIds = new Set(projects.map((p) => p.id));
+    if (existingIds.has(lastProjectId)) {
       navigation.selectedProjectId = lastProjectId;
     } else {
       // Project was deleted — clear the stale value
       await setStoreValue(LAST_PROJECT_STORE_KEY, null);
     }
+    // Remove unread entries for projects that no longer exist
+    projectStateStore.pruneDeletedProjects(existingIds);
   } catch {
     // If we can't list projects (e.g. store error), stay on home
     console.warn('[Navigation] Could not verify last project, falling back to home');

@@ -9,11 +9,16 @@
  * - The user navigates to that project
  *
  * Running sessions are tracked to show spinners on project cards
+ * Unread state is persisted to disk and the macOS dock badge is kept in sync.
  *
  * Note: Session-to-project lookups are now delegated to the unified sessionRegistry
  */
 
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getStoreValue, setStoreValue } from '../shared/persistentStore';
 import { sessionRegistry, type SessionType } from './sessionRegistry.svelte';
+
+const UNREAD_PROJECTS_STORE_KEY = 'unread-projects';
 
 interface ProjectState {
   unread: boolean;
@@ -84,6 +89,7 @@ class ProjectStateStore {
     const state = this.getOrCreateState(projectId);
     state.unread = false;
     this.version++; // Trigger reactivity
+    this.persistAndBadge();
   }
 
   /**
@@ -94,6 +100,7 @@ class ProjectStateStore {
     const state = this.getOrCreateState(projectId);
     state.unread = true;
     this.version++; // Trigger reactivity
+    this.persistAndBadge();
   }
 
   /**
@@ -189,6 +196,70 @@ class ProjectStateStore {
       }
     }
     return types;
+  }
+
+  /**
+   * Get the number of projects currently in the unread state.
+   */
+  getUnreadCount(): number {
+    this.version;
+    let count = 0;
+    for (const state of this.states.values()) {
+      if (state.unread) count++;
+    }
+    return count;
+  }
+
+  /**
+   * Persist the current set of unread project IDs to disk and update the dock badge.
+   */
+  private persistAndBadge(): void {
+    const ids: string[] = [];
+    for (const [id, state] of this.states) {
+      if (state.unread) ids.push(id);
+    }
+    setStoreValue(UNREAD_PROJECTS_STORE_KEY, ids);
+    getCurrentWindow()
+      .setBadgeCount(ids.length || null)
+      .catch(() => {
+        // setBadgeCount may be unsupported on some platforms — ignore
+      });
+  }
+
+  /**
+   * Restore unread state from the persistent store and sync the badge.
+   * Must be called after initPersistentStore().
+   */
+  async initFromStore(): Promise<void> {
+    const ids = await getStoreValue<string[]>(UNREAD_PROJECTS_STORE_KEY);
+    if (ids && ids.length > 0) {
+      for (const id of ids) {
+        const state = this.getOrCreateState(id);
+        state.unread = true;
+      }
+      this.version++;
+      getCurrentWindow()
+        .setBadgeCount(ids.length)
+        .catch(() => {});
+    }
+  }
+
+  /**
+   * Remove unread entries for projects that no longer exist.
+   * Called during navigation init after the project list is fetched.
+   */
+  pruneDeletedProjects(existingProjectIds: Set<string>): void {
+    let pruned = false;
+    for (const [id, state] of this.states) {
+      if (state.unread && !existingProjectIds.has(id)) {
+        state.unread = false;
+        pruned = true;
+      }
+    }
+    if (pruned) {
+      this.version++;
+      this.persistAndBadge();
+    }
   }
 }
 

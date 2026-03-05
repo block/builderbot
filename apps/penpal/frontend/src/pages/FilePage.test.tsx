@@ -150,7 +150,7 @@ describe('FilePage', () => {
     expect(api.startAgent).not.toHaveBeenCalled();
   });
 
-  it('refreshes agent status and threads on SSE reconnect', async () => {
+  it('refreshes content, agent status, and threads on SSE reconnect', async () => {
     vi.mocked(api.getAgentStatus).mockResolvedValue(agentNotRunning);
 
     renderFilePage();
@@ -159,6 +159,7 @@ describe('FilePage', () => {
     await waitFor(() => {
       expect(api.getAgentStatus).toHaveBeenCalledTimes(1);
       expect(api.getThreads).toHaveBeenCalledTimes(1);
+      expect(api.getRawFile).toHaveBeenCalledTimes(1);
     });
 
     // Get the onReconnect callback (2nd argument to useSSE)
@@ -169,13 +170,41 @@ describe('FilePage', () => {
     // Simulate SSE reconnect
     vi.mocked(api.getAgentStatus).mockClear();
     vi.mocked(api.getThreads).mockClear();
+    vi.mocked(api.getRawFile).mockClear();
     act(() => {
       onReconnect!();
     });
 
     await waitFor(() => {
+      expect(api.getRawFile).toHaveBeenCalledTimes(1);
       expect(api.getAgentStatus).toHaveBeenCalledTimes(1);
       expect(api.getThreads).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('refreshes content on SSE files event', async () => {
+    vi.mocked(api.getAgentStatus).mockResolvedValue(agentNotRunning);
+
+    renderFilePage();
+
+    // Wait for initial load
+    await waitFor(() => {
+      expect(api.getRawFile).toHaveBeenCalledTimes(1);
+    });
+
+    // Get the onEvent callback (1st argument to useSSE)
+    const useSSEMock = vi.mocked(useSSE);
+    const onEvent = useSSEMock.mock.calls[0]?.[0];
+    expect(onEvent).toBeDefined();
+
+    // Simulate a 'files' SSE event for our project
+    vi.mocked(api.getRawFile).mockClear();
+    act(() => {
+      onEvent!({ type: 'files', project: 'ws/proj' });
+    });
+
+    await waitFor(() => {
+      expect(api.getRawFile).toHaveBeenCalledTimes(1);
     });
   });
 });

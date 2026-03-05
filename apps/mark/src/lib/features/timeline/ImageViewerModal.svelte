@@ -44,7 +44,8 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
 <div
   class="modal-backdrop"
   role="dialog"
@@ -53,7 +54,7 @@
   onpointerdown={backdropDismiss.handlePointerDown}
   onclick={backdropDismiss.handleClick}
 >
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
   <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
     <header class="modal-header">
       <span class="filename">{filename}</span>

@@ -700,6 +700,7 @@ pub(crate) fn build_branch_context(
     // Notes and reviews from DB
     timeline.extend(note_timeline_entries(store, branch_id, None));
     timeline.extend(review_timeline_entries(store, branch_id));
+    timeline.extend(image_timeline_entries(store, branch_id));
 
     // Project-level notes
     timeline.extend(project_note_timeline_entries(store, project_id, None));
@@ -760,6 +761,7 @@ pub(crate) fn build_remote_branch_context(
         Some(workspace_name),
     ));
     timeline.extend(review_timeline_entries(store, branch_id));
+    timeline.extend(image_timeline_entries(store, branch_id));
 
     // Project-level notes
     timeline.extend(project_note_timeline_entries(
@@ -1044,6 +1046,7 @@ fn build_branch_timeline_summary(
     // remote workspace when available, otherwise local temp files.
     timeline.extend(note_timeline_entries(store, &branch.id, workspace_name));
     timeline.extend(review_timeline_entries(store, &branch.id));
+    timeline.extend(image_timeline_entries(store, &branch.id));
 
     if timeline.is_empty() {
         if let Some(err) = commit_error {
@@ -1366,6 +1369,40 @@ fn review_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineE
         });
     }
     entries
+}
+
+/// Convert images from the DB into timeline entries.
+///
+/// Each entry is a brief mention so the agent knows what images are attached
+/// to this branch without embedding the actual image data.
+fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEntry> {
+    let images = match store.list_images_for_branch(branch_id) {
+        Ok(imgs) => imgs,
+        Err(e) => {
+            log::warn!("Failed to list images for branch context: {e}");
+            return Vec::new();
+        }
+    };
+
+    images
+        .iter()
+        .map(|img| {
+            let size_label = if img.size_bytes > 1_000_000 {
+                format!("{:.1} MB", img.size_bytes as f64 / 1_000_000.0)
+            } else if img.size_bytes > 1_000 {
+                format!("{:.0} KB", img.size_bytes as f64 / 1_000.0)
+            } else {
+                format!("{} B", img.size_bytes)
+            };
+            TimelineEntry {
+                timestamp: img.created_at,
+                content: format!(
+                    "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
+                    img.filename, img.mime_type, size_label
+                ),
+            }
+        })
+        .collect()
 }
 
 /// Assemble the full prompt from action instructions + branch context + user prompt.

@@ -262,9 +262,10 @@ export default function FilePage() {
       [project, fetchThreads, fetchContent, fetchAgentStatus],
     ),
     useCallback(() => {
+      fetchContent();
       fetchAgentStatus();
       fetchThreads();
-    }, [fetchAgentStatus, fetchThreads]),
+    }, [fetchContent, fetchAgentStatus, fetchThreads]),
   );
 
   const handleComment = useCallback((anchor: Anchor, selectedText: string) => {

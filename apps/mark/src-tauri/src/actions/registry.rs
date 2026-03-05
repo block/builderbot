@@ -17,6 +17,7 @@ pub struct RunningActionInfo {
     pub branch_id: String,
     pub action_id: String,
     pub action_name: String,
+    pub action_type: String,
     pub started_at: i64,
 }
 
@@ -63,6 +64,7 @@ impl ActionRegistry {
         branch_id: String,
         action_id: String,
         action_name: String,
+        action_type: String,
         started_at: i64,
     ) {
         let info = RunningActionInfo {
@@ -70,6 +72,7 @@ impl ActionRegistry {
             branch_id,
             action_id,
             action_name,
+            action_type,
             started_at,
         };
 

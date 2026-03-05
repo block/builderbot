@@ -71,6 +71,7 @@
     listenToRunPhaseChanged,
     listenToRepoActionsDetection,
     type ActionStatusEvent,
+    type ActionType,
     type RunPhase,
   } from '../actions/actions';
   import { getAvailableOpeners, openInApp, copyPathToClipboard, type OpenerApp } from './branch';
@@ -324,6 +325,7 @@
     executionId: string;
     actionId: string;
     actionName: string;
+    actionType: ActionType;
     status: 'running' | 'completed' | 'failed' | 'stopped';
     exitCode?: number | null;
     startedAt?: number;
@@ -443,6 +445,7 @@
             executionId: payload.executionId,
             actionId: payload.actionId,
             actionName: payload.actionName,
+            actionType: payload.actionType,
             status: 'running',
             startedAt: payload.startedAt ?? Date.now(),
           });
@@ -869,6 +872,7 @@
             executionId: info.executionId,
             actionId: info.actionId,
             actionName: info.actionName,
+            actionType: info.actionType,
             status: 'running',
             startedAt: info.startedAt,
           });
@@ -882,11 +886,10 @@
           const phase = await getRunPhase(info.executionId);
           if (phase) {
             runPhases.set(info.executionId, phase);
-          } else {
-            // No persisted phase — the action is running but detection state
-            // was lost (app restart). Default to Running with no endpoint so
-            // the sine wave is shown. This is safe for non-Run actions too
-            // since phases are only rendered for Run-type action buttons.
+          } else if (info.actionType === 'run') {
+            // No persisted phase — the run action is running but detection
+            // state was lost (app restart). Default to Running with no
+            // endpoint so the sine wave is shown.
             runPhases.set(info.executionId, { type: 'running', endpoint: null });
           }
         } catch {
@@ -1829,7 +1832,7 @@
                   <Spinner size={12} class="danger" />
                 {:else if showStopIcon}
                   <StopCircle size={12} />
-                {:else if isRunning && phase && phase.type !== 'building'}
+                {:else if isRunning && phase && phase.type !== 'building' && execution.actionType === 'run'}
                   <SineWave size={12} />
                 {:else if isRunning}
                   <Spinner size={12} />

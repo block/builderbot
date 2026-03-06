@@ -670,6 +670,7 @@ impl Store {
             // SQLite doesn't support ALTER COLUMN, so recreate the table.
             conn.execute_batch(
                 "DROP TRIGGER IF EXISTS trg_cleanup_session_after_image_delete;
+                DROP TABLE IF EXISTS images_new;
 
                 CREATE TABLE images_new (
                     id          TEXT PRIMARY KEY,

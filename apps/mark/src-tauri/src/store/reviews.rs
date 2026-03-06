@@ -12,8 +12,8 @@ impl Store {
     pub fn create_review(&self, review: &Review) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 review.id,
                 review.branch_id,
@@ -21,6 +21,7 @@ impl Store {
                 review.scope.as_str(),
                 review.session_id,
                 review.title,
+                review.is_auto,
                 review.created_at,
                 review.updated_at,
             ],
@@ -48,7 +49,7 @@ impl Store {
         // when multiple reviews share the same (branch, commit, scope) triple.
         let existing: Option<Review> = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
                  FROM reviews
                  WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3
                  ORDER BY created_at DESC LIMIT 1",
@@ -65,8 +66,8 @@ impl Store {
         // Create new
         let review = Review::new(branch_id, commit_sha, scope);
         conn.execute(
-            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 review.id,
                 review.branch_id,
@@ -74,6 +75,7 @@ impl Store {
                 review.scope.as_str(),
                 review.session_id,
                 review.title,
+                review.is_auto,
                 review.created_at,
                 review.updated_at,
             ],
@@ -96,7 +98,7 @@ impl Store {
         // reviews share the same (branch, commit, scope) triple.
         let existing: Option<Review> = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
                  FROM reviews
                  WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3
                  ORDER BY created_at DESC LIMIT 1",
@@ -119,7 +121,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let review = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
                  FROM reviews WHERE id = ?1",
                 params![id],
                 Self::row_to_review_header,
@@ -139,7 +141,7 @@ impl Store {
     pub fn list_reviews_for_branch(&self, branch_id: &str) -> Result<Vec<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at
+            "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
              FROM reviews WHERE branch_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_review_header)?;
@@ -260,7 +262,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let review = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
                  FROM reviews WHERE session_id = ?1",
                 params![session_id],
                 Self::row_to_review_header,
@@ -293,6 +295,66 @@ impl Store {
         Ok(())
     }
 
+    /// Update the `is_auto` flag on a review.
+    pub fn set_review_auto(&self, id: &str, is_auto: bool) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE reviews SET is_auto = ?1, updated_at = ?2 WHERE id = ?3",
+            params![is_auto, now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Find the most recent auto review for a branch created after the given timestamp.
+    pub fn find_auto_review_since_commit(
+        &self,
+        branch_id: &str,
+        since_commit_created_at: i64,
+    ) -> Result<Option<Review>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let review: Option<Review> = conn
+            .query_row(
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+                 FROM reviews
+                 WHERE branch_id = ?1 AND is_auto = 1 AND created_at > ?2
+                 ORDER BY created_at DESC LIMIT 1",
+                params![branch_id, since_commit_created_at],
+                Self::row_to_review_header,
+            )
+            .optional()?;
+
+        match review {
+            Some(mut r) => {
+                Self::load_review_children(&conn, &mut r)?;
+                Ok(Some(r))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Find the most recent auto review for a branch.
+    pub fn find_latest_auto_review(&self, branch_id: &str) -> Result<Option<Review>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let review: Option<Review> = conn
+            .query_row(
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+                 FROM reviews
+                 WHERE branch_id = ?1 AND is_auto = 1
+                 ORDER BY created_at DESC LIMIT 1",
+                params![branch_id],
+                Self::row_to_review_header,
+            )
+            .optional()?;
+
+        match review {
+            Some(mut r) => {
+                Self::load_review_children(&conn, &mut r)?;
+                Ok(Some(r))
+            }
+            None => Ok(None),
+        }
+    }
+
     // =========================================================================
     // Internal helpers
     // =========================================================================
@@ -314,11 +376,12 @@ impl Store {
             scope: ReviewScope::parse(&scope_str).unwrap_or(ReviewScope::Commit),
             session_id: row.get(4)?,
             title: row.get(5)?,
+            is_auto: row.get(6)?,
             reviewed: Vec::new(),
             comments: Vec::new(),
             reference_files: Vec::new(),
-            created_at: row.get(6)?,
-            updated_at: row.get(7)?,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     }
 

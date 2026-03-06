@@ -63,7 +63,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// Oldest schema version we can migrate forward from.
 ///
@@ -376,6 +376,7 @@ impl Store {
                 scope           TEXT NOT NULL,
                 session_id      TEXT,
                 title           TEXT,
+                is_auto         INTEGER NOT NULL DEFAULT 0,
                 created_at      INTEGER NOT NULL,
                 updated_at      INTEGER NOT NULL
             );
@@ -657,6 +658,14 @@ impl Store {
                       AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
                 END;",
             )?;
+        }
+
+        if db_version < 22 {
+            // v21 → v22: add is_auto column to reviews
+            conn.execute_batch(
+                "ALTER TABLE reviews ADD COLUMN is_auto INTEGER NOT NULL DEFAULT 0;",
+            )
+            .ok(); // Ignore error if column already exists (fresh DB)
         }
 
         // Stamp the current schema version so future opens skip applied migrations.

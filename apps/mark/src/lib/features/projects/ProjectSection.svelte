@@ -506,9 +506,11 @@
     />
     <div class="prompt-input-wrapper" class:drag-over={dragOver} bind:this={promptWrapperEl}>
       <div class="prompt-input-row">
-        <button class="attach-btn" onclick={openImagePicker} title="Attach image">
-          <Paperclip size={14} />
-        </button>
+        {#if imageIds.length === 0}
+          <button class="attach-btn" onclick={openImagePicker} title="Attach image">
+            <Paperclip size={14} />
+          </button>
+        {/if}
         <textarea
           class="prompt-input"
           placeholder="Ask about this project…"

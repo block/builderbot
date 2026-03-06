@@ -559,9 +559,15 @@ impl Store {
                 .ok(); // Ignore error if column already exists (fresh DB)
         }
 
-        if db_version < 19 {
-            // v18 → v19: add images table and update session cleanup triggers
-            // to account for the new images table.
+        if db_version < 21 {
+            // v18 → v21: add images table, image_ids column on
+            // session_messages, and update session cleanup triggers.
+
+            conn.execute_batch(
+                "ALTER TABLE session_messages ADD COLUMN image_ids TEXT DEFAULT NULL;",
+            )
+            .ok(); // Ignore "duplicate column" on fresh DBs
+
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS images (
                     id          TEXT PRIMARY KEY,
@@ -573,127 +579,13 @@ impl Store {
                     size_bytes  INTEGER NOT NULL,
                     created_at  INTEGER NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_images_branch ON images(branch_id);",
-            )?;
-
-            // Drop and recreate all session cleanup triggers so they include
-            // the new `images` table in the NOT EXISTS checks.
-            conn.execute_batch(
-                "DROP TRIGGER IF EXISTS trg_cleanup_session_after_commit_delete;
-                DROP TRIGGER IF EXISTS trg_cleanup_session_after_note_delete;
-                DROP TRIGGER IF EXISTS trg_cleanup_session_after_review_delete;
-                DROP TRIGGER IF EXISTS trg_cleanup_session_after_project_note_delete;
-                DROP TRIGGER IF EXISTS trg_cleanup_session_after_image_delete;
-
-                CREATE TRIGGER trg_cleanup_session_after_commit_delete
-                AFTER DELETE ON commits
-                WHEN OLD.session_id IS NOT NULL
-                BEGIN
-                    DELETE FROM sessions
-                    WHERE id = OLD.session_id
-                      AND status != 'running'
-                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
-                END;
-
-                CREATE TRIGGER trg_cleanup_session_after_note_delete
-                AFTER DELETE ON notes
-                WHEN OLD.session_id IS NOT NULL
-                BEGIN
-                    DELETE FROM sessions
-                    WHERE id = OLD.session_id
-                      AND status != 'running'
-                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
-                END;
-
-                CREATE TRIGGER trg_cleanup_session_after_review_delete
-                AFTER DELETE ON reviews
-                WHEN OLD.session_id IS NOT NULL
-                BEGIN
-                    DELETE FROM sessions
-                    WHERE id = OLD.session_id
-                      AND status != 'running'
-                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
-                END;
-
-                CREATE TRIGGER trg_cleanup_session_after_project_note_delete
-                AFTER DELETE ON project_notes
-                WHEN OLD.session_id IS NOT NULL
-                BEGIN
-                    DELETE FROM sessions
-                    WHERE id = OLD.session_id
-                      AND status != 'running'
-                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
-                END;
-
-                CREATE TRIGGER trg_cleanup_session_after_image_delete
-                AFTER DELETE ON images
-                WHEN OLD.session_id IS NOT NULL
-                BEGIN
-                    DELETE FROM sessions
-                    WHERE id = OLD.session_id
-                      AND status != 'running'
-                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
-                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
-                END;",
-            )?;
-        }
-
-        // v19 → v20: add image_ids column to session_messages so user
-        // messages can record which images were attached.
-        // Always attempt (not gated on db_version) so it self-heals if a
-        // previous launch stamped v20 but the ALTER TABLE was swallowed.
-        conn.execute_batch("ALTER TABLE session_messages ADD COLUMN image_ids TEXT DEFAULT NULL;")
-            .ok(); // Ignore "duplicate column" on fresh DBs or re-runs
-
-        if db_version < 21 {
-            // v20 → v21: make branch_id nullable in images table so project-level
-            // sessions can attach images without a branch.
-            // SQLite doesn't support ALTER COLUMN, so recreate the table.
-            // Drop ALL triggers that reference the images table so that
-            // DROP TABLE images doesn't cascade-fail.  Also handle the
-            // partial-run case where a previous attempt already dropped
-            // `images` but crashed before renaming `images_new`.
-            conn.execute_batch(
-                "DROP TRIGGER IF EXISTS trg_cleanup_session_after_commit_delete;
-                DROP TRIGGER IF EXISTS trg_cleanup_session_after_note_delete;
-                DROP TRIGGER IF EXISTS trg_cleanup_session_after_review_delete;
-                DROP TRIGGER IF EXISTS trg_cleanup_session_after_project_note_delete;
-                DROP TRIGGER IF EXISTS trg_cleanup_session_after_image_delete;
-                DROP TABLE IF EXISTS images_new;
-
-                CREATE TABLE images_new (
-                    id          TEXT PRIMARY KEY,
-                    branch_id   TEXT REFERENCES branches(id) ON DELETE CASCADE,
-                    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-                    session_id  TEXT,
-                    filename    TEXT NOT NULL,
-                    mime_type   TEXT NOT NULL,
-                    size_bytes  INTEGER NOT NULL,
-                    created_at  INTEGER NOT NULL
-                );
-                INSERT OR IGNORE INTO images_new SELECT * FROM images;
-                DROP TABLE IF EXISTS images;
-                ALTER TABLE images_new RENAME TO images;
                 CREATE INDEX IF NOT EXISTS idx_images_branch ON images(branch_id);
+
+                DROP TRIGGER IF EXISTS trg_cleanup_session_after_commit_delete;
+                DROP TRIGGER IF EXISTS trg_cleanup_session_after_note_delete;
+                DROP TRIGGER IF EXISTS trg_cleanup_session_after_review_delete;
+                DROP TRIGGER IF EXISTS trg_cleanup_session_after_project_note_delete;
+                DROP TRIGGER IF EXISTS trg_cleanup_session_after_image_delete;
 
                 CREATE TRIGGER trg_cleanup_session_after_commit_delete
                 AFTER DELETE ON commits

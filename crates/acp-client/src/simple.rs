@@ -54,13 +54,20 @@ impl AgentDriver for SimpleDriverWrapper {
         &self,
         session_id: &str,
         prompt: &str,
-        _images: &[(String, String)],
+        images: &[(String, String)],
         working_dir: &Path,
         store: &Arc<dyn crate::driver::Store>,
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
     ) -> Result<(), String> {
+        if !images.is_empty() {
+            log::debug!(
+                "SimpleDriverWrapper: discarding {} image(s) - not supported in simple mode",
+                images.len()
+            );
+        }
+
         // Use the same implementation as AcpDriver, but with our own binary/args
         use agent_client_protocol::{
             Agent, ClientSideConnection, ContentBlock as AcpContentBlock, Implementation,

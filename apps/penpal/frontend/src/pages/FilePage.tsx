@@ -6,7 +6,6 @@ import MarkdownViewer from '../components/MarkdownViewer';
 import CommentsPanel from '../components/CommentsPanel';
 import SelectionToolbar, {
   applySvgHighlights,
-  removePendingHighlight,
 } from '../components/SelectionToolbar';
 import MermaidSelection, { removePendingSvgHighlight } from '../components/MermaidSelection';
 import FileTypeBadge from '../components/FileTypeBadge';
@@ -84,7 +83,7 @@ export default function FilePage() {
 
   // Compute highlights for the rehype plugin (text highlights only, not SVG)
   const threadHighlights = useMemo<ThreadHighlight[]>(() => {
-    return threads
+    const highlights: ThreadHighlight[] = threads
       .filter((t) => t.status !== 'resolved' && !t.anchor.svgRect)
       .map((t) => {
         const line = anchorLines[t.id];
@@ -96,7 +95,21 @@ export default function FilePage() {
         };
       })
       .filter((h): h is ThreadHighlight => h !== null);
-  }, [threads, anchorLines]);
+
+    // Include pending comment highlight so it's rendered via the rehype plugin
+    // (React-managed) rather than direct DOM mutation.
+    if (pendingAnchor && pendingAnchor.startLine != null && pendingAnchor.startLine > 0 && pendingAnchor.selectedText && !pendingAnchor.svgRect) {
+      highlights.push({
+        threadId: 'pending',
+        selectedText: pendingAnchor.selectedText,
+        startLine: pendingAnchor.startLine,
+        occurrenceIndex: pendingAnchor.occurrenceIndex,
+        pending: true,
+      });
+    }
+
+    return highlights;
+  }, [threads, anchorLines, pendingAnchor]);
 
   // Resolve project QN and file path from URL by matching against known projects.
   // The URL is /file/{qualifiedName}/{filePath} where qualifiedName may contain slashes
@@ -278,7 +291,6 @@ export default function FilePage() {
   const handleCancelNewThread = useCallback(() => {
     setPendingAnchor(null);
     setPendingText('');
-    removePendingHighlight();
     removePendingSvgHighlight();
   }, []);
 

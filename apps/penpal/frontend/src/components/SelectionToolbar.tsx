@@ -73,6 +73,8 @@ function computeAnchor(
     }
   }
 
+  anchor.occurrenceIndex = occurrenceIndex;
+
   // Find nth occurrence helper
   function findNthOccurrence(haystack: string, needle: string, n: number): number {
     let pos = 0;
@@ -126,54 +128,6 @@ function computeAnchor(
   }
 
   return anchor;
-}
-
-/**
- * Applies pending highlight marks to the current selection.
- */
-export function applyPendingHighlight(sel: Selection, contentEl: HTMLElement) {
-  removePendingHighlight();
-  if (!sel.rangeCount) return;
-  const range = sel.getRangeAt(0);
-  if (!contentEl.contains(range.commonAncestorContainer)) return;
-
-  const treeWalker = document.createTreeWalker(contentEl, NodeFilter.SHOW_TEXT);
-  const textNodes: Text[] = [];
-  while (treeWalker.nextNode()) {
-    if (range.intersectsNode(treeWalker.currentNode)) {
-      textNodes.push(treeWalker.currentNode as Text);
-    }
-  }
-
-  for (let i = textNodes.length - 1; i >= 0; i--) {
-    const node = textNodes[i];
-    const start = node === range.startContainer ? range.startOffset : 0;
-    const end = node === range.endContainer ? range.endOffset : node.nodeValue!.length;
-    if (start >= end) continue;
-
-    const mark = document.createElement('mark');
-    mark.className = 'pending-highlight';
-
-    if (start === 0 && end === node.nodeValue!.length) {
-      node.parentNode!.insertBefore(mark, node);
-      mark.appendChild(node);
-    } else {
-      const subRange = document.createRange();
-      subRange.setStart(node, start);
-      subRange.setEnd(node, end);
-      subRange.surroundContents(mark);
-    }
-  }
-  sel.removeAllRanges();
-}
-
-export function removePendingHighlight() {
-  document.querySelectorAll('.pending-highlight').forEach((mark) => {
-    const parent = mark.parentNode!;
-    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-    parent.removeChild(mark);
-    parent.normalize();
-  });
 }
 
 /**
@@ -322,7 +276,7 @@ export default function SelectionToolbar({
     if (!selectedText) return;
 
     const anchor = computeAnchor(sel, selectedText, rawMarkdown, contentRef.current);
-    applyPendingHighlight(sel, contentRef.current);
+    sel.removeAllRanges();
     setVisible(false);
     onComment(anchor, selectedText);
   };

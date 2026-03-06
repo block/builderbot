@@ -5,6 +5,8 @@ export interface ThreadHighlight {
   threadId: string;
   selectedText: string;
   startLine: number;
+  occurrenceIndex?: number;
+  pending?: boolean;
 }
 
 interface Options {
@@ -87,7 +89,22 @@ function applyHighlight(element: Element, highlight: ThreadHighlight) {
   // Normalize whitespace for matching (mirrors DOM-based approach)
   const normalizedText = text.replace(/\s+/g, ' ');
   const normalizedSelected = highlight.selectedText.replace(/\s+/g, ' ');
-  const matchIndex = normalizedText.indexOf(normalizedSelected);
+
+  // Use occurrenceIndex to find the Nth match within the block,
+  // falling back to the first occurrence if the index is not set or not found.
+  let matchIndex = -1;
+  const targetOccurrence = highlight.occurrenceIndex ?? 0;
+  let pos = 0;
+  for (let i = 0; i <= targetOccurrence; i++) {
+    const found = normalizedText.indexOf(normalizedSelected, pos);
+    if (found === -1) break;
+    if (i === targetOccurrence) {
+      matchIndex = found;
+    }
+    pos = found + 1;
+  }
+  // Fall back to first occurrence if Nth not found
+  if (matchIndex === -1) matchIndex = normalizedText.indexOf(normalizedSelected);
   if (matchIndex === -1) return;
 
   const matchStart = matchIndex;
@@ -139,7 +156,7 @@ function applyHighlight(element: Element, highlight: ThreadHighlight) {
       type: 'element',
       tagName: 'mark',
       properties: {
-        className: ['comment-highlight'],
+        className: highlight.pending ? ['comment-highlight', 'pending-highlight'] : ['comment-highlight'],
         dataThreadId: highlight.threadId,
       },
       children: [

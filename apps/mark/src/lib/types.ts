@@ -140,7 +140,7 @@ export interface BranchTimeline {
 
 export interface Image {
   id: string;
-  branchId: string;
+  branchId: string | null;
   projectId: string;
   sessionId: string | null;
   filename: string;

@@ -1179,7 +1179,7 @@ fn mime_type_for_extension(ext: &str) -> &'static str {
 #[tauri::command(rename_all = "camelCase")]
 fn create_image(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
+    branch_id: Option<String>,
     project_id: String,
     file_path: String,
 ) -> Result<store::Image, String> {
@@ -1222,10 +1222,16 @@ fn create_image(
     let size_bytes = metadata.len() as i64;
 
     let filename = store
-        .unique_image_filename_for_branch(&branch_id, &filename)
+        .unique_image_filename(branch_id.as_deref(), &project_id, &filename)
         .map_err(|e| e.to_string())?;
 
-    let image = store::Image::new(&branch_id, &project_id, &filename, &mime_type, size_bytes);
+    let image = store::Image::new(
+        branch_id.as_deref(),
+        &project_id,
+        &filename,
+        &mime_type,
+        size_bytes,
+    );
 
     // Compute destination path and ensure the images directory exists.
     let dest = store::images::image_file_path(&project_id, &image.id, &filename)?;
@@ -1318,7 +1324,7 @@ fn get_image_data(
 #[tauri::command(rename_all = "camelCase")]
 fn create_image_from_data(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
+    branch_id: Option<String>,
     project_id: String,
     filename: String,
     mime_type: String,
@@ -1356,11 +1362,11 @@ fn create_image_from_data(
     };
 
     let filename = store
-        .unique_image_filename_for_branch(&branch_id, &filename)
+        .unique_image_filename(branch_id.as_deref(), &project_id, &filename)
         .map_err(|e| e.to_string())?;
 
     let image = store::Image::new(
-        &branch_id,
+        branch_id.as_deref(),
         &project_id,
         &filename,
         &mime,

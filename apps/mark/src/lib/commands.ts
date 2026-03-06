@@ -176,12 +176,14 @@ export function deleteProjectNote(noteId: string): Promise<void> {
 export function startProjectSession(
   projectId: string,
   prompt: string,
-  provider?: string
+  provider?: string,
+  imageIds?: string[]
 ): Promise<import('./types').ProjectSessionResponse> {
   return invoke('start_project_session', {
     projectId,
     prompt,
     provider: provider ?? null,
+    imageIds: imageIds?.length ? imageIds : null,
   });
 }
 
@@ -814,7 +816,11 @@ export function refreshAllPrStatuses(projectId: string): Promise<void> {
 // =============================================================================
 
 /** Upload a local image file and create a DB record for it. */
-export function createImage(branchId: string, projectId: string, filePath: string): Promise<Image> {
+export function createImage(
+  branchId: string | null,
+  projectId: string,
+  filePath: string
+): Promise<Image> {
   return invoke('create_image', { branchId, projectId, filePath });
 }
 
@@ -840,7 +846,7 @@ export function getImageData(imageId: string): Promise<string> {
 
 /** Create an image from base64-encoded data (browser file input / clipboard paste). */
 export function createImageFromData(
-  branchId: string,
+  branchId: string | null,
   projectId: string,
   filename: string,
   mimeType: string,

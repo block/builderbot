@@ -7,6 +7,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
+  import { untrack } from 'svelte';
   import {
     ChevronLeft,
     Trash2,
@@ -17,6 +18,9 @@
     CirclePause,
     AlertCircle,
     Cloud,
+    Paperclip,
+    X,
+    ImagePlus,
   } from 'lucide-svelte';
   import type { Project, Branch, WorkspaceStatus, ProjectNote } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
@@ -33,6 +37,9 @@
   import AgentSelector from '../agents/AgentSelector.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgentForProject } from '../settings/preferences.svelte';
+  import { subscribeDragDrop } from '../branches/dragDrop';
+  import { isImageFile } from '../branches/branchCardHelpers';
+  import { createImage, createImageFromData, getImageData } from '../../api/commands';
 
   interface Props {
     project: Project;
@@ -175,6 +182,109 @@
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
 
+  // Image attachment state
+  let imageIds = $state<string[]>([]);
+  let imagePreviews = $state<Map<string, string>>(new Map());
+  let imageFileInput = $state<HTMLInputElement>();
+  let dragOver = $state(false);
+  let promptWrapperEl: HTMLDivElement | undefined = $state();
+
+  // Load previews for attached images
+  $effect(() => {
+    for (const id of imageIds) {
+      if (!imagePreviews.has(id)) {
+        getImageData(id).then((dataUrl) => {
+          imagePreviews = new Map(imagePreviews);
+          imagePreviews.set(id, dataUrl);
+        });
+      }
+    }
+  });
+
+  function openImagePicker() {
+    imageFileInput?.click();
+  }
+
+  async function handleImageFileSelect(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (!input.files) return;
+    for (const file of Array.from(input.files)) {
+      await addImageFile(file);
+    }
+    input.value = '';
+  }
+
+  async function addImageFile(file: File) {
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.length; i += 8192) {
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+    }
+    const base64 = btoa(chunks.join(''));
+    try {
+      const image = await createImageFromData(null, project.id, file.name, file.type, base64);
+      imageIds = [...imageIds, image.id];
+      const dataUrl = `data:${file.type};base64,${base64}`;
+      imagePreviews = new Map(imagePreviews);
+      imagePreviews.set(image.id, dataUrl);
+    } catch (err) {
+      console.error('Failed to attach image:', err);
+    }
+  }
+
+  function handleImagePaste(e: ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) void addImageFile(file);
+      }
+    }
+  }
+
+  function removeImage(imageId: string) {
+    imageIds = imageIds.filter((id) => id !== imageId);
+    imagePreviews = new Map(imagePreviews);
+    imagePreviews.delete(imageId);
+  }
+
+  function handleFileDrop(paths: string[]) {
+    const imagePaths = paths.filter(isImageFile);
+    if (imagePaths.length === 0) return;
+    const pid = project.id;
+    Promise.all(
+      imagePaths.map(async (filePath) => {
+        try {
+          const image = await createImage(null, pid, filePath);
+          imageIds = [...imageIds, image.id];
+        } catch (e) {
+          console.error('Failed to attach dropped image:', e);
+        }
+      })
+    );
+  }
+
+  // Subscribe to drag-drop service
+  $effect(() => {
+    const el = promptWrapperEl;
+    if (!el) return;
+    const unsub = untrack(() =>
+      subscribeDragDrop({
+        element: el,
+        onDragOver: (over) => {
+          dragOver = over;
+        },
+        onDrop: (paths) => {
+          handleFileDrop(paths);
+        },
+      })
+    );
+    return unsub;
+  });
+
   function autoResize(el: HTMLTextAreaElement) {
     el.style.height = 'auto';
     el.style.height = `${el.scrollHeight}px`;
@@ -185,12 +295,20 @@
     const provider = preferredProvider;
     if (!text || !provider) return;
 
+    const imageIdsToSend = imageIds.length > 0 ? [...imageIds] : undefined;
     promptText = '';
+    imageIds = [];
+    imagePreviews = new Map();
     if (promptTextarea) {
       promptTextarea.style.height = 'auto';
     }
     try {
-      const response = await commands.startProjectSession(project.id, text, provider);
+      const response = await commands.startProjectSession(
+        project.id,
+        text,
+        provider,
+        imageIdsToSend
+      );
       activeSessionIds = new Set([...activeSessionIds, response.sessionId]);
       sessionRegistry.register(response.sessionId, project.id, 'note');
       projectStateStore.addRunningSession(project.id, response.sessionId);
@@ -378,7 +496,18 @@
 
   <!-- Project session prompt -->
   <div class="project-prompt-section">
-    <div class="prompt-input-wrapper">
+    <input
+      bind:this={imageFileInput}
+      type="file"
+      accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+      multiple
+      class="file-input-hidden"
+      onchange={handleImageFileSelect}
+    />
+    <div class="prompt-input-wrapper" class:drag-over={dragOver} bind:this={promptWrapperEl}>
+      <button class="attach-btn" onclick={openImagePicker} title="Attach image">
+        <Paperclip size={14} />
+      </button>
       <textarea
         class="prompt-input"
         placeholder="Ask about this project…"
@@ -386,6 +515,7 @@
         bind:this={promptTextarea}
         onkeydown={handleKeydown}
         oninput={(e) => autoResize(e.currentTarget)}
+        onpaste={handleImagePaste}
         rows={1}
       ></textarea>
       <div class="prompt-actions">
@@ -400,6 +530,29 @@
         </button>
       </div>
     </div>
+    {#if imageIds.length > 0}
+      <div class="reply-images">
+        {#each imageIds as imageId}
+          <div class="reply-image-thumb">
+            {#if imagePreviews.get(imageId)}
+              <img src={imagePreviews.get(imageId)} alt="attached" />
+            {:else}
+              <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
+            {/if}
+            <button
+              class="reply-image-remove"
+              onclick={() => removeImage(imageId)}
+              title="Remove image"
+            >
+              <X size={10} />
+            </button>
+          </div>
+        {/each}
+        <button class="reply-image-add" onclick={openImagePicker} title="Add image">
+          <Plus size={16} />
+        </button>
+      </div>
+    {/if}
   </div>
 
   <!-- Project notes -->
@@ -681,11 +834,15 @@
     padding: 0;
   }
 
+  .file-input-hidden {
+    display: none;
+  }
+
   .prompt-input-wrapper {
     display: flex;
     align-items: flex-end;
     gap: 8px;
-    padding: 6px 8px 6px 12px;
+    padding: 6px 8px 6px 8px;
     border: 1px solid var(--border-muted);
     border-radius: 8px;
     background-color: var(--bg-primary);
@@ -696,6 +853,34 @@
 
   .prompt-input-wrapper:focus-within {
     border-color: var(--border-emphasis);
+  }
+
+  .prompt-input-wrapper.drag-over {
+    border-color: var(--ui-accent);
+    background-color: color-mix(in srgb, var(--ui-accent) 6%, var(--bg-primary));
+  }
+
+  .attach-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition:
+      color 0.15s ease,
+      background-color 0.15s ease;
+  }
+
+  .attach-btn:hover {
+    color: var(--text-primary);
+    background-color: var(--ui-selection);
   }
 
   .prompt-input {
@@ -748,6 +933,93 @@
   .send-button:disabled {
     opacity: 0.3;
     cursor: not-allowed;
+  }
+
+  /* ── Reply image previews ─────────────────────────────────────────── */
+
+  .reply-images {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 0 0;
+  }
+
+  .reply-image-thumb {
+    position: relative;
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border-muted);
+    background: var(--bg-hover);
+    flex-shrink: 0;
+  }
+
+  .reply-image-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .reply-image-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    color: var(--text-faint);
+  }
+
+  .reply-image-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--bg-deepest);
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 0.1s,
+      color 0.1s;
+  }
+
+  .reply-image-thumb:hover .reply-image-remove {
+    opacity: 1;
+  }
+
+  .reply-image-remove:hover {
+    color: var(--text-primary);
+    background: var(--bg-chrome);
+  }
+
+  .reply-image-add {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    border: 1px dashed var(--border-muted);
+    background: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition:
+      color 0.1s,
+      border-color 0.1s;
+  }
+
+  .reply-image-add:hover {
+    color: var(--text-muted);
+    border-color: var(--border-emphasis);
   }
 
   /* ── Project notes ───────────────────────────────────────────────────── */

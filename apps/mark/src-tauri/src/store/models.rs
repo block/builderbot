@@ -689,7 +689,7 @@ impl ProjectNote {
 #[serde(rename_all = "camelCase")]
 pub struct Image {
     pub id: String,
-    pub branch_id: String,
+    pub branch_id: Option<String>,
     pub project_id: String,
     pub session_id: Option<String>,
     pub filename: String,
@@ -700,7 +700,7 @@ pub struct Image {
 
 impl Image {
     pub fn new(
-        branch_id: &str,
+        branch_id: Option<&str>,
         project_id: &str,
         filename: &str,
         mime_type: &str,
@@ -708,7 +708,7 @@ impl Image {
     ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
-            branch_id: branch_id.to_string(),
+            branch_id: branch_id.map(|s| s.to_string()),
             project_id: project_id.to_string(),
             session_id: None,
             filename: filename.to_string(),

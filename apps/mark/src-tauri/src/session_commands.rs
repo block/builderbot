@@ -337,6 +337,7 @@ pub async fn start_project_session(
     project_id: String,
     prompt: String,
     provider: Option<String>,
+    image_ids: Option<Vec<String>>,
 ) -> Result<ProjectSessionResponse, String> {
     let store = get_store(&store)?;
 
@@ -438,7 +439,7 @@ pub async fn start_project_session(
             action_executor: Some(Arc::clone(&action_executor)),
             action_registry: Some(Arc::clone(&action_registry)),
             remote_working_dir: None,
-            image_ids: vec![],
+            image_ids: image_ids.unwrap_or_default(),
         },
         store,
         app_handle,

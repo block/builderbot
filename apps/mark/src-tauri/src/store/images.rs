@@ -53,20 +53,30 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Return a filename that is unique among images on the given branch.
+    /// Return a filename that is unique among images on the given branch (or project if no branch).
     /// If `filename` is already taken, appends ` 2`, ` 3`, … before the extension
     /// (e.g. `Screenshot.png` → `Screenshot 2.png`).
-    pub fn unique_image_filename_for_branch(
+    pub fn unique_image_filename(
         &self,
-        branch_id: &str,
+        branch_id: Option<&str>,
+        project_id: &str,
         filename: &str,
     ) -> Result<String, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT filename FROM images WHERE branch_id = ?1")?;
-        let existing: std::collections::HashSet<String> = stmt
-            .query_map(params![branch_id], |row| row.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let existing: std::collections::HashSet<String> = match branch_id {
+            Some(bid) => {
+                let mut stmt = conn.prepare("SELECT filename FROM images WHERE branch_id = ?1")?;
+                let rows = stmt.query_map(params![bid], |row| row.get::<_, String>(0))?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT filename FROM images WHERE project_id = ?1 AND branch_id IS NULL",
+                )?;
+                let rows = stmt.query_map(params![project_id], |row| row.get::<_, String>(0))?;
+                rows.filter_map(|r| r.ok()).collect()
+            }
+        };
 
         if !existing.contains(filename) {
             return Ok(filename.to_string());

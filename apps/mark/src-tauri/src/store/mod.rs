@@ -63,7 +63,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 /// Oldest schema version we can migrate forward from.
 ///
@@ -446,7 +446,7 @@ impl Store {
 
             CREATE TABLE IF NOT EXISTS images (
                 id          TEXT PRIMARY KEY,
-                branch_id   TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+                branch_id   TEXT REFERENCES branches(id) ON DELETE CASCADE,
                 project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 session_id  TEXT,
                 filename    TEXT NOT NULL,
@@ -565,7 +565,7 @@ impl Store {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS images (
                     id          TEXT PRIMARY KEY,
-                    branch_id   TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+                    branch_id   TEXT REFERENCES branches(id) ON DELETE CASCADE,
                     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                     session_id  TEXT,
                     filename    TEXT NOT NULL,
@@ -663,6 +663,44 @@ impl Store {
         // previous launch stamped v20 but the ALTER TABLE was swallowed.
         conn.execute_batch("ALTER TABLE session_messages ADD COLUMN image_ids TEXT DEFAULT NULL;")
             .ok(); // Ignore "duplicate column" on fresh DBs or re-runs
+
+        if db_version < 21 {
+            // v20 → v21: make branch_id nullable in images table so project-level
+            // sessions can attach images without a branch.
+            // SQLite doesn't support ALTER COLUMN, so recreate the table.
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS trg_cleanup_session_after_image_delete;
+
+                CREATE TABLE images_new (
+                    id          TEXT PRIMARY KEY,
+                    branch_id   TEXT REFERENCES branches(id) ON DELETE CASCADE,
+                    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                    session_id  TEXT,
+                    filename    TEXT NOT NULL,
+                    mime_type   TEXT NOT NULL,
+                    size_bytes  INTEGER NOT NULL,
+                    created_at  INTEGER NOT NULL
+                );
+                INSERT INTO images_new SELECT * FROM images;
+                DROP TABLE images;
+                ALTER TABLE images_new RENAME TO images;
+                CREATE INDEX IF NOT EXISTS idx_images_branch ON images(branch_id);
+
+                CREATE TRIGGER trg_cleanup_session_after_image_delete
+                AFTER DELETE ON images
+                WHEN OLD.session_id IS NOT NULL
+                BEGIN
+                    DELETE FROM sessions
+                    WHERE id = OLD.session_id
+                      AND status != 'running'
+                      AND NOT EXISTS (SELECT 1 FROM commits       WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM notes          WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM reviews        WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM project_notes  WHERE session_id = OLD.session_id)
+                      AND NOT EXISTS (SELECT 1 FROM images         WHERE session_id = OLD.session_id);
+                END;",
+            )?;
+        }
 
         // Stamp the current schema version so future opens skip applied migrations.
         conn.execute(

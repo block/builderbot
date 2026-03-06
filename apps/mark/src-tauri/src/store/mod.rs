@@ -582,6 +582,7 @@ impl Store {
                 DROP TRIGGER IF EXISTS trg_cleanup_session_after_note_delete;
                 DROP TRIGGER IF EXISTS trg_cleanup_session_after_review_delete;
                 DROP TRIGGER IF EXISTS trg_cleanup_session_after_project_note_delete;
+                DROP TRIGGER IF EXISTS trg_cleanup_session_after_image_delete;
 
                 CREATE TRIGGER trg_cleanup_session_after_commit_delete
                 AFTER DELETE ON commits

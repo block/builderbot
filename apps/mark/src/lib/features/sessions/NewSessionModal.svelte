@@ -15,11 +15,15 @@
 -->
 <script lang="ts">
   import { X, GitCommitVertical, FileText, FileSearch, GitBranch, Send } from 'lucide-svelte';
+  import { untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import type { Branch, BranchSessionType } from '../../types';
   import AgentSelector from '../agents/AgentSelector.svelte';
   import ImageAttachment from './ImageAttachment.svelte';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import { subscribeDragDrop } from '../branches/dragDrop';
+  import { isImageFile } from '../branches/branchCardHelpers';
+  import { createImage } from '../../commands';
 
   interface Props {
     branch: Branch;
@@ -53,6 +57,10 @@
 
   // Image attachment state
   let imageIds = $state<string[]>([]);
+
+  // Drag-and-drop state
+  let dragOver = $state(false);
+  let modalElement: HTMLDivElement | undefined = $state();
 
   // Seed prompt and mode from props once; caller preserves draft across open/close.
   $effect(() => {
@@ -111,6 +119,53 @@
   function formatBaseBranch(baseBranch: string): string {
     return baseBranch.replace(/^origin\//, '');
   }
+
+  // =========================================================================
+  // Drag-and-drop images (via Tauri native drag-drop events)
+  // =========================================================================
+
+  function handleFileDrop(paths: string[]) {
+    const imagePaths = paths.filter(isImageFile);
+    if (imagePaths.length === 0) return;
+
+    Promise.all(
+      imagePaths.map(async (filePath) => {
+        try {
+          const image = await createImage(branch.id, branch.projectId, filePath);
+          imageIds = [...imageIds, image.id];
+          onImageIdsChange(imageIds);
+        } catch (e) {
+          console.error('Failed to attach dropped image:', e);
+        }
+      })
+    );
+  }
+
+  // Keep imageIds in sync with ImageAttachment changes
+  function onImageIdsChange(ids: string[]) {
+    imageIds = ids;
+  }
+
+  // Subscribe to the shared drag-drop service so the modal intercepts
+  // drags that would otherwise land on the branch card behind it.
+  $effect(() => {
+    const el = modalElement;
+    if (!el) return;
+
+    const unsub = untrack(() =>
+      subscribeDragDrop({
+        element: el,
+        onDragOver: (over) => {
+          dragOver = over;
+        },
+        onDrop: (paths) => {
+          handleFileDrop(paths);
+        },
+      })
+    );
+
+    return unsub;
+  });
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -126,7 +181,13 @@
   onkeydown={(e) => e.key === 'Escape' && handleClose()}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
+  <div
+    bind:this={modalElement}
+    class="modal"
+    class:drag-over={dragOver}
+    role="presentation"
+    onclick={(e) => e.stopPropagation()}
+  >
     <header class="modal-header">
       <div class="header-title">
         {#if isReview}
@@ -173,7 +234,7 @@
         projectId={branch.projectId}
         disabled={starting}
         {imageIds}
-        onImageIdsChange={(ids) => (imageIds = ids)}
+        {onImageIdsChange}
       />
 
       <div class="form-actions">
@@ -219,9 +280,19 @@
     width: 580px;
     max-width: 90vw;
     background: var(--bg-chrome);
+    border: 2px solid transparent;
     border-radius: 12px;
     overflow: hidden;
     box-shadow: var(--shadow-elevated);
+    transition:
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  /* Drag-and-drop highlight */
+  .modal.drag-over {
+    border-color: var(--ui-accent);
+    background-color: color-mix(in srgb, var(--ui-accent) 5%, var(--bg-chrome));
   }
 
   /* Header */

@@ -205,6 +205,14 @@ pub fn start_session(
         )
         .map_err(|e| format!("Failed to persist user message: {e}"))?;
 
+    // Mark attached images as session-scoped so they don't appear in the
+    // branch timeline (they're only relevant within this session's messages).
+    if !config.image_ids.is_empty() {
+        store
+            .set_images_session_id(&config.image_ids, &config.session_id)
+            .map_err(|e| format!("Failed to associate images with session: {e}"))?;
+    }
+
     let cancel_token = registry.register(&config.session_id);
 
     // The agent protocol may use !Send futures, so we spin up a dedicated

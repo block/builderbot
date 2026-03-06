@@ -39,11 +39,15 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// List images attached directly to a branch (not scoped to a session).
+    ///
+    /// Images with a `session_id` are excluded — those are session-scoped
+    /// attachments that only appear in the session message history.
     pub fn list_images_for_branch(&self, branch_id: &str) -> Result<Vec<Image>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at
-             FROM images WHERE branch_id = ?1 ORDER BY created_at DESC",
+             FROM images WHERE branch_id = ?1 AND session_id IS NULL ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_image)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -86,6 +90,26 @@ impl Store {
             }
             counter += 1;
         }
+    }
+
+    /// Associate images with a session so they are scoped to that session
+    /// and excluded from the branch timeline.
+    pub fn set_images_session_id(
+        &self,
+        image_ids: &[String],
+        session_id: &str,
+    ) -> Result<(), StoreError> {
+        if image_ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().unwrap();
+        for id in image_ids {
+            conn.execute(
+                "UPDATE images SET session_id = ?1 WHERE id = ?2",
+                params![session_id, id],
+            )?;
+        }
+        Ok(())
     }
 
     pub fn delete_image(&self, id: &str) -> Result<(), StoreError> {

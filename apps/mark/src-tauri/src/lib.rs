@@ -1162,7 +1162,7 @@ fn delete_project_note(
 
 const MAX_IMAGE_SIZE: u64 = 10_485_760; // 10 MB
 
-const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg"];
+const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
 fn mime_type_for_extension(ext: &str) -> &'static str {
     match ext {
@@ -1244,7 +1244,10 @@ fn create_image(
     std::fs::copy(src, &dest).map_err(|e| format!("Cannot copy image file: {e}"))?;
 
     // Persist the DB record.
-    store.create_image(&image).map_err(|e| e.to_string())?;
+    if let Err(e) = store.create_image(&image) {
+        let _ = std::fs::remove_file(&dest);
+        return Err(e.to_string());
+    }
 
     Ok(image)
 }
@@ -1355,9 +1358,16 @@ fn create_image_from_data(
     }
 
     let store = get_store(&store)?;
+    const ALLOWED_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
     let mime = if mime_type.is_empty() {
         mime_type_for_extension(&ext).to_string()
     } else {
+        if !ALLOWED_MIME_TYPES.contains(&mime_type.as_str()) {
+            return Err(format!(
+                "Unsupported MIME type: {mime_type}. Allowed: {}",
+                ALLOWED_MIME_TYPES.join(", ")
+            ));
+        }
         mime_type
     };
 
@@ -1381,7 +1391,10 @@ fn create_image_from_data(
     }
     std::fs::write(&path, &bytes).map_err(|e| format!("Failed to save image: {e}"))?;
 
-    store.create_image(&image).map_err(|e| e.to_string())?;
+    if let Err(e) = store.create_image(&image) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e.to_string());
+    }
     Ok(image)
 }
 

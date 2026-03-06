@@ -49,6 +49,45 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Return a filename that is unique among images on the given branch.
+    /// If `filename` is already taken, appends ` 2`, ` 3`, … before the extension
+    /// (e.g. `Screenshot.png` → `Screenshot 2.png`).
+    pub fn unique_image_filename_for_branch(
+        &self,
+        branch_id: &str,
+        filename: &str,
+    ) -> Result<String, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT filename FROM images WHERE branch_id = ?1")?;
+        let existing: std::collections::HashSet<String> = stmt
+            .query_map(params![branch_id], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if !existing.contains(filename) {
+            return Ok(filename.to_string());
+        }
+
+        let path = std::path::Path::new(filename);
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(filename);
+        let ext = path.extension().and_then(|e| e.to_str());
+
+        let mut counter = 2u32;
+        loop {
+            let candidate = match ext {
+                Some(e) => format!("{stem} {counter}.{e}"),
+                None => format!("{stem} {counter}"),
+            };
+            if !existing.contains(&candidate) {
+                return Ok(candidate);
+            }
+            counter += 1;
+        }
+    }
+
     pub fn delete_image(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM images WHERE id = ?1", params![id])?;

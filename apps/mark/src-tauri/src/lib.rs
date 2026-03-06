@@ -1221,6 +1221,10 @@ fn create_image(
     let mime_type = mime_type_for_extension(&ext).to_string();
     let size_bytes = metadata.len() as i64;
 
+    let filename = store
+        .unique_image_filename_for_branch(&branch_id, &filename)
+        .map_err(|e| e.to_string())?;
+
     let image = store::Image::new(&branch_id, &project_id, &filename, &mime_type, size_bytes);
 
     // Compute destination path and ensure the images directory exists.
@@ -1350,6 +1354,10 @@ fn create_image_from_data(
     } else {
         mime_type
     };
+
+    let filename = store
+        .unique_image_filename_for_branch(&branch_id, &filename)
+        .map_err(|e| e.to_string())?;
 
     let image = store::Image::new(
         &branch_id,

@@ -117,6 +117,7 @@ export interface ReviewTimelineItem {
   sessionStatus: string | null;
   title: string | null;
   commentCount: number;
+  isAuto?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -234,6 +235,21 @@ export type BranchSessionType = 'note' | 'commit' | 'review';
 export interface BranchSessionResponse {
   sessionId: string;
   artifactId: string;
+}
+
+// =============================================================================
+// Session status event payload
+// =============================================================================
+
+/** Payload emitted by the `session-status-changed` Tauri event. */
+export interface SessionStatusPayload {
+  sessionId: string;
+  status: string;
+  errorMessage?: string | null;
+  branchId?: string;
+  projectId?: string;
+  sessionType?: string;
+  isAutoReview?: boolean;
 }
 
 // =============================================================================

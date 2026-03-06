@@ -685,6 +685,35 @@ export function removeReferenceFile(reviewId: string, path: string): Promise<voi
 }
 
 // =============================================================================
+// Auto review
+// =============================================================================
+
+/** Start an auto review for a branch. Returns the session and review IDs. */
+export function startAutoReview(
+  branchId: string
+): Promise<{ sessionId: string; reviewId: string }> {
+  return invoke('start_auto_review', { branchId });
+}
+
+/** Find an auto review created since a given commit timestamp. */
+export function findAutoReviewSinceCommit(
+  branchId: string,
+  sinceCommitCreatedAt: number
+): Promise<Review | null> {
+  return invoke('find_auto_review_since_commit', { branchId, sinceCommitCreatedAt });
+}
+
+/** Mark or unmark a review as auto-generated. */
+export function setReviewAuto(reviewId: string, isAuto: boolean): Promise<void> {
+  return invoke('set_review_auto', { reviewId, isAuto });
+}
+
+/** Find the latest auto review for a branch. */
+export function findLatestAutoReview(branchId: string): Promise<Review | null> {
+  return invoke('find_latest_auto_review', { branchId });
+}
+
+// =============================================================================
 // Git helpers
 // =============================================================================
 

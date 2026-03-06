@@ -272,7 +272,6 @@
         key: `image-${image.id}`,
         type: 'image' as TimelineItemType,
         title: image.filename,
-        meta: formatFileSize(image.sizeBytes),
         secondaryMeta: isDeleting ? 'Deleting...' : formatRelativeTimeMs(image.createdAt),
         deleting: isDeleting,
         timestamp: Math.floor(image.createdAt / 1000),
@@ -371,12 +370,6 @@
 
   function formatRelativeTimeMs(timestamp: number): string {
     return formatRelativeTime(Math.floor(timestamp / 1000));
-  }
-
-  function formatFileSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 </script>
 

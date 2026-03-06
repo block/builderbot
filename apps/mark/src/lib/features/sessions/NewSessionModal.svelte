@@ -124,21 +124,21 @@
   // Drag-and-drop images (via Tauri native drag-drop events)
   // =========================================================================
 
-  function handleFileDrop(paths: string[]) {
-    const imagePaths = paths.filter(isImageFile);
-    if (imagePaths.length === 0) return;
-
-    Promise.all(
-      imagePaths.map(async (filePath) => {
-        try {
-          const image = await createImage(branch.id, branch.projectId, filePath);
-          imageIds = [...imageIds, image.id];
-          onImageIdsChange(imageIds);
-        } catch (e) {
-          console.error('Failed to attach dropped image:', e);
-        }
-      })
-    );
+  async function handleFileDrop(paths: string[]) {
+    const imagePaths = paths.filter((p) => isImageFile(p));
+    const newIds: string[] = [];
+    for (const path of imagePaths) {
+      try {
+        const image = await createImage(branch.id, branch.projectId, path);
+        newIds.push(image.id);
+      } catch (e) {
+        console.error('Failed to create image from dropped file:', e);
+      }
+    }
+    if (newIds.length > 0) {
+      imageIds = [...imageIds, ...newIds];
+      onImageIdsChange(imageIds);
+    }
   }
 
   // Keep imageIds in sync with ImageAttachment changes

@@ -129,10 +129,16 @@
   $effect(() => {
     for (const id of replyImageIds) {
       if (!imagePreviews.has(id)) {
-        getImageData(id).then((dataUrl) => {
-          imagePreviews = new Map(imagePreviews);
-          imagePreviews.set(id, dataUrl);
-        });
+        getImageData(id)
+          .then((dataUrl) => {
+            imagePreviews = new Map(imagePreviews);
+            imagePreviews.set(id, dataUrl);
+          })
+          .catch(() => {
+            // Image may have been deleted — insert sentinel to prevent infinite retry
+            imagePreviews = new Map(imagePreviews);
+            imagePreviews.set(id, '');
+          });
       }
     }
   });
@@ -178,11 +184,11 @@
     if (!projectId) return;
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.length; i += 8192) {
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
     }
-    const base64 = btoa(binary);
+    const base64 = btoa(chunks.join(''));
     try {
       const image = await createImageFromData(
         branchId ?? null,
@@ -220,22 +226,23 @@
   }
 
   // Drag-and-drop images (via Tauri native drag-drop events)
-  function handleFileDrop(paths: string[]) {
+  async function handleFileDrop(paths: string[]) {
     if (!projectId) return;
-    const imagePaths = paths.filter(isImageFile);
-    if (imagePaths.length === 0) return;
+    const imagePaths = paths.filter((p) => isImageFile(p));
     const bid = branchId ?? null;
     const pid = projectId;
-    Promise.all(
-      imagePaths.map(async (filePath) => {
-        try {
-          const image = await createImage(bid, pid, filePath);
-          replyImageIds = [...replyImageIds, image.id];
-        } catch (e) {
-          console.error('Failed to attach dropped image:', e);
-        }
-      })
-    );
+    const newIds: string[] = [];
+    for (const path of imagePaths) {
+      try {
+        const image = await createImage(bid, pid, path);
+        newIds.push(image.id);
+      } catch (e) {
+        console.error('Failed to create image from dropped file:', e);
+      }
+    }
+    if (newIds.length > 0) {
+      replyImageIds = [...replyImageIds, ...newIds];
+    }
   }
 
   // Subscribe to the shared drag-drop service

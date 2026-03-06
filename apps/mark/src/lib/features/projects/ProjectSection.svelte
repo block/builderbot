@@ -39,7 +39,7 @@
   import { getPreferredAgentForProject } from '../settings/preferences.svelte';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import { isImageFile } from '../branches/branchCardHelpers';
-  import { createImage, createImageFromData, getImageData } from '../../api/commands';
+  import { createImage, createImageFromData, deleteImage, getImageData } from '../../api/commands';
 
   interface Props {
     project: Project;
@@ -193,10 +193,16 @@
   $effect(() => {
     for (const id of imageIds) {
       if (!imagePreviews.has(id)) {
-        getImageData(id).then((dataUrl) => {
-          imagePreviews = new Map(imagePreviews);
-          imagePreviews.set(id, dataUrl);
-        });
+        getImageData(id)
+          .then((dataUrl) => {
+            imagePreviews = new Map(imagePreviews);
+            imagePreviews.set(id, dataUrl);
+          })
+          .catch(() => {
+            // Image may have been deleted — insert sentinel to prevent infinite retry
+            imagePreviews = new Map(imagePreviews);
+            imagePreviews.set(id, '');
+          });
       }
     }
   });
@@ -249,22 +255,26 @@
     imageIds = imageIds.filter((id) => id !== imageId);
     imagePreviews = new Map(imagePreviews);
     imagePreviews.delete(imageId);
+    deleteImage(imageId).catch((err) => {
+      console.error('Failed to delete image:', err);
+    });
   }
 
-  function handleFileDrop(paths: string[]) {
-    const imagePaths = paths.filter(isImageFile);
-    if (imagePaths.length === 0) return;
+  async function handleFileDrop(paths: string[]) {
+    const imagePaths = paths.filter((p) => isImageFile(p));
     const pid = project.id;
-    Promise.all(
-      imagePaths.map(async (filePath) => {
-        try {
-          const image = await createImage(null, pid, filePath);
-          imageIds = [...imageIds, image.id];
-        } catch (e) {
-          console.error('Failed to attach dropped image:', e);
-        }
-      })
-    );
+    const newIds: string[] = [];
+    for (const path of imagePaths) {
+      try {
+        const image = await createImage(null, pid, path);
+        newIds.push(image.id);
+      } catch (e) {
+        console.error('Failed to create image from dropped file:', e);
+      }
+    }
+    if (newIds.length > 0) {
+      imageIds = [...imageIds, ...newIds];
+    }
   }
 
   // Subscribe to drag-drop service

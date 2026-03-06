@@ -12,7 +12,7 @@
   - reviewState: lazy review creation, comments, reviewed paths, reference files
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { X, ArrowLeft } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Spinner from '../../shared/Spinner.svelte';
@@ -32,6 +32,7 @@
     createFileSelectionWithSearch,
   } from '@builderbot/diff-viewer/utils';
   import type { Comment, SmartDiffAnnotation, Span } from '../../types';
+  import { findLatestAutoReview, getSession } from '../../commands';
   import {
     buildFileEntries,
     buildTree,
@@ -120,6 +121,74 @@
   // Annotation reveal state (hold A to reveal)
   let annotationsRevealed = $state(false);
 
+  // Auto review state (branch-scope only)
+  let autoReviewComments = $state<Comment[]>([]);
+  let autoReviewPollTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function loadAutoReviewAnnotations() {
+    try {
+      const review = await findLatestAutoReview(branchId);
+      if (!review) {
+        autoReviewComments = [];
+        return review;
+      }
+      autoReviewComments = review.comments;
+      return review;
+    } catch (e) {
+      console.error('Failed to load auto review annotations:', e);
+      autoReviewComments = [];
+      return null;
+    }
+  }
+
+  function startAutoReviewPolling(sessionId: string) {
+    stopAutoReviewPolling();
+    autoReviewPollTimer = setInterval(async () => {
+      const review = await loadAutoReviewAnnotations();
+      // Check if session is still running; if not, stop polling
+      if (!review?.sessionId) {
+        stopAutoReviewPolling();
+        return;
+      }
+      try {
+        const session = await getSession(sessionId);
+        if (!session || session.status !== 'running') {
+          stopAutoReviewPolling();
+        }
+      } catch {
+        stopAutoReviewPolling();
+      }
+    }, 4000);
+  }
+
+  function stopAutoReviewPolling() {
+    if (autoReviewPollTimer !== null) {
+      clearInterval(autoReviewPollTimer);
+      autoReviewPollTimer = null;
+    }
+  }
+
+  // Load auto review annotations for branch-scope diffs (no specific reviewId)
+  // svelte-ignore state_referenced_locally
+  if (scope === 'branch' && !reviewId) {
+    loadAutoReviewAnnotations().then((review) => {
+      if (review?.sessionId) {
+        // Check if the session is still running to start polling
+        getSession(review.sessionId)
+          .then((session) => {
+            if (session?.status === 'running') {
+              startAutoReviewPolling(review.sessionId!);
+            }
+          })
+          .catch(() => {});
+      }
+    });
+  }
+
+  onDestroy(() => {
+    stopAutoReviewPolling();
+  });
+
   // Create tracker for search initialization
   const checkSearchInitialization = createSearchInitializationTracker({
     searchState,
@@ -136,9 +205,10 @@
   // Split AI "information" comments into annotations; everything else stays as comments
   let currentComments = $derived(allComments.filter((c) => c.commentType !== 'information'));
 
-  /** Convert "information" comments to SmartDiffAnnotation for the overlay system. */
-  let currentAnnotations = $derived<SmartDiffAnnotation[]>(
-    allComments
+  /** Convert "information" comments to SmartDiffAnnotation for the overlay system.
+   *  Merges annotations from both the user's review and the latest auto review. */
+  let currentAnnotations = $derived<SmartDiffAnnotation[]>([
+    ...allComments
       .filter((c) => c.commentType === 'information')
       .map((c) => ({
         id: c.id,
@@ -146,8 +216,17 @@
         after_span: { start: c.span.start, end: c.span.end },
         content: c.content,
         category: 'explanation' as const,
-      }))
-  );
+      })),
+    ...autoReviewComments
+      .filter((c) => c.commentType === 'information')
+      .map((c) => ({
+        id: c.id,
+        file_path: c.path,
+        after_span: { start: c.span.start, end: c.span.end },
+        content: c.content,
+        category: 'explanation' as const,
+      })),
+  ]);
 
   let fileEntries = $derived(
     buildFileEntries(

@@ -74,7 +74,14 @@
     const base64 = btoa(chunks.join(''));
 
     try {
-      const image = await createImageFromData(branchId, projectId, file.name, file.type, base64);
+      const image = await createImageFromData(
+        branchId,
+        projectId,
+        file.name,
+        file.type,
+        base64,
+        true
+      );
       onImageIdsChange([...imageIds, image.id]);
       // Set preview immediately from the local data
       const dataUrl = `data:${file.type};base64,${base64}`;

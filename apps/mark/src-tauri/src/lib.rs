@@ -1175,12 +1175,18 @@ fn mime_type_for_extension(ext: &str) -> &'static str {
 }
 
 /// Create an image record and copy the file to the project images directory.
+///
+/// When `pending` is true the image is hidden from the branch timeline until
+/// a session is started (the session runner overwrites the sentinel with the
+/// real session ID).  Pass `false` for images that should appear in the
+/// timeline immediately (e.g. direct branch-card drops).
 #[tauri::command(rename_all = "camelCase")]
 fn create_image(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: Option<String>,
     project_id: String,
     file_path: String,
+    pending: Option<bool>,
 ) -> Result<store::Image, String> {
     let store = get_store(&store)?;
 
@@ -1230,6 +1236,7 @@ fn create_image(
         &filename,
         &mime_type,
         size_bytes,
+        pending.unwrap_or(false),
     );
 
     // Compute destination path and ensure the images directory exists.
@@ -1323,6 +1330,8 @@ fn get_image_data(
 }
 
 /// Create an image from base64-encoded data (for browser file input / clipboard paste).
+///
+/// See [`create_image`] for the meaning of the `pending` flag.
 #[tauri::command(rename_all = "camelCase")]
 fn create_image_from_data(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -1331,6 +1340,7 @@ fn create_image_from_data(
     filename: String,
     mime_type: String,
     data: String,
+    pending: Option<bool>,
 ) -> Result<store::Image, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -1380,6 +1390,7 @@ fn create_image_from_data(
         &filename,
         &mime,
         bytes.len() as i64,
+        pending.unwrap_or(false),
     );
     let path = crate::store::images::image_file_path(&project_id, &image.id, &filename)
         .map_err(|e| e.to_string())?;
@@ -2899,6 +2910,13 @@ pub fn run() {
                         Arc::clone(&store_arc),
                         app.handle().clone(),
                     );
+                    // Clean up images left in "pending" state from compose
+                    // dialogs that were abandoned (e.g. user quit mid-dialog).
+                    match store_arc.cleanup_pending_images() {
+                        Ok(0) => {}
+                        Ok(n) => log::info!("Cleaned up {n} pending image(s) from previous run"),
+                        Err(e) => log::warn!("Failed to clean up pending images: {e}"),
+                    }
                     (Mutex::new(Some(store_arc)), None)
                 }
                 store::DbCompatibility::NeedsReset { db_app_version } => {

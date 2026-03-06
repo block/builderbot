@@ -197,7 +197,8 @@
         projectId,
         file.name,
         file.type,
-        base64
+        base64,
+        true
       );
       replyImageIds = [...replyImageIds, image.id];
       const dataUrl = `data:${file.type};base64,${base64}`;
@@ -239,7 +240,7 @@
     const newIds: string[] = [];
     for (const path of imagePaths) {
       try {
-        const image = await createImage(bid, pid, path);
+        const image = await createImage(bid, pid, path, true);
         newIds.push(image.id);
       } catch (e) {
         console.error('Failed to create image from dropped file:', e);

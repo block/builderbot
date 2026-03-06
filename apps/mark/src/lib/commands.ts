@@ -819,9 +819,10 @@ export function refreshAllPrStatuses(projectId: string): Promise<void> {
 export function createImage(
   branchId: string | null,
   projectId: string,
-  filePath: string
+  filePath: string,
+  pending?: boolean
 ): Promise<Image> {
-  return invoke('create_image', { branchId, projectId, filePath });
+  return invoke('create_image', { branchId, projectId, filePath, pending });
 }
 
 /** Get the filesystem path for a stored image. */
@@ -850,7 +851,15 @@ export function createImageFromData(
   projectId: string,
   filename: string,
   mimeType: string,
-  data: string
+  data: string,
+  pending?: boolean
 ): Promise<Image> {
-  return invoke('create_image_from_data', { branchId, projectId, filename, mimeType, data });
+  return invoke('create_image_from_data', {
+    branchId,
+    projectId,
+    filename,
+    mimeType,
+    data,
+    pending,
+  });
 }

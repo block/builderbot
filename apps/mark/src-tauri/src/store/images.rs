@@ -128,6 +128,37 @@ impl Store {
         Ok(())
     }
 
+    /// Delete all images still marked as pending and remove their files from
+    /// disk.  Called once at app startup to clean up images from compose
+    /// sessions that were abandoned (e.g. the user quit the app mid-dialog).
+    pub fn cleanup_pending_images(&self) -> Result<usize, StoreError> {
+        use super::models::PENDING_SESSION_ID;
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, project_id, filename FROM images WHERE session_id = ?1")?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map(params![PENDING_SESSION_ID], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let count = rows.len();
+        for (id, project_id, filename) in &rows {
+            if let Ok(path) = image_file_path(project_id, id, filename) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+
+        conn.execute(
+            "DELETE FROM images WHERE session_id = ?1",
+            params![PENDING_SESSION_ID],
+        )?;
+
+        Ok(count)
+    }
+
     fn row_to_image(row: &rusqlite::Row) -> rusqlite::Result<Image> {
         Ok(Image {
             id: row.get(0)?,

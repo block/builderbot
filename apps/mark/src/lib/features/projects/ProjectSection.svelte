@@ -229,7 +229,7 @@
     }
     const base64 = btoa(chunks.join(''));
     try {
-      const image = await createImageFromData(null, project.id, file.name, file.type, base64);
+      const image = await createImageFromData(null, project.id, file.name, file.type, base64, true);
       imageIds = [...imageIds, image.id];
       const dataUrl = `data:${file.type};base64,${base64}`;
       imagePreviews = new Map(imagePreviews);
@@ -266,7 +266,7 @@
     const newIds: string[] = [];
     for (const path of imagePaths) {
       try {
-        const image = await createImage(null, pid, path);
+        const image = await createImage(null, pid, path, true);
         newIds.push(image.id);
       } catch (e) {
         console.error('Failed to create image from dropped file:', e);

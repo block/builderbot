@@ -698,19 +698,39 @@ pub struct Image {
     pub created_at: i64,
 }
 
+/// Sentinel value stored in `images.session_id` for images that are being
+/// composed in a modal but haven't been submitted yet.  The branch-timeline
+/// query (`WHERE session_id IS NULL`) naturally excludes these, so they never
+/// appear in the timeline.  When a session is actually started the runner
+/// overwrites this with the real session ID via `set_images_session_id`.
+/// On app startup any images still marked pending are cleaned up.
+pub const PENDING_SESSION_ID: &str = "pending";
+
 impl Image {
+    /// Create a new image record.
+    ///
+    /// When `pending` is true the image is created with
+    /// `session_id = "pending"` so it is invisible in the branch timeline
+    /// until a session is started (at which point the runner overwrites it
+    /// with the real session ID).  Pass `false` for images that should
+    /// appear in the timeline immediately (e.g. direct branch-card drops).
     pub fn new(
         branch_id: Option<&str>,
         project_id: &str,
         filename: &str,
         mime_type: &str,
         size_bytes: i64,
+        pending: bool,
     ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             branch_id: branch_id.map(|s| s.to_string()),
             project_id: project_id.to_string(),
-            session_id: None,
+            session_id: if pending {
+                Some(PENDING_SESSION_ID.to_string())
+            } else {
+                None
+            },
             filename: filename.to_string(),
             mime_type: mime_type.to_string(),
             size_bytes,

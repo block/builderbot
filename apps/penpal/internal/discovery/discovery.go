@@ -226,6 +226,7 @@ type Project struct {
 	Git           *GitInfo
 	FileCount     int
 	LastModified  time.Time
+	Worktrees     []Worktree // discovered worktrees for this project
 }
 
 // ThoughtsPath returns the thoughts source root if present, empty string otherwise.
@@ -362,6 +363,13 @@ func DiscoverWorkspace(workspacePath, workspaceName string) ([]Project, error) {
 		})
 	}
 
+	// Discover worktrees for each project
+	for i := range projects {
+		if projects[i].Name != "(root)" {
+			projects[i].Worktrees = DiscoverWorktrees(projects[i].Path)
+		}
+	}
+
 	sort.Slice(projects, func(i, j int) bool {
 		if projects[i].Name == "(root)" {
 			return true
@@ -400,6 +408,9 @@ func LoadStandaloneProject(projectPath string, cfg config.ProjectConfig) (Projec
 
 	// Add user-configured sources
 	project.Sources = append(project.Sources, SourceConfigsToFileSources(absPath, cfg.Sources)...)
+
+	// Discover worktrees
+	project.Worktrees = DiscoverWorktrees(absPath)
 
 	return project, nil
 }

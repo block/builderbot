@@ -323,13 +323,10 @@ a:hover { text-decoration: underline; }
   background: var(--badge-active-bg);
   color: var(--badge-active-color);
 }
-.sidebar-item .branch-info {
-  font-size: 0.8em;
-  color: var(--accent-success);
-  flex-shrink: 0;
-  margin-left: auto;
-}
-.sidebar-item .branch-dirty { color: var(--accent-danger); }
+.sidebar-item.worktree-item { flex-direction: column; align-items: flex-start; gap: 1px; }
+.sidebar-item.worktree-item .worktree-name { display: flex; align-items: center; gap: 6px; }
+.sidebar-item.worktree-item .branch-name { font-size: 0.85em; color: var(--accent-success); opacity: 0.8; }
+.sidebar-item.worktree-item .branch-dirty { color: var(--accent-danger); }
 .agent-dot {
   display: inline-block;
   width: 7px;
@@ -1179,9 +1176,15 @@ a:hover { text-decoration: underline; }
 }
 .project-card-name a { text-decoration: none; }
 .project-card-name a:hover { text-decoration: none; }
-.project-card-meta { font-size: 0.8em; color: var(--text-subtle); margin-bottom: 8px; }
+.project-card-meta { font-size: 0.8em; color: var(--text-subtle); margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 4px 8px; }
 .project-card-meta .branch { color: var(--accent-success); }
 .project-card-meta .dirty { color: var(--accent-danger); }
+.project-card-worktrees { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.worktree-card-item { display: flex; flex-direction: column; text-decoration: none; padding: 4px 8px; border-radius: 4px; background: var(--bg-surface-tertiary); min-width: 0; }
+.worktree-card-item:hover { background: var(--bg-surface-hover); }
+.worktree-card-name { font-size: 0.85em; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.worktree-card-branch { font-size: 0.78em; color: var(--accent-success); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.worktree-card-branch .dirty { color: var(--accent-danger); }
 .project-card .project-age { font-size: 0.8em; color: var(--text-faint); }
 .project-card-name .agent-dot {
   margin-left: 8px;

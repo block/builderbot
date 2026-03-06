@@ -17,15 +17,17 @@ import (
 // --- Input types for each tool ---
 
 type listThreadsInput struct {
-	Project string `json:"project" jsonschema:"Project name"`
-	Path    string `json:"path,omitempty" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
-	Status  string `json:"status,omitempty" jsonschema:"Filter by status: open or resolved"`
+	Project  string `json:"project" jsonschema:"Project name"`
+	Path     string `json:"path,omitempty" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
+	Status   string `json:"status,omitempty" jsonschema:"Filter by status: open or resolved"`
+	Worktree string `json:"worktree,omitempty" jsonschema:"Worktree name to scope comments to. Omit for main worktree."`
 }
 
 type readThreadInput struct {
 	Project  string `json:"project" jsonschema:"Project name"`
 	Path     string `json:"path" jsonschema:"File path relative to project root, e.g. thoughts/plans/foo.md"`
 	ThreadID string `json:"threadId" jsonschema:"Thread ID"`
+	Worktree string `json:"worktree,omitempty" jsonschema:"Worktree name to scope comments to. Omit for main worktree."`
 }
 
 type replyInput struct {
@@ -34,6 +36,7 @@ type replyInput struct {
 	ThreadID         string   `json:"threadId" jsonschema:"Thread ID to reply to"`
 	Body             string   `json:"body" jsonschema:"Reply message body"`
 	SuggestedReplies []string `json:"suggestedReplies,omitempty" jsonschema:"Up to 3 short reply suggestions shown as clickable pills to the human"`
+	Worktree         string   `json:"worktree,omitempty" jsonschema:"Worktree name to scope comments to. Omit for main worktree."`
 }
 
 type createThreadInput struct {
@@ -43,15 +46,18 @@ type createThreadInput struct {
 	Body             string   `json:"body" jsonschema:"Comment body"`
 	HeadingPath      string   `json:"headingPath,omitempty" jsonschema:"Heading path for context"`
 	SuggestedReplies []string `json:"suggestedReplies,omitempty" jsonschema:"Up to 3 short reply suggestions shown as clickable pills to the human"`
+	Worktree         string   `json:"worktree,omitempty" jsonschema:"Worktree name to scope comments to. Omit for main worktree."`
 }
 
 type filesInReviewInput struct {
-	Project string `json:"project" jsonschema:"Project name"`
+	Project  string `json:"project" jsonschema:"Project name"`
+	Worktree string `json:"worktree,omitempty" jsonschema:"Worktree name to scope comments to. Omit for main worktree."`
 }
 
 type waitForChangesInput struct {
 	Project  string `json:"project" jsonschema:"Project name"`
 	SinceSeq uint64 `json:"sinceSeq,omitempty" jsonschema:"Sequence number from previous wait call. Changes since this seq return immediately."`
+	Worktree string `json:"worktree,omitempty" jsonschema:"Worktree name to scope comments to. Omit for main worktree."`
 }
 
 type findProjectInput struct {
@@ -87,7 +93,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			if status == "" {
 				status = "open"
 			}
-			threads, err := store.ListThreadsByStatus(input.Project, status)
+			threads, err := store.ListThreadsByStatusForWorktree(input.Project, status, input.Worktree)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -108,7 +114,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 		// Load threads for a specific file
 		store.RecordHeartbeat(input.Project, input.Path)
-		fc, err := store.Load(input.Project, input.Path)
+		fc, err := store.LoadForWorktree(input.Project, input.Path, input.Worktree)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -137,7 +143,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 		store.RecordHeartbeat(input.Project, input.Path)
 
-		fc, err := store.Load(input.Project, input.Path)
+		fc, err := store.LoadForWorktree(input.Project, input.Path, input.Worktree)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -172,7 +178,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			Body:             input.Body,
 			SuggestedReplies: input.SuggestedReplies,
 		}
-		thread, err := store.AddComment(input.Project, input.Path, input.ThreadID, comment)
+		thread, err := store.AddCommentForWorktree(input.Project, input.Path, input.Worktree, input.ThreadID, comment)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -195,7 +201,17 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project not found: %s", input.Project)
 		}
 
-		fullPath := filepath.Join(project.Path, input.Path)
+		// Use worktree path if specified, otherwise project path
+		basePath := project.Path
+		if input.Worktree != "" {
+			wtPath := c.WorktreePath(input.Project, input.Worktree)
+			if wtPath == "" {
+				return nil, nil, fmt.Errorf("worktree not found: %s", input.Worktree)
+			}
+			basePath = wtPath
+		}
+
+		fullPath := filepath.Join(basePath, input.Path)
 		content, err := os.ReadFile(fullPath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("reading file: %w", err)
@@ -242,7 +258,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			SuggestedReplies: input.SuggestedReplies,
 		}
 
-		thread, err := store.CreateThread(input.Project, input.Path, anchor, comment)
+		thread, err := store.CreateThreadForWorktree(input.Project, input.Path, input.Worktree, anchor, comment)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -259,7 +275,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project is required")
 		}
 
-		files, err := store.ListFilesInReview(input.Project)
+		files, err := store.ListFilesInReviewForWorktree(input.Project, input.Worktree)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -280,7 +296,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				OpenThreads: f.OpenThreads,
 			}
 
-			fc, loadErr := store.Load(input.Project, f.FilePath)
+			fc, loadErr := store.LoadForWorktree(input.Project, f.FilePath, input.Worktree)
 			if loadErr == nil {
 				var oldestPending *comments.Thread
 				var oldestTime time.Time
@@ -332,7 +348,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		// Record heartbeat after waking
 		store.RecordHeartbeat(input.Project, "")
 
-		files, err := store.ListFilesInReview(input.Project)
+		files, err := store.ListFilesInReviewForWorktree(input.Project, input.Worktree)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -358,7 +374,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			}
 			var pending []pendingThread
 			for _, f := range files {
-				fc, loadErr := store.Load(input.Project, f.FilePath)
+				fc, loadErr := store.LoadForWorktree(input.Project, f.FilePath, input.Worktree)
 				if loadErr == nil {
 					for _, t := range fc.Threads {
 						if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
@@ -396,7 +412,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		// Refresh working timestamps for threads still awaiting a response
 		// so they survive across 30s wait cycles.
 		for _, f := range files {
-			fc, loadErr := store.Load(input.Project, f.FilePath)
+			fc, loadErr := store.LoadForWorktree(input.Project, f.FilePath, input.Worktree)
 			if loadErr == nil {
 				for _, t := range fc.Threads {
 					if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
@@ -418,13 +434,13 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// penpal_find_project
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_find_project",
-		Description: "Find the penpal project for a given directory. Returns the project name to use with other penpal tools. Call this first if you don't already know your project name.",
+		Description: "Find the penpal project for a given directory. Returns the project name and optional worktree to use with other penpal tools. Call this first if you don't already know your project name.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input findProjectInput) (*mcp.CallToolResult, any, error) {
 		if input.Directory == "" {
 			return nil, nil, fmt.Errorf("directory is required")
 		}
 
-		project := c.FindProjectByPath(input.Directory)
+		project, worktree := c.FindProjectByPathWithWorktree(input.Directory)
 		if project == nil {
 			return nil, nil, fmt.Errorf("no project found for directory: %s", input.Directory)
 		}
@@ -432,6 +448,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		result := map[string]string{
 			"project": project.QualifiedName(),
 			"path":    project.Path,
+		}
+		if worktree != "" {
+			result["worktree"] = worktree
 		}
 		res, err := textResult(result)
 		return res, nil, err

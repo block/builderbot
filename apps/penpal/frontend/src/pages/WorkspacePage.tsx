@@ -153,11 +153,27 @@ export default function WorkspacePage() {
             </div>
           </div>
         </div>
-        {p.branch && (
+        {p.worktrees && p.worktrees.length > 1 ? (
+          <div className="project-card-worktrees">
+            {p.worktrees.map((wt) => (
+              <Link
+                key={wt.name}
+                to={wt.isMain
+                  ? `/project/${p.qualifiedName}`
+                  : `/project/${p.qualifiedName}@${wt.name}`
+                }
+                className="worktree-card-item"
+              >
+                <span className="worktree-card-name">{wt.isMain ? p.name : wt.name}</span>
+                {wt.branch && <span className="worktree-card-branch">{wt.branch}{wt.isMain && p.dirty && <span className="dirty">*</span>}</span>}
+              </Link>
+            ))}
+          </div>
+        ) : p.branch ? (
           <div className="project-card-meta">
             <span className="branch">{p.branch}{p.dirty && <span className="dirty">*</span>}</span>
           </div>
-        )}
+        ) : null}
       </div>
     );
   }

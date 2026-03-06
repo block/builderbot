@@ -27,9 +27,10 @@ const (
 
 // Event represents a change notification
 type Event struct {
-	Type    EventType `json:"type"`
-	Project string    `json:"project,omitempty"`
-	Path    string    `json:"path,omitempty"`
+	Type     EventType `json:"type"`
+	Project  string    `json:"project,omitempty"`
+	Path     string    `json:"path,omitempty"`
+	Worktree string    `json:"worktree,omitempty"`
 }
 
 // Watcher watches for filesystem changes and updates the cache
@@ -123,6 +124,48 @@ func (w *Watcher) watchProject(p discovery.Project) {
 	if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
 		if err := w.watchDir(commentsDir); err != nil {
 			log.Printf("Warning: could not watch %s: %v", commentsDir, err)
+		}
+	}
+
+	// Watch worktree directories for source and comment changes
+	for _, wt := range p.Worktrees {
+		if wt.IsMain {
+			continue
+		}
+		// Watch worktree source directories (thoughts/, etc.)
+		for _, st := range discovery.AllSourceTypes() {
+			if st.AutoDetectDir == "" {
+				continue
+			}
+			wtSourceDir := filepath.Join(wt.Path, st.AutoDetectDir)
+			if info, err := os.Stat(wtSourceDir); err == nil && info.IsDir() {
+				if err := w.watchDir(wtSourceDir); err != nil {
+					log.Printf("Warning: could not watch worktree source %s: %v", wtSourceDir, err)
+				}
+			}
+		}
+		// Watch remapped manual sources (sources with RootPath but no AutoDetectDir)
+		for _, src := range p.Sources {
+			if src.RootPath == "" {
+				continue
+			}
+			rel, err := filepath.Rel(p.Path, src.RootPath)
+			if err != nil {
+				continue
+			}
+			wtSourceDir := filepath.Join(wt.Path, rel)
+			if info, err := os.Stat(wtSourceDir); err == nil && info.IsDir() {
+				if err := w.watchDir(wtSourceDir); err != nil {
+					log.Printf("Warning: could not watch worktree source %s: %v", wtSourceDir, err)
+				}
+			}
+		}
+		// Watch worktree comments directory
+		wtCommentsDir := filepath.Join(wt.Path, ".penpal", "comments")
+		if info, err := os.Stat(wtCommentsDir); err == nil && info.IsDir() {
+			if err := w.watchDir(wtCommentsDir); err != nil {
+				log.Printf("Warning: could not watch worktree comments %s: %v", wtCommentsDir, err)
+			}
 		}
 	}
 }
@@ -313,7 +356,8 @@ notAutoDetect:
 }
 
 // findProjectForPath finds which project a path belongs to by checking
-// all source roots and .penpal directories. Returns the qualified name.
+// all source roots, .penpal directories, and worktree directories.
+// Returns the qualified name.
 func (w *Watcher) findProjectForPath(path string) string {
 	for _, p := range w.cache.Projects() {
 		// Check all source roots
@@ -325,6 +369,15 @@ func (w *Watcher) findProjectForPath(path string) string {
 		// Check .penpal directory
 		if strings.HasPrefix(path, p.Path+"/.penpal/") {
 			return p.QualifiedName()
+		}
+		// Check worktree directories
+		for _, wt := range p.Worktrees {
+			if wt.IsMain {
+				continue
+			}
+			if strings.HasPrefix(path, wt.Path+"/") {
+				return p.QualifiedName()
+			}
 		}
 	}
 	return ""

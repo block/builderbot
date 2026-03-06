@@ -10,6 +10,7 @@ import FindBar from './FindBar';
 import InstallToolsModal from './InstallToolsModal';
 import type { Heading } from './TableOfContents';
 import type { APIProject, SSEEvent } from '../types';
+import { parseProjectWorktree } from '../utils/worktree';
 
 export interface LayoutContext {
   setHeadings: (headings: Heading[]) => void;
@@ -252,12 +253,30 @@ export default function Layout() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [goBack, goForward, canGoBack, canGoForward]);
 
-  // Detect project-mode view: /project/:qn or /file/:qn/*
+  // Detect project-mode view: /project/:qn[@worktree] or /file/:qn[@worktree]/*
   // QN may contain slashes (e.g. "Development/birdseye"), so match against known projects
   const pathAfterPrefix = location.pathname.match(/^\/(project|file)\/(.+)/)?.[2] || '';
-  const activeProject = pathAfterPrefix
-    ? projects.find((p) => pathAfterPrefix === p.qualifiedName || pathAfterPrefix.startsWith(p.qualifiedName + '/'))
-    : null;
+  const { activeProject, activeWorktree } = (() => {
+    if (!pathAfterPrefix) return { activeProject: null, activeWorktree: '' };
+    // Strip @worktree suffix before matching against project QNs
+    const sorted = [...projects].sort((a, b) => b.qualifiedName.length - a.qualifiedName.length);
+    for (const p of sorted) {
+      // Check for exact match or prefix match (with / or @ following)
+      if (
+        pathAfterPrefix === p.qualifiedName ||
+        pathAfterPrefix.startsWith(p.qualifiedName + '/') ||
+        pathAfterPrefix.startsWith(p.qualifiedName + '@')
+      ) {
+        const rest = pathAfterPrefix.slice(p.qualifiedName.length);
+        const { worktree } = parseProjectWorktree(p.qualifiedName + rest.split('/')[0]);
+        return { activeProject: p, activeWorktree: worktree };
+      }
+    }
+    // Fallback: try parsing with @
+    const parsed = parseProjectWorktree(pathAfterPrefix.split('/').slice(0, 2).join('/'));
+    const fallbackProject = projects.find((p) => p.qualifiedName === parsed.project) || null;
+    return { activeProject: fallbackProject, activeWorktree: parsed.worktree };
+  })();
   // Show project-mode sidebar as soon as URL matches, even before projects load
   const isProjectMode = !!pathAfterPrefix;
 
@@ -468,30 +487,64 @@ export default function Layout() {
                   .some((p) => p.agentConnected) && <span className="agent-dot" />}
               </NavLink>
             )}
-            {activeProject && (
+            {activeProject && activeProject.worktrees && activeProject.worktrees.length > 1 ? (
+              <>
+                {activeProject.worktrees.map((wt) => {
+                  const isActive = wt.isMain ? !activeWorktree : activeWorktree === wt.name;
+                  const url = wt.isMain
+                    ? `/project/${activeProject.qualifiedName}`
+                    : `/project/${activeProject.qualifiedName}@${wt.name}`;
+                  return (
+                    <NavLink
+                      key={wt.name}
+                      to={url}
+                      className={`sidebar-item subitem worktree-item${isActive ? ' active' : ''}`}
+                    >
+                      <span className="worktree-name">
+                        {wt.isMain ? activeProject.name : wt.name}
+                        {wt.isMain && activeProject.badges.map((b) => (
+                          <span
+                            key={b.text}
+                            className="source-badge"
+                            style={{ '--badge-bg': b.bg, '--badge-color': b.color, '--badge-active-bg': b.activeBg || b.bg, '--badge-active-color': b.activeColor || b.color } as React.CSSProperties}
+                          >
+                            {b.text}
+                          </span>
+                        ))}
+                      </span>
+                      {wt.branch && (
+                        <span className="branch-name">{wt.branch}</span>
+                      )}
+                    </NavLink>
+                  );
+                })}
+              </>
+            ) : activeProject ? (
               <NavLink
                 to={`/project/${activeProject.qualifiedName}`}
-                className="sidebar-item subitem active"
+                className="sidebar-item subitem worktree-item active"
               >
-                {activeProject.name}
-                {activeProject.badges.map((b) => (
-                  <span
-                    key={b.text}
-                    className="source-badge"
-                    style={{ '--badge-bg': b.bg, '--badge-color': b.color, '--badge-active-bg': b.activeBg || b.bg, '--badge-active-color': b.activeColor || b.color } as React.CSSProperties}
-                  >
-                    {b.text}
-                  </span>
-                ))}
-                {activeProject.agentConnected && <span className="agent-dot" />}
+                <span className="worktree-name">
+                  {activeProject.name}
+                  {activeProject.badges.map((b) => (
+                    <span
+                      key={b.text}
+                      className="source-badge"
+                      style={{ '--badge-bg': b.bg, '--badge-color': b.color, '--badge-active-bg': b.activeBg || b.bg, '--badge-active-color': b.activeColor || b.color } as React.CSSProperties}
+                    >
+                      {b.text}
+                    </span>
+                  ))}
+                  {activeProject.agentConnected && <span className="agent-dot" />}
+                </span>
                 {activeProject.branch && (
-                  <span className="branch-info">
+                  <span className="branch-name">
                     {activeProject.branch}
                     {activeProject.dirty && <span className="branch-dirty">*</span>}
                   </span>
                 )}
               </NavLink>
-            )}
+            ) : null}
           </>
         ) : (
           <>

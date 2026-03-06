@@ -15,10 +15,15 @@ import (
 // the specified text selection. The first comment is added to the thread.
 // IDs and timestamps are generated automatically.
 func (s *Store) CreateThread(projectName, filePath string, anchor Anchor, comment Comment) (*Thread, error) {
+	return s.CreateThreadForWorktree(projectName, filePath, "", anchor, comment)
+}
+
+// CreateThreadForWorktree creates a thread scoped to a specific worktree.
+func (s *Store) CreateThreadForWorktree(projectName, filePath, worktree string, anchor Anchor, comment Comment) (*Thread, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fc, err := s.Load(projectName, filePath)
+	fc, err := s.LoadForWorktree(projectName, filePath, worktree)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +42,7 @@ func (s *Store) CreateThread(projectName, filePath string, anchor Anchor, commen
 
 	fc.Threads = append(fc.Threads, thread)
 
-	if err := s.Save(projectName, filePath, fc); err != nil {
+	if err := s.SaveForWorktree(projectName, filePath, worktree, fc); err != nil {
 		return nil, err
 	}
 
@@ -50,10 +55,15 @@ func (s *Store) CreateThread(projectName, filePath string, anchor Anchor, commen
 // AddComment appends a comment to an existing thread. The comment ID and
 // timestamp are generated automatically.
 func (s *Store) AddComment(projectName, filePath, threadID string, comment Comment) (*Thread, error) {
+	return s.AddCommentForWorktree(projectName, filePath, "", threadID, comment)
+}
+
+// AddCommentForWorktree appends a comment scoped to a specific worktree.
+func (s *Store) AddCommentForWorktree(projectName, filePath, worktree, threadID string, comment Comment) (*Thread, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fc, err := s.Load(projectName, filePath)
+	fc, err := s.LoadForWorktree(projectName, filePath, worktree)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +77,7 @@ func (s *Store) AddComment(projectName, filePath, threadID string, comment Comme
 			}
 			fc.Threads[i].Comments = append(fc.Threads[i].Comments, comment)
 
-			if err := s.Save(projectName, filePath, fc); err != nil {
+			if err := s.SaveForWorktree(projectName, filePath, worktree, fc); err != nil {
 				return nil, err
 			}
 			if s.activity != nil {
@@ -83,10 +93,15 @@ func (s *Store) AddComment(projectName, filePath, threadID string, comment Comme
 
 // ResolveThread marks a thread as resolved.
 func (s *Store) ResolveThread(projectName, filePath, threadID, resolvedBy string) error {
+	return s.ResolveThreadForWorktree(projectName, filePath, "", threadID, resolvedBy)
+}
+
+// ResolveThreadForWorktree marks a thread as resolved, scoped to a worktree.
+func (s *Store) ResolveThreadForWorktree(projectName, filePath, worktree, threadID, resolvedBy string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fc, err := s.Load(projectName, filePath)
+	fc, err := s.LoadForWorktree(projectName, filePath, worktree)
 	if err != nil {
 		return err
 	}
@@ -96,7 +111,7 @@ func (s *Store) ResolveThread(projectName, filePath, threadID, resolvedBy string
 			fc.Threads[i].Status = "resolved"
 			fc.Threads[i].ResolvedAt = time.Now()
 			fc.Threads[i].ResolvedBy = resolvedBy
-			if err := s.Save(projectName, filePath, fc); err != nil {
+			if err := s.SaveForWorktree(projectName, filePath, worktree, fc); err != nil {
 				return err
 			}
 			if s.activity != nil {
@@ -111,10 +126,15 @@ func (s *Store) ResolveThread(projectName, filePath, threadID, resolvedBy string
 
 // ReopenThread sets a resolved thread back to open.
 func (s *Store) ReopenThread(projectName, filePath, threadID string) error {
+	return s.ReopenThreadForWorktree(projectName, filePath, "", threadID)
+}
+
+// ReopenThreadForWorktree sets a resolved thread back to open, scoped to a worktree.
+func (s *Store) ReopenThreadForWorktree(projectName, filePath, worktree, threadID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	fc, err := s.Load(projectName, filePath)
+	fc, err := s.LoadForWorktree(projectName, filePath, worktree)
 	if err != nil {
 		return err
 	}
@@ -124,7 +144,7 @@ func (s *Store) ReopenThread(projectName, filePath, threadID string) error {
 			fc.Threads[i].Status = "open"
 			fc.Threads[i].ResolvedAt = time.Time{}
 			fc.Threads[i].ResolvedBy = ""
-			return s.Save(projectName, filePath, fc)
+			return s.SaveForWorktree(projectName, filePath, worktree, fc)
 		}
 	}
 
@@ -142,12 +162,26 @@ func (s *Store) ListOpenThreads(projectName string) ([]ThreadWithFile, error) {
 // project and returns threads matching the given status filter.
 // An empty status returns all threads regardless of status.
 func (s *Store) ListThreadsByStatus(projectName, status string) ([]ThreadWithFile, error) {
+	return s.ListThreadsByStatusForWorktree(projectName, status, "")
+}
+
+// ListThreadsByStatusForWorktree walks the comments directory scoped to a worktree.
+func (s *Store) ListThreadsByStatusForWorktree(projectName, status, worktree string) ([]ThreadWithFile, error) {
 	project := s.cache.FindProject(projectName)
 	if project == nil {
 		return nil, fmt.Errorf("project not found: %s", projectName)
 	}
 
-	commentsDir := filepath.Join(project.Path, ".penpal", "comments")
+	basePath := project.Path
+	if worktree != "" {
+		wtPath := s.cache.WorktreePath(projectName, worktree)
+		if wtPath == "" {
+			return nil, fmt.Errorf("worktree not found: %s", worktree)
+		}
+		basePath = wtPath
+	}
+
+	commentsDir := filepath.Join(basePath, ".penpal", "comments")
 	var results []ThreadWithFile
 
 	err := filepath.Walk(commentsDir, func(path string, info os.FileInfo, err error) error {
@@ -215,12 +249,28 @@ func (s *Store) HasPendingHumanComments(projectName string) bool {
 // project and returns all files that have at least one open comment thread.
 // Returned file paths are relative to the project root (e.g., "thoughts/shared/plans/foo.md").
 func (s *Store) ListFilesInReview(projectName string) ([]FileInReview, error) {
+	return s.ListFilesInReviewForWorktree(projectName, "")
+}
+
+// ListFilesInReviewForWorktree lists files in review scoped to a worktree.
+func (s *Store) ListFilesInReviewForWorktree(projectName, worktree string) ([]FileInReview, error) {
 	project := s.cache.FindProject(projectName)
 	if project == nil {
 		return nil, fmt.Errorf("project not found: %s", projectName)
 	}
 
-	commentsDir := filepath.Join(project.Path, ".penpal", "comments")
+	basePath := project.Path
+	if worktree != "" {
+		wtPath := s.cache.WorktreePath(projectName, worktree)
+		if wtPath == "" {
+			return nil, fmt.Errorf("worktree not found: %s", worktree)
+		}
+		basePath = wtPath
+	}
+
+	commentsDir := filepath.Join(basePath, ".penpal", "comments")
+	// For source file existence checks, use the worktree path if available
+	sourceBasePath := basePath
 	var results []FileInReview
 
 	err := filepath.Walk(commentsDir, func(path string, info os.FileInfo, err error) error {
@@ -251,7 +301,7 @@ func (s *Store) ListFilesInReview(projectName string) ([]FileInReview, error) {
 		filePath := strings.TrimSuffix(rel, ".json")
 
 		// Skip sidecars whose source file no longer exists on disk.
-		sourceFile := filepath.Join(project.Path, filePath)
+		sourceFile := filepath.Join(sourceBasePath, filePath)
 		if _, err := os.Stat(sourceFile); os.IsNotExist(err) {
 			return nil
 		}

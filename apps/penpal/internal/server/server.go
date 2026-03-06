@@ -32,6 +32,8 @@ type Server struct {
 	mcpHandler  http.Handler
 	mux         *http.ServeMux
 	loadOnce    sync.Once
+	readyCh     chan struct{} // closed when initial population is complete
+	readyOnce   sync.Once
 	frontendDir string // if set, serve React SPA from this directory at /app/
 	cfg         *config.Config
 	cfgPath     string
@@ -59,6 +61,7 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 		activity:    act,
 		mcpHandler:  mcpHandler,
 		mux:         http.NewServeMux(),
+		readyCh:     make(chan struct{}),
 		frontendDir: frontendDir,
 		cfg:         cfg,
 		cfgPath:     cfgPath,
@@ -192,11 +195,20 @@ func (s *Server) ensureLoaded() {
 	})
 }
 
+// handleReady blocks until the server's initial population is complete.
+// Tauri polls this endpoint before showing the webview.
+func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
+	<-s.readyCh
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"ready":true}`))
+}
+
 // populateProjects scans file lists and fills in git info in the background.
 func (s *Server) populateProjects() {
 	s.cache.RefreshAllProjects()
 	s.seedRecentActivity()
 	log.Printf("Background file scan complete")
+	s.readyOnce.Do(func() { close(s.readyCh) }) // signal that essential data is ready
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 
 	// Notify any open project pages that their file lists are now ready.
@@ -282,6 +294,8 @@ func (s *Server) routes() {
 	// Publish to Blockcell
 	s.mux.HandleFunc("/api/publish", s.handlePublish)
 	s.mux.HandleFunc("/api/publish-state", s.handlePublishState)
+	// Readiness check — blocks until initial population is complete
+	s.mux.HandleFunc("/api/ready", s.handleReady)
 	// Install tools (CLI symlink + Claude Code plugin)
 	s.mux.HandleFunc("/api/install-tools", s.handleInstallTools)
 	// React SPA at /app/ (served from frontend/dist/ when it exists)
@@ -599,22 +613,30 @@ type APIBadge struct {
 	Bg    string `json:"bg"`
 }
 
+type APIWorktree struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+	IsMain bool   `json:"isMain"`
+}
+
 type APIProject struct {
-	Name           string     `json:"name"`
-	QualifiedName  string     `json:"qualifiedName"`
-	Workspace      string     `json:"workspace"`
-	WorkspacePath  string     `json:"workspacePath,omitempty"`
-	ProjectPath    string     `json:"projectPath"`
-	Origin         string     `json:"origin"`
-	Badges         []APIBadge `json:"badges"`
-	Branch         string     `json:"branch,omitempty"`
-	Dirty          bool       `json:"dirty,omitempty"`
-	FileCount      int        `json:"fileCount"`
-	LastModified   string     `json:"lastModified"`
-	AgentConnected bool       `json:"agentConnected,omitempty"`
-	AgentRunning   bool       `json:"agentRunning,omitempty"`
-	Age            string     `json:"age,omitempty"`
-	ReviewCount    int        `json:"reviewCount,omitempty"`
+	Name           string        `json:"name"`
+	QualifiedName  string        `json:"qualifiedName"`
+	Workspace      string        `json:"workspace"`
+	WorkspacePath  string        `json:"workspacePath,omitempty"`
+	ProjectPath    string        `json:"projectPath"`
+	Origin         string        `json:"origin"`
+	Badges         []APIBadge    `json:"badges"`
+	Branch         string        `json:"branch,omitempty"`
+	Dirty          bool          `json:"dirty,omitempty"`
+	FileCount      int           `json:"fileCount"`
+	LastModified   string        `json:"lastModified"`
+	AgentConnected bool          `json:"agentConnected,omitempty"`
+	AgentRunning   bool          `json:"agentRunning,omitempty"`
+	Age            string        `json:"age,omitempty"`
+	ReviewCount    int           `json:"reviewCount,omitempty"`
+	Worktrees      []APIWorktree `json:"worktrees,omitempty"`
 }
 
 func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
@@ -658,6 +680,19 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 		if p.Git != nil {
 			result[i].Branch = p.Git.Branch
 			result[i].Dirty = p.Git.Dirty
+		}
+		// Include worktrees
+		if len(p.Worktrees) > 0 {
+			apiWTs := make([]APIWorktree, len(p.Worktrees))
+			for j, wt := range p.Worktrees {
+				apiWTs[j] = APIWorktree{
+					Name:   wt.Name,
+					Path:   wt.Path,
+					Branch: wt.Branch,
+					IsMain: wt.IsMain,
+				}
+			}
+			result[i].Worktrees = apiWTs
 		}
 		// Count files in review for this project
 		if reviews, err := s.comments.ListFilesInReview(qn); err == nil {
@@ -712,10 +747,21 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ensure file titles are populated before serving
-	s.cache.EnrichTitles(qualifiedName)
+	worktree := r.URL.Query().Get("worktree")
 
-	cachedFiles := s.cache.ProjectFiles(qualifiedName)
+	var cachedFiles []cache.FileInfo
+	if worktree != "" {
+		wtPath := s.cache.WorktreePath(qualifiedName, worktree)
+		if wtPath == "" {
+			json.NewEncoder(w).Encode([]APIFileGroupView{})
+			return
+		}
+		cachedFiles = cache.ScanProjectSourcesForWorktree(project, wtPath)
+	} else {
+		// Ensure file titles are populated before serving
+		s.cache.EnrichTitles(qualifiedName)
+		cachedFiles = s.cache.ProjectFiles(qualifiedName)
+	}
 	fileGroups := buildFileGroups(project, cachedFiles)
 
 	result := make([]APIFileGroupView, 0, len(fileGroups))

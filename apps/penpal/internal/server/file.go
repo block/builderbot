@@ -12,6 +12,7 @@ import (
 func (s *Server) handleRawFile(w http.ResponseWriter, r *http.Request) {
 	qualifiedName := r.URL.Query().Get("project")
 	filePath := r.URL.Query().Get("path")
+	worktree := r.URL.Query().Get("worktree")
 	if qualifiedName == "" || filePath == "" {
 		http.Error(w, "missing project or path", http.StatusBadRequest)
 		return
@@ -23,11 +24,22 @@ func (s *Server) handleRawFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath := filepath.Join(project.Path, filePath)
+	// Use worktree path if specified
+	basePath := project.Path
+	if worktree != "" {
+		wtPath := s.cache.WorktreePath(qualifiedName, worktree)
+		if wtPath == "" {
+			http.Error(w, "worktree not found", http.StatusNotFound)
+			return
+		}
+		basePath = wtPath
+	}
 
-	// Prevent path traversal: resolved path must stay within the project root.
+	fullPath := filepath.Join(basePath, filePath)
+
+	// Prevent path traversal: resolved path must stay within the base path.
 	resolved, err := filepath.Abs(fullPath)
-	if err != nil || !isSubpath(project.Path, resolved) {
+	if err != nil || !isSubpath(basePath, resolved) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}

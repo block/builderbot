@@ -5,6 +5,7 @@ import { useSSE } from '../hooks/useSSE';
 import type { LayoutContext } from '../components/Layout';
 import type { APIFileGroupView, APIFile, APIFileInReview, AgentStatus, SSEEvent } from '../types';
 import FileTypeBadge from '../components/FileTypeBadge';
+import { parseProjectWorktree } from '../utils/worktree';
 
 function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
   let timer: ReturnType<typeof setTimeout>;
@@ -26,7 +27,8 @@ function WorkingIndicator() {
 export default function ProjectPage() {
   const location = useLocation();
   const { setSidebarExtra } = useOutletContext<LayoutContext>();
-  const qn = location.pathname.replace(/^\/project\//, '');
+  const qnRaw = location.pathname.replace(/^\/project\//, '');
+  const { project: qn, worktree } = parseProjectWorktree(qnRaw);
   const [groups, setGroups] = useState<APIFileGroupView[]>([]);
   const [reviewData, setReviewData] = useState<Record<string, APIFileInReview>>({});
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
@@ -44,17 +46,17 @@ export default function ProjectPage() {
 
   const refreshFiles = useCallback(() => {
     if (!qn) return;
-    api.getProjectFiles(qn).then(setGroups).catch(() => {});
-  }, [qn]);
+    api.getProjectFiles(qn, worktree || undefined).then(setGroups).catch(() => {});
+  }, [qn, worktree]);
 
   const refreshReviews = useCallback(() => {
     if (!qn) return;
-    api.getReviews(qn).then((reviews) => {
+    api.getReviews(qn, worktree || undefined).then((reviews) => {
       const map: Record<string, APIFileInReview> = {};
       reviews.forEach((r) => { map[r.filePath] = r; });
       setReviewData(map);
     }).catch(() => {});
-  }, [qn]);
+  }, [qn, worktree]);
 
   const refreshAgent = useCallback(() => {
     if (!qn) return;
@@ -368,7 +370,7 @@ export default function ProjectPage() {
           )}
           {review && (review.workingThreads ?? 0) > 0 && <WorkingIndicator />}
           <span className="file-name">
-            <Link to={`/file/${qn}/${file.path}`} onClick={(e) => e.stopPropagation()}>
+            <Link to={`/file/${qnRaw}/${file.path}`} onClick={(e) => e.stopPropagation()}>
               {file.title || file.name}
             </Link>
             <span className="file-subtitle">{file.title ? file.name : '\u00A0'}</span>
@@ -453,7 +455,7 @@ export default function ProjectPage() {
                     <span className={`review-badge${reviewData[path].agentActive ? ' agent-active' : ''}`}>in review</span>
                     {(reviewData[path].workingThreads ?? 0) > 0 && <WorkingIndicator />}
                     <span className="file-name">
-                      <Link to={`/file/${qn}/${path}`}>{title || name}</Link>
+                      <Link to={`/file/${qnRaw}/${path}`}>{title || name}</Link>
                       <span className="file-subtitle">{title ? name : '\u00A0'}</span>
                     </span>
                   </div>

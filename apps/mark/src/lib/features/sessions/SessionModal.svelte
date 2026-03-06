@@ -239,6 +239,7 @@
     const unsub = untrack(() =>
       subscribeDragDrop({
         element: el,
+        blocking: true,
         onDragOver: (over) => {
           dragOver = over;
         },

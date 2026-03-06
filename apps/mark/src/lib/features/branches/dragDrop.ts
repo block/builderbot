@@ -20,6 +20,12 @@ export type DragDropSubscription = {
   onDragOver: (over: boolean) => void;
   /** Called when files are dropped on this card. */
   onDrop: (paths: string[]) => void;
+  /**
+   * When true, this subscriber blocks all earlier subscribers from receiving
+   * events — even at positions outside this element's bounds. Use this for
+   * modal dialogs whose backdrop overlay covers the entire viewport.
+   */
+  blocking?: boolean;
 };
 
 let subscribers: DragDropSubscription[] = [];
@@ -48,6 +54,11 @@ function handleEvent(type: string, x: number, y: number, paths?: string[]) {
         found = subscribers[i];
         break;
       }
+      // A blocking subscriber (e.g. a modal with a backdrop) prevents events
+      // from reaching any earlier subscribers, even outside its own bounds.
+      if (subscribers[i].blocking) {
+        break;
+      }
     }
 
     if (found !== currentHover) {
@@ -66,6 +77,9 @@ function handleEvent(type: string, x: number, y: number, paths?: string[]) {
     for (let i = subscribers.length - 1; i >= 0; i--) {
       if (isPositionOverElement(subscribers[i].element, x, y)) {
         subscribers[i].onDrop(paths ?? []);
+        break;
+      }
+      if (subscribers[i].blocking) {
         break;
       }
     }

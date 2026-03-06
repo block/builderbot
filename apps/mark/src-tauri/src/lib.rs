@@ -1170,7 +1170,6 @@ fn mime_type_for_extension(ext: &str) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
-        "svg" => "image/svg+xml",
         _ => "application/octet-stream",
     }
 }

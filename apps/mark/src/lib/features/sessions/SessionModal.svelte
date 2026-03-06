@@ -49,6 +49,7 @@
     cancelSession,
     createImage,
     createImageFromData,
+    deleteImage,
     getImageData,
     getSession,
     getSessionMessages,
@@ -161,7 +162,8 @@
             messageImageCache.set(id, dataUrl);
           })
           .catch(() => {
-            // Image may have been deleted — ignore
+            messageImageCache = new Map(messageImageCache);
+            messageImageCache.set(id, '');
           });
       }
     }
@@ -223,6 +225,9 @@
     replyImageIds = replyImageIds.filter((id) => id !== imageId);
     imagePreviews = new Map(imagePreviews);
     imagePreviews.delete(imageId);
+    deleteImage(imageId).catch((err) => {
+      console.error('Failed to delete image:', err);
+    });
   }
 
   // Drag-and-drop images (via Tauri native drag-drop events)

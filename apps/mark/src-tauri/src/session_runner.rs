@@ -64,6 +64,10 @@ pub struct SessionStatusEvent {
     pub branch_id: Option<String>,
     pub project_id: Option<String>,
     pub session_type: Option<String>,
+    /// When `true`, the session belongs to an automatically triggered review
+    /// (not user-initiated). The frontend uses this to suppress UI for auto reviews.
+    #[serde(default)]
+    pub is_auto_review: bool,
 }
 
 // =============================================================================
@@ -926,6 +930,7 @@ fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Op
         branch_id: None,
         project_id: None,
         session_type: None,
+        is_auto_review: false,
     };
     if let Err(e) = app_handle.emit("session-status-changed", &event) {
         log::warn!("Failed to emit session-status-changed: {e}");
@@ -950,6 +955,7 @@ pub fn emit_session_running(
         branch_id: Some(branch_id.to_string()),
         project_id: Some(project_id.to_string()),
         session_type: Some(session_type.to_string()),
+        is_auto_review: false,
     };
     if let Err(e) = app_handle.emit("session-status-changed", &event) {
         log::warn!("Failed to emit session-status-changed (running): {e}");

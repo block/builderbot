@@ -217,6 +217,7 @@ pub fn resume_session(
             branch_id: None,
             project_id: None,
             session_type: None,
+            is_auto_review: false,
         },
     );
 
@@ -267,6 +268,7 @@ pub fn cancel_session(
                         branch_id: None,
                         project_id: None,
                         session_type: None,
+                        is_auto_review: false,
                     },
                 );
             }
@@ -669,6 +671,226 @@ pub async fn start_branch_session(
         session_id: session.id,
         artifact_id,
     })
+}
+
+// =============================================================================
+// Auto review commands
+// =============================================================================
+
+/// Start an automatic review for a branch.
+///
+/// Creates a review with `is_auto = true`, starts a session, and emits
+/// `session-status-changed` with `isAutoReview: true` so the frontend
+/// knows not to display it in the UI.
+///
+/// Returns the session ID and review ID.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_auto_review(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+) -> Result<BranchSessionResponse, String> {
+    let store = get_store(&store)?;
+
+    // Resolve branch → project
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let is_remote = branch.workspace_name.is_some();
+
+    // Resolve working directory and branch context.
+    let (working_dir, branch_context) = if is_remote {
+        let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
+            .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let base_branch = branch.base_branch.clone();
+        let store_for_context = Arc::clone(&store);
+        let branch_id_for_context = branch_id.clone();
+        let project_id_for_context = branch.project_id.clone();
+        let ctx = tauri::async_runtime::spawn_blocking(move || {
+            build_remote_branch_context(
+                &workspace_name,
+                &base_branch,
+                &store_for_context,
+                &branch_id_for_context,
+                &project_id_for_context,
+            )
+        })
+        .await
+        .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
+        (fallback_dir, ctx)
+    } else {
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+        let mut worktree_path = PathBuf::from(&workdir.path);
+        let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
+            store
+                .get_project_repo(repo_id)
+                .ok()
+                .flatten()
+                .and_then(|repo| repo.subpath)
+        } else {
+            project.subpath.clone()
+        };
+        if let Some(ref subpath) = effective_subpath {
+            worktree_path = worktree_path.join(subpath);
+        }
+
+        let ctx = build_branch_context(
+            &worktree_path,
+            &branch.base_branch,
+            &store,
+            &branch_id,
+            &branch.project_id,
+        );
+        (worktree_path, ctx)
+    };
+
+    // Get the current tip SHA for the review anchor
+    let tip_sha = if is_remote {
+        let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+        run_blox_blocking(move || blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"]))
+            .await
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "unknown".to_string())
+    } else {
+        git::get_head_sha(&working_dir).map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
+    };
+
+    // Build the full prompt (reuse Review prompt)
+    let prompt = "Review the latest changes on this branch.".to_string();
+    let project_information = build_project_context(&store, &project, &branch);
+    let full_prompt = build_full_prompt(
+        &prompt,
+        &project_information,
+        &branch_context,
+        &BranchSessionType::Review,
+    );
+
+    // Create the session
+    let mut session = store::Session::new_running(&full_prompt, &working_dir);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
+    }
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    // Create auto review
+    let review = store::Review::new(&branch_id, &tip_sha, store::ReviewScope::Branch)
+        .with_session(&session.id)
+        .with_auto();
+    store.create_review(&review).map_err(|e| e.to_string())?;
+
+    // Emit session-status-changed with isAutoReview: true
+    let _ = app_handle.emit(
+        "session-status-changed",
+        session_runner::SessionStatusEvent {
+            session_id: session.id.clone(),
+            status: "running".to_string(),
+            error_message: None,
+            branch_id: Some(branch_id.clone()),
+            project_id: Some(branch.project_id.clone()),
+            session_type: Some("review".to_string()),
+            is_auto_review: true,
+        },
+    );
+
+    // Resolve the remote working dir for remote branches
+    let remote_working_dir = if is_remote {
+        let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let store_for_resolve = Arc::clone(&store);
+        let branch_for_resolve = branch.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            crate::branches::resolve_branch_workspace_subpath(
+                &store_for_resolve,
+                &branch_for_resolve,
+            )
+            .ok()
+            .flatten()
+            .and_then(|subpath| {
+                crate::branches::resolve_workspace_repo_path(&ws_name, &subpath).ok()
+            })
+        })
+        .await
+        {
+            Ok(Some(path)) => Some(PathBuf::from(path)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    session_runner::start_session(
+        SessionConfig {
+            session_id: session.id.clone(),
+            prompt: full_prompt,
+            working_dir,
+            agent_session_id: None,
+            pre_head_sha: None,
+            provider,
+            workspace_name: branch.workspace_name.clone(),
+            extra_env: vec![],
+            mcp_project_id: None,
+            action_executor: None,
+            action_registry: None,
+            remote_working_dir,
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(BranchSessionResponse {
+        session_id: session.id,
+        artifact_id: review.id,
+    })
+}
+
+/// Find an auto review created after a given commit timestamp.
+#[tauri::command(rename_all = "camelCase")]
+pub fn find_auto_review_since_commit(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    since_commit_created_at: i64,
+) -> Result<Option<store::Review>, String> {
+    get_store(&store)?
+        .find_auto_review_since_commit(&branch_id, since_commit_created_at)
+        .map_err(|e| e.to_string())
+}
+
+/// Update the `is_auto` flag on a review.
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_review_auto(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    review_id: String,
+    is_auto: bool,
+) -> Result<(), String> {
+    get_store(&store)?
+        .set_review_auto(&review_id, is_auto)
+        .map_err(|e| e.to_string())
+}
+
+/// Find the most recent auto review for a branch.
+#[tauri::command(rename_all = "camelCase")]
+pub fn find_latest_auto_review(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<Option<store::Review>, String> {
+    get_store(&store)?
+        .find_latest_auto_review(&branch_id)
+        .map_err(|e| e.to_string())
 }
 
 // =============================================================================

@@ -505,54 +505,56 @@
       onchange={handleImageFileSelect}
     />
     <div class="prompt-input-wrapper" class:drag-over={dragOver} bind:this={promptWrapperEl}>
-      <button class="attach-btn" onclick={openImagePicker} title="Attach image">
-        <Paperclip size={14} />
-      </button>
-      <textarea
-        class="prompt-input"
-        placeholder="Ask about this project…"
-        bind:value={promptText}
-        bind:this={promptTextarea}
-        onkeydown={handleKeydown}
-        oninput={(e) => autoResize(e.currentTarget)}
-        onpaste={handleImagePaste}
-        rows={1}
-      ></textarea>
-      <div class="prompt-actions">
-        <AgentSelector projectId={project.id} />
-        <button
-          class="send-button"
-          onclick={handleSubmitPrompt}
-          disabled={!canSubmitPrompt}
-          title={sendButtonTitle}
-        >
-          <Send size={14} />
+      <div class="prompt-input-row">
+        <button class="attach-btn" onclick={openImagePicker} title="Attach image">
+          <Paperclip size={14} />
         </button>
+        <textarea
+          class="prompt-input"
+          placeholder="Ask about this project…"
+          bind:value={promptText}
+          bind:this={promptTextarea}
+          onkeydown={handleKeydown}
+          oninput={(e) => autoResize(e.currentTarget)}
+          onpaste={handleImagePaste}
+          rows={1}
+        ></textarea>
+        <div class="prompt-actions">
+          <AgentSelector projectId={project.id} />
+          <button
+            class="send-button"
+            onclick={handleSubmitPrompt}
+            disabled={!canSubmitPrompt}
+            title={sendButtonTitle}
+          >
+            <Send size={14} />
+          </button>
+        </div>
       </div>
+      {#if imageIds.length > 0}
+        <div class="reply-images">
+          {#each imageIds as imageId}
+            <div class="reply-image-thumb">
+              {#if imagePreviews.get(imageId)}
+                <img src={imagePreviews.get(imageId)} alt="attached" />
+              {:else}
+                <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
+              {/if}
+              <button
+                class="reply-image-remove"
+                onclick={() => removeImage(imageId)}
+                title="Remove image"
+              >
+                <X size={10} />
+              </button>
+            </div>
+          {/each}
+          <button class="reply-image-add" onclick={openImagePicker} title="Add image">
+            <Plus size={16} />
+          </button>
+        </div>
+      {/if}
     </div>
-    {#if imageIds.length > 0}
-      <div class="reply-images">
-        {#each imageIds as imageId}
-          <div class="reply-image-thumb">
-            {#if imagePreviews.get(imageId)}
-              <img src={imagePreviews.get(imageId)} alt="attached" />
-            {:else}
-              <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
-            {/if}
-            <button
-              class="reply-image-remove"
-              onclick={() => removeImage(imageId)}
-              title="Remove image"
-            >
-              <X size={10} />
-            </button>
-          </div>
-        {/each}
-        <button class="reply-image-add" onclick={openImagePicker} title="Add image">
-          <Plus size={16} />
-        </button>
-      </div>
-    {/if}
   </div>
 
   <!-- Project notes -->
@@ -840,15 +842,20 @@
 
   .prompt-input-wrapper {
     display: flex;
-    align-items: flex-end;
-    gap: 8px;
-    padding: 6px 8px 6px 8px;
+    flex-direction: column;
     border: 1px solid var(--border-muted);
     border-radius: 8px;
     background-color: var(--bg-primary);
     transition:
       border-color 0.15s ease,
       background-color 0.15s ease;
+  }
+
+  .prompt-input-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    padding: 6px 8px;
   }
 
   .prompt-input-wrapper:focus-within {
@@ -942,7 +949,7 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    padding: 8px 0 0;
+    padding: 0 8px 8px;
   }
 
   .reply-image-thumb {
@@ -1087,7 +1094,7 @@
   }
 
   @media (max-width: 720px) {
-    .prompt-input-wrapper {
+    .prompt-input-row {
       padding: 6px;
     }
 

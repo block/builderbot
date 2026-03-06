@@ -119,7 +119,7 @@
     const content = selectedText || getFullOutputText();
     if (!content) return;
     try {
-      const title = selectedText ? `${actionName} output (selection)` : `${actionName} output`;
+      const title = `${actionName} log`;
       await createNote(branchId, title, content);
       saveState = 'saved';
       if (saveTimeout) clearTimeout(saveTimeout);
@@ -423,7 +423,7 @@
           class:saved={saveState === 'saved'}
           onclick={handleSaveAsNote}
           disabled={saveState === 'saved'}
-          title={selectedText ? 'Save selected text as a note' : 'Save output as a note'}
+          title={selectedText ? 'Save selected text as a log note' : 'Save log as a note'}
         >
           {#if saveState === 'saved'}
             <span class="save-note-label">
@@ -433,12 +433,12 @@
           {:else if selectedText}
             <span class="save-note-label">
               <StickyNote size={14} />
-              <span>Save selection as note</span>
+              <span>Save as log</span>
             </span>
           {:else}
             <span class="save-note-label">
               <StickyNote size={14} />
-              <span>Save as note</span>
+              <span>Save as log</span>
             </span>
           {/if}
         </button>

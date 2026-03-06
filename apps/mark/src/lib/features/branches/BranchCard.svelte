@@ -51,6 +51,7 @@
     Branch,
     BranchTimeline as BranchTimelineData,
     BranchSessionType,
+    SessionStatusPayload,
     WorkspaceStatus,
   } from '../../types';
   import * as commands from '../../api/commands';
@@ -379,6 +380,10 @@
   let pendingSessionItems = $state<PendingSessionItem[]>([]);
   let isSessionStartPending = $derived(pendingSessionItems.some((item) => !item.sessionId));
 
+  // Auto review state — tracks a background review started after each commit
+  let autoReviewSessionId = $state<string | null>(null);
+  let autoReviewId = $state<string | null>(null);
+
   // Session modal (opened after starting a branch session, or from timeline)
   let openSessionId = $state<string | null>(null);
 
@@ -412,13 +417,28 @@
   $effect(() => {
     const branchId = branch.id;
 
-    listen<{
-      sessionId: string;
-      status: string;
-      branchId?: string;
-    }>('session-status-changed', (event) => {
-      const { sessionId: eventSessionId, status, branchId: eventBranchId } = event.payload;
+    listen<SessionStatusPayload>('session-status-changed', (event) => {
+      const {
+        sessionId: eventSessionId,
+        status,
+        branchId: eventBranchId,
+        isAutoReview,
+        sessionType,
+      } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        // If this is the auto review session completing, just clear tracking
+        // — don't trigger pending-item removal, timeline refresh, or unread markers.
+        if (eventSessionId === autoReviewSessionId) {
+          autoReviewSessionId = null;
+          return;
+        }
+
+        // Skip normal completion handling for any auto review session
+        // that isn't tracked locally (e.g. from another branch card instance).
+        if (isAutoReview) {
+          return;
+        }
+
         pendingSessionItems = pendingSessionItems.filter(
           (item) => item.sessionId !== eventSessionId
         );
@@ -431,10 +451,26 @@
         if (eventSessionId === pushSessionId) {
           handlePushSessionComplete(status);
         }
+
+        // Trigger auto review when a commit session completes successfully
+        if (status === 'completed' && sessionType === 'commit' && eventBranchId === branchId) {
+          commands
+            .startAutoReview(branchId)
+            .then(({ sessionId, reviewId }) => {
+              autoReviewSessionId = sessionId;
+              autoReviewId = reviewId;
+            })
+            .catch((e) => {
+              console.error('[BranchCard] Failed to start auto review:', e);
+            });
+        }
       } else if (status === 'running' && eventBranchId === branchId) {
         // An MCP-initiated session just started in this branch — refresh the
         // timeline so the pending note/commit stub appears immediately.
-        loadTimeline();
+        // Skip refresh for auto review sessions — they shouldn't appear until adopted.
+        if (!isAutoReview) {
+          loadTimeline();
+        }
       }
     }).then((unlisten) => {
       unlistenStatus = unlisten;
@@ -1213,11 +1249,70 @@
     }
   }
 
+  /** Cancel and delete the in-flight auto review (if any). */
+  function cancelAutoReview() {
+    if (autoReviewSessionId) {
+      commands.cancelSession(autoReviewSessionId).catch(() => {});
+    }
+    if (autoReviewId) {
+      commands.deleteReview(autoReviewId).catch(() => {});
+    }
+    autoReviewSessionId = null;
+    autoReviewId = null;
+  }
+
+  /**
+   * Try to adopt an existing auto review instead of starting a new review session.
+   * Returns true if an auto review was adopted, false otherwise.
+   */
+  async function tryAdoptAutoReview(): Promise<boolean> {
+    // Find the most recent commit's timestamp from timeline data
+    const commits = timeline?.commits ?? [];
+    const lastCommit =
+      commits.length > 0
+        ? commits.reduce((latest, c) => (c.timestamp > latest.timestamp ? c : latest))
+        : null;
+
+    if (!lastCommit) return false;
+
+    try {
+      const review = await commands.findAutoReviewSinceCommit(branch.id, lastCommit.timestamp);
+      if (!review) return false;
+
+      // Promote the auto review to a user review
+      await commands.setReviewAuto(review.id, false);
+
+      // If the auto review session is still running, register it so it now
+      // contributes to spinners.
+      if (autoReviewSessionId) {
+        sessionRegistry.register(autoReviewSessionId, branch.projectId, 'review', branch.id);
+        projectStateStore.addRunningSession(branch.projectId, autoReviewSessionId);
+      }
+
+      // Clear auto review tracking since it's now a user review
+      autoReviewSessionId = null;
+      autoReviewId = null;
+
+      // Refresh timeline so the adopted review appears
+      loadTimeline();
+      return true;
+    } catch (e) {
+      console.error('[BranchCard] Failed to adopt auto review:', e);
+      return false;
+    }
+  }
+
   async function startBranchSessionWithPendingItem(
     mode: BranchSessionType,
     prompt: string,
     imageIds: string[] = []
   ) {
+    // Cancel any active auto review when the user starts a non-review session,
+    // or a review session with custom (non-empty) prompt text.
+    if (autoReviewSessionId && mode !== 'review') {
+      cancelAutoReview();
+    }
+
     const pendingKey = `session-start-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     pendingSessionItems = [
       ...pendingSessionItems,
@@ -1280,11 +1375,16 @@
   }
 
   async function startReviewSessionImmediately() {
-    const reviewPrompt = 'Review the code changes on this branch.';
     newSessionMode = 'review';
     showNewSession = false;
     draftPrompt = '';
     draftImageIds = [];
+
+    // Try to adopt an existing auto review first
+    const adopted = await tryAdoptAutoReview();
+    if (adopted) return;
+
+    const reviewPrompt = 'Review the code changes on this branch.';
     await startBranchSessionWithPendingItem('review', reviewPrompt);
   }
 
@@ -1299,7 +1399,7 @@
     showNewSession = false;
   }
 
-  function handleNewSessionSubmit(data: {
+  async function handleNewSessionSubmit(data: {
     prompt: string;
     mode: BranchSessionType;
     imageIds: string[];
@@ -1308,6 +1408,21 @@
     showNewSession = false;
     draftPrompt = '';
     draftImageIds = [];
+
+    // When the user starts a review with empty prompt, try adopting an auto review
+    if (data.mode === 'review' && !data.prompt.trim()) {
+      const adopted = await tryAdoptAutoReview();
+      if (adopted) return;
+      // No auto review found — fall through with default prompt
+      void startBranchSessionWithPendingItem(data.mode, 'Review the code changes on this branch.', data.imageIds);
+      return;
+    }
+
+    // For review sessions with custom text, cancel the auto review
+    if (data.mode === 'review' && autoReviewSessionId) {
+      cancelAutoReview();
+    }
+
     void startBranchSessionWithPendingItem(data.mode, data.prompt, data.imageIds);
   }
 

@@ -880,6 +880,7 @@
   />
 {/if}
 
+
 <style>
   .branch-card {
     display: flex;

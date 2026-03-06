@@ -20,11 +20,20 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { X, AlertCircle, CircleStop, CheckCircle, XCircle } from 'lucide-svelte';
+  import {
+    X,
+    AlertCircle,
+    CircleStop,
+    CheckCircle,
+    XCircle,
+    Check,
+    StickyNote,
+  } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import Convert from 'ansi-to-html';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import { createNote } from '../../commands';
   import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
   import {
     getActionOutputBuffer,
@@ -36,13 +45,21 @@
 
   interface Props {
     executionId: string;
+    branchId: string;
     actionName: string;
     isStopping?: boolean;
     onClose: () => void;
     onRemove?: (executionId: string) => void;
   }
 
-  let { executionId, actionName, isStopping = false, onClose, onRemove }: Props = $props();
+  let {
+    executionId,
+    branchId,
+    actionName,
+    isStopping = false,
+    onClose,
+    onRemove,
+  }: Props = $props();
 
   // =========================================================================
   // State
@@ -77,6 +94,43 @@
 
   let isRunning = $derived(status === 'running');
   let isStoppingDerived = $derived(stoppingExecutions.has(executionId));
+
+  // Save-as-note state
+  let selectedText = $state('');
+  let saveState = $state<'idle' | 'saved'>('idle');
+  let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  function handleSelectionChange() {
+    const sel = document.getSelection();
+    if (sel && outputEl?.contains(sel.anchorNode)) {
+      selectedText = sel.toString().trim();
+    } else {
+      selectedText = '';
+    }
+  }
+
+  /** Get plain text from all output lines. */
+  function getFullOutputText(): string {
+    return displayLines.map((l) => l.text).join('\n');
+  }
+
+  async function handleSaveAsNote() {
+    if (saveState === 'saved') return;
+    const content = selectedText || getFullOutputText();
+    if (!content) return;
+    try {
+      const title = selectedText ? `${actionName} output (selection)` : `${actionName} output`;
+      await createNote(branchId, title, content);
+      saveState = 'saved';
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(() => {
+        saveState = 'idle';
+      }, 2000);
+    } catch (e: any) {
+      error = e?.message || 'Failed to save note';
+      console.error('Failed to save note:', e);
+    }
+  }
 
   /**
    * Process raw output chunks into terminal lines, handling carriage returns.
@@ -140,6 +194,7 @@
   // =========================================================================
 
   onMount(async () => {
+    document.addEventListener('selectionchange', handleSelectionChange);
     await loadBufferedOutput();
     await setupListeners();
     // Scroll to bottom after initial load
@@ -147,6 +202,8 @@
   });
 
   onDestroy(() => {
+    document.removeEventListener('selectionchange', handleSelectionChange);
+    if (saveTimeout) clearTimeout(saveTimeout);
     cleanup();
   });
 
@@ -361,6 +418,30 @@
         {/if}
       </div>
       <div class="header-actions">
+        <button
+          class="save-note-btn"
+          class:saved={saveState === 'saved'}
+          onclick={handleSaveAsNote}
+          disabled={saveState === 'saved'}
+          title={selectedText ? 'Save selected text as a note' : 'Save output as a note'}
+        >
+          {#if saveState === 'saved'}
+            <span class="save-note-label">
+              <Check size={14} />
+              <span>Saved</span>
+            </span>
+          {:else if selectedText}
+            <span class="save-note-label">
+              <StickyNote size={14} />
+              <span>Save selection as note</span>
+            </span>
+          {:else}
+            <span class="save-note-label">
+              <StickyNote size={14} />
+              <span>Save as note</span>
+            </span>
+          {/if}
+        </button>
         {#if isRunning}
           {@const isCurrentlyStopping = isStopping || isStoppingDerived}
           <button
@@ -613,5 +694,39 @@
 
   .output-line.stderr {
     color: #9ca3af;
+  }
+
+  .save-note-btn {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    overflow: hidden;
+  }
+
+  .save-note-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--border-focus);
+  }
+
+  .save-note-btn.saved {
+    background: rgba(34, 197, 94, 0.1);
+    color: #22c55e;
+    border-color: rgba(34, 197, 94, 0.2);
+    cursor: default;
+  }
+
+  .save-note-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
   }
 </style>

@@ -587,6 +587,10 @@ pub struct SessionMessage {
     pub role: MessageRole,
     pub content: String,
     pub created_at: i64,
+    /// Image IDs attached to this message (user messages only).
+    /// Stored as a JSON array string in the DB, deserialized to a Vec here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_ids: Vec<String>,
 }
 
 // =============================================================================

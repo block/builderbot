@@ -115,11 +115,15 @@
   let canAttachImages = $derived(!!branchId && !!projectId);
   let replyImageIds = $state<string[]>([]);
   let imagePreviews = $state<Map<string, string>>(new Map());
-  let imageFileInput: HTMLInputElement;
+  let imageFileInput = $state<HTMLInputElement>();
 
   // Drag-and-drop state
   let dragOver = $state(false);
   let modalElement: HTMLDivElement | undefined = $state();
+
+  // Shared image data cache for both reply previews and message history images.
+  // Maps image ID → data URL. Loaded lazily when needed.
+  let messageImageCache = $state<Map<string, string>>(new Map());
 
   // Load previews for attached images
   $effect(() => {
@@ -129,6 +133,30 @@
           imagePreviews = new Map(imagePreviews);
           imagePreviews.set(id, dataUrl);
         });
+      }
+    }
+  });
+
+  // Load image data for images referenced in message history
+  $effect(() => {
+    const allImageIds = new Set<string>();
+    for (const msg of messages) {
+      if (msg.imageIds) {
+        for (const id of msg.imageIds) {
+          allImageIds.add(id);
+        }
+      }
+    }
+    for (const id of allImageIds) {
+      if (!messageImageCache.has(id)) {
+        getImageData(id)
+          .then((dataUrl) => {
+            messageImageCache = new Map(messageImageCache);
+            messageImageCache.set(id, dataUrl);
+          })
+          .catch(() => {
+            // Image may have been deleted — ignore
+          });
       }
     }
   });
@@ -849,10 +877,29 @@
                 </div>
               {/if}
               <!-- User prompt bubble -->
-              {#if userText.trim()}
+              {#if userText.trim() || (group.message.imageIds && group.message.imageIds.length > 0)}
                 <div class="message-row human-message">
                   <div class="human-bubble">
-                    {userText}
+                    {#if userText.trim()}
+                      <span class="human-text">{userText}</span>
+                    {/if}
+                    {#if group.message.imageIds && group.message.imageIds.length > 0}
+                      <div class="message-images">
+                        {#each group.message.imageIds as imgId}
+                          {#if messageImageCache.get(imgId)}
+                            <img
+                              class="message-image-thumb"
+                              src={messageImageCache.get(imgId)}
+                              alt="attachment"
+                            />
+                          {:else}
+                            <div class="message-image-placeholder">
+                              <ImagePlus size={16} />
+                            </div>
+                          {/if}
+                        {/each}
+                      </div>
+                    {/if}
                     <button
                       class="copy-btn inline-copy"
                       onclick={() => copyContent(group.message.content, group.message.id)}
@@ -1276,6 +1323,10 @@
     white-space: pre-wrap;
   }
 
+  .human-text {
+    display: block;
+  }
+
   .human-bubble .inline-copy {
     position: absolute;
     top: 6px;
@@ -1286,6 +1337,35 @@
 
   .human-bubble:hover .inline-copy {
     opacity: 1;
+  }
+
+  /* Images attached to user messages */
+  .message-images {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+  }
+
+  .message-image-thumb {
+    width: 120px;
+    max-height: 120px;
+    object-fit: cover;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+    cursor: pointer;
+  }
+
+  .message-image-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-hover);
+    color: var(--text-faint);
   }
 
   /* Context blocks (action/branch-history tags rendered as tool-call-style cards) */

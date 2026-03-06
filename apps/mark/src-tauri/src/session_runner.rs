@@ -195,8 +195,14 @@ pub fn start_session(
     };
 
     // Persist the user message right away so it's visible immediately.
+    // Include image IDs so the frontend can display them alongside the text.
     store
-        .add_session_message(&config.session_id, MessageRole::User, &config.prompt)
+        .add_session_message_with_images(
+            &config.session_id,
+            MessageRole::User,
+            &config.prompt,
+            &config.image_ids,
+        )
         .map_err(|e| format!("Failed to persist user message: {e}"))?;
 
     let cancel_token = registry.register(&config.session_id);

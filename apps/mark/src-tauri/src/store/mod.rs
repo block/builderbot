@@ -63,7 +63,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 19;
+pub const SCHEMA_VERSION: i64 = 20;
 
 /// Oldest schema version we can migrate forward from.
 ///
@@ -341,7 +341,8 @@ impl Store {
                 session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                 role            TEXT NOT NULL,
                 content         TEXT NOT NULL,
-                created_at      INTEGER NOT NULL
+                created_at      INTEGER NOT NULL,
+                image_ids       TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_session_messages_session
                 ON session_messages(session_id);
@@ -655,6 +656,13 @@ impl Store {
                 END;",
             )?;
         }
+
+        // v19 → v20: add image_ids column to session_messages so user
+        // messages can record which images were attached.
+        // Always attempt (not gated on db_version) so it self-heals if a
+        // previous launch stamped v20 but the ALTER TABLE was swallowed.
+        conn.execute_batch("ALTER TABLE session_messages ADD COLUMN image_ids TEXT DEFAULT NULL;")
+            .ok(); // Ignore "duplicate column" on fresh DBs or re-runs
 
         // Stamp the current schema version so future opens skip applied migrations.
         conn.execute(

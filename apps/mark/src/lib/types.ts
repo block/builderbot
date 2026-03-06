@@ -221,6 +221,8 @@ export interface SessionMessage {
   role: MessageRole;
   content: string;
   createdAt: number;
+  /** Image IDs attached to this message (user messages only). */
+  imageIds?: string[];
 }
 
 // =============================================================================

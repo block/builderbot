@@ -2379,11 +2379,6 @@
     background-color: var(--bg-primary);
     border-radius: 8px;
     border: 1px solid var(--border-subtle);
-    transition: border-color 0.15s ease;
-  }
-
-  .branch-card:hover:not(.deleting) {
-    border-color: var(--border-muted);
   }
 
   .branch-card.deleting {

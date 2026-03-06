@@ -34,10 +34,17 @@
   $effect(() => {
     for (const id of imageIds) {
       if (!previews.has(id)) {
-        getImageData(id).then((dataUrl) => {
-          previews = new Map(previews);
-          previews.set(id, dataUrl);
-        });
+        getImageData(id)
+          .then((dataUrl) => {
+            previews = new Map(previews);
+            previews.set(id, dataUrl);
+          })
+          .catch((err) => {
+            console.error('Failed to load image preview:', err);
+            // Insert sentinel to prevent infinite retries
+            previews = new Map(previews);
+            previews.set(id, '');
+          });
       }
     }
   });
@@ -59,12 +66,12 @@
   async function addImageFile(file: File) {
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
-    // Convert to base64
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    // Convert to base64 using chunked approach to avoid O(n²) string concatenation
+    const chunks = [];
+    for (let i = 0; i < bytes.length; i += 8192) {
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
     }
-    const base64 = btoa(binary);
+    const base64 = btoa(chunks.join(''));
 
     try {
       const image = await createImageFromData(branchId, projectId, file.name, file.type, base64);
@@ -79,6 +86,7 @@
   }
 
   function handlePaste(e: ClipboardEvent) {
+    if (e.defaultPrevented) return;
     const items = e.clipboardData?.items;
     if (!items || disabled) return;
     for (const item of Array.from(items)) {
@@ -94,6 +102,9 @@
     onImageIdsChange(imageIds.filter((id) => id !== imageId));
     previews = new Map(previews);
     previews.delete(imageId);
+    deleteImage(imageId).catch((err) => {
+      console.error('Failed to delete image from backend:', err);
+    });
   }
 </script>
 

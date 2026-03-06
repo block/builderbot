@@ -111,8 +111,8 @@
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
 
-  // Image attachment state (only available when branch context is provided)
-  let canAttachImages = $derived(!!branchId && !!projectId);
+  // Image attachment state (available when project context is provided; branchId is optional)
+  let canAttachImages = $derived(!!projectId);
   let replyImageIds = $state<string[]>([]);
   let imagePreviews = $state<Map<string, string>>(new Map());
   let imageFileInput = $state<HTMLInputElement>();
@@ -175,7 +175,7 @@
   }
 
   async function addImageFile(file: File) {
-    if (!branchId || !projectId) return;
+    if (!projectId) return;
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     let binary = '';
@@ -184,7 +184,13 @@
     }
     const base64 = btoa(binary);
     try {
-      const image = await createImageFromData(branchId, projectId, file.name, file.type, base64);
+      const image = await createImageFromData(
+        branchId ?? null,
+        projectId,
+        file.name,
+        file.type,
+        base64
+      );
       replyImageIds = [...replyImageIds, image.id];
       const dataUrl = `data:${file.type};base64,${base64}`;
       imagePreviews = new Map(imagePreviews);
@@ -215,10 +221,10 @@
 
   // Drag-and-drop images (via Tauri native drag-drop events)
   function handleFileDrop(paths: string[]) {
-    if (!branchId || !projectId) return;
+    if (!projectId) return;
     const imagePaths = paths.filter(isImageFile);
     if (imagePaths.length === 0) return;
-    const bid = branchId;
+    const bid = branchId ?? null;
     const pid = projectId;
     Promise.all(
       imagePaths.map(async (filePath) => {
@@ -1105,14 +1111,16 @@
             class="file-input-hidden"
             onchange={handleImageFileSelect}
           />
-          <button
-            class="attach-btn"
-            onclick={openImagePicker}
-            disabled={isLive}
-            title="Attach image"
-          >
-            <Paperclip size={16} />
-          </button>
+          {#if replyImageIds.length === 0}
+            <button
+              class="attach-btn"
+              onclick={openImagePicker}
+              disabled={isLive}
+              title="Attach image"
+            >
+              <Paperclip size={16} />
+            </button>
+          {/if}
         {/if}
         <textarea
           bind:this={inputEl}

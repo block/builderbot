@@ -623,6 +623,7 @@
 {#if openSessionId}
   <SessionModal
     sessionId={openSessionId}
+    projectId={project.id}
     onClose={() => {
       openSessionId = null;
       loadProjectNotes();

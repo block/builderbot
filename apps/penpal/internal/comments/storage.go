@@ -15,11 +15,28 @@ import (
 //
 // filePath is relative to the project root (e.g., "thoughts/shared/plans/foo.md").
 func (s *Store) commentsPath(projectName, filePath string) (string, error) {
+	return s.commentsPathForWorktree(projectName, filePath, "")
+}
+
+// commentsPathForWorktree returns the absolute path to the sidecar JSON file,
+// scoped to a specific worktree. When worktree is empty, uses the main project path.
+// When worktree is specified, uses the worktree's filesystem path.
+func (s *Store) commentsPathForWorktree(projectName, filePath, worktree string) (string, error) {
 	project := s.cache.FindProject(projectName)
 	if project == nil {
 		return "", fmt.Errorf("project not found: %s", projectName)
 	}
-	commentsDir := filepath.Join(project.Path, ".penpal", "comments")
+
+	basePath := project.Path
+	if worktree != "" {
+		wtPath := s.cache.WorktreePath(projectName, worktree)
+		if wtPath == "" {
+			return "", fmt.Errorf("worktree not found: %s", worktree)
+		}
+		basePath = wtPath
+	}
+
+	commentsDir := filepath.Join(basePath, ".penpal", "comments")
 	full := filepath.Join(commentsDir, filePath+".json")
 
 	// Prevent path traversal: resolved path must stay within the comments dir.
@@ -39,7 +56,12 @@ func (s *Store) commentsPath(projectName, filePath string) (string, error) {
 // Load reads and parses the sidecar JSON for the given project and file.
 // If the file does not exist, it returns an empty FileComments (not an error).
 func (s *Store) Load(projectName, filePath string) (*FileComments, error) {
-	p, err := s.commentsPath(projectName, filePath)
+	return s.LoadForWorktree(projectName, filePath, "")
+}
+
+// LoadForWorktree reads and parses the sidecar JSON scoped to a worktree.
+func (s *Store) LoadForWorktree(projectName, filePath, worktree string) (*FileComments, error) {
+	p, err := s.commentsPathForWorktree(projectName, filePath, worktree)
 	if err != nil {
 		return nil, err
 	}
@@ -76,8 +98,13 @@ func migrateInReplyTo(fc *FileComments) {
 // It writes to a temporary file first, then renames it into place.
 // Directories are created as needed.
 func (s *Store) Save(projectName, filePath string, fc *FileComments) error {
+	return s.SaveForWorktree(projectName, filePath, "", fc)
+}
+
+// SaveForWorktree writes comments scoped to a worktree.
+func (s *Store) SaveForWorktree(projectName, filePath, worktree string, fc *FileComments) error {
 	migrateInReplyTo(fc)
-	p, err := s.commentsPath(projectName, filePath)
+	p, err := s.commentsPathForWorktree(projectName, filePath, worktree)
 	if err != nil {
 		return err
 	}

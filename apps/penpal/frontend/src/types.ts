@@ -8,6 +8,13 @@ export interface APIBadge {
   activeColor?: string;
 }
 
+export interface APIWorktree {
+  name: string;
+  path: string;
+  branch: string;
+  isMain: boolean;
+}
+
 export interface APIProject {
   name: string;
   qualifiedName: string;
@@ -24,6 +31,7 @@ export interface APIProject {
   agentRunning?: boolean;
   age?: string;
   reviewCount?: number;
+  worktrees?: APIWorktree[];
 }
 
 export interface APIFile {
@@ -165,6 +173,7 @@ export interface SSEEvent {
   type: 'projects' | 'files' | 'comments' | 'agents' | 'navigate';
   project?: string;
   path?: string;
+  worktree?: string;
 }
 
 // Search types

@@ -65,7 +65,7 @@ type APIFileInReview struct {
 	WorkingThreads int    `json:"workingThreads,omitempty"`
 }
 
-// handleAPIListReviews handles GET /api/reviews?project=X[&agent=true].
+// handleAPIListReviews handles GET /api/reviews?project=X[&agent=true][&worktree=Z].
 func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -78,9 +78,10 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	worktree := r.URL.Query().Get("worktree")
 	isAgent := r.URL.Query().Get("agent") == "true"
 
-	files, err := s.comments.ListFilesInReview(projectName)
+	files, err := s.comments.ListFilesInReviewForWorktree(projectName, worktree)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -119,7 +120,7 @@ type threadResponse struct {
 	AgentWorking bool `json:"agentWorking,omitempty"`
 }
 
-// handleListThreads handles GET /api/threads?project=X&path=Y[&status=open][&agent=true].
+// handleListThreads handles GET /api/threads?project=X&path=Y[&status=open][&agent=true][&worktree=Z].
 // Paths are project-relative (e.g., "thoughts/plans/foo.md").
 func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 	projectName := r.URL.Query().Get("project")
@@ -130,6 +131,7 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 
 	filePath := r.URL.Query().Get("path")
 	status := r.URL.Query().Get("status")
+	worktree := r.URL.Query().Get("worktree")
 	isAgent := r.URL.Query().Get("agent") == "true"
 
 	// Record heartbeat when an agent polls for threads
@@ -139,7 +141,7 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 
 	// When path is omitted, return all open threads across the project
 	if filePath == "" {
-		threads, err := s.comments.ListOpenThreads(projectName)
+		threads, err := s.comments.ListThreadsByStatusForWorktree(projectName, "open", worktree)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -152,11 +154,12 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	threads, err := s.comments.LoadThreads(projectName, filePath)
+	fc, err := s.comments.LoadForWorktree(projectName, filePath, worktree)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	threads := fc.Threads
 
 	// Filter by status if requested
 	if status != "" {
@@ -200,6 +203,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		Role             string          `json:"role"`
 		Body             string          `json:"body"`
 		SuggestedReplies []string        `json:"suggestedReplies,omitempty"`
+		Worktree         string          `json:"worktree,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -218,7 +222,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		SuggestedReplies: req.SuggestedReplies,
 	}
 
-	thread, err := s.comments.CreateThread(req.Project, req.Path, req.Anchor, comment)
+	thread, err := s.comments.CreateThreadForWorktree(req.Project, req.Path, req.Worktree, req.Anchor, comment)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -240,6 +244,7 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request, thread
 		Role             string   `json:"role"`
 		Body             string   `json:"body"`
 		SuggestedReplies []string `json:"suggestedReplies,omitempty"`
+		Worktree         string   `json:"worktree,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -258,7 +263,7 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request, thread
 		SuggestedReplies: req.SuggestedReplies,
 	}
 
-	thread, err := s.comments.AddComment(req.Project, req.Path, threadID, comment)
+	thread, err := s.comments.AddCommentForWorktree(req.Project, req.Path, req.Worktree, threadID, comment)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -282,6 +287,7 @@ func (s *Server) handleUpdateThread(w http.ResponseWriter, r *http.Request, thre
 		Path       string `json:"path"`
 		Status     string `json:"status"`
 		ResolvedBy string `json:"resolvedBy"`
+		Worktree   string `json:"worktree,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -296,9 +302,9 @@ func (s *Server) handleUpdateThread(w http.ResponseWriter, r *http.Request, thre
 	var err error
 	switch req.Status {
 	case "resolved":
-		err = s.comments.ResolveThread(req.Project, req.Path, threadID, req.ResolvedBy)
+		err = s.comments.ResolveThreadForWorktree(req.Project, req.Path, req.Worktree, threadID, req.ResolvedBy)
 	case "open":
-		err = s.comments.ReopenThread(req.Project, req.Path, threadID)
+		err = s.comments.ReopenThreadForWorktree(req.Project, req.Path, req.Worktree, threadID)
 	default:
 		http.Error(w, "invalid status: must be 'resolved' or 'open'", http.StatusBadRequest)
 		return

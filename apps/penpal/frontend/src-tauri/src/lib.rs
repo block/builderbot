@@ -50,11 +50,24 @@ pub fn run() {
             // Store the child so we can kill it on quit
             *app.state::<Sidecar>().0.lock().unwrap() = Some(child);
 
-            // Wait for server to be ready
+            // Wait for server to be fully ready (projects discovered and files scanned).
+            // The /api/ready endpoint blocks until initialization is complete.
             let addr = format!("127.0.0.1:{}", port);
-            for _ in 0..50 {
-                if std::net::TcpStream::connect(&addr).is_ok() {
-                    break;
+            for _ in 0..300 {
+                if let Ok(mut stream) = std::net::TcpStream::connect(&addr) {
+                    use std::io::{Read, Write};
+                    let req = format!("GET /api/ready HTTP/1.0\r\nHost: {}\r\n\r\n", addr);
+                    if stream.write_all(req.as_bytes()).is_ok() {
+                        // Set a generous timeout — initialization may take a while
+                        stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
+                        let mut buf = [0u8; 256];
+                        if let Ok(n) = stream.read(&mut buf) {
+                            let resp = String::from_utf8_lossy(&buf[..n]);
+                            if resp.contains("200") {
+                                break;
+                            }
+                        }
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }

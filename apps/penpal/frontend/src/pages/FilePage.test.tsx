@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, act } from '@testing-library/react';
-import { MemoryRouter, Routes, Route, Outlet } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, Outlet, useNavigate } from 'react-router-dom';
 import FilePage from './FilePage';
 import { api } from '../api';
 import { useSSE } from '../hooks/useSSE';
@@ -41,12 +41,31 @@ function LayoutWrapper() {
   return <Outlet context={ctx} />;
 }
 
-function renderFilePage() {
+function renderFilePage(url = '/file/ws/proj/thoughts/plan.md') {
   return render(
-    <MemoryRouter initialEntries={['/file/ws/proj/thoughts/plan.md']}>
+    <MemoryRouter initialEntries={[url]}>
       <Routes>
         <Route element={<LayoutWrapper />}>
           <Route path="/file/*" element={<FilePage />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+// Helper component to expose programmatic navigation for tests
+let testNavigate: ReturnType<typeof useNavigate>;
+function NavTrigger() {
+  testNavigate = useNavigate();
+  return null;
+}
+
+function renderFilePageNavigable(url = '/file/ws/proj/thoughts/plan.md') {
+  return render(
+    <MemoryRouter initialEntries={[url]}>
+      <Routes>
+        <Route element={<LayoutWrapper />}>
+          <Route path="/file/*" element={<><NavTrigger /><FilePage /></>} />
         </Route>
       </Routes>
     </MemoryRouter>,
@@ -386,6 +405,29 @@ describe('FilePage', () => {
       expect(api.getRawFile).toHaveBeenCalledTimes(1);
       expect(api.getAgentStatus).toHaveBeenCalledTimes(1);
       expect(api.getThreads).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('re-fetches file metadata when worktree changes', async () => {
+    vi.mocked(api.getAgentStatus).mockResolvedValue(agentNotRunning);
+    vi.mocked(api.getProjectFiles).mockResolvedValue([
+      { name: 'Thoughts', source: 'thoughts', sourceType: 'thoughts', auto: false, files: [{ path: 'thoughts/plan.md', name: 'plan.md', title: 'Plan', fileType: 'thoughts', age: '1h' }] },
+    ]);
+
+    renderFilePageNavigable('/file/ws/proj@wt1/thoughts/plan.md');
+
+    await waitFor(() => {
+      expect(api.getProjectFiles).toHaveBeenCalledWith('ws/proj', 'wt1');
+    });
+
+    // Navigate to a different worktree on the same file
+    vi.mocked(api.getProjectFiles).mockClear();
+    await act(async () => {
+      testNavigate('/file/ws/proj@wt2/thoughts/plan.md');
+    });
+
+    await waitFor(() => {
+      expect(api.getProjectFiles).toHaveBeenCalledWith('ws/proj', 'wt2');
     });
   });
 

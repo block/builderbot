@@ -38,6 +38,10 @@ async function apiVoid(path: string, options?: RequestInit): Promise<void> {
   if (!res.ok) throw new Error(`API error: ${res.status}`);
 }
 
+function wtParam(worktree?: string): string {
+  return worktree ? `&worktree=${encodeURIComponent(worktree)}` : '';
+}
+
 export const api = {
   // Projects
   listProjects: () => apiFetch<APIProject[]>('/api/projects'),
@@ -47,8 +51,8 @@ export const api = {
     apiVoid('/api/projects', { method: 'DELETE', body: JSON.stringify({ path }) }),
 
   // Project files
-  getProjectFiles: (qn: string) =>
-    apiFetch<APIFileGroupView[]>(`/api/project/${qn}`),
+  getProjectFiles: (qn: string, worktree?: string) =>
+    apiFetch<APIFileGroupView[]>(`/api/project/${qn}${worktree ? '?worktree=' + encodeURIComponent(worktree) : ''}`),
   getProjectInfo: (name: string) =>
     apiFetch<ProjectInfo>(`/api/project-info?name=${encodeURIComponent(name)}`),
   deleteProject: (project: string) =>
@@ -61,30 +65,30 @@ export const api = {
   getInReview: () => apiFetch<ReviewGroup[]>('/api/in-review'),
 
   // Threads
-  getThreads: (project: string, file: string) =>
-    apiFetch<ThreadResponse[]>(`/api/threads?project=${encodeURIComponent(project)}&path=${encodeURIComponent(file)}`),
+  getThreads: (project: string, file: string, worktree?: string) =>
+    apiFetch<ThreadResponse[]>(`/api/threads?project=${encodeURIComponent(project)}&path=${encodeURIComponent(file)}${wtParam(worktree)}`),
   getAllThreads: (project: string) =>
     apiFetch<ThreadWithFile[]>(`/api/threads?project=${encodeURIComponent(project)}`),
-  createThread: (data: CreateThreadReq) =>
+  createThread: (data: CreateThreadReq & { worktree?: string }) =>
     apiFetch<Thread>('/api/threads', { method: 'POST', body: JSON.stringify(data) }),
-  replyToThread: (id: string, data: ReplyReq) =>
+  replyToThread: (id: string, data: ReplyReq & { worktree?: string }) =>
     apiFetch<Thread>(`/api/threads/${encodeURIComponent(id)}/comments`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  patchThread: (id: string, data: PatchThreadReq) =>
+  patchThread: (id: string, data: PatchThreadReq & { worktree?: string }) =>
     apiFetch<{ ok: boolean }>(`/api/threads/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
 
   // Reviews
-  getReviews: (project: string) =>
-    apiFetch<APIFileInReview[]>(`/api/reviews?project=${encodeURIComponent(project)}`),
+  getReviews: (project: string, worktree?: string) =>
+    apiFetch<APIFileInReview[]>(`/api/reviews?project=${encodeURIComponent(project)}${wtParam(worktree)}`),
 
   // Raw file content
-  getRawFile: (project: string, path: string) =>
-    fetch(`${API_BASE}/api/raw?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}`, {
+  getRawFile: (project: string, path: string, worktree?: string) =>
+    fetch(`${API_BASE}/api/raw?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}${wtParam(worktree)}`, {
       cache: 'no-store',
     }).then(
       (r) => {

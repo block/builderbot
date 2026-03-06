@@ -9,6 +9,7 @@ interface CommentsPanelProps {
   threads: ThreadResponse[];
   anchorLines: Record<string, number>;
   project: string;
+  worktree?: string;
   filePath: string;
   onRefresh: () => void;
   onThreadFocus?: (threadId: string, line: number) => void;
@@ -45,6 +46,7 @@ export default function CommentsPanel({
   threads,
   anchorLines,
   project,
+  worktree,
   filePath,
   onRefresh,
   onThreadFocus,
@@ -147,6 +149,7 @@ export default function CommentsPanel({
             anchor={pendingAnchor}
             selectedText={pendingText || ''}
             project={project}
+            worktree={worktree}
             filePath={filePath}
             onSubmit={() => {
               onCancelNewThread?.();
@@ -170,6 +173,7 @@ export default function CommentsPanel({
             isHighlighted={highlightedThread === t.id}
             onClick={() => handleThreadClick(t.id)}
             project={project}
+            worktree={worktree}
             filePath={filePath}
             onRefresh={onRefresh}
             replyOpen={replyFormThread === t.id}
@@ -188,6 +192,7 @@ export default function CommentsPanel({
             isHighlighted={highlightedThread === t.id}
             onClick={() => handleThreadClick(t.id)}
             project={project}
+            worktree={worktree}
             filePath={filePath}
             onRefresh={onRefresh}
             replyOpen={replyFormThread === t.id}
@@ -227,6 +232,7 @@ interface NewThreadFormProps {
   anchor: Anchor;
   selectedText: string;
   project: string;
+  worktree?: string;
   filePath: string;
   onSubmit: () => void;
   onCancel: () => void;
@@ -237,6 +243,7 @@ function NewThreadForm({
   anchor,
   selectedText,
   project,
+  worktree,
   filePath,
   onSubmit,
   onCancel,
@@ -263,6 +270,7 @@ function NewThreadForm({
         author: author.trim(),
         role: 'human',
         body: body.trim(),
+        worktree: worktree || undefined,
       });
       onSubmit();
     } catch (err) {
@@ -324,6 +332,7 @@ interface ThreadCardProps {
   isHighlighted: boolean;
   onClick: () => void;
   project: string;
+  worktree?: string;
   filePath: string;
   onRefresh: () => void;
   replyOpen: boolean;
@@ -338,6 +347,7 @@ function ThreadCard({
   isHighlighted,
   onClick,
   project,
+  worktree,
   filePath,
   onRefresh,
   replyOpen,
@@ -353,14 +363,14 @@ function ThreadCard({
   const handleResolve = (e: React.MouseEvent) => {
     e.stopPropagation();
     const author = getSavedAuthor() || 'anonymous';
-    api.patchThread(thread.id, { project, path: filePath, status: 'resolved', resolvedBy: author })
+    api.patchThread(thread.id, { project, path: filePath, status: 'resolved', resolvedBy: author, worktree: worktree || undefined })
       .then(onRefresh)
       .catch((err) => console.error('Failed to resolve:', err));
   };
 
   const handleReopen = (e: React.MouseEvent) => {
     e.stopPropagation();
-    api.patchThread(thread.id, { project, path: filePath, status: 'open' })
+    api.patchThread(thread.id, { project, path: filePath, status: 'open', worktree: worktree || undefined })
       .then(onRefresh)
       .catch((err) => console.error('Failed to reopen:', err));
   };
@@ -371,7 +381,7 @@ function ThreadCard({
       onToggleReply();
       return;
     }
-    api.replyToThread(thread.id, { project, path: filePath, author, role: 'human', body: text })
+    api.replyToThread(thread.id, { project, path: filePath, author, role: 'human', body: text, worktree: worktree || undefined })
       .then(onRefresh)
       .catch((err) => console.error('Failed to submit suggested reply:', err));
   };
@@ -487,6 +497,7 @@ function ThreadCard({
         <ReplyForm
           threadId={thread.id}
           project={project}
+          worktree={worktree}
           filePath={filePath}
           onSubmit={() => {
             onToggleReply();
@@ -504,12 +515,13 @@ function ThreadCard({
 interface ReplyFormProps {
   threadId: string;
   project: string;
+  worktree?: string;
   filePath: string;
   onSubmit: () => void;
   onCancel: () => void;
 }
 
-function ReplyForm({ threadId, project, filePath, onSubmit, onCancel }: ReplyFormProps) {
+function ReplyForm({ threadId, project, worktree, filePath, onSubmit, onCancel }: ReplyFormProps) {
   const [body, setBody] = useState('');
   const [author, setAuthor] = useState(getSavedAuthor());
   const [submitting, setSubmitting] = useState(false);
@@ -530,6 +542,7 @@ function ReplyForm({ threadId, project, filePath, onSubmit, onCancel }: ReplyFor
         author: author.trim(),
         role: 'human',
         body: body.trim(),
+        worktree: worktree || undefined,
       });
       onSubmit();
     } catch (err) {

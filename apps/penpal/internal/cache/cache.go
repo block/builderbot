@@ -26,6 +26,7 @@ type FileInfo struct {
 	Title       string // H1 heading extracted from markdown files
 	ModTime     time.Time
 	FileType    string // "research", "plan", or "other"
+	Worktree    string // worktree name, empty for main
 }
 
 // Cache holds all cached data for the server
@@ -100,6 +101,65 @@ func (c *Cache) FindProjectByPath(absPath string) *discovery.Project {
 		}
 	}
 	return best
+}
+
+// FindProjectByPathWithWorktree returns a project and the worktree name for a
+// given absolute path. If the path is inside a worktree of a known project,
+// it returns the parent project and the worktree name. If the path is inside
+// the main project, worktree is empty.
+func (c *Cache) FindProjectByPathWithWorktree(absPath string) (project *discovery.Project, worktree string) {
+	absPath = filepath.Clean(absPath)
+
+	// First, try direct project match (handles main worktree and non-worktree projects)
+	project = c.FindProjectByPath(absPath)
+	if project != nil {
+		// Check if the path is inside a worktree of this project
+		for _, wt := range project.Worktrees {
+			if !wt.IsMain && (strings.HasPrefix(absPath, wt.Path+"/") || absPath == wt.Path) {
+				return project, wt.Name
+			}
+		}
+		return project, ""
+	}
+
+	// Path didn't match any project directly. It might be inside a worktree
+	// that lives outside the project directory (e.g., at an arbitrary path).
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for i := range c.projects {
+		for _, wt := range c.projects[i].Worktrees {
+			if !wt.IsMain && (strings.HasPrefix(absPath, wt.Path+"/") || absPath == wt.Path) {
+				p := c.projects[i]
+				return &p, wt.Name
+			}
+		}
+	}
+
+	return nil, ""
+}
+
+// WorktreePath returns the filesystem path for a worktree of the given project.
+// If worktreeName is empty, returns the project's main path.
+func (c *Cache) WorktreePath(projectName, worktreeName string) string {
+	if worktreeName == "" {
+		project := c.FindProject(projectName)
+		if project == nil {
+			return ""
+		}
+		return project.Path
+	}
+
+	project := c.FindProject(projectName)
+	if project == nil {
+		return ""
+	}
+
+	for _, wt := range project.Worktrees {
+		if wt.Name == worktreeName {
+			return wt.Path
+		}
+	}
+	return ""
 }
 
 // SetProjectFiles updates the file list for a project
@@ -310,6 +370,51 @@ func extractTitle(path string) string {
 		}
 	}
 	return ""
+}
+
+// ScanProjectSourcesForWorktree scans a project's sources remapped to a worktree path.
+// Each source's RootPath under the project is remapped to the equivalent path under
+// the worktree. Sources whose directory doesn't exist in the worktree are skipped.
+func ScanProjectSourcesForWorktree(project *discovery.Project, worktreePath string) []FileInfo {
+	// Build a temporary project with remapped sources
+	wtProject := *project
+	wtProject.Path = worktreePath
+	var remapped []discovery.FileSource
+	for _, s := range project.Sources {
+		ns := s
+		if s.RootPath != "" {
+			rel, err := filepath.Rel(project.Path, s.RootPath)
+			if err != nil {
+				continue
+			}
+			newRoot := filepath.Join(worktreePath, rel)
+			if _, err := os.Stat(newRoot); err != nil {
+				continue // source dir doesn't exist in worktree
+			}
+			ns.RootPath = newRoot
+		}
+		if len(s.Files) > 0 {
+			// Remap absolute file paths from main project to worktree
+			var remappedFiles []string
+			for _, f := range s.Files {
+				rel, err := filepath.Rel(project.Path, f)
+				if err != nil {
+					continue
+				}
+				newPath := filepath.Join(worktreePath, rel)
+				if _, err := os.Stat(newPath); err == nil {
+					remappedFiles = append(remappedFiles, newPath)
+				}
+			}
+			if len(remappedFiles) == 0 {
+				continue // no files exist in worktree
+			}
+			ns.Files = remappedFiles
+		}
+		remapped = append(remapped, ns)
+	}
+	wtProject.Sources = remapped
+	return scanProjectSources(&wtProject)
 }
 
 // scanProjectSources scans all sources of a project for markdown files.

@@ -15,6 +15,7 @@ import type { Heading } from '../components/TableOfContents';
 import type { LayoutContext } from '../components/Layout';
 import type { ThreadHighlight } from '../components/rehypeCommentHighlights';
 import type { ThreadResponse, Anchor, AgentStatus } from '../types';
+import { parseProjectWorktree } from '../utils/worktree';
 
 export default function FilePage() {
   const location = useLocation();
@@ -111,25 +112,40 @@ export default function FilePage() {
     return highlights;
   }, [threads, anchorLines, pendingAnchor]);
 
-  // Resolve project QN and file path from URL by matching against known projects.
-  // The URL is /file/{qualifiedName}/{filePath} where qualifiedName may contain slashes
-  // (e.g. "Development/birdseye"), so we can't rely on a single :param.
-  const { project, path } = useMemo(() => {
+  // Resolve project QN, worktree, and file path from URL by matching against known projects.
+  // URL: /file/{qualifiedName}[@worktree]/{filePath}
+  // QN may contain slashes (e.g. "Development/birdseye"), so we match longest-first.
+  const { project, worktree, path } = useMemo(() => {
     const rest = location.pathname.replace(/^\/file\//, '');
     // Try matching against known projects (longest match first)
     const sorted = [...projects].sort((a, b) => b.qualifiedName.length - a.qualifiedName.length);
     for (const p of sorted) {
-      if (rest === p.qualifiedName || rest.startsWith(p.qualifiedName + '/')) {
-        return {
-          project: p.qualifiedName,
-          path: rest.slice(p.qualifiedName.length + 1),
-        };
+      if (rest === p.qualifiedName || rest.startsWith(p.qualifiedName + '/') || rest.startsWith(p.qualifiedName + '@')) {
+        const afterQN = rest.slice(p.qualifiedName.length);
+        // afterQN could be "@worktree/path", "/path", or ""
+        let wt = '';
+        let filePath = '';
+        if (afterQN.startsWith('@')) {
+          const slashIdx = afterQN.indexOf('/');
+          if (slashIdx === -1) {
+            wt = afterQN.slice(1);
+          } else {
+            wt = afterQN.slice(1, slashIdx);
+            filePath = afterQN.slice(slashIdx + 1);
+          }
+        } else if (afterQN.startsWith('/')) {
+          filePath = afterQN.slice(1);
+        }
+        return { project: p.qualifiedName, worktree: wt, path: filePath };
       }
     }
-    // Fallback: assume first two segments are the QN
+    // Fallback: parse with @ support
     const segments = rest.split('/');
+    const qnCandidate = segments.slice(0, 2).join('/');
+    const { project: proj, worktree: wt } = parseProjectWorktree(qnCandidate);
     return {
-      project: segments.slice(0, 2).join('/'),
+      project: proj,
+      worktree: wt,
       path: segments.slice(2).join('/'),
     };
   }, [location.pathname, projects]);
@@ -138,7 +154,7 @@ export default function FilePage() {
   const fetchContent = useCallback(async (opts?: { silent?: boolean }) => {
     if (!project || !path) return;
     try {
-      const content = await api.getRawFile(project, path);
+      const content = await api.getRawFile(project, path, worktree || undefined);
       setRawMarkdown(content);
       setError(null);
     } catch (err) {
@@ -149,13 +165,13 @@ export default function FilePage() {
     } finally {
       setLoading(false);
     }
-  }, [project, path]);
+  }, [project, path, worktree]);
 
   // Fetch threads
   const fetchThreads = useCallback(async () => {
     if (!project || !path) return;
     try {
-      const data = await api.getThreads(project, path);
+      const data = await api.getThreads(project, path, worktree || undefined);
       setThreads(data);
       // Build anchor lines from thread data
       // The server resolves anchors; here we use startLine from the anchor
@@ -167,7 +183,7 @@ export default function FilePage() {
     } catch (err) {
       console.error('Failed to load threads:', err);
     }
-  }, [project, path]);
+  }, [project, path, worktree]);
 
   // Start polling for agent status updates
   const startAgentPolling = useCallback(() => {
@@ -215,7 +231,7 @@ export default function FilePage() {
   useEffect(() => {
     if (!project || !path) return;
     // Get file metadata from project files list
-    api.getProjectFiles(project).then((groups) => {
+    api.getProjectFiles(project, worktree || undefined).then((groups) => {
       for (const group of (groups || [])) {
         for (const file of (group.files || [])) {
           if (file.path === path) {
@@ -237,7 +253,7 @@ export default function FilePage() {
       const p = projects.find((pr) => pr.qualifiedName === project);
       if (p) setProjectPath(p.projectPath);
     }).catch(() => {});
-  }, [project, path]);
+  }, [project, path, worktree]);
 
   // Initial data load
   useEffect(() => {
@@ -415,6 +431,7 @@ export default function FilePage() {
         threads={threads}
         anchorLines={anchorLines}
         project={project}
+        worktree={worktree}
         filePath={path}
         onRefresh={fetchThreads}
         onThreadFocus={handleThreadFocus}

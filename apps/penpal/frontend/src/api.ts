@@ -147,6 +147,14 @@ export const api = {
   installTools: () =>
     apiFetch<InstallToolsStatus>('/api/install-tools', { method: 'POST' }),
 
+  // Focus (tells server what to deep-watch for the current view)
+  focusProject: (project: string) =>
+    apiVoid(`/api/focus?project=${encodeURIComponent(project)}`, { method: 'POST' }),
+  focusFile: (project: string, path: string, worktree?: string) =>
+    apiVoid(`/api/focus?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}${wtParam(worktree)}`, { method: 'POST' }),
+  clearFocus: () =>
+    apiVoid('/api/focus', { method: 'DELETE' }),
+
   // Misc
   open: (path: string) =>
     apiFetch<{ url: string }>('/api/open', { method: 'POST', body: JSON.stringify({ path }) }),

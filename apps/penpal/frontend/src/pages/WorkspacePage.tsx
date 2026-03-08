@@ -36,6 +36,9 @@ export default function WorkspacePage() {
     }).catch(() => {});
   }, [name]);
 
+  // Workspace dirs are already watched; clear any deep project/file focus
+  useEffect(() => { api.clearFocus().catch(() => {}); }, []);
+
   useEffect(() => {
     refreshProjects();
   }, [refreshProjects]);

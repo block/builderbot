@@ -284,6 +284,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/threads/", s.handleAPIThreadAction)
 	s.mux.HandleFunc("/api/reviews", s.handleAPIListReviews)
 	// Agent management endpoints
+	s.mux.HandleFunc("/api/focus", s.handleFocus)
 	s.mux.HandleFunc("/api/agents", s.handleAgentStatus)
 	s.mux.HandleFunc("/api/agents/start", s.handleAgentStart)
 	s.mux.HandleFunc("/api/agents/stop", s.handleAgentStop)
@@ -307,6 +308,37 @@ func (s *Server) routes() {
 		s.mux.Handle("/mcp/", s.mcpHandler)
 	}
 
+}
+
+// handleFocus tells the watcher what to deep-watch based on current view.
+//
+//	POST /api/focus?project=X            — watch project sources (ProjectPage)
+//	POST /api/focus?project=X&path=Y     — watch file directory only (FilePage)
+//	DELETE /api/focus                     — clear all deep watches
+func (s *Server) handleFocus(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			http.Error(w, "missing project parameter", http.StatusBadRequest)
+			return
+		}
+		filePath := r.URL.Query().Get("path")
+		worktree := r.URL.Query().Get("worktree")
+		if filePath != "" {
+			s.watcher.FocusFile(project, filePath, worktree)
+		} else {
+			s.watcher.FocusProject(project)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	case http.MethodDelete:
+		s.watcher.ClearFocus()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func formatAge(t time.Time) string {

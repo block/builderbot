@@ -255,6 +255,11 @@ export default function FilePage() {
     }).catch(() => {});
   }, [project, path, worktree]);
 
+  // Tell the server to watch just this file's directory
+  useEffect(() => {
+    if (project && path) api.focusFile(project, path, worktree || undefined).catch(() => {});
+  }, [project, path, worktree]);
+
   // Initial data load
   useEffect(() => {
     fetchContent();

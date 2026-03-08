@@ -34,6 +34,7 @@ vi.mock('../api', () => ({
       },
     ]),
     getInReview: vi.fn().mockResolvedValue([]),
+    clearFocus: vi.fn().mockResolvedValue(undefined),
   },
 }));
 

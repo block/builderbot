@@ -24,6 +24,7 @@ vi.mock('../api', () => ({
     getAgentStatus: vi.fn().mockResolvedValue({ running: false }),
     listProjects: vi.fn().mockResolvedValue([{ qualifiedName: 'ws/proj' }]),
     getInReview: vi.fn().mockResolvedValue([]),
+    focusProject: vi.fn().mockResolvedValue(undefined),
   },
   API_BASE: 'http://localhost:8080',
   isDesktopApp: false,

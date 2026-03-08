@@ -123,6 +123,9 @@ func (s *Server) discoverAllProjects() []discovery.Project {
 		}
 		allProjects = append(allProjects, projects...)
 	}
+	// Standalone projects are intentionally not subject to worktree de-duping
+	// (which runs inside DiscoverWorkspace). If a user explicitly adds a project,
+	// it should always appear regardless of worktree relationships.
 	for _, pc := range s.cfg.Projects {
 		p, err := discovery.LoadStandaloneProject(pc.Path, pc)
 		if err != nil {

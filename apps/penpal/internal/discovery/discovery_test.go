@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"path/filepath"
 	"testing"
 )
 
@@ -204,6 +205,105 @@ func TestClassifyRP1File(t *testing.T) {
 			got := st.ClassifyFile(tt.path)
 			if got != tt.expected {
 				t.Errorf("ClassifyFile(%q) = %q, want %q", tt.path, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestDeduplicateWorktreeProjects(t *testing.T) {
+	mkWT := func(path, branch string, isMain bool) Worktree {
+		return Worktree{Name: filepath.Base(path), Path: path, Branch: branch, IsMain: isMain}
+	}
+
+	tests := []struct {
+		name      string
+		projects  []Project
+		wantNames []string
+	}{
+		{
+			name: "no worktrees, no dedup",
+			projects: []Project{
+				{Name: "alpha", Path: "/ws/alpha"},
+				{Name: "beta", Path: "/ws/beta"},
+			},
+			wantNames: []string{"alpha", "beta"},
+		},
+		{
+			name: "worktree project removed, main kept",
+			projects: []Project{
+				{Name: "myrepo", Path: "/ws/myrepo", Worktrees: []Worktree{
+					mkWT("/ws/myrepo", "main", true),
+					mkWT("/ws/myrepo-wt", "feature", false),
+				}},
+				{Name: "myrepo-wt", Path: "/ws/myrepo-wt", Worktrees: []Worktree{
+					mkWT("/ws/myrepo", "main", true),
+					mkWT("/ws/myrepo-wt", "feature", false),
+				}},
+			},
+			wantNames: []string{"myrepo"},
+		},
+		{
+			name: "neither is main, first kept",
+			projects: []Project{
+				{Name: "wt-a", Path: "/ws/wt-a", Worktrees: []Worktree{
+					mkWT("/elsewhere/repo", "main", true),
+					mkWT("/ws/wt-a", "branch-a", false),
+					mkWT("/ws/wt-b", "branch-b", false),
+				}},
+				{Name: "wt-b", Path: "/ws/wt-b", Worktrees: []Worktree{
+					mkWT("/elsewhere/repo", "main", true),
+					mkWT("/ws/wt-a", "branch-a", false),
+					mkWT("/ws/wt-b", "branch-b", false),
+				}},
+			},
+			wantNames: []string{"wt-a"},
+		},
+		{
+			name: "main is second project, it wins",
+			projects: []Project{
+				{Name: "feature-wt", Path: "/ws/feature-wt", Worktrees: []Worktree{
+					mkWT("/ws/mainrepo", "main", true),
+					mkWT("/ws/feature-wt", "feature", false),
+				}},
+				{Name: "mainrepo", Path: "/ws/mainrepo", Worktrees: []Worktree{
+					mkWT("/ws/mainrepo", "main", true),
+					mkWT("/ws/feature-wt", "feature", false),
+				}},
+			},
+			wantNames: []string{"mainrepo"},
+		},
+		{
+			name: "unrelated projects not affected",
+			projects: []Project{
+				{Name: "alpha", Path: "/ws/alpha"},
+				{Name: "repo", Path: "/ws/repo", Worktrees: []Worktree{
+					mkWT("/ws/repo", "main", true),
+					mkWT("/ws/repo-wt", "feat", false),
+				}},
+				{Name: "repo-wt", Path: "/ws/repo-wt", Worktrees: []Worktree{
+					mkWT("/ws/repo", "main", true),
+					mkWT("/ws/repo-wt", "feat", false),
+				}},
+				{Name: "beta", Path: "/ws/beta"},
+			},
+			wantNames: []string{"alpha", "repo", "beta"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := deduplicateWorktreeProjects(tt.projects)
+			if len(got) != len(tt.wantNames) {
+				names := make([]string, len(got))
+				for i, p := range got {
+					names[i] = p.Name
+				}
+				t.Fatalf("got %d projects %v, want %d %v", len(got), names, len(tt.wantNames), tt.wantNames)
+			}
+			for i, name := range tt.wantNames {
+				if got[i].Name != name {
+					t.Errorf("project[%d].Name = %q, want %q", i, got[i].Name, name)
+				}
 			}
 		})
 	}

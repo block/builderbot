@@ -370,6 +370,13 @@ func DiscoverWorkspace(workspacePath, workspaceName string) ([]Project, error) {
 		}
 	}
 
+	// Deduplicate: if a discovered project is actually a worktree of another
+	// discovered project, remove it (it's already represented in the other
+	// project's worktree list). This intentionally only applies to workspace-
+	// discovered projects; standalone projects are added later in
+	// discoverAllProjects and are shielded from worktree de-duping.
+	projects = deduplicateWorktreeProjects(projects)
+
 	sort.Slice(projects, func(i, j int) bool {
 		if projects[i].Name == "(root)" {
 			return true
@@ -381,6 +388,70 @@ func DiscoverWorkspace(workspacePath, workspaceName string) ([]Project, error) {
 	})
 
 	return projects, nil
+}
+
+// deduplicateWorktreeProjects removes projects that are worktrees of another
+// discovered project. When two projects share the same git repo (one is a
+// worktree of the other), the main worktree is kept and the other is removed.
+// If neither project is the main worktree (both are worktrees of a repo outside
+// the workspace), the first alphabetically is kept.
+func deduplicateWorktreeProjects(projects []Project) []Project {
+	// Build path → index map for quick lookup
+	pathIndex := make(map[string]int, len(projects))
+	for i, p := range projects {
+		pathIndex[filepath.Clean(p.Path)] = i
+	}
+
+	// Track which project indices should be removed
+	remove := make(map[int]bool)
+
+	for i, p := range projects {
+		if remove[i] || len(p.Worktrees) == 0 {
+			continue
+		}
+		for _, wt := range p.Worktrees {
+			if wt.IsMain {
+				continue
+			}
+			j, found := pathIndex[filepath.Clean(wt.Path)]
+			if !found || remove[j] || j == i {
+				continue
+			}
+			// Project j is a worktree of project i's repo.
+			// Keep whichever is the repo's actual main worktree; if
+			// neither is, keep the one with the lower index.
+			// Note: git always lists the main worktree first in
+			// `git worktree list`, so Worktrees[0] is the repo's
+			// true main worktree — not Worktree.IsMain, which is
+			// relative to whichever project was scanned.
+			iIsMain := len(p.Worktrees) > 0 &&
+				filepath.Clean(p.Worktrees[0].Path) == filepath.Clean(p.Path)
+			if iIsMain {
+				remove[j] = true
+			} else {
+				jIsMain := len(projects[j].Worktrees) > 0 &&
+					filepath.Clean(projects[j].Worktrees[0].Path) == filepath.Clean(projects[j].Path)
+				if jIsMain {
+					remove[i] = true
+					break
+				}
+				// Neither is main; remove the later one
+				remove[j] = true
+			}
+		}
+	}
+
+	if len(remove) == 0 {
+		return projects
+	}
+
+	result := make([]Project, 0, len(projects)-len(remove))
+	for i, p := range projects {
+		if !remove[i] {
+			result = append(result, p)
+		}
+	}
+	return result
 }
 
 // LoadStandaloneProject creates a Project from an explicit path with optional configured sources.

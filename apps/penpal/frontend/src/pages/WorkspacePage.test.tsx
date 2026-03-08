@@ -20,6 +20,11 @@ vi.mock('../api', () => ({
         agentConnected: false,
         age: '2h ago',
         reviewCount: 2,
+        worktrees: [
+          { name: 'my-project', path: '/tmp/ws/my-project', branch: 'main', isMain: true },
+          { name: 'feature-wt', path: '/tmp/ws/my-project/.claude/worktrees/feature-wt', branch: 'feature', isMain: false },
+          { name: 'bugfix-wt', path: '/tmp/ws/my-project/.claude/worktrees/bugfix-wt', branch: 'bugfix', isMain: false },
+        ],
       },
       {
         name: 'empty-project',
@@ -30,6 +35,22 @@ vi.mock('../api', () => ({
         badges: [],
         fileCount: 0,
         lastModified: '2026-01-01',
+      },
+      {
+        name: 'single-wt',
+        qualifiedName: 'ws/single-wt',
+        workspace: 'ws',
+        projectPath: '/tmp/ws/single-wt',
+        origin: 'workspace',
+        badges: [],
+        branch: 'develop',
+        dirty: true,
+        fileCount: 3,
+        lastModified: '2026-01-01',
+        worktrees: [
+          { name: 'single-wt', path: '/tmp/ws/single-wt', branch: 'develop', isMain: true },
+          { name: 'one-extra', path: '/tmp/ws/single-wt/.claude/worktrees/one-extra', branch: 'fix', isMain: false },
+        ],
       },
     ]),
     getProjectInfo: vi.fn().mockResolvedValue({ fileCount: 5, dirty: false, unpushedCommits: 0 }),
@@ -104,5 +125,41 @@ describe('WorkspacePage', () => {
   it('has workspace-page testid', () => {
     renderPage();
     expect(screen.getByTestId('workspace-page')).toBeTruthy();
+  });
+
+  it('shows worktree count excluding main', async () => {
+    renderPage();
+    await waitFor(() => {
+      // my-project has 2 non-main worktrees
+      expect(screen.getByText('+ 2 worktrees')).toBeTruthy();
+    });
+  });
+
+  it('uses singular worktree for count of 1', async () => {
+    renderPage();
+    await waitFor(() => {
+      // single-wt has 1 non-main worktree
+      expect(screen.getByText('+ 1 worktree')).toBeTruthy();
+    });
+  });
+
+  it('does not show worktree count when there are no extra worktrees', async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText('empty-project')).toBeTruthy();
+    });
+    // empty-project has no worktrees at all
+    const card = screen.getByText('empty-project').closest('.project-card');
+    expect(card?.querySelector('.worktree-count')).toBeNull();
+  });
+
+  it('always shows branch alongside worktree count', async () => {
+    renderPage();
+    await waitFor(() => {
+      const card = screen.getByText('my-project').closest('.project-card');
+      const meta = card?.querySelector('.project-card-meta');
+      expect(meta?.querySelector('.branch')?.textContent).toBe('main');
+      expect(meta?.querySelector('.worktree-count')?.textContent).toBe('+ 2 worktrees');
+    });
   });
 });

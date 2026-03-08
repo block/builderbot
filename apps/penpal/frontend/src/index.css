@@ -1179,12 +1179,7 @@ a:hover { text-decoration: underline; }
 .project-card-meta { font-size: 0.8em; color: var(--text-subtle); margin-bottom: 8px; display: flex; flex-wrap: wrap; gap: 4px 8px; }
 .project-card-meta .branch { color: var(--accent-success); }
 .project-card-meta .dirty { color: var(--accent-danger); }
-.project-card-worktrees { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-.worktree-card-item { display: flex; flex-direction: column; text-decoration: none; padding: 4px 8px; border-radius: 4px; background: var(--bg-surface-tertiary); min-width: 0; }
-.worktree-card-item:hover { background: var(--bg-surface-hover); }
-.worktree-card-name { font-size: 0.85em; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.worktree-card-branch { font-size: 0.78em; color: var(--accent-success); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.worktree-card-branch .dirty { color: var(--accent-danger); }
+.worktree-count { font-size: 0.8em; color: var(--text-subtle); }
 .project-card .project-age { font-size: 0.8em; color: var(--text-faint); }
 .project-card-name .agent-dot {
   margin-left: 8px;

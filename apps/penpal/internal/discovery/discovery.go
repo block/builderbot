@@ -418,28 +418,19 @@ func deduplicateWorktreeProjects(projects []Project) []Project {
 				continue
 			}
 			// Project j is a worktree of project i's repo.
-			// Keep whichever is the main worktree; if neither is,
-			// keep the one with the lower index (first alphabetically
-			// after the earlier sort in the caller doesn't apply yet,
-			// but the order is stable from readdir).
-			iIsMain := false
-			for _, w := range p.Worktrees {
-				if w.IsMain && filepath.Clean(w.Path) == filepath.Clean(p.Path) {
-					iIsMain = true
-					break
-				}
-			}
+			// Keep whichever is the repo's actual main worktree; if
+			// neither is, keep the one with the lower index.
+			// Note: git always lists the main worktree first in
+			// `git worktree list`, so Worktrees[0] is the repo's
+			// true main worktree — not Worktree.IsMain, which is
+			// relative to whichever project was scanned.
+			iIsMain := len(p.Worktrees) > 0 &&
+				filepath.Clean(p.Worktrees[0].Path) == filepath.Clean(p.Path)
 			if iIsMain {
 				remove[j] = true
 			} else {
-				// Check if j is the main
-				jIsMain := false
-				for _, w := range projects[j].Worktrees {
-					if w.IsMain && filepath.Clean(w.Path) == filepath.Clean(projects[j].Path) {
-						jIsMain = true
-						break
-					}
-				}
+				jIsMain := len(projects[j].Worktrees) > 0 &&
+					filepath.Clean(projects[j].Worktrees[0].Path) == filepath.Clean(projects[j].Path)
 				if jIsMain {
 					remove[i] = true
 					break

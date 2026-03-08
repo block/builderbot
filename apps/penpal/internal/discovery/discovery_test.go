@@ -236,8 +236,8 @@ func TestDeduplicateWorktreeProjects(t *testing.T) {
 					mkWT("/ws/myrepo-wt", "feature", false),
 				}},
 				{Name: "myrepo-wt", Path: "/ws/myrepo-wt", Worktrees: []Worktree{
-					mkWT("/ws/myrepo", "main", true),
-					mkWT("/ws/myrepo-wt", "feature", false),
+					mkWT("/ws/myrepo", "main", false),
+					mkWT("/ws/myrepo-wt", "feature", true),
 				}},
 			},
 			wantNames: []string{"myrepo"},
@@ -246,14 +246,14 @@ func TestDeduplicateWorktreeProjects(t *testing.T) {
 			name: "neither is main, first kept",
 			projects: []Project{
 				{Name: "wt-a", Path: "/ws/wt-a", Worktrees: []Worktree{
-					mkWT("/elsewhere/repo", "main", true),
-					mkWT("/ws/wt-a", "branch-a", false),
+					mkWT("/elsewhere/repo", "main", false),
+					mkWT("/ws/wt-a", "branch-a", true),
 					mkWT("/ws/wt-b", "branch-b", false),
 				}},
 				{Name: "wt-b", Path: "/ws/wt-b", Worktrees: []Worktree{
-					mkWT("/elsewhere/repo", "main", true),
+					mkWT("/elsewhere/repo", "main", false),
 					mkWT("/ws/wt-a", "branch-a", false),
-					mkWT("/ws/wt-b", "branch-b", false),
+					mkWT("/ws/wt-b", "branch-b", true),
 				}},
 			},
 			wantNames: []string{"wt-a"},
@@ -261,9 +261,11 @@ func TestDeduplicateWorktreeProjects(t *testing.T) {
 		{
 			name: "main is second project, it wins",
 			projects: []Project{
+				// DiscoverWorktrees("/ws/feature-wt") sets IsMain relative
+				// to feature-wt, NOT the repo's actual main worktree.
 				{Name: "feature-wt", Path: "/ws/feature-wt", Worktrees: []Worktree{
-					mkWT("/ws/mainrepo", "main", true),
-					mkWT("/ws/feature-wt", "feature", false),
+					mkWT("/ws/mainrepo", "main", false),
+					mkWT("/ws/feature-wt", "feature", true),
 				}},
 				{Name: "mainrepo", Path: "/ws/mainrepo", Worktrees: []Worktree{
 					mkWT("/ws/mainrepo", "main", true),
@@ -281,8 +283,8 @@ func TestDeduplicateWorktreeProjects(t *testing.T) {
 					mkWT("/ws/repo-wt", "feat", false),
 				}},
 				{Name: "repo-wt", Path: "/ws/repo-wt", Worktrees: []Worktree{
-					mkWT("/ws/repo", "main", true),
-					mkWT("/ws/repo-wt", "feat", false),
+					mkWT("/ws/repo", "main", false),
+					mkWT("/ws/repo-wt", "feat", true),
 				}},
 				{Name: "beta", Path: "/ws/beta"},
 			},

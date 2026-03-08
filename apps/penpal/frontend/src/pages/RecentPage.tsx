@@ -20,6 +20,7 @@ export default function RecentPage() {
     api.getRecentFiles().then(setFiles).catch(() => {});
   }, []);
 
+  useEffect(() => { api.clearFocus().catch(() => {}); }, []);
   useEffect(() => { refresh(); }, [refresh]);
 
   const debouncedRefresh = useCallback(() => debounce(refresh, 200)(), [refresh]);

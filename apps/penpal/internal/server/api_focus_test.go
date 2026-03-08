@@ -1,0 +1,57 @@
+package server
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestAPIFocus_Project(t *testing.T) {
+	s, _, _ := testServer(t)
+	seedProject(s.cache, "ws/proj", t.TempDir(), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/focus?project=ws/proj", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPIFocus_File(t *testing.T) {
+	s, _, _ := testServer(t)
+	seedProject(s.cache, "ws/proj", t.TempDir(), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/focus?project=ws/proj&path=thoughts/plan.md", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPIFocus_Clear(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/focus", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAPIFocus_MissingProject(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/focus", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}

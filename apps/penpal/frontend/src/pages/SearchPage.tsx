@@ -19,6 +19,7 @@ export default function SearchPage() {
       .finally(() => setLoading(false));
   }, [query]);
 
+  useEffect(() => { api.clearFocus().catch(() => {}); }, []);
   useEffect(() => { doSearch(); }, [doSearch]);
 
   const hasProjects = (results?.matchingProjects?.length ?? 0) > 0;

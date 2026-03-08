@@ -81,6 +81,11 @@ export default function ProjectPage() {
     }).catch(() => {});
   }, [qn]);
 
+  // Tell the server to deep-watch this project's files
+  useEffect(() => {
+    if (qn) api.focusProject(qn).catch(() => {});
+  }, [qn]);
+
   useEffect(() => {
     refreshFiles();
     refreshReviews();

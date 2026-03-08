@@ -10,6 +10,7 @@ vi.mock('./api', () => ({
     listProjects: vi.fn().mockResolvedValue([]),
     getRecentFiles: vi.fn().mockResolvedValue([]),
     getInReview: vi.fn().mockResolvedValue([]),
+    clearFocus: vi.fn().mockResolvedValue(undefined),
   },
 }));
 

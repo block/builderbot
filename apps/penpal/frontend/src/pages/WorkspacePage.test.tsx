@@ -34,6 +34,7 @@ vi.mock('../api', () => ({
     ]),
     getProjectInfo: vi.fn().mockResolvedValue({ fileCount: 5, dirty: false, unpushedCommits: 0 }),
     getInReview: vi.fn().mockResolvedValue([]),
+    clearFocus: vi.fn().mockResolvedValue(undefined),
   },
   API_BASE: 'http://localhost:8080',
   isDesktopApp: false,

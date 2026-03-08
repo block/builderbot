@@ -29,6 +29,7 @@ export default function InReviewPage() {
     api.getInReview().then(setGroups).catch(() => {});
   }, []);
 
+  useEffect(() => { api.clearFocus().catch(() => {}); }, []);
   useEffect(() => { refresh(); }, [refresh]);
 
   const debouncedRefresh = useCallback(() => debounce(refresh, 200)(), [refresh]);

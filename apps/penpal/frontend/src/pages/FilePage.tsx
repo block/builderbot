@@ -53,33 +53,28 @@ export default function FilePage() {
     resizeStartX.current = e.clientX;
     resizeStartWidth.current = chatWidthRef.current;
     e.preventDefault();
-  }, []);
 
-  useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
-      if (!isResizing.current) return;
-      if (e.buttons === 0) {
-        isResizing.current = false;
-        localStorage.setItem('chatPanelWidth', String(chatWidthRef.current));
+    const onMouseMove = (ev: MouseEvent) => {
+      if (ev.buttons === 0) {
+        cleanup();
         return;
       }
-      const delta = resizeStartX.current - e.clientX;
+      const delta = resizeStartX.current - ev.clientX;
       const newWidth = Math.min(Math.max(resizeStartWidth.current + delta, 200), 700);
       setChatWidth(newWidth);
       chatWidthRef.current = newWidth;
     };
     const onMouseUp = () => {
-      if (isResizing.current) {
-        isResizing.current = false;
-        localStorage.setItem('chatPanelWidth', String(chatWidthRef.current));
-      }
+      cleanup();
     };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-    return () => {
+    const cleanup = () => {
+      isResizing.current = false;
+      localStorage.setItem('chatPanelWidth', String(chatWidthRef.current));
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
     };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
   }, []);
 
   // Compute highlights for the rehype plugin (text highlights only, not SVG)

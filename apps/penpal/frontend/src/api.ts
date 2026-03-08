@@ -146,6 +146,11 @@ export const api = {
   checkInstallStatus: () => apiFetch<InstallToolsStatus>('/api/install-tools'),
   installTools: () =>
     apiFetch<InstallToolsStatus>('/api/install-tools', { method: 'POST' }),
+  setClaudePath: (path: string) =>
+    apiFetch<{ path: string; version: string }>('/api/claude-path', {
+      method: 'PUT',
+      body: JSON.stringify({ path }),
+    }),
 
   // Focus (tells server what to deep-watch for the current view)
   focusProject: (project: string) =>

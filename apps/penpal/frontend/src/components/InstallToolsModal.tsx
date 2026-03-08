@@ -11,10 +11,17 @@ interface Props {
 export default function InstallToolsModal({ open, isUpdate, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<InstallToolsStatus | null>(null);
+  const [claudePathInput, setClaudePathInput] = useState('');
+  const [claudePathError, setClaudePathError] = useState('');
+  const [settingPath, setSettingPath] = useState(false);
+
+  const needsClaudePath = result && !result.claudeBin && !result.plugin.installed;
 
   async function handleInstall() {
     setLoading(true);
     setResult(null);
+    setClaudePathInput('');
+    setClaudePathError('');
     try {
       const status = await api.installTools();
       setResult(status);
@@ -28,12 +35,30 @@ export default function InstallToolsModal({ open, isUpdate, onClose }: Props) {
     }
   }
 
+  async function handleSetClaudePath() {
+    const path = claudePathInput.trim();
+    if (!path) return;
+    setSettingPath(true);
+    setClaudePathError('');
+    try {
+      await api.setClaudePath(path);
+      // Path accepted — retry the full install
+      await handleInstall();
+    } catch {
+      setClaudePathError('Not a valid claude executable');
+    } finally {
+      setSettingPath(false);
+    }
+  }
+
   const allInstalled = result?.cli.installed && result?.plugin.installed;
 
   function handleClose() {
     const didInstall = !!allInstalled;
     setResult(null);
     setLoading(false);
+    setClaudePathInput('');
+    setClaudePathError('');
     onClose(didInstall);
   }
 
@@ -68,11 +93,52 @@ export default function InstallToolsModal({ open, isUpdate, onClose }: Props) {
           </div>
         )}
 
+        {needsClaudePath && (
+          <div className="claude-path-prompt" data-testid="claude-path-prompt">
+            <p style={{ fontSize: '13px', margin: '12px 0 8px' }}>
+              Could not find the <code>claude</code> binary. Enter the full path:
+            </p>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                value={claudePathInput}
+                onChange={(e) => setClaudePathInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSetClaudePath()}
+                placeholder="/path/to/claude"
+                style={{
+                  flex: 1,
+                  padding: '6px 10px',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-secondary)',
+                  color: 'var(--text-primary)',
+                  fontSize: '13px',
+                  fontFamily: 'monospace',
+                }}
+                disabled={settingPath}
+              />
+              <button
+                className="btn-primary"
+                onClick={handleSetClaudePath}
+                disabled={settingPath || !claudePathInput.trim()}
+                style={{ whiteSpace: 'nowrap' }}
+              >
+                {settingPath ? 'Checking...' : 'Set Path'}
+              </button>
+            </div>
+            {claudePathError && (
+              <p style={{ color: 'var(--text-error, #e53e3e)', fontSize: '12px', margin: '4px 0 0' }}>
+                {claudePathError}
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="modal-actions">
           <button className="btn-cancel" onClick={handleClose}>
             {allInstalled ? 'Done' : 'Not Now'}
           </button>
-          {!allInstalled && (
+          {!allInstalled && !needsClaudePath && (
             <button
               className="btn-primary"
               onClick={handleInstall}

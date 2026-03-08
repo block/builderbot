@@ -236,4 +236,5 @@ export interface InstallComponentStatus {
 export interface InstallToolsStatus {
   cli: InstallComponentStatus;
   plugin: InstallComponentStatus;
+  claudeBin?: string;
 }

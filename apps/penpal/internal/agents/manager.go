@@ -32,12 +32,13 @@ type Agent struct {
 
 // Manager manages Claude Code agent processes, one per project.
 type Manager struct {
-	mu       sync.Mutex
-	agents   map[string]*Agent // key: qualified project name
-	cache    *cache.Cache
-	comments *comments.Store
-	port     int
-	onChange func(projectName string) // called when agent starts or stops
+	mu        sync.Mutex
+	agents    map[string]*Agent // key: qualified project name
+	cache     *cache.Cache
+	comments  *comments.Store
+	port      int
+	onChange  func(projectName string) // called when agent starts or stops
+	claudeBin func() string            // returns resolved path to claude binary
 }
 
 func New(c *cache.Cache, cs *comments.Store, port int) *Manager {
@@ -47,6 +48,13 @@ func New(c *cache.Cache, cs *comments.Store, port int) *Manager {
 		comments: cs,
 		port:     port,
 	}
+}
+
+// SetClaudeBin sets the function used to resolve the claude binary path.
+func (m *Manager) SetClaudeBin(fn func() string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claudeBin = fn
 }
 
 // SetOnChange sets a callback invoked when an agent starts or stops.
@@ -87,7 +95,14 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 
 	prompt := buildPrompt(projectName)
 
-	cmd := exec.Command("claude",
+	claudeBin := "claude"
+	if m.claudeBin != nil {
+		if p := m.claudeBin(); p != "" {
+			claudeBin = p
+		}
+	}
+
+	cmd := exec.Command(claudeBin,
 		"-p", prompt,
 		"--mcp-config", mcpConfigPath,
 		"--dangerously-skip-permissions",

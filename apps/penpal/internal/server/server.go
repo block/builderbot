@@ -71,6 +71,7 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 		am.SetOnChange(func(projectName string) {
 			s.watcher.Broadcast(watcher.Event{Type: watcher.EventAgentsChanged, Project: projectName})
 		})
+		am.SetClaudeBin(s.resolveClaudePath)
 	}
 
 	cs.SetOnWorking(func(project string) {
@@ -302,6 +303,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/ready", s.handleReady)
 	// Install tools (CLI symlink + Claude Code plugin)
 	s.mux.HandleFunc("/api/install-tools", s.handleInstallTools)
+	s.mux.HandleFunc("/api/claude-path", s.handleClaudePath)
 	// React SPA at /app/ (served from frontend/dist/ when it exists)
 	s.mux.Handle("/app/", newSPAHandler(s.frontendDir, "/app"))
 	s.mux.Handle("/app", http.RedirectHandler("/app/", http.StatusMovedPermanently))

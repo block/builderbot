@@ -262,7 +262,6 @@ func (w *Watcher) removeFocusWatches() {
 	w.focusWatched = nil
 }
 
-
 // Stop stops the watcher and closes all subscriber channels
 func (w *Watcher) Stop() {
 	close(w.done)

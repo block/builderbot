@@ -30,7 +30,7 @@ function getSnapshot(): ProjectSortOrder {
 }
 
 export function useProjectSort() {
-  const sortOrder = useSyncExternalStore(subscribe, getSnapshot);
+  const sortOrder = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   const setSortOrder = useCallback((order: ProjectSortOrder) => {
     localStorage.setItem(STORAGE_KEY, order);

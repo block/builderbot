@@ -14,6 +14,7 @@ type Config struct {
 	Workspaces     []Workspace               `json:"workspaces"`
 	Projects       []ProjectConfig           `json:"projects,omitempty"`
 	ProjectSources map[string][]SourceConfig `json:"projectSources,omitempty"` // key: absolute project path, for workspace projects
+	ClaudePath     string                    `json:"claudePath,omitempty"`     // remembered absolute path to claude binary
 }
 
 // Workspace is a directory that is scanned for projects.

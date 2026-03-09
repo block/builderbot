@@ -6,7 +6,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/loganj/penpal/internal/config"
 )
 
 func TestInstallToolsStatus_ReturnsJSON(t *testing.T) {
@@ -139,6 +142,159 @@ func TestInstallToolsInstall_MethodNotAllowed(t *testing.T) {
 	s, _, _ := testServer(t)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/install-tools", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestInstallToolsStatus_IncludesClaudeBin(t *testing.T) {
+	s, _, _ := testServer(t)
+	// Create a fake claude binary and inject it via installCfg
+	dir := t.TempDir()
+	fakeClaude := filepath.Join(dir, "claude")
+	os.WriteFile(fakeClaude, []byte("#!/bin/sh\n"), 0755)
+
+	s.installCfg = &installConfig{binDir: t.TempDir(), claudeBin: fakeClaude}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/install-tools", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	var resp installToolsResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	if resp.ClaudeBin != fakeClaude {
+		t.Errorf("expected claudeBin %q, got %q", fakeClaude, resp.ClaudeBin)
+	}
+}
+
+func TestInstallToolsStatus_ClaudeBinEmpty(t *testing.T) {
+	s, _, _ := testServer(t)
+	s.installCfg = &installConfig{binDir: t.TempDir(), claudeBin: ""}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/install-tools", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	var resp installToolsResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	if resp.ClaudeBin != "" {
+		t.Errorf("expected empty claudeBin, got %q", resp.ClaudeBin)
+	}
+}
+
+func TestPerformInstall_NoClaudeBin_ReportsError(t *testing.T) {
+	appRoot := t.TempDir()
+	macosDir := filepath.Join(appRoot, "Contents", "MacOS")
+	marketplaceDir := filepath.Join(appRoot, "Contents", "Resources", ".claude-plugin")
+	os.MkdirAll(macosDir, 0o755)
+	os.MkdirAll(marketplaceDir, 0o755)
+	os.WriteFile(filepath.Join(marketplaceDir, "marketplace.json"), []byte(`{}`), 0o644)
+	os.WriteFile(filepath.Join(macosDir, "penpal-cli"), []byte("fake"), 0o755)
+
+	cfg := installConfig{binDir: t.TempDir(), appRoot: appRoot, claudeBin: ""}
+	resp := performInstall(cfg)
+
+	if resp.Plugin.Installed {
+		t.Error("expected plugin not installed when claudeBin is empty")
+	}
+	if !strings.Contains(resp.Plugin.Error, "claude binary not found") {
+		t.Errorf("expected 'claude binary not found' error, got %q", resp.Plugin.Error)
+	}
+}
+
+func TestClaudePath_PUT_Valid(t *testing.T) {
+	s, _, _ := testServer(t)
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	s.cfgPath = cfgPath
+
+	// Create a fake claude binary
+	dir := t.TempDir()
+	fakeClaude := filepath.Join(dir, "claude")
+	os.WriteFile(fakeClaude, []byte("#!/bin/sh\n"), 0755)
+
+	body := `{"path":"` + fakeClaude + `"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/claude-path", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["path"] != fakeClaude {
+		t.Errorf("expected path %q, got %q", fakeClaude, resp["path"])
+	}
+
+	// Verify it was persisted
+	saved, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if saved.ClaudePath != fakeClaude {
+		t.Errorf("expected persisted claudePath %q, got %q", fakeClaude, saved.ClaudePath)
+	}
+}
+
+func TestClaudePath_PUT_InvalidPath(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	body := `{"path":"/nonexistent/path/to/claude"}`
+	req := httptest.NewRequest(http.MethodPut, "/api/claude-path", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestClaudePath_PUT_EmptyPath(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	body := `{"path":""}`
+	req := httptest.NewRequest(http.MethodPut, "/api/claude-path", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestClaudePath_GET(t *testing.T) {
+	s, _, _ := testServer(t)
+	// Pre-set a remembered path
+	dir := t.TempDir()
+	fakeClaude := filepath.Join(dir, "claude")
+	os.WriteFile(fakeClaude, []byte("#!/bin/sh\n"), 0755)
+	s.cfg.ClaudePath = fakeClaude
+
+	req := httptest.NewRequest(http.MethodGet, "/api/claude-path", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["path"] != fakeClaude {
+		t.Errorf("expected path %q, got %q", fakeClaude, resp["path"])
+	}
+}
+
+func TestClaudePath_MethodNotAllowed(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/claude-path", nil)
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 

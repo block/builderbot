@@ -9,6 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/loganj/penpal/internal/claudepath"
+	"github.com/loganj/penpal/internal/config"
 )
 
 type installComponentStatus struct {
@@ -18,14 +21,16 @@ type installComponentStatus struct {
 }
 
 type installToolsResponse struct {
-	CLI    installComponentStatus `json:"cli"`
-	Plugin installComponentStatus `json:"plugin"`
+	CLI       installComponentStatus `json:"cli"`
+	Plugin    installComponentStatus `json:"plugin"`
+	ClaudeBin string                 `json:"claudeBin,omitempty"` // resolved path to claude binary (empty if not found)
 }
 
 // installConfig holds injectable paths for testing.
 type installConfig struct {
-	binDir  string // override for CLI symlink target directory
-	appRoot string // override for .app bundle root
+	binDir    string // override for CLI symlink target directory
+	appRoot   string // override for .app bundle root
+	claudeBin string // resolved path to claude binary
 }
 
 func (s *Server) handleInstallTools(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +48,7 @@ func (s *Server) handleInstallToolsStatus(w http.ResponseWriter, _ *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	cfg := s.getInstallConfig()
 	resp := checkInstallStatus(cfg)
+	resp.ClaudeBin = cfg.claudeBin
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -50,15 +56,81 @@ func (s *Server) handleInstallToolsInstall(w http.ResponseWriter, _ *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	cfg := s.getInstallConfig()
 	resp := performInstall(cfg)
+
+	// If plugin installed successfully, remember the claude path
+	if resp.Plugin.Installed && cfg.claudeBin != "" {
+		s.rememberClaudePath(cfg.claudeBin)
+	}
+
+	resp.ClaudeBin = cfg.claudeBin
 	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) getInstallConfig() installConfig {
-	cfg := installConfig{}
 	if s.installCfg != nil {
 		return *s.installCfg
 	}
-	return cfg
+	return installConfig{
+		claudeBin: s.resolveClaudePath(),
+	}
+}
+
+// resolveClaudePath finds the claude binary, checking the remembered config path first,
+// then falling back to PATH and well-known locations.
+func (s *Server) resolveClaudePath() string {
+	s.cfgMu.Lock()
+	remembered := s.cfg.ClaudePath
+	s.cfgMu.Unlock()
+
+	resolved := claudepath.Resolve(remembered)
+
+	// If we found it and it differs from what was remembered, persist it
+	if resolved != "" && resolved != remembered {
+		s.rememberClaudePath(resolved)
+	}
+
+	return resolved
+}
+
+func (s *Server) rememberClaudePath(path string) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	if s.cfg.ClaudePath != path {
+		s.cfg.ClaudePath = path
+		config.Save(s.cfgPath, s.cfg)
+		log.Printf("Remembered claude path: %s", path)
+	}
+}
+
+func (s *Server) handleClaudePath(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"path":    s.resolveClaudePath(),
+			"version": claudepath.Version(s.resolveClaudePath()),
+		})
+	case http.MethodPut:
+		var body struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if body.Path == "" || !claudepath.IsExecutable(body.Path) {
+			http.Error(w, "path is not a valid executable", http.StatusBadRequest)
+			return
+		}
+		s.rememberClaudePath(body.Path)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"path":    body.Path,
+			"version": claudepath.Version(body.Path),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // resolveAppRoot finds the .app bundle root from the current executable path.
@@ -107,9 +179,11 @@ func checkInstallStatus(cfg installConfig) installToolsResponse {
 		resp.CLI.Path = target
 	}
 
-	if out, err := exec.Command("claude", "plugin", "list").Output(); err == nil {
-		if strings.Contains(string(out), "penpal") {
-			resp.Plugin.Installed = true
+	if cfg.claudeBin != "" {
+		if out, err := exec.Command(cfg.claudeBin, "plugin", "list").Output(); err == nil {
+			if strings.Contains(string(out), "penpal") {
+				resp.Plugin.Installed = true
+			}
 		}
 	}
 
@@ -161,10 +235,12 @@ func performInstall(cfg installConfig) installToolsResponse {
 	marketplaceJSON := filepath.Join(marketplaceDir, ".claude-plugin", "marketplace.json")
 	if _, err := os.Stat(marketplaceJSON); err != nil {
 		resp.Plugin.Error = fmt.Sprintf("marketplace.json not found in app bundle: %v", err)
+	} else if cfg.claudeBin == "" {
+		resp.Plugin.Error = "claude binary not found; install Claude Code first (https://claude.ai/install.sh)"
 	} else {
-		if out, err := exec.Command("claude", "plugin", "marketplace", "add", marketplaceDir).CombinedOutput(); err != nil {
+		if out, err := exec.Command(cfg.claudeBin, "plugin", "marketplace", "add", marketplaceDir).CombinedOutput(); err != nil {
 			resp.Plugin.Error = fmt.Sprintf("marketplace add failed: %v (%s)", err, strings.TrimSpace(string(out)))
-		} else if out, err := exec.Command("claude", "plugin", "install", "penpal").CombinedOutput(); err != nil {
+		} else if out, err := exec.Command(cfg.claudeBin, "plugin", "install", "penpal").CombinedOutput(); err != nil {
 			resp.Plugin.Error = fmt.Sprintf("plugin install failed: %v (%s)", err, strings.TrimSpace(string(out)))
 		} else {
 			resp.Plugin.Installed = true

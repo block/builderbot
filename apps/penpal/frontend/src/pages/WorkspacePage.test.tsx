@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, Outlet } from 'react-router-dom';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import WorkspacePage from './WorkspacePage';
@@ -84,6 +84,7 @@ function renderPage() {
 describe('WorkspacePage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
   });
 
   it('renders project cards', async () => {
@@ -160,6 +161,41 @@ describe('WorkspacePage', () => {
       const meta = card?.querySelector('.project-card-meta');
       expect(meta?.querySelector('.branch')?.textContent).toBe('main');
       expect(meta?.querySelector('.worktree-count')?.textContent).toBe('+ 2 worktrees');
+    });
+  });
+
+  it('renders sort toggle button defaulting to A-Z', async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText('A-Z')).toBeTruthy();
+    });
+  });
+
+  it('sorts projects alphabetically by default', async () => {
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText('my-project')).toBeTruthy();
+    });
+    const grid = screen.getByTestId('workspace-page').querySelector('.projects-grid') as HTMLElement;
+    const cards = within(grid).getAllByText(/my-project|single-wt|empty-project/);
+    const names = cards.map((el) => el.textContent);
+    // my-project and single-wt have files (sorted alpha), empty-project last
+    expect(names).toEqual(['my-project', 'single-wt', 'empty-project']);
+  });
+
+  it('toggles to Recent sort', async () => {
+    renderPage();
+    const btn = await screen.findByText('A-Z');
+    fireEvent.click(btn);
+    expect(screen.getByText('Recent')).toBeTruthy();
+    expect(localStorage.getItem('penpal-project-sort')).toBe('recent');
+  });
+
+  it('persists sort preference across renders', async () => {
+    localStorage.setItem('penpal-project-sort', 'recent');
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText('Recent')).toBeTruthy();
     });
   });
 });

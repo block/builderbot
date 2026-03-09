@@ -1145,6 +1145,25 @@ a:hover { text-decoration: underline; }
 }
 
 /* ── Project cards (workspace page) ── */
+.projects-grid-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+.sort-toggle {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-card);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.sort-toggle:hover {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
+}
 .projects-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));

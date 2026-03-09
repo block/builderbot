@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useOutletContext } from 'react-router-dom';
 import { api } from '../api';
 import { useSSE } from '../hooks/useSSE';
+import { useProjectSort } from '../hooks/useProjectSort';
 import type { LayoutContext } from '../components/Layout';
 import type { APIProject, SSEEvent, ProjectInfo } from '../types';
 
@@ -22,16 +23,11 @@ export default function WorkspacePage() {
   const [deleteTarget, setDeleteTarget] = useState<APIProject | null>(null);
   const [deleteInfo, setDeleteInfo] = useState<ProjectInfo | null>(null);
   const [deleting, setDeleting] = useState<Set<string>>(new Set());
+  const { sortOrder, toggle: toggleSort } = useProjectSort();
 
   const refreshProjects = useCallback(() => {
     api.listProjects().then((all) => {
-      const filtered = all.filter((p) => p.workspace === name && p.origin === 'workspace');
-      filtered.sort((a, b) => {
-        if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
-        if (a.fileCount === 0 && b.fileCount === 0) return a.name.localeCompare(b.name);
-        return 0;
-      });
-      setProjects(filtered);
+      setProjects(all.filter((p) => p.workspace === name && p.origin === 'workspace'));
       setStandaloneProjects(all.filter((p) => p.origin === 'standalone'));
     }).catch(() => {});
   }, [name]);
@@ -59,9 +55,17 @@ export default function WorkspacePage() {
     ),
   );
 
+  const sortedProjects = useMemo(() => [...projects].sort((a, b) => {
+    // Empty projects always last
+    if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
+    if (sortOrder === 'alpha') return a.name.localeCompare(b.name);
+    // recent: API already returns by lastModified desc
+    return 0;
+  }), [projects, sortOrder]);
+
   // Push sidebar card listing projects
   useEffect(() => {
-    if (projects.length === 0) {
+    if (sortedProjects.length === 0) {
       setSidebarExtra(null);
       return;
     }
@@ -69,7 +73,7 @@ export default function WorkspacePage() {
       <div className="sidebar-card">
         <div className="sidebar-card-title">Projects</div>
         <nav className="sidebar-card-nav">
-          {projects.map((p) => (
+          {sortedProjects.map((p) => (
             <Link
               key={p.qualifiedName}
               to={`/project/${p.qualifiedName}`}
@@ -82,7 +86,7 @@ export default function WorkspacePage() {
       </div>,
     );
     return () => setSidebarExtra(null);
-  }, [projects, setSidebarExtra]);
+  }, [sortedProjects, setSidebarExtra]);
 
   function handleCopyPath(project: APIProject, e: React.MouseEvent) {
     e.stopPropagation();
@@ -173,11 +177,16 @@ export default function WorkspacePage() {
 
   return (
     <div data-testid="workspace-page">
+      <div className="projects-grid-header">
+        <button className="sort-toggle" onClick={toggleSort} title={`Sort by ${sortOrder === 'alpha' ? 'recent' : 'name'}`}>
+          {sortOrder === 'alpha' ? 'A-Z' : 'Recent'}
+        </button>
+      </div>
       <div className="projects-grid">
-        {projects.map(renderProjectCard)}
+        {sortedProjects.map(renderProjectCard)}
       </div>
 
-      {projects.length === 0 && <p className="empty">No projects in this workspace.</p>}
+      {sortedProjects.length === 0 && <p className="empty">No projects in this workspace.</p>}
 
       {standaloneProjects.length > 0 && (
         <>

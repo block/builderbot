@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef, type ReactNode } from 'react';
 import { Link, NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { api, isDesktopApp, API_BASE } from '../api';
 import { useTheme } from '../hooks/useTheme';
@@ -11,6 +11,7 @@ import InstallToolsModal from './InstallToolsModal';
 import type { Heading } from './TableOfContents';
 import type { APIProject, SSEEvent } from '../types';
 import { parseProjectWorktree } from '../utils/worktree';
+import { useProjectSort } from '../hooks/useProjectSort';
 
 export interface LayoutContext {
   setHeadings: (headings: Heading[]) => void;
@@ -126,10 +127,23 @@ export default function Layout() {
     }
   }, [openSidebarMenu]);
 
+  const { sortOrder } = useProjectSort();
+
   // Group projects by workspace
-  const workspaceProjects = projects.filter((p) => p.origin === 'workspace');
-  const standaloneProjects = projects.filter((p) => p.origin === 'standalone');
-  const workspaces = [...new Set(workspaceProjects.map((p) => p.workspace))];
+  const workspaceProjects = useMemo(
+    () => projects.filter((p) => p.origin === 'workspace'),
+    [projects],
+  );
+  const standaloneProjects = useMemo(() => {
+    const sp = projects.filter((p) => p.origin === 'standalone');
+    if (sortOrder === 'alpha') sp.sort((a, b) => a.name.localeCompare(b.name));
+    return sp;
+  }, [projects, sortOrder]);
+  const workspaces = useMemo(() => {
+    const ws = [...new Set(workspaceProjects.map((p) => p.workspace))];
+    if (sortOrder === 'alpha') ws.sort((a, b) => a.localeCompare(b));
+    return ws;
+  }, [workspaceProjects, sortOrder]);
 
   // Listen for native menu events (tab/window shortcuts)
   useEffect(() => {

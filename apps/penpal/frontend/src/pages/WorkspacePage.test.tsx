@@ -176,7 +176,7 @@ describe('WorkspacePage', () => {
     await waitFor(() => {
       expect(screen.getByText('my-project')).toBeTruthy();
     });
-    const grid = screen.getByTestId('workspace-page').querySelector('.projects-grid')!;
+    const grid = screen.getByTestId('workspace-page').querySelector('.projects-grid') as HTMLElement;
     const cards = within(grid).getAllByText(/my-project|single-wt|empty-project/);
     const names = cards.map((el) => el.textContent);
     // my-project and single-wt have files (sorted alpha), empty-project last

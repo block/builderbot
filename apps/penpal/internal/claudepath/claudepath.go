@@ -17,8 +17,8 @@ func candidatePaths() []string {
 
 	paths := []string{
 		filepath.Join(home, ".local", "bin", "claude"), // native installer (most common)
-		"/opt/homebrew/bin/claude",                      // Homebrew on Apple Silicon
-		"/usr/local/bin/claude",                         // Homebrew on Intel / legacy npm
+		"/opt/homebrew/bin/claude",                     // Homebrew on Apple Silicon
+		"/usr/local/bin/claude",                        // Homebrew on Intel / legacy npm
 	}
 
 	// nvm: check all installed node versions

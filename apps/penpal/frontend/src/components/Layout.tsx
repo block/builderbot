@@ -11,6 +11,7 @@ import InstallToolsModal from './InstallToolsModal';
 import type { Heading } from './TableOfContents';
 import type { APIProject, SSEEvent } from '../types';
 import { parseProjectWorktree } from '../utils/worktree';
+import { useProjectSort } from '../hooks/useProjectSort';
 
 export interface LayoutContext {
   setHeadings: (headings: Heading[]) => void;
@@ -126,10 +127,16 @@ export default function Layout() {
     }
   }, [openSidebarMenu]);
 
+  const { sortOrder } = useProjectSort();
+
   // Group projects by workspace
   const workspaceProjects = projects.filter((p) => p.origin === 'workspace');
-  const standaloneProjects = projects.filter((p) => p.origin === 'standalone');
+  const standaloneProjects = [...projects.filter((p) => p.origin === 'standalone')];
   const workspaces = [...new Set(workspaceProjects.map((p) => p.workspace))];
+  if (sortOrder === 'alpha') {
+    workspaces.sort((a, b) => a.localeCompare(b));
+    standaloneProjects.sort((a, b) => a.name.localeCompare(b.name));
+  }
 
   // Listen for native menu events (tab/window shortcuts)
   useEffect(() => {

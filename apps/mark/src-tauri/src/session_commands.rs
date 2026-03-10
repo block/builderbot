@@ -846,6 +846,7 @@ pub async fn start_auto_review(
             action_executor: None,
             action_registry: None,
             remote_working_dir,
+            image_ids: vec![],
         },
         store,
         app_handle,

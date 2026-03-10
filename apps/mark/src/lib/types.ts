@@ -121,10 +121,32 @@ export interface ReviewTimelineItem {
   updatedAt: number;
 }
 
+export interface ImageTimelineItem {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  sessionId: string | null;
+  sessionStatus: string | null;
+  createdAt: number;
+}
+
 export interface BranchTimeline {
   commits: CommitTimelineItem[];
   notes: NoteTimelineItem[];
   reviews: ReviewTimelineItem[];
+  images: ImageTimelineItem[];
+}
+
+export interface Image {
+  id: string;
+  branchId: string | null;
+  projectId: string;
+  sessionId: string | null;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: number;
 }
 
 export interface BranchRef {
@@ -199,6 +221,8 @@ export interface SessionMessage {
   role: MessageRole;
   content: string;
   createdAt: number;
+  /** Image IDs attached to this message (user messages only). */
+  imageIds?: string[];
 }
 
 // =============================================================================

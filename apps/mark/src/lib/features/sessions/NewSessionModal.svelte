@@ -10,26 +10,40 @@
     branch        — the branch to create a session on
     mode          — 'commit', 'note', or 'review' (shown as title, not togglable)
     initialPrompt — pre-fill the textarea (e.g. from a previous close)
-    onClose       — called with { prompt, mode } when dismissed
-    onSubmit      — called with { prompt, mode } when submit is pressed
+    onClose       — called with { prompt, mode, imageIds } when dismissed
+    onSubmit      — called with { prompt, mode, imageIds } when submit is pressed
 -->
 <script lang="ts">
   import { X, GitCommitVertical, FileText, FileSearch, GitBranch, Send } from 'lucide-svelte';
+  import { untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import type { Branch, BranchSessionType } from '../../types';
   import AgentSelector from '../agents/AgentSelector.svelte';
+  import ImageAttachment from './ImageAttachment.svelte';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import { subscribeDragDrop } from '../branches/dragDrop';
+  import { isImageFile } from '../branches/branchCardHelpers';
+  import { createImage } from '../../commands';
 
   interface Props {
     branch: Branch;
     mode: BranchSessionType;
     initialPrompt?: string;
+    initialImageIds?: string[];
     remote?: boolean;
-    onClose: (draft: { prompt: string; mode: BranchSessionType }) => void;
-    onSubmit: (data: { prompt: string; mode: BranchSessionType }) => void;
+    onClose: (draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
+    onSubmit: (data: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
   }
 
-  let { branch, mode, initialPrompt = '', remote = false, onClose, onSubmit }: Props = $props();
+  let {
+    branch,
+    mode,
+    initialPrompt = '',
+    initialImageIds = [],
+    remote = false,
+    onClose,
+    onSubmit,
+  }: Props = $props();
 
   let prompt = $state('');
   let currentMode = $state<BranchSessionType>('commit');
@@ -41,12 +55,20 @@
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
 
+  // Image attachment state
+  let imageIds = $state<string[]>([]);
+
+  // Drag-and-drop state
+  let dragOver = $state(false);
+  let modalElement: HTMLDivElement | undefined = $state();
+
   // Seed prompt and mode from props once; caller preserves draft across open/close.
   $effect(() => {
     if (!initialized) {
       initialized = true;
       prompt = initialPrompt;
       currentMode = mode;
+      imageIds = [...initialImageIds];
     }
   });
 
@@ -71,13 +93,13 @@
     starting = true;
     const finalPrompt =
       prompt.trim() || (isReview ? 'Review the code changes on this branch.' : '');
-    onSubmit({ prompt: finalPrompt, mode: currentMode });
+    onSubmit({ prompt: finalPrompt, mode: currentMode, imageIds });
     // Close immediately; parent handles async start + optimistic timeline row.
-    onClose({ prompt: '', mode: currentMode });
+    onClose({ prompt: '', mode: currentMode, imageIds: [] });
   }
 
   function handleClose() {
-    onClose({ prompt, mode: currentMode });
+    onClose({ prompt, mode: currentMode, imageIds });
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -97,6 +119,54 @@
   function formatBaseBranch(baseBranch: string): string {
     return baseBranch.replace(/^origin\//, '');
   }
+
+  // =========================================================================
+  // Drag-and-drop images (via Tauri native drag-drop events)
+  // =========================================================================
+
+  async function handleFileDrop(paths: string[]) {
+    const imagePaths = paths.filter((p) => isImageFile(p));
+    const newIds: string[] = [];
+    for (const path of imagePaths) {
+      try {
+        const image = await createImage(branch.id, branch.projectId, path, true);
+        newIds.push(image.id);
+      } catch (e) {
+        console.error('Failed to create image from dropped file:', e);
+      }
+    }
+    if (newIds.length > 0) {
+      imageIds = [...imageIds, ...newIds];
+      onImageIdsChange(imageIds);
+    }
+  }
+
+  // Keep imageIds in sync with ImageAttachment changes
+  function onImageIdsChange(ids: string[]) {
+    imageIds = ids;
+  }
+
+  // Subscribe to the shared drag-drop service so the modal intercepts
+  // drags that would otherwise land on the branch card behind it.
+  $effect(() => {
+    const el = modalElement;
+    if (!el) return;
+
+    const unsub = untrack(() =>
+      subscribeDragDrop({
+        element: el,
+        blocking: true,
+        onDragOver: (over) => {
+          dragOver = over;
+        },
+        onDrop: (paths) => {
+          handleFileDrop(paths);
+        },
+      })
+    );
+
+    return unsub;
+  });
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -112,7 +182,13 @@
   onkeydown={(e) => e.key === 'Escape' && handleClose()}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
+  <div
+    bind:this={modalElement}
+    class="modal"
+    class:drag-over={dragOver}
+    role="presentation"
+    onclick={(e) => e.stopPropagation()}
+  >
     <header class="modal-header">
       <div class="header-title">
         {#if isReview}
@@ -153,6 +229,14 @@
         ></textarea>
         <span class="hint">⌘ Enter to start</span>
       </div>
+
+      <ImageAttachment
+        branchId={branch.id}
+        projectId={branch.projectId}
+        disabled={starting}
+        {imageIds}
+        {onImageIdsChange}
+      />
 
       <div class="form-actions">
         <AgentSelector disabled={starting} {remote} />
@@ -197,9 +281,19 @@
     width: 580px;
     max-width: 90vw;
     background: var(--bg-chrome);
+    border: 2px solid transparent;
     border-radius: 12px;
     overflow: hidden;
     box-shadow: var(--shadow-elevated);
+    transition:
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  /* Drag-and-drop highlight */
+  .modal.drag-over {
+    border-color: var(--ui-accent);
+    background-color: color-mix(in srgb, var(--ui-accent) 5%, var(--bg-chrome));
   }
 
   /* Header */

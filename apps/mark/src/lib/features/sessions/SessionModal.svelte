@@ -24,7 +24,7 @@
     onClose   — callback to close this modal
 -->
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { slide } from 'svelte/transition';
   import {
     X,
@@ -37,6 +37,9 @@
     ChevronDown,
     Zap,
     GitBranch,
+    Paperclip,
+    ImagePlus,
+    Plus,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { marked } from 'marked';
@@ -44,6 +47,10 @@
   import type { Session, SessionMessage } from '../../types';
   import {
     cancelSession,
+    createImage,
+    createImageFromData,
+    deleteImage,
+    getImageData,
     getSession,
     getSessionMessages,
     getSessionMessagesSince,
@@ -51,6 +58,8 @@
     resumeSession,
   } from '../../api/commands';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import { subscribeDragDrop } from '../branches/dragDrop';
+  import { isImageFile } from '../branches/branchCardHelpers';
   import {
     formatToolDisplay,
     groupByVerb,
@@ -70,9 +79,13 @@
     onClose: () => void;
     /** Repo base directory — tool call paths within it are shown as relative. */
     repoDir?: string | null;
+    /** Branch ID — when provided, enables image attachment on replies. */
+    branchId?: string | null;
+    /** Project ID — when provided, enables image attachment on replies. */
+    projectId?: string | null;
   }
 
-  let { sessionId, onClose, repoDir }: Props = $props();
+  let { sessionId, onClose, repoDir, branchId, projectId }: Props = $props();
 
   // =========================================================================
   // State
@@ -98,6 +111,164 @@
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
+
+  // Image attachment state (available when project context is provided; branchId is optional)
+  let canAttachImages = $derived(!!projectId);
+  let replyImageIds = $state<string[]>([]);
+  let imagePreviews = $state<Map<string, string>>(new Map());
+  let imageFileInput = $state<HTMLInputElement>();
+
+  // Drag-and-drop state
+  let dragOver = $state(false);
+  let modalElement: HTMLDivElement | undefined = $state();
+
+  // Shared image data cache for both reply previews and message history images.
+  // Maps image ID → data URL. Loaded lazily when needed.
+  let messageImageCache = $state<Map<string, string>>(new Map());
+
+  // Load previews for attached images
+  $effect(() => {
+    for (const id of replyImageIds) {
+      if (!imagePreviews.has(id)) {
+        getImageData(id)
+          .then((dataUrl) => {
+            imagePreviews = new Map(imagePreviews);
+            imagePreviews.set(id, dataUrl);
+          })
+          .catch(() => {
+            // Image may have been deleted — insert sentinel to prevent infinite retry
+            imagePreviews = new Map(imagePreviews);
+            imagePreviews.set(id, '');
+          });
+      }
+    }
+  });
+
+  // Load image data for images referenced in message history
+  $effect(() => {
+    const allImageIds = new Set<string>();
+    for (const msg of messages) {
+      if (msg.imageIds) {
+        for (const id of msg.imageIds) {
+          allImageIds.add(id);
+        }
+      }
+    }
+    for (const id of allImageIds) {
+      if (!messageImageCache.has(id)) {
+        getImageData(id)
+          .then((dataUrl) => {
+            messageImageCache = new Map(messageImageCache);
+            messageImageCache.set(id, dataUrl);
+          })
+          .catch(() => {
+            messageImageCache = new Map(messageImageCache);
+            messageImageCache.set(id, '');
+          });
+      }
+    }
+  });
+
+  function openImagePicker() {
+    imageFileInput?.click();
+  }
+
+  async function handleImageFileSelect(e: Event) {
+    const input = e.target as HTMLInputElement;
+    if (!input.files) return;
+    for (const file of Array.from(input.files)) {
+      await addImageFile(file);
+    }
+    input.value = '';
+  }
+
+  async function addImageFile(file: File) {
+    if (!projectId) return;
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.length; i += 8192) {
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+    }
+    const base64 = btoa(chunks.join(''));
+    try {
+      const image = await createImageFromData(
+        branchId ?? null,
+        projectId,
+        file.name,
+        file.type,
+        base64,
+        true
+      );
+      replyImageIds = [...replyImageIds, image.id];
+      const dataUrl = `data:${file.type};base64,${base64}`;
+      imagePreviews = new Map(imagePreviews);
+      imagePreviews.set(image.id, dataUrl);
+    } catch (err) {
+      console.error('Failed to attach image:', err);
+    }
+  }
+
+  function handleImagePaste(e: ClipboardEvent) {
+    if (!canAttachImages || isLive) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) void addImageFile(file);
+      }
+    }
+  }
+
+  function removeReplyImage(imageId: string) {
+    replyImageIds = replyImageIds.filter((id) => id !== imageId);
+    imagePreviews = new Map(imagePreviews);
+    imagePreviews.delete(imageId);
+    deleteImage(imageId).catch((err) => {
+      console.error('Failed to delete image:', err);
+    });
+  }
+
+  // Drag-and-drop images (via Tauri native drag-drop events)
+  async function handleFileDrop(paths: string[]) {
+    if (!projectId) return;
+    const imagePaths = paths.filter((p) => isImageFile(p));
+    const bid = branchId ?? null;
+    const pid = projectId;
+    const newIds: string[] = [];
+    for (const path of imagePaths) {
+      try {
+        const image = await createImage(bid, pid, path, true);
+        newIds.push(image.id);
+      } catch (e) {
+        console.error('Failed to create image from dropped file:', e);
+      }
+    }
+    if (newIds.length > 0) {
+      replyImageIds = [...replyImageIds, ...newIds];
+    }
+  }
+
+  // Subscribe to the shared drag-drop service
+  $effect(() => {
+    const el = modalElement;
+    if (!el || !canAttachImages) return;
+    const unsub = untrack(() =>
+      subscribeDragDrop({
+        element: el,
+        blocking: true,
+        onDragOver: (over) => {
+          dragOver = over;
+        },
+        onDrop: (paths) => {
+          handleFileDrop(paths);
+        },
+      })
+    );
+    return unsub;
+  });
 
   // Search state
   let searchVisible = $state(false);
@@ -228,6 +399,9 @@
     const text = inputText.trim();
     if (!text) return;
     inputText = '';
+    const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
+    replyImageIds = [];
+    imagePreviews = new Map();
     // Reset textarea height after clearing (oninput won't fire for programmatic changes)
     tick().then(() => autoResize());
 
@@ -238,16 +412,16 @@
     }
 
     // Session is idle — send immediately
-    await sendMessage(text);
+    await sendMessage(text, imageIdsToSend);
   }
 
   /** Actually send a message to the backend and start the agent. */
-  async function sendMessage(text: string) {
+  async function sendMessage(text: string, imageIds?: string[]) {
     if (!session || sending) return;
     sending = true;
     error = null;
     try {
-      await resumeSession(session.id, text);
+      await resumeSession(session.id, text, imageIds);
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = { ...session, status: 'running' };
@@ -605,7 +779,7 @@
   });
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onpaste={handleImagePaste} />
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
@@ -619,7 +793,13 @@
   onkeydown={(e) => e.key === 'Escape' && requestClose()}
 >
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
+  <div
+    bind:this={modalElement}
+    class="modal"
+    class:drag-over={dragOver}
+    role="presentation"
+    onclick={(e) => e.stopPropagation()}
+  >
     <!-- Header -->
     <header class="modal-header">
       <div class="header-content">
@@ -717,10 +897,29 @@
                 </div>
               {/if}
               <!-- User prompt bubble -->
-              {#if userText.trim()}
+              {#if userText.trim() || (group.message.imageIds && group.message.imageIds.length > 0)}
                 <div class="message-row human-message">
                   <div class="human-bubble">
-                    {userText}
+                    {#if userText.trim()}
+                      <span class="human-text">{userText}</span>
+                    {/if}
+                    {#if group.message.imageIds && group.message.imageIds.length > 0}
+                      <div class="message-images">
+                        {#each group.message.imageIds as imgId}
+                          {#if messageImageCache.get(imgId)}
+                            <img
+                              class="message-image-thumb"
+                              src={messageImageCache.get(imgId)}
+                              alt="attachment"
+                            />
+                          {:else}
+                            <div class="message-image-placeholder">
+                              <ImagePlus size={16} />
+                            </div>
+                          {/if}
+                        {/each}
+                      </div>
+                    {/if}
                     <button
                       class="copy-btn inline-copy"
                       onclick={() => copyContent(group.message.content, group.message.id)}
@@ -867,7 +1066,7 @@
       {/if}
     </div>
 
-    <!-- Input area with queued messages -->
+    <!-- Input area with queued messages and image previews -->
     <div class="input-wrapper">
       {#if hasQueuedMessages}
         <div class="queue-popover">
@@ -888,7 +1087,54 @@
           {/each}
         </div>
       {/if}
+      {#if canAttachImages && replyImageIds.length > 0}
+        <div class="reply-images">
+          {#each replyImageIds as imageId}
+            <div class="reply-image-thumb">
+              {#if imagePreviews.get(imageId)}
+                <img src={imagePreviews.get(imageId)} alt="attached" />
+              {:else}
+                <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
+              {/if}
+              {#if !isLive}
+                <button
+                  class="reply-image-remove"
+                  onclick={() => removeReplyImage(imageId)}
+                  title="Remove image"
+                >
+                  <X size={10} />
+                </button>
+              {/if}
+            </div>
+          {/each}
+          {#if !isLive}
+            <button class="reply-image-add" onclick={openImagePicker} title="Add image">
+              <Plus size={16} />
+            </button>
+          {/if}
+        </div>
+      {/if}
       <div class="input-area">
+        {#if canAttachImages}
+          <input
+            bind:this={imageFileInput}
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+            multiple
+            class="file-input-hidden"
+            onchange={handleImageFileSelect}
+          />
+          {#if replyImageIds.length === 0}
+            <button
+              class="attach-btn"
+              onclick={openImagePicker}
+              disabled={isLive}
+              title="Attach image"
+            >
+              <Paperclip size={16} />
+            </button>
+          {/if}
+        {/if}
         <textarea
           bind:this={inputEl}
           bind:value={inputText}
@@ -952,9 +1198,18 @@
     width: 700px;
     height: 600px;
     background: var(--bg-chrome);
+    border: 2px solid transparent;
     border-radius: 12px;
     overflow: hidden;
     box-shadow: var(--shadow-elevated);
+    transition:
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .modal.drag-over {
+    border-color: var(--ui-accent);
+    background-color: color-mix(in srgb, var(--ui-accent) 5%, var(--bg-chrome));
   }
 
   /* ----- Header ---------------------------------------------------------- */
@@ -1090,6 +1345,10 @@
     white-space: pre-wrap;
   }
 
+  .human-text {
+    display: block;
+  }
+
   .human-bubble .inline-copy {
     position: absolute;
     top: 6px;
@@ -1100,6 +1359,35 @@
 
   .human-bubble:hover .inline-copy {
     opacity: 1;
+  }
+
+  /* Images attached to user messages */
+  .message-images {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+  }
+
+  .message-image-thumb {
+    width: 120px;
+    max-height: 120px;
+    object-fit: cover;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+    cursor: pointer;
+  }
+
+  .message-image-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 8px;
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-hover);
+    color: var(--text-faint);
   }
 
   /* Context blocks (action/branch-history tags rendered as tool-call-style cards) */
@@ -1449,6 +1737,102 @@
     background: var(--bg-hover);
   }
 
+  /* ----- Reply image previews -------------------------------------------- */
+
+  .file-input-hidden {
+    display: none;
+  }
+
+  .reply-images {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 14px 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .reply-images + .input-area {
+    border-top: none;
+  }
+
+  .reply-image-thumb {
+    position: relative;
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border-muted);
+    background: var(--bg-hover);
+    flex-shrink: 0;
+  }
+
+  .reply-image-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .reply-image-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    color: var(--text-faint);
+  }
+
+  .reply-image-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--bg-deepest);
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 0.1s,
+      color 0.1s;
+  }
+
+  .reply-image-thumb:hover .reply-image-remove {
+    opacity: 1;
+  }
+
+  .reply-image-remove:hover {
+    color: var(--text-primary);
+    background: var(--bg-chrome);
+  }
+
+  .reply-image-add {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    border: 1px dashed var(--border-muted);
+    background: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    transition:
+      color 0.1s,
+      border-color 0.1s;
+  }
+
+  .reply-image-add:hover {
+    color: var(--text-muted);
+    border-color: var(--border-emphasis);
+  }
+
   /* ----- Input area ------------------------------------------------------ */
 
   .input-area {
@@ -1459,6 +1843,34 @@
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;
+  }
+
+  .attach-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: none;
+    border-radius: 10px;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
+  }
+
+  .attach-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+
+  .attach-btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
   }
 
   .message-input {

@@ -11,6 +11,7 @@
     "clipboard-manager:allow-write-text",
     "window-state:default",
     "store:default",
-    "core:window:allow-set-badge-count"
+    "core:window:allow-set-badge-count",
+    "dialog:default"
   ]
 }

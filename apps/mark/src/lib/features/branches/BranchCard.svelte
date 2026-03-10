@@ -56,6 +56,7 @@
   import * as commands from '../../api/commands';
   import type { ProjectAction } from '../../api/commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
+  import ImageViewerModal from '../timeline/ImageViewerModal.svelte';
   import DiffModal from '../diff/DiffModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
@@ -88,6 +89,7 @@
     groupActionsByType,
     isPushRejectedNonFastForward,
     isTextFile,
+    isImageFile,
   } from './branchCardHelpers';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
@@ -353,10 +355,19 @@
   // Note modal (opened by clicking a note in the timeline)
   let openNote = $state<{ title: string; content: string } | null>(null);
 
+  // Image viewer modal (opened by clicking an image in the timeline)
+  let viewImageId = $state<string | null>(null);
+  let viewImageFilename = $state<string>('');
+  let deletingImageIds = $state<Set<string>>(new Set());
+  let timelineDeletingItems = $derived(
+    [...deletingImageIds].map((id) => ({ type: 'image' as const, id }))
+  );
+
   // New session modal state
   let showNewSession = $state(false);
   let newSessionMode = $state<BranchSessionType>('commit');
   let draftPrompt = $state('');
+  let draftImageIds = $state<string[]>([]);
   type PendingSessionItemType = 'pending-commit' | 'generating-note' | 'generating-review';
   type PendingSessionItem = {
     key: string;
@@ -1202,7 +1213,11 @@
     }
   }
 
-  async function startBranchSessionWithPendingItem(mode: BranchSessionType, prompt: string) {
+  async function startBranchSessionWithPendingItem(
+    mode: BranchSessionType,
+    prompt: string,
+    imageIds: string[] = []
+  ) {
     const pendingKey = `session-start-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     pendingSessionItems = [
       ...pendingSessionItems,
@@ -1220,7 +1235,8 @@
         branch.id,
         prompt,
         mode,
-        getPreferredAgent(agents) ?? undefined
+        getPreferredAgent(agents) ?? undefined,
+        imageIds.length > 0 ? imageIds : undefined
       );
 
       if (!result || !result.sessionId) {
@@ -1268,20 +1284,31 @@
     newSessionMode = 'review';
     showNewSession = false;
     draftPrompt = '';
+    draftImageIds = [];
     await startBranchSessionWithPendingItem('review', reviewPrompt);
   }
 
-  function handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType }) {
+  function handleNewSessionClose(draft: {
+    prompt: string;
+    mode: BranchSessionType;
+    imageIds: string[];
+  }) {
     draftPrompt = draft.prompt;
     newSessionMode = draft.mode;
+    draftImageIds = draft.imageIds;
     showNewSession = false;
   }
 
-  function handleNewSessionSubmit(data: { prompt: string; mode: BranchSessionType }) {
+  function handleNewSessionSubmit(data: {
+    prompt: string;
+    mode: BranchSessionType;
+    imageIds: string[];
+  }) {
     newSessionMode = data.mode;
     showNewSession = false;
     draftPrompt = '';
-    void startBranchSessionWithPendingItem(data.mode, data.prompt);
+    draftImageIds = [];
+    void startBranchSessionWithPendingItem(data.mode, data.prompt, data.imageIds);
   }
 
   // =========================================================================
@@ -1411,6 +1438,38 @@
       console.error('Failed to delete pending commit:', e);
       notifyError('Failed to delete pending commit', e);
     }
+  }
+
+  function handleImageClick(imageId: string) {
+    const image = timeline?.images.find((img) => img.id === imageId);
+    if (image) {
+      viewImageId = imageId;
+      viewImageFilename = image.filename;
+    }
+  }
+
+  function handleDeleteImage(imageId: string) {
+    confirmDelete = {
+      title: 'Delete Image',
+      message: 'Are you sure you want to delete this image?',
+      onConfirm: async () => {
+        confirmDelete = null;
+        deletingImageIds = new Set([...deletingImageIds, imageId]);
+        // Close the viewer if the deleted image is currently being viewed
+        if (viewImageId === imageId) {
+          viewImageId = null;
+        }
+        try {
+          await commands.deleteImage(imageId);
+          loadTimeline();
+        } catch (e) {
+          console.error('Failed to delete image:', e);
+          notifyError('Failed to delete image', e);
+        } finally {
+          deletingImageIds = new Set([...deletingImageIds].filter((id) => id !== imageId));
+        }
+      },
+    };
   }
 
   // =========================================================================
@@ -1666,32 +1725,50 @@
 
   function handleFileDrop(paths: string[]) {
     const textPaths = paths.filter(isTextFile);
-    if (textPaths.length === 0) return;
+    const imagePaths = paths.filter(isImageFile);
 
-    // Show placeholder items immediately
-    const placeholders = textPaths.map((filePath) => ({
-      key: `drop-${Date.now()}-${filePath}`,
-      title: fileNameFromPath(filePath),
-    }));
-    pendingDropNotes = [...pendingDropNotes, ...placeholders];
+    // Handle text file drops (create notes)
+    if (textPaths.length > 0) {
+      // Show placeholder items immediately
+      const placeholders = textPaths.map((filePath) => ({
+        key: `drop-${Date.now()}-${filePath}`,
+        title: fileNameFromPath(filePath),
+      }));
+      pendingDropNotes = [...pendingDropNotes, ...placeholders];
 
-    // Process each file asynchronously without blocking the UI
-    Promise.all(
-      textPaths.map(async (filePath, i) => {
-        try {
-          const content = await commands.readTextFile(filePath);
-          const title = fileNameFromPath(filePath);
-          await commands.createNote(branch.id, title, content);
-        } catch (e) {
-          console.error('Failed to create note from dropped file:', e);
-        } finally {
-          // Remove this placeholder
-          pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
-        }
-      })
-    ).then(() => {
-      loadTimeline();
-    });
+      // Process each file asynchronously without blocking the UI
+      Promise.all(
+        textPaths.map(async (filePath, i) => {
+          try {
+            const content = await commands.readTextFile(filePath);
+            const title = fileNameFromPath(filePath);
+            await commands.createNote(branch.id, title, content);
+          } catch (e) {
+            console.error('Failed to create note from dropped file:', e);
+          } finally {
+            // Remove this placeholder
+            pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
+          }
+        })
+      ).then(() => {
+        loadTimeline();
+      });
+    }
+
+    // Handle image file drops
+    if (imagePaths.length > 0) {
+      Promise.all(
+        imagePaths.map(async (filePath) => {
+          try {
+            await commands.createImage(branch.id, branch.projectId, filePath);
+          } catch (e) {
+            console.error('Failed to create image from drop:', e);
+          }
+        })
+      ).then(() => {
+        loadTimeline();
+      });
+    }
   }
 
   // Subscribe to the shared drag-drop service (local branches only).
@@ -2123,6 +2200,7 @@
           repoDir={branch.worktreePath}
           pendingDropNotes={isLocal ? pendingDropNotes : undefined}
           pendingItems={pendingSessionItems}
+          deletingItems={timelineDeletingItems}
           reviewCommentBreakdown={timelineReviewDetailsById}
           onSessionClick={handleTimelineSessionClick}
           onCommitClick={handleCommitClick}
@@ -2132,6 +2210,8 @@
           onDeletePendingCommit={handleDeletePendingCommit}
           onDeleteNote={handleDeleteNote}
           onDeleteReview={handleDeleteReview}
+          onImageClick={handleImageClick}
+          onDeleteImage={handleDeleteImage}
           onNewNote={() => openNewSession('note')}
           onNewCommit={() => openNewSession('commit')}
           onNewReview={hasCodeChanges ? (e) => openNewSession('review', e) : undefined}
@@ -2276,11 +2356,27 @@
   <NoteModal title={openNote.title} content={openNote.content} onClose={() => (openNote = null)} />
 {/if}
 
+{#if viewImageId}
+  <ImageViewerModal
+    imageId={viewImageId}
+    filename={viewImageFilename}
+    onClose={() => {
+      viewImageId = null;
+    }}
+    onDelete={() => {
+      if (viewImageId) {
+        handleDeleteImage(viewImageId);
+      }
+    }}
+  />
+{/if}
+
 {#if showNewSession}
   <NewSessionModal
     {branch}
     mode={newSessionMode}
     initialPrompt={draftPrompt}
+    initialImageIds={draftImageIds}
     remote={isRemote}
     onClose={handleNewSessionClose}
     onSubmit={handleNewSessionSubmit}
@@ -2291,6 +2387,8 @@
   <SessionModal
     sessionId={openSessionId}
     repoDir={branch.worktreePath}
+    branchId={branch.id}
+    projectId={branch.projectId}
     onClose={async () => {
       const closedSessionId = openSessionId;
       openSessionId = null;

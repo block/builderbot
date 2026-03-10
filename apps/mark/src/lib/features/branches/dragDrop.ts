@@ -1,10 +1,11 @@
 /**
- * Shared drag-drop service for BranchCards.
+ * Shared drag-drop service for file drops via Tauri native events.
  *
  * Registers a single global Tauri `onDragDropEvent` listener instead of one
- * per BranchCard. Each card subscribes with its DOM element and callbacks;
- * the service hit-tests the drag position against all registered cards and
- * dispatches to the correct one.
+ * per component. Each subscriber registers its DOM element and callbacks;
+ * the service hit-tests the drag position against all registered elements
+ * and dispatches to the topmost match (last registered wins when elements
+ * overlap, e.g. a modal over a branch card).
  *
  * This eliminates the O(N) listener storm that caused UI freezes when
  * multiple branch cards were rendered.
@@ -19,6 +20,12 @@ export type DragDropSubscription = {
   onDragOver: (over: boolean) => void;
   /** Called when files are dropped on this card. */
   onDrop: (paths: string[]) => void;
+  /**
+   * When true, this subscriber blocks all earlier subscribers from receiving
+   * events — even at positions outside this element's bounds. Use this for
+   * modal dialogs whose backdrop overlay covers the entire viewport.
+   */
+  blocking?: boolean;
 };
 
 let subscribers: DragDropSubscription[] = [];
@@ -37,11 +44,19 @@ let currentHover: DragDropSubscription | null = null;
 
 function handleEvent(type: string, x: number, y: number, paths?: string[]) {
   if (type === 'enter' || type === 'over') {
-    // Find which subscriber the cursor is over
+    // Find which subscriber the cursor is over.
+    // Iterate in reverse so that later subscribers (e.g. modals layered on
+    // top of branch cards) take priority over earlier ones at the same
+    // coordinates.
     let found: DragDropSubscription | null = null;
-    for (const sub of subscribers) {
-      if (isPositionOverElement(sub.element, x, y)) {
-        found = sub;
+    for (let i = subscribers.length - 1; i >= 0; i--) {
+      if (isPositionOverElement(subscribers[i].element, x, y)) {
+        found = subscribers[i];
+        break;
+      }
+      // A blocking subscriber (e.g. a modal with a backdrop) prevents events
+      // from reaching any earlier subscribers, even outside its own bounds.
+      if (subscribers[i].blocking) {
         break;
       }
     }
@@ -58,10 +73,13 @@ function handleEvent(type: string, x: number, y: number, paths?: string[]) {
       currentHover = found;
     }
   } else if (type === 'drop') {
-    // Find the drop target
-    for (const sub of subscribers) {
-      if (isPositionOverElement(sub.element, x, y)) {
-        sub.onDrop(paths ?? []);
+    // Find the drop target (reverse order — prefer topmost element)
+    for (let i = subscribers.length - 1; i >= 0; i--) {
+      if (isPositionOverElement(subscribers[i].element, x, y)) {
+        subscribers[i].onDrop(paths ?? []);
+        break;
+      }
+      if (subscribers[i].blocking) {
         break;
       }
     }
@@ -104,10 +122,11 @@ function ensureGlobalListener(): Promise<void> {
 }
 
 /**
- * Subscribe a BranchCard to drag-drop events.
+ * Subscribe a component to drag-drop events.
  *
  * The global listener is lazily created on the first subscription and
- * torn down when the last subscriber unsubscribes.
+ * torn down when the last subscriber unsubscribes. Later subscribers
+ * take priority when elements overlap (e.g. modals over cards).
  *
  * Returns an unsubscribe function.
  */

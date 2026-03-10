@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::{
-    Agent, ClientSideConnection, ContentBlock as AcpContentBlock, Implementation,
+    Agent, ClientSideConnection, ContentBlock as AcpContentBlock, ImageContent, Implementation,
     InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOptionId,
     PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
@@ -74,10 +74,14 @@ pub trait Store: Send + Sync {
 #[allow(clippy::too_many_arguments)]
 pub trait AgentDriver {
     /// Run a single turn: send `prompt`, stream results via `writer`.
+    ///
+    /// `images` contains `(base64_data, mime_type)` pairs that are sent as
+    /// `ContentBlock::Image` entries alongside the text prompt.
     async fn run(
         &self,
         session_id: &str,
         prompt: &str,
+        images: &[(String, String)],
         working_dir: &Path,
         store: &Arc<dyn Store>,
         writer: &Arc<dyn MessageWriter>,
@@ -215,6 +219,7 @@ impl AgentDriver for AcpDriver {
         &self,
         session_id: &str,
         prompt: &str,
+        images: &[(String, String)],
         working_dir: &Path,
         store: &Arc<dyn Store>,
         writer: &Arc<dyn MessageWriter>,
@@ -373,7 +378,7 @@ impl AgentDriver for AcpDriver {
                 return Ok(());
             }
             result = run_acp_protocol(
-                &connection, &acp_working_dir, prompt, store,
+                &connection, &acp_working_dir, prompt, images, store,
                 session_id, agent_session_id, &handler, &self.mcp_servers,
             ) => result,
         };
@@ -659,6 +664,7 @@ async fn run_acp_protocol(
     connection: &ClientSideConnection,
     working_dir: &Path,
     prompt: &str,
+    images: &[(String, String)],
     store: &Arc<dyn Store>,
     our_session_id: &str,
     acp_session_id: Option<&str>,
@@ -686,10 +692,14 @@ async fn run_acp_protocol(
 
     handler.set_live();
 
-    let prompt_request = PromptRequest::new(
-        agent_session_id,
-        vec![AcpContentBlock::Text(TextContent::new(prompt))],
-    );
+    let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
+    for (data, mime_type) in images {
+        content_blocks.push(AcpContentBlock::Image(ImageContent::new(
+            data.as_str(),
+            mime_type.as_str(),
+        )));
+    }
+    let prompt_request = PromptRequest::new(agent_session_id, content_blocks);
 
     connection
         .prompt(prompt_request)

@@ -161,6 +161,9 @@ pub struct SessionConfig {
     /// the agent operates in the correct repo directory (e.g.
     /// `/home/bloxer/cash-server` instead of the workspace default).
     pub remote_working_dir: Option<PathBuf>,
+    /// Image IDs to include in the prompt. The runner reads the image files,
+    /// base64-encodes them, and passes them as content blocks to the driver.
+    pub image_ids: Vec<String>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -192,9 +195,30 @@ pub fn start_session(
     };
 
     // Persist the user message right away so it's visible immediately.
+    // Include image IDs so the frontend can display them alongside the text.
+    // We also mark attached images as session-scoped immediately after so they
+    // don't appear in the branch timeline. Both operations are kept together;
+    // if set_images_session_id fails we log a warning rather than aborting the
+    // session, since the message was already persisted.
     store
-        .add_session_message(&config.session_id, MessageRole::User, &config.prompt)
+        .add_session_message_with_images(
+            &config.session_id,
+            MessageRole::User,
+            &config.prompt,
+            &config.image_ids,
+        )
         .map_err(|e| format!("Failed to persist user message: {e}"))?;
+
+    if !config.image_ids.is_empty() {
+        if let Err(e) = store.set_images_session_id(&config.image_ids, &config.session_id) {
+            log::warn!(
+                "Failed to associate images {:?} with session {}: {e}. \
+                 Images may appear orphaned in the branch timeline.",
+                config.image_ids,
+                config.session_id
+            );
+        }
+    }
 
     let cancel_token = registry.register(&config.session_id);
 
@@ -254,6 +278,43 @@ pub fn start_session(
                 Arc::clone(&store),
             ));
 
+            // Read and base64-encode images for the prompt content blocks.
+            let mut image_data: Vec<(String, String)> = Vec::new();
+            for image_id in &config.image_ids {
+                match store.get_image(image_id) {
+                    Ok(Some(image)) => {
+                        match crate::store::images::image_file_path(
+                            &image.project_id,
+                            &image.id,
+                            &image.filename,
+                        ) {
+                            Ok(path) => {
+                                if let Ok(bytes) = std::fs::read(&path) {
+                                    use base64::Engine;
+                                    let encoded =
+                                        base64::engine::general_purpose::STANDARD.encode(&bytes);
+                                    image_data.push((encoded, image.mime_type.clone()));
+                                } else {
+                                    log::warn!(
+                                        "Failed to read image file for image {image_id}: {}",
+                                        path.display()
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to resolve file path for image {image_id}: {e}");
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        log::warn!("Image {image_id} not found in store, skipping");
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to fetch image {image_id} from store: {e}");
+                    }
+                }
+            }
+
             // Cast to trait objects for the driver
             let store_trait: Arc<dyn acp_client::Store> = store;
             let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
@@ -262,6 +323,7 @@ pub fn start_session(
                 .run(
                     &config.session_id,
                     &config.prompt,
+                    &image_data,
                     &config.working_dir,
                     &store_trait,
                     &writer_trait,

@@ -1196,7 +1196,8 @@
     display: flex;
     flex-direction: column;
     width: 700px;
-    height: 600px;
+    height: 80vh;
+    max-height: 900px;
     background: var(--bg-chrome);
     border: 2px solid transparent;
     border-radius: 12px;

@@ -555,8 +555,9 @@ fn run_post_completion_hooks(
                         .ok()
                         .flatten()
                         .map(|s| {
-                            let t: String = s.prompt.chars().take(80).collect();
-                            if s.prompt.len() > 80 {
+                            let prompt = strip_action_wrapper(&s.prompt);
+                            let t: String = prompt.chars().take(80).collect();
+                            if prompt.len() > 80 {
                                 format!("{t}…")
                             } else {
                                 t
@@ -597,8 +598,9 @@ fn run_post_completion_hooks(
                         .ok()
                         .flatten()
                         .map(|s| {
-                            let t: String = s.prompt.chars().take(80).collect();
-                            if s.prompt.len() > 80 {
+                            let prompt = strip_action_wrapper(&s.prompt);
+                            let t: String = prompt.chars().take(80).collect();
+                            if prompt.len() > 80 {
                                 format!("{t}…")
                             } else {
                                 t
@@ -802,6 +804,18 @@ fn line_byte_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
         offset += line.len() + 1;
         (start, line)
     })
+}
+
+/// Strip leading `<action>...</action>` blocks from a prompt so that fallback
+/// title generation uses the user's actual text rather than injected XML.
+fn strip_action_wrapper(prompt: &str) -> &str {
+    let trimmed = prompt.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("<action>") {
+        if let Some(end) = rest.find("</action>") {
+            return rest[end + "</action>".len()..].trim_start();
+        }
+    }
+    prompt
 }
 
 /// Extract a title (leading `# H1`) from note content.

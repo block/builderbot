@@ -217,15 +217,13 @@
         content: c.content,
         category: 'explanation' as const,
       })),
-    ...autoReviewComments
-      .filter((c) => c.commentType === 'information')
-      .map((c) => ({
-        id: c.id,
-        file_path: c.path,
-        after_span: { start: c.span.start, end: c.span.end },
-        content: c.content,
-        category: 'explanation' as const,
-      })),
+    ...autoReviewComments.map((c) => ({
+      id: c.id,
+      file_path: c.path,
+      after_span: { start: c.span.start, end: c.span.end },
+      content: c.content,
+      category: 'explanation' as const,
+    })),
   ]);
 
   let fileEntries = $derived(

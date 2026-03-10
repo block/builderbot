@@ -665,6 +665,7 @@
           {remoteWorkspaceStatus}
           {onDelete}
           {onRename}
+          onNoteCreated={() => loadTimeline()}
         />
       </div>
     </div>
@@ -879,7 +880,6 @@
     onCancel={() => (confirmDelete = null)}
   />
 {/if}
-
 
 <style>
   .branch-card {

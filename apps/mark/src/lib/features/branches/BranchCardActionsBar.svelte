@@ -64,6 +64,7 @@
     remoteWorkspaceStatus: string | null;
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
+    onNoteCreated?: () => void;
   }
 
   let {
@@ -74,6 +75,7 @@
     remoteWorkspaceStatus,
     onDelete,
     onRename,
+    onNoteCreated,
   }: Props = $props();
 
   // Custom transition combining slide and fade effects
@@ -849,9 +851,11 @@
 {#if actionOutputModal}
   <ActionOutputModal
     executionId={actionOutputModal.executionId}
+    branchId={branch.id}
     actionName={actionOutputModal.actionName}
     isStopping={actionOutputModal.isStopping}
     onClose={() => (actionOutputModal = null)}
+    {onNoteCreated}
   />
 {/if}
 

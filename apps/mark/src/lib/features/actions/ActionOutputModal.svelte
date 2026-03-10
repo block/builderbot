@@ -33,7 +33,7 @@
   import Convert from 'ansi-to-html';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import { createNote } from '../../commands';
+  import { createNote, invalidateBranchTimeline } from '../../commands';
   import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
   import {
     getActionOutputBuffer,
@@ -50,6 +50,7 @@
     isStopping?: boolean;
     onClose: () => void;
     onRemove?: (executionId: string) => void;
+    onNoteCreated?: () => void;
   }
 
   let {
@@ -59,6 +60,7 @@
     isStopping = false,
     onClose,
     onRemove,
+    onNoteCreated,
   }: Props = $props();
 
   // =========================================================================
@@ -97,6 +99,7 @@
 
   // Save-as-note state
   let selectedText = $state('');
+  let capturedSelection = '';
   let saveState = $state<'idle' | 'saved'>('idle');
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -109,6 +112,11 @@
     }
   }
 
+  /** Capture selection on mousedown before the click clears it. */
+  function handleSaveMouseDown() {
+    capturedSelection = selectedText;
+  }
+
   /** Get plain text from all output lines. */
   function getFullOutputText(): string {
     return displayLines.map((l) => l.text).join('\n');
@@ -116,11 +124,14 @@
 
   async function handleSaveAsNote() {
     if (saveState === 'saved') return;
-    const content = selectedText || getFullOutputText();
+    const content = capturedSelection || selectedText || getFullOutputText();
+    capturedSelection = '';
     if (!content) return;
     try {
       const title = `${actionName} log`;
       await createNote(branchId, title, content);
+      invalidateBranchTimeline(branchId);
+      onNoteCreated?.();
       saveState = 'saved';
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => {
@@ -421,24 +432,20 @@
         <button
           class="save-note-btn"
           class:saved={saveState === 'saved'}
+          onmousedown={handleSaveMouseDown}
           onclick={handleSaveAsNote}
           disabled={saveState === 'saved'}
-          title={selectedText ? 'Save selected text as a log note' : 'Save log as a note'}
+          title={selectedText ? 'Save selected text as a note' : 'Save full log as a note'}
         >
           {#if saveState === 'saved'}
             <span class="save-note-label">
               <Check size={14} />
               <span>Saved</span>
             </span>
-          {:else if selectedText}
-            <span class="save-note-label">
-              <StickyNote size={14} />
-              <span>Save as log</span>
-            </span>
           {:else}
             <span class="save-note-label">
               <StickyNote size={14} />
-              <span>Save as log</span>
+              <span>{selectedText ? 'Save selection' : 'Save log'}</span>
             </span>
           {/if}
         </button>

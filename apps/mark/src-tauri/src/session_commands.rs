@@ -857,29 +857,6 @@ pub async fn trigger_auto_review(
     })
 }
 
-/// Start an automatic review for a branch (Tauri command wrapper).
-///
-/// Delegates to [`trigger_auto_review`] after extracting the store from
-/// Tauri state.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn start_auto_review(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
-    app_handle: tauri::AppHandle,
-    branch_id: String,
-    provider: Option<String>,
-) -> Result<BranchSessionResponse, String> {
-    let store = get_store(&store)?;
-    trigger_auto_review(
-        store,
-        Arc::clone(&registry),
-        app_handle,
-        branch_id,
-        provider,
-    )
-    .await
-}
-
 /// Find an auto review created after a given commit timestamp.
 #[tauri::command(rename_all = "camelCase")]
 pub fn find_auto_review_since_commit(

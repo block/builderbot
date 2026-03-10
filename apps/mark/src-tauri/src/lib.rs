@@ -3071,7 +3071,6 @@ pub fn run() {
             session_commands::delete_session,
             session_commands::start_branch_session,
             session_commands::start_project_session,
-            session_commands::start_auto_review,
             session_commands::find_auto_review_since_commit,
             session_commands::set_review_auto,
             session_commands::find_latest_auto_review,

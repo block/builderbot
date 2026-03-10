@@ -688,13 +688,6 @@ export function removeReferenceFile(reviewId: string, path: string): Promise<voi
 // Auto review
 // =============================================================================
 
-/** Start an auto review for a branch. Returns the session and review IDs. */
-export function startAutoReview(
-  branchId: string
-): Promise<{ sessionId: string; reviewId: string }> {
-  return invoke('start_auto_review', { branchId });
-}
-
 /** Find an auto review created since a given commit timestamp. */
 export function findAutoReviewSinceCommit(
   branchId: string,

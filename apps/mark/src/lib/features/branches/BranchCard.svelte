@@ -454,21 +454,21 @@
           handlePushSessionComplete(status);
         }
 
-        // Trigger auto review when a commit session completes successfully
-        if (status === 'completed' && sessionType === 'commit' && eventBranchId === branchId) {
-          commands
-            .startAutoReview(branchId)
-            .then(({ sessionId, reviewId }) => {
-              autoReviewSessionId = sessionId;
-              autoReviewId = reviewId;
-            })
-            .catch((e) => {
-              console.error('[BranchCard] Failed to start auto review:', e);
-            });
-        }
+        // Auto review is triggered by the backend when a commit session
+        // completes — no frontend action needed here.
       } else if (status === 'running' && eventBranchId === branchId) {
-        // An MCP-initiated session just started in this branch — refresh the
-        // timeline so the pending note/commit stub appears immediately.
+        // Track auto review sessions started by the backend so we can
+        // cancel/adopt them later.
+        if (isAutoReview) {
+          autoReviewSessionId = eventSessionId;
+          // Look up the review ID so we can delete it on cancel.
+          commands.findLatestAutoReview(branchId).then((review) => {
+            if (review) {
+              autoReviewId = review.id;
+            }
+          });
+        }
+        // Refresh the timeline so the pending note/commit stub appears immediately.
         loadTimeline();
       }
     }).then((unlisten) => {

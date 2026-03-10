@@ -677,23 +677,21 @@ pub async fn start_branch_session(
 // Auto review commands
 // =============================================================================
 
-/// Start an automatic review for a branch.
+/// Core logic for starting an automatic review for a branch.
 ///
 /// Creates a review with `is_auto = true`, starts a session, and emits
 /// `session-status-changed` with `isAutoReview: true` so the frontend
-/// knows not to display it in the UI.
+/// can track it.
 ///
-/// Returns the session ID and review ID.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn start_auto_review(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+/// This is called both from the Tauri command and from the session runner
+/// when a commit session completes.
+pub async fn trigger_auto_review(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
 ) -> Result<BranchSessionResponse, String> {
-    let store = get_store(&store)?;
-
     // Resolve branch → project
     let branch = store
         .get_branch(&branch_id)
@@ -857,6 +855,29 @@ pub async fn start_auto_review(
         session_id: session.id,
         artifact_id: review.id,
     })
+}
+
+/// Start an automatic review for a branch (Tauri command wrapper).
+///
+/// Delegates to [`trigger_auto_review`] after extracting the store from
+/// Tauri state.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_auto_review(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+) -> Result<BranchSessionResponse, String> {
+    let store = get_store(&store)?;
+    trigger_auto_review(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        provider,
+    )
+    .await
 }
 
 /// Find an auto review created after a given commit timestamp.

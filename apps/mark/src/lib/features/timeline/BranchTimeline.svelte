@@ -254,7 +254,7 @@
       all.push({
         key: `review-${review.id}`,
         type,
-        title: review.title || 'Code Review',
+        title: (review.title || 'Code Review') + (review.isAuto ? ' (Autoreview)' : ''),
         meta: countParts.length > 0 ? countParts.join(' + ') : undefined,
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,

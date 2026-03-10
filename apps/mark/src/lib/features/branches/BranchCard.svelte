@@ -426,16 +426,18 @@
         sessionType,
       } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
-        // If this is the auto review session completing, just clear tracking
-        // — don't trigger pending-item removal, timeline refresh, or unread markers.
+        // If this is the auto review session completing, clear tracking
+        // and refresh the timeline so the auto review status updates.
         if (eventSessionId === autoReviewSessionId) {
           autoReviewSessionId = null;
+          loadTimeline();
           return;
         }
 
-        // Skip normal completion handling for any auto review session
-        // that isn't tracked locally (e.g. from another branch card instance).
+        // For any other auto review session completing (e.g. from another
+        // branch card instance), just refresh the timeline.
         if (isAutoReview) {
+          loadTimeline();
           return;
         }
 
@@ -467,10 +469,7 @@
       } else if (status === 'running' && eventBranchId === branchId) {
         // An MCP-initiated session just started in this branch — refresh the
         // timeline so the pending note/commit stub appears immediately.
-        // Skip refresh for auto review sessions — they shouldn't appear until adopted.
-        if (!isAutoReview) {
-          loadTimeline();
-        }
+        loadTimeline();
       }
     }).then((unlisten) => {
       unlistenStatus = unlisten;

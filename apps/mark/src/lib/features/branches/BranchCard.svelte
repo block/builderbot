@@ -1414,7 +1414,11 @@
       const adopted = await tryAdoptAutoReview();
       if (adopted) return;
       // No auto review found — fall through with default prompt
-      void startBranchSessionWithPendingItem(data.mode, 'Review the code changes on this branch.', data.imageIds);
+      void startBranchSessionWithPendingItem(
+        data.mode,
+        'Review the code changes on this branch.',
+        data.imageIds
+      );
       return;
     }
 

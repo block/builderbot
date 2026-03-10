@@ -96,11 +96,13 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         // ORDER BY created_at DESC so we get the latest when multiple
         // reviews share the same (branch, commit, scope) triple.
+        // Exclude auto reviews — they are surfaced separately via
+        // find_latest_auto_review and should not be returned here.
         let existing: Option<Review> = conn
             .query_row(
                 "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
                  FROM reviews
-                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3
+                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3 AND is_auto = 0
                  ORDER BY created_at DESC LIMIT 1",
                 params![branch_id, commit_sha, scope.as_str()],
                 Self::row_to_review_header,

@@ -1426,7 +1426,9 @@
       cancelAutoReview();
     }
 
-    void startBranchSessionWithPendingItem(data.mode, data.prompt, data.imageIds);
+    const prompt =
+      data.prompt || (data.mode === 'review' ? 'Review the code changes on this branch.' : '');
+    void startBranchSessionWithPendingItem(data.mode, prompt, data.imageIds);
   }
 
   // =========================================================================

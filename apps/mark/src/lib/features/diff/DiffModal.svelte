@@ -132,7 +132,7 @@
         autoReviewComments = [];
         return review;
       }
-      autoReviewComments = review.comments;
+      autoReviewComments = review.comments.filter((c) => c.commentType === 'information');
       return review;
     } catch (e) {
       console.error('Failed to load auto review annotations:', e);

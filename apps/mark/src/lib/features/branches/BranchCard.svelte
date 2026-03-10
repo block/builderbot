@@ -426,18 +426,16 @@
         sessionType,
       } = event.payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
-        // If this is the auto review session completing, clear tracking
-        // and refresh the timeline so the auto review status updates.
+        // If this is the auto review session completing, just clear tracking
+        // — don't trigger pending-item removal, timeline refresh, or unread markers.
         if (eventSessionId === autoReviewSessionId) {
           autoReviewSessionId = null;
-          loadTimeline();
           return;
         }
 
-        // For any other auto review session completing (e.g. from another
-        // branch card instance), just refresh the timeline.
+        // Skip normal completion handling for any auto review session
+        // that isn't tracked locally (e.g. from another branch card instance).
         if (isAutoReview) {
-          loadTimeline();
           return;
         }
 
@@ -469,7 +467,10 @@
           });
         }
         // Refresh the timeline so the pending note/commit stub appears immediately.
-        loadTimeline();
+        // Skip refresh for auto review sessions — they shouldn't appear until adopted.
+        if (!isAutoReview) {
+          loadTimeline();
+        }
       }
     }).then((unlisten) => {
       unlistenStatus = unlisten;

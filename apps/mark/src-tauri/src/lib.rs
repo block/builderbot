@@ -1664,12 +1664,13 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         })
         .collect();
 
-    // Get reviews
+    // Get reviews (filter out auto reviews — they're not shown in the timeline)
     let db_reviews = store
         .list_reviews_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
     let reviews: Vec<ReviewTimelineItem> = db_reviews
         .into_iter()
+        .filter(|r| !r.is_auto)
         .map(|r| {
             let (session_id, session_status) =
                 store.resolve_session_status(r.session_id.as_deref());
@@ -3069,6 +3070,9 @@ pub fn run() {
             session_commands::delete_session,
             session_commands::start_branch_session,
             session_commands::start_project_session,
+            session_commands::find_auto_review_since_commit,
+            session_commands::set_review_auto,
+            session_commands::find_latest_auto_review,
             // Actions
             actions::commands::detect_repo_actions,
             actions::commands::run_branch_action,

@@ -91,9 +91,7 @@
     if (starting) return;
 
     starting = true;
-    const finalPrompt =
-      prompt.trim() || (isReview ? 'Review the code changes on this branch.' : '');
-    onSubmit({ prompt: finalPrompt, mode: currentMode, imageIds });
+    onSubmit({ prompt: prompt.trim(), mode: currentMode, imageIds });
     // Close immediately; parent handles async start + optimistic timeline row.
     onClose({ prompt: '', mode: currentMode, imageIds: [] });
   }

@@ -897,6 +897,8 @@ pub struct Review {
     pub session_id: Option<String>,
     /// AI-generated one-sentence title summarising the review's confidence.
     pub title: Option<String>,
+    /// Whether this review was automatically generated (not user-initiated).
+    pub is_auto: bool,
     /// Paths that have been marked as reviewed.
     pub reviewed: Vec<String>,
     /// Comments attached to specific locations.
@@ -917,6 +919,7 @@ impl Review {
             scope,
             session_id: None,
             title: None,
+            is_auto: false,
             reviewed: Vec::new(),
             comments: Vec::new(),
             reference_files: Vec::new(),
@@ -927,6 +930,11 @@ impl Review {
 
     pub fn with_session(mut self, session_id: &str) -> Self {
         self.session_id = Some(session_id.to_string());
+        self
+    }
+
+    pub fn with_auto(mut self) -> Self {
+        self.is_auto = true;
         self
     }
 }

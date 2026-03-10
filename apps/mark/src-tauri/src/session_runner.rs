@@ -64,6 +64,10 @@ pub struct SessionStatusEvent {
     pub branch_id: Option<String>,
     pub project_id: Option<String>,
     pub session_type: Option<String>,
+    /// When `true`, the session belongs to an automatically triggered review
+    /// (not user-initiated). The frontend uses this to suppress UI for auto reviews.
+    #[serde(default)]
+    pub is_auto_review: bool,
 }
 
 // =============================================================================
@@ -362,15 +366,18 @@ pub fn start_session(
 
         // Run post-completion hooks before transitioning status.
         // These detect artifacts produced by the session (commits, notes).
-        if new_status == "completed" {
+        // Returns the branch_id when a new commit was detected.
+        let committed_branch_id = if new_status == "completed" {
             run_post_completion_hooks(
                 &session_id_for_status,
                 &config.working_dir,
                 config.pre_head_sha.as_deref(),
                 config.workspace_name.as_deref(),
                 &store_for_status,
-            );
-        }
+            )
+        } else {
+            None
+        };
 
         let status_enum = SessionStatus::parse(new_status).unwrap();
         let transitioned = store_for_status
@@ -379,6 +386,37 @@ pub fn start_session(
 
         if transitioned {
             emit_status(&app_handle, &session_id_for_status, new_status, error_msg);
+        }
+
+        // Trigger auto review when a commit session completes successfully.
+        // Spawned on the Tauri async runtime so the blocking session thread
+        // can exit immediately.
+        if let Some(branch_id) = committed_branch_id {
+            let store_for_auto = Arc::clone(&store_for_status);
+            let registry_for_auto = Arc::clone(&registry);
+            let app_handle_for_auto = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                match crate::session_commands::trigger_auto_review(
+                    store_for_auto,
+                    registry_for_auto,
+                    app_handle_for_auto,
+                    branch_id.clone(),
+                    None,
+                )
+                .await
+                {
+                    Ok(resp) => {
+                        log::info!(
+                            "Auto review triggered for branch {branch_id}: session={}, review={}",
+                            resp.session_id,
+                            resp.artifact_id,
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("Failed to trigger auto review for branch {branch_id}: {e}");
+                    }
+                }
+            });
         }
     });
 
@@ -452,13 +490,18 @@ fn is_process_alive(pid: u32) -> bool {
 ///   For remote workspaces, HEAD is checked via `blox ws_exec`.
 /// - **Notes**: If an empty note is linked to this session, parse the
 ///   assistant's last message for content after the first `---`.
+///
+/// Returns the `branch_id` when a new commit was successfully detected,
+/// so the caller can trigger follow-up work (e.g. auto review).
 fn run_post_completion_hooks(
     session_id: &str,
     working_dir: &std::path::Path,
     pre_head_sha: Option<&str>,
     workspace_name: Option<&str>,
     store: &Arc<Store>,
-) {
+) -> Option<String> {
+    let mut committed_branch_id: Option<String> = None;
+
     // --- Commit detection ---
     if let Some(pre_sha) = pre_head_sha {
         if let Ok(Some(pending_commit)) = store.get_pending_commit_by_session(session_id) {
@@ -481,6 +524,7 @@ fn run_post_completion_hooks(
                     if let Err(e) = store.update_commit_sha(&pending_commit.id, &current_head) {
                         log::error!("Failed to update commit SHA: {e}");
                     }
+                    committed_branch_id = Some(pending_commit.branch_id.clone());
                 }
                 Ok(_) => {
                     log::info!("Session {session_id}: no new commit (HEAD unchanged), leaving pending commit as failed");
@@ -621,6 +665,8 @@ fn run_post_completion_hooks(
             }
         }
     }
+
+    committed_branch_id
 }
 
 /// Extract note content from a single assistant message.
@@ -926,6 +972,7 @@ fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Op
         branch_id: None,
         project_id: None,
         session_type: None,
+        is_auto_review: false,
     };
     if let Err(e) = app_handle.emit("session-status-changed", &event) {
         log::warn!("Failed to emit session-status-changed: {e}");
@@ -950,6 +997,7 @@ pub fn emit_session_running(
         branch_id: Some(branch_id.to_string()),
         project_id: Some(project_id.to_string()),
         session_type: Some(session_type.to_string()),
+        is_auto_review: false,
     };
     if let Err(e) = app_handle.emit("session-status-changed", &event) {
         log::warn!("Failed to emit session-status-changed (running): {e}");

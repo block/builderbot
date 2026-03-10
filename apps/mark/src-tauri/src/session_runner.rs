@@ -536,52 +536,47 @@ fn run_post_completion_hooks(
         }
     }
 
-    // --- Note extraction ---
-    if let Ok(Some(note)) = store.get_note_by_session(session_id) {
-        // Collect all assistant messages for this session and find note content.
-        if let Ok(messages) = store.get_session_messages(session_id) {
-            let note_content = messages
-                .iter()
-                .rev()
-                .filter(|m| m.role == MessageRole::Assistant)
-                .find_map(|m| extract_note_content(&m.content));
-
-            if let Some(note_content) = note_content {
-                let (title, body) = extract_note_title(&note_content);
-                let final_title = if title.is_empty() {
-                    // Fallback title from the session prompt
-                    store
-                        .get_session(session_id)
-                        .ok()
-                        .flatten()
-                        .map(|s| {
-                            let t: String = s.prompt.chars().take(80).collect();
-                            if s.prompt.len() > 80 {
-                                format!("{t}…")
-                            } else {
-                                t
-                            }
-                        })
-                        .unwrap_or_else(|| "Untitled Note".to_string())
-                } else {
-                    title
-                };
-                let is_amendment = !note.content.is_empty();
-                log::info!(
-                    "Session {session_id}: {} note \"{final_title}\"",
-                    if is_amendment { "amended" } else { "extracted" }
-                );
-                if let Err(e) = store.update_note_title_and_content(&note.id, &final_title, &body) {
-                    log::error!("Failed to update note content: {e}");
-                }
-            } else {
-                log::warn!("Session {session_id}: note session completed but no --- found in assistant output");
-            }
-        }
+    // --- Note extraction (repo notes and project notes) ---
+    //
+    // Both paths share the same message-scanning and title-resolution logic
+    // via `resolve_note_title_and_body`, differing only in which DB record
+    // they read/write.
+    struct NoteTarget {
+        id: String,
+        is_amendment: bool,
+        kind: NoteKind,
+    }
+    enum NoteKind {
+        Repo,
+        Project,
     }
 
-    // --- Project note extraction ---
-    if let Ok(Some(note)) = store.get_project_note_by_session(session_id) {
+    let note_targets: Vec<NoteTarget> = [
+        store
+            .get_note_by_session(session_id)
+            .ok()
+            .flatten()
+            .map(|n| NoteTarget {
+                id: n.id,
+                is_amendment: !n.content.is_empty(),
+                kind: NoteKind::Repo,
+            }),
+        store
+            .get_project_note_by_session(session_id)
+            .ok()
+            .flatten()
+            .map(|n| NoteTarget {
+                id: n.id,
+                is_amendment: !n.content.is_empty(),
+                kind: NoteKind::Project,
+            }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    if !note_targets.is_empty() {
+        // Scan assistant messages once for all note targets.
         if let Ok(messages) = store.get_session_messages(session_id) {
             let note_content = messages
                 .iter()
@@ -589,37 +584,38 @@ fn run_post_completion_hooks(
                 .filter(|m| m.role == MessageRole::Assistant)
                 .find_map(|m| extract_note_content(&m.content));
 
-            if let Some(note_content) = note_content {
-                let (title, body) = extract_note_title(&note_content);
-                let final_title = if title.is_empty() {
-                    store
-                        .get_session(session_id)
-                        .ok()
-                        .flatten()
-                        .map(|s| {
-                            let t: String = s.prompt.chars().take(80).collect();
-                            if s.prompt.len() > 80 {
-                                format!("{t}…")
-                            } else {
-                                t
-                            }
-                        })
-                        .unwrap_or_else(|| "Untitled Note".to_string())
-                } else {
-                    title
+            for target in &note_targets {
+                let label = match target.kind {
+                    NoteKind::Repo => "note",
+                    NoteKind::Project => "project note",
                 };
-                let is_amendment = !note.content.is_empty();
-                log::info!(
-                    "Session {session_id}: {} project note \"{final_title}\"",
-                    if is_amendment { "amended" } else { "extracted" }
-                );
-                if let Err(e) =
-                    store.update_project_note_title_and_content(&note.id, &final_title, &body)
-                {
-                    log::error!("Failed to update project note content: {e}");
+                if let Some(ref note_content) = note_content {
+                    let (final_title, body) =
+                        resolve_note_title_and_body(note_content, store, session_id);
+                    log::info!(
+                        "Session {session_id}: {} {label} \"{final_title}\"",
+                        if target.is_amendment {
+                            "amended"
+                        } else {
+                            "extracted"
+                        }
+                    );
+                    let result = match target.kind {
+                        NoteKind::Repo => {
+                            store.update_note_title_and_content(&target.id, &final_title, &body)
+                        }
+                        NoteKind::Project => store.update_project_note_title_and_content(
+                            &target.id,
+                            &final_title,
+                            &body,
+                        ),
+                    };
+                    if let Err(e) = result {
+                        log::error!("Failed to update {label} content: {e}");
+                    }
+                } else {
+                    log::warn!("Session {session_id}: {label} session completed but no --- found in assistant output");
                 }
-            } else {
-                log::warn!("Session {session_id}: project note session completed but no --- found in assistant output");
             }
         }
     }
@@ -804,6 +800,18 @@ fn line_byte_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
+/// Strip leading `<action>...</action>` blocks from a prompt so that fallback
+/// title generation uses the user's actual text rather than injected XML.
+fn strip_action_wrapper(prompt: &str) -> &str {
+    let trimmed = prompt.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("<action>") {
+        if let Some(end) = rest.find("</action>") {
+            return rest[end + "</action>".len()..].trim_start();
+        }
+    }
+    prompt
+}
+
 /// Extract a title (leading `# H1`) from note content.
 ///
 /// Returns `(title, body_without_title)`. If no H1 is found, title is empty
@@ -823,6 +831,37 @@ fn extract_note_title(content: &str) -> (String, String) {
     } else {
         (String::new(), content.to_string())
     }
+}
+
+/// Parse note content into a final `(title, body)` pair, using the session
+/// prompt as a fallback title when the note has no H1 heading.
+///
+/// Shared by both repo-note and project-note extraction paths.
+fn resolve_note_title_and_body(
+    note_content: &str,
+    store: &Store,
+    session_id: &str,
+) -> (String, String) {
+    let (title, body) = extract_note_title(note_content);
+    let final_title = if title.is_empty() {
+        store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .map(|s| {
+                let prompt = strip_action_wrapper(&s.prompt);
+                let t: String = prompt.chars().take(80).collect();
+                if prompt.len() > 80 {
+                    format!("{t}…")
+                } else {
+                    t
+                }
+            })
+            .unwrap_or_else(|| "Untitled Note".to_string())
+    } else {
+        title
+    };
+    (final_title, body)
 }
 
 /// Extract review comments from assistant output.
@@ -1420,5 +1459,49 @@ Second batch:
         let (title, body) = extract_note_title("No heading here.\nJust text.");
         assert!(title.is_empty());
         assert_eq!(body, "No heading here.\nJust text.");
+    }
+
+    // ── strip_action_wrapper ────────────────────────────────────────────
+
+    #[test]
+    fn strip_action_no_wrapper() {
+        assert_eq!(strip_action_wrapper("plain prompt"), "plain prompt");
+    }
+
+    #[test]
+    fn strip_action_normal_wrapper() {
+        let input = "<action>\nSome injected context\n</action>\nActual user prompt";
+        assert_eq!(strip_action_wrapper(input), "Actual user prompt");
+    }
+
+    #[test]
+    fn strip_action_wrapper_with_leading_whitespace() {
+        let input = "  \n<action>injected</action>  user text";
+        assert_eq!(strip_action_wrapper(input), "user text");
+    }
+
+    #[test]
+    fn strip_action_missing_closing_tag() {
+        // If the closing tag is absent, return the original prompt unchanged.
+        let input = "<action>unclosed block\nuser text";
+        assert_eq!(strip_action_wrapper(input), input);
+    }
+
+    #[test]
+    fn strip_action_whitespace_only_after_stripping() {
+        // After stripping the wrapper, only whitespace remains — should trim to empty.
+        let input = "<action>stuff</action>   \n  ";
+        assert_eq!(strip_action_wrapper(input), "");
+    }
+
+    #[test]
+    fn strip_action_nested_action_tags() {
+        // The function uses the *first* </action> it finds, so a nested
+        // <action> inside the wrapper content would split there.
+        let input = "<action>outer <action>inner</action> leftover</action>\nreal prompt";
+        assert_eq!(
+            strip_action_wrapper(input),
+            "leftover</action>\nreal prompt"
+        );
     }
 }

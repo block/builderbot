@@ -1544,7 +1544,7 @@ fn review_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineE
 
     let mut entries = Vec::new();
     for review in &reviews {
-        if review.comments.is_empty() {
+        if review.is_auto || review.comments.is_empty() {
             continue;
         }
         let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];

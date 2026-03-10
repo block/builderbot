@@ -396,24 +396,42 @@
     loadProjectNotes();
 
     let unlistenSession: (() => void) | undefined;
-    listen<{ sessionId: string; status: string }>('session-status-changed', (event) => {
-      const { sessionId, status } = event.payload;
-      const isTracked = activeSessionIds.has(sessionId);
-      // Also reload if this session belongs to a known project note (handles
-      // sessions that were already running when the component mounted).
-      const isKnownNoteSession = projectNotes.some((n) => n.sessionId === sessionId);
-      if (isTracked || isKnownNoteSession) {
-        if (status === 'completed' || status === 'error' || status === 'cancelled') {
-          if (isTracked) {
-            const next = new Set(activeSessionIds);
-            next.delete(sessionId);
-            activeSessionIds = next;
+    listen<{ sessionId: string; status: string; projectId?: string }>(
+      'session-status-changed',
+      (event) => {
+        const { sessionId, status, projectId } = event.payload;
+        const isTracked = activeSessionIds.has(sessionId);
+        // Also reload if this session belongs to a known project note (handles
+        // sessions that were already running when the component mounted).
+        const isKnownNoteSession = projectNotes.some((n) => n.sessionId === sessionId);
+
+        // Handle resumed sessions: when a project note session is resumed,
+        // the backend emits a "running" event with the projectId. Re-add it
+        // to active tracking so the row spinner and sidebar spinner appear.
+        if (
+          status === 'running' &&
+          !isTracked &&
+          isKnownNoteSession &&
+          (projectId === project.id || !projectId)
+        ) {
+          activeSessionIds = new Set([...activeSessionIds, sessionId]);
+          sessionRegistry.register(sessionId, project.id, 'note');
+          projectStateStore.addRunningSession(project.id, sessionId);
+        }
+
+        if (isTracked || isKnownNoteSession) {
+          if (status === 'completed' || status === 'error' || status === 'cancelled') {
+            if (isTracked) {
+              const next = new Set(activeSessionIds);
+              next.delete(sessionId);
+              activeSessionIds = next;
+            }
+            // Refresh notes after session completes
+            loadProjectNotes();
           }
-          // Refresh notes after session completes
-          loadProjectNotes();
         }
       }
-    }).then((unlisten) => {
+    ).then((unlisten) => {
       unlistenSession = unlisten;
     });
 

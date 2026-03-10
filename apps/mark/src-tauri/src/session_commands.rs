@@ -183,6 +183,8 @@ pub fn start_session(
 pub fn resume_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    action_executor: tauri::State<'_, Arc<ActionExecutor>>,
+    action_registry: tauri::State<'_, Arc<ActionRegistry>>,
     app_handle: tauri::AppHandle,
     session_id: String,
     prompt: String,
@@ -201,6 +203,14 @@ pub fn resume_session(
     let agent_session_id = session.agent_id.clone();
     let working_dir = PathBuf::from(&session.working_dir);
 
+    // Check if this session is linked to a project note — if so, we need
+    // to start the MCP server so the agent has access to project tools.
+    let mcp_project_id = store
+        .get_project_note_by_session(&session_id)
+        .ok()
+        .flatten()
+        .map(|note| note.project_id);
+
     let transitioned = store
         .transition_to_running(&session_id)
         .map_err(|e| e.to_string())?;
@@ -215,7 +225,7 @@ pub fn resume_session(
             status: "running".to_string(),
             error_message: None,
             branch_id: None,
-            project_id: None,
+            project_id: mcp_project_id.clone(),
             session_type: None,
             is_auto_review: false,
         },
@@ -231,9 +241,17 @@ pub fn resume_session(
             provider,
             workspace_name: None,
             extra_env: vec![],
-            mcp_project_id: None,
-            action_executor: None,
-            action_registry: None,
+            mcp_project_id: mcp_project_id.clone(),
+            action_executor: if mcp_project_id.is_some() {
+                Some(Arc::clone(&action_executor))
+            } else {
+                None
+            },
+            action_registry: if mcp_project_id.is_some() {
+                Some(Arc::clone(&action_registry))
+            } else {
+                None
+            },
             remote_working_dir: None,
             image_ids: image_ids.unwrap_or_default(),
         },

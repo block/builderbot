@@ -134,10 +134,26 @@ describe('CommentsPanel', () => {
     expect(screen.getByText('Anchor text not found in document')).toBeDefined();
   });
 
-  it('renders agent working indicator', () => {
+  it('renders agent working indicator visible when active', () => {
     const workingThread: ThreadResponse = { ...mockThread, agentWorking: true };
     const { container } = renderPanel([workingThread]);
-    expect(container.querySelector('.thread-working')).toBeDefined();
+    const el = container.querySelector('.thread-working');
+    expect(el).toBeDefined();
+    expect(el?.classList.contains('hidden')).toBe(false);
+  });
+
+  it('renders agent working indicator hidden when inactive', () => {
+    const { container } = renderPanel([mockThread]);
+    const el = container.querySelector('.thread-working');
+    expect(el).toBeDefined();
+    expect(el?.classList.contains('hidden')).toBe(true);
+  });
+
+  it('always renders agent indicator in DOM for layout stability', () => {
+    const { container } = renderPanel();
+    const el = container.querySelector('.agent-indicator');
+    expect(el).toBeDefined();
+    expect(el?.classList.contains('hidden')).toBe(true);
   });
 
   it('renders agent status indicator when running', () => {
@@ -155,5 +171,37 @@ describe('CommentsPanel', () => {
     );
     expect(screen.getByText('Agent')).toBeDefined();
     expect(screen.getByText('45%')).toBeDefined();
+  });
+
+  it('agent indicator is visible when running, hidden when not', () => {
+    const { container, rerender } = render(
+      <MemoryRouter>
+        <CommentsPanel
+          threads={[mockThread]}
+          anchorLines={{ 'thread-1': 5 }}
+          project="test/project"
+          filePath="thoughts/test.md"
+          onRefresh={vi.fn()}
+          agentStatus={{ running: true, contextPercent: 45 }}
+        />
+      </MemoryRouter>,
+    );
+    const indicator = container.querySelector('.agent-indicator');
+    expect(indicator?.classList.contains('hidden')).toBe(false);
+
+    rerender(
+      <MemoryRouter>
+        <CommentsPanel
+          threads={[mockThread]}
+          anchorLines={{ 'thread-1': 5 }}
+          project="test/project"
+          filePath="thoughts/test.md"
+          onRefresh={vi.fn()}
+          agentStatus={{ running: false }}
+        />
+      </MemoryRouter>,
+    );
+    const indicatorAfter = container.querySelector('.agent-indicator');
+    expect(indicatorAfter?.classList.contains('hidden')).toBe(true);
   });
 });

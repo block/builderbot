@@ -321,6 +321,15 @@ func (m *Manager) SimulateFinished(projectName string) {
 	}
 }
 
+// SetQuickExit records a quick exit for the given project, activating the
+// restart cooldown. This is intended for testing the cooldown behavior
+// without requiring an actual agent process.
+func (m *Manager) SetQuickExit(projectName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastQuickExit[projectName] = time.Now()
+}
+
 // StopAll terminates all running agents (for server shutdown).
 func (m *Manager) StopAll() {
 	m.mu.Lock()

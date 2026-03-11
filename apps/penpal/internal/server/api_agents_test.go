@@ -115,6 +115,74 @@ func TestAPIAgentStatus_NoNeedsAgent_WhenAgentReplied(t *testing.T) {
 	}
 }
 
+func TestAPIAgentStatus_CooldownAfterQuickExit(t *testing.T) {
+	s, c, cs := testServer(t)
+	s.agents = agents.New(c, cs, 0)
+	dir := t.TempDir()
+	seedProject(c, "test-proj", dir, nil)
+
+	// Simulate a quick exit by directly setting the cooldown state
+	s.agents.SetQuickExit("test-proj")
+
+	// Create a pending human comment
+	anchor := comments.Anchor{SelectedText: "review me"}
+	comment := comments.Comment{Author: "user", Role: "human", Body: "New comment"}
+	_, err := cs.CreateThread("test-proj", "thoughts/plan.md", anchor, comment)
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents?project=test-proj", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	if resp["running"] != false {
+		t.Errorf("expected running=false during cooldown")
+	}
+	if resp["cooldown"] != true {
+		t.Errorf("expected cooldown=true, got %v", resp["cooldown"])
+	}
+	// needsAgent should still be true (there ARE pending comments)
+	if resp["needsAgent"] != true {
+		t.Errorf("expected needsAgent=true during cooldown with pending comments, got %v", resp["needsAgent"])
+	}
+}
+
+func TestAPIAgentStatus_StartBlockedDuringCooldown(t *testing.T) {
+	s, c, cs := testServer(t)
+	s.agents = agents.New(c, cs, 0)
+	dir := t.TempDir()
+	seedProject(c, "test-proj", dir, nil)
+
+	s.agents.SetQuickExit("test-proj")
+
+	// Attempting to start should succeed (HTTP 200) but not actually launch
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/start?project=test-proj", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+
+	if resp["running"] != false {
+		t.Errorf("expected running=false (start blocked by cooldown)")
+	}
+	if resp["cooldown"] != true {
+		t.Errorf("expected cooldown=true in start response")
+	}
+}
+
 func TestAPIAgentStatus_NeedsAgent_AfterAgentFinished(t *testing.T) {
 	s, c, cs := testServer(t)
 	s.agents = agents.New(c, cs, 0)

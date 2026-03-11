@@ -48,7 +48,16 @@
     onDeleteReview?: (reviewId: string, sessionId?: string) => void;
     onDeleteImage?: (imageId: string) => void;
     /** Optional per-review breakdown of visible comments vs hold-to-reveal annotations. */
-    reviewCommentBreakdown?: Record<string, { comments: number; annotations: number }>;
+    reviewCommentBreakdown?: Record<
+      string,
+      {
+        comments: number;
+        annotations: number;
+        warnings?: number;
+        suggestions?: number;
+        issues?: number;
+      }
+    >;
     onNewNote?: () => void;
     onNewCommit?: () => void;
     onNewReview?: (e: MouseEvent) => void;
@@ -231,10 +240,25 @@
       const isDeleting = deletingReviewIds.has(review.id);
       const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
 
-      // Build badges: show both comment and annotation counts when present
+      // Build per-type badges matching the icons used in the diff UI
+      const warningCount = breakdown?.warnings ?? 0;
+      const suggestionCount = breakdown?.suggestions ?? 0;
+      const issueCount = breakdown?.issues ?? 0;
+      // Comments without a specific type (user comments, or untyped agent comments)
+      const plainCommentCount = commentCount - warningCount - suggestionCount - issueCount;
+
       const badges: TimelineBadge[] = [];
-      if (commentCount > 0) {
-        badges.push({ icon: 'comment', count: commentCount });
+      if (issueCount > 0) {
+        badges.push({ icon: 'issue', count: issueCount });
+      }
+      if (warningCount > 0) {
+        badges.push({ icon: 'warning', count: warningCount });
+      }
+      if (suggestionCount > 0) {
+        badges.push({ icon: 'suggestion', count: suggestionCount });
+      }
+      if (plainCommentCount > 0) {
+        badges.push({ icon: 'comment', count: plainCommentCount });
       }
       if (annotationCount > 0) {
         badges.push({ icon: 'annotation', count: annotationCount });

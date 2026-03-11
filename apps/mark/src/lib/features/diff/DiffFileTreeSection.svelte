@@ -548,19 +548,21 @@
     padding-left: 4px;
   }
 
-  .comment-indicator.comment-indicator-warning {
-    color: var(--status-modified);
+  /* CSS order matches icon priority (issue > warning > suggestion > info)
+     so the last matching rule wins for color, matching the displayed icon. */
+  .comment-indicator.comment-indicator-info {
+    color: var(--text-accent);
   }
 
   .comment-indicator.comment-indicator-suggestion {
     color: var(--status-added);
   }
 
-  .comment-indicator.comment-indicator-issue {
-    color: var(--status-deleted);
+  .comment-indicator.comment-indicator-warning {
+    color: var(--status-modified);
   }
 
-  .comment-indicator.comment-indicator-info {
-    color: var(--text-accent);
+  .comment-indicator.comment-indicator-issue {
+    color: var(--status-deleted);
   }
 </style>

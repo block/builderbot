@@ -14,6 +14,8 @@
     Info,
     Trash2,
     AlertTriangle,
+    CircleAlert,
+    Lightbulb,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
 
@@ -30,7 +32,7 @@
     | 'image';
 
   export type TimelineBadge = {
-    icon: 'comment' | 'annotation';
+    icon: 'comment' | 'warning' | 'suggestion' | 'issue' | 'annotation';
     count: number;
   };
 
@@ -152,11 +154,23 @@
           {/if}
           {#if badges}
             {#each badges as badge}
-              <span class="meta-badge">
-                {#if badge.icon === 'comment'}
-                  <MessageSquare size={10} />
-                {:else}
+              <span
+                class="meta-badge"
+                class:meta-badge-warning={badge.icon === 'warning'}
+                class:meta-badge-suggestion={badge.icon === 'suggestion'}
+                class:meta-badge-issue={badge.icon === 'issue'}
+                class:meta-badge-annotation={badge.icon === 'annotation'}
+              >
+                {#if badge.icon === 'warning'}
+                  <AlertTriangle size={10} />
+                {:else if badge.icon === 'suggestion'}
+                  <Lightbulb size={10} />
+                {:else if badge.icon === 'issue'}
+                  <CircleAlert size={10} />
+                {:else if badge.icon === 'annotation'}
                   <Info size={10} />
+                {:else}
+                  <MessageSquare size={10} />
                 {/if}
                 <span>{badge.count}</span>
               </span>
@@ -364,6 +378,26 @@
     font-size: calc(var(--size-xs) - 1px);
     font-weight: 600;
     line-height: 1;
+  }
+
+  .meta-badge.meta-badge-warning {
+    color: var(--status-modified);
+    border-color: var(--status-modified);
+  }
+
+  .meta-badge.meta-badge-suggestion {
+    color: var(--status-added);
+    border-color: var(--status-added);
+  }
+
+  .meta-badge.meta-badge-issue {
+    color: var(--status-deleted);
+    border-color: var(--status-deleted);
+  }
+
+  .meta-badge.meta-badge-annotation {
+    color: var(--text-accent);
+    border-color: var(--text-accent);
   }
 
   /* Actions container — visible on row hover */

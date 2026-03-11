@@ -204,18 +204,13 @@ pub fn resume_session(
     let agent_session_id = session.agent_id.clone();
     let working_dir = PathBuf::from(&session.working_dir);
 
-    // Use the project_id stored directly on the session record. This is
-    // set by start_project_session and ensures the MCP server (with
-    // start_repo_session / add_project_repo tools) is always started on
-    // resume. Falls back to the legacy project_notes lookup for sessions
-    // created before the project_id column was added.
-    let mcp_project_id = session.project_id.clone().or_else(|| {
-        store
-            .get_project_note_by_session(&session_id)
-            .ok()
-            .flatten()
-            .map(|note| note.project_id)
-    });
+    // Check if this session is linked to a project note — if so, we need
+    // to start the MCP server so the agent has access to project tools.
+    let mcp_project_id = store
+        .get_project_note_by_session(&session_id)
+        .ok()
+        .flatten()
+        .map(|note| note.project_id);
 
     // If this session is linked to a commit, capture the current HEAD so we
     // can detect amended commits when the session completes.
@@ -464,10 +459,8 @@ Begin the note with a markdown H1 heading as the title.\n\n"
     let working_dir = crate::git::project_worktree_root_for(&project.id)
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
-    // Create the session — link it to the project so that resume_session
-    // can reliably start the MCP server on follow-up turns.
-    let mut session =
-        store::Session::new_running(&full_prompt, &working_dir).with_project(&project_id);
+    // Create the session
+    let mut session = store::Session::new_running(&full_prompt, &working_dir);
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }

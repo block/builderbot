@@ -240,7 +240,7 @@
 
       // Build badges: warnings get their own badge, everything else is a comment
       const warningCount = breakdown?.warnings ?? 0;
-      const nonWarningCount = totalCount - warningCount;
+      const nonWarningCount = commentCount - warningCount;
 
       const badges: TimelineBadge[] = [];
       if (warningCount > 0) {

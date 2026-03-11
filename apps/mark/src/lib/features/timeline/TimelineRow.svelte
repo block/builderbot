@@ -338,7 +338,7 @@
 
   .timeline-meta {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 8px;
     margin-top: 3px;
   }
@@ -356,9 +356,10 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    padding: 1px 6px;
+    padding: 2px 7px;
     border-radius: 8px;
-    background-color: var(--bg-elevated);
+    background: none;
+    border: 1px solid var(--border-subtle);
     color: var(--text-muted);
     font-size: calc(var(--size-xs) - 1px);
     font-weight: 600;

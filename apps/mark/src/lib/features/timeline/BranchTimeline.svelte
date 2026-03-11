@@ -231,11 +231,12 @@
       const isDeleting = deletingReviewIds.has(review.id);
       const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
 
-      // Build badges: show comments badge if any; only show annotations if no comments
+      // Build badges: show both comment and annotation counts when present
       const badges: TimelineBadge[] = [];
       if (commentCount > 0) {
         badges.push({ icon: 'comment', count: commentCount });
-      } else if (annotationCount > 0) {
+      }
+      if (annotationCount > 0) {
         badges.push({ icon: 'annotation', count: annotationCount });
       }
 

@@ -180,6 +180,7 @@ pub fn start_session(
 /// The working directory is read from the session record (set when the
 /// session was first created), so the frontend doesn't need to pass it.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn resume_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,

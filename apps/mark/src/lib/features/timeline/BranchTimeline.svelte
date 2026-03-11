@@ -54,8 +54,6 @@
         comments: number;
         annotations: number;
         warnings?: number;
-        suggestions?: number;
-        issues?: number;
       }
     >;
     onNewNote?: () => void;
@@ -240,28 +238,16 @@
       const isDeleting = deletingReviewIds.has(review.id);
       const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
 
-      // Build per-type badges matching the icons used in the diff UI
+      // Build badges: warnings get their own badge, everything else is a comment
       const warningCount = breakdown?.warnings ?? 0;
-      const suggestionCount = breakdown?.suggestions ?? 0;
-      const issueCount = breakdown?.issues ?? 0;
-      // Comments without a specific type (user comments, or untyped agent comments)
-      const plainCommentCount = commentCount - warningCount - suggestionCount - issueCount;
+      const nonWarningCount = totalCount - warningCount;
 
       const badges: TimelineBadge[] = [];
-      if (issueCount > 0) {
-        badges.push({ icon: 'issue', count: issueCount });
-      }
       if (warningCount > 0) {
         badges.push({ icon: 'warning', count: warningCount });
       }
-      if (suggestionCount > 0) {
-        badges.push({ icon: 'suggestion', count: suggestionCount });
-      }
-      if (plainCommentCount > 0) {
-        badges.push({ icon: 'comment', count: plainCommentCount });
-      }
-      if (annotationCount > 0) {
-        badges.push({ icon: 'annotation', count: annotationCount });
+      if (nonWarningCount > 0) {
+        badges.push({ icon: 'comment', count: nonWarningCount });
       }
 
       let type: TimelineItemType;

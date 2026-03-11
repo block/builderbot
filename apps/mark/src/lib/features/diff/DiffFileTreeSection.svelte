@@ -2,9 +2,6 @@
   import {
     AlertTriangle,
     Check,
-    CircleAlert,
-    Info,
-    Lightbulb,
     RotateCcw,
     ChevronRight,
     ChevronDown,
@@ -235,18 +232,9 @@
             <span
               class="comment-indicator"
               class:comment-indicator-warning={node.file.commentTypes.includes('warning')}
-              class:comment-indicator-suggestion={node.file.commentTypes.includes('suggestion')}
-              class:comment-indicator-issue={node.file.commentTypes.includes('issue')}
-              class:comment-indicator-info={node.file.commentTypes.includes('information')}
             >
-              {#if node.file.commentTypes.includes('issue')}
-                <CircleAlert size={12} />
-              {:else if node.file.commentTypes.includes('warning')}
+              {#if node.file.commentTypes.includes('warning')}
                 <AlertTriangle size={12} />
-              {:else if node.file.commentTypes.includes('suggestion')}
-                <Lightbulb size={12} />
-              {:else if node.file.commentTypes.includes('information')}
-                <Info size={12} />
               {:else}
                 <MessageSquare size={12} />
               {/if}
@@ -548,21 +536,7 @@
     padding-left: 4px;
   }
 
-  /* CSS order matches icon priority (issue > warning > suggestion > info)
-     so the last matching rule wins for color, matching the displayed icon. */
-  .comment-indicator.comment-indicator-info {
-    color: var(--text-accent);
-  }
-
-  .comment-indicator.comment-indicator-suggestion {
-    color: var(--status-added);
-  }
-
   .comment-indicator.comment-indicator-warning {
     color: var(--status-modified);
-  }
-
-  .comment-indicator.comment-indicator-issue {
-    color: var(--status-deleted);
   }
 </style>

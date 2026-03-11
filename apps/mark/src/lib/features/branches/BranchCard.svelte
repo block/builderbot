@@ -310,8 +310,6 @@
     comments: number;
     annotations: number;
     warnings: number;
-    suggestions: number;
-    issues: number;
   };
   let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
   let reviewDetailsLoadVersion = 0;
@@ -868,8 +866,6 @@
           let comments = 0;
           let annotations = 0;
           let warnings = 0;
-          let suggestions = 0;
-          let issues = 0;
           for (const comment of fullReview.comments) {
             if (comment.commentType === 'information') {
               annotations += 1;
@@ -877,10 +873,6 @@
               comments += 1;
               if (comment.commentType === 'warning') {
                 warnings += 1;
-              } else if (comment.commentType === 'suggestion') {
-                suggestions += 1;
-              } else if (comment.commentType === 'issue') {
-                issues += 1;
               }
             }
           }
@@ -891,8 +883,6 @@
             comments,
             annotations,
             warnings,
-            suggestions,
-            issues,
           };
           return { id: review.id, details };
         } catch (e) {

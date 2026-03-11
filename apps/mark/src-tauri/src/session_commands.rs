@@ -413,13 +413,12 @@ pub async fn start_project_session(
         `expected_outcome=\"commit\"` for code changes/commits. For remote branches this subagent \
         runs on the remote workspace, where file access, notes, and commits must happen."
     } else {
-        "- start_repo_session: Use this to make changes or run tasks within one of the project's \
-        repositories. Pass the repo slug (e.g. \"org/repo\") and clear instructions for what to \
-        do there. This tool starts a subagent session and waits for it to complete before \
-        returning the outcome. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
+        "- start_repo_session: Use this to make changes or run tasks in one of the project's \
+        repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
         `expected_outcome=\"commit\"` for code changes/commits. Do not ask for both a note and a \
         commit in a single start_repo_session request — choose one outcome per call. All reasoning \
-        specific to a repo should be done within a repo session rather in this project wide context."
+        specific to a repo must be done within a repo session rather than in this project-wide context. \
+        The only way you are allowed to write ANY files: MUST be done via start_repo_session with expected_outcome=\"commit\"."
     };
 
     let coordinator_reminder = if is_remote {

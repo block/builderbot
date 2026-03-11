@@ -98,28 +98,26 @@ export default function CommentsPanel({
         <span>
           Comments {openCount > 0 && <span id="comments-count">{openCount}</span>}
         </span>
-        {agentStatus?.running && (
-          <span className="agent-indicator">
-            <span className="agent-dot" />
-            <span>Agent</span>
-            {agentStatus.contextPercent !== undefined && (
-              <span
-                className={`agent-context-label ${agentContextColorClass(agentStatus.contextPercent)}`}
-              >
-                {Math.round(agentStatus.contextPercent)}%
-              </span>
-            )}
-            <button
-              className="agent-stop-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                api.stopAgent(project).then(onRefresh);
-              }}
+        <span className={`agent-indicator${agentStatus?.running ? '' : ' hidden'}`}>
+          <span className="agent-dot" />
+          <span>Agent</span>
+          {agentStatus?.running && agentStatus.contextPercent !== undefined && (
+            <span
+              className={`agent-context-label ${agentContextColorClass(agentStatus.contextPercent)}`}
             >
-              Stop
-            </button>
-          </span>
-        )}
+              {Math.round(agentStatus.contextPercent)}%
+            </span>
+          )}
+          <button
+            className="agent-stop-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              api.stopAgent(project).then(onRefresh);
+            }}
+          >
+            Stop
+          </button>
+        </span>
         {resolvedThreads.length > 0 && (
           <span id="resolved-toggle">
             <label style={{ cursor: 'pointer', fontWeight: 'normal', textTransform: 'none', letterSpacing: 'normal' }}>
@@ -456,17 +454,15 @@ function ThreadCard({
         </div>
       )}
 
-      {/* Working indicator */}
-      {thread.agentWorking && (
-        <div className="thread-working">
-          <span className="agent-dot" />
-          <span className="working-dots">
-            <span>.</span>
-            <span>.</span>
-            <span>.</span>
-          </span>
-        </div>
-      )}
+      {/* Working indicator — always rendered to avoid layout shift */}
+      <div className={`thread-working${thread.agentWorking ? '' : ' hidden'}`}>
+        <span className="agent-dot" />
+        <span className="working-dots">
+          <span>.</span>
+          <span>.</span>
+          <span>.</span>
+        </span>
+      </div>
 
       {/* Actions */}
       {!replyOpen && (

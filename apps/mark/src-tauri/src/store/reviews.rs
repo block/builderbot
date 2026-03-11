@@ -326,20 +326,26 @@ impl Store {
         Ok(())
     }
 
-    /// Find the most recent auto review for a branch created after the given timestamp.
+    /// Find the most recent auto review for a branch created after all
+    /// commits on the branch.  Compares `reviews.created_at` against
+    /// `MAX(commits.updated_at)` so both sides use the same millisecond
+    /// clock, avoiding the seconds-vs-milliseconds mismatch that would
+    /// occur when using the git committer timestamp from the frontend.
     pub fn find_auto_review_since_commit(
         &self,
         branch_id: &str,
-        since_commit_created_at: i64,
     ) -> Result<Option<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let review: Option<Review> = conn
             .query_row(
                 "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
                  FROM reviews
-                 WHERE branch_id = ?1 AND is_auto = 1 AND created_at > ?2
+                 WHERE branch_id = ?1 AND is_auto = 1
+                   AND created_at >= COALESCE(
+                       (SELECT MAX(updated_at) FROM commits WHERE branch_id = ?1 AND sha IS NOT NULL),
+                       0)
                  ORDER BY created_at DESC LIMIT 1",
-                params![branch_id, since_commit_created_at],
+                params![branch_id],
                 Self::row_to_review_header,
             )
             .optional()?;

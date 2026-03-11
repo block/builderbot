@@ -688,12 +688,9 @@ export function removeReferenceFile(reviewId: string, path: string): Promise<voi
 // Auto review
 // =============================================================================
 
-/** Find an auto review created since a given commit timestamp. */
-export function findAutoReviewSinceCommit(
-  branchId: string,
-  sinceCommitCreatedAt: number
-): Promise<Review | null> {
-  return invoke('find_auto_review_since_commit', { branchId, sinceCommitCreatedAt });
+/** Find an auto review created after all commits on a branch. */
+export function findAutoReviewSinceCommit(branchId: string): Promise<Review | null> {
+  return invoke('find_auto_review_since_commit', { branchId });
 }
 
 /** Mark or unmark a review as auto-generated. */

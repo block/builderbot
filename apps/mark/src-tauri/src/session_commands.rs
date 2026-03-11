@@ -899,15 +899,14 @@ pub async fn trigger_auto_review(
     })
 }
 
-/// Find an auto review created after a given commit timestamp.
+/// Find an auto review created after all commits on a branch.
 #[tauri::command(rename_all = "camelCase")]
 pub fn find_auto_review_since_commit(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
-    since_commit_created_at: i64,
 ) -> Result<Option<store::Review>, String> {
     get_store(&store)?
-        .find_auto_review_since_commit(&branch_id, since_commit_created_at)
+        .find_auto_review_since_commit(&branch_id)
         .map_err(|e| e.to_string())
 }
 

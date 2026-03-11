@@ -42,8 +42,8 @@ const restartCooldown = 30 * time.Second
 // Manager manages Claude Code agent processes, one per project.
 type Manager struct {
 	mu            sync.Mutex
-	agents        map[string]*Agent     // key: qualified project name
-	lastQuickExit map[string]time.Time  // key: project name -> time of last quick exit
+	agents        map[string]*Agent    // key: qualified project name
+	lastQuickExit map[string]time.Time // key: project name -> time of last quick exit
 	cache         *cache.Cache
 	comments      *comments.Store
 	port          int

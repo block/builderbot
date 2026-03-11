@@ -1416,6 +1416,12 @@ fn cleanup_reviews_after_commit(
     registry: &session_runner::SessionRegistry,
     commit: &store::models::Commit,
 ) {
+    // Only clean up reviews for commits that actually landed (have a SHA).
+    // Pending/failed commits without a SHA never produced a reviewable diff.
+    if commit.sha.is_none() {
+        return;
+    }
+
     let reviews = match store.find_reviews_created_since(&commit.branch_id, commit.created_at) {
         Ok(r) => r,
         Err(_) => return,

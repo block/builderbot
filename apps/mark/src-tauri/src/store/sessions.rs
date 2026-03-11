@@ -9,8 +9,8 @@ impl Store {
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at, owner_pid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at, owner_pid, project_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 session.id,
                 session.prompt,
@@ -22,6 +22,7 @@ impl Store {
                 session.created_at,
                 session.updated_at,
                 session.owner_pid,
+                session.project_id,
             ],
         )?;
         Ok(())
@@ -30,7 +31,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at, owner_pid
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at, owner_pid, project_id
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -106,7 +107,7 @@ impl Store {
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at, owner_pid
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, created_at, updated_at, owner_pid, project_id
              FROM sessions WHERE status = 'running'",
         )?;
         let sessions = stmt
@@ -145,6 +146,7 @@ impl Store {
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
             owner_pid: row.get(9)?,
+            project_id: row.get(10)?,
         })
     }
 }

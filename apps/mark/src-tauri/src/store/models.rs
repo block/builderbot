@@ -446,6 +446,10 @@ pub struct Session {
     /// PID of the Mark process that owns this session while it is running.
     /// Used on startup to detect sessions orphaned by a dead process.
     pub owner_pid: Option<u32>,
+    /// When set, this session is a project-level session and should receive
+    /// the MCP server with `start_repo_session` / `add_project_repo` tools
+    /// on every run — including resumes.
+    pub project_id: Option<String>,
 }
 
 impl Session {
@@ -462,6 +466,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             owner_pid: Some(std::process::id()),
+            project_id: None,
         }
     }
 
@@ -472,6 +477,11 @@ impl Session {
 
     pub fn with_agent(mut self, agent_id: &str) -> Self {
         self.agent_id = Some(agent_id.to_string());
+        self
+    }
+
+    pub fn with_project(mut self, project_id: &str) -> Self {
+        self.project_id = Some(project_id.to_string());
         self
     }
 }

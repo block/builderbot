@@ -37,15 +37,8 @@
   } from './lib/features/keyboard/shortcuts';
   import { runSearchShortcut } from './lib/features/keyboard/searchTargets';
   import { projectStateStore } from './lib/stores/projectState.svelte';
-  import { prStateStore } from './lib/stores/prState.svelte';
-  import { pushStateStore } from './lib/stores/pushState.svelte';
-  import { sessionRegistry } from './lib/stores/sessionRegistry.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
-  import {
-    extractPrUrl,
-    extractPrNumber,
-    isPushRejectedNonFastForward,
-  } from './lib/features/branches/branchCardHelpers';
+  import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import type { StoreIncompatibility } from './lib/types';
 
   let showSessionLab = $state(false);
@@ -120,153 +113,9 @@
       if (!triggerShortcut('view-reset-size')) resetSize();
     });
 
-    // Listen for session status changes globally to handle spinner cleanup
-    // This must be at the App level so it works regardless of which view the user is on
-    //
-    // Session completion handler updates THREE independent state stores:
-    // 1. projectState: Aggregate view of all sessions in a project (for project tiles)
-    // 2. prState: Branch-specific PR creation workflow state (for PR buttons)
-    // 3. pushState: Branch-specific push workflow state (for push operations)
-    //
-    // Session lookups are delegated to the unified sessionRegistry for consistency
-    unlistenSessionStatus = await listen<{
-      sessionId: string;
-      status: string;
-      branchId?: string;
-      projectId?: string;
-      sessionType?: string;
-    }>('session-status-changed', async (event) => {
-      const {
-        sessionId,
-        status,
-        branchId: eventBranchId,
-        projectId: eventProjectId,
-        sessionType,
-      } = event.payload;
-
-      // MCP-initiated repo session just started — register it so the project
-      // spinner shows and the completion handler can clean it up correctly.
-      if (status === 'running' && eventProjectId) {
-        sessionRegistry.register(
-          sessionId,
-          eventProjectId,
-          (sessionType as import('./lib/stores/sessionRegistry.svelte').SessionType) ?? 'other',
-          eventBranchId
-        );
-        projectStateStore.addRunningSession(eventProjectId, sessionId);
-        return;
-      }
-
-      if (status === 'completed' || status === 'error' || status === 'cancelled') {
-        // Get session metadata from the unified registry
-        const sessionProjectId = sessionRegistry.getProjectId(sessionId);
-        const sessionType = sessionRegistry.getType(sessionId);
-        const branchId = sessionRegistry.getBranchId(sessionId);
-        const currentProjectId = navigation.selectedProjectId;
-        if (!sessionProjectId && !sessionType && !branchId) {
-          console.warn('Received completion event for unknown session ID', { sessionId, status });
-        }
-
-        // Mark project as unread if:
-        // 1. We know which project the session belonged to AND
-        // 2. The user is currently viewing a different project
-        if (sessionProjectId && currentProjectId !== sessionProjectId) {
-          projectStateStore.markAsUnread(sessionProjectId);
-        }
-
-        // Always remove the running session from its project
-        if (sessionProjectId) {
-          projectStateStore.removeRunningSession(sessionProjectId, sessionId);
-        }
-
-        // Handle PR-specific completion logic
-        if (sessionType === 'pr' && branchId) {
-          if (status === 'completed') {
-            try {
-              // Fetch session messages to find the PR URL
-              const messages = await commands.getSessionMessages(sessionId);
-              const foundUrl = extractPrUrl(messages);
-
-              if (foundUrl) {
-                const prNumber = extractPrNumber(foundUrl);
-                if (prNumber) {
-                  try {
-                    // Save PR number to storage (separate try-catch to handle storage failures)
-                    await commands.updateBranchPr(branchId, prNumber);
-                  } catch (storageError) {
-                    // If storage fails, we still have the PR URL from the session
-                    // Log the error but don't fail the PR creation - the PR exists on GitHub
-                    console.error('Failed to persist PR number to storage:', storageError);
-                  }
-                }
-                // Set state to created regardless of storage success - the PR was created
-                prStateStore.setPrCreated(branchId, foundUrl);
-              } else {
-                // Session completed but we couldn't find a PR URL
-                prStateStore.setPrError(
-                  branchId,
-                  'PR session completed but no PR URL was found in the output.'
-                );
-              }
-            } catch (e) {
-              // Failed to get session messages or extract PR URL
-              prStateStore.setPrError(branchId, e instanceof Error ? e.message : String(e));
-            }
-          } else {
-            // Session errored or was cancelled
-            prStateStore.setPrError(
-              branchId,
-              `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
-            );
-          }
-          // Clear PR state's session tracking (does NOT unregister from registry)
-          prStateStore.clearSessionTracking(branchId);
-        }
-
-        // Handle push-specific completion logic
-        if (sessionType === 'push' && branchId) {
-          if (status === 'completed') {
-            try {
-              // Check session messages for the non-fast-forward rejection marker
-              const messages = await commands.getSessionMessages(sessionId);
-              if (isPushRejectedNonFastForward(messages)) {
-                // The agent stopped because the remote would lose commits.
-                // Go to error state — clicking the button will open the force push dialog.
-                pushStateStore.setPushError(branchId, '', true); // rejectedNonFastForward=true
-              } else {
-                // Push completed successfully — clear stale PR status (checks,
-                // mergeable, etc.) before marking done so the UI doesn't briefly
-                // flash outdated indicators like "Has conflicts".
-                try {
-                  await commands.clearBranchPrStatus(branchId);
-                } catch (e) {
-                  console.warn('[Mark] Failed to clear PR status after push:', e);
-                }
-                pushStateStore.setPushDone(branchId);
-                // Reset to idle after a brief moment so the button returns to "View PR"
-                setTimeout(() => {
-                  pushStateStore.clearPushState(branchId);
-                }, 1_500);
-              }
-            } catch (e) {
-              // Failed to get session messages - treat as error
-              pushStateStore.setPushError(branchId, e instanceof Error ? e.message : String(e));
-            }
-          } else {
-            // Session errored or was cancelled
-            pushStateStore.setPushError(
-              branchId,
-              `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`
-            );
-          }
-          // Clear push state's session tracking (does NOT unregister from registry)
-          pushStateStore.clearSessionTracking(branchId);
-        }
-
-        // Clean up the session from the unified registry (single point of cleanup)
-        sessionRegistry.unregister(sessionId);
-      }
-    });
+    // Global session-status listener — must live at App level so it works
+    // regardless of which view the user is on. See sessionStatusListener.ts.
+    unlistenSessionStatus = await listenForSessionStatus();
 
     const t0 = performance.now();
     try {

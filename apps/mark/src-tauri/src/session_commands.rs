@@ -401,50 +401,50 @@ pub async fn start_project_session(
 
     let preamble = if is_remote {
         "This top-level project session runs locally and acts as a coordinator. \
-        For repository-specific execution, use MCP subagent tools.\n\n\
-        This is a remote-workspace project. Use the project MCP tools to orchestrate work:"
+For repository-specific execution, use MCP subagent tools.\n\n\
+This is a remote-workspace project. Use the project MCP tools to orchestrate work:"
     } else {
         "You have access to the following tools:"
     };
 
     let start_repo_session_desc = if is_remote {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-        repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
-        `expected_outcome=\"commit\"` for code changes/commits. For remote branches this subagent \
-        runs on the remote workspace, where file access, notes, and commits must happen."
+repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
+`expected_outcome=\"commit\"` for code changes/commits. For remote branches this subagent \
+runs on the remote workspace, where file access, notes, and commits must happen."
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-        repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
-        `expected_outcome=\"commit\"` for code changes/commits. Do not ask for both a note and a \
-        commit in a single start_repo_session request — choose one outcome per call. All reasoning \
-        specific to a repo must be done within a repo session rather than in this project-wide context. \
-        The only way you are allowed to write ANY files: MUST be done via start_repo_session with expected_outcome=\"commit\"."
+repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
+`expected_outcome=\"commit\"` for code changes/commits. Do not ask for both a note and a \
+commit in a single start_repo_session request — choose one outcome per call. All reasoning \
+specific to a repo must be done within a repo session rather than in this project-wide context. \
+The only way you are allowed to write ANY files: MUST be done via start_repo_session with expected_outcome=\"commit\"."
     };
 
     let coordinator_reminder = if is_remote {
         "\n\nKeep this project session focused on coordination and synthesis. Do not perform \
-        repository edits directly here; use `start_repo_session` for implementation work."
+repository edits directly here; use `start_repo_session` for implementation work."
     } else {
         ""
     };
 
     let action_instructions = format!(
         "The user is requesting work at the project level. Investigate and \
-        fulfill the request below, then produce a project note summarizing what you found and any \
-        actions taken.\n\n\
-        {preamble}\n\n\
-        {start_repo_session_desc}\n\n\
-        - add_project_repo: Use this when the task requires a repository that isn't yet in the \
-        project. Pass the GitHub repo slug to add it.\n\n\
-        IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
-        Do not run `which`/`type` for these names and do not ask the user to add repos manually \
-        unless the MCP tool call itself returns an error. If the tool call fails, report the exact \
-        error and the next action needed.\
-        {coordinator_reminder}\n\n\
-        To discover repositories that might be relevant, use `gh` to explore repos in the user's \
-        GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
-        To return the note, include a horizontal rule (---) followed by the note content. \
-        Begin the note with a markdown H1 heading as the title.\n\n"
+fulfill the request below, then produce a project note summarizing what you found and any \
+actions taken.\n\n\
+{preamble}\n\n\
+{start_repo_session_desc}\n\n\
+- add_project_repo: Use this when the task requires a repository that isn't yet in the \
+project. Pass the GitHub repo slug to add it.\n\n\
+IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
+Do not run `which`/`type` for these names and do not ask the user to add repos manually \
+unless the MCP tool call itself returns an error. If the tool call fails, report the exact \
+error and the next action needed.\
+{coordinator_reminder}\n\n\
+To discover repositories that might be relevant, use `gh` to explore repos in the user's \
+GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
+To return the note, include a horizontal rule (---) followed by the note content. \
+Begin the note with a markdown H1 heading as the title.\n\n"
     );
 
     let full_prompt = format!(

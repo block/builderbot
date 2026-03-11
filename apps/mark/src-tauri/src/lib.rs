@@ -1408,6 +1408,33 @@ fn create_image_from_data(
     Ok(image)
 }
 
+/// Cancel and delete any reviews (auto or manual) created at or after a commit's
+/// `created_at` timestamp.  If a review has an active session, the session is
+/// cancelled via the registry and then deleted.
+fn cleanup_reviews_after_commit(
+    store: &Arc<Store>,
+    registry: &session_runner::SessionRegistry,
+    commit: &store::models::Commit,
+) {
+    // Only clean up reviews for commits that actually landed (have a SHA).
+    // Pending/failed commits without a SHA never produced a reviewable diff.
+    if commit.sha.is_none() {
+        return;
+    }
+
+    let reviews = match store.find_reviews_created_since(&commit.branch_id, commit.created_at) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for review in reviews {
+        if let Some(ref sid) = review.session_id {
+            registry.cancel(sid);
+            let _ = store.delete_session(sid);
+        }
+        let _ = store.delete_review(&review.id);
+    }
+}
+
 /// Delete a review and all its comments, optionally deleting its linked session.
 #[tauri::command(rename_all = "camelCase")]
 fn delete_review(
@@ -1435,6 +1462,7 @@ fn delete_review(
 /// This does NOT touch git — it only removes the DB record and optionally its session.
 #[tauri::command(rename_all = "camelCase")]
 fn delete_pending_commit(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     commit_id: String,
     delete_session: Option<bool>,
@@ -1454,6 +1482,9 @@ fn delete_pending_commit(
         );
     }
 
+    // Clean up reviews created at or after this commit
+    cleanup_reviews_after_commit(&store, &registry, &commit);
+
     store.delete_commit(&commit_id).map_err(|e| e.to_string())?;
 
     if delete_session.unwrap_or(false) {
@@ -1472,6 +1503,7 @@ fn delete_pending_commit(
 /// Returns an error if the commit is not the current HEAD.
 #[tauri::command(rename_all = "camelCase")]
 fn delete_commit(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
     commit_sha: String,
@@ -1510,6 +1542,9 @@ fn delete_commit(
 
     // Clean up DB record if one exists
     if let Ok(Some(db_commit)) = store.get_commit_by_sha(&branch_id, &commit_sha) {
+        // Clean up reviews created at or after this commit
+        cleanup_reviews_after_commit(&store, &registry, &db_commit);
+
         let _ = store.delete_commit(&db_commit.id);
 
         if delete_session.unwrap_or(false) {

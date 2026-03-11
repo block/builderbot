@@ -287,6 +287,25 @@ impl Store {
         Ok(())
     }
 
+    /// Find all reviews on a branch created at or after a given timestamp.
+    /// Returns just the review headers (no children loaded) since callers
+    /// typically only need the id and session_id for cleanup.
+    pub fn find_reviews_created_since(
+        &self,
+        branch_id: &str,
+        since: i64,
+    ) -> Result<Vec<Review>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+             FROM reviews
+             WHERE branch_id = ?1 AND created_at >= ?2
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![branch_id, since], Self::row_to_review_header)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Update the title of a review.
     pub fn update_review_title(&self, id: &str, title: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
@@ -334,7 +353,9 @@ impl Store {
         }
     }
 
-    /// Find the most recent auto review for a branch.
+    /// Find the most recent auto review for a branch, but only if it was
+    /// created after every commit on the branch.  This prevents stale auto
+    /// reviews (e.g. from before an amended commit) from surfacing.
     pub fn find_latest_auto_review(&self, branch_id: &str) -> Result<Option<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let review: Option<Review> = conn
@@ -342,6 +363,9 @@ impl Store {
                 "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
                  FROM reviews
                  WHERE branch_id = ?1 AND is_auto = 1
+                   AND created_at >= COALESCE(
+                       (SELECT MAX(updated_at) FROM commits WHERE branch_id = ?1 AND sha IS NOT NULL),
+                       0)
                  ORDER BY created_at DESC LIMIT 1",
                 params![branch_id],
                 Self::row_to_review_header,

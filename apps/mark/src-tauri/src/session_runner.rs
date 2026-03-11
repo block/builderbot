@@ -504,7 +504,9 @@ fn run_post_completion_hooks(
 
     // --- Commit detection ---
     if let Some(pre_sha) = pre_head_sha {
-        if let Ok(Some(pending_commit)) = store.get_pending_commit_by_session(session_id) {
+        // Look for any commit linked to this session — not just pending (sha IS NULL)
+        // ones — so we also detect amended commits on resumed sessions.
+        if let Ok(Some(commit)) = store.get_commit_by_session(session_id) {
             // Get current HEAD — either from local worktree or remote workspace.
             let current_head_result = if let Some(ws_name) = workspace_name {
                 crate::blox::ws_exec(ws_name, &["git", "rev-parse", "HEAD"])
@@ -521,13 +523,17 @@ fn run_post_completion_hooks(
                         &pre_sha[..7.min(pre_sha.len())],
                         &current_head[..7.min(current_head.len())]
                     );
-                    if let Err(e) = store.update_commit_sha(&pending_commit.id, &current_head) {
+                    if let Err(e) = store.update_commit_sha(&commit.id, &current_head) {
                         log::error!("Failed to update commit SHA: {e}");
                     }
-                    committed_branch_id = Some(pending_commit.branch_id.clone());
+                    committed_branch_id = Some(commit.branch_id.clone());
                 }
                 Ok(_) => {
-                    log::info!("Session {session_id}: no new commit (HEAD unchanged), leaving pending commit as failed");
+                    if commit.sha.is_none() {
+                        log::info!("Session {session_id}: no new commit (HEAD unchanged), leaving pending commit as failed");
+                    } else {
+                        log::info!("Session {session_id}: no commit change (HEAD unchanged)");
+                    }
                 }
                 Err(e) => {
                     log::error!("Failed to get HEAD SHA after session: {e}");

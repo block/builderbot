@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { AlertTriangle, Check, Copy, MessageSquare, Trash2 } from 'lucide-svelte';
+  import { AlertTriangle, Bot, Check, Copy, MessageSquare, Trash2 } from 'lucide-svelte';
   import type { Comment } from '../../types';
   import { formatLineRange, truncateText } from './diffModalHelpers';
 
@@ -68,15 +68,22 @@
             style="padding-left: 8px"
             onclick={() => onSelectComment(comment)}
           >
-            <span
-              class="comment-icon"
-              class:comment-icon-warning={comment.commentType === 'warning'}
-            >
-              {#if comment.commentType === 'warning'}
-                <AlertTriangle size={12} />
-              {:else}
-                <MessageSquare size={12} />
+            <span class="comment-icons">
+              {#if comment.author === 'agent'}
+                <span class="comment-icon agent-icon">
+                  <Bot size={12} />
+                </span>
               {/if}
+              <span
+                class="comment-icon"
+                class:comment-icon-warning={comment.commentType === 'warning'}
+              >
+                {#if comment.commentType === 'warning'}
+                  <AlertTriangle size={12} />
+                {:else}
+                  <MessageSquare size={12} />
+                {/if}
+              </span>
             </span>
             <span class="comment-details">
               <span class="comment-location">
@@ -223,15 +230,27 @@
     gap: 2px !important;
     padding-top: 6px !important;
     padding-bottom: 6px !important;
-    padding-left: 28px !important;
+    padding-left: 40px !important;
     width: 100%;
   }
 
-  .comment-icon {
+  .comment-icons {
     position: absolute;
     left: 8px;
     top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .comment-icon {
+    display: flex;
+    align-items: center;
     color: var(--text-faint);
+  }
+
+  .comment-icon.agent-icon {
+    color: var(--status-modified);
   }
 
   .comment-icon.comment-icon-warning {

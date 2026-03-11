@@ -287,6 +287,25 @@ impl Store {
         Ok(())
     }
 
+    /// Find all reviews on a branch created at or after a given timestamp.
+    /// Returns just the review headers (no children loaded) since callers
+    /// typically only need the id and session_id for cleanup.
+    pub fn find_reviews_created_since(
+        &self,
+        branch_id: &str,
+        since: i64,
+    ) -> Result<Vec<Review>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+             FROM reviews
+             WHERE branch_id = ?1 AND created_at >= ?2
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![branch_id, since], Self::row_to_review_header)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Update the title of a review.
     pub fn update_review_title(&self, id: &str, title: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();

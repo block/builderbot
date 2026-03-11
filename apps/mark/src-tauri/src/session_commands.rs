@@ -418,7 +418,7 @@ repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
 `expected_outcome=\"commit\"` for code changes/commits. Do not ask for both a note and a \
 commit in a single start_repo_session request — choose one outcome per call. All reasoning \
 specific to a repo must be done within a repo session rather than in this project-wide context. \
-The only way you are allowed to write ANY files: MUST be done via start_repo_session with expected_outcome=\"commit\"."
+You MUST NOT write files directly — all file writes MUST go through start_repo_session with expected_outcome=\"commit\"."
     };
 
     let coordinator_reminder = if is_remote {

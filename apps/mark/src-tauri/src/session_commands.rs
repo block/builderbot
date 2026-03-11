@@ -451,12 +451,13 @@ pub async fn start_project_session(
         "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
     );
 
-    // Resolve working directory — use the primary repo's clone path, then the
-    // project-scoped worktree root (created at project creation time), then /tmp.
-    let working_dir = project.clone_path().unwrap_or_else(|| {
-        crate::git::project_worktree_root_for(&project.id)
-            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
-    });
+    // Resolve working directory — use the project-scoped worktree root (created
+    // at project creation time), NOT the repo clone path (~/.mark/repos/…).
+    // Project sessions must never have a repos-dir working directory because the
+    // agent would see it and start reading/writing files there directly instead
+    // of using start_repo_session.
+    let working_dir = crate::git::project_worktree_root_for(&project.id)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
     // Create the session
     let mut session = store::Session::new_running(&full_prompt, &working_dir);

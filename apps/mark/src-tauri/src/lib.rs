@@ -2431,7 +2431,7 @@ async fn check_existing_local_branch(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
-    let Some(repo_path) = project.clone_path() else {
+    let Some(repo_path) = project.primary_repo().and_then(paths::clone_path_for) else {
         return Ok(false);
     };
 

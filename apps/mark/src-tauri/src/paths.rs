@@ -26,6 +26,13 @@ pub fn repos_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("repos"))
 }
 
+/// Derive the local clone path for a GitHub repo: `<repos_dir>/<owner>/<repo>/`.
+///
+/// Returns `None` if the data directory can't be determined.
+pub fn clone_path_for(github_repo: &str) -> Option<PathBuf> {
+    repos_dir().map(|d| d.join(github_repo))
+}
+
 /// Root directory for workspace-scoped local data: `~/.mark/workspaces/`
 pub fn workspaces_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("workspaces"))

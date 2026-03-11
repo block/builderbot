@@ -48,8 +48,7 @@ impl FromStr for ProjectLocation {
 /// A tracked repository (user opt-in).
 ///
 /// Projects are identified by their `id` and may share the same GitHub
-/// `owner/repo` slug when they use different subpaths. The local clone path
-/// is derived on demand via [`crate::paths::repos_dir`].
+/// `owner/repo` slug when they use different subpaths.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -98,15 +97,6 @@ impl Project {
     pub fn with_subpath(mut self, subpath: String) -> Self {
         self.subpath = Some(subpath);
         self
-    }
-
-    /// Derive the local clone path: `<repos_dir>/<owner>/<repo>/`.
-    ///
-    /// Returns `None` if the data directory can't be determined.
-    pub fn clone_path(&self) -> Option<std::path::PathBuf> {
-        self.github_repo
-            .as_ref()
-            .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
     }
 
     /// Extract the repo name (last component of `owner/repo`) if set.

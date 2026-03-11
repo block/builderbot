@@ -151,7 +151,7 @@
           {/if}
           {#if badges}
             {#each badges as badge}
-              <span class="meta-badge" class:meta-badge-warning={badge.icon === 'warning'}>
+              <span class="meta-badge">
                 {#if badge.icon === 'warning'}
                   <AlertTriangle size={10} />
                 {:else}
@@ -363,11 +363,6 @@
     font-size: calc(var(--size-xs) - 1px);
     font-weight: 600;
     line-height: 1;
-  }
-
-  .meta-badge.meta-badge-warning {
-    color: var(--status-modified);
-    border-color: var(--status-modified);
   }
 
   /* Actions container — visible on row hover */

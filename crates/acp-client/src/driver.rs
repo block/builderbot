@@ -178,7 +178,7 @@ impl AcpDriver {
         self
     }
 
-    /// Set MCP servers to inject into the session via `NewSessionRequest`.
+    /// Set MCP servers to inject into the session via `NewSessionRequest` or `LoadSessionRequest`.
     pub fn with_mcp_servers(mut self, servers: Vec<McpServer>) -> Self {
         self.mcp_servers = servers;
         self
@@ -758,10 +758,10 @@ async fn setup_acp_session(
             );
 
             connection
-                .load_session(LoadSessionRequest::new(
-                    existing_id.to_string(),
-                    working_dir.to_path_buf(),
-                ))
+                .load_session(
+                    LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
+                        .mcp_servers(mcp_servers.to_vec()),
+                )
                 .await
                 .map_err(|e| format!("Failed to load ACP session: {e:?}"))?;
 

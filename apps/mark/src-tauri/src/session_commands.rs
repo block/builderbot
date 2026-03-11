@@ -212,6 +212,29 @@ pub fn resume_session(
         .flatten()
         .map(|note| note.project_id);
 
+    // If this session is linked to a commit, capture the current HEAD so we
+    // can detect amended commits when the session completes.
+    let (pre_head_sha, workspace_name) =
+        if let Ok(Some(commit)) = store.get_commit_by_session(&session_id) {
+            // Only bother if the commit already has a SHA (i.e. was previously completed).
+            if commit.sha.is_some() {
+                let branch = store.get_branch(&commit.branch_id).ok().flatten();
+                let ws_name = branch.as_ref().and_then(|b| b.workspace_name.clone());
+                let head = if let Some(ref ws) = ws_name {
+                    crate::blox::ws_exec(ws, &["git", "rev-parse", "HEAD"])
+                        .map(|s| s.trim().to_string())
+                        .ok()
+                } else {
+                    crate::git::get_head_sha(&working_dir).ok()
+                };
+                (head, ws_name)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
     let transitioned = store
         .transition_to_running(&session_id)
         .map_err(|e| e.to_string())?;
@@ -238,9 +261,9 @@ pub fn resume_session(
             prompt,
             working_dir,
             agent_session_id,
-            pre_head_sha: None,
+            pre_head_sha,
             provider,
-            workspace_name: None,
+            workspace_name,
             extra_env: vec![],
             mcp_project_id: mcp_project_id.clone(),
             action_executor: if mcp_project_id.is_some() {

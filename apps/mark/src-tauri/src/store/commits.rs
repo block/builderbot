@@ -88,6 +88,19 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Find any commit linked to a given session (regardless of SHA status).
+    pub fn get_commit_by_session(&self, session_id: &str) -> Result<Option<Commit>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, branch_id, sha, session_id, created_at, updated_at
+             FROM commits WHERE session_id = ?1",
+            params![session_id],
+            Self::row_to_commit,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn delete_commit(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM commits WHERE id = ?1", params![id])?;

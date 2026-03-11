@@ -63,7 +63,7 @@ impl From<rusqlite::Error> for StoreError {
 ///
 /// Bump this whenever the schema changes.
 /// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 23;
+pub const SCHEMA_VERSION: i64 = 22;
 
 /// Oldest schema version we can migrate forward from.
 ///
@@ -321,8 +321,7 @@ impl Store {
                 error_message   TEXT,
                 created_at      INTEGER NOT NULL,
                 updated_at      INTEGER NOT NULL,
-                owner_pid       INTEGER,
-                project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL
+                owner_pid       INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS commits (
@@ -667,26 +666,6 @@ impl Store {
                 "ALTER TABLE reviews ADD COLUMN is_auto INTEGER NOT NULL DEFAULT 0;",
             )
             .ok(); // Ignore error if column already exists (fresh DB)
-        }
-
-        if db_version < 23 {
-            // v22 → v23: add project_id column to sessions so resume_session
-            // can reliably detect project sessions without relying on the
-            // indirect project_notes lookup.
-            conn.execute_batch(
-                "ALTER TABLE sessions ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;",
-            )
-            .ok(); // Ignore error if column already exists (fresh DB)
-
-            // Backfill project_id from existing project_notes linkage.
-            conn.execute_batch(
-                "UPDATE sessions SET project_id = (
-                    SELECT pn.project_id FROM project_notes pn WHERE pn.session_id = sessions.id LIMIT 1
-                ) WHERE project_id IS NULL AND EXISTS (
-                    SELECT 1 FROM project_notes pn WHERE pn.session_id = sessions.id
-                );",
-            )
-            .ok();
         }
 
         // Stamp the current schema version so future opens skip applied migrations.

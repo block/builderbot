@@ -11,7 +11,7 @@
   import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
   import type { BranchTimeline as BranchTimelineData } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
-  import type { TimelineItemType } from './TimelineRow.svelte';
+  import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
   import {
     collectRunningSessionIds,
     createLiveSessionHints,
@@ -113,6 +113,7 @@
     reviewId?: string;
     imageId?: string;
     imageFilename?: string;
+    badges?: TimelineBadge[];
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
   };
@@ -120,10 +121,6 @@
   /** Strip XML-tagged context blocks (action, branch-history) from display text. */
   function stripXmlTags(text: string): string {
     return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
-  }
-
-  function formatCount(count: number, singular: string): string {
-    return `${count} ${singular}${count === 1 ? '' : 's'}`;
   }
 
   let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
@@ -233,30 +230,35 @@
       const isFailed = !isRunning && !!review.sessionId && totalCount === 0;
       const isDeleting = deletingReviewIds.has(review.id);
       const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
-      const countParts: string[] = [];
-      if (commentCount > 0) countParts.push(formatCount(commentCount, 'comment'));
-      if (annotationCount > 0) countParts.push(formatCount(annotationCount, 'annotation'));
+
+      // Build badges: show comments badge if any; only show annotations if no comments
+      const badges: TimelineBadge[] = [];
+      if (commentCount > 0) {
+        badges.push({ icon: 'comment', count: commentCount });
+      } else if (annotationCount > 0) {
+        badges.push({ icon: 'annotation', count: annotationCount });
+      }
 
       let type: TimelineItemType;
-      let secondaryMeta: string | undefined;
+      let meta: string | undefined;
 
       if (isFailed) {
         type = 'failed-review';
-        secondaryMeta = 'Session finished — no comments created';
+        meta = 'Session finished — no comments created';
       } else if (isRunning) {
         type = 'generating-review';
-        secondaryMeta = liveHint ?? 'Generating review';
+        meta = liveHint ?? 'Generating review';
       } else {
         type = 'review';
-        secondaryMeta = formatRelativeTimeMs(review.createdAt);
+        meta = formatRelativeTimeMs(review.createdAt);
       }
 
       all.push({
         key: `review-${review.id}`,
         type,
         title: review.title || 'Code Review',
-        meta: countParts.length > 0 ? countParts.join(' + ') : undefined,
-        secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
+        meta: isDeleting ? 'Deleting...' : meta,
+        badges: badges.length > 0 ? badges : undefined,
         deleting: isDeleting,
         timestamp: Math.floor(review.createdAt / 1000),
         sessionId: review.sessionId ?? undefined,
@@ -418,6 +420,7 @@
         title={item.title}
         meta={item.meta}
         secondaryMeta={item.secondaryMeta}
+        badges={item.badges}
         deleting={item.deleting}
         isLast={index === items.length - 1 &&
           !onNewNote &&

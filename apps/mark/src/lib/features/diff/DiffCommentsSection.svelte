@@ -1,5 +1,14 @@
 <script lang="ts">
-  import { Bot, Check, Copy, MessageSquare, Trash2 } from 'lucide-svelte';
+  import {
+    AlertTriangle,
+    Check,
+    CircleAlert,
+    Copy,
+    Info,
+    Lightbulb,
+    MessageSquare,
+    Trash2,
+  } from 'lucide-svelte';
   import type { Comment } from '../../types';
   import { formatLineRange, truncateText } from './diffModalHelpers';
 
@@ -68,9 +77,21 @@
             style="padding-left: 8px"
             onclick={() => onSelectComment(comment)}
           >
-            <span class="comment-icon" class:agent-comment={comment.author === 'agent'}>
-              {#if comment.author === 'agent'}
-                <Bot size={12} />
+            <span
+              class="comment-icon"
+              class:comment-icon-warning={comment.commentType === 'warning'}
+              class:comment-icon-suggestion={comment.commentType === 'suggestion'}
+              class:comment-icon-issue={comment.commentType === 'issue'}
+              class:comment-icon-info={comment.commentType === 'information'}
+            >
+              {#if comment.commentType === 'warning'}
+                <AlertTriangle size={12} />
+              {:else if comment.commentType === 'suggestion'}
+                <Lightbulb size={12} />
+              {:else if comment.commentType === 'issue'}
+                <CircleAlert size={12} />
+              {:else if comment.commentType === 'information'}
+                <Info size={12} />
               {:else}
                 <MessageSquare size={12} />
               {/if}
@@ -231,8 +252,20 @@
     color: var(--text-faint);
   }
 
-  .comment-icon.agent-comment {
+  .comment-icon.comment-icon-warning {
     color: var(--status-modified);
+  }
+
+  .comment-icon.comment-icon-suggestion {
+    color: var(--status-added);
+  }
+
+  .comment-icon.comment-icon-issue {
+    color: var(--status-deleted);
+  }
+
+  .comment-icon.comment-icon-info {
+    color: var(--text-accent);
   }
 
   .comment-details {

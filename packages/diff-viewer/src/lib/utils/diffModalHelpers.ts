@@ -1,4 +1,4 @@
-import type { Comment, FileDiffSummary } from '../types';
+import type { Comment, CommentType, FileDiffSummary } from '../types';
 import { fileSummaryPath } from '../state/diffViewerState.svelte';
 
 export interface FileEntry {
@@ -6,6 +6,8 @@ export interface FileEntry {
   status: 'added' | 'deleted' | 'modified' | 'renamed';
   isReviewed: boolean;
   commentCount: number;
+  /** The distinct comment types present on this file (e.g. 'warning', 'suggestion'). */
+  commentTypes: CommentType[];
 }
 
 export interface TreeNode {
@@ -30,8 +32,17 @@ export function buildFileEntries(
 ): FileEntry[] {
   const reviewedSet = new Set(reviewedPaths);
   const commentCounts = new Map<string, number>();
+  const commentTypesByFile = new Map<string, Set<CommentType>>();
   for (const comment of comments) {
     commentCounts.set(comment.path, (commentCounts.get(comment.path) || 0) + 1);
+    if (comment.commentType) {
+      let types = commentTypesByFile.get(comment.path);
+      if (!types) {
+        types = new Set();
+        commentTypesByFile.set(comment.path, types);
+      }
+      types.add(comment.commentType);
+    }
   }
 
   return files.map((summary) => {
@@ -41,6 +52,7 @@ export function buildFileEntries(
       status: fileStatus(summary),
       isReviewed: reviewedSet.has(path),
       commentCount: commentCounts.get(path) || 0,
+      commentTypes: [...(commentTypesByFile.get(path) || [])],
     };
   });
 }

@@ -11,6 +11,7 @@
     FileSearch,
     Image as ImageLucide,
     MessageSquare,
+    Info,
     Trash2,
     AlertTriangle,
   } from 'lucide-svelte';
@@ -28,11 +29,17 @@
     | 'failed-review'
     | 'image';
 
+  export type TimelineBadge = {
+    icon: 'comment' | 'annotation';
+    count: number;
+  };
+
   interface Props {
     type: TimelineItemType;
     title: string;
     meta?: string;
     secondaryMeta?: string;
+    badges?: TimelineBadge[];
     deleting?: boolean;
     isLast?: boolean;
     sessionId?: string;
@@ -48,6 +55,7 @@
     title,
     meta,
     secondaryMeta,
+    badges,
     deleting = false,
     isLast = false,
     sessionId,
@@ -134,13 +142,25 @@
       <span class="timeline-title" class:skeleton-title={isPending} class:failed-title={isFailed}
         >{title}</span
       >
-      {#if meta || secondaryMeta}
+      {#if meta || secondaryMeta || (badges && badges.length > 0)}
         <div class="timeline-meta">
           {#if meta}
             <span class="meta-item">{meta}</span>
           {/if}
           {#if secondaryMeta}
             <span class="meta-item meta-sha" class:failed-meta={isFailed}>{secondaryMeta}</span>
+          {/if}
+          {#if badges}
+            {#each badges as badge}
+              <span class="meta-badge">
+                {#if badge.icon === 'comment'}
+                  <MessageSquare size={10} />
+                {:else}
+                  <Info size={10} />
+                {/if}
+                <span>{badge.count}</span>
+              </span>
+            {/each}
           {/if}
         </div>
       {/if}
@@ -330,6 +350,19 @@
 
   .meta-sha {
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+  }
+
+  .meta-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background-color: var(--bg-elevated);
+    color: var(--text-muted);
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 600;
+    line-height: 1;
   }
 
   /* Actions container — visible on row hover */

@@ -458,7 +458,6 @@ impl ProjectToolsHandler {
                     // after the parent project session has been cancelled.
                     self.registry.cancel(&session_id);
                     return serde_json::json!({
-                        "session_id": session_id,
                         "outcome": "cancelled",
                         "output": "",
                     })
@@ -523,13 +522,9 @@ impl ProjectToolsHandler {
                             None
                         };
                     let mut result = serde_json::json!({
-                        "session_id": session_id,
                         "outcome": outcome,
                         "output": output,
                     });
-                    if let Some(aid) = artifact_id.as_deref() {
-                        result["artifact_id"] = serde_json::Value::String(aid.to_string());
-                    }
                     if let Some(note) = note_info {
                         result["note"] = serde_json::Value::String(note);
                     }
@@ -622,10 +617,7 @@ impl ProjectToolsHandler {
                     "[project_mcp] add_project_repo: no branch found for repo {} after creation",
                     github_repo
                 );
-                return format!(
-                    r#"{{"repo_id": "{}", "message": "Added repository {} to project (no branch found)"}}"#,
-                    repo.id, github_repo
-                );
+                return format!("Added repository {github_repo} to project (no branch found)");
             }
         };
 
@@ -660,21 +652,17 @@ impl ProjectToolsHandler {
                         "[project_mcp] add_project_repo: worktree setup failed (continuing): {e}"
                     );
                     // Don't abort — return the repo even if worktree setup failed
-                    return serde_json::json!({
-                        "repo_id": repo.id,
-                        "message": format!("Added repository {github_repo} to project (worktree setup failed: {e})"),
-                    })
-                    .to_string();
+                    return format!(
+                        "Added repository {github_repo} to project (worktree setup failed: {e})"
+                    );
                 }
                 Err(e) => {
                     log::warn!(
                         "[project_mcp] add_project_repo: worktree task panicked (continuing): {e}"
                     );
-                    return serde_json::json!({
-                        "repo_id": repo.id,
-                        "message": format!("Added repository {github_repo} to project (worktree task error: {e})"),
-                    })
-                    .to_string();
+                    return format!(
+                        "Added repository {github_repo} to project (worktree task error: {e})"
+                    );
                 }
             }
 
@@ -718,11 +706,7 @@ impl ProjectToolsHandler {
             }
         }
 
-        serde_json::json!({
-            "repo_id": repo.id,
-            "message": format!("Added repository {github_repo} to project"),
-        })
-        .to_string()
+        format!("Added repository {github_repo} to project")
     }
 }
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import {
+    AlertTriangle,
     Check,
     RotateCcw,
     ChevronRight,
@@ -228,7 +229,16 @@
           {@render fileIcon(node.file, showReviewedSection)}
           <span class="file-name">{node.name}</span>
           {#if node.file.commentCount > 0}
-            <span class="comment-indicator"><MessageSquare size={12} /></span>
+            <span
+              class="comment-indicator"
+              class:comment-indicator-warning={node.file.commentTypes.includes('warning')}
+            >
+              {#if node.file.commentTypes.includes('warning')}
+                <AlertTriangle size={12} />
+              {:else}
+                <MessageSquare size={12} />
+              {/if}
+            </span>
           {/if}
           {#if searchState?.state.isOpen && searchState.state.fileResults.has(node.file.path)}
             {@const resultCount =
@@ -524,5 +534,9 @@
     flex-shrink: 0;
     margin-left: auto;
     padding-left: 4px;
+  }
+
+  .comment-indicator.comment-indicator-warning {
+    color: var(--status-modified);
   }
 </style>

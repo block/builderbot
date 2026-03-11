@@ -309,6 +309,7 @@
     scope: 'branch' | 'commit';
     comments: number;
     annotations: number;
+    warnings: number;
   };
   let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
   let reviewDetailsLoadVersion = 0;
@@ -864,11 +865,15 @@
 
           let comments = 0;
           let annotations = 0;
+          let warnings = 0;
           for (const comment of fullReview.comments) {
             if (comment.commentType === 'information') {
               annotations += 1;
             } else {
               comments += 1;
+              if (comment.commentType === 'warning') {
+                warnings += 1;
+              }
             }
           }
 
@@ -877,6 +882,7 @@
             scope: fullReview.scope,
             comments,
             annotations,
+            warnings,
           };
           return { id: review.id, details };
         } catch (e) {

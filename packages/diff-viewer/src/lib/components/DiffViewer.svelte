@@ -1416,6 +1416,8 @@
   function handleLineCommentCancel() {
     commentingOnLines = null;
     lineCommentEditorStyle = null;
+    lineCommentPositionPreference = 'below';
+    editingCommentId = null;
     activeLineComment = null;
     lineCommentReadOnly = false;
   }
@@ -1482,12 +1484,7 @@
       if (commentingOnLines) {
         event.preventDefault();
         event.stopPropagation();
-        commentingOnLines = null;
-        lineCommentEditorStyle = null;
-        lineCommentPositionPreference = 'below';
-        editingCommentId = null;
-        activeLineComment = null;
-        lineCommentReadOnly = false;
+        handleLineCommentCancel();
         return;
       }
       if (commentingOnRange !== null) {

@@ -135,7 +135,7 @@ impl ProjectToolsHandler {
         &self,
         Parameters(p): Parameters<StartRepoSessionParams>,
     ) -> String {
-        log::info!(
+        log::debug!(
             "[project_mcp] start_repo_session called: repo={:?} subpath={:?} expected_outcome={:?} return_info={:?} provider={:?} instructions={:?}",
             p.repo,
             p.subpath,
@@ -541,7 +541,7 @@ impl ProjectToolsHandler {
         description = "Add a GitHub repository to the current project. Use this when the task requires a repository that isn't yet in the project. Waits until the repository worktree is ready and setup actions have completed before returning."
     )]
     async fn add_project_repo(&self, Parameters(p): Parameters<AddProjectRepoParams>) -> String {
-        log::info!(
+        log::debug!(
             "[project_mcp] add_project_repo called: github_repo={:?} branch_name={:?} subpath={:?}",
             p.github_repo,
             p.branch_name,
@@ -623,7 +623,7 @@ impl ProjectToolsHandler {
 
         // For local branches, set up the git worktree
         if branch.workspace_name.is_none() {
-            log::info!(
+            log::debug!(
                 "[project_mcp] add_project_repo: setting up worktree for branch {}",
                 branch.branch_name
             );
@@ -638,7 +638,7 @@ impl ProjectToolsHandler {
 
             match worktree_result {
                 Ok(Ok(worktree_path)) => {
-                    log::info!(
+                    log::debug!(
                         "[project_mcp] add_project_repo: worktree ready at {}",
                         worktree_path
                     );
@@ -670,7 +670,7 @@ impl ProjectToolsHandler {
             if let (Some(executor), Some(act_registry)) =
                 (self.action_executor.as_ref(), self.action_registry.as_ref())
             {
-                log::info!(
+                log::debug!(
                     "[project_mcp] add_project_repo: running prerun actions for branch {}",
                     branch.id
                 );
@@ -684,7 +684,7 @@ impl ProjectToolsHandler {
                 .await;
                 match prerun_result {
                     Ok(count) => {
-                        log::info!(
+                        log::debug!(
                             "[project_mcp] add_project_repo: ran {count} prerun actions for branch {}",
                             branch.id
                         );
@@ -700,7 +700,7 @@ impl ProjectToolsHandler {
                     }
                 }
             } else {
-                log::info!(
+                log::debug!(
                     "[project_mcp] add_project_repo: no action executor available, skipping prerun actions"
                 );
             }
@@ -753,7 +753,7 @@ pub async fn start_project_mcp_server(
         cancel_token,
         workspace_name,
     );
-    log::info!(
+    log::debug!(
         "[project_mcp] HTTP server bound on port {port} for project {}",
         handler.project_id
     );

@@ -9,7 +9,7 @@
  * the timeline refreshes and reads pendingSessionItems to pass to BranchTimeline.
  */
 
-import type { Branch, BranchSessionType } from '../../types';
+import type { Branch, BranchTimeline as BranchTimelineData, BranchSessionType } from '../../types';
 import * as commands from '../../api/commands';
 import { getPreferredAgent } from '../settings/preferences.svelte';
 import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';

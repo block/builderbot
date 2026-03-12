@@ -762,7 +762,7 @@ fn update_project_repo_branch_name(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[tauri::command]
 async fn delete_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     executor: tauri::State<'_, Arc<actions::ActionExecutor>>,

@@ -8,7 +8,7 @@ const MAX_IMAGE_SIZE: u64 = 10_485_760; // 10 MB
 
 const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
-pub(crate) fn mime_type_for_extension(ext: &str) -> &'static str {
+fn mime_type_for_extension(ext: &str) -> &'static str {
     match ext {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",

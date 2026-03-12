@@ -32,21 +32,10 @@
     isRemote: boolean;
     hasCodeChanges: boolean;
     timeline: BranchTimelineData | null;
-    onPrSessionComplete?: (status: string) => void;
-    onPushSessionComplete?: (status: string) => void;
     onOpenSession?: (sessionId: string) => void;
   }
 
-  let {
-    branch,
-    isLocal,
-    isRemote,
-    hasCodeChanges,
-    timeline,
-    onPrSessionComplete,
-    onPushSessionComplete,
-    onOpenSession,
-  }: Props = $props();
+  let { branch, isLocal, isRemote, hasCodeChanges, timeline, onOpenSession }: Props = $props();
 
   // =========================================================================
   // Option-key tracking (for draft PR creation)
@@ -419,7 +408,6 @@
       );
     }
     prStateStore.clearSessionTracking(branch.id);
-    onPrSessionComplete?.(status);
   }
 
   // =========================================================================
@@ -475,7 +463,6 @@
       );
     }
     pushStateStore.clearSessionTracking(branch.id);
-    onPushSessionComplete?.(status);
   }
 
   function handleForcePushConfirm() {

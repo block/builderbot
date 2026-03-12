@@ -10,10 +10,7 @@ use crate::{
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-pub(crate) fn build_branch_timeline(
-    store: &Arc<Store>,
-    branch_id: &str,
-) -> Result<BranchTimeline, String> {
+fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTimeline, String> {
     // Get the branch and its workdir for git operations
     let branch = store
         .get_branch(branch_id)

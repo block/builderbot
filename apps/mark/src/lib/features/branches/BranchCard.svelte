@@ -461,7 +461,7 @@
         if (isAutoReview) {
           autoReviewSessionId = eventSessionId;
           // Look up the review ID so we can delete it on cancel.
-          commands.findLatestAutoReview(branchId).then((review) => {
+          commands.findFreshAutoReview(branchId).then((review) => {
             if (review) {
               autoReviewId = review.id;
             }
@@ -1273,7 +1273,7 @@
    */
   async function tryAdoptAutoReview(): Promise<boolean> {
     try {
-      const review = await commands.findAutoReviewSinceCommit(branch.id);
+      const review = await commands.findFreshAutoReview(branch.id);
       if (!review) return false;
 
       // Promote the auto review to a user review

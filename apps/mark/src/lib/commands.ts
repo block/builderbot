@@ -689,18 +689,13 @@ export function removeReferenceFile(reviewId: string, path: string): Promise<voi
 // =============================================================================
 
 /** Find an auto review created after all commits on a branch. */
-export function findAutoReviewSinceCommit(branchId: string): Promise<Review | null> {
-  return invoke('find_auto_review_since_commit', { branchId });
+export function findFreshAutoReview(branchId: string): Promise<Review | null> {
+  return invoke('find_fresh_auto_review', { branchId });
 }
 
 /** Mark or unmark a review as auto-generated. */
 export function setReviewAuto(reviewId: string, isAuto: boolean): Promise<void> {
   return invoke('set_review_auto', { reviewId, isAuto });
-}
-
-/** Find the latest auto review for a branch. */
-export function findLatestAutoReview(branchId: string): Promise<Review | null> {
-  return invoke('find_latest_auto_review', { branchId });
 }
 
 // =============================================================================

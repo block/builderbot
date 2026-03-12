@@ -363,10 +363,17 @@
       onClose();
       return;
     }
-    // Escape to go back (skip if focused on an input/textarea)
+    // Escape to dismiss layers, then close modal (skip if focused on an input/textarea)
     if (event.key === 'Escape') {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
         return;
+      // Close search bar first if open
+      if (searchState.state.isOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        searchState.closeSearch();
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       onClose();

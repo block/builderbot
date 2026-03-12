@@ -367,6 +367,10 @@
     if (event.key === 'Escape') {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
         return;
+      // If DiffViewer already handled this Escape (e.g. clearing selection/comment state),
+      // don't also close the modal. Both handlers are on `document`, so stopPropagation
+      // doesn't help — check defaultPrevented instead.
+      if (event.defaultPrevented) return;
       // Close search bar first if open
       if (searchState.state.isOpen) {
         event.preventDefault();

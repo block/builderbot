@@ -363,6 +363,26 @@
       onClose();
       return;
     }
+    // Escape to dismiss layers, then close modal (skip if focused on an input/textarea)
+    if (event.key === 'Escape') {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
+        return;
+      // If DiffViewer already handled this Escape (e.g. clearing selection/comment state),
+      // don't also close the modal. Both handlers are on `document`, so stopPropagation
+      // doesn't help — check defaultPrevented instead.
+      if (event.defaultPrevented) return;
+      // Close search bar first if open
+      if (searchState.state.isOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        searchState.closeSearch();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
     // Hold A to reveal AI annotations
     if (event.key === 'a' || event.key === 'A') {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
@@ -440,7 +460,7 @@
     <div class="title-bar" onpointerdown={startDrag}>
       <div class="traffic-light-spacer"></div>
       <div class="left-actions">
-        <button class="icon-btn" onclick={onClose} title="Back (⌘←)">
+        <button class="icon-btn" onclick={onClose} title="Back (Esc)">
           <ArrowLeft size={14} />
         </button>
       </div>

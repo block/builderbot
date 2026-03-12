@@ -1416,6 +1416,8 @@
   function handleLineCommentCancel() {
     commentingOnLines = null;
     lineCommentEditorStyle = null;
+    lineCommentPositionPreference = 'below';
+    editingCommentId = null;
     activeLineComment = null;
     lineCommentReadOnly = false;
   }
@@ -1477,10 +1479,27 @@
       return;
     }
 
-    if (event.key === 'Escape' && selectedLineRange && !commentingOnLines) {
-      event.preventDefault();
-      clearLineSelection();
-      return;
+    if (event.key === 'Escape') {
+      // Layered dismiss: comment editors first, then line selection
+      if (commentingOnLines) {
+        event.preventDefault();
+        event.stopPropagation();
+        handleLineCommentCancel();
+        return;
+      }
+      if (commentingOnRange !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        commentingOnRange = null;
+        commentEditorStyle = null;
+        return;
+      }
+      if (selectedLineRange) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearLineSelection();
+        return;
+      }
     }
   }
 

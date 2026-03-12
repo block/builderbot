@@ -1,0 +1,371 @@
+//! Timeline — branch timeline construction and related delete commands.
+
+use crate::git;
+use crate::session_runner;
+use crate::store::Store;
+use crate::{
+    branches, BranchTimeline, CommitTimelineItem, ImageTimelineItem, NoteTimelineItem,
+    ReviewTimelineItem,
+};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+pub(crate) fn build_branch_timeline(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<BranchTimeline, String> {
+    // Get the branch and its workdir for git operations
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let workdir = store
+        .get_workdir_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+
+    // Get commits from git (the source of truth for commit data)
+    let mut commits = Vec::new();
+    if let Some(ref ws_name) = branch.workspace_name {
+        let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+        // Remote branch: fetch commits via ws_exec.
+        // Use merge-base to find the fork point so that only the branch's
+        // own commits are shown, even after a rebase or when the base ref
+        // has moved forward.
+        let range = if let Ok(mb_output) = branches::run_workspace_git(
+            ws_name,
+            repo_subpath.as_deref(),
+            &["merge-base", &branch.base_branch, "HEAD"],
+        ) {
+            let mb = mb_output.trim().to_string();
+            format!("{mb}..HEAD")
+        } else {
+            // Fallback: if merge-base fails (e.g. shallow clone), use
+            // the raw base ref.
+            format!("{}..HEAD", &branch.base_branch)
+        };
+        let format_arg = "--format=%H|%h|%s|%an|%ct";
+        if let Ok(output) = branches::run_workspace_git(
+            ws_name,
+            repo_subpath.as_deref(),
+            &["log", format_arg, &range],
+        ) {
+            for line in output.lines() {
+                if line.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = line.splitn(5, '|').collect();
+                if parts.len() >= 5 {
+                    let sha = parts[0].to_string();
+                    let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
+                    let (session_id, session_status) = store.resolve_session_status(
+                        our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
+                    );
+
+                    commits.push(CommitTimelineItem {
+                        id: our_commit.as_ref().map(|c| c.id.clone()),
+                        sha,
+                        short_sha: parts[1].to_string(),
+                        subject: parts[2].to_string(),
+                        author: parts[3].to_string(),
+                        timestamp: parts[4].parse().unwrap_or(0),
+                        session_id,
+                        session_status,
+                    });
+                }
+            }
+        }
+    } else if let Some(ref wd) = workdir {
+        // Local branch: fetch commits from the local worktree
+        let worktree_path = Path::new(&wd.path);
+        if worktree_path.exists() {
+            let git_commits =
+                git::get_commits_since_base(worktree_path, &branch.base_branch).unwrap_or_default();
+
+            // For each git commit, look up our metadata (session linkage)
+            for gc in git_commits {
+                let our_commit = store.get_commit_by_sha(branch_id, &gc.sha).unwrap_or(None);
+                let (session_id, session_status) = store.resolve_session_status(
+                    our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
+                );
+
+                commits.push(CommitTimelineItem {
+                    id: our_commit.as_ref().map(|c| c.id.clone()),
+                    sha: gc.sha,
+                    short_sha: gc.short_sha,
+                    subject: gc.subject,
+                    author: gc.author,
+                    timestamp: gc.timestamp,
+                    session_id,
+                    session_status,
+                });
+            }
+        }
+    }
+
+    // Also include pending commits (sha = None, i.e. session in progress)
+    let db_commits = store
+        .list_commits_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+    for dc in db_commits {
+        if dc.sha.is_none() {
+            let (session_id, session_status) =
+                store.resolve_session_status(dc.session_id.as_deref());
+
+            commits.push(CommitTimelineItem {
+                id: Some(dc.id.clone()),
+                sha: String::new(),
+                short_sha: String::new(),
+                subject: session_id
+                    .as_deref()
+                    .and_then(|sid| {
+                        store
+                            .get_session(sid)
+                            .ok()
+                            .flatten()
+                            .map(|s| s.prompt.clone())
+                    })
+                    .unwrap_or_else(|| "Pending commit".to_string()),
+                author: String::new(),
+                timestamp: dc.created_at / 1000, // convert ms to seconds
+                session_id,
+                session_status,
+            });
+        }
+    }
+
+    // Get notes
+    let db_notes = store
+        .list_notes_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+    let notes: Vec<NoteTimelineItem> = db_notes
+        .into_iter()
+        .map(|n| {
+            let (session_id, session_status) =
+                store.resolve_session_status(n.session_id.as_deref());
+            NoteTimelineItem {
+                id: n.id,
+                title: n.title,
+                content: n.content,
+                session_id,
+                session_status,
+                created_at: n.created_at,
+                updated_at: n.updated_at,
+            }
+        })
+        .collect();
+
+    // Get reviews (filter out auto reviews — they're not shown in the timeline)
+    let db_reviews = store
+        .list_reviews_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+    let reviews: Vec<ReviewTimelineItem> = db_reviews
+        .into_iter()
+        .filter(|r| !r.is_auto)
+        .map(|r| {
+            let (session_id, session_status) =
+                store.resolve_session_status(r.session_id.as_deref());
+            let comment_count = r.comments.len();
+            ReviewTimelineItem {
+                id: r.id,
+                commit_sha: r.commit_sha,
+                scope: r.scope.as_str().to_string(),
+                session_id,
+                session_status,
+                title: r.title,
+                comment_count,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            }
+        })
+        .collect();
+
+    // Get images
+    let db_images = store
+        .list_images_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+    let images: Vec<ImageTimelineItem> = db_images
+        .into_iter()
+        .map(|img| {
+            let (session_id, session_status) =
+                store.resolve_session_status(img.session_id.as_deref());
+            ImageTimelineItem {
+                id: img.id,
+                filename: img.filename,
+                mime_type: img.mime_type,
+                size_bytes: img.size_bytes,
+                session_id,
+                session_status,
+                created_at: img.created_at,
+            }
+        })
+        .collect();
+
+    Ok(BranchTimeline {
+        commits,
+        notes,
+        reviews,
+        images,
+    })
+}
+
+#[tauri::command]
+pub async fn get_branch_timeline(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<BranchTimeline, String> {
+    let store = crate::get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || build_branch_timeline(&store, &branch_id))
+        .await
+        .map_err(|e| format!("Timeline task failed: {e}"))?
+}
+
+/// Cancel and delete any reviews (auto or manual) created at or after a commit's
+/// `created_at` timestamp.  If a review has an active session, the session is
+/// cancelled via the registry and then deleted.
+pub(crate) fn cleanup_reviews_after_commit(
+    store: &Arc<Store>,
+    registry: &session_runner::SessionRegistry,
+    commit: &crate::store::models::Commit,
+) {
+    // Only clean up reviews for commits that actually landed (have a SHA).
+    // Pending/failed commits without a SHA never produced a reviewable diff.
+    if commit.sha.is_none() {
+        return;
+    }
+
+    let reviews = match store.find_reviews_created_since(&commit.branch_id, commit.created_at) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for review in reviews {
+        if let Some(ref sid) = review.session_id {
+            registry.cancel(sid);
+            let _ = store.delete_session(sid);
+        }
+        let _ = store.delete_review(&review.id);
+    }
+}
+
+/// Delete a review and all its comments, optionally deleting its linked session.
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_review(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    review_id: String,
+    delete_session: Option<bool>,
+) -> Result<(), String> {
+    let store = crate::get_store(&store)?;
+    let review = store
+        .get_review(&review_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Review not found: {review_id}"))?;
+
+    store.delete_review(&review_id).map_err(|e| e.to_string())?;
+
+    if delete_session.unwrap_or(false) {
+        if let Some(sid) = review.session_id {
+            let _ = store.delete_session(&sid);
+        }
+    }
+    Ok(())
+}
+
+/// Delete a pending commit (one with no SHA) by its DB id.
+/// This does NOT touch git — it only removes the DB record and optionally its session.
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_pending_commit(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    commit_id: String,
+    delete_session: Option<bool>,
+) -> Result<(), String> {
+    let store = crate::get_store(&store)?;
+
+    let commit = store
+        .get_commit(&commit_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Commit not found: {commit_id}"))?;
+
+    // Safety check: only allow deleting commits that have no SHA (pending/failed)
+    if commit.sha.is_some() {
+        return Err(
+            "Cannot use delete_pending_commit for commits with a SHA. Use delete_commit instead."
+                .to_string(),
+        );
+    }
+
+    // Clean up reviews created at or after this commit
+    cleanup_reviews_after_commit(&store, &registry, &commit);
+
+    store.delete_commit(&commit_id).map_err(|e| e.to_string())?;
+
+    if delete_session.unwrap_or(false) {
+        if let Some(sid) = commit.session_id {
+            let _ = store.delete_session(&sid);
+        }
+    }
+
+    Ok(())
+}
+
+/// Delete a commit: resets the branch HEAD to the parent commit,
+/// removing the git commit, then cleans up the DB record and session.
+///
+/// Only works for the tip commit (HEAD) of the branch's worktree.
+/// Returns an error if the commit is not the current HEAD.
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_commit(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    commit_sha: String,
+    delete_session: Option<bool>,
+) -> Result<(), String> {
+    let store = crate::get_store(&store)?;
+
+    // Get the worktree path for this branch
+    let workdir = store
+        .get_workdir_for_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+    let worktree = Path::new(&workdir.path);
+
+    // Verify the commit is the current HEAD
+    let head_sha = git::get_head_sha(worktree).map_err(|e| e.to_string())?;
+    if !head_sha.starts_with(&commit_sha)
+        && !commit_sha.starts_with(&head_sha)
+        && head_sha != commit_sha
+    {
+        return Err(format!(
+            "Can only delete the latest commit. {} is not HEAD ({})",
+            &commit_sha[..7.min(commit_sha.len())],
+            &head_sha[..7.min(head_sha.len())]
+        ));
+    }
+
+    // Find the parent commit
+    let parent = git::get_parent_commit(worktree, &commit_sha)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Cannot delete the initial commit".to_string())?;
+
+    // Reset to parent — this removes the commit from the branch
+    git::reset_to_commit(worktree, &parent).map_err(|e| e.to_string())?;
+
+    // Clean up DB record if one exists
+    if let Ok(Some(db_commit)) = store.get_commit_by_sha(&branch_id, &commit_sha) {
+        // Clean up reviews created at or after this commit
+        cleanup_reviews_after_commit(&store, &registry, &db_commit);
+
+        let _ = store.delete_commit(&db_commit.id);
+
+        if delete_session.unwrap_or(false) {
+            if let Some(sid) = db_commit.session_id {
+                let _ = store.delete_session(&sid);
+            }
+        }
+    }
+
+    Ok(())
+}

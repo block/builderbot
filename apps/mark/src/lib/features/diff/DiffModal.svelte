@@ -32,7 +32,7 @@
     createFileSelectionWithSearch,
   } from '@builderbot/diff-viewer/utils';
   import type { Comment, SmartDiffAnnotation, Span } from '../../types';
-  import { findLatestAutoReview, getSession } from '../../commands';
+  import { findFreshAutoReview, getSession } from '../../commands';
   import {
     buildFileEntries,
     buildTree,
@@ -127,7 +127,7 @@
 
   async function loadAutoReviewAnnotations() {
     try {
-      const review = await findLatestAutoReview(branchId);
+      const review = await findFreshAutoReview(branchId);
       if (!review) {
         autoReviewComments = [];
         return review;

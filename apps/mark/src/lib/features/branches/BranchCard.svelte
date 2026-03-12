@@ -461,7 +461,7 @@
         if (isAutoReview) {
           autoReviewSessionId = eventSessionId;
           // Look up the review ID so we can delete it on cancel.
-          commands.findLatestAutoReview(branchId).then((review) => {
+          commands.findFreshAutoReview(branchId).then((review) => {
             if (review) {
               autoReviewId = review.id;
             }
@@ -1272,17 +1272,8 @@
    * Returns true if an auto review was adopted, false otherwise.
    */
   async function tryAdoptAutoReview(): Promise<boolean> {
-    // Find the most recent commit's timestamp from timeline data
-    const commits = timeline?.commits ?? [];
-    const lastCommit =
-      commits.length > 0
-        ? commits.reduce((latest, c) => (c.timestamp > latest.timestamp ? c : latest))
-        : null;
-
-    if (!lastCommit) return false;
-
     try {
-      const review = await commands.findAutoReviewSinceCommit(branch.id, lastCommit.timestamp);
+      const review = await commands.findFreshAutoReview(branch.id);
       if (!review) return false;
 
       // Promote the auto review to a user review

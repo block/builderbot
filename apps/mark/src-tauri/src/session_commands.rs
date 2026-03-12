@@ -904,16 +904,49 @@ pub async fn trigger_auto_review(
     })
 }
 
-/// Find an auto review created after a given commit timestamp.
+/// Resolve the latest git committer timestamp (in milliseconds) for a
+/// branch by querying the actual git log.  This covers commits made
+/// outside the app that are absent from the `commits` table.
+///
+/// Returns `0` when the branch has no worktree, no commits, or when the
+/// git query fails — callers fall back to the DB-only comparison in that
+/// case.
+fn latest_git_commit_ms(store: &Arc<Store>, branch_id: &str) -> i64 {
+    let branch = match store.get_branch(branch_id) {
+        Ok(Some(b)) => b,
+        _ => return 0,
+    };
+    let workdir = match store.get_workdir_for_branch(branch_id) {
+        Ok(Some(w)) => w,
+        _ => return 0,
+    };
+    let worktree_path = std::path::Path::new(&workdir.path);
+    if !worktree_path.exists() {
+        return 0;
+    }
+    let commits = match git::get_commits_since_base(worktree_path, &branch.base_branch) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    // CommitInfo.timestamp is in seconds; convert to milliseconds.
+    commits.iter().map(|c| c.timestamp).max().unwrap_or(0) * 1000
+}
+
+/// Find an auto review created after all commits on a branch.
 #[tauri::command(rename_all = "camelCase")]
-pub fn find_auto_review_since_commit(
+pub async fn find_fresh_auto_review(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
-    since_commit_created_at: i64,
 ) -> Result<Option<store::Review>, String> {
-    get_store(&store)?
-        .find_auto_review_since_commit(&branch_id, since_commit_created_at)
-        .map_err(|e| e.to_string())
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let git_ts = latest_git_commit_ms(&store, &branch_id);
+        store
+            .find_fresh_auto_review(&branch_id, git_ts)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Update the `is_auto` flag on a review.
@@ -925,17 +958,6 @@ pub fn set_review_auto(
 ) -> Result<(), String> {
     get_store(&store)?
         .set_review_auto(&review_id, is_auto)
-        .map_err(|e| e.to_string())
-}
-
-/// Find the most recent auto review for a branch.
-#[tauri::command(rename_all = "camelCase")]
-pub fn find_latest_auto_review(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
-) -> Result<Option<store::Review>, String> {
-    get_store(&store)?
-        .find_latest_auto_review(&branch_id)
         .map_err(|e| e.to_string())
 }
 

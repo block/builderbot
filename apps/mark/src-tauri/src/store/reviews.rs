@@ -97,7 +97,7 @@ impl Store {
         // ORDER BY created_at DESC so we get the latest when multiple
         // reviews share the same (branch, commit, scope) triple.
         // Exclude auto reviews — they are surfaced separately via
-        // find_latest_auto_review and should not be returned here.
+        // find_fresh_auto_review and should not be returned here.
         let existing: Option<Review> = conn
             .query_row(
                 "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
@@ -326,8 +326,10 @@ impl Store {
         Ok(())
     }
 
-    /// Find the most recent auto review for a branch created after all
-    /// commits on the branch.
+    /// Find the most recent auto review for a branch, but only if it was
+    /// created after every commit on the branch.  This prevents stale auto
+    /// reviews (from before an amended commit or a new push) from being
+    /// adopted or surfaced.
     ///
     /// `git_latest_commit_ms` is the latest git committer timestamp
     /// (converted to milliseconds) obtained from the full git log.  This
@@ -335,43 +337,7 @@ impl Store {
     /// `commits` table.  The query takes the greater of this value and
     /// `MAX(commits.updated_at)` so that both in-app and out-of-app
     /// commits invalidate stale auto reviews.
-    pub fn find_auto_review_since_commit(
-        &self,
-        branch_id: &str,
-        git_latest_commit_ms: i64,
-    ) -> Result<Option<Review>, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        let review: Option<Review> = conn
-            .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
-                 FROM reviews
-                 WHERE branch_id = ?1 AND is_auto = 1
-                   AND created_at >= MAX(
-                       ?2,
-                       COALESCE(
-                           (SELECT MAX(updated_at) FROM commits WHERE branch_id = ?1 AND sha IS NOT NULL),
-                           0))
-                 ORDER BY created_at DESC LIMIT 1",
-                params![branch_id, git_latest_commit_ms],
-                Self::row_to_review_header,
-            )
-            .optional()?;
-
-        match review {
-            Some(mut r) => {
-                Self::load_review_children(&conn, &mut r)?;
-                Ok(Some(r))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Find the most recent auto review for a branch, but only if it was
-    /// created after every commit on the branch.  This prevents stale auto
-    /// reviews (e.g. from before an amended commit) from surfacing.
-    ///
-    /// `git_latest_commit_ms` — see [`find_auto_review_since_commit`].
-    pub fn find_latest_auto_review(
+    pub fn find_fresh_auto_review(
         &self,
         branch_id: &str,
         git_latest_commit_ms: i64,

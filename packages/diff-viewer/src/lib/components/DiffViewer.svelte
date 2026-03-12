@@ -1479,6 +1479,7 @@
 
     if (event.key === 'Escape' && selectedLineRange && !commentingOnLines) {
       event.preventDefault();
+      event.stopPropagation();
       clearLineSelection();
       return;
     }

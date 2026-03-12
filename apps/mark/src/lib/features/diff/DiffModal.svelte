@@ -363,6 +363,15 @@
       onClose();
       return;
     }
+    // Escape to go back (skip if focused on an input/textarea)
+    if (event.key === 'Escape') {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+      return;
+    }
     // Hold A to reveal AI annotations
     if (event.key === 'a' || event.key === 'A') {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
@@ -440,7 +449,7 @@
     <div class="title-bar" onpointerdown={startDrag}>
       <div class="traffic-light-spacer"></div>
       <div class="left-actions">
-        <button class="icon-btn" onclick={onClose} title="Back (⌘←)">
+        <button class="icon-btn" onclick={onClose} title="Back (Esc)">
           <ArrowLeft size={14} />
         </button>
       </div>

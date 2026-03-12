@@ -901,7 +901,7 @@
                 <div class="message-row human-message">
                   <div class="human-bubble">
                     {#if userText.trim()}
-                      <span class="human-text">{userText}</span>
+                      <span class="human-text">{userText.trim()}</span>
                     {/if}
                     {#if group.message.imageIds && group.message.imageIds.length > 0}
                       <div class="message-images">
@@ -1343,11 +1343,11 @@
     color: var(--text-primary);
     line-height: 1.5;
     word-break: break-word;
-    white-space: pre-wrap;
   }
 
   .human-text {
     display: block;
+    white-space: pre-wrap;
   }
 
   .human-bubble .inline-copy {

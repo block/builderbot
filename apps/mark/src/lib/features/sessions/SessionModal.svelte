@@ -1343,11 +1343,11 @@
     color: var(--text-primary);
     line-height: 1.5;
     word-break: break-word;
-    white-space: pre-wrap;
   }
 
   .human-text {
     display: block;
+    white-space: pre-wrap;
   }
 
   .human-bubble .inline-copy {

@@ -927,9 +927,8 @@ fn latest_git_commit_ms(store: &Arc<Store>, branch_id: &str) -> i64 {
     commits.iter().map(|c| c.timestamp).max().unwrap_or(0) * 1000
 }
 
-/// Find an auto review created after all commits on a branch.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn find_auto_review_since_commit(
+/// Shared implementation for finding a fresh auto review on a branch.
+async fn fresh_auto_review(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<Option<store::Review>, String> {
@@ -942,6 +941,15 @@ pub async fn find_auto_review_since_commit(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Find an auto review created after all commits on a branch.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn find_auto_review_since_commit(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<Option<store::Review>, String> {
+    fresh_auto_review(store, branch_id).await
 }
 
 /// Update the `is_auto` flag on a review.
@@ -962,15 +970,7 @@ pub async fn find_latest_auto_review(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<Option<store::Review>, String> {
-    let store = get_store(&store)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let git_ts = latest_git_commit_ms(&store, &branch_id);
-        store
-            .find_fresh_auto_review(&branch_id, git_ts)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    fresh_auto_review(store, branch_id).await
 }
 
 // =============================================================================

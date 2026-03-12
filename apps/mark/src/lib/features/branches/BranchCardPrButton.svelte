@@ -373,41 +373,46 @@
     }
   }
 
-  export function handlePrSessionComplete(status: string) {
-    const sid = prSessionId;
-    if (status === 'completed' && sid) {
-      commands
-        .getSessionMessages(sid)
-        .then((messages) => {
-          const foundUrl = extractPrUrl(messages);
+  let prCompletionInFlight = false;
 
-          if (foundUrl) {
-            const prNumber = extractPrNumber(foundUrl);
-            if (prNumber) {
-              commands.updateBranchPr(branch.id, prNumber);
-              branch.prNumber = prNumber;
-              commands
-                .refreshPrStatus(branch.id)
-                .catch((e) => console.error('Failed to fetch initial PR status:', e));
-            }
-            prStateStore.setPrCreated(branch.id, foundUrl);
-          } else {
-            prStateStore.setPrError(
-              branch.id,
-              'PR session completed but no PR URL was found in the output.'
-            );
-          }
-        })
-        .catch((e) => {
-          prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
-        });
-    } else {
-      prStateStore.setPrError(
-        branch.id,
-        `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
-      );
-    }
+  export async function handlePrSessionComplete(status: string) {
+    if (prCompletionInFlight) return;
+    const sid = prSessionId;
+    prCompletionInFlight = true;
     prStateStore.clearSessionTracking(branch.id);
+
+    try {
+      if (status === 'completed' && sid) {
+        const messages = await commands.getSessionMessages(sid);
+        const foundUrl = extractPrUrl(messages);
+
+        if (foundUrl) {
+          const prNumber = extractPrNumber(foundUrl);
+          if (prNumber) {
+            await commands.updateBranchPr(branch.id, prNumber);
+            branch.prNumber = prNumber;
+            commands
+              .refreshPrStatus(branch.id)
+              .catch((e) => console.error('Failed to fetch initial PR status:', e));
+          }
+          prStateStore.setPrCreated(branch.id, foundUrl);
+        } else {
+          prStateStore.setPrError(
+            branch.id,
+            'PR session completed but no PR URL was found in the output.'
+          );
+        }
+      } else {
+        prStateStore.setPrError(
+          branch.id,
+          `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
+        );
+      }
+    } catch (e) {
+      prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
+    } finally {
+      prCompletionInFlight = false;
+    }
   }
 
   // =========================================================================
@@ -431,38 +436,42 @@
     }
   }
 
-  export function handlePushSessionComplete(status: string) {
-    const sid = pushSessionId;
-    if (status === 'completed' && sid) {
-      commands
-        .getSessionMessages(sid)
-        .then((messages) => {
-          if (isPushRejectedNonFastForward(messages)) {
-            pushStateStore.setPushError(branch.id, '', true);
-            pushStateStore.clearSessionTracking(branch.id);
-            return;
-          }
+  let pushCompletionInFlight = false;
 
-          pushStateStore.setPushDone(branch.id);
-          hasUnpushed = false;
-          setTimeout(() => {
-            pushStateStore.clearPushState(branch.id);
-          }, 1_500);
-        })
-        .catch(() => {
-          pushStateStore.setPushDone(branch.id);
-          hasUnpushed = false;
-          setTimeout(() => {
-            pushStateStore.clearPushState(branch.id);
-          }, 1_500);
-        });
-    } else {
-      pushStateStore.setPushError(
-        branch.id,
-        `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`
-      );
-    }
+  export async function handlePushSessionComplete(status: string) {
+    if (pushCompletionInFlight) return;
+    const sid = pushSessionId;
+    pushCompletionInFlight = true;
     pushStateStore.clearSessionTracking(branch.id);
+
+    try {
+      if (status === 'completed' && sid) {
+        let rejected = false;
+        try {
+          const messages = await commands.getSessionMessages(sid);
+          rejected = isPushRejectedNonFastForward(messages);
+        } catch {
+          // If we can't read messages, treat as success (original behavior)
+        }
+
+        if (rejected) {
+          pushStateStore.setPushError(branch.id, '', true);
+        } else {
+          pushStateStore.setPushDone(branch.id);
+          hasUnpushed = false;
+          setTimeout(() => {
+            pushStateStore.clearPushState(branch.id);
+          }, 1_500);
+        }
+      } else {
+        pushStateStore.setPushError(
+          branch.id,
+          `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`
+        );
+      }
+    } finally {
+      pushCompletionInFlight = false;
+    }
   }
 
   function handleForcePushConfirm() {

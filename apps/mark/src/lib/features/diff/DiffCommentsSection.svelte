@@ -250,7 +250,7 @@
   }
 
   .comment-icon.agent-icon {
-    color: var(--status-modified);
+    color: var(--text-faint);
   }
 
   .comment-icon.comment-icon-warning {

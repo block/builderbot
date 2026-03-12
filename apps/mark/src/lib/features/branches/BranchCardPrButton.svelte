@@ -16,7 +16,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import type { Branch } from '../../types';
+  import type { Branch, BranchTimeline as BranchTimelineData } from '../../types';
   import * as commands from '../../api/commands';
   import { extractPrNumber, extractPrUrl, isPushRejectedNonFastForward } from './branchCardHelpers';
   import { getPreferredAgent } from '../settings/preferences.svelte';
@@ -31,6 +31,7 @@
     isLocal: boolean;
     isRemote: boolean;
     hasCodeChanges: boolean;
+    timeline: BranchTimelineData | null;
     onPrSessionComplete?: (status: string) => void;
     onPushSessionComplete?: (status: string) => void;
     onOpenSession?: (sessionId: string) => void;
@@ -41,6 +42,7 @@
     isLocal,
     isRemote,
     hasCodeChanges,
+    timeline,
     onPrSessionComplete,
     onPushSessionComplete,
     onOpenSession,
@@ -214,7 +216,8 @@
 
   // Re-check unpushed commits whenever the timeline refreshes and a PR exists
   $effect(() => {
-    if (hasCodeChanges && branch.prNumber) {
+    // Re-run when timeline changes (dependency) and PR exists
+    if (timeline && branch.prNumber) {
       commands.hasUnpushedCommits(branch.id).then((v) => (hasUnpushed = v));
     }
   });

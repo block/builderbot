@@ -670,6 +670,7 @@
                   {isLocal}
                   {isRemote}
                   {hasCodeChanges}
+                  {timeline}
                   onOpenSession={(sid) => {
                     sessionMgr.openSessionId = sid;
                   }}

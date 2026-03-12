@@ -901,7 +901,7 @@
                 <div class="message-row human-message">
                   <div class="human-bubble">
                     {#if userText.trim()}
-                      <span class="human-text">{userText}</span>
+                      <span class="human-text">{userText.trim()}</span>
                     {/if}
                     {#if group.message.imageIds && group.message.imageIds.length > 0}
                       <div class="message-images">

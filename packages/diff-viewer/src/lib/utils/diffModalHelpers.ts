@@ -18,6 +18,15 @@ export interface TreeNode {
   file?: FileEntry;
 }
 
+/** Check whether two file paths refer to the same file.
+ *  Handles cases where one path is a suffix of the other (e.g. different root prefixes). */
+export function pathsMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (a.endsWith(b)) return a[a.length - b.length - 1] === '/';
+  if (b.endsWith(a)) return b[b.length - a.length - 1] === '/';
+  return false;
+}
+
 export function fileStatus(summary: FileDiffSummary): 'added' | 'deleted' | 'modified' | 'renamed' {
   if (!summary.before) return 'added';
   if (!summary.after) return 'deleted';
@@ -31,28 +40,24 @@ export function buildFileEntries(
   comments: Comment[]
 ): FileEntry[] {
   const reviewedSet = new Set(reviewedPaths);
-  const commentCounts = new Map<string, number>();
-  const commentTypesByFile = new Map<string, Set<CommentType>>();
-  for (const comment of comments) {
-    commentCounts.set(comment.path, (commentCounts.get(comment.path) || 0) + 1);
-    if (comment.commentType) {
-      let types = commentTypesByFile.get(comment.path);
-      if (!types) {
-        types = new Set();
-        commentTypesByFile.set(comment.path, types);
-      }
-      types.add(comment.commentType);
-    }
-  }
+  const filePaths = files.map(fileSummaryPath);
 
-  return files.map((summary) => {
-    const path = fileSummaryPath(summary);
+  return files.map((summary, i) => {
+    const path = filePaths[i];
+    let commentCount = 0;
+    const commentTypes = new Set<CommentType>();
+    for (const comment of comments) {
+      if (pathsMatch(comment.path, path)) {
+        commentCount++;
+        if (comment.commentType) commentTypes.add(comment.commentType);
+      }
+    }
     return {
       path,
       status: fileStatus(summary),
       isReviewed: reviewedSet.has(path),
-      commentCount: commentCounts.get(path) || 0,
-      commentTypes: [...(commentTypesByFile.get(path) || [])],
+      commentCount,
+      commentTypes: [...commentTypes],
     };
   });
 }

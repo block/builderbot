@@ -62,6 +62,7 @@
     resolveLineSelectionToolbarLeft,
   } from '../utils/diffViewerHelpers';
   import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
+  import { pathsMatch } from '../utils/diffModalHelpers';
   import CommentEditor from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
@@ -230,8 +231,10 @@
   let activeAlignments = $derived(diff?.alignments ?? []);
 
   // File type detection
-  let isNewFile = $derived(diff !== null && diff.before === null);
-  let isDeletedFile = $derived(diff !== null && diff.after === null);
+  // When both before and after are null, the file wasn't found — treat as no diff
+  let isEmptyDiff = $derived(diff !== null && diff.before === null && diff.after === null);
+  let isNewFile = $derived(diff !== null && !isEmptyDiff && diff.before === null);
+  let isDeletedFile = $derived(diff !== null && !isEmptyDiff && diff.after === null);
   let isTwoPaneMode = $derived(!isNewFile && !isDeletedFile);
   let isBinary = $derived(diff !== null && isBinaryDiff(diff));
 
@@ -311,8 +314,10 @@
     return buildLineToAlignmentMap(changedAlignments, 'after');
   });
 
-  // Comments for the current file
-  let currentFileComments = $derived(comments.filter((c) => c.path === currentFilePath));
+  // Comments for the current file (suffix-match to handle path prefix mismatches)
+  let currentFileComments = $derived(
+    comments.filter((c) => currentFilePath !== null && pathsMatch(c.path, currentFilePath)),
+  );
 
   // ==========================================================================
   // Custom scroll controller (frame-perfect sync)
@@ -1649,6 +1654,10 @@
   {#if diff === null}
     <div class="empty-state">
       <p>Select a file to view changes</p>
+    </div>
+  {:else if isEmptyDiff}
+    <div class="empty-state">
+      <p>File not found in this diff</p>
     </div>
   {:else if isBinary}
     <div class="binary-notice">

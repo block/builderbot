@@ -4,6 +4,7 @@ export {
   buildTree,
   compactTree,
   formatLineRange,
+  pathsMatch,
   truncateText,
   type FileEntry,
   type TreeNode,

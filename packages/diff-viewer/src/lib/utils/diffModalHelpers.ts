@@ -21,7 +21,10 @@ export interface TreeNode {
 /** Check whether two file paths refer to the same file.
  *  Handles cases where one path is a suffix of the other (e.g. different root prefixes). */
 export function pathsMatch(a: string, b: string): boolean {
-  return a === b || a.endsWith(b) || b.endsWith(a);
+  if (a === b) return true;
+  if (a.endsWith(b)) return a[a.length - b.length - 1] === '/';
+  if (b.endsWith(a)) return b[b.length - a.length - 1] === '/';
+  return false;
 }
 
 export function fileStatus(summary: FileDiffSummary): 'added' | 'deleted' | 'modified' | 'renamed' {

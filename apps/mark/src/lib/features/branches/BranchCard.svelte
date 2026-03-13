@@ -813,7 +813,12 @@
     initialImageIds={sessionMgr.draftImageIds}
     prefilled={usePrefill}
     remote={isRemote}
-    onClose={(draft) => sessionMgr.handleNewSessionClose(draft)}
+    onClose={(draft) => {
+      // Don't persist prefilled text as a draft — it should be re-evaluated
+      // each time the dialog opens based on the current timeline state.
+      const prompt = draft.prompt === commitPrefill ? '' : draft.prompt;
+      sessionMgr.handleNewSessionClose({ ...draft, prompt });
+    }}
     onSubmit={(data) => sessionMgr.handleNewSessionSubmit(data)}
   />
 {/if}

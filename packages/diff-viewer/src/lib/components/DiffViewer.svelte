@@ -230,8 +230,10 @@
   let activeAlignments = $derived(diff?.alignments ?? []);
 
   // File type detection
-  let isNewFile = $derived(diff !== null && diff.before === null);
-  let isDeletedFile = $derived(diff !== null && diff.after === null);
+  // When both before and after are null, the file wasn't found — treat as no diff
+  let isEmptyDiff = $derived(diff !== null && diff.before === null && diff.after === null);
+  let isNewFile = $derived(diff !== null && !isEmptyDiff && diff.before === null);
+  let isDeletedFile = $derived(diff !== null && !isEmptyDiff && diff.after === null);
   let isTwoPaneMode = $derived(!isNewFile && !isDeletedFile);
   let isBinary = $derived(diff !== null && isBinaryDiff(diff));
 
@@ -1649,6 +1651,10 @@
   {#if diff === null}
     <div class="empty-state">
       <p>Select a file to view changes</p>
+    </div>
+  {:else if isEmptyDiff}
+    <div class="empty-state">
+      <p>File not found in this diff</p>
     </div>
   {:else if isBinary}
     <div class="binary-notice">

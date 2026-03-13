@@ -15,7 +15,7 @@
 -->
 <script lang="ts">
   import { X, GitCommitVertical, FileText, FileSearch, GitBranch, Send } from 'lucide-svelte';
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import type { Branch, BranchSessionType } from '../../types';
   import AgentSelector from '../agents/AgentSelector.svelte';
@@ -30,6 +30,8 @@
     mode: BranchSessionType;
     initialPrompt?: string;
     initialImageIds?: string[];
+    /** When true, the initial prompt is a suggestion — select all so typing replaces it. */
+    prefilled?: boolean;
     remote?: boolean;
     onClose: (draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
     onSubmit: (data: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
@@ -40,6 +42,7 @@
     mode,
     initialPrompt = '',
     initialImageIds = [],
+    prefilled = false,
     remote = false,
     onClose,
     onSubmit,
@@ -72,15 +75,23 @@
     }
   });
 
-  // Focus textarea on mount (one-time)
+  // Focus textarea on mount (one-time).
+  // We await tick() so the DOM reflects the prompt value set by the init effect above.
   $effect(() => {
     if (textareaEl) {
       const el = textareaEl;
-      // Read length from the DOM element to avoid tracking `prompt` reactively,
-      // which would re-run this effect on every keystroke and force the cursor
-      // to the end of the buffer.
-      el.focus();
-      el.selectionStart = el.selectionEnd = el.value.length;
+      const shouldSelect = prefilled;
+      tick().then(() => {
+        el.focus();
+        if (shouldSelect && el.value.length > 0) {
+          // Select all so typing replaces the suggested text
+          el.selectionStart = 0;
+          el.selectionEnd = el.value.length;
+        } else {
+          // Place cursor at end
+          el.selectionStart = el.selectionEnd = el.value.length;
+        }
+      });
     }
   });
 

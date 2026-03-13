@@ -108,6 +108,54 @@
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
 
+  // Compute a suggested commit prompt from the latest visible timeline entry.
+  // Only used when the user hasn't typed a draft yet.
+  let commitPrefill = $derived.by(() => {
+    if (!timeline) return '';
+
+    // Find the latest completed item across commits, notes, and reviews
+    type Candidate =
+      | { kind: 'review'; commentCount: number; timestamp: number }
+      | { kind: 'note'; title: string; timestamp: number };
+
+    const candidates: Candidate[] = [];
+
+    for (const review of timeline.reviews) {
+      if (review.sessionStatus === 'running') continue;
+      const ts = Math.floor(review.createdAt / 1000);
+      candidates.push({ kind: 'review', commentCount: review.commentCount, timestamp: ts });
+    }
+
+    for (const note of timeline.notes) {
+      if (note.sessionStatus === 'running') continue;
+      const ts = Math.floor(note.createdAt / 1000);
+      candidates.push({ kind: 'note', title: note.title, timestamp: ts });
+    }
+
+    // We also need commits so we can tell if the latest item overall is a commit
+    // (in which case we return blank).
+    type AnyCandidate = Candidate | { kind: 'commit'; timestamp: number };
+    const all: AnyCandidate[] = [...candidates];
+    for (const commit of timeline.commits) {
+      if (!commit.sha) continue; // skip pending
+      all.push({ kind: 'commit', timestamp: commit.timestamp });
+    }
+
+    if (all.length === 0) return '';
+
+    all.sort((a, b) => b.timestamp - a.timestamp);
+    const latest = all[0];
+
+    if (latest.kind === 'review' && latest.commentCount > 0) {
+      return 'Resolve code review comments';
+    }
+    if (latest.kind === 'note' && latest.title.toLowerCase().includes('plan')) {
+      return 'Implement plan';
+    }
+
+    return '';
+  });
+
   // Commit diff modal (opened by clicking a commit in the timeline)
   let commitDiffSha = $state<string | null>(null);
 
@@ -756,13 +804,21 @@
 {/if}
 
 {#if sessionMgr.showNewSession}
+  {@const usePrefill =
+    sessionMgr.newSessionMode === 'commit' && !sessionMgr.draftPrompt && !!commitPrefill}
   <NewSessionModal
     {branch}
     mode={sessionMgr.newSessionMode}
-    initialPrompt={sessionMgr.draftPrompt}
+    initialPrompt={usePrefill ? commitPrefill : sessionMgr.draftPrompt}
     initialImageIds={sessionMgr.draftImageIds}
+    prefilled={usePrefill}
     remote={isRemote}
-    onClose={(draft) => sessionMgr.handleNewSessionClose(draft)}
+    onClose={(draft) => {
+      // Don't persist prefilled text as a draft — it should be re-evaluated
+      // each time the dialog opens based on the current timeline state.
+      const prompt = draft.prompt === commitPrefill ? '' : draft.prompt;
+      sessionMgr.handleNewSessionClose({ ...draft, prompt });
+    }}
     onSubmit={(data) => sessionMgr.handleNewSessionSubmit(data)}
   />
 {/if}

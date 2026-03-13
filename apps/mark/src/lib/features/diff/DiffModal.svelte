@@ -38,6 +38,7 @@
     buildTree,
     compactTree,
     formatLineRange,
+    pathsMatch,
     truncateText,
     type FileEntry,
     type TreeNode,
@@ -200,7 +201,16 @@
   // ==========================================================================
 
   let currentDiff = $derived(diffViewer.getCurrentDiff());
-  let allComments = $derived(reviewHandle?.state.comments ?? []);
+  let rawComments = $derived(reviewHandle?.state.comments ?? []);
+
+  /** Normalize comment paths so they match the file list used by the diff viewer.
+   *  This is done once here so downstream components can use exact equality. */
+  let allComments = $derived(
+    rawComments.map((c) => {
+      const resolved = resolveCommentPath(c.path);
+      return resolved === c.path ? c : { ...c, path: resolved };
+    })
+  );
 
   // Split AI "information" comments into annotations; everything else stays as comments
   let currentComments = $derived(allComments.filter((c) => c.commentType !== 'information'));
@@ -321,15 +331,9 @@
    *  Falls back to the comment's own path if no match is found. */
   function resolveCommentPath(commentPath: string): string {
     const files = diffViewer.state.files;
-    // Exact match against file summary paths
     for (const f of files) {
       const fp = f.after ?? f.before ?? '';
-      if (fp === commentPath) return fp;
-    }
-    // Suffix match: comment path may end with the file path or vice versa
-    for (const f of files) {
-      const fp = f.after ?? f.before ?? '';
-      if (commentPath.endsWith(fp) || fp.endsWith(commentPath)) return fp;
+      if (pathsMatch(commentPath, fp)) return fp;
     }
     return commentPath;
   }

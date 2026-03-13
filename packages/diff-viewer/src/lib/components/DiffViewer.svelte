@@ -62,6 +62,7 @@
     resolveLineSelectionToolbarLeft,
   } from '../utils/diffViewerHelpers';
   import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
+  import { pathsMatch } from '../utils/diffModalHelpers';
   import CommentEditor from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
@@ -313,8 +314,10 @@
     return buildLineToAlignmentMap(changedAlignments, 'after');
   });
 
-  // Comments for the current file
-  let currentFileComments = $derived(comments.filter((c) => c.path === currentFilePath));
+  // Comments for the current file (suffix-match to handle path prefix mismatches)
+  let currentFileComments = $derived(
+    comments.filter((c) => currentFilePath !== null && pathsMatch(c.path, currentFilePath)),
+  );
 
   // ==========================================================================
   // Custom scroll controller (frame-perfect sync)

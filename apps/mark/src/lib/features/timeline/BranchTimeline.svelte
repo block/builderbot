@@ -8,6 +8,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import type { Snippet } from 'svelte';
+  import { slide } from 'svelte/transition';
   import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
   import type { BranchTimeline as BranchTimelineData } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
@@ -426,47 +427,53 @@
   <!-- Unified timeline (vertical) -->
   <div class="timeline">
     {#each items as item, index (item.key)}
-      <TimelineRow
-        type={item.type}
-        title={item.title}
-        meta={item.meta}
-        secondaryMeta={item.secondaryMeta}
-        badges={item.badges}
-        deleting={item.deleting}
-        isLast={index === items.length - 1 &&
-          !onNewNote &&
-          !onNewCommit &&
-          pendingDropNotes.length === 0}
-        sessionId={item.sessionId}
-        deleteDisabledReason={item.deleteDisabledReason}
-        {onSessionClick}
-        onItemClick={() => handleItemClick(item)}
-        onDeleteClick={item.deleteDisabledReason ? undefined : () => handleDeleteClick(item)}
-      />
+      <div transition:slide={{ duration: 200 }}>
+        <TimelineRow
+          type={item.type}
+          title={item.title}
+          meta={item.meta}
+          secondaryMeta={item.secondaryMeta}
+          badges={item.badges}
+          deleting={item.deleting}
+          isLast={index === items.length - 1 &&
+            !onNewNote &&
+            !onNewCommit &&
+            pendingDropNotes.length === 0}
+          sessionId={item.sessionId}
+          deleteDisabledReason={item.deleteDisabledReason}
+          {onSessionClick}
+          onItemClick={() => handleItemClick(item)}
+          onDeleteClick={item.deleteDisabledReason ? undefined : () => handleDeleteClick(item)}
+        />
+      </div>
     {/each}
     {#each pendingDropNotes as drop, index (drop.key)}
-      <TimelineRow
-        type="generating-note"
-        title={drop.title}
-        secondaryMeta="adding..."
-        isLast={index === pendingDropNotes.length - 1 &&
-          pendingItems.length === 0 &&
-          !onNewNote &&
-          !onNewCommit}
-      />
+      <div transition:slide={{ duration: 200 }}>
+        <TimelineRow
+          type="generating-note"
+          title={drop.title}
+          secondaryMeta="adding..."
+          isLast={index === pendingDropNotes.length - 1 &&
+            pendingItems.length === 0 &&
+            !onNewNote &&
+            !onNewCommit}
+        />
+      </div>
     {/each}
     {#each pendingItems as item, index (item.key)}
-      <TimelineRow
-        type={item.type}
-        title={item.title}
-        secondaryMeta={item.sessionId
-          ? (liveSessionHints[item.sessionId] ??
-            item.secondaryMeta ??
-            fallbackHintForPendingType(item.type))
-          : item.secondaryMeta}
-        sessionId={item.sessionId}
-        isLast={index === pendingItems.length - 1 && !onNewNote && !onNewCommit}
-      />
+      <div transition:slide={{ duration: 200 }}>
+        <TimelineRow
+          type={item.type}
+          title={item.title}
+          secondaryMeta={item.sessionId
+            ? (liveSessionHints[item.sessionId] ??
+              item.secondaryMeta ??
+              fallbackHintForPendingType(item.type))
+            : item.secondaryMeta}
+          sessionId={item.sessionId}
+          isLast={index === pendingItems.length - 1 && !onNewNote && !onNewCommit}
+        />
+      </div>
     {/each}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}
       <div class="footer-row">

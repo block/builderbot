@@ -665,6 +665,7 @@
           {remoteWorkspaceStatus}
           {onDelete}
           {onRename}
+          onNoteCreated={() => loadTimeline()}
         />
       </div>
     </div>

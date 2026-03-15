@@ -20,11 +20,20 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import { X, AlertCircle, CircleStop, CheckCircle, XCircle } from 'lucide-svelte';
+  import {
+    X,
+    AlertCircle,
+    CircleStop,
+    CheckCircle,
+    XCircle,
+    Check,
+    StickyNote,
+  } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import Convert from 'ansi-to-html';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import { createNote, invalidateBranchTimeline } from '../../commands';
   import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
   import {
     getActionOutputBuffer,
@@ -36,13 +45,23 @@
 
   interface Props {
     executionId: string;
+    branchId: string;
     actionName: string;
     isStopping?: boolean;
     onClose: () => void;
     onRemove?: (executionId: string) => void;
+    onNoteCreated?: () => void;
   }
 
-  let { executionId, actionName, isStopping = false, onClose, onRemove }: Props = $props();
+  let {
+    executionId,
+    branchId,
+    actionName,
+    isStopping = false,
+    onClose,
+    onRemove,
+    onNoteCreated,
+  }: Props = $props();
 
   // =========================================================================
   // State
@@ -59,6 +78,7 @@
   let outputChunks = $state<OutputChunk[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let saveError = $state<string | null>(null);
   let stoppingExecutions = $state<Set<string>>(new Set());
   let outputEl: HTMLDivElement;
   let unlistenOutput: (() => void) | null = null;
@@ -77,6 +97,59 @@
 
   let isRunning = $derived(status === 'running');
   let isStoppingDerived = $derived(stoppingExecutions.has(executionId));
+
+  // Save-as-note state
+  let selectedText = $state('');
+  let capturedSelection = '';
+  let saveState = $state<'idle' | 'saved' | 'error'>('idle');
+  let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  function handleSelectionChange() {
+    const sel = document.getSelection();
+    if (sel && outputEl?.contains(sel.anchorNode) && outputEl?.contains(sel.focusNode)) {
+      selectedText = sel.toString().trim();
+    } else {
+      selectedText = '';
+    }
+  }
+
+  /** Capture selection on mousedown before the click clears it. */
+  function handleSaveMouseDown() {
+    capturedSelection = selectedText;
+  }
+
+  /** Get plain text from all output lines. */
+  function getFullOutputText(): string {
+    return displayLines.map((l) => l.text).join('\n');
+  }
+
+  async function handleSaveAsNote() {
+    if (saveState === 'saved') return;
+    const content = capturedSelection || selectedText || getFullOutputText();
+    capturedSelection = '';
+    if (!content) return;
+    try {
+      saveError = null;
+      const title = `${actionName} log`;
+      await createNote(branchId, title, content);
+      invalidateBranchTimeline(branchId);
+      onNoteCreated?.();
+      saveState = 'saved';
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(() => {
+        saveState = 'idle';
+      }, 2000);
+    } catch (e: any) {
+      saveError = e?.message || 'Failed to save note';
+      console.error('Failed to save note:', e);
+      saveState = 'error';
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(() => {
+        saveState = 'idle';
+        saveError = null;
+      }, 3000);
+    }
+  }
 
   /**
    * Process raw output chunks into terminal lines, handling carriage returns.
@@ -140,6 +213,7 @@
   // =========================================================================
 
   onMount(async () => {
+    document.addEventListener('selectionchange', handleSelectionChange);
     await loadBufferedOutput();
     await setupListeners();
     // Scroll to bottom after initial load
@@ -147,6 +221,8 @@
   });
 
   onDestroy(() => {
+    document.removeEventListener('selectionchange', handleSelectionChange);
+    if (saveTimeout) clearTimeout(saveTimeout);
     cleanup();
   });
 
@@ -361,6 +437,36 @@
         {/if}
       </div>
       <div class="header-actions">
+        <button
+          class="save-note-btn"
+          class:saved={saveState === 'saved'}
+          class:save-error={saveState === 'error'}
+          onmousedown={handleSaveMouseDown}
+          onclick={handleSaveAsNote}
+          disabled={saveState === 'saved' || saveState === 'error'}
+          title={saveState === 'error'
+            ? (saveError ?? 'Failed to save note')
+            : selectedText
+              ? 'Save selected text as a note'
+              : 'Save full log as a note'}
+        >
+          {#if saveState === 'saved'}
+            <span class="save-note-label">
+              <Check size={14} />
+              <span>Saved</span>
+            </span>
+          {:else if saveState === 'error'}
+            <span class="save-note-label">
+              <AlertCircle size={14} />
+              <span>Failed</span>
+            </span>
+          {:else}
+            <span class="save-note-label">
+              <StickyNote size={14} />
+              <span>{selectedText ? 'Save selection' : 'Save log'}</span>
+            </span>
+          {/if}
+        </button>
         {#if isRunning}
           {@const isCurrentlyStopping = isStopping || isStoppingDerived}
           <button
@@ -613,5 +719,46 @@
 
   .output-line.stderr {
     color: #9ca3af;
+  }
+
+  .save-note-btn {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    overflow: hidden;
+  }
+
+  .save-note-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--border-focus);
+  }
+
+  .save-note-btn.saved {
+    background: var(--commit-bg);
+    color: var(--status-added);
+    border-color: var(--commit-bg-emphasis);
+    cursor: default;
+  }
+
+  .save-note-btn.save-error {
+    background: var(--ui-danger-bg);
+    color: var(--ui-danger);
+    border-color: var(--ui-danger-bg);
+    cursor: default;
+  }
+
+  .save-note-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
   }
 </style>

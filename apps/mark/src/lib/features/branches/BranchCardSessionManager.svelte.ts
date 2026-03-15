@@ -28,6 +28,12 @@ export type PendingSessionItem = {
 };
 
 export default class BranchCardSessionManager {
+  // Private callback refs — declared first so $derived fields can reference them
+  private getBranch: () => Branch = undefined!;
+  private getIsRemote: () => boolean = undefined!;
+  private loadTimeline: () => void = undefined!;
+  private getTimeline: () => BranchTimelineData | null = () => null;
+
   // New session modal state
   showNewSession = $state(false);
   newSessionMode = $state<BranchSessionType>('commit');
@@ -61,11 +67,6 @@ export default class BranchCardSessionManager {
       this.isSessionStartPending ||
       this.hasRunningSession
   );
-
-  private getBranch: () => Branch;
-  private getIsRemote: () => boolean;
-  private loadTimeline: () => void;
-  private getTimeline: () => BranchTimelineData | null;
 
   constructor(opts: {
     getBranch: () => Branch;

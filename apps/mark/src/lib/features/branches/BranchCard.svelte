@@ -106,7 +106,7 @@
   } | null>(null);
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
-  let hasCodeChanges = $derived(timeline?.commits.some((c) => !!c.sha) ?? false);
+  let hasCodeChanges = $derived(timeline?.commits.some((c) => c.sha) ?? false);
 
   // Compute a suggested commit prompt from the latest visible timeline entry.
   // Only used when the user hasn't typed a draft yet.
@@ -185,22 +185,11 @@
     getBranch: () => branch,
     getIsRemote: () => isRemote,
     loadTimeline: () => loadTimeline(),
+    getTimeline: () => timeline,
   });
 
   /** Number of finalized commits on this branch. */
-  let commitCount = $derived(timeline?.commits.filter((c) => !!c.sha).length ?? 0);
-
-  /** True when any session is actively generating on this branch. */
-  let hasRunningSession = $derived(
-    (timeline?.commits.some((c) => c.sessionStatus === 'running') ?? false) ||
-      (timeline?.notes.some((n) => n.sessionStatus === 'running') ?? false) ||
-      (timeline?.reviews.some((r) => r.sessionStatus === 'running') ?? false)
-  );
-
-  /** Mirrors the disabled logic for the "New commit" button in BranchTimeline. */
-  let newCommitDisabled = $derived(
-    sessionMgr.showNewSession || sessionMgr.isSessionStartPending || hasRunningSession
-  );
+  let commitCount = $derived(timeline?.commits.filter((c) => c.sha).length ?? 0);
 
   // =========================================================================
   // PR button ref
@@ -688,7 +677,7 @@
               'commit',
               "Collapse this branch's commits"
             )}
-          {newCommitDisabled}
+          newCommitDisabled={sessionMgr.isNewSessionDisabled}
           {commitCount}
         />
       </div>
@@ -732,7 +721,7 @@
           onNewNote={() => sessionMgr.openNewSession('note')}
           onNewCommit={() => sessionMgr.openNewSession('commit')}
           onNewReview={hasCodeChanges ? (e) => sessionMgr.openNewSession('review', e) : undefined}
-          newSessionDisabled={sessionMgr.showNewSession || sessionMgr.isSessionStartPending}
+          newSessionDisabled={sessionMgr.isNewSessionDisabled}
         >
           {#snippet footerActions()}
             {#if hasCodeChanges}

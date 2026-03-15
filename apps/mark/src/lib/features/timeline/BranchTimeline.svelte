@@ -88,13 +88,6 @@
     footerActions,
   }: Props = $props();
 
-  // Disable creating new branch sessions while one is actively generating.
-  let hasRunningSessionGeneration = $derived(
-    timeline.commits.some((commit) => commit.sessionStatus === 'running') ||
-      timeline.notes.some((note) => note.sessionStatus === 'running') ||
-      timeline.reviews.some((review) => review.sessionStatus === 'running')
-  );
-  let disableNewSessionActions = $derived(newSessionDisabled || hasRunningSessionGeneration);
   let liveSessionHints = $state<Record<string, string>>({});
   const liveSessionHintPoller = createLiveSessionHints(
     (nextHints) => {
@@ -396,7 +389,7 @@
       <button
         class="empty-action-btn note-action"
         onclick={onNewNote}
-        disabled={disableNewSessionActions}
+        disabled={newSessionDisabled}
       >
         <FileText size={18} />
         <span>New note</span>
@@ -406,7 +399,7 @@
       <button
         class="empty-action-btn commit-action"
         onclick={onNewCommit}
-        disabled={disableNewSessionActions}
+        disabled={newSessionDisabled}
       >
         <GitCommitVertical size={18} />
         <span>New commit</span>
@@ -416,7 +409,7 @@
       <button
         class="empty-action-btn review-action"
         onclick={(e) => onNewReview?.(e)}
-        disabled={disableNewSessionActions}
+        disabled={newSessionDisabled}
       >
         <FileSearch size={18} />
         <span>New code review</span>
@@ -482,7 +475,7 @@
             <button
               class="add-item-btn note-btn"
               onclick={onNewNote}
-              disabled={disableNewSessionActions}
+              disabled={newSessionDisabled}
               title="New note"
             >
               <FileText size={13} />
@@ -493,7 +486,7 @@
             <button
               class="add-item-btn commit-btn"
               onclick={onNewCommit}
-              disabled={disableNewSessionActions}
+              disabled={newSessionDisabled}
               title="New commit"
             >
               <GitCommitVertical size={13} />
@@ -504,7 +497,7 @@
             <button
               class="add-item-btn review-btn"
               onclick={(e) => onNewReview?.(e)}
-              disabled={disableNewSessionActions}
+              disabled={newSessionDisabled}
               title="New code review"
             >
               <FileSearch size={13} />

@@ -43,18 +43,37 @@ export default class BranchCardSessionManager {
   // Session modal (opened after starting a branch session, or from timeline)
   openSessionId = $state<string | null>(null);
 
+  /** True when any session is actively generating on this branch's timeline. */
+  get hasRunningSession(): boolean {
+    const tl = this.getTimeline();
+    if (!tl) return false;
+    return (
+      tl.commits.some((c) => c.sessionStatus === 'running') ||
+      tl.notes.some((n) => n.sessionStatus === 'running') ||
+      tl.reviews.some((r) => r.sessionStatus === 'running')
+    );
+  }
+
+  /** True when new session actions (new commit, note, review) should be disabled. */
+  get isNewSessionDisabled(): boolean {
+    return this.showNewSession || this.isSessionStartPending || this.hasRunningSession;
+  }
+
   private getBranch: () => Branch;
   private getIsRemote: () => boolean;
   private loadTimeline: () => void;
+  private getTimeline: () => BranchTimelineData | null;
 
   constructor(opts: {
     getBranch: () => Branch;
     getIsRemote: () => boolean;
     loadTimeline: () => void;
+    getTimeline: () => BranchTimelineData | null;
   }) {
     this.getBranch = opts.getBranch;
     this.getIsRemote = opts.getIsRemote;
     this.loadTimeline = opts.loadTimeline;
+    this.getTimeline = opts.getTimeline;
   }
 
   prunePendingSessionItems(nextTimeline: BranchTimelineData) {

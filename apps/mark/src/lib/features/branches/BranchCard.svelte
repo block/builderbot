@@ -187,6 +187,21 @@
     loadTimeline: () => loadTimeline(),
   });
 
+  /** Number of finalized commits on this branch. */
+  let commitCount = $derived(timeline?.commits.filter((c) => !!c.sha).length ?? 0);
+
+  /** True when any session is actively generating on this branch. */
+  let hasRunningSession = $derived(
+    (timeline?.commits.some((c) => c.sessionStatus === 'running') ?? false) ||
+      (timeline?.notes.some((n) => n.sessionStatus === 'running') ?? false) ||
+      (timeline?.reviews.some((r) => r.sessionStatus === 'running') ?? false)
+  );
+
+  /** Mirrors the disabled logic for the "New commit" button in BranchTimeline. */
+  let newCommitDisabled = $derived(
+    sessionMgr.showNewSession || sessionMgr.isSessionStartPending || hasRunningSession
+  );
+
   // =========================================================================
   // PR button ref
   // =========================================================================
@@ -666,6 +681,15 @@
           {onDelete}
           {onRename}
           onNoteCreated={() => loadTimeline()}
+          onRebaseBranch={() =>
+            sessionMgr.startBranchSessionWithPendingItem('commit', 'Rebase this branch')}
+          onCollapseCommits={() =>
+            sessionMgr.startBranchSessionWithPendingItem(
+              'commit',
+              "Collapse this branch's commits"
+            )}
+          {newCommitDisabled}
+          {commitCount}
         />
       </div>
     </div>

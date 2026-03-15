@@ -78,6 +78,7 @@
   let outputChunks = $state<OutputChunk[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let saveError = $state<string | null>(null);
   let stoppingExecutions = $state<Set<string>>(new Set());
   let outputEl: HTMLDivElement;
   let unlistenOutput: (() => void) | null = null;
@@ -100,12 +101,12 @@
   // Save-as-note state
   let selectedText = $state('');
   let capturedSelection = '';
-  let saveState = $state<'idle' | 'saved'>('idle');
+  let saveState = $state<'idle' | 'saved' | 'error'>('idle');
   let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
   function handleSelectionChange() {
     const sel = document.getSelection();
-    if (sel && outputEl?.contains(sel.anchorNode)) {
+    if (sel && outputEl?.contains(sel.anchorNode) && outputEl?.contains(sel.focusNode)) {
       selectedText = sel.toString().trim();
     } else {
       selectedText = '';
@@ -128,6 +129,7 @@
     capturedSelection = '';
     if (!content) return;
     try {
+      saveError = null;
       const title = `${actionName} log`;
       await createNote(branchId, title, content);
       invalidateBranchTimeline(branchId);
@@ -138,8 +140,14 @@
         saveState = 'idle';
       }, 2000);
     } catch (e: any) {
-      error = e?.message || 'Failed to save note';
+      saveError = e?.message || 'Failed to save note';
       console.error('Failed to save note:', e);
+      saveState = 'error';
+      if (saveTimeout) clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(() => {
+        saveState = 'idle';
+        saveError = null;
+      }, 3000);
     }
   }
 
@@ -432,15 +440,25 @@
         <button
           class="save-note-btn"
           class:saved={saveState === 'saved'}
+          class:save-error={saveState === 'error'}
           onmousedown={handleSaveMouseDown}
           onclick={handleSaveAsNote}
-          disabled={saveState === 'saved'}
-          title={selectedText ? 'Save selected text as a note' : 'Save full log as a note'}
+          disabled={saveState === 'saved' || saveState === 'error'}
+          title={saveState === 'error'
+            ? (saveError ?? 'Failed to save note')
+            : selectedText
+              ? 'Save selected text as a note'
+              : 'Save full log as a note'}
         >
           {#if saveState === 'saved'}
             <span class="save-note-label">
               <Check size={14} />
               <span>Saved</span>
+            </span>
+          {:else if saveState === 'error'}
+            <span class="save-note-label">
+              <AlertCircle size={14} />
+              <span>Failed</span>
             </span>
           {:else}
             <span class="save-note-label">
@@ -724,9 +742,16 @@
   }
 
   .save-note-btn.saved {
-    background: rgba(34, 197, 94, 0.1);
-    color: #22c55e;
-    border-color: rgba(34, 197, 94, 0.2);
+    background: var(--commit-bg);
+    color: var(--status-added);
+    border-color: var(--commit-bg-emphasis);
+    cursor: default;
+  }
+
+  .save-note-btn.save-error {
+    background: var(--ui-danger-bg);
+    color: var(--ui-danger);
+    border-color: var(--ui-danger-bg);
     cursor: default;
   }
 

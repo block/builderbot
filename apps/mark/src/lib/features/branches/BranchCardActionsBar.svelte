@@ -65,6 +65,10 @@
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
     onNoteCreated?: () => void;
+    onRebaseBranch?: () => void;
+    onCollapseCommits?: () => void;
+    newCommitDisabled?: boolean;
+    commitCount?: number;
   }
 
   let {
@@ -76,6 +80,10 @@
     onDelete,
     onRename,
     onNoteCreated,
+    onRebaseBranch,
+    onCollapseCommits,
+    newCommitDisabled = false,
+    commitCount = 0,
   }: Props = $props();
 
   // Custom transition combining slide and fade effects
@@ -839,6 +847,30 @@
         <GitBranch size={14} />
         Rename Branch
       </button>
+      <button
+        class="more-menu-item"
+        disabled={newCommitDisabled}
+        onclick={() => {
+          showMoreMenu = false;
+          onRebaseBranch?.();
+        }}
+      >
+        <GitBranch size={14} />
+        Rebase Branch
+      </button>
+      {#if commitCount >= 2}
+        <button
+          class="more-menu-item"
+          disabled={newCommitDisabled}
+          onclick={() => {
+            showMoreMenu = false;
+            onCollapseCommits?.();
+          }}
+        >
+          <GitBranch size={14} />
+          Collapse Commits
+        </button>
+      {/if}
       <div class="menu-separator"></div>
       <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
         <Trash2 size={14} />
@@ -919,6 +951,15 @@
   .more-menu-item :global(svg) {
     color: var(--text-muted);
     flex-shrink: 0;
+  }
+
+  .more-menu-item:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .more-menu-item:disabled:hover {
+    background-color: transparent;
   }
 
   .more-menu-item.danger:hover {

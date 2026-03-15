@@ -28,6 +28,12 @@ export type PendingSessionItem = {
 };
 
 export default class BranchCardSessionManager {
+  // Private callback refs — declared first so $derived fields can reference them
+  private getBranch: () => Branch = undefined!;
+  private getIsRemote: () => boolean = undefined!;
+  private loadTimeline: () => void = undefined!;
+  private getTimeline: () => BranchTimelineData | null = () => null;
+
   // New session modal state
   showNewSession = $state(false);
   newSessionMode = $state<BranchSessionType>('commit');
@@ -43,18 +49,35 @@ export default class BranchCardSessionManager {
   // Session modal (opened after starting a branch session, or from timeline)
   openSessionId = $state<string | null>(null);
 
-  private getBranch: () => Branch;
-  private getIsRemote: () => boolean;
-  private loadTimeline: () => void;
+  /** True when any session is actively generating on this branch's timeline. */
+  hasRunningSession = $derived.by(() => {
+    const tl = this.getTimeline();
+    if (!tl) return false;
+    return (
+      tl.commits.some((c) => c.sessionStatus === 'running') ||
+      tl.notes.some((n) => n.sessionStatus === 'running') ||
+      tl.reviews.some((r) => r.sessionStatus === 'running')
+    );
+  });
+
+  /** True when new session actions (new commit, note, review) should be disabled. */
+  isNewSessionDisabled = $derived(
+    !this.getTimeline() ||
+      this.showNewSession ||
+      this.isSessionStartPending ||
+      this.hasRunningSession
+  );
 
   constructor(opts: {
     getBranch: () => Branch;
     getIsRemote: () => boolean;
     loadTimeline: () => void;
+    getTimeline: () => BranchTimelineData | null;
   }) {
     this.getBranch = opts.getBranch;
     this.getIsRemote = opts.getIsRemote;
     this.loadTimeline = opts.loadTimeline;
+    this.getTimeline = opts.getTimeline;
   }
 
   prunePendingSessionItems(nextTimeline: BranchTimelineData) {

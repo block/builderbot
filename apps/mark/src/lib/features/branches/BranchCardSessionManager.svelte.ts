@@ -56,7 +56,10 @@ export default class BranchCardSessionManager {
 
   /** True when new session actions (new commit, note, review) should be disabled. */
   isNewSessionDisabled = $derived(
-    this.showNewSession || this.isSessionStartPending || this.hasRunningSession
+    !this.getTimeline() ||
+      this.showNewSession ||
+      this.isSessionStartPending ||
+      this.hasRunningSession
   );
 
   private getBranch: () => Branch;

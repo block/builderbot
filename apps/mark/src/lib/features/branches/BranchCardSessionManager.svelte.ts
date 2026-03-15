@@ -44,7 +44,7 @@ export default class BranchCardSessionManager {
   openSessionId = $state<string | null>(null);
 
   /** True when any session is actively generating on this branch's timeline. */
-  get hasRunningSession(): boolean {
+  hasRunningSession = $derived.by(() => {
     const tl = this.getTimeline();
     if (!tl) return false;
     return (
@@ -52,12 +52,12 @@ export default class BranchCardSessionManager {
       tl.notes.some((n) => n.sessionStatus === 'running') ||
       tl.reviews.some((r) => r.sessionStatus === 'running')
     );
-  }
+  });
 
   /** True when new session actions (new commit, note, review) should be disabled. */
-  get isNewSessionDisabled(): boolean {
-    return this.showNewSession || this.isSessionStartPending || this.hasRunningSession;
-  }
+  isNewSessionDisabled = $derived(
+    this.showNewSession || this.isSessionStartPending || this.hasRunningSession
+  );
 
   private getBranch: () => Branch;
   private getIsRemote: () => boolean;

@@ -14,7 +14,23 @@ A desktop app for reviewing git changes, managing branches, and running AI codin
 
 ## Installation
 
-### Quick Install (macOS)
+### Stable Release (macOS arm64)
+
+Download the signed DMG from GitHub Releases:
+
+```text
+https://github.com/block/builderbot/releases/download/staged-latest/Staged-latest-aarch64.dmg
+```
+
+Install `Staged.app` from that DMG if you want the auto-updating release channel. In-app updates are driven by the matching updater feed at:
+
+```text
+https://github.com/block/builderbot/releases/download/staged-latest/latest.json
+```
+
+Release and signing details live in [`docs/release-and-updates.md`](./docs/release-and-updates.md).
+
+### Development Install From Source
 
 Install with a single command:
 
@@ -31,7 +47,7 @@ The installer will:
 - Install to `/Applications/Staged.app`
 - Install the `staged` CLI to `/usr/local/bin`
 
-**Note**: This builds from source, which takes a few minutes. Requires git to be installed.
+**Note**: This builds from source, which takes a few minutes. It is meant for development and does not use the signed auto-updating release channel.
 
 ### Command Line Usage
 

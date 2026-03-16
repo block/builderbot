@@ -56,6 +56,14 @@ dev repo="":
 build:
     pnpm run tauri:build
 
+# Generate the release-only Tauri config with updater settings
+release-config:
+    pnpm run tauri:release:config
+
+# Build a signed/notarized release bundle once release config exists
+release-build target="aarch64-apple-darwin" *args:
+    pnpm exec tauri build --target {{target}} --config src-tauri/tauri.release.conf.json {{args}}
+
 # ============================================================================
 # Code Quality
 # ============================================================================

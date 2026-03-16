@@ -1031,6 +1031,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(
@@ -1044,6 +1045,21 @@ pub fn run() {
         )
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
+            let updater_pubkey_present = app
+                .config()
+                .plugins
+                .0
+                .get("updater")
+                .and_then(|value| value.as_object())
+                .and_then(|updater| updater.get("pubkey"))
+                .and_then(|pubkey| pubkey.as_str())
+                .is_some_and(|pubkey| !pubkey.trim().is_empty());
+
+            if updater_pubkey_present {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
+
             // Build a custom macOS application menu so that the app submenu,
             // "About" item, and "Quit" item use the capitalised product name
             // "Staged" instead of the lowercase Cargo package name "staged".

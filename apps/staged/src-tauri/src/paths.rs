@@ -9,23 +9,6 @@ pub fn data_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|d| d.join(".staged"))
 }
 
-/// Legacy home data directory used during the Mark rename: `~/.mark/`.
-pub fn legacy_data_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|d| d.join(".mark"))
-}
-
-/// Legacy platform data directory used by the Mark bundle identifier.
-/// On macOS this was `~/Library/Application Support/com.mark.app/`.
-pub fn legacy_platform_data_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("com.mark.app"))
-}
-
-/// Older platform data directory used before the Mark rename.
-/// On macOS this was `~/Library/Application Support/staged/`.
-pub fn older_platform_data_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("staged"))
-}
-
 /// Directory for bare/clone repos: `~/.staged/repos/`
 pub fn repos_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("repos"))

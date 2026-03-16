@@ -80,7 +80,7 @@ export default class BranchCardSessionManager {
     this.getTimeline = opts.getTimeline;
   }
 
-  prunePendingSessionItems(nextTimeline: BranchTimelineData) {
+  prunePendingSessionItems(nextTimeline: BranchTimelineData): Set<string> {
     const persistedSessionIds = new Set<string>();
     for (const commit of nextTimeline.commits) {
       if (commit.sessionId) persistedSessionIds.add(commit.sessionId);
@@ -92,9 +92,15 @@ export default class BranchCardSessionManager {
       if (review.sessionId) persistedSessionIds.add(review.sessionId);
     }
 
-    this.pendingSessionItems = this.pendingSessionItems.filter(
-      (item) => !item.sessionId || !persistedSessionIds.has(item.sessionId)
-    );
+    const prunedSessionIds = new Set<string>();
+    this.pendingSessionItems = this.pendingSessionItems.filter((item) => {
+      if (item.sessionId && persistedSessionIds.has(item.sessionId)) {
+        prunedSessionIds.add(item.sessionId);
+        return false;
+      }
+      return true;
+    });
+    return prunedSessionIds;
   }
 
   private pendingSessionTypeForMode(mode: BranchSessionType): PendingSessionItemType {

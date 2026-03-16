@@ -671,7 +671,10 @@
           {onRename}
           onNoteCreated={() => loadTimeline()}
           onRebaseBranch={() =>
-            sessionMgr.startBranchSessionWithPendingItem('commit', 'Rebase this branch')}
+            sessionMgr.startBranchSessionWithPendingItem(
+              'commit',
+              'Rebase this branch. Do not push the branch.'
+            )}
           onCollapseCommits={() =>
             sessionMgr.startBranchSessionWithPendingItem(
               'commit',

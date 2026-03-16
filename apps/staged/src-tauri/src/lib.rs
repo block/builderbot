@@ -25,7 +25,7 @@ pub mod timeline;
 pub mod util_commands;
 
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use store::Store;
 use tauri::{Emitter, Manager};
@@ -43,121 +43,8 @@ struct DbState {
     needs_reset: Mutex<Option<StoreIncompatibility>>,
 }
 
-fn migrate_db_path_prefixes(
-    db_path: &Path,
-    old_prefix: &Path,
-    new_prefix: &Path,
-) -> Result<(), String> {
-    if !db_path.exists() {
-        return Ok(());
-    }
-
-    let old_prefix = old_prefix.to_string_lossy().to_string();
-    let new_prefix = new_prefix.to_string_lossy().to_string();
-    if old_prefix == new_prefix {
-        return Ok(());
-    }
-
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| format!("Cannot open database for path migration: {e}"))?;
-
-    for (table, column) in [("workdirs", "path"), ("sessions", "working_dir")] {
-        let exists: i64 = conn
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1
-                    FROM sqlite_master
-                    WHERE type = 'table' AND name = ?1
-                )",
-                rusqlite::params![table],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Cannot inspect schema for path migration: {e}"))?;
-        if exists == 0 {
-            continue;
-        }
-
-        let sql = format!(
-            "UPDATE {table}
-             SET {column} = replace({column}, ?1, ?2)
-             WHERE {column} = ?1
-                OR {column} LIKE (?1 || '/%')
-                OR {column} LIKE (?1 || '\\\\%')"
-        );
-        let updated = conn
-            .execute(&sql, rusqlite::params![old_prefix, new_prefix])
-            .map_err(|e| format!("Failed migrating paths in {table}.{column}: {e}"))?;
-        if updated > 0 {
-            log::info!(
-                "Migrated {updated} row(s) in {}.{} from '{}' to '{}'",
-                table,
-                column,
-                old_prefix,
-                new_prefix
-            );
-        }
-    }
-
-    Ok(())
-}
-
 pub(crate) fn preferences_store_path_buf() -> Option<PathBuf> {
     crate::paths::data_dir().map(|d| d.join("preferences.json"))
-}
-
-fn migrate_legacy_preferences_file(target_path: &Path, legacy_dirs: Vec<PathBuf>) {
-    if target_path.exists() {
-        return;
-    }
-
-    if let Some(parent) = target_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            log::warn!(
-                "Cannot create preferences directory {}: {e}",
-                parent.display()
-            );
-            return;
-        }
-    }
-
-    for old_dir in legacy_dirs {
-        let old_path = old_dir.join("preferences.json");
-        if old_path == target_path || !old_path.exists() {
-            continue;
-        }
-
-        log::info!(
-            "Migrating preferences from {} to {}",
-            old_path.display(),
-            target_path.display()
-        );
-
-        if let Err(rename_err) = std::fs::rename(&old_path, target_path) {
-            log::warn!(
-                "Failed to move preferences {} -> {}: {rename_err}",
-                old_path.display(),
-                target_path.display()
-            );
-
-            if let Err(copy_err) = std::fs::copy(&old_path, target_path) {
-                log::warn!(
-                    "Failed to copy preferences {} -> {}: {copy_err}",
-                    old_path.display(),
-                    target_path.display()
-                );
-                continue;
-            }
-
-            if let Err(remove_err) = std::fs::remove_file(&old_path) {
-                log::warn!(
-                    "Copied preferences but could not remove legacy file {}: {remove_err}",
-                    old_path.display()
-                );
-            }
-        }
-
-        break;
-    }
 }
 
 /// Structured info about a database incompatibility, passed to the frontend.
@@ -1196,105 +1083,11 @@ pub fn run() {
                 .map_err(|e| format!("Cannot create data dir: {e}"))?;
 
             let db_path = data_dir.join("data.db");
-            let legacy_home_data_dir = crate::paths::legacy_data_dir();
-            let legacy_platform_data_dir = crate::paths::legacy_platform_data_dir();
-            let older_platform_data_dir = crate::paths::older_platform_data_dir();
 
-            // Migrate from older data directories if the new location is empty.
-            // Priority: legacy ~/.mark/ first, then legacy platform app-data
-            // (for example ~/Library/Application Support/com.mark.app or
-            // ~/Library/Application Support/staged on macOS), then the current
-            // Tauri app_data_dir (com.staged.app).
-            if !db_path.exists() {
-                let mut legacy_candidates: Vec<PathBuf> = Vec::new();
-                for candidate in [
-                    legacy_home_data_dir.clone(),
-                    legacy_platform_data_dir.clone(),
-                    older_platform_data_dir.clone(),
-                    app.path().app_data_dir().ok(),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if candidate != data_dir && !legacy_candidates.contains(&candidate) {
-                        legacy_candidates.push(candidate);
-                    }
-                }
-
-                for old_dir in legacy_candidates {
-                    let old_db = old_dir.join("data.db");
-                    if old_db.exists() {
-                        log::info!(
-                            "Migrating data from {} to {}",
-                            old_dir.display(),
-                            data_dir.display()
-                        );
-                        // Move the entire directory contents (db, repos, worktree/workspace data)
-                        crate::paths::migrate_directory_contents(&old_dir, &data_dir);
-                        break;
-                    }
-                }
-            }
-
-            // Keep frontend preferences alongside the rest of Staged data in ~/.staged.
-            // If the new file does not exist yet, migrate it from legacy locations.
-            if let Some(preferences_path) = preferences_store_path_buf() {
-                let mut legacy_preference_dirs: Vec<PathBuf> = Vec::new();
-                for candidate in [
-                    legacy_home_data_dir.clone(),
-                    legacy_platform_data_dir.clone(),
-                    older_platform_data_dir.clone(),
-                    app.path().app_data_dir().ok(),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if candidate != data_dir && !legacy_preference_dirs.contains(&candidate) {
-                        legacy_preference_dirs.push(candidate);
-                    }
-                }
-
-                migrate_legacy_preferences_file(&preferences_path, legacy_preference_dirs);
-            } else {
-                log::warn!("Cannot determine preferences path, skipping preferences migration");
-            }
-
-            // Rewrite stored worktree paths from legacy prefixes and move local
-            // worktrees from the legacy top-level `worktrees/` folder into the
-            // workspace-scoped `workspaces/local/` folder.
-            let current_legacy_worktrees = crate::paths::legacy_worktrees_dir();
-            if let Some(new_worktrees) = crate::paths::worktrees_dir() {
-                let mut legacy_worktree_prefixes: Vec<PathBuf> = Vec::new();
-                for prefix in [
-                    current_legacy_worktrees.clone(),
-                    legacy_home_data_dir.clone().map(|d| d.join("worktrees")),
-                    legacy_home_data_dir
-                        .clone()
-                        .map(|d| d.join("workspaces").join("local")),
-                    legacy_platform_data_dir
-                        .clone()
-                        .map(|d| d.join("worktrees")),
-                    legacy_platform_data_dir
-                        .clone()
-                        .map(|d| d.join("workspaces").join("local")),
-                    older_platform_data_dir.clone().map(|d| d.join("worktrees")),
-                    older_platform_data_dir
-                        .clone()
-                        .map(|d| d.join("workspaces").join("local")),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if prefix != new_worktrees && !legacy_worktree_prefixes.contains(&prefix) {
-                        legacy_worktree_prefixes.push(prefix);
-                    }
-                }
-
-                for old_prefix in legacy_worktree_prefixes {
-                    migrate_db_path_prefixes(&db_path, &old_prefix, &new_worktrees)?;
-                }
-
-                if let Some(old_worktrees) = current_legacy_worktrees {
+            // Move local worktrees from the legacy top-level `worktrees/`
+            // folder into the workspace-scoped `workspaces/local/` folder.
+            if let Some(old_worktrees) = crate::paths::legacy_worktrees_dir() {
+                if let Some(new_worktrees) = crate::paths::worktrees_dir() {
                     if old_worktrees.exists() && old_worktrees != new_worktrees {
                         crate::paths::migrate_legacy_worktrees_layout();
                     }

@@ -5,7 +5,7 @@
 //! discovered from `store/migrations/` using the crate's built-in
 //! directory loader.
 
-use std::sync::LazyLock;
+use std::sync::OnceLock;
 
 use include_dir::{include_dir, Dir};
 use rusqlite::{params, Connection};
@@ -14,14 +14,15 @@ use rusqlite_migration::Migrations;
 use super::{StoreError, APP_VERSION};
 
 static MIGRATION_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/store/migrations");
-static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
-    Migrations::from_directory(&MIGRATION_DIR).expect("staged store migrations should be valid")
-});
+static MIGRATIONS: OnceLock<Migrations<'static>> = OnceLock::new();
 
 pub(super) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
-    let pending = pending_migrations(conn)?;
+    let migrations = migrations();
+    let pending = migrations
+        .pending_migrations(conn)
+        .map_err(map_migration_error)?;
     if pending < 0 {
         let version = current_user_version(conn)?;
         return Err(StoreError(format!(
@@ -31,7 +32,7 @@ pub(super) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
 
     if pending > 0 {
         log::info!("Applying {pending} staged store migration(s)");
-        MIGRATIONS.to_latest(conn).map_err(map_migration_error)?;
+        migrations.to_latest(conn).map_err(map_migration_error)?;
     }
 
     update_app_metadata(conn)?;
@@ -39,14 +40,20 @@ pub(super) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
 }
 
 pub(super) fn pending_migrations(conn: &Connection) -> Result<i32, StoreError> {
-    MIGRATIONS
+    migrations()
         .pending_migrations(conn)
         .map_err(map_migration_error)
 }
 
 #[cfg(test)]
 pub(super) fn validate() -> Result<(), StoreError> {
-    MIGRATIONS.validate().map_err(map_migration_error)
+    migrations().validate().map_err(map_migration_error)
+}
+
+fn migrations() -> &'static Migrations<'static> {
+    MIGRATIONS.get_or_init(|| {
+        Migrations::from_directory(&MIGRATION_DIR).expect("staged store migrations should be valid")
+    })
 }
 
 fn update_app_metadata(conn: &Connection) -> Result<(), StoreError> {

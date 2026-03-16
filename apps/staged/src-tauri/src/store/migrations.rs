@@ -1106,7 +1106,7 @@ fn looks_like_github_repo_slug(value: &str) -> bool {
     let mut parts = value.split('/');
     let owner = parts.next().unwrap_or_default();
     let repo = parts.next().unwrap_or_default();
-    owner.len() > 0 && repo.len() > 0 && parts.next().is_none()
+    !owner.is_empty() && !repo.is_empty() && parts.next().is_none()
 }
 
 fn make_unique_project_name(

@@ -839,7 +839,7 @@ fn test_review_crud() {
 }
 
 #[test]
-fn test_review_unique_constraint() {
+fn test_review_duplicates_allowed_and_latest_is_returned() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
@@ -847,11 +847,19 @@ fn test_review_unique_constraint() {
     store.create_branch(&branch).unwrap();
 
     let r1 = Review::new(&branch.id, "abc123", ReviewScope::Commit);
-    let r2 = Review::new(&branch.id, "abc123", ReviewScope::Commit);
+    let mut r2 = Review::new(&branch.id, "abc123", ReviewScope::Commit);
+    r2.created_at = r1.created_at + 1;
+    r2.updated_at = r2.created_at;
     store.create_review(&r1).unwrap();
-    assert!(store.create_review(&r2).is_err());
+    store.create_review(&r2).unwrap();
 
-    // Different scope on same commit is fine
+    let latest = store
+        .find_review(&branch.id, "abc123", ReviewScope::Commit)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.id, r2.id);
+
+    // Different scope on same commit is also fine.
     let r3 = Review::new(&branch.id, "abc123", ReviewScope::Branch);
     store.create_review(&r3).unwrap();
 }

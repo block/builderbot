@@ -59,6 +59,34 @@ fn test_check_db_compatibility_requires_reset_for_unversioned_db_with_tables() {
 }
 
 #[test]
+fn test_check_db_compatibility_requires_reset_for_pre_migration_db() {
+    let path = temp_db_path("compat-pre-migration");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "
+        CREATE TABLE schema_version (
+            version     INTEGER NOT NULL,
+            app_version TEXT
+        );
+        INSERT INTO schema_version (version, app_version) VALUES (22, '0.2.9');
+        CREATE TABLE sessions (id TEXT PRIMARY KEY);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let compat = check_db_compatibility(&path).unwrap();
+    match compat {
+        DbCompatibility::NeedsReset { db_app_version } => {
+            assert_eq!(db_app_version, "0.1.0");
+        }
+        other => panic!("expected reset for pre-migration database, got {other:?}"),
+    }
+
+    cleanup_db(&path);
+}
+
+#[test]
 fn test_check_db_compatibility_detects_newer_schema_version() {
     let path = temp_db_path("compat-too-new");
     let conn = Connection::open(&path).unwrap();

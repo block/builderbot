@@ -9,6 +9,8 @@ SQLite `user_version`.
 - Each migration lives in a numbered subdirectory such as `0001-baseline/`.
 - The required file is `up.sql`.
 - Fresh databases apply migrations in order on first open.
+- Only databases created after this migration system landed are migrated in
+  place. Older Staged databases are treated as incompatible and reset.
 - Future schema changes should be added as new numbered directories.
 - `app_metadata` is application-owned metadata for UX messaging; it is not used
   to decide which migrations have run.

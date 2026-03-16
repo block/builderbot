@@ -3,8 +3,9 @@
 //! Schema migrations are tracked with SQLite `user_version` via
 //! `rusqlite_migration`. Fresh installs bootstrap from the migration
 //! directory and future releases append new migrations in place. Databases
-//! with user tables but no schema version are treated as unsupported and
-//! trigger a reset-and-recreate dialog.
+//! with user tables but no `user_version` are intentionally treated as
+//! incompatible and trigger a reset-and-recreate dialog. This release is
+//! the starting point for the new migration path.
 //!
 //! Tables: app_metadata, projects, project_repos, branches, workdirs, commits,
 //! sessions, session_messages, notes, project_notes, reviews, images,
@@ -84,10 +85,10 @@ pub enum DbCompatibility {
 /// Check whether an existing database file is compatible with this build.
 ///
 /// Returns [`DbCompatibility::Ok`] if the file doesn't exist (fresh DB),
-/// is empty, or has a schema version that this build can migrate from.
-/// Returns [`DbCompatibility::NeedsReset`] for unsupported databases with
-/// user tables but no `user_version`, or [`DbCompatibility::TooNew`] for
-/// newer ones.
+/// is empty, or has a `user_version` schema that this build can migrate
+/// from. Returns [`DbCompatibility::NeedsReset`] for populated databases
+/// with no `user_version`, including databases created before this
+/// migration system landed, or [`DbCompatibility::TooNew`] for newer ones.
 ///
 /// This opens a temporary read-only connection and closes it before
 /// returning — it does **not** create a `Store`.
@@ -143,6 +144,8 @@ pub fn check_db_compatibility(path: &Path) -> Result<DbCompatibility, String> {
         if user_table_count == 0 {
             return Ok(DbCompatibility::Ok);
         }
+        // Cut over to the new migration system here: any populated database
+        // that never wrote `user_version` must be reset before continuing.
         return Ok(DbCompatibility::NeedsReset { db_app_version });
     }
 

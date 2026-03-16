@@ -41,6 +41,9 @@
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import type { StoreIncompatibility } from './lib/types';
 
+  const updaterEnabled = import.meta.env.VITE_UPDATER_ENABLED === 'true';
+  const updaterCheckIntervalMs = 15 * 60 * 1000;
+
   let showSessionLab = $state(false);
   let unlistenSettings: UnlistenFn | undefined;
   let unlistenFind: UnlistenFn | undefined;
@@ -51,6 +54,7 @@
   let unlistenZoomReset: UnlistenFn | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
+  let stopUpdaterLoop: (() => void) | null = null;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
@@ -85,6 +89,102 @@
   function requestNewProject() {
     if (navigation.activeView === 'settings') return;
     window.dispatchEvent(new CustomEvent('staged:new-project'));
+  }
+
+  async function logUpdater(message: string) {
+    console.warn(message);
+    try {
+      const { warn } = await import('@tauri-apps/plugin-log');
+      await warn(message);
+    } catch {
+      // log plugin is optional during local web-only development
+    }
+  }
+
+  function startUpdaterLoop(): () => void {
+    const isTauriApp = typeof window !== 'undefined' && '__TAURI__' in window;
+    void logUpdater(
+      `[updater] gate check: enabled=${updaterEnabled} dev=${import.meta.env.DEV} isTauriApp=${isTauriApp}`
+    );
+
+    if (!updaterEnabled || import.meta.env.DEV || !isTauriApp) {
+      void logUpdater('[updater] skipped because a gate condition was not met');
+      return () => {};
+    }
+
+    let cancelled = false;
+    let updaterRunInFlight = false;
+    let updaterRunQueued = false;
+    let lastPromptedUpdateVersion: string | null = null;
+
+    const runUpdater = async () => {
+      if (updaterRunInFlight) {
+        updaterRunQueued = true;
+        await logUpdater('[updater] check skipped because a previous run is still active');
+        return;
+      }
+
+      updaterRunInFlight = true;
+      try {
+        await logUpdater('[updater] checking for updates');
+        const [{ check }, { relaunch }] = await Promise.all([
+          import('@tauri-apps/plugin-updater'),
+          import('@tauri-apps/plugin-process'),
+        ]);
+        const updatePromise = check();
+        const timeoutPromise = new Promise<null>((resolve) =>
+          setTimeout(() => resolve(null), 15_000)
+        );
+        const update = await Promise.race([updatePromise, timeoutPromise]);
+
+        if (!update || cancelled) {
+          await logUpdater('[updater] no update available, cancelled, or timed out');
+          return;
+        }
+
+        if (lastPromptedUpdateVersion === update.version) {
+          await logUpdater(`[updater] update ${update.version} already prompted; skipping`);
+          return;
+        }
+
+        lastPromptedUpdateVersion = update.version;
+        await logUpdater(`[updater] update found: ${update.version}`);
+
+        const { confirm } = await import('@tauri-apps/plugin-dialog');
+        const shouldInstall = await confirm(
+          `Staged ${update.version} is available. Install now? The app will restart once finished.`,
+          { title: 'Update Available', kind: 'info' }
+        );
+        if (!shouldInstall || cancelled) {
+          await logUpdater(`[updater] install deferred for ${update.version}`);
+          return;
+        }
+
+        await logUpdater('[updater] downloading and installing update');
+        await update.downloadAndInstall();
+        if (cancelled) return;
+
+        await relaunch();
+      } catch (error) {
+        await logUpdater(`[updater] check failed: ${error}`);
+      } finally {
+        updaterRunInFlight = false;
+        if (!cancelled && updaterRunQueued) {
+          updaterRunQueued = false;
+          void runUpdater();
+        }
+      }
+    };
+
+    void runUpdater();
+    const interval = setInterval(() => {
+      void runUpdater();
+    }, updaterCheckIntervalMs);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }
 
   onMount(async () => {
@@ -256,6 +356,7 @@
 
     // Window was created hidden — show it now that the theme is applied
     await getCurrentWindow().show();
+    stopUpdaterLoop = startUpdaterLoop();
   });
 
   onDestroy(() => {
@@ -269,6 +370,7 @@
     unlistenZoomOut?.();
     unlistenZoomReset?.();
     unlistenSessionStatus?.();
+    stopUpdaterLoop?.();
   });
 
   async function handleResetStore() {

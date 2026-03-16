@@ -12,6 +12,9 @@
     "window-state:default",
     "store:default",
     "core:window:allow-set-badge-count",
-    "dialog:default"
+    "dialog:default",
+    "process:allow-restart",
+    "updater:default",
+    "log:default"
   ]
 }

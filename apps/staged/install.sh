@@ -113,6 +113,7 @@ fi
 
 cd "$SOURCE_DIR"
 
+log "building a development install from source (not the signed release DMG channel)"
 log "activating hermit"
 # shellcheck disable=SC1091
 source ./bin/activate-hermit

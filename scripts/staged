@@ -1,0 +1,47 @@
+#!/bin/bash
+# CLI launcher for Staged app
+# Usage: staged [path]
+#   path - Optional directory to open (defaults to current directory)
+
+set -e
+
+# Resolve the target path
+if [ -n "$1" ]; then
+    TARGET_PATH="$1"
+else
+    TARGET_PATH="."
+fi
+
+# Convert to absolute path
+TARGET_PATH=$(cd "$TARGET_PATH" 2>/dev/null && pwd) || {
+    echo "Error: '$1' is not a valid directory" >&2
+    exit 1
+}
+
+# Find the Staged app
+# Priority: /Applications > ~/Applications > built app in repo
+if [ -d "/Applications/Staged.app" ]; then
+    APP_PATH="/Applications/Staged.app"
+elif [ -d "$HOME/Applications/Staged.app" ]; then
+    APP_PATH="$HOME/Applications/Staged.app"
+else
+    # Try to find it relative to this script (for development)
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+    STAGED_APP="$REPO_ROOT/apps/staged"
+
+    if [ -d "$STAGED_APP/src-tauri/target/release/bundle/macos/Staged.app" ]; then
+        APP_PATH="$STAGED_APP/src-tauri/target/release/bundle/macos/Staged.app"
+    elif [ -d "$STAGED_APP/src-tauri/target/debug/bundle/macos/Staged.app" ]; then
+        APP_PATH="$STAGED_APP/src-tauri/target/debug/bundle/macos/Staged.app"
+    else
+        echo "Error: Could not find Staged.app" >&2
+        echo "Install it to /Applications or build with 'just app staged build'" >&2
+        exit 1
+    fi
+fi
+
+# Launch the app with the target path as argument
+# Run in background and detach so CLI returns immediately
+"$APP_PATH/Contents/MacOS/staged" "$TARGET_PATH" &>/dev/null &
+disown

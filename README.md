@@ -15,24 +15,24 @@ just setup
 Then run an app:
 
 ```bash
-just dev          # start Mark
-just dev staged   # start Staged
+just dev          # start Staged
+just dev differ   # start Differ
 ```
 
 ## App Installation
 
 For end-user installs:
 
-- Mark (macOS): `curl -fsSL https://raw.githubusercontent.com/block/builderbot/main/apps/mark/install.sh | bash`
-- Staged: no standalone installer yet; run from source with `just dev staged` or build with `just app staged build`
+- Staged (macOS): `curl -fsSL https://raw.githubusercontent.com/block/builderbot/main/apps/staged/install.sh | bash`
+- Differ: no standalone installer yet; run from source with `just dev differ` or build with `just app differ build`
 
 ## Command Guide
 
 The root `justfile` supports both styles:
 
 ```bash
-just dev staged     # verb-first (recommended for humans)
-just app staged dev # explicit delegation form
+just dev differ     # verb-first (recommended for humans)
+just app differ dev # explicit delegation form
 ```
 
 Useful commands:
@@ -40,10 +40,10 @@ Useful commands:
 ```bash
 just apps         # list app names
 just setup        # first-time setup (hooks + JS deps)
-just dev          # run Mark app
-just dev staged   # run Staged app
-just mark         # alias for `just app mark dev`
+just dev          # run Staged app
+just dev differ   # run Differ app
 just staged       # alias for `just app staged dev`
+just differ       # alias for `just app differ dev`
 just check        # full non-modifying checks
 just ci           # alias of `just check`
 just fmt          # format repo
@@ -53,8 +53,8 @@ just test         # run Rust workspace tests
 
 ## Repo Layout
 
-- `apps/mark`: main desktop app.
-- `apps/staged`: standalone staged/diff app.
+- `apps/staged`: main desktop app.
+- `apps/differ`: standalone diff app.
 - `packages/diff-viewer`: shared Svelte diff viewer package.
 - `crates/`: shared Rust crates.
 - `scripts/`: helper scripts used by app tooling.
@@ -63,14 +63,14 @@ just test         # run Rust workspace tests
 
 Each app has its own `justfile` for app-specific workflows:
 
-- `apps/mark/justfile`
 - `apps/staged/justfile`
+- `apps/differ/justfile`
 
 Use root delegation to run any app recipe:
 
 ```bash
-just app mark ci
-just app staged build
+just app staged ci
+just app differ build
 ```
 
 ## Troubleshooting
@@ -84,4 +84,4 @@ just app staged build
 
 ## More Docs
 
-- Mark app docs: `apps/mark/README.md`
+- Staged app docs: `apps/staged/README.md`

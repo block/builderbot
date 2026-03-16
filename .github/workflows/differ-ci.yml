@@ -1,26 +1,26 @@
-name: Mark CI
+name: Differ CI
 
 on:
   pull_request:
     branches: [main]
     paths:
-      - "apps/staged/**"
+      - "apps/differ/**"
       - "packages/**"
       - "crates/**"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "package.json"
-      - ".github/workflows/mark-ci.yml"
+      - ".github/workflows/differ-ci.yml"
   push:
     branches: [main]
     paths:
-      - "apps/staged/**"
+      - "apps/differ/**"
       - "packages/**"
       - "crates/**"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "package.json"
-      - ".github/workflows/mark-ci.yml"
+      - ".github/workflows/differ-ci.yml"
   workflow_dispatch:
 
 env:
@@ -44,7 +44,7 @@ jobs:
       # Cache Cargo dependencies
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          workspaces: apps/staged/src-tauri
+          workspaces: apps/differ/src-tauri
 
       # Install system dependencies for Tauri (Linux)
       - name: Install Tauri dependencies (Linux)
@@ -69,8 +69,8 @@ jobs:
       - name: Install dependencies
         run: |
           pnpm install --frozen-lockfile
-          cd apps/staged/src-tauri && cargo fetch
+          cd apps/differ/src-tauri && cargo fetch
 
       # Run all checks via the app justfile
       - name: Check all (fmt, lint, typecheck)
-        run: just -f apps/staged/justfile ci
+        run: just -f apps/differ/justfile ci

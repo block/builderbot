@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "apps/differ/**"
+      - "apps/staged/**"
       - "packages/**"
       - "crates/**"
       - "pnpm-lock.yaml"
@@ -14,7 +14,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "apps/differ/**"
+      - "apps/staged/**"
       - "packages/**"
       - "crates/**"
       - "pnpm-lock.yaml"
@@ -44,7 +44,7 @@ jobs:
       # Cache Cargo dependencies
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          workspaces: apps/differ/src-tauri
+          workspaces: apps/staged/src-tauri
 
       # Install system dependencies for Tauri (Linux)
       - name: Install Tauri dependencies (Linux)
@@ -69,8 +69,8 @@ jobs:
       - name: Install dependencies
         run: |
           pnpm install --frozen-lockfile
-          cd apps/differ/src-tauri && cargo fetch
+          cd apps/staged/src-tauri && cargo fetch
 
       # Run all checks via the app justfile
       - name: Check all (fmt, lint, typecheck)
-        run: just -f apps/differ/justfile ci
+        run: just -f apps/staged/justfile ci

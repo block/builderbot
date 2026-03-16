@@ -36,6 +36,8 @@
     pendingDropNotes?: { key: string; title: string }[];
     /** Placeholder items for newly started sessions before timeline persistence catches up. */
     pendingItems?: PendingItem[];
+    /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */
+    prunedSessionIds?: Set<string>;
     /** Existing timeline rows currently being deleted (rendered in-place as deleting). */
     deletingItems?: { type: 'commit' | 'note' | 'review' | 'image'; id: string }[];
     onSessionClick?: (sessionId: string) => void;
@@ -69,6 +71,7 @@
     repoDir,
     pendingDropNotes = [],
     pendingItems = [],
+    prunedSessionIds = new Set(),
     deletingItems = [],
     onSessionClick,
     onCommitClick,
@@ -87,6 +90,30 @@
     newSessionDisabled = false,
     footerActions,
   }: Props = $props();
+
+  // ── Suppress transitions when a pending item is replaced by a real one ──
+  //
+  // When a pending session placeholder is pruned because the real timeline
+  // row arrived, the parent passes the pruned session IDs via the
+  // prunedSessionIds prop.  Both the pending item removal and the real
+  // timeline data arrive in the same synchronous block (inside loadTimeline),
+  // so Svelte batches them into a single render cycle.
+  //
+  // We suppress the slide-in on the new real item and the slide-out on
+  // the departing pending item so neither animates — the real row simply
+  // replaces the placeholder in place.
+
+  /**
+   * Slide transition that skips animation when the given session ID is in the
+   * pruned set — used for both the intro on the arriving real row and the outro
+   * on the departing pending row so neither side animates during replacement.
+   */
+  function maybeSlide(node: Element, params: { sessionId?: string }) {
+    if (params.sessionId && prunedSessionIds.has(params.sessionId)) {
+      return { duration: 0 };
+    }
+    return slide(node, { duration: 200 });
+  }
 
   let liveSessionHints = $state<Record<string, string>>({});
   const liveSessionHintPoller = createLiveSessionHints(
@@ -420,7 +447,7 @@
   <!-- Unified timeline (vertical) -->
   <div class="timeline">
     {#each items as item, index (item.key)}
-      <div transition:slide={{ duration: 200 }}>
+      <div in:maybeSlide={{ sessionId: item.sessionId }} out:slide={{ duration: 200 }}>
         <TimelineRow
           type={item.type}
           title={item.title}
@@ -454,7 +481,7 @@
       </div>
     {/each}
     {#each pendingItems as item, index (item.key)}
-      <div transition:slide={{ duration: 200 }}>
+      <div in:slide={{ duration: 200 }} out:maybeSlide={{ sessionId: item.sessionId }}>
         <TimelineRow
           type={item.type}
           title={item.title}

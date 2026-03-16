@@ -170,6 +170,9 @@
     [...deletingImageIds].map((id) => ({ type: 'image' as const, id }))
   );
 
+  /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */
+  let prunedSessionIds = $state<Set<string>>(new Set());
+
   // Confirm delete dialog
   let confirmDelete = $state<{
     title: string;
@@ -229,9 +232,6 @@
           return;
         }
 
-        sessionMgr.pendingSessionItems = sessionMgr.pendingSessionItems.filter(
-          (item) => item.sessionId !== eventSessionId
-        );
         loadTimeline();
         // Handle PR session completion
         if (prButton && eventSessionId === prButton.getPrSessionId()) {
@@ -286,7 +286,7 @@
     try {
       const nextTimeline = await commands.getBranchTimeline(branch.id, { force: !isInitialLoad });
       timeline = nextTimeline;
-      sessionMgr.prunePendingSessionItems(nextTimeline);
+      prunedSessionIds = sessionMgr.prunePendingSessionItems(nextTimeline);
       void loadTimelineReviewDetails(nextTimeline.reviews);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -706,6 +706,7 @@
           repoDir={branch.worktreePath}
           pendingDropNotes={isLocal ? pendingDropNotes : undefined}
           pendingItems={sessionMgr.pendingSessionItems}
+          {prunedSessionIds}
           deletingItems={timelineDeletingItems}
           reviewCommentBreakdown={timelineReviewDetailsById}
           onSessionClick={(sid) => sessionMgr.handleTimelineSessionClick(sid)}

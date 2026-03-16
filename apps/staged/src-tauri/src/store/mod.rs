@@ -1,12 +1,14 @@
 //! SQLite storage for Staged.
 //!
-//! A `schema_version` table tracks compatibility. Fresh installs bootstrap
-//! from the current baseline schema and older versioned databases are
-//! upgraded in place in [`Store::init_schema`]. Only unsupported
-//! pre-versioning databases trigger a reset-and-recreate dialog.
+//! Schema migrations are tracked with SQLite `user_version` via
+//! `rusqlite_migration`. Fresh installs bootstrap from the migration
+//! directory and future releases append new migrations in place. Databases
+//! with user tables but no schema version are treated as unsupported and
+//! trigger a reset-and-recreate dialog.
 //!
-//! Tables: schema_version, projects, project_repos, branches, workdirs, commits,
-//! sessions, session_messages, notes, project_notes, reviews, images, action_contexts, repo_actions.
+//! Tables: app_metadata, projects, project_repos, branches, workdirs, commits,
+//! sessions, session_messages, notes, project_notes, reviews, images,
+//! action_contexts, repo_actions.
 
 pub mod models;
 
@@ -58,26 +60,6 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
-// =============================================================================
-// Schema version
-// =============================================================================
-
-/// The schema version written by this build.
-///
-/// Bump this whenever the schema changes.
-/// Many app versions may share the same schema version.
-pub const SCHEMA_VERSION: i64 = 22;
-
-/// Oldest schema version we can migrate forward from.
-///
-/// Databases with a version in `MIN_MIGRATABLE_VERSION..=SCHEMA_VERSION` are
-/// upgraded in place by [`Store::init_schema`]. Databases older than this are
-/// pre-versioning beta databases that require a full wipe.
-///
-/// Version `0` is reserved for a freshly initialized but not-yet-migrated
-/// database, so it is also considered migratable.
-pub const MIN_MIGRATABLE_VERSION: i64 = 0;
-
 /// The app version of this build, pulled from Cargo.toml at compile time.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -102,10 +84,10 @@ pub enum DbCompatibility {
 /// Check whether an existing database file is compatible with this build.
 ///
 /// Returns [`DbCompatibility::Ok`] if the file doesn't exist (fresh DB),
-/// has a matching schema version, or has a version within the migratable
-/// range ([`MIN_MIGRATABLE_VERSION`]..=`SCHEMA_VERSION`). Returns
-/// [`DbCompatibility::NeedsReset`] for unsupported pre-versioning schemas or
-/// [`DbCompatibility::TooNew`] for newer ones.
+/// is empty, or has a schema version that this build can migrate from.
+/// Returns [`DbCompatibility::NeedsReset`] for unsupported databases with
+/// user tables but no `user_version`, or [`DbCompatibility::TooNew`] for
+/// newer ones.
 ///
 /// This opens a temporary read-only connection and closes it before
 /// returning — it does **not** create a `Store`.
@@ -122,63 +104,57 @@ pub fn check_db_compatibility(path: &Path) -> Result<DbCompatibility, String> {
             "SELECT COUNT(*)
              FROM sqlite_master
              WHERE type = 'table'
-               AND name NOT LIKE 'sqlite_%'
-               AND name != 'schema_version'",
+               AND name NOT LIKE 'sqlite_%'",
             [],
             |row| row.get::<_, i64>(0),
         )
     };
 
-    let table_exists: bool = conn
+    let user_version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| format!("Cannot read schema version: {e}"))?;
+
+    let has_app_metadata = conn
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'",
+            "SELECT COUNT(*)
+             FROM sqlite_master
+             WHERE type = 'table' AND name = 'app_metadata'",
             [],
             |row| row.get::<_, i64>(0),
         )
         .map(|count| count > 0)
         .unwrap_or(false);
 
-    if !table_exists {
-        let user_table_count = user_table_count().unwrap_or(0);
+    let db_app_version = if has_app_metadata {
+        conn.query_row(
+            "SELECT app_version FROM app_metadata WHERE id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("Cannot read app metadata: {e}"))?
+    } else {
+        None
+    }
+    .unwrap_or_else(|| "0.1.0".to_string());
+    let user_table_count = user_table_count().unwrap_or(0);
 
+    if user_version == 0 {
         if user_table_count == 0 {
             return Ok(DbCompatibility::Ok);
         }
-
-        // Pre-versioning beta database — this shape predates the stable
-        // versioned store and still requires a reset.
-        return Ok(DbCompatibility::NeedsReset {
-            db_app_version: "0.1.0".to_string(),
-        });
-    }
-
-    let version_row: Option<(i64, Option<String>)> = conn
-        .query_row(
-            "SELECT version, app_version FROM schema_version LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(|e| format!("Cannot read schema version: {e}"))?;
-
-    let (version, app_version) = version_row.unwrap_or((0, None));
-
-    let db_app_version = app_version.unwrap_or_else(|| "0.1.0".to_string());
-    let user_table_count = user_table_count().unwrap_or(0);
-
-    if version == 0 && user_table_count > 0 {
         return Ok(DbCompatibility::NeedsReset { db_app_version });
     }
 
-    if version == SCHEMA_VERSION {
-        return Ok(DbCompatibility::Ok);
+    if user_table_count == 0 {
+        return Ok(DbCompatibility::NeedsReset { db_app_version });
     }
 
-    if version > SCHEMA_VERSION {
+    let pending = migrations::pending_migrations(&conn)
+        .map_err(|e| format!("Cannot evaluate database migrations: {e}"))?;
+    if pending < 0 {
         Ok(DbCompatibility::TooNew { db_app_version })
-    } else if version >= MIN_MIGRATABLE_VERSION {
-        // We have incremental migrations for this range — let Store::new()
-        // apply them.
+    } else if user_version > 0 {
         Ok(DbCompatibility::Ok)
     } else {
         Ok(DbCompatibility::NeedsReset { db_app_version })
@@ -253,8 +229,8 @@ impl Store {
     }
 
     fn init_schema(&self) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
-        migrations::initialize(&conn)
+        let mut conn = self.conn.lock().unwrap();
+        migrations::initialize(&mut conn)
     }
 }
 

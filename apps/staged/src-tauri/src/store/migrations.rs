@@ -5,6 +5,9 @@
 //! compatibility steps in this file.
 //! New schema changes after the baseline should be appended as ordered SQL
 //! migrations in `store/migrations/`.
+//!
+//! See `store/migrations/README.md` for the migration workflow and naming
+//! conventions.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

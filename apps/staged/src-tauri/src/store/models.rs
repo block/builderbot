@@ -95,6 +95,11 @@ impl Project {
     }
 
     pub fn with_subpath(mut self, subpath: String) -> Self {
+        if let Some(repo_name) = self.repo_name().map(str::to_string) {
+            if self.name == repo_name {
+                self.name = format!("{repo_name} ({subpath})");
+            }
+        }
         self.subpath = Some(subpath);
         self
     }

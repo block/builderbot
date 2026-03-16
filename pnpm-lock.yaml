@@ -8,7 +8,7 @@ importers:
 
   .: {}
 
-  apps/mark:
+  apps/staged:
     dependencies:
       '@builderbot/diff-viewer':
         specifier: workspace:*
@@ -172,7 +172,7 @@ importers:
         specifier: ^4.0.0
         version: 4.0.18(@types/node@24.11.0)(jiti@2.6.1)(jsdom@28.1.0)(lightningcss@1.31.1)
 
-  apps/staged:
+  apps/differ:
     dependencies:
       '@builderbot/diff-viewer':
         specifier: workspace:*

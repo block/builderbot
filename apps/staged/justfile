@@ -1,4 +1,4 @@
-# Staged - Standalone Diff Viewer
+# Staged - AI-Powered Development Workspace
 # Run `just dev` to start development.
 
 # ============================================================================
@@ -14,13 +14,18 @@ install:
 # Development
 # ============================================================================
 
-# Run the app in development mode
-dev:
+# Run the app in development mode (optionally point to another repo)
+dev repo="":
     #!/usr/bin/env bash
     set -euo pipefail
+
+    # Install JS deps if needed
     [[ -d node_modules ]] || pnpm install
 
-    # Derive a stable port from the working directory
+    # Derive a stable port from the working directory so the same worktree
+    # always gets the same port. This avoids changing TAURI_CONFIG between
+    # runs, which would invalidate Cargo's build cache and trigger a full
+    # Rust rebuild every time.
     VITE_PORT=$(python3 -c "import hashlib,os; h=int(hashlib.sha256(os.getcwd().encode()).hexdigest(),16); print(10000 + h % 55000)")
     export VITE_PORT
     TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${VITE_PORT} --strictPort\"}}"
@@ -44,6 +49,7 @@ dev:
     fi
 
     echo "Starting on port ${VITE_PORT}"
+    {{ if repo != "" { "export STAGED_REPO=" + repo } else { "" } }}
     pnpm exec tauri dev --config "$TAURI_CONFIG"
 
 # Build the app for production

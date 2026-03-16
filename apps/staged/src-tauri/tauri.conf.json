@@ -1,24 +1,29 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Staged",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "identifier": "com.staged.app",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5175",
-    "beforeDevCommand": "VITE_PORT=${VITE_PORT:-5175} pnpm run dev",
+    "devUrl": "http://localhost:5174",
+    "beforeDevCommand": "VITE_PORT=${VITE_PORT:-5174} pnpm run dev",
     "beforeBuildCommand": "pnpm run build"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Staged",
-        "width": 1400,
-        "height": 900,
-        "minWidth": 900,
-        "minHeight": 600,
+        "width": 1600,
+        "height": 1200,
+        "minWidth": 1100,
+        "minHeight": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false,
         "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 12, "y": 22 }
       }
     ],
     "security": {
@@ -34,6 +39,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "infoPlist": "Info.plist"
+    }
   }
 }

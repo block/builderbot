@@ -18,7 +18,7 @@ pre-push:
       run: cargo clippy --workspace -- -D warnings
     crates-test:
       run: cargo test --workspace
-    mark-ci:
-      run: just app mark ci
     staged-ci:
       run: just app staged ci
+    differ-ci:
+      run: just app differ ci

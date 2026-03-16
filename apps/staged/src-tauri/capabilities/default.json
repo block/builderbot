@@ -6,6 +6,12 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
-    "store:default"
+    "core:window:allow-show",
+    "core:window:allow-close",
+    "clipboard-manager:allow-write-text",
+    "window-state:default",
+    "store:default",
+    "core:window:allow-set-badge-count",
+    "dialog:default"
   ]
 }

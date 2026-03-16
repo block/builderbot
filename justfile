@@ -2,9 +2,9 @@
 # Run `just setup` once after cloning.
 #
 # Common flows:
-#   just dev            # Start Mark
-#   just dev staged     # Start Staged
-#   just app mark ci    # Run any app recipe
+#   just dev            # Start Staged
+#   just dev differ     # Start Differ
+#   just app staged ci  # Run any app recipe
 #   just check          # Full non-modifying checks
 
 # Default: list available recipes
@@ -33,7 +33,7 @@ apps:
         basename "$dir"
     done
 
-# Run a recipe in a specific app (e.g. `just app mark dev`)
+# Run a recipe in a specific app (e.g. `just app staged dev`)
 app name recipe="dev" *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -50,16 +50,16 @@ app name recipe="dev" *args:
 
     just -f "$app_justfile" {{recipe}} {{args}}
 
-# Human-friendly shortcuts (supports `just dev staged` style)
-dev app="mark" *args:
+# Human-friendly shortcuts (supports `just dev differ` style)
+dev app="staged" *args:
     just app {{app}} dev {{args}}
 
 # Convenience aliases
-mark recipe="dev" *args:
-    just app mark {{recipe}} {{args}}
-
 staged recipe="dev" *args:
     just app staged {{recipe}} {{args}}
+
+differ recipe="dev" *args:
+    just app differ {{recipe}} {{args}}
 
 # ============================================================================
 # Cross-Cutting

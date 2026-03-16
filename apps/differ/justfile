@@ -1,0 +1,88 @@
+# Differ - Standalone Diff Viewer
+# Run `just dev` to start development.
+
+# ============================================================================
+# Setup
+# ============================================================================
+
+# First-time setup: install all dependencies
+install:
+    pnpm install
+    cd src-tauri && cargo fetch
+
+# ============================================================================
+# Development
+# ============================================================================
+
+# Run the app in development mode
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [[ -d node_modules ]] || pnpm install
+
+    # Derive a stable port from the working directory
+    VITE_PORT=$(python3 -c "import hashlib,os; h=int(hashlib.sha256(os.getcwd().encode()).hexdigest(),16); print(10000 + h % 55000)")
+    export VITE_PORT
+    TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${VITE_PORT} --strictPort\"}}"
+
+    # In worktrees, generate a labeled icon so you can tell instances apart
+    if git rev-parse --is-inside-work-tree &>/dev/null; then
+        GIT_DIR=$(git rev-parse --git-dir)
+        if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
+            BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+            WORKTREE_LABEL="${BRANCH_NAME##*/}"
+
+            ICON_DIR="$(pwd)/src-tauri/target/dev-icons"
+            mkdir -p "$ICON_DIR"
+            DEV_ICON="$ICON_DIR/icon.icns"
+
+            if swift ../../scripts/generate-dev-icon.swift src-tauri/icons/icon.icns "$DEV_ICON" "$WORKTREE_LABEL"; then
+                echo "🌳 Worktree: ${WORKTREE_LABEL}"
+                TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${VITE_PORT} --strictPort\"},\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
+            fi
+        fi
+    fi
+
+    echo "Starting on port ${VITE_PORT}"
+    pnpm exec tauri dev --config "$TAURI_CONFIG"
+
+# Build the app for production
+build:
+    pnpm run tauri:build
+
+# ============================================================================
+# Code Quality
+# ============================================================================
+
+# Auto-format all code
+fmt:
+    cd src-tauri && cargo fmt
+    pnpm exec prettier --write "src/**/*.{ts,svelte,css,html}"
+
+# Verify formatting without modifying files (used by CI/hooks)
+fmt-check:
+    cd src-tauri && cargo fmt --check
+    pnpm exec prettier --check "src/**/*.{ts,svelte,css,html}"
+
+# Lint Rust code with clippy
+lint:
+    cd src-tauri && cargo clippy -- -D warnings
+
+# Type-check frontend (Svelte + TypeScript)
+typecheck:
+    pnpm run check
+
+# Format, then verify everything passes — run before pushing
+check-all: fmt lint typecheck
+
+# Verify everything without modifying files — for CI
+ci: fmt-check lint typecheck
+
+# ============================================================================
+# Maintenance
+# ============================================================================
+
+# Delete all build artifacts and dependencies
+clean:
+    rm -rf dist node_modules
+    rm -rf src-tauri/target

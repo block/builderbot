@@ -10,17 +10,12 @@
   import Spinner from '../../shared/Spinner.svelte';
   import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
-  import { parseGitHubUrl } from '../../shared/githubUrl';
+  import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
 
-  export interface RepoPickerSelection {
-    nameWithOwner: string;
-    subpath?: string;
-    branchName?: string;
-    prNumber?: number;
-  }
+  export type { RepoSelection as RepoPickerSelection };
 
   interface Props {
-    onSelect: (selection: RepoPickerSelection) => void;
+    onSelect: (selection: RepoSelection) => void;
     onBack: () => void;
     excludeRepos?: Set<string>;
     showHeader?: boolean;

@@ -1,4 +1,9 @@
-import type { RepoSelection } from '../features/projects/RepoSearchInput.svelte';
+export interface RepoSelection {
+  nameWithOwner: string;
+  subpath?: string;
+  prNumber?: number;
+  branchName?: string;
+}
 
 /**
  * Parse a GitHub URL into a RepoSelection.
@@ -22,7 +27,7 @@ export function parseGitHubUrl(input: string): RepoSelection | null {
   // Match branch/tree URLs: github.com/owner/repo/tree/branch-name
   // Branch names can contain slashes, so capture everything after /tree/
   const treeMatch = trimmed.match(
-    /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)\/tree\/(.+?)(?:\?.*)?$/
+    /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)\/tree\/(.+?)(?:[?#].*)?$/
   );
   if (treeMatch) {
     return { nameWithOwner: treeMatch[1], branchName: treeMatch[2] };

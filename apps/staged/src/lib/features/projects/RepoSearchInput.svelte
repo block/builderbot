@@ -12,14 +12,9 @@
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
-  import { parseGitHubUrl } from '../../shared/githubUrl';
+  import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
 
-  export interface RepoSelection {
-    nameWithOwner: string;
-    subpath?: string;
-    prNumber?: number;
-    branchName?: string;
-  }
+  export type { RepoSelection };
 
   interface Props {
     onSelect: (selection: RepoSelection) => void;

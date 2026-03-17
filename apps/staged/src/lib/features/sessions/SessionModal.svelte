@@ -40,7 +40,6 @@
     Paperclip,
     ImagePlus,
     Plus,
-    FileText,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { marked } from 'marked';
@@ -830,8 +829,7 @@
             onclick={() => onOpenNote?.(noteInfo!.id, noteInfo!.title, noteInfo!.content)}
             title="Open note"
           >
-            <FileText size={16} />
-            <span>Note</span>
+            View note
           </button>
         {/if}
         <button class="close-btn" onclick={requestClose} title="Close (Esc)">
@@ -1267,10 +1265,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 4px;
-    padding: 4px 8px;
+    padding: 4px 10px;
     background: none;
-    border: none;
+    border: 1px solid var(--border-primary);
     border-radius: 6px;
     color: var(--text-muted);
     cursor: pointer;
@@ -1278,12 +1275,14 @@
     font-size: 12px;
     transition:
       color 0.1s,
-      background-color 0.1s;
+      background-color 0.1s,
+      border-color 0.1s;
   }
 
   .header-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+    border-color: var(--text-muted);
   }
 
   .close-btn {

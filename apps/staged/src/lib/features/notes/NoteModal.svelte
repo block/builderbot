@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { X, Copy, Check, MessageSquare } from 'lucide-svelte';
+  import { X, Copy, Check } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
@@ -183,8 +183,7 @@
             onclick={() => onOpenSession?.(sessionId!)}
             title="Open chat session"
           >
-            <MessageSquare size={16} />
-            <span>Chat session</span>
+            View chat
           </button>
         {/if}
         <button
@@ -294,10 +293,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 4px;
-    padding: 4px 8px;
+    padding: 4px 10px;
     background: none;
-    border: none;
+    border: 1px solid var(--border-primary);
     border-radius: 6px;
     color: var(--text-muted);
     cursor: pointer;
@@ -305,12 +303,14 @@
     font-size: 12px;
     transition:
       color 0.1s,
-      background-color 0.1s;
+      background-color 0.1s,
+      border-color 0.1s;
   }
 
   .header-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+    border-color: var(--text-muted);
   }
 
   .header-btn.copied {

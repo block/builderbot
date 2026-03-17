@@ -313,12 +313,15 @@
   // Track which projects are safe to delete (for button styling)
   let safeToDeleteProjects = $state<Set<string>>(new Set());
 
-  // Update safe-to-delete status when branches change
+  // Update safe-to-delete status when branches change.
+  // Only check visible projects — calling hasUnpushedCommits for every
+  // project wastes IPC round-trips (especially expensive for remote branches)
+  // and the result is only consumed in the visibleProjects render loop.
   $effect(() => {
     const updateSafeStatus = async () => {
       const nextSafe = new Set<string>();
 
-      for (const project of projects) {
+      for (const project of visibleProjects) {
         const branches = branchesByProject.get(project.id) || [];
         const repoCount = repoCountsByProject.get(project.id) || 0;
 

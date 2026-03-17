@@ -313,12 +313,15 @@
   // Track which projects are safe to delete (for button styling)
   let safeToDeleteProjects = $state<Set<string>>(new Set());
 
-  // Update safe-to-delete status when branches change
+  // Update safe-to-delete status when branches change.
+  // Only check visible projects — calling hasUnpushedCommits for every
+  // project wastes IPC round-trips (especially expensive for remote branches)
+  // and the result is only consumed in the visibleProjects render loop.
   $effect(() => {
     const updateSafeStatus = async () => {
       const nextSafe = new Set<string>();
 
-      for (const project of projects) {
+      for (const project of visibleProjects) {
         const branches = branchesByProject.get(project.id) || [];
         const repoCount = repoCountsByProject.get(project.id) || 0;
 
@@ -328,12 +331,16 @@
           continue;
         }
 
-        // Check if all branches have merged PRs and no unpushed changes
+        // Check if all branches have merged PRs and no unpushed changes.
+        // Skip the expensive hasUnpushedCommits check for remote branches —
+        // their commits live on the workspace and the SSH round-trip (~5s)
+        // blocks the UI. Treat merged remote branches as safe.
         if (branches.length > 0) {
           const allSafe = await Promise.all(
             branches.map(async (branch) => {
               const isMerged = branch.prState === 'MERGED';
               if (!isMerged) return false;
+              if (branch.branchType === 'remote') return true;
 
               try {
                 const hasUnpushed = await commands.hasUnpushedCommits(branch.id);
@@ -410,11 +417,14 @@
       return;
     }
 
-    // Check if all branches have merged PRs and no unpushed changes
+    // Check if all branches have merged PRs and no unpushed changes.
+    // Skip the expensive hasUnpushedCommits check for remote branches —
+    // their commits live on the workspace and the SSH round-trip blocks the UI.
     const allSafe = await Promise.all(
       branches.map(async (branch) => {
         const isMerged = branch.prState === 'MERGED';
         if (!isMerged) return false;
+        if (branch.branchType === 'remote') return true;
 
         // Check for unpushed commits
         try {

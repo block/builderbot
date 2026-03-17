@@ -32,6 +32,6 @@ pub use worktree::{
     create_worktree_for_existing_branch_at_path, create_worktree_from_pr,
     create_worktree_from_pr_at_path, get_commits_since_base, get_full_commit_log, get_head_sha,
     get_parent_commit, has_unpushed_commits, list_worktrees, project_worktree_path_for,
-    project_worktree_root_for, remove_worktree, reset_to_commit, switch_branch,
-    update_branch_from_pr, worktree_path_for, CommitInfo, UpdateFromPrResult,
+    project_worktree_root_for, remote_branch_exists, remove_worktree, reset_to_commit,
+    switch_branch, update_branch_from_pr, worktree_path_for, CommitInfo, UpdateFromPrResult,
 };

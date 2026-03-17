@@ -179,15 +179,6 @@
         onClose={closeSearch}
       />
       <div class="header-actions">
-        {#if sessionId && onOpenSession}
-          <button
-            class="header-btn"
-            onclick={() => onOpenSession?.(sessionId!)}
-            title="Open chat session"
-          >
-            View chat
-          </button>
-        {/if}
         <button
           class="header-btn"
           class:copied
@@ -200,6 +191,15 @@
             <Copy size={16} />
           {/if}
         </button>
+        {#if sessionId && onOpenSession}
+          <button
+            class="header-btn"
+            onclick={() => onOpenSession?.(sessionId!)}
+            title="Open chat session"
+          >
+            View chat
+          </button>
+        {/if}
         <button class="close-btn" onclick={onClose} title="Close (Esc)">
           <X size={16} />
         </button>

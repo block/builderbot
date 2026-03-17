@@ -166,7 +166,9 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
     <header class="modal-header">
-      <h2 class="modal-title">{title}</h2>
+      <div class="header-content">
+        <span class="header-title">{title}</span>
+      </div>
       <InContentSearch
         visible={searchVisible}
         {matchCount}
@@ -244,21 +246,27 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
+    padding: 12px 16px;
     border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
     gap: 12px;
   }
 
-  .modal-title {
-    margin: 0;
-    font-size: var(--size-base);
+  .header-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .header-title {
+    font-size: var(--size-sm);
     font-weight: 600;
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    min-width: 0;
   }
 
   .close-btn {

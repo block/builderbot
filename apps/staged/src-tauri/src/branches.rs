@@ -809,10 +809,22 @@ pub async fn setup_worktree(
         )
         .map_err(|e| e.to_string())?
     } else {
+        // If the branch exists on the remote (e.g. from an existing PR),
+        // start the new local branch from the remote tracking ref so it
+        // includes the PR's commits. Otherwise fall back to base_branch
+        // for genuinely new branches.
+        let remote_ref = format!("origin/{}", branch.branch_name);
+        let start_point = if git::remote_branch_exists(&repo_path, &branch.branch_name)
+            .map_err(|e| e.to_string())?
+        {
+            &remote_ref
+        } else {
+            &branch.base_branch
+        };
         match create_worktree_with_fallback(
             &repo_path,
             &branch.branch_name,
-            &branch.base_branch,
+            start_point,
             &desired_worktree_path,
         ) {
             Ok(path) => path,

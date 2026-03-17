@@ -295,7 +295,7 @@
     justify-content: center;
     padding: 4px 10px;
     background: none;
-    border: 1px solid var(--border-primary);
+    border: 1px solid var(--border-muted);
     border-radius: 6px;
     color: var(--text-muted);
     cursor: pointer;

@@ -57,6 +57,8 @@
   let showDropdown = $state(false);
   let highlightedIndex = $state(-1);
   let inputEl: HTMLInputElement | undefined = $state();
+  /** Generation counter to discard stale async responses when repo changes rapidly. */
+  let fetchGeneration = 0;
 
   // Fetch PRs and branches when repo changes
   $effect(() => {
@@ -69,12 +71,15 @@
   });
 
   async function fetchData(ghRepo: string) {
+    const gen = ++fetchGeneration;
     loading = true;
     try {
       const [prs, refs] = await Promise.all([
         commands.listPullRequests(ghRepo).catch(() => [] as PullRequest[]),
         commands.listGitBranches(ghRepo).catch(() => [] as BranchRef[]),
       ]);
+      // Discard results if a newer fetch was started while we were waiting
+      if (gen !== fetchGeneration) return;
       pullRequests = prs;
       branches = refs;
 
@@ -137,10 +142,11 @@
     return names;
   });
 
-  // Update isNewBranch whenever value or known branches change
+  // Update isNewBranch whenever value or known branches change.
+  // Gate on !loading to avoid a flash of "New branch" while data is being fetched.
   $effect(() => {
     const trimmed = value.trim();
-    isNewBranch = trimmed.length > 0 && !knownBranches.has(trimmed);
+    isNewBranch = trimmed.length > 0 && !loading && !knownBranches.has(trimmed);
   });
 
   /** Build a unified list of picker items from PRs and branches. */
@@ -159,7 +165,7 @@
     for (const ref of branches) {
       // Strip "origin/" prefix for display
       const name = ref.name.replace(/^origin\//, '');
-      // Skip the default branch and any refs already covered by PRs
+      // Skip any refs already covered by PRs (avoids duplicate entries)
       if (items.some((i) => i.branchName === name)) continue;
       items.push({
         kind: 'branch',

@@ -12,8 +12,6 @@
   import type { GitHubRepo, RecentRepo } from '../../types';
   import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
 
-  export type { RepoSelection as RepoPickerSelection };
-
   interface Props {
     onSelect: (selection: RepoSelection) => void;
     onBack: () => void;

@@ -165,6 +165,7 @@
   /** Derive a human-friendly project name from a branch name like "feat/dark-mode". */
   function nameFromBranch(branch: string): string {
     const last = branch.split('/').pop() ?? branch;
+    if (!last) return branch;
     const spaced = last.replace(/[-_]/g, ' ');
     return spaced.charAt(0).toUpperCase() + spaced.slice(1);
   }

@@ -34,6 +34,8 @@ export function parseGitHubUrl(input: string): RepoSelection | null {
   }
 
   // Plain repo URL: github.com/owner/repo
+  // NOTE: This pattern also matches PR and tree URLs (capturing just owner/repo),
+  // so it must remain last — the ordering of these three checks is load-bearing.
   const repoMatch = trimmed.match(
     /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\/.*|\.git)?$/
   );

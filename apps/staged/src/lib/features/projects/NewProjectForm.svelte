@@ -19,6 +19,7 @@
   import type { SubpathInputApi } from './SubpathInput.svelte';
   import BranchPicker, { type BranchSelection } from './BranchPicker.svelte';
   import type { RepoSelection } from './RepoSearchInput.svelte';
+  import { parseGitHubUrl } from '../../shared/githubUrl';
   import type { PullRequest } from '../../types';
 
   interface Props {
@@ -174,6 +175,14 @@
     }
   }
 
+  function handleNameInput() {
+    const parsed = parseGitHubUrl(name);
+    if (parsed) {
+      name = '';
+      handleRepoSelected(parsed);
+    }
+  }
+
   let pendingPrNumber = $state<number | null>(null);
   let pendingBranchName = $state<string | null>(null);
 
@@ -200,6 +209,7 @@
       autocapitalize="off"
       spellcheck={false}
       autofocus
+      oninput={handleNameInput}
     />
   </div>
 

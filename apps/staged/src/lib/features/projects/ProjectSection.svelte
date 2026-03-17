@@ -31,7 +31,7 @@
   import BranchCard from '../branches/BranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import GitHubRepoPicker from './GitHubRepoPicker.svelte';
-  import type { RepoPickerSelection } from './GitHubRepoPicker.svelte';
+  import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import TimelineRow from '../timeline/TimelineRow.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';

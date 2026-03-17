@@ -18,7 +18,7 @@
   import SubpathInput from './SubpathInput.svelte';
   import type { SubpathInputApi } from './SubpathInput.svelte';
   import BranchPicker, { type BranchSelection } from './BranchPicker.svelte';
-  import type { RepoSelection } from './RepoSearchInput.svelte';
+  import type { RepoSelection } from '../../shared/githubUrl';
   import { parseGitHubUrl } from '../../shared/githubUrl';
   import type { PullRequest } from '../../types';
 

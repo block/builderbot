@@ -390,7 +390,7 @@ pub fn clear_branch_pr_status(
 
 /// Check if a branch has commits that haven't been pushed to the remote.
 #[tauri::command(rename_all = "camelCase")]
-pub fn has_unpushed_commits(
+pub async fn has_unpushed_commits(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<bool, String> {
@@ -405,28 +405,36 @@ pub fn has_unpushed_commits(
         let workspace_name = branch
             .workspace_name
             .as_deref()
-            .ok_or_else(|| format!("Branch has no workspace name: {branch_id}"))?;
+            .ok_or_else(|| format!("Branch has no workspace name: {branch_id}"))?
+            .to_string();
         let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)?;
+        let branch_name = branch.branch_name.clone();
 
-        let remote_ref = format!("origin/{}", branch.branch_name);
-        // Check that the remote tracking branch exists
-        if crate::branches::run_workspace_git(
-            workspace_name,
-            repo_subpath.as_deref(),
-            &["rev-parse", "--verify", &remote_ref],
-        )
-        .is_err()
-        {
-            return Ok(false);
-        }
-        let rev_range = format!("{remote_ref}..HEAD");
-        let output = crate::branches::run_workspace_git(
-            workspace_name,
-            repo_subpath.as_deref(),
-            &["rev-list", &rev_range],
-        )
-        .map_err(|e| e.to_string())?;
-        return Ok(!output.trim().is_empty());
+        // Run the blocking SSH calls on a background thread so we don't
+        // block the Tauri IPC thread and freeze the UI.
+        return tauri::async_runtime::spawn_blocking(move || {
+            let remote_ref = format!("origin/{}", branch_name);
+            // Check that the remote tracking branch exists
+            if crate::branches::run_workspace_git(
+                &workspace_name,
+                repo_subpath.as_deref(),
+                &["rev-parse", "--verify", &remote_ref],
+            )
+            .is_err()
+            {
+                return Ok(false);
+            }
+            let rev_range = format!("{remote_ref}..HEAD");
+            let output = crate::branches::run_workspace_git(
+                &workspace_name,
+                repo_subpath.as_deref(),
+                &["rev-list", &rev_range],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(!output.trim().is_empty())
+        })
+        .await
+        .map_err(|e| format!("has_unpushed_commits task failed: {e}"))?;
     }
 
     let workdir = store

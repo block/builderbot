@@ -328,12 +328,16 @@
           continue;
         }
 
-        // Check if all branches have merged PRs and no unpushed changes
+        // Check if all branches have merged PRs and no unpushed changes.
+        // Skip the expensive hasUnpushedCommits check for remote branches —
+        // their commits live on the workspace and the SSH round-trip (~5s)
+        // blocks the UI. Treat merged remote branches as safe.
         if (branches.length > 0) {
           const allSafe = await Promise.all(
             branches.map(async (branch) => {
               const isMerged = branch.prState === 'MERGED';
               if (!isMerged) return false;
+              if (branch.branchType === 'remote') return true;
 
               try {
                 const hasUnpushed = await commands.hasUnpushedCommits(branch.id);
@@ -410,11 +414,14 @@
       return;
     }
 
-    // Check if all branches have merged PRs and no unpushed changes
+    // Check if all branches have merged PRs and no unpushed changes.
+    // Skip the expensive hasUnpushedCommits check for remote branches —
+    // their commits live on the workspace and the SSH round-trip blocks the UI.
     const allSafe = await Promise.all(
       branches.map(async (branch) => {
         const isMerged = branch.prState === 'MERGED';
         if (!isMerged) return false;
+        if (branch.branchType === 'remote') return true;
 
         // Check for unpushed commits
         try {

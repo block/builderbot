@@ -203,10 +203,11 @@
     return () => clearInterval(interval);
   });
 
-  // Re-check unpushed commits whenever the timeline refreshes and a PR exists
+  // Re-check unpushed commits whenever the timeline refreshes and a PR exists.
+  // Skip for remote branches — the SSH round-trip to check takes ~5s and
+  // blocks the UI. Remote workspace commits are already on the server.
   $effect(() => {
-    // Re-run when timeline changes (dependency) and PR exists
-    if (timeline && branch.prNumber) {
+    if (timeline && branch.prNumber && isLocal) {
       commands.hasUnpushedCommits(branch.id).then((v) => (hasUnpushed = v));
     }
   });

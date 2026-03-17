@@ -337,10 +337,31 @@ async fn clone_repo_into_workspace(
             "Failed to fetch base branch '{base_ref}' for '{repo_slug}' in workspace '{ws_name}': {e}"
         ))?;
 
+    // If the branch already exists on the remote (e.g. from an existing PR),
+    // fetch it and start from there so we pick up its commits. Otherwise fall
+    // back to starting from the base branch.
+    let has_remote_branch = if branch_name != base_ref {
+        run_workspace_git_async(
+            ws_name,
+            Some(repo_subpath),
+            &["fetch", "origin", branch_name],
+        )
+        .await
+        .is_ok()
+    } else {
+        false
+    };
+
+    let start_point = if has_remote_branch {
+        format!("origin/{branch_name}")
+    } else {
+        format!("origin/{base_ref}")
+    };
+
     run_workspace_git_async(
         ws_name,
         Some(repo_subpath),
-        &["checkout", "-B", branch_name, &format!("origin/{base_ref}")],
+        &["checkout", "-B", branch_name, &start_point],
     )
     .await
     .map_err(|e| {
@@ -1124,15 +1145,35 @@ pub async fn start_workspace(
                 ws_name,
                 ws_start_started_at.elapsed().as_millis()
             );
-            // Create the feature branch inside the workspace so work happens
-            // on `branch_name` rather than the detached base ref.
-            if let Err(e) = run_workspace_git_async(
+            // If the branch already exists on the remote (e.g. from an
+            // existing PR), fetch it and start from there so we pick up its
+            // commits. Otherwise create a fresh branch from the base ref.
+            let has_remote_branch = run_workspace_git_async(
                 ws_name,
                 repo_subpath.as_deref(),
-                &["checkout", "-b", &branch.branch_name],
+                &["fetch", "origin", &branch.branch_name],
             )
             .await
-            {
+            .is_ok();
+
+            let remote_ref = format!("origin/{}", branch.branch_name);
+            let checkout_result = if has_remote_branch {
+                run_workspace_git_async(
+                    ws_name,
+                    repo_subpath.as_deref(),
+                    &["checkout", "-B", &branch.branch_name, &remote_ref],
+                )
+                .await
+            } else {
+                run_workspace_git_async(
+                    ws_name,
+                    repo_subpath.as_deref(),
+                    &["checkout", "-b", &branch.branch_name],
+                )
+                .await
+            };
+
+            if let Err(e) = checkout_result {
                 log::warn!(
                     "failed to create branch '{}' in workspace '{}': {e}",
                     branch.branch_name,

@@ -637,16 +637,14 @@ impl ProjectToolsHandler {
             })
             .await;
 
-            match worktree_result {
-                Ok(Ok(worktree_path)) => {
-                    log::debug!(
-                        "[project_mcp] add_project_repo: worktree ready at {}",
-                        worktree_path
-                    );
+            let worktree_path = match worktree_result {
+                Ok(Ok(path)) => {
+                    log::debug!("[project_mcp] add_project_repo: worktree ready at {}", path);
                     // Notify UI that the worktree is ready so branch state updates
                     let _ = self
                         .app_handle
                         .emit("project-setup-progress", self.project_id.clone());
+                    path
                 }
                 Ok(Err(e)) => {
                     log::warn!(
@@ -665,7 +663,7 @@ impl ProjectToolsHandler {
                         "Added repository {github_repo} to project (worktree task error: {e})"
                     );
                 }
-            }
+            };
 
             // Run detect_actions + prerun actions if we have an executor
             if let (Some(executor), Some(act_registry)) =
@@ -705,6 +703,16 @@ impl ProjectToolsHandler {
                     "[project_mcp] add_project_repo: no action executor available, skipping prerun actions"
                 );
             }
+
+            // If the repo already has commits on this branch, kick off
+            // an automatic code review so the user gets immediate feedback.
+            crate::maybe_trigger_auto_review_for_new_repo(
+                &self.store,
+                &self.app_handle,
+                &branch.id,
+                Some(&worktree_path),
+            )
+            .await;
         }
 
         format!("Added repository {github_repo} to project")

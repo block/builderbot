@@ -209,6 +209,69 @@ fn confirm_reset_store(
 // Project commands
 // =============================================================================
 
+/// Check whether a newly added repo already has commits on its branch and, if
+/// so, kick off an automatic code review.
+///
+/// For **local** branches (`worktree_path: Some`) the check is done by
+/// inspecting the worktree on disk before triggering.
+/// For **remote** branches (`worktree_path: None`) the review is triggered
+/// unconditionally — the caller is responsible for ensuring the workspace is
+/// running before calling this (e.g. after `start_workspace` or
+/// `setup_remote_repo_clone` completes).
+///
+/// This is fire-and-forget — errors are logged but never propagated.
+pub(crate) async fn maybe_trigger_auto_review_for_new_repo(
+    store: &Arc<Store>,
+    app_handle: &tauri::AppHandle,
+    branch_id: &str,
+    worktree_path: Option<&str>,
+) {
+    // For local branches, check whether there are any commits on the branch
+    // relative to its base before spinning up a review session.
+    if let Some(path) = worktree_path {
+        let branch = match store.get_branch(branch_id) {
+            Ok(Some(b)) => b,
+            _ => return,
+        };
+        let worktree = std::path::PathBuf::from(path);
+        match git::get_commits_since_base(&worktree, &branch.base_branch) {
+            Ok(commits) if commits.is_empty() => {
+                log::info!(
+                    "[auto_review] branch {branch_id} has no commits yet — skipping auto review"
+                );
+                return;
+            }
+            Err(e) => {
+                log::warn!("[auto_review] failed to check commits for branch {branch_id}: {e}");
+                return;
+            }
+            Ok(_) => { /* has commits — fall through to trigger */ }
+        }
+    }
+
+    let registry = app_handle.state::<Arc<session_runner::SessionRegistry>>();
+    match session_commands::trigger_auto_review(
+        Arc::clone(store),
+        Arc::clone(&registry),
+        app_handle.clone(),
+        branch_id.to_string(),
+        None,
+    )
+    .await
+    {
+        Ok(resp) => {
+            log::info!(
+                "[auto_review] triggered for new repo on branch {branch_id}: session={}, review={}",
+                resp.session_id,
+                resp.artifact_id,
+            );
+        }
+        Err(e) => {
+            log::warn!("[auto_review] failed to trigger for branch {branch_id}: {e}");
+        }
+    }
+}
+
 #[tauri::command]
 fn list_projects(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -298,7 +361,7 @@ fn create_project(
             format!("origin/{detected_base}")
         };
 
-        let branch_id = match project.location {
+        let (branch_id, is_local) = match project.location {
             store::ProjectLocation::Local => {
                 let mut branch =
                     store::Branch::new(&project.id, &inferred_branch_name, &effective_base)
@@ -307,7 +370,7 @@ fn create_project(
                     branch = branch.with_pr(pr);
                 }
                 store.create_branch(&branch).map_err(|e| e.to_string())?;
-                Some(branch.id)
+                (branch.id, true)
             }
             store::ProjectLocation::Remote => {
                 let workspace_name = branches::infer_workspace_name(&inferred_branch_name);
@@ -328,12 +391,12 @@ fn create_project(
                     workspace_name,
                     project.id
                 );
-                None // remote branches don't need worktree setup
+                (branch.id, false)
             }
         };
 
-        // Spawn background worktree + prerun-actions setup for local branches.
-        if let Some(branch_id) = branch_id {
+        if is_local {
+            // Spawn background worktree + prerun-actions setup for local branches.
             let project_id = project.id.clone();
             let store_bg = Arc::clone(&store);
             tauri::async_runtime::spawn(async move {
@@ -346,10 +409,11 @@ fn create_project(
                 })
                 .await;
 
-                match worktree_result {
+                let worktree_path = match worktree_result {
                     Ok(Ok(path)) => {
                         log::info!("[create_project] worktree ready at {path}");
                         let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                        path
                     }
                     Ok(Err(e)) => {
                         log::warn!("[create_project] worktree setup failed: {e}");
@@ -359,7 +423,7 @@ fn create_project(
                         log::warn!("[create_project] worktree task panicked: {e}");
                         return;
                     }
-                }
+                };
 
                 let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
                 let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
@@ -380,7 +444,21 @@ fn create_project(
                         log::warn!("[create_project] prerun actions failed: {e}");
                     }
                 }
+
+                // If the repo already has commits on this branch, kick off
+                // an automatic code review so the user gets immediate feedback.
+                maybe_trigger_auto_review_for_new_repo(
+                    &store_bg,
+                    &app_handle,
+                    &branch_id,
+                    Some(&worktree_path),
+                )
+                .await;
             });
+        } else {
+            // Remote branches: auto-review is deferred until `start_workspace`
+            // completes — the workspace isn't running yet at this point, so
+            // attempting to trigger a review here would fail.
         }
     } else if project.location == store::ProjectLocation::Remote {
         log::info!(
@@ -472,10 +550,11 @@ async fn add_project_repo(
                 })
                 .await;
 
-                match worktree_result {
+                let worktree_path = match worktree_result {
                     Ok(Ok(path)) => {
                         log::info!("[add_project_repo] worktree ready at {path}");
                         let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                        path
                     }
                     Ok(Err(e)) => {
                         log::warn!("[add_project_repo] worktree setup failed: {e}");
@@ -485,7 +564,7 @@ async fn add_project_repo(
                         log::warn!("[add_project_repo] worktree task panicked: {e}");
                         return;
                     }
-                }
+                };
 
                 let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
                 let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
@@ -506,6 +585,16 @@ async fn add_project_repo(
                         log::warn!("[add_project_repo] prerun actions failed: {e}");
                     }
                 }
+
+                // If the repo already has commits on this branch, kick off
+                // an automatic code review so the user gets immediate feedback.
+                maybe_trigger_auto_review_for_new_repo(
+                    &store,
+                    &app_handle,
+                    &branch.id,
+                    Some(&worktree_path),
+                )
+                .await;
             } else {
                 // Remote branch: clone the repo into the running workspace,
                 // fetch the base branch, and create the feature branch.
@@ -521,9 +610,21 @@ async fn add_project_repo(
                             "[add_project_repo] remote repo clone failed for branch '{}': {e}",
                             branch.branch_name
                         );
+                        let _ = app_handle.emit("project-setup-progress", project_id);
+                        return;
                     }
                 }
                 let _ = app_handle.emit("project-setup-progress", project_id);
+
+                // If the repo already has commits on this branch, kick off
+                // an automatic code review so the user gets immediate feedback.
+                maybe_trigger_auto_review_for_new_repo(
+                    &store,
+                    &app_handle,
+                    &branch.id,
+                    None, // remote — trigger_auto_review resolves HEAD via workspace
+                )
+                .await;
             }
         }
     });

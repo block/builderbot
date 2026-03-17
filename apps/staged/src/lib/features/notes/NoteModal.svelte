@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { X, Copy, Check } from 'lucide-svelte';
+  import { X, Copy, Check, MessageSquare } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
@@ -21,9 +21,12 @@
     title: string;
     content: string;
     onClose: () => void;
+    /** When set, shows a button to open the associated chat session. */
+    sessionId?: string | null;
+    onOpenSession?: (sessionId: string) => void;
   }
 
-  let { title, content, onClose }: Props = $props();
+  let { title, content, onClose, sessionId, onOpenSession }: Props = $props();
 
   let copied = $state(false);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
@@ -174,8 +177,17 @@
         onClose={closeSearch}
       />
       <div class="header-actions">
+        {#if sessionId && onOpenSession}
+          <button
+            class="header-btn"
+            onclick={() => onOpenSession?.(sessionId!)}
+            title="Open chat session"
+          >
+            <MessageSquare size={16} />
+          </button>
+        {/if}
         <button
-          class="share-btn"
+          class="header-btn"
           class:copied
           onclick={handleShare}
           title={copied ? 'Copied!' : 'Copy note to clipboard'}
@@ -277,7 +289,7 @@
     flex-shrink: 0;
   }
 
-  .share-btn {
+  .header-btn {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -293,12 +305,12 @@
       background-color 0.1s;
   }
 
-  .share-btn:hover {
+  .header-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
   }
 
-  .share-btn.copied {
+  .header-btn.copied {
     color: var(--status-added);
   }
 

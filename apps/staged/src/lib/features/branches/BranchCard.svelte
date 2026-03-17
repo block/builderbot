@@ -160,7 +160,7 @@
   let commitDiffSha = $state<string | null>(null);
 
   // Note modal (opened by clicking a note in the timeline)
-  let openNote = $state<{ title: string; content: string } | null>(null);
+  let openNote = $state<{ title: string; content: string; sessionId?: string } | null>(null);
 
   // Image viewer modal (opened by clicking an image in the timeline)
   let viewImageId = $state<string | null>(null);
@@ -351,12 +351,21 @@
   // Timeline item interactions
   // =========================================================================
 
+  /** Look up note info from timeline data by session ID (for cross-modal navigation). */
+  function findNoteForSession(
+    sessionId: string
+  ): { id: string; title: string; content: string } | null {
+    const note = timeline?.notes.find((n) => n.sessionId === sessionId && n.content?.trim());
+    if (!note) return null;
+    return { id: note.id, title: note.title, content: note.content };
+  }
+
   function handleCommitClick(sha: string) {
     commitDiffSha = sha;
   }
 
-  function handleNoteClick(_noteId: string, title: string, content: string) {
-    openNote = { title, content };
+  function handleNoteClick(_noteId: string, title: string, content: string, sessionId?: string) {
+    openNote = { title, content, sessionId };
   }
 
   async function handleReviewClick(reviewId: string) {
@@ -803,7 +812,16 @@
 {/if}
 
 {#if openNote}
-  <NoteModal title={openNote.title} content={openNote.content} onClose={() => (openNote = null)} />
+  <NoteModal
+    title={openNote.title}
+    content={openNote.content}
+    sessionId={openNote.sessionId}
+    onClose={() => (openNote = null)}
+    onOpenSession={(sid) => {
+      openNote = null;
+      sessionMgr.openSessionId = sid;
+    }}
+  />
 {/if}
 
 {#if viewImageId}
@@ -847,6 +865,12 @@
     repoDir={branch.worktreePath}
     branchId={branch.id}
     projectId={branch.projectId}
+    noteInfo={findNoteForSession(sessionMgr.openSessionId)}
+    onOpenNote={(noteId, title, content) => {
+      const sid = sessionMgr.openSessionId;
+      sessionMgr.openSessionId = null;
+      openNote = { title, content, sessionId: sid ?? undefined };
+    }}
     onClose={async () => {
       const closedSessionId = sessionMgr.openSessionId;
       sessionMgr.openSessionId = null;

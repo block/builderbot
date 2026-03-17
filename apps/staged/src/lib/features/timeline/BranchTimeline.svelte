@@ -42,7 +42,7 @@
     deletingItems?: { type: 'commit' | 'note' | 'review' | 'image'; id: string }[];
     onSessionClick?: (sessionId: string) => void;
     onCommitClick?: (sha: string) => void;
-    onNoteClick?: (noteId: string, title: string, content: string) => void;
+    onNoteClick?: (noteId: string, title: string, content: string, sessionId?: string) => void;
     onReviewClick?: (reviewId: string) => void;
     onImageClick?: (imageId: string) => void;
     onDeleteCommit?: (sha: string, sessionId?: string) => void;
@@ -351,7 +351,7 @@
     if (item.type === 'commit' && item.commitSha && onCommitClick) {
       onCommitClick(item.commitSha);
     } else if (item.type === 'note' && item.noteId && onNoteClick) {
-      onNoteClick(item.noteId, item.noteTitle ?? '', item.noteContent ?? '');
+      onNoteClick(item.noteId, item.noteTitle ?? '', item.noteContent ?? '', item.sessionId);
     } else if (item.type === 'review' && item.reviewId && onReviewClick) {
       onReviewClick(item.reviewId);
     } else if (item.type === 'image' && item.imageId && onImageClick) {

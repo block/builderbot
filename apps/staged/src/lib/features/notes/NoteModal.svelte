@@ -230,9 +230,9 @@
   .modal {
     display: flex;
     flex-direction: column;
-    width: 640px;
-    max-width: 90vw;
-    max-height: 80vh;
+    width: 700px;
+    height: 80vh;
+    max-height: 900px;
     background: var(--bg-chrome);
     border-radius: 12px;
     overflow: hidden;

@@ -31,6 +31,8 @@
     repo: string;
     disabled?: boolean;
     isNewBranch?: boolean;
+    /** The PR that matches the current branch value, if any. */
+    matchedPr?: PullRequest | null;
     onSelect?: (selection: BranchSelection) => void;
   }
 
@@ -39,6 +41,7 @@
     repo,
     disabled = false,
     isNewBranch = $bindable(false),
+    matchedPr = $bindable(null),
     onSelect,
   }: Props = $props();
 
@@ -134,6 +137,8 @@
   function handleInput() {
     highlightedIndex = -1;
     showDropdown = true;
+    // User is typing freely — clear any previously matched PR
+    matchedPr = null;
   }
 
   function handleFocus() {
@@ -151,6 +156,13 @@
     showDropdown = false;
     highlightedIndex = -1;
     inputEl?.focus();
+
+    // Update matched PR: set when selecting a PR item, clear for branches
+    if (item.kind === 'pr') {
+      matchedPr = pullRequests.find((pr) => pr.headRef === item.branchName) ?? null;
+    } else {
+      matchedPr = null;
+    }
 
     // For PRs, pass the PR title (strip the "#123 " prefix); for branches, pass the branch name.
     const label = item.kind === 'pr' ? item.label.replace(/^#\d+\s*/, '') : item.branchName;
@@ -227,6 +239,19 @@
   {:else if showDropdown && loading && !disabled}
     <div class="suggestions-dropdown">
       <div class="loading-hint">Loading…</div>
+    </div>
+  {/if}
+
+  {#if matchedPr}
+    <div class="pr-info-card">
+      <GitPullRequest size={14} class="pr-info-icon" />
+      <div class="pr-info-content">
+        <span class="pr-info-title">#{matchedPr.number} {matchedPr.title}</span>
+        <span class="pr-info-meta"
+          >{matchedPr.author} · {matchedPr.baseRef}{#if matchedPr.draft}
+            · Draft{/if}</span
+        >
+      </div>
     </div>
   {/if}
 </div>
@@ -327,6 +352,42 @@
   .loading-hint {
     padding: 8px 12px;
     font-size: var(--size-sm);
+    color: var(--text-faint);
+  }
+
+  .pr-info-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 6px;
+    padding: 8px 12px;
+    background: var(--bg-hover);
+    border-radius: 8px;
+  }
+
+  .pr-info-card :global(.pr-info-icon) {
+    color: var(--text-faint);
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .pr-info-content {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .pr-info-title {
+    font-size: var(--size-sm);
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pr-info-meta {
+    font-size: var(--size-xs);
     color: var(--text-faint);
   }
 </style>

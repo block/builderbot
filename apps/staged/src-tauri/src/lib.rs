@@ -218,6 +218,7 @@ fn list_projects(
         .map_err(|e| e.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 fn create_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -227,6 +228,7 @@ fn create_project(
     location: Option<String>,
     subpath: Option<String>,
     branch_name: Option<String>,
+    pr_number: Option<u64>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
     let trimmed = name.trim();
@@ -298,21 +300,27 @@ fn create_project(
 
         let branch_id = match project.location {
             store::ProjectLocation::Local => {
-                let branch =
+                let mut branch =
                     store::Branch::new(&project.id, &inferred_branch_name, &effective_base)
                         .with_project_repo(&project_repo.id);
+                if let Some(pr) = pr_number {
+                    branch = branch.with_pr(pr);
+                }
                 store.create_branch(&branch).map_err(|e| e.to_string())?;
                 Some(branch.id)
             }
             store::ProjectLocation::Remote => {
                 let workspace_name = branches::infer_workspace_name(&inferred_branch_name);
-                let branch = store::Branch::new_remote(
+                let mut branch = store::Branch::new_remote(
                     &project.id,
                     &inferred_branch_name,
                     &effective_base,
                     &workspace_name,
                 )
                 .with_project_repo(&project_repo.id);
+                if let Some(pr) = pr_number {
+                    branch = branch.with_pr(pr);
+                }
                 store.create_branch(&branch).map_err(|e| e.to_string())?;
                 log::info!(
                     "[create_project] created remote branch={} workspace={} status=starting project={}",

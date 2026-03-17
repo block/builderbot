@@ -18,6 +18,7 @@
   import SubpathInput from './SubpathInput.svelte';
   import type { SubpathInputApi } from './SubpathInput.svelte';
   import BranchPicker, { type BranchSelection } from './BranchPicker.svelte';
+  import type { PullRequest } from '../../types';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -39,6 +40,7 @@
 
   let branchName = $state('');
   let isNewBranch = $state(false);
+  let matchedPr = $state<PullRequest | null>(null);
 
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -108,13 +110,15 @@
         : undefined;
 
       const normalizedBranch = selectedRepo ? branchName.trim() || undefined : undefined;
+      const prNumber = matchedPr?.number ?? undefined;
 
       const project = await commands.createProject(
         name.trim(),
         location,
         selectedRepo ?? undefined,
         normalizedSubpath,
-        normalizedBranch
+        normalizedBranch,
+        prNumber
       );
       onCreated(project);
     } catch (e) {
@@ -226,6 +230,7 @@
             selectedRepo = null;
             subpath = '';
             branchName = '';
+            matchedPr = null;
           }}
         >
           <X size={14} />
@@ -282,6 +287,7 @@
       <BranchPicker
         bind:value={branchName}
         bind:isNewBranch
+        bind:matchedPr
         repo={selectedRepo}
         disabled={saving}
         onSelect={handleBranchSelected}

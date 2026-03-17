@@ -58,7 +58,8 @@ export function createProject(
   location: 'local' | 'remote',
   githubRepo?: string,
   subpath?: string,
-  branchName?: string
+  branchName?: string,
+  prNumber?: number
 ): Promise<Project> {
   return invoke('create_project', {
     name,
@@ -66,6 +67,7 @@ export function createProject(
     githubRepo: githubRepo ?? null,
     subpath,
     branchName: branchName ?? null,
+    prNumber: prNumber ?? null,
   });
 }
 

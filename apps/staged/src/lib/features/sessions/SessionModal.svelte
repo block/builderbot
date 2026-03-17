@@ -831,6 +831,7 @@
             title="Open note"
           >
             <FileText size={16} />
+            <span>Note</span>
           </button>
         {/if}
         <button class="close-btn" onclick={requestClose} title="Close (Esc)">
@@ -1266,13 +1267,15 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 4px;
+    gap: 4px;
+    padding: 4px 8px;
     background: none;
     border: none;
     border-radius: 6px;
     color: var(--text-muted);
     cursor: pointer;
     flex-shrink: 0;
+    font-size: 12px;
     transition:
       color 0.1s,
       background-color 0.1s;

@@ -226,6 +226,7 @@ fn create_project(
     github_repo: Option<String>,
     location: Option<String>,
     subpath: Option<String>,
+    branch_name: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
     let trimmed = name.trim();
@@ -243,7 +244,12 @@ fn create_project(
         Some("remote") => store::ProjectLocation::Remote,
         _ => store::ProjectLocation::Local,
     };
-    let inferred_branch_name = branches::infer_branch_name(trimmed);
+    let inferred_branch_name = branch_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| branches::infer_branch_name(trimmed));
     let mut project = store::Project::named(trimmed);
     project.location = project_location;
     if let Some(repo) = github_repo.clone() {

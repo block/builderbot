@@ -17,6 +17,7 @@
   import RepoSearchInput from './RepoSearchInput.svelte';
   import SubpathInput from './SubpathInput.svelte';
   import type { SubpathInputApi } from './SubpathInput.svelte';
+  import BranchPicker from './BranchPicker.svelte';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -35,6 +36,8 @@
     selectedRepo = $bindable(null),
     subpath = $bindable(''),
   }: Props = $props();
+
+  let branchName = $state('');
 
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -103,11 +106,14 @@
         ? subpath.trim().replace(/^\/+|\/+$/g, '') || undefined
         : undefined;
 
+      const normalizedBranch = selectedRepo ? branchName.trim() || undefined : undefined;
+
       const project = await commands.createProject(
         name.trim(),
         location,
         selectedRepo ?? undefined,
-        normalizedSubpath
+        normalizedSubpath,
+        normalizedBranch
       );
       onCreated(project);
     } catch (e) {
@@ -139,6 +145,8 @@
       if (target.closest('.repo-search-wrapper')) return;
       // Don't submit if a suggestion is highlighted in the subpath dropdown
       if (target.closest('.subpath-input-wrapper')) return;
+      // Don't submit if a suggestion is highlighted in the branch picker dropdown
+      if (target.closest('.branch-picker-wrapper')) return;
       e.preventDefault();
       handleCreate();
     }
@@ -203,6 +211,7 @@
           onclick={() => {
             selectedRepo = null;
             subpath = '';
+            branchName = '';
           }}
         >
           <X size={14} />
@@ -247,6 +256,14 @@
         disabled={saving}
         bind:api={subpathApi}
       />
+    </div>
+
+    <div class="form-group">
+      <label for="project-branch"
+        >PR or Branch
+        <span class="field-badge optional">Optional</span></label
+      >
+      <BranchPicker bind:value={branchName} repo={selectedRepo} disabled={saving} />
     </div>
   {/if}
 

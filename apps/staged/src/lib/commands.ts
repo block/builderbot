@@ -57,9 +57,16 @@ export function createProject(
   name: string,
   location: 'local' | 'remote',
   githubRepo?: string,
-  subpath?: string
+  subpath?: string,
+  branchName?: string
 ): Promise<Project> {
-  return invoke('create_project', { name, location, githubRepo: githubRepo ?? null, subpath });
+  return invoke('create_project', {
+    name,
+    location,
+    githubRepo: githubRepo ?? null,
+    subpath,
+    branchName: branchName ?? null,
+  });
 }
 
 export function deleteProject(id: string): Promise<void> {

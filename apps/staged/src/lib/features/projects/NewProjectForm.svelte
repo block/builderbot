@@ -17,7 +17,7 @@
   import RepoSearchInput from './RepoSearchInput.svelte';
   import SubpathInput from './SubpathInput.svelte';
   import type { SubpathInputApi } from './SubpathInput.svelte';
-  import BranchPicker from './BranchPicker.svelte';
+  import BranchPicker, { type BranchSelection } from './BranchPicker.svelte';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -152,6 +152,19 @@
     }
   }
 
+  /** Derive a human-friendly project name from a branch name like "feat/dark-mode". */
+  function nameFromBranch(branch: string): string {
+    const last = branch.split('/').pop() ?? branch;
+    const spaced = last.replace(/[-_]/g, ' ');
+    return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+  }
+
+  function handleBranchSelected(selection: BranchSelection) {
+    if (!name.trim()) {
+      name = selection.kind === 'pr' ? selection.label : nameFromBranch(selection.branchName);
+    }
+  }
+
   function handleRepoSelected(nameWithOwner: string, selectedSubpath?: string) {
     selectedRepo = nameWithOwner;
     subpath = selectedSubpath ?? '';
@@ -263,7 +276,12 @@
         >PR or Branch
         <span class="field-badge optional">Optional</span></label
       >
-      <BranchPicker bind:value={branchName} repo={selectedRepo} disabled={saving} />
+      <BranchPicker
+        bind:value={branchName}
+        repo={selectedRepo}
+        disabled={saving}
+        onSelect={handleBranchSelected}
+      />
     </div>
   {/if}
 

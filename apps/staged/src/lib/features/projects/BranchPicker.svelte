@@ -19,13 +19,21 @@
     detail?: string;
   }
 
+  export interface BranchSelection {
+    kind: 'pr' | 'branch';
+    branchName: string;
+    /** For PRs this is the PR title; for branches it is the branch name. */
+    label: string;
+  }
+
   interface Props {
     value: string;
     repo: string;
     disabled?: boolean;
+    onSelect?: (selection: BranchSelection) => void;
   }
 
-  let { value = $bindable(''), repo, disabled = false }: Props = $props();
+  let { value = $bindable(''), repo, disabled = false, onSelect }: Props = $props();
 
   let pullRequests = $state<PullRequest[]>([]);
   let branches = $state<BranchRef[]>([]);
@@ -118,6 +126,10 @@
     showDropdown = false;
     highlightedIndex = -1;
     inputEl?.focus();
+
+    // For PRs, pass the PR title (strip the "#123 " prefix); for branches, pass the branch name.
+    const label = item.kind === 'pr' ? item.label.replace(/^#\d+\s*/, '') : item.branchName;
+    onSelect?.({ kind: item.kind, branchName: item.branchName, label });
   }
 
   function handleKeydown(e: KeyboardEvent) {

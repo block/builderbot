@@ -18,6 +18,7 @@
   import SubpathInput from './SubpathInput.svelte';
   import type { SubpathInputApi } from './SubpathInput.svelte';
   import BranchPicker, { type BranchSelection } from './BranchPicker.svelte';
+  import type { RepoSelection } from './RepoSearchInput.svelte';
   import type { PullRequest } from '../../types';
 
   interface Props {
@@ -140,7 +141,10 @@
       if (idx < recentRepos.length) {
         e.preventDefault();
         const recent = recentRepos[idx];
-        handleRepoSelected(recent.githubRepo, recent.subpath ?? undefined);
+        handleRepoSelected({
+          nameWithOwner: recent.githubRepo,
+          subpath: recent.subpath ?? undefined,
+        });
       }
       return;
     }
@@ -170,9 +174,14 @@
     }
   }
 
-  function handleRepoSelected(nameWithOwner: string, selectedSubpath?: string) {
-    selectedRepo = nameWithOwner;
-    subpath = selectedSubpath ?? '';
+  let pendingPrNumber = $state<number | null>(null);
+  let pendingBranchName = $state<string | null>(null);
+
+  function handleRepoSelected(selection: RepoSelection) {
+    selectedRepo = selection.nameWithOwner;
+    subpath = selection.subpath ?? '';
+    pendingPrNumber = selection.prNumber ?? null;
+    pendingBranchName = selection.branchName ?? null;
   }
 </script>
 
@@ -231,6 +240,8 @@
             subpath = '';
             branchName = '';
             matchedPr = null;
+            pendingPrNumber = null;
+            pendingBranchName = null;
           }}
         >
           <X size={14} />
@@ -245,7 +256,11 @@
         {#each recentRepos.slice(0, 5) as recent, i}
           <button
             class="recent-repo-item"
-            onclick={() => handleRepoSelected(recent.githubRepo, recent.subpath ?? undefined)}
+            onclick={() =>
+              handleRepoSelected({
+                nameWithOwner: recent.githubRepo,
+                subpath: recent.subpath ?? undefined,
+              })}
           >
             <Clock size={12} class="recent-repo-icon" />
             <span class="recent-repo-label">
@@ -288,6 +303,8 @@
         bind:value={branchName}
         bind:isNewBranch
         bind:matchedPr
+        bind:initialPrNumber={pendingPrNumber}
+        bind:initialBranchName={pendingBranchName}
         repo={selectedRepo}
         disabled={saving}
         onSelect={handleBranchSelected}

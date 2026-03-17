@@ -33,6 +33,10 @@
     isNewBranch?: boolean;
     /** The PR that matches the current branch value, if any. */
     matchedPr?: PullRequest | null;
+    /** When set, auto-select this PR after data loads. Cleared after use. */
+    initialPrNumber?: number | null;
+    /** When set, auto-fill this branch name after data loads. Cleared after use. */
+    initialBranchName?: string | null;
     onSelect?: (selection: BranchSelection) => void;
   }
 
@@ -42,6 +46,8 @@
     disabled = false,
     isNewBranch = $bindable(false),
     matchedPr = $bindable(null),
+    initialPrNumber = $bindable(null),
+    initialBranchName = $bindable(null),
     onSelect,
   }: Props = $props();
 
@@ -71,6 +77,49 @@
       ]);
       pullRequests = prs;
       branches = refs;
+
+      // Auto-select a PR if initialPrNumber was provided (e.g. from a pasted PR URL)
+      if (initialPrNumber != null) {
+        const pr = prs.find((p) => p.number === initialPrNumber);
+        if (pr) {
+          selectItem({
+            kind: 'pr',
+            label: `#${pr.number} ${pr.title}`,
+            branchName: pr.headRef,
+            detail: pr.headRef,
+          });
+        }
+        initialPrNumber = null;
+      }
+      // Auto-fill a branch name if initialBranchName was provided (e.g. from a pasted branch URL)
+      else if (initialBranchName) {
+        const branchNameToFind = initialBranchName;
+        // Check PRs first — a branch might back a PR
+        const prForBranch = prs.find((p) => p.headRef === branchNameToFind);
+        if (prForBranch) {
+          selectItem({
+            kind: 'pr',
+            label: `#${prForBranch.number} ${prForBranch.title}`,
+            branchName: prForBranch.headRef,
+            detail: prForBranch.headRef,
+          });
+        } else {
+          // Check remote branches
+          const refName = refs.find((r) => r.name.replace(/^origin\//, '') === branchNameToFind);
+          if (refName) {
+            selectItem({
+              kind: 'branch',
+              label: branchNameToFind,
+              branchName: branchNameToFind,
+            });
+          } else {
+            // Branch not in the list — just set the value (will show as "New branch")
+            value = branchNameToFind;
+            onSelect?.({ kind: 'branch', branchName: branchNameToFind, label: branchNameToFind });
+          }
+        }
+        initialBranchName = null;
+      }
     } finally {
       loading = false;
     }

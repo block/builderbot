@@ -13,8 +13,15 @@
   import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
 
+  export interface RepoSelection {
+    nameWithOwner: string;
+    subpath?: string;
+    prNumber?: number;
+    branchName?: string;
+  }
+
   interface Props {
-    onSelect: (nameWithOwner: string, subpath?: string) => void;
+    onSelect: (selection: RepoSelection) => void;
     disabled?: boolean;
   }
 
@@ -42,12 +49,35 @@
     dropdownStyle = `position:fixed;top:${top}px;left:${rect.left}px;width:${rect.width}px;max-height:${maxH}px`;
   }
 
-  function parseGitHubUrl(input: string): string | null {
+  function parseGitHubUrl(input: string): RepoSelection | null {
     const trimmed = input.trim();
-    const match = trimmed.match(
+
+    // Match PR URLs: github.com/owner/repo/pull/123
+    const prMatch = trimmed.match(
+      /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)\/pull\/(\d+)(?:\/.*)?$/
+    );
+    if (prMatch) {
+      return { nameWithOwner: prMatch[1], prNumber: parseInt(prMatch[2], 10) };
+    }
+
+    // Match branch/tree URLs: github.com/owner/repo/tree/branch-name
+    // Branch names can contain slashes, so capture everything after /tree/
+    const treeMatch = trimmed.match(
+      /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)\/tree\/(.+?)(?:\?.*)?$/
+    );
+    if (treeMatch) {
+      return { nameWithOwner: treeMatch[1], branchName: treeMatch[2] };
+    }
+
+    // Plain repo URL: github.com/owner/repo
+    const repoMatch = trimmed.match(
       /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\/.*|\.git)?$/
     );
-    return match ? match[1] : null;
+    if (repoMatch) {
+      return { nameWithOwner: repoMatch[1] };
+    }
+
+    return null;
   }
 
   function isOwnerRepoFormat(input: string): boolean {
@@ -122,10 +152,10 @@
     if (searchTimer) clearTimeout(searchTimer);
   });
 
-  function handleSelect(nameWithOwner: string, subpath?: string) {
+  function handleSelect(selection: RepoSelection) {
     query = '';
     dropdownOpen = false;
-    onSelect(nameWithOwner, subpath);
+    onSelect(selection);
   }
 
   async function handleInput() {
@@ -272,7 +302,11 @@
           <button
             class="repo-item recent"
             tabindex="-1"
-            onclick={() => handleSelect(recent.githubRepo, recent.subpath ?? undefined)}
+            onclick={() =>
+              handleSelect({
+                nameWithOwner: recent.githubRepo,
+                subpath: recent.subpath ?? undefined,
+              })}
           >
             <div class="repo-icon recent-icon">
               <Clock size={14} />
@@ -325,7 +359,7 @@
             <button
               class="repo-item"
               tabindex="-1"
-              onclick={() => handleSelect(repo.nameWithOwner)}
+              onclick={() => handleSelect({ nameWithOwner: repo.nameWithOwner })}
             >
               <div class="repo-icon">
                 {#if repo.isPrivate}

@@ -90,8 +90,11 @@
     error = null;
   });
 
+  let repoMissing = $derived(location === 'remote' && !selectedRepo);
+  let canCreate = $derived(!!name.trim() && !saving && !repoMissing);
+
   async function handleCreate() {
-    if (!name.trim() || saving) return;
+    if (!canCreate) return;
 
     saving = true;
     error = null;
@@ -239,7 +242,12 @@
   </div>
 
   <div class="form-group">
-    <label for="project-repo-select">Repository</label>
+    <label for="project-repo-select"
+      >Repository
+      {#if location === 'remote'}
+        <span class="field-badge required">Required</span>
+      {/if}</label
+    >
     {#if selectedRepo}
       <div class="repo-info">
         <GitBranch size={14} class="repo-info-icon" />
@@ -337,7 +345,7 @@
       variant="primary"
       class={!onCancel ? 'full-width-btn' : ''}
       onclick={handleCreate}
-      disabled={saving || !name.trim()}
+      disabled={!canCreate}
     >
       {#if saving}
         <span class="button-content">
@@ -392,6 +400,11 @@
 
   .field-badge.recommended {
     background-color: var(--ui-accent);
+    color: var(--bg-deepest);
+  }
+
+  .field-badge.required {
+    background-color: var(--ui-danger);
     color: var(--bg-deepest);
   }
 

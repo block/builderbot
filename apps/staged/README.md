@@ -102,6 +102,8 @@ just dev       # Run in development mode (hot-reload)
 just install    # First-time setup: install all dependencies
 just dev        # Run app in dev mode with hot-reload
 just build      # Build for production
+just prepare 0.1.1  # Create release branch, bump versions, push PR
+just release 0.1.1  # Tag merged release commit and trigger release CI
 
 # Code quality
 just fmt        # Format all code (Rust + TypeScript/Svelte)

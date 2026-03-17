@@ -37,14 +37,23 @@ Repository secrets required by `.github/workflows/staged-release.yml`:
 
 ## Release flow
 
-1. Bump the version in:
-   - `apps/staged/package.json`
-   - `apps/staged/src-tauri/tauri.conf.json`
-   - `apps/staged/src-tauri/Cargo.toml`
-   - `apps/staged/src-tauri/Cargo.lock` (`[[package]] name = "Staged"` entry)
-2. Commit the version bump to `main`.
-3. Push a tag named `staged/vX.Y.Z`.
-4. GitHub Actions builds the signed release, publishes the versioned release at `staged/vX.Y.Z`, and refreshes the fixed `staged-latest` updater and DMG aliases.
+1. From `apps/staged` on `main`, run `just prepare X.Y.Z`.
+2. That command:
+   - creates a release branch
+   - updates `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`
+   - regenerates `src-tauri/Cargo.lock`
+   - commits and pushes the branch
+   - opens the release PR
+3. Merge the release PR to `main`.
+4. From `apps/staged` on `main`, run `just release X.Y.Z`.
+5. GitHub Actions builds the signed release, publishes the versioned release at `staged/vX.Y.Z`, and refreshes the fixed `staged-latest` updater and DMG aliases.
+
+The tag trigger still expects the git tag to match the staged app version in:
+
+- `apps/staged/package.json`
+- `apps/staged/src-tauri/tauri.conf.json`
+- `apps/staged/src-tauri/Cargo.toml`
+- `apps/staged/src-tauri/Cargo.lock` (`[[package]] name = "Staged"` entry)
 
 ## Local verification
 

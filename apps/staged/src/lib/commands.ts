@@ -57,9 +57,18 @@ export function createProject(
   name: string,
   location: 'local' | 'remote',
   githubRepo?: string,
-  subpath?: string
+  subpath?: string,
+  branchName?: string,
+  prNumber?: number
 ): Promise<Project> {
-  return invoke('create_project', { name, location, githubRepo: githubRepo ?? null, subpath });
+  return invoke('create_project', {
+    name,
+    location,
+    githubRepo: githubRepo ?? null,
+    subpath,
+    branchName: branchName ?? null,
+    prNumber: prNumber ?? null,
+  });
 }
 
 export function deleteProject(id: string): Promise<void> {
@@ -79,7 +88,8 @@ export function addProjectRepo(
   githubRepo: string,
   branchName?: string,
   subpath?: string,
-  setAsPrimary?: boolean
+  setAsPrimary?: boolean,
+  prNumber?: number
 ): Promise<ProjectRepo> {
   return invoke('add_project_repo', {
     projectId,
@@ -87,6 +97,7 @@ export function addProjectRepo(
     branchName: branchName ?? null,
     subpath: subpath ?? null,
     setAsPrimary: setAsPrimary ?? null,
+    prNumber: prNumber ?? null,
   });
 }
 

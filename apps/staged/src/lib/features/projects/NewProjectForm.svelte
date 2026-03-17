@@ -17,6 +17,10 @@
   import RepoSearchInput from './RepoSearchInput.svelte';
   import SubpathInput from './SubpathInput.svelte';
   import type { SubpathInputApi } from './SubpathInput.svelte';
+  import BranchPicker, { type BranchSelection } from './BranchPicker.svelte';
+  import type { RepoSelection } from '../../shared/githubUrl';
+  import { parseGitHubUrl } from '../../shared/githubUrl';
+  import type { PullRequest } from '../../types';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -35,6 +39,10 @@
     selectedRepo = $bindable(null),
     subpath = $bindable(''),
   }: Props = $props();
+
+  let branchName = $state('');
+  let isNewBranch = $state(false);
+  let matchedPr = $state<PullRequest | null>(null);
 
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -103,11 +111,16 @@
         ? subpath.trim().replace(/^\/+|\/+$/g, '') || undefined
         : undefined;
 
+      const normalizedBranch = selectedRepo ? branchName.trim() || undefined : undefined;
+      const prNumber = matchedPr?.number ?? undefined;
+
       const project = await commands.createProject(
         name.trim(),
         location,
         selectedRepo ?? undefined,
-        normalizedSubpath
+        normalizedSubpath,
+        normalizedBranch,
+        prNumber
       );
       onCreated(project);
     } catch (e) {
@@ -129,7 +142,10 @@
       if (idx < recentRepos.length) {
         e.preventDefault();
         const recent = recentRepos[idx];
-        handleRepoSelected(recent.githubRepo, recent.subpath ?? undefined);
+        handleRepoSelected({
+          nameWithOwner: recent.githubRepo,
+          subpath: recent.subpath ?? undefined,
+        });
       }
       return;
     }
@@ -139,14 +155,45 @@
       if (target.closest('.repo-search-wrapper')) return;
       // Don't submit if a suggestion is highlighted in the subpath dropdown
       if (target.closest('.subpath-input-wrapper')) return;
+      // Don't submit if a suggestion is highlighted in the branch picker dropdown
+      if (target.closest('.branch-picker-wrapper')) return;
       e.preventDefault();
       handleCreate();
     }
   }
 
-  function handleRepoSelected(nameWithOwner: string, selectedSubpath?: string) {
-    selectedRepo = nameWithOwner;
-    subpath = selectedSubpath ?? '';
+  /** Derive a human-friendly project name from a branch name like "feat/dark-mode". */
+  function nameFromBranch(branch: string): string {
+    const last = branch.split('/').pop() ?? branch;
+    if (!last) return branch;
+    const spaced = last.replace(/[-_]/g, ' ');
+    return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+  }
+
+  function handleBranchSelected(selection: BranchSelection) {
+    if (!name.trim()) {
+      name = selection.kind === 'pr' ? selection.label : nameFromBranch(selection.branchName);
+    }
+  }
+
+  function handleNameInput() {
+    const parsed = parseGitHubUrl(name);
+    if (parsed) {
+      name = '';
+      handleRepoSelected(parsed);
+      // Blur the name field so focus doesn't jump into the newly-revealed BranchPicker
+      (document.activeElement as HTMLElement | null)?.blur();
+    }
+  }
+
+  let pendingPrNumber = $state<number | null>(null);
+  let pendingBranchName = $state<string | null>(null);
+
+  function handleRepoSelected(selection: RepoSelection) {
+    selectedRepo = selection.nameWithOwner;
+    subpath = selection.subpath ?? '';
+    pendingPrNumber = selection.prNumber ?? null;
+    pendingBranchName = selection.branchName ?? null;
   }
 </script>
 
@@ -165,6 +212,7 @@
       autocapitalize="off"
       spellcheck={false}
       autofocus
+      oninput={handleNameInput}
     />
   </div>
 
@@ -203,6 +251,10 @@
           onclick={() => {
             selectedRepo = null;
             subpath = '';
+            branchName = '';
+            matchedPr = null;
+            pendingPrNumber = null;
+            pendingBranchName = null;
           }}
         >
           <X size={14} />
@@ -217,7 +269,11 @@
         {#each recentRepos.slice(0, 5) as recent, i}
           <button
             class="recent-repo-item"
-            onclick={() => handleRepoSelected(recent.githubRepo, recent.subpath ?? undefined)}
+            onclick={() =>
+              handleRepoSelected({
+                nameWithOwner: recent.githubRepo,
+                subpath: recent.subpath ?? undefined,
+              })}
           >
             <Clock size={12} class="recent-repo-icon" />
             <span class="recent-repo-label">
@@ -246,6 +302,25 @@
         repo={selectedRepo}
         disabled={saving}
         bind:api={subpathApi}
+      />
+    </div>
+
+    <div class="form-group">
+      <label for="project-branch"
+        >PR or Branch
+        <span class="field-badge {isNewBranch ? 'new-branch' : 'optional'}"
+          >{isNewBranch ? 'New branch' : 'Optional'}</span
+        ></label
+      >
+      <BranchPicker
+        bind:value={branchName}
+        bind:isNewBranch
+        bind:matchedPr
+        bind:initialPrNumber={pendingPrNumber}
+        bind:initialBranchName={pendingBranchName}
+        repo={selectedRepo}
+        disabled={saving}
+        onSelect={handleBranchSelected}
       />
     </div>
   {/if}
@@ -316,6 +391,11 @@
   }
 
   .field-badge.recommended {
+    background-color: var(--ui-accent);
+    color: var(--bg-deepest);
+  }
+
+  .field-badge.new-branch {
     background-color: var(--ui-accent);
     color: var(--bg-deepest);
   }

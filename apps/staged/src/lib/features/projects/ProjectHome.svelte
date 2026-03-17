@@ -14,6 +14,7 @@
   import { projectDisplayName } from '../../shared/utils';
   import { goHome, selectProject } from '../layout/navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
+  import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
@@ -486,9 +487,16 @@
 
   // ── Branch actions ──
 
-  async function handleRepoSelected(projectId: string, nameWithOwner: string, subpath?: string) {
+  async function handleRepoSelected(projectId: string, selection: RepoPickerSelection) {
     try {
-      await commands.addProjectRepo(projectId, nameWithOwner, undefined, subpath);
+      await commands.addProjectRepo(
+        projectId,
+        selection.nameWithOwner,
+        selection.branchName,
+        selection.subpath,
+        undefined,
+        selection.prNumber
+      );
       const [projectsList, branches, repos] = await Promise.all([
         commands.listProjects(),
         commands.listBranchesForProject(projectId),
@@ -733,8 +741,7 @@
             excludeRepos={new Set(
               [...(repoLabelsByProject.get(project.id)?.values() ?? [])].map((r) => r.githubRepo)
             )}
-            onRepoSelected={(nameWithOwner, subpath) =>
-              handleRepoSelected(project.id, nameWithOwner, subpath)}
+            onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
           />
         {/each}

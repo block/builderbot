@@ -397,6 +397,13 @@ pub fn branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
     Ok(result.is_ok())
 }
 
+/// Check whether a remote tracking branch (`origin/<branch_name>`) exists.
+pub fn remote_branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
+    let ref_name = format!("refs/remotes/origin/{branch_name}");
+    let result = cli::run(repo, &["rev-parse", "--verify", &ref_name]);
+    Ok(result.is_ok())
+}
+
 /// Reset HEAD to a specific commit (hard reset).
 /// This discards all commits after the specified commit.
 pub fn reset_to_commit(worktree: &Path, commit_sha: &str) -> Result<(), GitError> {

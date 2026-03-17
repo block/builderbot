@@ -12,9 +12,12 @@
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
+  import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
+
+  export type { RepoSelection };
 
   interface Props {
-    onSelect: (nameWithOwner: string, subpath?: string) => void;
+    onSelect: (selection: RepoSelection) => void;
     disabled?: boolean;
   }
 
@@ -40,14 +43,6 @@
     const top = rect.bottom + 4;
     const maxH = Math.max(120, window.innerHeight - top - 12);
     dropdownStyle = `position:fixed;top:${top}px;left:${rect.left}px;width:${rect.width}px;max-height:${maxH}px`;
-  }
-
-  function parseGitHubUrl(input: string): string | null {
-    const trimmed = input.trim();
-    const match = trimmed.match(
-      /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\/.*|\.git)?$/
-    );
-    return match ? match[1] : null;
   }
 
   function isOwnerRepoFormat(input: string): boolean {
@@ -122,10 +117,10 @@
     if (searchTimer) clearTimeout(searchTimer);
   });
 
-  function handleSelect(nameWithOwner: string, subpath?: string) {
+  function handleSelect(selection: RepoSelection) {
     query = '';
     dropdownOpen = false;
-    onSelect(nameWithOwner, subpath);
+    onSelect(selection);
   }
 
   async function handleInput() {
@@ -134,6 +129,8 @@
     const parsed = parseGitHubUrl(trimmed);
     if (parsed) {
       handleSelect(parsed);
+      // Blur so focus doesn't jump into the newly-revealed BranchPicker
+      inputEl?.blur();
       return;
     }
 
@@ -272,7 +269,11 @@
           <button
             class="repo-item recent"
             tabindex="-1"
-            onclick={() => handleSelect(recent.githubRepo, recent.subpath ?? undefined)}
+            onclick={() =>
+              handleSelect({
+                nameWithOwner: recent.githubRepo,
+                subpath: recent.subpath ?? undefined,
+              })}
           >
             <div class="repo-icon recent-icon">
               <Clock size={14} />
@@ -325,7 +326,7 @@
             <button
               class="repo-item"
               tabindex="-1"
-              onclick={() => handleSelect(repo.nameWithOwner)}
+              onclick={() => handleSelect({ nameWithOwner: repo.nameWithOwner })}
             >
               <div class="repo-icon">
                 {#if repo.isPrivate}

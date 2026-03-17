@@ -212,9 +212,12 @@ fn confirm_reset_store(
 /// Check whether a newly added repo already has commits on its branch and, if
 /// so, kick off an automatic code review.
 ///
-/// For **local** branches the check is done by inspecting the worktree on disk.
-/// For **remote** branches we optimistically trigger the review and let
-/// `trigger_auto_review` resolve the HEAD via the workspace.
+/// For **local** branches (`worktree_path: Some`) the check is done by
+/// inspecting the worktree on disk before triggering.
+/// For **remote** branches (`worktree_path: None`) the review is triggered
+/// unconditionally — the caller is responsible for ensuring the workspace is
+/// running before calling this (e.g. after `start_workspace` or
+/// `setup_remote_repo_clone` completes).
 ///
 /// This is fire-and-forget — errors are logged but never propagated.
 pub(crate) async fn maybe_trigger_auto_review_for_new_repo(
@@ -453,13 +456,9 @@ fn create_project(
                 .await;
             });
         } else {
-            // Remote branches: optimistically trigger auto-review (the
-            // workspace will resolve HEAD). No worktree setup needed.
-            let store_bg = Arc::clone(&store);
-            tauri::async_runtime::spawn(async move {
-                maybe_trigger_auto_review_for_new_repo(&store_bg, &app_handle, &branch_id, None)
-                    .await;
-            });
+            // Remote branches: auto-review is deferred until `start_workspace`
+            // completes — the workspace isn't running yet at this point, so
+            // attempting to trigger a review here would fail.
         }
     } else if project.location == store::ProjectLocation::Remote {
         log::info!(

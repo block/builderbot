@@ -358,7 +358,7 @@ fn create_project(
             format!("origin/{detected_base}")
         };
 
-        let branch_id = match project.location {
+        let (branch_id, is_local) = match project.location {
             store::ProjectLocation::Local => {
                 let mut branch =
                     store::Branch::new(&project.id, &inferred_branch_name, &effective_base)
@@ -367,7 +367,7 @@ fn create_project(
                     branch = branch.with_pr(pr);
                 }
                 store.create_branch(&branch).map_err(|e| e.to_string())?;
-                Some(branch.id)
+                (branch.id, true)
             }
             store::ProjectLocation::Remote => {
                 let workspace_name = branches::infer_workspace_name(&inferred_branch_name);
@@ -388,12 +388,12 @@ fn create_project(
                     workspace_name,
                     project.id
                 );
-                None // remote branches don't need worktree setup
+                (branch.id, false)
             }
         };
 
-        // Spawn background worktree + prerun-actions setup for local branches.
-        if let Some(branch_id) = branch_id {
+        if is_local {
+            // Spawn background worktree + prerun-actions setup for local branches.
             let project_id = project.id.clone();
             let store_bg = Arc::clone(&store);
             tauri::async_runtime::spawn(async move {
@@ -451,6 +451,14 @@ fn create_project(
                     Some(&worktree_path),
                 )
                 .await;
+            });
+        } else {
+            // Remote branches: optimistically trigger auto-review (the
+            // workspace will resolve HEAD). No worktree setup needed.
+            let store_bg = Arc::clone(&store);
+            tauri::async_runtime::spawn(async move {
+                maybe_trigger_auto_review_for_new_repo(&store_bg, &app_handle, &branch_id, None)
+                    .await;
             });
         }
     } else if project.location == store::ProjectLocation::Remote {

@@ -88,7 +88,8 @@ export function addProjectRepo(
   githubRepo: string,
   branchName?: string,
   subpath?: string,
-  setAsPrimary?: boolean
+  setAsPrimary?: boolean,
+  prNumber?: number
 ): Promise<ProjectRepo> {
   return invoke('add_project_repo', {
     projectId,
@@ -96,6 +97,7 @@ export function addProjectRepo(
     branchName: branchName ?? null,
     subpath: subpath ?? null,
     setAsPrimary: setAsPrimary ?? null,
+    prNumber: prNumber ?? null,
   });
 }
 

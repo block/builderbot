@@ -16,6 +16,7 @@ pub(crate) async fn add_project_repo_impl(
     subpath: Option<String>,
     set_as_primary: Option<bool>,
     reason: Option<String>,
+    pr_number: Option<u64>,
 ) -> Result<store::ProjectRepo, String> {
     let project = store
         .get_project(&project_id)
@@ -121,13 +122,26 @@ pub(crate) async fn add_project_repo_impl(
     };
     let branch = match project.location {
         store::ProjectLocation::Local => {
-            store::Branch::new(&project_id, &repo.branch_name, &effective_base)
-                .with_project_repo(&repo.id)
+            let mut b = store::Branch::new(&project_id, &repo.branch_name, &effective_base)
+                .with_project_repo(&repo.id);
+            if let Some(pr) = pr_number {
+                b = b.with_pr(pr);
+            }
+            b
         }
         store::ProjectLocation::Remote => {
             let ws_name = branches::resolve_project_workspace_name(&store, &project, None)?;
-            store::Branch::new_remote(&project_id, &repo.branch_name, &effective_base, &ws_name)
-                .with_project_repo(&repo.id)
+            let mut b = store::Branch::new_remote(
+                &project_id,
+                &repo.branch_name,
+                &effective_base,
+                &ws_name,
+            )
+            .with_project_repo(&repo.id);
+            if let Some(pr) = pr_number {
+                b = b.with_pr(pr);
+            }
+            b
         }
     };
     store.create_branch(&branch).map_err(|e| e.to_string())?;

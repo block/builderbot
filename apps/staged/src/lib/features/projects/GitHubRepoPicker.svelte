@@ -10,9 +10,17 @@
   import Spinner from '../../shared/Spinner.svelte';
   import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
+  import { parseGitHubUrl } from '../../shared/githubUrl';
+
+  export interface RepoPickerSelection {
+    nameWithOwner: string;
+    subpath?: string;
+    branchName?: string;
+    prNumber?: number;
+  }
 
   interface Props {
-    onSelect: (nameWithOwner: string, subpath?: string) => void;
+    onSelect: (selection: RepoPickerSelection) => void;
     onBack: () => void;
     excludeRepos?: Set<string>;
     showHeader?: boolean;
@@ -30,14 +38,6 @@
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
   let isSearching = $state(false);
   let directFetchRepo = $state<GitHubRepo | null>(null);
-
-  function parseGitHubUrl(input: string): string | null {
-    const trimmed = input.trim();
-    const match = trimmed.match(
-      /^(?:https?:\/\/)?github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\/.*|\.git)?$/
-    );
-    return match ? match[1] : null;
-  }
 
   function isOwnerRepoFormat(input: string): boolean {
     const trimmed = input.trim();
@@ -122,6 +122,19 @@
 
     const parsed = parseGitHubUrl(trimmed);
     if (parsed) {
+      if (parsed.prNumber) {
+        // PR URL: resolve the PR's head branch before selecting
+        try {
+          const prs = await commands.listPullRequests(parsed.nameWithOwner);
+          const pr = prs.find((p) => p.number === parsed.prNumber);
+          if (pr) {
+            onSelect({ ...parsed, branchName: pr.headRef });
+            return;
+          }
+        } catch {
+          // Couldn't fetch PRs — fall through with just the repo
+        }
+      }
       onSelect(parsed);
       return;
     }
@@ -207,7 +220,7 @@
       bind:this={searchInputEl}
       bind:value={query}
       type="text"
-      placeholder="Search or paste a repository..."
+      placeholder="Search or paste a repo or PR link..."
       autocomplete="off"
       autocorrect="off"
       spellcheck="false"
@@ -221,7 +234,8 @@
         <button
           class="repo-item recent"
           tabindex="-1"
-          onclick={() => onSelect(recent.githubRepo, recent.subpath ?? undefined)}
+          onclick={() =>
+            onSelect({ nameWithOwner: recent.githubRepo, subpath: recent.subpath ?? undefined })}
         >
           <div class="repo-icon recent-icon">
             <Clock size={14} />
@@ -266,7 +280,11 @@
       {#each displayItems as item}
         {#if item.type === 'repo'}
           {@const repo = item.data as GitHubRepo}
-          <button class="repo-item" tabindex="-1" onclick={() => onSelect(repo.nameWithOwner)}>
+          <button
+            class="repo-item"
+            tabindex="-1"
+            onclick={() => onSelect({ nameWithOwner: repo.nameWithOwner })}
+          >
             <div class="repo-icon">
               {#if repo.isPrivate}
                 <Lock size={14} />

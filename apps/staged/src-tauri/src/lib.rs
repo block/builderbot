@@ -424,6 +424,7 @@ async fn add_project_repo(
     branch_name: Option<String>,
     subpath: Option<String>,
     set_as_primary: Option<bool>,
+    pr_number: Option<u64>,
 ) -> Result<store::ProjectRepo, String> {
     let store = get_store(&store)?;
     let repo = project_commands::add_project_repo_impl(
@@ -434,6 +435,7 @@ async fn add_project_repo(
         subpath,
         set_as_primary,
         None,
+        pr_number,
     )
     .await?;
 

@@ -31,6 +31,7 @@
   import BranchCard from '../branches/BranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import GitHubRepoPicker from './GitHubRepoPicker.svelte';
+  import type { RepoPickerSelection } from './GitHubRepoPicker.svelte';
   import TimelineRow from '../timeline/TimelineRow.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
@@ -65,7 +66,7 @@
       status: WorkspaceStatus,
       workstationId?: number | null
     ) => void;
-    onRepoSelected?: (nameWithOwner: string, subpath?: string) => void;
+    onRepoSelected?: (selection: RepoPickerSelection) => void;
     onRetryWorktree?: (branchId: string) => void;
   }
 
@@ -140,9 +141,9 @@
     }
   }
 
-  function handleRepoSelected(nameWithOwner: string, subpath?: string) {
+  function handleRepoSelected(selection: RepoPickerSelection) {
     dropdownOpen = false;
-    onRepoSelected?.(nameWithOwner, subpath);
+    onRepoSelected?.(selection);
   }
 
   $effect(() => {

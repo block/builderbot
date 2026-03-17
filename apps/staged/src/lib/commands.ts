@@ -4,7 +4,7 @@
  * One function per command. Each returns a typed promise.
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from './invoke';
 import type {
   Project,
   ProjectRepo,

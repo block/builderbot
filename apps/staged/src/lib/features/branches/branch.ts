@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../../invoke';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 /** An application that can open a directory */

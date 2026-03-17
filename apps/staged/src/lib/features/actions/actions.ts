@@ -6,7 +6,7 @@
  * that can be run in branch worktrees with real-time output streaming.
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../../invoke';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 /** Action types available for project actions. */

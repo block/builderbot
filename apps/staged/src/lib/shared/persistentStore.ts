@@ -8,7 +8,7 @@
  * The store is saved to `~/.staged/preferences.json`.
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../invoke';
 import { load, type Store } from '@tauri-apps/plugin-store';
 
 // Singleton store instance

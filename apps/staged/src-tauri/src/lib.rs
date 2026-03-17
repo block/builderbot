@@ -1049,6 +1049,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             let updater_pubkey_present = app
                 .config()
@@ -1272,6 +1273,38 @@ pub fn run() {
                 db_path,
                 needs_reset: Mutex::new(reset_info),
             });
+
+            // Deep-link: forward `staged:` URLs to the frontend.
+            // `on_open_url` fires when the app is already running and a URL is
+            // opened; `get_current` catches the URL that launched the app.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        let url_str = url.to_string();
+                        log::info!("[deep-link] received URL while running: {url_str}");
+                        let _ = handle.emit("deep-link-open", url_str);
+                    }
+                });
+
+                // Check if the app was launched via a deep link.
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    let handle = app.handle().clone();
+                    for url in urls {
+                        let url_str = url.to_string();
+                        log::info!("[deep-link] app launched with URL: {url_str}");
+                        // Emit after a short delay so the frontend has time to
+                        // mount its listener.
+                        let h = handle.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            let _ = h.emit("deep-link-open", url_str);
+                        });
+                    }
+                }
+            }
 
             if cfg!(debug_assertions) {
                 app.handle().plugin(

@@ -8,6 +8,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { convertDeepLinkToHttps } from './lib/shared/deepLink';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -45,6 +46,7 @@
   const updaterCheckIntervalMs = 15 * 60 * 1000;
 
   let showSessionLab = $state(false);
+  let unlistenDeepLink: UnlistenFn | undefined;
   let unlistenSettings: UnlistenFn | undefined;
   let unlistenFind: UnlistenFn | undefined;
   let unlistenFindNext: UnlistenFn | undefined;
@@ -189,6 +191,16 @@
 
   onMount(async () => {
     document.addEventListener('keydown', handleKonamiKey);
+
+    // Listen for deep-link URLs (staged: scheme).
+    unlistenDeepLink = await listen<string>('deep-link-open', (event) => {
+      const httpsUrl = convertDeepLinkToHttps(event.payload);
+      if (httpsUrl) {
+        window.dispatchEvent(
+          new CustomEvent('staged:new-project-with-url', { detail: { url: httpsUrl } })
+        );
+      }
+    });
 
     // Listen for the app menu Preferences item.
     unlistenSettings = await listen('menu:settings', () => {
@@ -362,6 +374,7 @@
   onDestroy(() => {
     document.removeEventListener('keydown', handleKonamiKey);
     unregisterShortcuts?.();
+    unlistenDeepLink?.();
     unlistenSettings?.();
     unlistenFind?.();
     unlistenFindNext?.();

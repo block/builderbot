@@ -33,6 +33,13 @@
       "csp": null
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["staged"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

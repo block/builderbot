@@ -8,6 +8,7 @@ use crate::{blox, branches, git};
 /// Core logic for adding a GitHub repository to a project.
 ///
 /// Called by both the `add_project_repo` Tauri command and the MCP tool.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn add_project_repo_impl(
     store: Arc<Store>,
     project_id: String,

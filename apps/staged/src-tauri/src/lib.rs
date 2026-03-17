@@ -415,6 +415,7 @@ fn list_recent_repos(
         .map_err(|e| e.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 async fn add_project_repo(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,

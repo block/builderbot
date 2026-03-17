@@ -1,9 +1,23 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { ArrowLeft, FolderGit2, Keyboard, Stethoscope } from 'lucide-svelte';
   import { closeSettings, navigation } from '../layout/navigation.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
+
+  let appVersion = $state(__APP_VERSION__);
+
+  onMount(async () => {
+    if (typeof window === 'undefined' || !('__TAURI__' in window)) return;
+
+    try {
+      const { getVersion } = await import('@tauri-apps/api/app');
+      appVersion = await getVersion();
+    } catch (error) {
+      console.warn('[Settings] Could not load runtime app version', error);
+    }
+  });
 
   function handleBack() {
     closeSettings();
@@ -18,6 +32,7 @@
     </button>
     <div class="header-text">
       <h1>Settings</h1>
+      <p class="header-meta">v{appVersion}</p>
     </div>
   </header>
 
@@ -132,6 +147,12 @@
     margin: 0;
     font-size: calc(var(--size-xl) * 1.1);
     line-height: 1.2;
+  }
+
+  .header-meta {
+    margin: 4px 0 0;
+    font-size: var(--size-sm);
+    color: var(--text-muted);
   }
 
   .settings-body {

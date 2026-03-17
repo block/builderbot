@@ -83,40 +83,51 @@
       pullRequests = prs;
       branches = refs;
 
-      // Auto-select a PR if initialPrNumber was provided (e.g. from a pasted PR URL)
+      // Auto-select a PR if initialPrNumber was provided (e.g. from a pasted PR URL).
+      // Skip focusing the input — the user didn't interact with the picker directly.
       if (initialPrNumber != null) {
         const pr = prs.find((p) => p.number === initialPrNumber);
         if (pr) {
-          selectItem({
-            kind: 'pr',
-            label: `#${pr.number} ${pr.title}`,
-            branchName: pr.headRef,
-            detail: pr.headRef,
-          });
+          selectItem(
+            {
+              kind: 'pr',
+              label: `#${pr.number} ${pr.title}`,
+              branchName: pr.headRef,
+              detail: pr.headRef,
+            },
+            { focus: false }
+          );
         }
         initialPrNumber = null;
       }
-      // Auto-fill a branch name if initialBranchName was provided (e.g. from a pasted branch URL)
+      // Auto-fill a branch name if initialBranchName was provided (e.g. from a pasted branch URL).
+      // Skip focusing the input — the user didn't interact with the picker directly.
       else if (initialBranchName) {
         const branchNameToFind = initialBranchName;
         // Check PRs first — a branch might back a PR
         const prForBranch = prs.find((p) => p.headRef === branchNameToFind);
         if (prForBranch) {
-          selectItem({
-            kind: 'pr',
-            label: `#${prForBranch.number} ${prForBranch.title}`,
-            branchName: prForBranch.headRef,
-            detail: prForBranch.headRef,
-          });
+          selectItem(
+            {
+              kind: 'pr',
+              label: `#${prForBranch.number} ${prForBranch.title}`,
+              branchName: prForBranch.headRef,
+              detail: prForBranch.headRef,
+            },
+            { focus: false }
+          );
         } else {
           // Check remote branches
           const refName = refs.find((r) => r.name.replace(/^origin\//, '') === branchNameToFind);
           if (refName) {
-            selectItem({
-              kind: 'branch',
-              label: branchNameToFind,
-              branchName: branchNameToFind,
-            });
+            selectItem(
+              {
+                kind: 'branch',
+                label: branchNameToFind,
+                branchName: branchNameToFind,
+              },
+              { focus: false }
+            );
           } else {
             // Branch not in the list — just set the value (will show as "New branch")
             value = branchNameToFind;
@@ -206,11 +217,11 @@
     }, 150);
   }
 
-  function selectItem(item: PickerItem) {
+  function selectItem(item: PickerItem, { focus = true }: { focus?: boolean } = {}) {
     value = item.branchName;
     showDropdown = false;
     highlightedIndex = -1;
-    inputEl?.focus();
+    if (focus) inputEl?.focus();
 
     // Update matched PR: set when selecting a PR item, clear for branches
     if (item.kind === 'pr') {

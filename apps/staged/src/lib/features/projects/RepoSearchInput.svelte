@@ -129,6 +129,8 @@
     const parsed = parseGitHubUrl(trimmed);
     if (parsed) {
       handleSelect(parsed);
+      // Blur so focus doesn't jump into the newly-revealed BranchPicker
+      inputEl?.blur();
       return;
     }
 

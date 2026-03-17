@@ -181,6 +181,8 @@
     if (parsed) {
       name = '';
       handleRepoSelected(parsed);
+      // Blur the name field so focus doesn't jump into the newly-revealed BranchPicker
+      (document.activeElement as HTMLElement | null)?.blur();
     }
   }
 

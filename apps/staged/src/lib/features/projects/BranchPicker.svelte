@@ -30,10 +30,17 @@
     value: string;
     repo: string;
     disabled?: boolean;
+    isNewBranch?: boolean;
     onSelect?: (selection: BranchSelection) => void;
   }
 
-  let { value = $bindable(''), repo, disabled = false, onSelect }: Props = $props();
+  let {
+    value = $bindable(''),
+    repo,
+    disabled = false,
+    isNewBranch = $bindable(false),
+    onSelect,
+  }: Props = $props();
 
   let pullRequests = $state<PullRequest[]>([]);
   let branches = $state<BranchRef[]>([]);
@@ -65,6 +72,24 @@
       loading = false;
     }
   }
+
+  /** All known remote branch names (without origin/ prefix). */
+  let knownBranches = $derived.by((): Set<string> => {
+    const names = new Set<string>();
+    for (const pr of pullRequests) {
+      names.add(pr.headRef);
+    }
+    for (const ref of branches) {
+      names.add(ref.name.replace(/^origin\//, ''));
+    }
+    return names;
+  });
+
+  // Update isNewBranch whenever value or known branches change
+  $effect(() => {
+    const trimmed = value.trim();
+    isNewBranch = trimmed.length > 0 && !knownBranches.has(trimmed);
+  });
 
   /** Build a unified list of picker items from PRs and branches. */
   let allItems = $derived.by((): PickerItem[] => {

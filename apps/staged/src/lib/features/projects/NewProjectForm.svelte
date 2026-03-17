@@ -38,6 +38,7 @@
   }: Props = $props();
 
   let branchName = $state('');
+  let isNewBranch = $state(false);
 
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -274,10 +275,13 @@
     <div class="form-group">
       <label for="project-branch"
         >PR or Branch
-        <span class="field-badge optional">Optional</span></label
+        <span class="field-badge {isNewBranch ? 'new-branch' : 'optional'}"
+          >{isNewBranch ? 'New branch' : 'Optional'}</span
+        ></label
       >
       <BranchPicker
         bind:value={branchName}
+        bind:isNewBranch
         repo={selectedRepo}
         disabled={saving}
         onSelect={handleBranchSelected}
@@ -351,6 +355,11 @@
   }
 
   .field-badge.recommended {
+    background-color: var(--ui-accent);
+    color: var(--bg-deepest);
+  }
+
+  .field-badge.new-branch {
     background-color: var(--ui-accent);
     color: var(--bg-deepest);
   }

@@ -21,9 +21,12 @@
     title: string;
     content: string;
     onClose: () => void;
+    /** When set, shows a button to open the associated chat session. */
+    sessionId?: string | null;
+    onOpenSession?: (sessionId: string) => void;
   }
 
-  let { title, content, onClose }: Props = $props();
+  let { title, content, onClose, sessionId, onOpenSession }: Props = $props();
 
   let copied = $state(false);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
@@ -163,7 +166,9 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
     <header class="modal-header">
-      <h2 class="modal-title">{title}</h2>
+      <div class="header-content">
+        <span class="header-title">{title}</span>
+      </div>
       <InContentSearch
         visible={searchVisible}
         {matchCount}
@@ -175,7 +180,7 @@
       />
       <div class="header-actions">
         <button
-          class="share-btn"
+          class="header-btn"
           class:copied
           onclick={handleShare}
           title={copied ? 'Copied!' : 'Copy note to clipboard'}
@@ -186,6 +191,15 @@
             <Copy size={16} />
           {/if}
         </button>
+        {#if sessionId && onOpenSession}
+          <button
+            class="header-btn"
+            onclick={() => onOpenSession?.(sessionId!)}
+            title="Open chat session"
+          >
+            View chat
+          </button>
+        {/if}
         <button class="close-btn" onclick={onClose} title="Close (Esc)">
           <X size={16} />
         </button>
@@ -218,9 +232,9 @@
   .modal {
     display: flex;
     flex-direction: column;
-    width: 640px;
-    max-width: 90vw;
-    max-height: 80vh;
+    width: 700px;
+    height: 80vh;
+    max-height: 900px;
     background: var(--bg-chrome);
     border-radius: 12px;
     overflow: hidden;
@@ -232,21 +246,27 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 16px 20px;
+    padding: 12px 16px;
     border-bottom: 1px solid var(--border-subtle);
     flex-shrink: 0;
     gap: 12px;
   }
 
-  .modal-title {
-    margin: 0;
-    font-size: var(--size-base);
+  .header-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    flex: 1;
+  }
+
+  .header-title {
+    font-size: var(--size-sm);
     font-weight: 600;
     color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    min-width: 0;
   }
 
   .close-btn {
@@ -277,28 +297,31 @@
     flex-shrink: 0;
   }
 
-  .share-btn {
+  .header-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 4px;
+    padding: 4px 10px;
     background: none;
-    border: none;
+    border: 1px solid var(--border-muted);
     border-radius: 6px;
     color: var(--text-muted);
     cursor: pointer;
     flex-shrink: 0;
+    font-size: 12px;
     transition:
       color 0.1s,
-      background-color 0.1s;
+      background-color 0.1s,
+      border-color 0.1s;
   }
 
-  .share-btn:hover {
+  .header-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+    border-color: var(--text-muted);
   }
 
-  .share-btn.copied {
+  .header-btn.copied {
     color: var(--status-added);
   }
 

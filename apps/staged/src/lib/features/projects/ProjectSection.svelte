@@ -373,7 +373,7 @@
     })
   );
 
-  let openNote = $state<{ title: string; content: string } | null>(null);
+  let openNote = $state<{ title: string; content: string; sessionId?: string } | null>(null);
   let openSessionId = $state<string | null>(null);
 
   function formatRelativeTime(timestampMs: number): string {
@@ -614,7 +614,11 @@
             onItemClick={isRunning || isFailed
               ? undefined
               : () => {
-                  openNote = { title: note.title, content: note.content };
+                  openNote = {
+                    title: note.title,
+                    content: note.content,
+                    sessionId: note.sessionId ?? undefined,
+                  };
                 }}
             onSessionClick={(sid) => {
               openSessionId = sid;
@@ -646,13 +650,33 @@
 </div>
 
 {#if openNote}
-  <NoteModal title={openNote.title} content={openNote.content} onClose={() => (openNote = null)} />
+  <NoteModal
+    title={openNote.title}
+    content={openNote.content}
+    sessionId={openNote.sessionId}
+    onClose={() => (openNote = null)}
+    onOpenSession={(sid) => {
+      openNote = null;
+      openSessionId = sid;
+    }}
+  />
 {/if}
 
 {#if openSessionId}
+  {@const noteForSession = projectNotes.find(
+    (n) => n.sessionId === openSessionId && n.content?.trim()
+  )}
   <SessionModal
     sessionId={openSessionId}
     projectId={project.id}
+    noteInfo={noteForSession
+      ? { id: noteForSession.id, title: noteForSession.title, content: noteForSession.content }
+      : null}
+    onOpenNote={(_noteId, title, content) => {
+      const sid = openSessionId;
+      openSessionId = null;
+      openNote = { title, content, sessionId: sid ?? undefined };
+    }}
     onClose={() => {
       openSessionId = null;
       loadProjectNotes();

@@ -83,9 +83,12 @@
     branchId?: string | null;
     /** Project ID — when provided, enables image attachment on replies. */
     projectId?: string | null;
+    /** When set, shows a button to open the associated note. */
+    noteInfo?: { id: string; title: string; content: string } | null;
+    onOpenNote?: (noteId: string, title: string, content: string) => void;
   }
 
-  let { sessionId, onClose, repoDir, branchId, projectId }: Props = $props();
+  let { sessionId, onClose, repoDir, branchId, projectId, noteInfo, onOpenNote }: Props = $props();
 
   // =========================================================================
   // State
@@ -820,6 +823,15 @@
         onClose={closeSearch}
       />
       <div class="header-actions">
+        {#if noteInfo && onOpenNote}
+          <button
+            class="header-btn"
+            onclick={() => onOpenNote?.(noteInfo!.id, noteInfo!.title, noteInfo!.content)}
+            title="Open note"
+          >
+            View note
+          </button>
+        {/if}
         <button class="close-btn" onclick={requestClose} title="Close (Esc)">
           <X size={16} />
         </button>
@@ -1247,6 +1259,30 @@
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
+  }
+
+  .header-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 10px;
+    background: none;
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    font-size: 12px;
+    transition:
+      color 0.1s,
+      background-color 0.1s,
+      border-color 0.1s;
+  }
+
+  .header-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border-color: var(--text-muted);
   }
 
   .close-btn {

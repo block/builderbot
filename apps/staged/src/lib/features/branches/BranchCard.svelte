@@ -152,6 +152,9 @@
     if (latest.kind === 'note' && latest.title.toLowerCase().includes('plan')) {
       return 'Implement plan';
     }
+    if (latest.kind === 'note' && latest.title.toLowerCase().endsWith(' log')) {
+      return 'Read the latest note which contains logs. Look for any issues.';
+    }
 
     return '';
   });

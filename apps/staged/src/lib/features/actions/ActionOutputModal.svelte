@@ -131,7 +131,7 @@
     try {
       saveError = null;
       const title = `${actionName} log`;
-      await createNote(branchId, title, content);
+      await createNote(branchId, title, '```\n' + content + '\n```');
       invalidateBranchTimeline(branchId);
       onNoteCreated?.();
       saveState = 'saved';

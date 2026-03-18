@@ -68,6 +68,7 @@
     ) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void;
     onRetryWorktree?: (branchId: string) => void;
+    onDismissReason?: (projectRepoId: string) => void;
   }
 
   let {
@@ -89,6 +90,7 @@
     onWorkspaceStatusChange,
     onRepoSelected,
     onRetryWorktree,
+    onDismissReason,
   }: Props = $props();
 
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
@@ -644,6 +646,7 @@
         onRetryWorktree={() => onRetryWorktree?.(branch.id)}
         onWorkspaceStatusChange={(status, workstationId) =>
           onWorkspaceStatusChange?.(branch.id, status, workstationId)}
+        onDismissReason={(projectRepoId) => onDismissReason?.(projectRepoId)}
       />
     {/each}
   </div>

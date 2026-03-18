@@ -753,6 +753,17 @@
             )}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
+            onDismissReason={(projectRepoId) => {
+              const projectLabels = repoLabelsByProject.get(project.id);
+              if (projectLabels) {
+                const entry = projectLabels.get(projectRepoId);
+                if (entry) {
+                  const next = new Map(projectLabels);
+                  next.set(projectRepoId, { ...entry, reason: null });
+                  repoLabelsByProject = new Map(repoLabelsByProject).set(project.id, next);
+                }
+              }
+            }}
           />
         {/each}
       </div>

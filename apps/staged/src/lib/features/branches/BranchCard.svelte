@@ -52,6 +52,7 @@
     onRename?: (branchName: string) => void;
     onRetryWorktree?: () => void;
     onWorkspaceStatusChange?: (status: WorkspaceStatus, workstationId?: number | null) => void;
+    onDismissReason?: (projectRepoId: string) => void;
   }
 
   let {
@@ -65,6 +66,7 @@
     onRename,
     onRetryWorktree,
     onWorkspaceStatusChange,
+    onDismissReason,
   }: Props = $props();
 
   // Determine if this is a local or remote branch
@@ -521,6 +523,7 @@
     if (branch.projectRepoId) {
       try {
         await commands.clearProjectRepoReason(branch.projectRepoId);
+        onDismissReason?.(branch.projectRepoId);
       } catch (e) {
         console.error('Failed to clear repo reason:', e);
       }

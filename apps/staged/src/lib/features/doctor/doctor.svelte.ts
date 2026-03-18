@@ -26,7 +26,9 @@ export async function runChecks(): Promise<void> {
     doctorState.report = await runDoctor();
     // Re-discover providers so newly-installed agents are immediately
     // available in the agent selector without requiring an app reload.
-    await refreshProviders();
+    // Fire-and-forget: the agent selector updates reactively once the
+    // promise resolves, so no need to delay showing the doctor report.
+    refreshProviders();
   } catch (e) {
     console.error('[Doctor] Failed to run checks:', e);
   } finally {

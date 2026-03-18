@@ -5,6 +5,7 @@
  * that calls the Tauri `run_doctor` command.
  */
 import { runDoctor, type DoctorReport } from '../../api/commands';
+import { refreshProviders } from '../agents/agent.svelte';
 
 interface DoctorState {
   /** The most recent report, or null if not yet run. */
@@ -23,6 +24,9 @@ export async function runChecks(): Promise<void> {
   doctorState.loading = true;
   try {
     doctorState.report = await runDoctor();
+    // Re-discover providers so newly-installed agents are immediately
+    // available in the agent selector without requiring an app reload.
+    await refreshProviders();
   } catch (e) {
     console.error('[Doctor] Failed to run checks:', e);
   } finally {

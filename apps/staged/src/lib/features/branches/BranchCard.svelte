@@ -153,7 +153,7 @@
       return 'Implement plan';
     }
     if (latest.kind === 'note' && latest.title.toLowerCase().endsWith(' log')) {
-      return 'Look for issues in the logs in the latest note';
+      return 'Read the latest note which contains logs. Look for any issues.';
     }
 
     return '';

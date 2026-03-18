@@ -22,7 +22,7 @@
     X,
     ImagePlus,
   } from 'lucide-svelte';
-  import type { Project, Branch, WorkspaceStatus, ProjectNote } from '../../types';
+  import type { Project, ProjectRepo, Branch, WorkspaceStatus, ProjectNote } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome } from '../layout/navigation.svelte';
   import * as commands from '../../api/commands';
@@ -45,10 +45,7 @@
   interface Props {
     project: Project;
     branches: Branch[];
-    repoLabelsById?: Map<
-      string,
-      { githubRepo: string; subpath: string | null; reason: string | null }
-    >;
+    reposById?: Map<string, ProjectRepo>;
     canAddRepo?: boolean;
     addRepoHint?: string | null;
     deleting?: boolean;
@@ -68,12 +65,13 @@
     ) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void;
     onRetryWorktree?: (branchId: string) => void;
+    onDismissReason?: (projectRepoId: string) => void;
   }
 
   let {
     project,
     branches,
-    repoLabelsById = new Map(),
+    reposById = new Map(),
     canAddRepo = true,
     addRepoHint = null,
     deleting = false,
@@ -89,6 +87,7 @@
     onWorkspaceStatusChange,
     onRepoSelected,
     onRetryWorktree,
+    onDismissReason,
   }: Props = $props();
 
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
@@ -159,14 +158,9 @@
     return () => window.removeEventListener('pointerdown', onPointerDown);
   });
 
-  function repoLabelForBranch(
-    branch: Branch
-  ): { githubRepo: string; subpath: string | null } | null {
-    const fallback = project.githubRepo
-      ? { githubRepo: project.githubRepo, subpath: project.subpath ?? null }
-      : null;
-    if (!branch.projectRepoId) return fallback;
-    return repoLabelsById.get(branch.projectRepoId) ?? fallback;
+  function repoForBranch(branch: Branch): ProjectRepo | null {
+    if (!branch.projectRepoId) return null;
+    return reposById.get(branch.projectRepoId) ?? null;
   }
 
   // ── Project session input ──────────────────────────────────────────────
@@ -634,7 +628,7 @@
     {#each sortedBranches as branch (branch.id)}
       <BranchCard
         {branch}
-        repoLabel={repoLabelForBranch(branch)}
+        repoLabel={repoForBranch(branch)}
         projectName={project.name}
         deleting={deletingBranches.has(branch.id)}
         worktreeError={worktreeErrors.get(branch.id)}
@@ -644,6 +638,7 @@
         onRetryWorktree={() => onRetryWorktree?.(branch.id)}
         onWorkspaceStatusChange={(status, workstationId) =>
           onWorkspaceStatusChange?.(branch.id, status, workstationId)}
+        {onDismissReason}
       />
     {/each}
   </div>

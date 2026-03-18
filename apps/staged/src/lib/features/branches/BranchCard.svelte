@@ -19,6 +19,7 @@
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
+    ProjectRepo,
     SessionStatusPayload,
     WorkspaceStatus,
   } from '../../types';
@@ -43,7 +44,7 @@
 
   interface Props {
     branch: Branch;
-    repoLabel?: { githubRepo: string; subpath: string | null; reason?: string | null } | null;
+    repoLabel?: ProjectRepo | null;
     projectName?: string;
     deleting?: boolean;
     worktreeError?: string;
@@ -52,6 +53,7 @@
     onRename?: (branchName: string) => void;
     onRetryWorktree?: () => void;
     onWorkspaceStatusChange?: (status: WorkspaceStatus, workstationId?: number | null) => void;
+    onDismissReason?: (projectRepoId: string) => void;
   }
 
   let {
@@ -65,6 +67,7 @@
     onRename,
     onRetryWorktree,
     onWorkspaceStatusChange,
+    onDismissReason,
   }: Props = $props();
 
   // Determine if this is a local or remote branch
@@ -521,6 +524,7 @@
     if (branch.projectRepoId) {
       try {
         await commands.clearProjectRepoReason(branch.projectRepoId);
+        onDismissReason?.(branch.projectRepoId);
       } catch (e) {
         console.error('Failed to clear repo reason:', e);
       }

@@ -134,6 +134,7 @@ impl ProjectToolsHandler {
     async fn start_repo_session(
         &self,
         Parameters(p): Parameters<StartRepoSessionParams>,
+        request_ct: CancellationToken,
     ) -> String {
         log::debug!(
             "[project_mcp] start_repo_session called: repo={:?} subpath={:?} expected_outcome={:?} return_info={:?} provider={:?} instructions={:?}",
@@ -448,14 +449,29 @@ impl ProjectToolsHandler {
         }
 
         // Poll until the session reaches a terminal state.
-        // Also watch the parent project session's cancellation token so we
-        // don't loop forever if the project session is cancelled while waiting.
+        // Watch both the parent project session's cancellation token and the
+        // per-request cancellation token (fired by rmcp when the MCP client
+        // sends a CancelledNotification, e.g. on Goose's 5-minute timeout).
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                 _ = self.cancel_token.cancelled() => {
                     // Cancel the child session so it doesn't run as an orphan
                     // after the parent project session has been cancelled.
+                    self.registry.cancel(&session_id);
+                    return serde_json::json!({
+                        "outcome": "cancelled",
+                        "output": "",
+                    })
+                    .to_string();
+                }
+                _ = request_ct.cancelled() => {
+                    // The MCP client cancelled this specific tool call (e.g.
+                    // Goose's per-tool timeout fired). Cancel the child session
+                    // so it doesn't continue running as an orphan.
+                    log::info!(
+                        "[project_mcp] per-request cancellation received for session {session_id}"
+                    );
                     self.registry.cancel(&session_id);
                     return serde_json::json!({
                         "outcome": "cancelled",

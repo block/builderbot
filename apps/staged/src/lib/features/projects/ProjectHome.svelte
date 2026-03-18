@@ -8,7 +8,13 @@
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import type { Project, Branch, StoreIncompatibility, WorkspaceStatus } from '../../types';
+  import type {
+    Project,
+    ProjectRepo,
+    Branch,
+    StoreIncompatibility,
+    WorkspaceStatus,
+  } from '../../types';
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
@@ -32,9 +38,17 @@
   // Data
   let projects = $state<Project[]>([]);
   let branchesByProject = $state<Map<string, Branch[]>>(new Map());
-  let repoLabelsByProject = $state<
-    Map<string, Map<string, { githubRepo: string; subpath: string | null; reason: string | null }>>
-  >(new Map());
+  let reposById = $state<Map<string, ProjectRepo>>(new Map());
+
+  /** Replace all cached repos for a single project with a fresh list. */
+  function replaceProjectRepos(projectId: string, repos: ProjectRepo[]) {
+    const next = new Map(reposById);
+    for (const [id, repo] of next) {
+      if (repo.projectId === projectId) next.delete(id);
+    }
+    for (const repo of repos) next.set(repo.id, repo);
+    reposById = next;
+  }
   let loading = $state(true);
   let error = $state<string | null>(null);
   let loadGeneration = 0;
@@ -109,22 +123,7 @@
         projects = projectsList;
         branchesByProject = new Map(branchesByProject).set(projectId, branches);
         workspaceLifecycle.enqueueInitialSetup(projectId, branches);
-        repoLabelsByProject = new Map(repoLabelsByProject).set(
-          projectId,
-          new Map(
-            repos.map(
-              (repo) =>
-                [
-                  repo.id,
-                  {
-                    githubRepo: repo.githubRepo,
-                    subpath: repo.subpath ?? null,
-                    reason: repo.reason ?? null,
-                  },
-                ] as const
-            )
-          )
-        );
+        replaceProjectRepos(projectId, repos);
       } catch (e) {
         console.error('[ProjectHome] Failed to refresh project after setup progress:', e);
       }
@@ -222,16 +221,18 @@
 
       // Seed maps so project sections can render immediately.
       const branchMap = new Map<string, Branch[]>();
-      const repoLabelMap = new Map<
-        string,
-        Map<string, { githubRepo: string; subpath: string | null; reason: string | null }>
-      >();
       for (const project of projectList) {
         branchMap.set(project.id, branchesByProject.get(project.id) || []);
-        repoLabelMap.set(project.id, repoLabelsByProject.get(project.id) || new Map());
       }
       branchesByProject = branchMap;
-      repoLabelsByProject = repoLabelMap;
+
+      // Drop cached repos for projects that no longer exist.
+      const projectIds = new Set(projectList.map((p) => p.id));
+      const prunedRepos = new Map<string, ProjectRepo>();
+      for (const [id, repo] of reposById) {
+        if (projectIds.has(repo.projectId)) prunedRepos.set(id, repo);
+      }
+      reposById = prunedRepos;
 
       await Promise.all(
         projectList.map(async (project) => {
@@ -243,22 +244,7 @@
             if (generation !== loadGeneration) return;
             branchesByProject = new Map(branchesByProject).set(project.id, branches);
             workspaceLifecycle.enqueueInitialSetup(project.id, branches);
-            repoLabelsByProject = new Map(repoLabelsByProject).set(
-              project.id,
-              new Map(
-                repos.map(
-                  (repo) =>
-                    [
-                      repo.id,
-                      {
-                        githubRepo: repo.githubRepo,
-                        subpath: repo.subpath ?? null,
-                        reason: repo.reason ?? null,
-                      },
-                    ] as const
-                )
-              )
-            );
+            replaceProjectRepos(project.id, repos);
           } catch (e) {
             console.error(`[ProjectHome] Failed to hydrate project '${project.id}':`, e);
           }
@@ -303,7 +289,10 @@
   let repoCountsByProject = $derived(
     new Map(
       projects.map((project) => {
-        const knownCount = repoLabelsByProject.get(project.id)?.size ?? 0;
+        let knownCount = 0;
+        for (const repo of reposById.values()) {
+          if (repo.projectId === project.id) knownCount++;
+        }
         const fallbackCount = project.githubRepo ? 1 : 0;
         return [project.id, knownCount > 0 ? knownCount : fallbackCount] as const;
       })
@@ -385,22 +374,7 @@
     ]);
     branchesByProject = new Map(branchesByProject).set(project.id, branches);
     workspaceLifecycle.enqueueInitialSetup(project.id, branches);
-    repoLabelsByProject = new Map(repoLabelsByProject).set(
-      project.id,
-      new Map(
-        repos.map(
-          (repo) =>
-            [
-              repo.id,
-              {
-                githubRepo: repo.githubRepo,
-                subpath: repo.subpath ?? null,
-                reason: repo.reason ?? null,
-              },
-            ] as const
-        )
-      )
-    );
+    replaceProjectRepos(project.id, repos);
     showNewProjectModal = false;
     selectProject(project.id);
   }
@@ -469,9 +443,11 @@
       const nextBranches = new Map(branchesByProject);
       nextBranches.delete(id);
       branchesByProject = nextBranches;
-      const nextRepoLabels = new Map(repoLabelsByProject);
-      nextRepoLabels.delete(id);
-      repoLabelsByProject = nextRepoLabels;
+      const nextRepos = new Map(reposById);
+      for (const [repoId, repo] of nextRepos) {
+        if (repo.projectId === id) nextRepos.delete(repoId);
+      }
+      reposById = nextRepos;
       for (const branch of branchesToClear) {
         workspaceLifecycle.clearBranchState(branch.id);
       }
@@ -515,22 +491,7 @@
       projects = projectsList;
       branchesByProject = new Map(branchesByProject).set(projectId, branches);
       workspaceLifecycle.enqueueInitialSetup(projectId, branches);
-      repoLabelsByProject = new Map(repoLabelsByProject).set(
-        projectId,
-        new Map(
-          repos.map(
-            (repo) =>
-              [
-                repo.id,
-                {
-                  githubRepo: repo.githubRepo,
-                  subpath: repo.subpath ?? null,
-                  reason: repo.reason ?? null,
-                },
-              ] as const
-          )
-        )
-      );
+      replaceProjectRepos(projectId, repos);
     } catch (e) {
       console.error('Failed to add repo:', e);
       const message = e instanceof Error ? e.message : String(e);
@@ -612,22 +573,7 @@
         ]);
         projects = projectsList;
         branchesByProject = new Map(branchesByProject).set(branch.projectId, branches);
-        repoLabelsByProject = new Map(repoLabelsByProject).set(
-          branch.projectId,
-          new Map(
-            repos.map(
-              (repo) =>
-                [
-                  repo.id,
-                  {
-                    githubRepo: repo.githubRepo,
-                    subpath: repo.subpath ?? null,
-                    reason: repo.reason ?? null,
-                  },
-                ] as const
-            )
-          )
-        );
+        replaceProjectRepos(branch.projectId, repos);
       } else {
         await commands.deleteBranch(branch.id);
         // Fallback for legacy branches without repo linkage
@@ -733,7 +679,7 @@
           <ProjectSection
             {project}
             branches={branchesByProject.get(project.id) || []}
-            repoLabelsById={repoLabelsByProject.get(project.id) || new Map()}
+            {reposById}
             canAddRepo={canAddRepo(project)}
             addRepoHint={project.location === 'remote' ? addRepoHint(project) : null}
             deleting={deletingProjectNames.has(project.id)}
@@ -749,19 +695,16 @@
             onWorkspaceStatusChange={(branchId, workspaceStatus, workstationId) =>
               handleWorkspaceStatusChange(project.id, branchId, workspaceStatus, workstationId)}
             excludeRepos={new Set(
-              [...(repoLabelsByProject.get(project.id)?.values() ?? [])].map((r) => r.githubRepo)
+              [...reposById.values()]
+                .filter((r) => r.projectId === project.id)
+                .map((r) => r.githubRepo)
             )}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
             onDismissReason={(projectRepoId) => {
-              const projectLabels = repoLabelsByProject.get(project.id);
-              if (projectLabels) {
-                const entry = projectLabels.get(projectRepoId);
-                if (entry) {
-                  const next = new Map(projectLabels);
-                  next.set(projectRepoId, { ...entry, reason: null });
-                  repoLabelsByProject = new Map(repoLabelsByProject).set(project.id, next);
-                }
+              const repo = reposById.get(projectRepoId);
+              if (repo) {
+                reposById = new Map(reposById).set(projectRepoId, { ...repo, reason: null });
               }
             }}
           />

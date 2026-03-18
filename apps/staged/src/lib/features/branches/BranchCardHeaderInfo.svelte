@@ -1,10 +1,11 @@
 <script lang="ts">
   import { GitBranch } from 'lucide-svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import type { ProjectRepo } from '../../types';
 
   interface Props {
     branchName: string;
-    repoLabel?: { githubRepo: string; subpath: string | null } | null;
+    repoLabel?: ProjectRepo | null;
     secondaryLabel?: string | null;
   }
 

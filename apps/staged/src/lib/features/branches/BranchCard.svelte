@@ -19,6 +19,7 @@
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
+    ProjectRepo,
     SessionStatusPayload,
     WorkspaceStatus,
   } from '../../types';
@@ -43,7 +44,7 @@
 
   interface Props {
     branch: Branch;
-    repoLabel?: { githubRepo: string; subpath: string | null; reason?: string | null } | null;
+    repoLabel?: ProjectRepo | null;
     projectName?: string;
     deleting?: boolean;
     worktreeError?: string;

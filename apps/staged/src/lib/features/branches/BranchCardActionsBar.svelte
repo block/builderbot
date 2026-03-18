@@ -30,7 +30,7 @@
   import SineWave from '../../shared/SineWave.svelte';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import type { Branch } from '../../types';
+  import type { Branch, ProjectRepo } from '../../types';
   import * as commands from '../../api/commands';
   import type { ProjectAction } from '../../api/commands';
   import {
@@ -58,7 +58,7 @@
 
   interface Props {
     branch: Branch;
-    repoLabel?: { githubRepo: string; subpath: string | null; reason?: string | null } | null;
+    repoLabel?: ProjectRepo | null;
     isLocal: boolean;
     isRemote: boolean;
     remoteWorkspaceStatus: string | null;

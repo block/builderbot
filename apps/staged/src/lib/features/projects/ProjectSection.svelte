@@ -638,7 +638,7 @@
         onRetryWorktree={() => onRetryWorktree?.(branch.id)}
         onWorkspaceStatusChange={(status, workstationId) =>
           onWorkspaceStatusChange?.(branch.id, status, workstationId)}
-        onDismissReason={(projectRepoId) => onDismissReason?.(projectRepoId)}
+        {onDismissReason}
       />
     {/each}
   </div>

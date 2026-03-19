@@ -414,7 +414,7 @@ pub async fn has_unpushed_commits(
         // block the Tauri IPC thread and freeze the UI.
         return tauri::async_runtime::spawn_blocking(move || {
             let remote_ref = format!("origin/{}", branch_name);
-            // Check that the remote tracking branch exists
+            // Remote tracking branch doesn't exist — all commits are unpushed
             if crate::branches::run_workspace_git(
                 &workspace_name,
                 repo_subpath.as_deref(),
@@ -422,7 +422,7 @@ pub async fn has_unpushed_commits(
             )
             .is_err()
             {
-                return Ok(false);
+                return Ok(true);
             }
             let rev_range = format!("{remote_ref}..HEAD");
             let output = crate::branches::run_workspace_git(

@@ -163,11 +163,12 @@ const VERB_NOUNS: Record<string, string> = {
 
 export function groupByVerb(
   pairs: { call: { id: number; content: string }; result: { content: string } | null }[],
-  repoDir?: string | null
+  repoDir?: string | null,
+  forcePastTense?: boolean
 ): VerbGroup[] {
   const groups: VerbGroup[] = [];
   for (const pair of pairs) {
-    const pending = !pair.result;
+    const pending = !pair.result && !forcePastTense;
     const { verb, detail } = formatToolDisplay(pair.call.content, repoDir, pending);
     const item: ToolPairDisplay = { pair, verb, detail };
     const last = groups[groups.length - 1];

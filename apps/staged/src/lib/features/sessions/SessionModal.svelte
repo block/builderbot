@@ -867,7 +867,7 @@
         </div>
       {:else}
         <div class="messages">
-          {#each grouped as group}
+          {#each grouped as group, groupIdx}
             {#if group.type === 'user'}
               {@const hasBlocks = hasXmlBlocks(group.message.content)}
               {@const segments = hasBlocks ? parseContentSegments(group.message.content) : []}
@@ -967,7 +967,9 @@
               </div>
             {:else}
               <div class="message-row tool-group">
-                {#each groupByVerb(group.pairs, repoDir) as vg, vgIdx}
+                {@const forcePast =
+                  !isLive || grouped.slice(groupIdx + 1).some((g) => g.type === 'user')}
+                {#each groupByVerb(group.pairs, repoDir, forcePast) as vg, vgIdx}
                   {#if vg.items.length === 1}
                     {@const item = vg.items[0]}
                     {@const isExpanded = expandedTools.has(item.pair.call.id)}

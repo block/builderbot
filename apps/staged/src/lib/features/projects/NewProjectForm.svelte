@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { slide } from 'svelte/transition';
   import { GitBranch, Monitor, Cloud, X, Clock, Command } from 'lucide-svelte';
   import type { Project, RecentRepo } from '../../types';
   import * as commands from '../../api/commands';
@@ -273,7 +274,7 @@
     {/if}
 
     {#if !selectedRepo && recentRepos.length > 0}
-      <div class="recent-repos">
+      <div class="recent-repos" transition:slide={{ duration: 150 }}>
         {#each recentRepos.slice(0, 5) as recent, i}
           <button
             class="recent-repo-item"
@@ -298,7 +299,7 @@
   </div>
 
   {#if selectedRepo}
-    <div class="form-group">
+    <div class="form-group" transition:slide={{ duration: 150 }}>
       <label for="project-subpath"
         >Subpath
         <span class="field-badge {isMonorepo ? 'recommended' : 'optional'}"
@@ -313,7 +314,7 @@
       />
     </div>
 
-    <div class="form-group">
+    <div class="form-group" transition:slide={{ duration: 150 }}>
       <label for="project-branch"
         >PR or Branch
         <span class="field-badge {isNewBranch ? 'new-branch' : 'optional'}"
@@ -334,7 +335,7 @@
   {/if}
 
   {#if error}
-    <div class="error-message">{error}</div>
+    <div class="error-message" transition:slide={{ duration: 150 }}>{error}</div>
   {/if}
 
   <div class="actions">

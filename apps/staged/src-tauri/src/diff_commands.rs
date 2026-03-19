@@ -261,10 +261,6 @@ fn file_content_from_bytes(bytes: &[u8], path: &str) -> git::FileContent {
     }
 }
 
-fn file_content_from_text(text: &str, path: &str) -> git::FileContent {
-    file_content_from_bytes(text.as_bytes(), path)
-}
-
 /// For binary content in the remote path, try to produce an ImageBase64 variant.
 fn file_content_binary_or_image(bytes: &[u8], path: &str) -> git::FileContent {
     if bytes.len() > git::IMAGE_PREVIEW_MAX_BYTES {

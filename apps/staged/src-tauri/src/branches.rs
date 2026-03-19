@@ -184,6 +184,23 @@ pub(crate) fn run_workspace_git(
     blox::ws_exec(workspace_name, &borrowed)
 }
 
+pub(crate) fn run_workspace_git_bytes(
+    workspace_name: &str,
+    repo_subpath: Option<&str>,
+    git_args: &[&str],
+) -> Result<Vec<u8>, blox::BloxError> {
+    let mut owned = Vec::<String>::new();
+    owned.push("git".to_string());
+    if let Some(subpath) = repo_subpath.map(str::trim).filter(|s| !s.is_empty()) {
+        let resolved = resolve_workspace_repo_path(workspace_name, subpath)?;
+        owned.push("-C".to_string());
+        owned.push(resolved);
+    }
+    owned.extend(git_args.iter().map(|arg| (*arg).to_string()));
+    let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
+    blox::ws_exec_bytes(workspace_name, &borrowed)
+}
+
 async fn run_blox_blocking<T, F>(op: F) -> Result<T, blox::BloxError>
 where
     T: Send + 'static,

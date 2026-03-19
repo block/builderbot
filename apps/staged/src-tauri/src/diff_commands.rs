@@ -61,6 +61,15 @@ fn run_remote_git(ctx: &BranchDiffContext, args: &[&str]) -> Result<String, Stri
         .map_err(|e| e.to_string())
 }
 
+fn run_remote_git_bytes(ctx: &BranchDiffContext, args: &[&str]) -> Result<Vec<u8>, String> {
+    let workspace = ctx
+        .workspace_name
+        .as_deref()
+        .ok_or("Missing remote workspace context")?;
+    branches::run_workspace_git_bytes(workspace, ctx.repo_subpath.as_deref(), args)
+        .map_err(|e| e.to_string())
+}
+
 /// Build a DiffSpec for a branch diff.
 ///
 /// - Branch scope with no commit_sha: merge-base(base, tip)..tip
@@ -241,13 +250,19 @@ fn parse_unified_hunks(diff_text: &str) -> Vec<RemoteHunk> {
     hunks
 }
 
-fn file_content_from_text(text: &str, path: &str) -> git::FileContent {
-    if text.as_bytes()[..text.len().min(8192)].contains(&0) {
-        return file_content_binary_or_image(text.as_bytes(), path);
+fn file_content_from_bytes(bytes: &[u8], path: &str) -> git::FileContent {
+    let check_len = bytes.len().min(8192);
+    if bytes[..check_len].contains(&0) {
+        return file_content_binary_or_image(bytes, path);
     }
+    let text = String::from_utf8_lossy(bytes);
     git::FileContent::Text {
         lines: text.lines().map(|line| line.to_string()).collect(),
     }
+}
+
+fn file_content_from_text(text: &str, path: &str) -> git::FileContent {
+    file_content_from_bytes(text.as_bytes(), path)
 }
 
 /// For binary content in the remote path, try to produce an ImageBase64 variant.
@@ -291,11 +306,6 @@ fn is_missing_object_error(msg: &str) -> bool {
         || lower.contains("path '")
 }
 
-fn is_utf8_parse_error(msg: &str) -> bool {
-    msg.to_lowercase()
-        .contains("invalid utf-8 in sq blox output")
-}
-
 fn load_remote_file_at_ref(
     ctx: &BranchDiffContext,
     ref_name: &str,
@@ -309,15 +319,14 @@ fn load_remote_file_at_ref(
         Err(e) => return Err(e),
     }
 
-    match run_remote_git(ctx, &["show", &spec]) {
-        Ok(content) => Ok(Some(git::File {
-            path: path.to_string(),
-            content: file_content_from_text(&content, path),
-        })),
-        Err(e) if is_utf8_parse_error(&e) => Ok(Some(git::File {
-            path: path.to_string(),
-            content: git::FileContent::Binary,
-        })),
+    match run_remote_git_bytes(ctx, &["show", &spec]) {
+        Ok(bytes) => {
+            let content = file_content_from_bytes(&bytes, path);
+            Ok(Some(git::File {
+                path: path.to_string(),
+                content,
+            }))
+        }
         Err(e) => Err(e),
     }
 }

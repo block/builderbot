@@ -194,8 +194,8 @@ fn is_auth_error(stderr: &str) -> bool {
         || lower.contains("401")
 }
 
-/// Run `sq blox <args…>` and return stdout as a string.
-fn run(args: &[&str], timeout: Duration) -> Result<String, BloxError> {
+/// Run `sq blox <args…>` and return stdout as raw bytes.
+fn run_bytes(args: &[&str], timeout: Duration) -> Result<Vec<u8>, BloxError> {
     let sq = sq_binary()?;
 
     let mut full_args = vec!["blox"];
@@ -255,7 +255,13 @@ fn run(args: &[&str], timeout: Duration) -> Result<String, BloxError> {
         return Err(BloxError::CommandFailed(stderr.into_owned()));
     }
 
-    String::from_utf8(stdout)
+    Ok(stdout)
+}
+
+/// Run `sq blox <args…>` and return stdout as a string.
+fn run(args: &[&str], timeout: Duration) -> Result<String, BloxError> {
+    let bytes = run_bytes(args, timeout)?;
+    String::from_utf8(bytes)
         .map_err(|e| BloxError::ParseError(format!("invalid UTF-8 in sq blox output: {e}")))
 }
 
@@ -336,6 +342,16 @@ pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
     let mut full_args = vec!["ws", "exec", name, "--"];
     full_args.extend_from_slice(args);
     run(&full_args, EXEC_TIMEOUT)
+}
+
+/// Execute a command inside a Blox workspace, returning raw bytes.
+///
+/// Like `ws_exec` but returns the raw stdout bytes without UTF-8 validation.
+/// Use this when the command may produce binary output (e.g. `git show` on image files).
+pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
+    let mut full_args = vec!["ws", "exec", name, "--"];
+    full_args.extend_from_slice(args);
+    run_bytes(&full_args, EXEC_TIMEOUT)
 }
 
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.

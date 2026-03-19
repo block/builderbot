@@ -251,6 +251,7 @@
                 src={afterSrc}
                 alt="After"
                 class="slider-img"
+                draggable="false"
               />
             {/if}
             {#if beforeSrc}
@@ -258,6 +259,7 @@
                 src={beforeSrc}
                 alt="Before"
                 class="slider-img"
+                draggable="false"
                 style="clip-path: inset(0 {100 - sliderPosition}% 0 0);"
               />
             {/if}
@@ -446,19 +448,20 @@
     content: '';
     position: absolute;
     top: 50%;
-    width: 6px;
-    height: 2px;
-    background: white;
-    border-radius: 1px;
+    transform: translateY(-50%);
+    width: 0;
+    height: 0;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
   }
 
   .slider-handle::before {
     left: 5px;
-    transform: translateY(-50%);
+    border-right: 6px solid white;
   }
 
   .slider-handle::after {
     right: 5px;
-    transform: translateY(-50%);
+    border-left: 6px solid white;
   }
 </style>

@@ -244,7 +244,7 @@
   <div class="form-group">
     <label for="project-repo-select"
       >Repository
-      {#if location === 'remote'}
+      {#if location === 'remote' && !selectedRepo}
         <span class="field-badge required">Required</span>
       {/if}</label
     >

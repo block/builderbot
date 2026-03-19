@@ -2,7 +2,7 @@
   ImageDiffViewer.svelte - Rich image diff viewer
 
   Displays before/after images with three viewing modes:
-  1. Side-by-side: before and after images in left/right panes
+  1. Classic: before and after images in left/right panes
   2. Highlight: canvas-based pixel difference visualization
   3. Slider: draggable vertical divider revealing before vs after
 -->
@@ -16,8 +16,8 @@
 
   let { beforeSrc, afterSrc }: Props = $props();
 
-  type ViewMode = 'side-by-side' | 'highlight' | 'slider';
-  let mode: ViewMode = $state('side-by-side');
+  type ViewMode = 'classic' | 'highlight' | 'slider';
+  let mode: ViewMode = $state('classic');
 
   // Slider state
   let sliderPosition = $state(50);
@@ -165,34 +165,34 @@
 </script>
 
 <div class="image-diff-viewer">
-  <div class="mode-toolbar">
-    <button
-      class="mode-btn"
-      class:active={mode === 'side-by-side'}
-      onclick={() => (mode = 'side-by-side')}
-    >
-      Side-by-side
-    </button>
-    <button
-      class="mode-btn"
-      class:active={mode === 'highlight'}
-      disabled={!beforeSrc || !afterSrc}
-      onclick={() => (mode = 'highlight')}
-    >
-      Highlight
-    </button>
-    <button
-      class="mode-btn"
-      class:active={mode === 'slider'}
-      disabled={!beforeSrc || !afterSrc}
-      onclick={() => (mode = 'slider')}
-    >
-      Slider
-    </button>
-  </div>
+  {#if beforeSrc && afterSrc}
+    <div class="mode-toolbar">
+      <button
+        class="mode-btn"
+        class:active={mode === 'classic'}
+        onclick={() => (mode = 'classic')}
+      >
+        Classic
+      </button>
+      <button
+        class="mode-btn"
+        class:active={mode === 'highlight'}
+        onclick={() => (mode = 'highlight')}
+      >
+        Highlight
+      </button>
+      <button
+        class="mode-btn"
+        class:active={mode === 'slider'}
+        onclick={() => (mode = 'slider')}
+      >
+        Slider
+      </button>
+    </div>
+  {/if}
 
   <div class="image-content">
-    {#if mode === 'side-by-side'}
+    {#if mode === 'classic'}
       <div class="side-by-side">
         <div class="image-pane">
           {#if beforeSrc}
@@ -284,9 +284,9 @@
 
   .mode-toolbar {
     display: flex;
+    justify-content: center;
     gap: 2px;
     padding: 8px 12px;
-    border-bottom: 1px solid var(--border-muted);
     background: var(--bg-secondary);
     flex-shrink: 0;
   }
@@ -327,7 +327,7 @@
     overflow: auto;
   }
 
-  /* Side-by-side mode */
+  /* Classic mode */
   .side-by-side {
     display: flex;
     gap: 16px;

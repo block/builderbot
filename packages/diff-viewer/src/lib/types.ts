@@ -15,8 +15,11 @@ export interface Span {
   end: number;
 }
 
-/** Content of a file — either text lines or binary marker. */
-export type FileContent = { type: 'Text'; lines: string[] } | { type: 'Binary' };
+/** Content of a file — text lines, binary marker, or base64-encoded image. */
+export type FileContent =
+  | { type: 'Text'; lines: string[] }
+  | { type: 'Binary' }
+  | { type: 'ImageBase64'; mimeType: string; data: string };
 
 /** A file with its path and content. */
 export interface File {

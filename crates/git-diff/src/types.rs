@@ -104,12 +104,26 @@ impl Span {
     }
 }
 
-/// Content of a file - either text lines or binary marker
+/// Maximum file size (in bytes) for image preview. Files larger than this
+/// fall back to the generic binary notice to avoid sending huge payloads.
+pub const IMAGE_PREVIEW_MAX_BYTES: usize = 5 * 1024 * 1024; // 5 MB
+
+/// Image extensions eligible for inline base64 preview.
+pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+
+/// Content of a file - either text lines, binary marker, or base64-encoded image
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum FileContent {
-    Text { lines: Vec<String> },
+    Text {
+        lines: Vec<String>,
+    },
     Binary,
+    ImageBase64 {
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        data: String,
+    },
 }
 
 /// A file with its path and content

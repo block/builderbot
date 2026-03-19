@@ -65,7 +65,7 @@ function getTextLines(diff: FileDiff, side: 'before' | 'after'): string[] {
 	if (!file) return [];
 
 	const content = file.content;
-	if (content.type === 'Binary') return [];
+	if (content.type !== 'Text') return [];
 
 	return content.lines;
 }

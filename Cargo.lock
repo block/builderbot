@@ -777,6 +777,7 @@ dependencies = [
 name = "git-diff"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "git2",
  "serde",
  "tempfile",

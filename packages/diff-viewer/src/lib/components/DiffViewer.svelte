@@ -38,8 +38,10 @@
     getLanguageFromDiff,
     getFilePath,
     isBinaryDiff,
+    isImageDiff,
     getTextLines,
   } from '../utils/diffUtils';
+  import ImageDiffViewer from './ImageDiffViewer.svelte';
   import type { SearchState, FileSearchResult } from '../state/searchState.svelte';
   import type { SearchMatch, MatchLocation } from '../utils/diffSearch';
   import {
@@ -237,6 +239,7 @@
   let isDeletedFile = $derived(diff !== null && !isEmptyDiff && diff.after === null);
   let isTwoPaneMode = $derived(!isNewFile && !isDeletedFile);
   let isBinary = $derived(diff !== null && isBinaryDiff(diff));
+  let isImage = $derived(diff !== null && isImageDiff(diff));
 
   // Extract lines from the diff
   let beforeLines = $derived(diff ? getTextLines(diff, 'before') : []);
@@ -1659,6 +1662,15 @@
     <div class="empty-state">
       <p>File not found in this diff</p>
     </div>
+  {:else if isImage}
+    <ImageDiffViewer
+      beforeSrc={diff.before?.content.type === 'ImageBase64'
+        ? `data:${diff.before.content.mimeType};base64,${diff.before.content.data}`
+        : null}
+      afterSrc={diff.after?.content.type === 'ImageBase64'
+        ? `data:${diff.after.content.mimeType};base64,${diff.after.content.data}`
+        : null}
+    />
   {:else if isBinary}
     <div class="binary-notice">
       <p>Binary file - cannot display diff</p>

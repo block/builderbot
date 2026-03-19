@@ -241,12 +241,44 @@ fn parse_unified_hunks(diff_text: &str) -> Vec<RemoteHunk> {
     hunks
 }
 
-fn file_content_from_text(text: &str) -> git::FileContent {
+fn file_content_from_text(text: &str, path: &str) -> git::FileContent {
     if text.as_bytes()[..text.len().min(8192)].contains(&0) {
-        return git::FileContent::Binary;
+        return file_content_binary_or_image(text.as_bytes(), path);
     }
     git::FileContent::Text {
         lines: text.lines().map(|line| line.to_string()).collect(),
+    }
+}
+
+/// For binary content in the remote path, try to produce an ImageBase64 variant.
+fn file_content_binary_or_image(bytes: &[u8], path: &str) -> git::FileContent {
+    if bytes.len() > git::IMAGE_PREVIEW_MAX_BYTES {
+        return git::FileContent::Binary;
+    }
+
+    let file_path = std::path::Path::new(path);
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+
+    let mime = match ext.as_deref() {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    };
+
+    if let Some(mime) = mime {
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        git::FileContent::ImageBase64 {
+            mime_type: mime.to_string(),
+            data,
+        }
+    } else {
+        git::FileContent::Binary
     }
 }
 
@@ -280,7 +312,7 @@ fn load_remote_file_at_ref(
     match run_remote_git(ctx, &["show", &spec]) {
         Ok(content) => Ok(Some(git::File {
             path: path.to_string(),
-            content: file_content_from_text(&content),
+            content: file_content_from_text(&content, path),
         })),
         Err(e) if is_utf8_parse_error(&e) => Ok(Some(git::File {
             path: path.to_string(),

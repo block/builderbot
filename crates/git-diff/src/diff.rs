@@ -420,7 +420,7 @@ fn load_file_from_tree(
         None => return Ok(None), // Not a file (maybe a submodule)
     };
 
-    let content = bytes_to_content(blob.content());
+    let content = bytes_to_content(blob.content(), path);
 
     Ok(Some(File {
         path: path.to_string_lossy().to_string(),
@@ -443,7 +443,7 @@ fn load_file_from_index(repo: &Repository, path: &Path) -> Result<Option<File>, 
         .find_blob(entry.id)
         .map_err(|e| GitError::CommandFailed(format!("Cannot load blob from index: {e}")))?;
 
-    let content = bytes_to_content(blob.content());
+    let content = bytes_to_content(blob.content(), path);
 
     Ok(Some(File {
         path: path.to_string_lossy().to_string(),
@@ -472,22 +472,55 @@ fn load_file_from_workdir(repo: &Repository, path: &Path) -> Result<Option<File>
 
     Ok(Some(File {
         path: path.to_string_lossy().to_string(),
-        content: bytes_to_content(&bytes),
+        content: bytes_to_content(&bytes, path),
     }))
 }
 
-/// Convert raw bytes to FileContent, detecting binary
-fn bytes_to_content(bytes: &[u8]) -> FileContent {
+/// Convert raw bytes to FileContent, detecting binary and images.
+///
+/// When binary content is detected and the file path has a known image extension,
+/// the bytes are base64-encoded and returned as `ImageBase64` (up to 5 MB).
+fn bytes_to_content(bytes: &[u8], path: &Path) -> FileContent {
     // Check for binary: look for null bytes in first 8KB
     let check_len = bytes.len().min(8192);
     if bytes[..check_len].contains(&0) {
-        return FileContent::Binary;
+        return bytes_to_binary_or_image(bytes, path);
     }
 
     // Parse as UTF-8 (lossy for display)
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
     FileContent::Text { lines }
+}
+
+/// For binary content, check if it's a previewable image and base64-encode it.
+fn bytes_to_binary_or_image(bytes: &[u8], path: &Path) -> FileContent {
+    if bytes.len() > IMAGE_PREVIEW_MAX_BYTES {
+        return FileContent::Binary;
+    }
+
+    if let Some(mime) = image_mime_for_path(path) {
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        FileContent::ImageBase64 {
+            mime_type: mime.to_string(),
+            data,
+        }
+    } else {
+        FileContent::Binary
+    }
+}
+
+/// Return the MIME type if the path has a known image extension.
+fn image_mime_for_path(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
 }
 
 /// Get hunks for a single file using libgit2

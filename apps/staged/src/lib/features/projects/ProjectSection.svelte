@@ -357,13 +357,13 @@
     }
   }
 
-  /** All notes: completed (newest first) followed by generating. */
+  /** All notes: completed (oldest first) followed by generating – matches branch timeline order. */
   let timelineNotes = $derived(
     [...projectNotes].sort((a, b) => {
       const aIsGenerating = !a.title.trim() && !a.content.trim();
       const bIsGenerating = !b.title.trim() && !b.content.trim();
       if (aIsGenerating !== bIsGenerating) return aIsGenerating ? 1 : -1;
-      return b.createdAt - a.createdAt;
+      return a.createdAt - b.createdAt;
     })
   );
 

@@ -182,6 +182,50 @@ pub fn acp_proxy_args(workspace_name: &str, command: Option<&str>) -> Vec<String
 }
 
 /// Heuristic: does the CLI stderr look like an authentication / login error?
+/// Strip ANSI escape sequences (CSI and OSC) from a string so that
+/// downstream string-matching (e.g. `is_auth_error`) is not confused by
+/// terminal colour / style codes that `sq` may emit on stderr.
+fn strip_ansi_escape_sequences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            output.push(ch);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            // CSI sequence: ESC [ … <final byte in @–~>
+            Some('[') => {
+                let _ = chars.next();
+                for candidate in chars.by_ref() {
+                    if ('@'..='~').contains(&candidate) {
+                        break;
+                    }
+                }
+            }
+            // OSC sequence: ESC ] … (terminated by BEL or ST)
+            Some(']') => {
+                let _ = chars.next();
+                let mut previous = '\0';
+                for candidate in chars.by_ref() {
+                    if candidate == '\u{0007}' {
+                        break;
+                    }
+                    if previous == '\u{1b}' && candidate == '\\' {
+                        break;
+                    }
+                    previous = candidate;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    output
+}
+
 fn is_auth_error(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("not logged in")
@@ -248,11 +292,11 @@ fn run(args: &[&str], timeout: Duration) -> Result<String, BloxError> {
     let stderr = stderr_reader.join().unwrap_or_default();
 
     if !status.success() {
-        let stderr = String::from_utf8_lossy(&stderr);
+        let stderr = strip_ansi_escape_sequences(&String::from_utf8_lossy(&stderr));
         if is_auth_error(&stderr) {
             return Err(BloxError::NotAuthenticated);
         }
-        return Err(BloxError::CommandFailed(stderr.into_owned()));
+        return Err(BloxError::CommandFailed(stderr));
     }
 
     String::from_utf8(stdout)
@@ -349,5 +393,54 @@ pub fn check_auth() -> Result<(), BloxError> {
         // Any other error (e.g. network timeout) — not necessarily an auth issue,
         // so let it through and let the caller decide.
         Err(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_plain_text_unchanged() {
+        let input = "hello world";
+        assert_eq!(strip_ansi_escape_sequences(input), "hello world");
+    }
+
+    #[test]
+    fn strip_ansi_csi_sequences() {
+        // Bold + red text with reset
+        let input = "\x1b[1;31merror: not logged in\x1b[0m";
+        assert_eq!(strip_ansi_escape_sequences(input), "error: not logged in");
+    }
+
+    #[test]
+    fn strip_ansi_osc_sequence_bel_terminated() {
+        // OSC to set window title, terminated by BEL (\x07)
+        let input = "\x1b]0;my title\x07some text";
+        assert_eq!(strip_ansi_escape_sequences(input), "some text");
+    }
+
+    #[test]
+    fn strip_ansi_osc_sequence_st_terminated() {
+        // OSC terminated by ST (ESC \)
+        let input = "\x1b]0;my title\x1b\\some text";
+        assert_eq!(strip_ansi_escape_sequences(input), "some text");
+    }
+
+    #[test]
+    fn strip_ansi_mixed_sequences() {
+        let input = "\x1b[31mError:\x1b[0m \x1b[1mnot authenticated\x1b[0m";
+        assert_eq!(strip_ansi_escape_sequences(input), "Error: not authenticated");
+    }
+
+    #[test]
+    fn strip_ansi_empty_string() {
+        assert_eq!(strip_ansi_escape_sequences(""), "");
+    }
+
+    #[test]
+    fn strip_ansi_preserves_non_escape_special_chars() {
+        let input = "line1\nline2\ttab";
+        assert_eq!(strip_ansi_escape_sequences(input), "line1\nline2\ttab");
     }
 }

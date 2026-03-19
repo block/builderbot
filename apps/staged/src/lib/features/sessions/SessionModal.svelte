@@ -991,7 +991,7 @@
                       {#if isExpanded && item.pair.result}
                         {@const resultContent = stripCodeFences(item.pair.result.content)}
                         <div class="tool-code-block" transition:slide={{ duration: 150 }}>
-                          {#if item.verb === 'Ran' && item.detail}
+                          {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
                             <div class="tool-code-command">$ {item.detail}</div>
                           {/if}
                           {#if resultContent}
@@ -1041,7 +1041,7 @@
                           {#if isExpanded && item.pair.result}
                             {@const resultContent = stripCodeFences(item.pair.result.content)}
                             <div class="tool-code-block" transition:slide={{ duration: 150 }}>
-                              {#if item.verb === 'Ran' && item.detail}
+                              {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
                                 <div class="tool-code-command">$ {item.detail}</div>
                               {/if}
                               {#if resultContent}

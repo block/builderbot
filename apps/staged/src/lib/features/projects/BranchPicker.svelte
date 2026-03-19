@@ -73,11 +73,13 @@
   async function fetchData(ghRepo: string) {
     const gen = ++fetchGeneration;
     loading = true;
+
     try {
       const [prs, refs] = await Promise.all([
         commands.listPullRequests(ghRepo).catch(() => [] as PullRequest[]),
         commands.listGitBranches(ghRepo).catch(() => [] as BranchRef[]),
       ]);
+
       // Discard results if a newer fetch was started while we were waiting
       if (gen !== fetchGeneration) return;
       pullRequests = prs;

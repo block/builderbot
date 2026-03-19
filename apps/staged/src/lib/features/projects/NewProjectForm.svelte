@@ -51,6 +51,10 @@
   let checkingMonorepo = $state(false);
   let subpathApi = $state<SubpathInputApi | undefined>(undefined);
   let recentRepos = $state<RecentRepo[]>([]);
+  /** BranchPicker is expensive to mount in WebKit — defer it until after the
+   *  initial layout change paints so the UI feels responsive. */
+  let showBranchPicker = $state(false);
+  let branchPickerTimer: ReturnType<typeof setTimeout> | null = null;
 
   onMount(async () => {
     try {
@@ -194,10 +198,18 @@
   let pendingBranchName = $state<string | null>(null);
 
   function handleRepoSelected(selection: RepoSelection) {
+    if (branchPickerTimer) clearTimeout(branchPickerTimer);
+    showBranchPicker = false;
     selectedRepo = selection.nameWithOwner;
     subpath = selection.subpath ?? '';
     pendingPrNumber = selection.prNumber ?? null;
     pendingBranchName = selection.branchName ?? null;
+    // Mount BranchPicker after the slide animation (150ms) completes.
+    // BranchPicker is expensive to mount in WebKit, so deferring it
+    // keeps the initial repo selection feeling responsive.
+    branchPickerTimer = setTimeout(() => {
+      showBranchPicker = true;
+    }, 200);
   }
 </script>
 
@@ -258,6 +270,8 @@
         <button
           class="clear-button"
           onclick={() => {
+            if (branchPickerTimer) clearTimeout(branchPickerTimer);
+            showBranchPicker = false;
             selectedRepo = null;
             subpath = '';
             branchName = '';
@@ -321,16 +335,25 @@
           >{isNewBranch ? 'New branch' : 'Optional'}</span
         ></label
       >
-      <BranchPicker
-        bind:value={branchName}
-        bind:isNewBranch
-        bind:matchedPr
-        bind:initialPrNumber={pendingPrNumber}
-        bind:initialBranchName={pendingBranchName}
-        repo={selectedRepo}
-        disabled={saving}
-        onSelect={handleBranchSelected}
-      />
+      {#if showBranchPicker}
+        <BranchPicker
+          bind:value={branchName}
+          bind:isNewBranch
+          bind:matchedPr
+          bind:initialPrNumber={pendingPrNumber}
+          bind:initialBranchName={pendingBranchName}
+          repo={selectedRepo}
+          disabled={saving}
+          onSelect={handleBranchSelected}
+        />
+      {:else}
+        <input
+          class="branch-picker-placeholder"
+          type="text"
+          placeholder="Search PRs or branches…"
+          readonly
+        />
+      {/if}
     </div>
   {/if}
 
@@ -537,5 +560,23 @@
     font-size: 10px;
     flex-shrink: 0;
     line-height: 1;
+  }
+
+  .branch-picker-placeholder {
+    width: 100%;
+    min-height: 42px;
+    border: 1.5px solid var(--border-muted);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-primary);
+    padding: 10px 14px;
+    font-size: var(--size-md);
+    font-family: inherit;
+    outline: none;
+    box-sizing: border-box;
+  }
+
+  .branch-picker-placeholder::placeholder {
+    color: var(--text-faint);
   }
 </style>

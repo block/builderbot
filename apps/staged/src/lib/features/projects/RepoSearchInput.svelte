@@ -105,6 +105,7 @@
   onMount(async () => {
     try {
       recentRepos = await commands.listRecentRepos(10);
+
       repos = await commands.listUserRepos(30);
     } catch (e) {
       error = typeof e === 'string' ? e : String(e);

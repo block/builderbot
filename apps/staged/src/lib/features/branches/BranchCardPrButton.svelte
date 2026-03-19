@@ -567,7 +567,7 @@
   }
 </script>
 
-{#if isLocal && hasCodeChanges}
+{#if (isLocal || isRemote) && hasCodeChanges}
   <button
     class="pr-btn"
     class:creating={prState === 'creating'}

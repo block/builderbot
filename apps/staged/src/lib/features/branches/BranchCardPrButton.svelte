@@ -357,21 +357,24 @@
   // PR creation
   // =========================================================================
 
-  async function handleCreatePr(draft = false) {
+  function handleCreatePr(draft = false) {
     if (prState === 'creating') return;
 
     prStateStore.setPrCreating(branch.id, '__pending__');
 
-    try {
-      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
-      const provider = getPreferredAgent(agents) ?? undefined;
-      const sessionId = await commands.createPr(branch.id, provider, draft);
-      sessionRegistry.register(sessionId, branch.projectId, 'pr', branch.id);
-      prStateStore.setPrCreating(branch.id, sessionId);
-      projectStateStore.addRunningSession(branch.projectId, sessionId);
-    } catch (e) {
-      prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
-    }
+    const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+    const provider = getPreferredAgent(agents) ?? undefined;
+
+    commands
+      .createPr(branch.id, provider, draft)
+      .then((sessionId) => {
+        sessionRegistry.register(sessionId, branch.projectId, 'pr', branch.id);
+        prStateStore.setPrCreating(branch.id, sessionId);
+        projectStateStore.addRunningSession(branch.projectId, sessionId);
+      })
+      .catch((e) => {
+        prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
+      });
   }
 
   let prCompletionInFlight = false;
@@ -420,21 +423,24 @@
   // Push
   // =========================================================================
 
-  async function handlePush(force = false) {
+  function handlePush(force = false) {
     if (pushState === 'pushing') return;
 
     pushStateStore.setPushing(branch.id, '__pending__');
 
-    try {
-      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
-      const provider = getPreferredAgent(agents) ?? undefined;
-      const sessionId = await commands.pushBranch(branch.id, provider, force);
-      sessionRegistry.register(sessionId, branch.projectId, 'push', branch.id);
-      pushStateStore.setPushing(branch.id, sessionId);
-      projectStateStore.addRunningSession(branch.projectId, sessionId);
-    } catch (e) {
-      pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
-    }
+    const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+    const provider = getPreferredAgent(agents) ?? undefined;
+
+    commands
+      .pushBranch(branch.id, provider, force)
+      .then((sessionId) => {
+        sessionRegistry.register(sessionId, branch.projectId, 'push', branch.id);
+        pushStateStore.setPushing(branch.id, sessionId);
+        projectStateStore.addRunningSession(branch.projectId, sessionId);
+      })
+      .catch((e) => {
+        pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
+      });
   }
 
   let pushCompletionInFlight = false;
@@ -513,7 +519,7 @@
     } else if (prState === 'created') {
       const url = prUrl ?? cachedPrUrl;
       if (url) {
-        commands.openUrl(url);
+        commands.openUrl(url).catch((e) => console.error('Failed to open PR URL:', e));
       } else if (branch.prNumber) {
         commands
           .getPrUrl(branch.id, branch.prNumber)

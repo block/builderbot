@@ -181,7 +181,6 @@ pub fn acp_proxy_args(workspace_name: &str, command: Option<&str>) -> Vec<String
     args
 }
 
-/// Heuristic: does the CLI stderr look like an authentication / login error?
 /// Strip ANSI escape sequences (CSI and OSC) from a string so that
 /// downstream string-matching (e.g. `is_auth_error`) is not confused by
 /// terminal colour / style codes that `sq` may emit on stderr.
@@ -226,6 +225,7 @@ fn strip_ansi_escape_sequences(input: &str) -> String {
     output
 }
 
+/// Heuristic: does the CLI stderr look like an authentication / login error?
 fn is_auth_error(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("not logged in")
@@ -430,7 +430,10 @@ mod tests {
     #[test]
     fn strip_ansi_mixed_sequences() {
         let input = "\x1b[31mError:\x1b[0m \x1b[1mnot authenticated\x1b[0m";
-        assert_eq!(strip_ansi_escape_sequences(input), "Error: not authenticated");
+        assert_eq!(
+            strip_ansi_escape_sequences(input),
+            "Error: not authenticated"
+        );
     }
 
     #[test]

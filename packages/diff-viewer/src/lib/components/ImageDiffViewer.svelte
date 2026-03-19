@@ -191,7 +191,7 @@
     </div>
   {/if}
 
-  <div class="image-content">
+  <div class="image-content" class:slider-active={mode === 'slider'}>
     {#if mode === 'classic'}
       <div class="side-by-side">
         <div class="image-pane">
@@ -263,12 +263,12 @@
                 style="clip-path: inset(0 {100 - sliderPosition}% 0 0);"
               />
             {/if}
-            <div
-              class="slider-divider"
-              style="left: {sliderPosition}%;"
-            >
-              <div class="slider-handle"></div>
-            </div>
+          </div>
+          <div
+            class="slider-divider"
+            style="left: {sliderPosition}%;"
+          >
+            <div class="slider-handle"></div>
           </div>
         {/if}
       </div>
@@ -327,6 +327,11 @@
     justify-content: center;
     padding: 16px;
     overflow: auto;
+  }
+
+  .image-content.slider-active {
+    padding-top: 0;
+    padding-bottom: 0;
   }
 
   /* Classic mode */
@@ -397,16 +402,20 @@
   .slider-container {
     position: relative;
     width: 100%;
+    height: 100%;
     max-width: 100%;
     cursor: ew-resize;
     user-select: none;
     touch-action: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .slider-images {
     position: relative;
     width: 100%;
-    max-height: 70vh;
+    max-height: 100%;
   }
 
   .slider-img {

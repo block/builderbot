@@ -415,7 +415,7 @@
   .slider-images {
     position: relative;
     width: 100%;
-    max-height: 100%;
+    max-height: 70vh;
   }
 
   .slider-img {

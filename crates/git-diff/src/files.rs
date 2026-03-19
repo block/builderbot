@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use crate::cli::{self, GitError};
-use crate::types::{File, FileContent, WORKDIR};
+use crate::types::{File, FileContent, IMAGE_PREVIEW_MAX_BYTES, WORKDIR};
 
 /// Search for files matching a query in the repository at a given ref.
 ///
@@ -149,7 +149,7 @@ pub fn get_file_at_ref(repo: &Path, ref_name: &str, path: &str) -> Result<File, 
             .map_err(|e| GitError::CommandFailed(format!("Cannot read file: {e}")))?;
 
         let content = if is_binary(&bytes) {
-            FileContent::Binary
+            bytes_to_image_or_binary(&bytes, path)
         } else {
             let text = String::from_utf8_lossy(&bytes);
             text_to_content(&text)
@@ -172,7 +172,7 @@ pub fn get_file_at_ref(repo: &Path, ref_name: &str, path: &str) -> Result<File, 
         // git show returns text, check if it looks binary
         let bytes = output.as_bytes();
         let content = if is_binary(bytes) {
-            FileContent::Binary
+            bytes_to_image_or_binary(bytes, path)
         } else {
             text_to_content(&output)
         };
@@ -188,6 +188,38 @@ pub fn get_file_at_ref(repo: &Path, ref_name: &str, path: &str) -> Result<File, 
 fn is_binary(data: &[u8]) -> bool {
     let check_len = data.len().min(8192);
     data[..check_len].contains(&0)
+}
+
+/// For binary content, check if it's a previewable image and base64-encode it.
+fn bytes_to_image_or_binary(bytes: &[u8], path: &str) -> FileContent {
+    if bytes.len() > IMAGE_PREVIEW_MAX_BYTES {
+        return FileContent::Binary;
+    }
+
+    let file_path = std::path::Path::new(path);
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+
+    let mime = match ext.as_deref() {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    };
+
+    if let Some(mime) = mime {
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        FileContent::ImageBase64 {
+            mime_type: mime.to_string(),
+            data,
+        }
+    } else {
+        FileContent::Binary
+    }
 }
 
 /// Convert text to FileContent with lines

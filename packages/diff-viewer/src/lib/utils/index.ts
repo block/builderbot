@@ -4,6 +4,7 @@ export {
   getLineBoundary,
   getLanguageFromDiff,
   isBinaryDiff,
+  isImageDiff,
   getTextLines,
   referenceFileAsDiff,
 } from './diffUtils';

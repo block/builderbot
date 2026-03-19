@@ -49,6 +49,14 @@ pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
     blox_cli::ws_exec(name, args)
 }
 
+/// Execute a command inside a Blox workspace, returning raw bytes.
+///
+/// Like `ws_exec` but returns the raw stdout bytes without UTF-8 validation.
+/// Use this when the command may produce binary output (e.g. `git show` on image files).
+pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
+    blox_cli::ws_exec_bytes(name, args)
+}
+
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.
 ///
 /// Returns `Ok(())` if the user appears to be authenticated, or

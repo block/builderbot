@@ -77,8 +77,8 @@ impl AgentDriver for SimpleDriverWrapper {
             SessionUpdate, TextContent,
         };
         use std::process::Stdio;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use tokio::process::Command;
+        use tokio::sync::Mutex;
         use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
         let mut child = Command::new(&self.binary_path)
@@ -103,11 +103,31 @@ impl AgentDriver for SimpleDriverWrapper {
         let stdin_compat = stdin.compat_write();
         let stdout_compat = stdout.compat();
 
-        // Simplified handler that just collects text (no tool call handling needed for simple use)
+        // Phase-based handler for simple prompting.
+        // With empty db_messages, replay completes immediately.
+        enum SimpleHandlerPhase {
+            Replaying,
+            WaitingForPrompt,
+            Live,
+        }
+
         struct SimpleHandler {
             writer: Arc<dyn MessageWriter>,
-            replaying: AtomicBool,
-            prompt_sent: AtomicBool,
+            phase: Mutex<SimpleHandlerPhase>,
+        }
+
+        impl SimpleHandler {
+            async fn transition_to_waiting(&self) {
+                let mut phase = self.phase.lock().await;
+                log::info!("[replay-guard] simple: transition to WaitingForPrompt");
+                *phase = SimpleHandlerPhase::WaitingForPrompt;
+            }
+
+            async fn transition_to_live(&self) {
+                let mut phase = self.phase.lock().await;
+                log::info!("[replay-guard] simple: transition to Live");
+                *phase = SimpleHandlerPhase::Live;
+            }
         }
 
         #[async_trait(?Send)]
@@ -131,35 +151,33 @@ impl AgentDriver for SimpleDriverWrapper {
                 &self,
                 notification: SessionNotification,
             ) -> agent_client_protocol::Result<()> {
-                if self.replaying.load(Ordering::Acquire) {
-                    log::info!(
-                        "[replay-guard] simple: dropping replayed notification: {:?}",
-                        notification.update
-                    );
-                    return Ok(());
-                }
+                let phase = self.phase.lock().await;
 
-                if !self.prompt_sent.load(Ordering::Acquire) {
-                    log::info!(
-                        "[replay-guard] simple: dropping pre-prompt notification: {:?}",
-                        notification.update
-                    );
-                    return Ok(());
-                }
-
-                log::info!(
-                    "[replay-guard] simple: processing LIVE notification: {:?}",
-                    notification.update
-                );
-
-                match &notification.update {
-                    SessionUpdate::AgentMessageChunk(chunk) => {
-                        if let AcpContentBlock::Text(text) = &chunk.content {
-                            self.writer.append_text(&text.text).await;
-                        }
+                match &*phase {
+                    SimpleHandlerPhase::Replaying | SimpleHandlerPhase::WaitingForPrompt => {
+                        log::info!(
+                            "[replay-guard] simple: dropping pre-live notification: {:?}",
+                            notification.update
+                        );
+                        return Ok(());
                     }
-                    _ => {
-                        // Ignore other updates for simple use
+                    SimpleHandlerPhase::Live => {
+                        log::info!(
+                            "[replay-guard] simple: processing LIVE notification: {:?}",
+                            notification.update
+                        );
+                        // Drop the lock before calling writer
+                        drop(phase);
+                        match &notification.update {
+                            SessionUpdate::AgentMessageChunk(chunk) => {
+                                if let AcpContentBlock::Text(text) = &chunk.content {
+                                    self.writer.append_text(&text.text).await;
+                                }
+                            }
+                            _ => {
+                                // Ignore other updates for simple use
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -169,8 +187,11 @@ impl AgentDriver for SimpleDriverWrapper {
         let is_resuming = agent_session_id.is_some();
         let handler = Arc::new(SimpleHandler {
             writer: Arc::clone(writer),
-            replaying: AtomicBool::new(is_resuming),
-            prompt_sent: AtomicBool::new(false),
+            phase: Mutex::new(if is_resuming {
+                SimpleHandlerPhase::Replaying
+            } else {
+                SimpleHandlerPhase::Live
+            }),
         });
         let handler_for_conn = Arc::clone(&handler);
 
@@ -231,18 +252,22 @@ impl AgentDriver for SimpleDriverWrapper {
                     }
                 };
 
-                // Now we're live (not replaying)
-                log::info!("[replay-guard] simple driver: transitioning from replaying to live");
-                handler.replaying.store(false, Ordering::Release);
+                // Transition: Replaying -> WaitingForPrompt -> Live
+                // For the simple driver, no DB messages means replay is
+                // effectively instant. The transitions still happen so that
+                // any straggler notifications arriving between load_session
+                // and the prompt send are correctly dropped.
+                if is_resuming {
+                    handler.transition_to_waiting().await;
+                }
 
-                // Send prompt
+                // Build and send prompt
                 let prompt_request = PromptRequest::new(
                     agent_session_id,
                     vec![AcpContentBlock::Text(TextContent::new(prompt))],
                 );
 
-                log::info!("[replay-guard] simple driver: mark_prompt_sent — notifications are now live");
-                handler.prompt_sent.store(true, Ordering::Release);
+                handler.transition_to_live().await;
 
                 connection
                     .prompt(prompt_request)

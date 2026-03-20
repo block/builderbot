@@ -10,7 +10,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -64,6 +63,16 @@ pub trait MessageWriter: Send + Sync {
 pub trait Store: Send + Sync {
     /// Save the agent's session ID for resumption.
     fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String>;
+
+    /// Retrieve existing session messages as `(role, content)` pairs.
+    ///
+    /// Used during session resumption to match replayed notifications
+    /// against previously persisted messages.  The default implementation
+    /// returns an empty list, which is correct for stores that do not
+    /// support message persistence (e.g. `NoOpStore`).
+    fn get_session_messages(&self, _session_id: &str) -> Result<Vec<(String, String)>, String> {
+        Ok(vec![])
+    }
 }
 
 /// Everything needed to run one turn of an agent.
@@ -350,7 +359,16 @@ impl AgentDriver for AcpDriver {
         let stdout_compat = incoming_reader.compat();
 
         let is_resuming = agent_session_id.is_some();
-        let handler = Arc::new(AcpNotificationHandler::new(Arc::clone(writer), is_resuming));
+        let db_messages = if is_resuming {
+            store.get_session_messages(session_id).unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let handler = Arc::new(AcpNotificationHandler::new(
+            Arc::clone(writer),
+            is_resuming,
+            db_messages,
+        ));
         let handler_for_conn = Arc::clone(&handler);
 
         let (connection, io_future) =
@@ -578,41 +596,214 @@ async fn normalize_local_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
 }
 
 // =============================================================================
-// ACP notification handler
+// ACP notification handler — phase-based replay-sync state machine
 // =============================================================================
 
-struct AcpNotificationHandler {
-    writer: Arc<dyn MessageWriter>,
-    replaying: AtomicBool,
-    /// Set once the prompt has been sent to the server.  Between `set_live()`
-    /// and `mark_prompt_sent()` **all** notifications are definitively stale
-    /// because the server cannot produce new-turn output before receiving the
-    /// prompt.  This gate is deterministic and does not rely on timeouts.
-    prompt_sent: AtomicBool,
-    /// Tool-call IDs observed during the replay / pre-prompt phases.  Used as
-    /// a safety-net after the prompt is sent to catch any stale tool-call
-    /// notifications that were buffered longer than expected.
-    replayed_tool_call_ids: std::sync::Mutex<HashSet<String>>,
+/// The current phase of the notification handler during session resumption.
+enum HandlerPhase {
+    /// Accumulating replay notifications and matching against DB messages.
+    Replaying(ReplayBuffer),
+    /// Replay detected as complete; waiting for prompt to be sent.
+    /// All notifications are dropped; tool-call IDs are recorded.
+    WaitingForPrompt {
+        replayed_tool_call_ids: HashSet<String>,
+    },
+    /// Prompt has been sent; forwarding live notifications to the writer.
+    Live {
+        replayed_tool_call_ids: HashSet<String>,
+    },
 }
 
-impl AcpNotificationHandler {
-    fn new(writer: Arc<dyn MessageWriter>, replaying: bool) -> Self {
+/// Accumulates replay notifications and matches them against DB messages.
+struct ReplayBuffer {
+    /// `(role, content)` pairs from the DB, in order.
+    db_messages: Vec<(String, String)>,
+    /// Index into `db_messages` of the next message to match.
+    match_cursor: usize,
+    /// Index of the last non-user message in `db_messages`.
+    /// When the cursor passes this, replay is considered complete.
+    target_index: Option<usize>,
+    /// Text accumulated for the current streaming message.
+    current_text: String,
+    /// Role of the current streaming message (`"user"` or `"assistant"`).
+    current_role: Option<String>,
+    /// Tool-call IDs observed during replay (used as a safety-net later).
+    replayed_tool_call_ids: HashSet<String>,
+    /// Timestamp of the last notification received during replay.
+    last_notification_at: Instant,
+    /// Whether at least one notification has been received.
+    received_any: bool,
+}
+
+impl ReplayBuffer {
+    fn new(db_messages: Vec<(String, String)>) -> Self {
+        // Find index of last non-user message.
+        let target_index = db_messages
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, (role, _))| role != "user")
+            .map(|(i, _)| i);
+
         Self {
-            writer,
-            replaying: AtomicBool::new(replaying),
-            prompt_sent: AtomicBool::new(false),
-            replayed_tool_call_ids: std::sync::Mutex::new(HashSet::new()),
+            db_messages,
+            match_cursor: 0,
+            target_index,
+            current_text: String::new(),
+            current_role: None,
+            replayed_tool_call_ids: HashSet::new(),
+            last_notification_at: Instant::now(),
+            received_any: false,
         }
     }
 
-    fn set_live(&self) {
-        log::info!("[replay-guard] set_live() called — transitioning from replaying to live");
-        self.replaying.store(false, Ordering::Release);
+    /// Finalize the current streaming text and try to match it against DB.
+    /// Called when the role transitions (e.g. from assistant text to tool call).
+    /// Returns `true` if replay is now considered complete.
+    fn finalize_current(&mut self) -> bool {
+        if let Some(role) = self.current_role.take() {
+            if !self.current_text.is_empty() {
+                let text = std::mem::take(&mut self.current_text);
+                return self.try_match(&role, &text);
+            }
+        }
+        false
     }
 
-    fn mark_prompt_sent(&self) {
-        log::info!("[replay-guard] mark_prompt_sent() — notifications are now live");
-        self.prompt_sent.store(true, Ordering::Release);
+    /// Try to match a `(role, content)` pair against `db_messages[match_cursor]`.
+    /// Returns `true` if replay is now considered complete.
+    fn try_match(&mut self, role: &str, content: &str) -> bool {
+        if self.match_cursor >= self.db_messages.len() {
+            return self.is_complete();
+        }
+
+        let (db_role, db_content) = &self.db_messages[self.match_cursor];
+        let content_prefix: String = content.trim().chars().take(200).collect();
+        let db_prefix: String = db_content.trim().chars().take(200).collect();
+
+        if role == db_role {
+            if content_prefix == db_prefix {
+                log::info!(
+                    "[replay-guard] replay match at cursor={}: role={role} content_len={}",
+                    self.match_cursor,
+                    content.len()
+                );
+            } else {
+                log::warn!(
+                    "[replay-guard] replay role-match but content-mismatch at cursor={}: role={role} \
+                     expected_prefix={:?} got_prefix={:?}",
+                    self.match_cursor,
+                    db_prefix.chars().take(80).collect::<String>(),
+                    content_prefix.chars().take(80).collect::<String>()
+                );
+            }
+            self.match_cursor += 1;
+        } else {
+            log::warn!(
+                "[replay-guard] replay role-mismatch at cursor={}: expected={db_role} got={role}",
+                self.match_cursor
+            );
+            // Don't advance cursor on role mismatch.
+        }
+
+        self.is_complete()
+    }
+
+    /// Returns `true` if the match cursor has passed the target index.
+    fn is_complete(&self) -> bool {
+        match self.target_index {
+            Some(target) => self.match_cursor > target,
+            None => true, // No non-user messages → complete immediately
+        }
+    }
+}
+
+struct AcpNotificationHandler {
+    writer: Arc<dyn MessageWriter>,
+    phase: Mutex<HandlerPhase>,
+    /// Signalled when replay matching determines all DB messages have been replayed.
+    replay_done: tokio::sync::Notify,
+}
+
+impl AcpNotificationHandler {
+    fn new(
+        writer: Arc<dyn MessageWriter>,
+        replaying: bool,
+        db_messages: Vec<(String, String)>,
+    ) -> Self {
+        let phase = if replaying {
+            HandlerPhase::Replaying(ReplayBuffer::new(db_messages))
+        } else {
+            HandlerPhase::Live {
+                replayed_tool_call_ids: HashSet::new(),
+            }
+        };
+
+        Self {
+            writer,
+            phase: Mutex::new(phase),
+            replay_done: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Check whether the replay phase has been idle for at least `timeout`.
+    /// Returns `false` if not in the Replaying phase or no notification received yet.
+    async fn is_replay_idle(&self, timeout: Duration) -> bool {
+        let phase = self.phase.lock().await;
+        if let HandlerPhase::Replaying(buf) = &*phase {
+            buf.received_any && buf.last_notification_at.elapsed() >= timeout
+        } else {
+            false
+        }
+    }
+
+    /// Transition from Replaying to WaitingForPrompt.
+    /// Extracts the replayed_tool_call_ids from the ReplayBuffer.
+    async fn transition_to_waiting_for_prompt(&self) {
+        let mut phase = self.phase.lock().await;
+        let ids = match &mut *phase {
+            HandlerPhase::Replaying(buf) => std::mem::take(&mut buf.replayed_tool_call_ids),
+            HandlerPhase::WaitingForPrompt { .. } => {
+                // Already transitioned — no-op.
+                log::warn!("[replay-guard] transition_to_waiting_for_prompt called but already in WaitingForPrompt");
+                return;
+            }
+            HandlerPhase::Live { .. } => {
+                log::warn!(
+                    "[replay-guard] transition_to_waiting_for_prompt called but already Live"
+                );
+                return;
+            }
+        };
+        log::info!(
+            "[replay-guard] transitioning to WaitingForPrompt with {} replayed tool-call IDs",
+            ids.len()
+        );
+        *phase = HandlerPhase::WaitingForPrompt {
+            replayed_tool_call_ids: ids,
+        };
+    }
+
+    /// Transition from WaitingForPrompt (or Replaying) to Live.
+    async fn transition_to_live(&self) {
+        let mut phase = self.phase.lock().await;
+        let ids = match &mut *phase {
+            HandlerPhase::WaitingForPrompt {
+                replayed_tool_call_ids,
+            } => std::mem::take(replayed_tool_call_ids),
+            HandlerPhase::Replaying(buf) => std::mem::take(&mut buf.replayed_tool_call_ids),
+            HandlerPhase::Live { .. } => {
+                log::warn!("[replay-guard] transition_to_live called but already Live");
+                return;
+            }
+        };
+        log::info!(
+            "[replay-guard] transitioning to Live with {} replayed tool-call IDs",
+            ids.len()
+        );
+        *phase = HandlerPhase::Live {
+            replayed_tool_call_ids: ids,
+        };
     }
 }
 
@@ -637,77 +828,143 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
-        // — Replay phase: drop everything, but record tool-call IDs so we can
-        //   recognise late stragglers after set_live().
-        if self.replaying.load(Ordering::Acquire) {
-            if let Some(id) = notification_tool_call_id(&notification.update) {
-                self.replayed_tool_call_ids.lock().unwrap().insert(id);
-            }
-            log::info!(
-                "[replay-guard] Dropping replayed notification: {:?}",
-                notification.update
-            );
-            return Ok(());
-        }
+        let mut phase = self.phase.lock().await;
 
-        // — Pre-prompt gate: between set_live() and mark_prompt_sent() the
-        //   server has not yet received the prompt, so every notification is
-        //   a late-arriving replay artefact.  Record tool-call IDs for the
-        //   safety-net filter below, then drop.
-        if !self.prompt_sent.load(Ordering::Acquire) {
-            if let Some(id) = notification_tool_call_id(&notification.update) {
-                self.replayed_tool_call_ids.lock().unwrap().insert(id);
-            }
-            log::info!(
-                "[replay-guard] Dropping pre-prompt notification: {:?}",
-                notification.update
-            );
-            return Ok(());
-        }
+        match &mut *phase {
+            // ── Replaying phase: accumulate chunks, match against DB ──
+            HandlerPhase::Replaying(buf) => {
+                buf.last_notification_at = Instant::now();
+                buf.received_any = true;
 
-        // — Safety net: after the prompt is sent, any tool call / update whose
-        //   ID was seen during replay or the pre-prompt window is still stale.
-        if let Some(id) = notification_tool_call_id(&notification.update) {
-            if self.replayed_tool_call_ids.lock().unwrap().contains(&id) {
+                // Record tool-call IDs for the safety-net.
+                if let Some(id) = notification_tool_call_id(&notification.update) {
+                    buf.replayed_tool_call_ids.insert(id);
+                }
+
+                let completed = match &notification.update {
+                    SessionUpdate::AgentMessageChunk(chunk) => {
+                        if let AcpContentBlock::Text(text) = &chunk.content {
+                            // If switching from non-assistant role, finalize previous.
+                            if buf.current_role.as_deref() != Some("assistant") {
+                                buf.finalize_current();
+                                buf.current_role = Some("assistant".to_string());
+                            }
+                            buf.current_text.push_str(&text.text);
+                        }
+                        false
+                    }
+                    SessionUpdate::UserMessageChunk(chunk) => {
+                        if let AcpContentBlock::Text(text) = &chunk.content {
+                            if buf.current_role.as_deref() != Some("user") {
+                                buf.finalize_current();
+                                buf.current_role = Some("user".to_string());
+                            }
+                            buf.current_text.push_str(&text.text);
+                        }
+                        false
+                    }
+                    SessionUpdate::ToolCall(tc) => {
+                        buf.finalize_current();
+                        let title = tc.title.replace('`', ""); // sanitize_title
+                        buf.try_match("tool_call", &title)
+                    }
+                    SessionUpdate::ToolCallUpdate(update) => {
+                        if let Some(ref content) = update.fields.content {
+                            buf.finalize_current();
+                            if let Some(preview) = extract_content_preview(content) {
+                                let stripped = strip_code_fences(&preview);
+                                buf.try_match("tool_result", &stripped)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    SessionUpdate::AgentThoughtChunk(_) => {
+                        // Thinking is not persisted — ignore.
+                        false
+                    }
+                    _ => false,
+                };
+
+                if completed {
+                    log::info!(
+                        "[replay-guard] replay complete — last DB message matched (cursor={})",
+                        buf.match_cursor
+                    );
+                    // Notify the replay-wait loop.
+                    self.replay_done.notify_one();
+                }
+
                 log::info!(
-                    "[replay-guard] Dropping stale post-prompt notification (tool_call_id={id}): {:?}",
-                    notification.update
+                    "[replay-guard] Replaying: processed notification (cursor={}): {:?}",
+                    buf.match_cursor,
+                    std::mem::discriminant(&notification.update)
                 );
-                return Ok(());
             }
-        }
 
-        log::info!(
-            "[replay-guard] Processing LIVE notification: {:?}",
-            notification.update
-        );
-
-        match &notification.update {
-            SessionUpdate::AgentMessageChunk(chunk) => {
-                if let AcpContentBlock::Text(text) = &chunk.content {
-                    self.writer.append_text(&text.text).await;
+            // ── WaitingForPrompt phase: drop everything, record tool-call IDs ──
+            HandlerPhase::WaitingForPrompt {
+                replayed_tool_call_ids,
+            } => {
+                if let Some(id) = notification_tool_call_id(&notification.update) {
+                    replayed_tool_call_ids.insert(id);
                 }
+                log::info!(
+                    "[replay-guard] WaitingForPrompt: dropping notification: {:?}",
+                    std::mem::discriminant(&notification.update)
+                );
             }
-            SessionUpdate::ToolCall(tool_call) => {
-                self.writer
-                    .record_tool_call(tool_call.tool_call_id.0.as_ref(), &tool_call.title)
-                    .await;
-            }
-            SessionUpdate::ToolCallUpdate(update) => {
-                let tc_id = update.tool_call_id.0.to_string();
 
-                if let Some(ref title) = update.fields.title {
-                    self.writer.update_tool_call_title(&tc_id, title).await;
-                }
-
-                if let Some(ref content) = update.fields.content {
-                    if let Some(preview) = extract_content_preview(content) {
-                        self.writer.record_tool_result(&preview).await;
+            // ── Live phase: forward to writer, with safety-net filter ──
+            HandlerPhase::Live {
+                replayed_tool_call_ids,
+            } => {
+                // Safety net: drop notifications for tool-call IDs seen during replay.
+                if let Some(id) = notification_tool_call_id(&notification.update) {
+                    if replayed_tool_call_ids.contains(&id) {
+                        log::info!(
+                            "[replay-guard] Live: dropping stale notification (tool_call_id={id}): {:?}",
+                            std::mem::discriminant(&notification.update)
+                        );
+                        return Ok(());
                     }
                 }
-            }
-            _ => {
-                log::debug!("Ignoring session update: {:?}", notification.update);
+
+                log::info!(
+                    "[replay-guard] Live: processing notification: {:?}",
+                    std::mem::discriminant(&notification.update)
+                );
+
+                match &notification.update {
+                    SessionUpdate::AgentMessageChunk(chunk) => {
+                        if let AcpContentBlock::Text(text) = &chunk.content {
+                            self.writer.append_text(&text.text).await;
+                        }
+                    }
+                    SessionUpdate::ToolCall(tool_call) => {
+                        self.writer
+                            .record_tool_call(tool_call.tool_call_id.0.as_ref(), &tool_call.title)
+                            .await;
+                    }
+                    SessionUpdate::ToolCallUpdate(update) => {
+                        let tc_id = update.tool_call_id.0.to_string();
+
+                        if let Some(ref title) = update.fields.title {
+                            self.writer.update_tool_call_title(&tc_id, title).await;
+                        }
+
+                        if let Some(ref content) = update.fields.content {
+                            if let Some(preview) = extract_content_preview(content) {
+                                self.writer.record_tool_result(&preview).await;
+                            }
+                        }
+                    }
+                    _ => {
+                        log::debug!("Ignoring session update: {:?}", notification.update);
+                    }
+                }
             }
         }
         Ok(())
@@ -758,10 +1015,27 @@ async fn run_acp_protocol(
         )
     })??;
 
-    handler.set_live();
-    log::info!(
-        "[replay-guard] setup_acp_session complete, handler is now live — about to send prompt"
-    );
+    // If resuming, wait for replay to complete (content match OR idle timeout).
+    if acp_session_id.is_some() {
+        log::info!("[replay-guard] waiting for replay completion…");
+        loop {
+            tokio::select! {
+                _ = handler.replay_done.notified() => {
+                    log::info!("[replay-guard] replay complete — last DB message matched");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if handler.is_replay_idle(Duration::from_secs(1)).await {
+                        log::info!("[replay-guard] replay idle timeout — treating as complete");
+                        break;
+                    }
+                }
+            }
+        }
+        handler.transition_to_waiting_for_prompt().await;
+    }
+
+    log::info!("[replay-guard] setup_acp_session complete — about to send prompt");
 
     let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
     for (data, mime_type) in images {
@@ -772,7 +1046,7 @@ async fn run_acp_protocol(
     }
     let prompt_request = PromptRequest::new(agent_session_id, content_blocks);
 
-    handler.mark_prompt_sent();
+    handler.transition_to_live().await;
 
     connection
         .prompt(prompt_request)
@@ -855,6 +1129,23 @@ async fn setup_acp_session(
             Ok(new_id)
         }
     }
+}
+
+/// Strip outer markdown code fences from tool-result content.
+/// Mirrors the same logic used by the DB writer.
+fn strip_code_fences(content: &str) -> String {
+    let trimmed = content.trim();
+    if let Some(after_open) = trimmed.strip_prefix("```") {
+        if let Some(nl) = after_open.find('\n') {
+            let body = after_open[nl + 1..].trim_end();
+            return body
+                .strip_suffix("```")
+                .unwrap_or(body)
+                .trim_end()
+                .to_string();
+        }
+    }
+    content.to_string()
 }
 
 fn extract_content_preview(content: &[agent_client_protocol::ToolCallContent]) -> Option<String> {

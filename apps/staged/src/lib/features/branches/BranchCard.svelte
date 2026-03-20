@@ -1011,7 +1011,6 @@
   .card-content {
     padding: 16px;
     min-height: 80px;
-    overflow: hidden;
   }
 
   .loading {

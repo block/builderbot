@@ -496,7 +496,6 @@
               item.secondaryMeta ??
               fallbackHintForPendingType(item.type))
             : item.secondaryMeta}
-          sessionId={item.sessionId}
           isLast={index === pendingItems.length - 1 && !revalidating && !onNewNote && !onNewCommit}
         />
       </div>

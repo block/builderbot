@@ -7,6 +7,7 @@
 //! - Remote workspace support via Blox
 //! - Cancellation support
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -583,19 +584,36 @@ async fn normalize_local_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
 struct AcpNotificationHandler {
     writer: Arc<dyn MessageWriter>,
     replaying: AtomicBool,
+    /// Tool-call IDs observed during the replay phase. Used after `set_live()`
+    /// to definitively identify late-arriving replay notifications that slipped
+    /// past the `replaying` flag due to async notification delivery.
+    replayed_tool_call_ids: std::sync::Mutex<HashSet<String>>,
+    /// Timestamp of the most recent stale notification dropped *after*
+    /// `set_live()`. Non-tool notifications (e.g. `AgentMessageChunk`) that
+    /// arrive within [`STALE_PROXIMITY`] of the last stale drop are also
+    /// treated as stale, since they are interleaved old assistant text.
+    last_stale_drop: std::sync::Mutex<Option<Instant>>,
 }
+
+/// Maximum time window after the last definitively-stale notification within
+/// which non-tool notifications are also considered stale.
+const STALE_PROXIMITY: Duration = Duration::from_millis(500);
 
 impl AcpNotificationHandler {
     fn new(writer: Arc<dyn MessageWriter>, replaying: bool) -> Self {
         Self {
             writer,
             replaying: AtomicBool::new(replaying),
+            replayed_tool_call_ids: std::sync::Mutex::new(HashSet::new()),
+            last_stale_drop: std::sync::Mutex::new(None),
         }
     }
 
     fn set_live(&self) {
         log::info!("[replay-guard] set_live() called — transitioning from replaying to live");
         self.replaying.store(false, Ordering::Release);
+        // Reset so the temporal filter only triggers on post-set_live stale drops.
+        *self.last_stale_drop.lock().unwrap() = None;
     }
 }
 
@@ -620,12 +638,54 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
+        // — Replay phase: drop everything, but record tool-call IDs so we can
+        //   recognise late stragglers after set_live().
         if self.replaying.load(Ordering::Acquire) {
+            if let Some(id) = notification_tool_call_id(&notification.update) {
+                self.replayed_tool_call_ids.lock().unwrap().insert(id);
+            }
             log::info!(
                 "[replay-guard] Dropping replayed notification: {:?}",
                 notification.update
             );
             return Ok(());
+        }
+
+        // — Post-replay stale-notification filter.
+        //
+        // After set_live() there is a brief window where late replay
+        // notifications can arrive because the transport delivers them
+        // asynchronously relative to the load_session response.
+        //
+        // 1. Tool calls / updates whose ID was seen during replay are
+        //    definitively stale → drop and record the drop timestamp.
+        // 2. Any other notification that arrives within STALE_PROXIMITY of the
+        //    last stale drop is almost certainly interleaved old assistant
+        //    text or an AvailableCommandsUpdate from the old turn → drop.
+        if let Some(id) = notification_tool_call_id(&notification.update) {
+            if self.replayed_tool_call_ids.lock().unwrap().contains(&id) {
+                *self.last_stale_drop.lock().unwrap() = Some(Instant::now());
+                log::info!(
+                    "[replay-guard] Dropping stale post-replay notification (tool_call_id={id}): {:?}",
+                    notification.update
+                );
+                return Ok(());
+            }
+        } else {
+            let dominated_by_stale = self
+                .last_stale_drop
+                .lock()
+                .unwrap()
+                .map_or(false, |t| t.elapsed() < STALE_PROXIMITY);
+            if dominated_by_stale {
+                *self.last_stale_drop.lock().unwrap() = Some(Instant::now());
+                log::info!(
+                    "[replay-guard] Dropping likely-stale notification (within {}ms of last stale drop): {:?}",
+                    STALE_PROXIMITY.as_millis(),
+                    notification.update
+                );
+                return Ok(());
+            }
         }
 
         log::info!(
@@ -662,6 +722,15 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
             }
         }
         Ok(())
+    }
+}
+
+/// Extract the tool-call ID from a session update, if it carries one.
+fn notification_tool_call_id(update: &SessionUpdate) -> Option<String> {
+    match update {
+        SessionUpdate::ToolCall(tc) => Some(tc.tool_call_id.0.to_string()),
+        SessionUpdate::ToolCallUpdate(tcu) => Some(tcu.tool_call_id.0.to_string()),
+        _ => None,
     }
 }
 

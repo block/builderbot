@@ -672,39 +672,17 @@ impl ReplayBuffer {
 
     /// Try to match a `(role, content)` pair against `db_messages[match_cursor]`.
     /// Returns `true` if replay is now considered complete.
-    fn try_match(&mut self, role: &str, content: &str) -> bool {
+    fn try_match(&mut self, role: &str, _content: &str) -> bool {
         if self.match_cursor >= self.db_messages.len() {
             return self.is_complete();
         }
 
-        let (db_role, db_content) = &self.db_messages[self.match_cursor];
-        let content_prefix: String = content.trim().chars().take(200).collect();
-        let db_prefix: String = db_content.trim().chars().take(200).collect();
+        let (db_role, _db_content) = &self.db_messages[self.match_cursor];
 
         if role == db_role {
-            if content_prefix == db_prefix {
-                log::info!(
-                    "[replay-guard] replay match at cursor={}: role={role} content_len={}",
-                    self.match_cursor,
-                    content.len()
-                );
-            } else {
-                log::warn!(
-                    "[replay-guard] replay role-match but content-mismatch at cursor={}: role={role} \
-                     expected_prefix={:?} got_prefix={:?}",
-                    self.match_cursor,
-                    db_prefix.chars().take(80).collect::<String>(),
-                    content_prefix.chars().take(80).collect::<String>()
-                );
-            }
             self.match_cursor += 1;
-        } else {
-            log::warn!(
-                "[replay-guard] replay role-mismatch at cursor={}: expected={db_role} got={role}",
-                self.match_cursor
-            );
-            // Don't advance cursor on role mismatch.
         }
+        // Don't advance cursor on role mismatch.
 
         self.is_complete()
     }
@@ -763,22 +741,8 @@ impl AcpNotificationHandler {
         let mut phase = self.phase.lock().await;
         let ids = match &mut *phase {
             HandlerPhase::Replaying(buf) => std::mem::take(&mut buf.replayed_tool_call_ids),
-            HandlerPhase::WaitingForPrompt { .. } => {
-                // Already transitioned — no-op.
-                log::warn!("[replay-guard] transition_to_waiting_for_prompt called but already in WaitingForPrompt");
-                return;
-            }
-            HandlerPhase::Live { .. } => {
-                log::warn!(
-                    "[replay-guard] transition_to_waiting_for_prompt called but already Live"
-                );
-                return;
-            }
+            HandlerPhase::WaitingForPrompt { .. } | HandlerPhase::Live { .. } => return,
         };
-        log::info!(
-            "[replay-guard] transitioning to WaitingForPrompt with {} replayed tool-call IDs",
-            ids.len()
-        );
         *phase = HandlerPhase::WaitingForPrompt {
             replayed_tool_call_ids: ids,
         };
@@ -792,15 +756,8 @@ impl AcpNotificationHandler {
                 replayed_tool_call_ids,
             } => std::mem::take(replayed_tool_call_ids),
             HandlerPhase::Replaying(buf) => std::mem::take(&mut buf.replayed_tool_call_ids),
-            HandlerPhase::Live { .. } => {
-                log::warn!("[replay-guard] transition_to_live called but already Live");
-                return;
-            }
+            HandlerPhase::Live { .. } => return,
         };
-        log::info!(
-            "[replay-guard] transitioning to Live with {} replayed tool-call IDs",
-            ids.len()
-        );
         *phase = HandlerPhase::Live {
             replayed_tool_call_ids: ids,
         };
@@ -845,23 +802,29 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                     SessionUpdate::AgentMessageChunk(chunk) => {
                         if let AcpContentBlock::Text(text) = &chunk.content {
                             // If switching from non-assistant role, finalize previous.
+                            let mut done = false;
                             if buf.current_role.as_deref() != Some("assistant") {
-                                buf.finalize_current();
+                                done = buf.finalize_current();
                                 buf.current_role = Some("assistant".to_string());
                             }
                             buf.current_text.push_str(&text.text);
+                            done
+                        } else {
+                            false
                         }
-                        false
                     }
                     SessionUpdate::UserMessageChunk(chunk) => {
                         if let AcpContentBlock::Text(text) = &chunk.content {
+                            let mut done = false;
                             if buf.current_role.as_deref() != Some("user") {
-                                buf.finalize_current();
+                                done = buf.finalize_current();
                                 buf.current_role = Some("user".to_string());
                             }
                             buf.current_text.push_str(&text.text);
+                            done
+                        } else {
+                            false
                         }
-                        false
                     }
                     SessionUpdate::ToolCall(tc) => {
                         buf.finalize_current();
@@ -889,19 +852,8 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                 };
 
                 if completed {
-                    log::info!(
-                        "[replay-guard] replay complete — last DB message matched (cursor={})",
-                        buf.match_cursor
-                    );
-                    // Notify the replay-wait loop.
                     self.replay_done.notify_one();
                 }
-
-                log::info!(
-                    "[replay-guard] Replaying: processed notification (cursor={}): {:?}",
-                    buf.match_cursor,
-                    std::mem::discriminant(&notification.update)
-                );
             }
 
             // ── WaitingForPrompt phase: drop everything, record tool-call IDs ──
@@ -911,10 +863,6 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                 if let Some(id) = notification_tool_call_id(&notification.update) {
                     replayed_tool_call_ids.insert(id);
                 }
-                log::info!(
-                    "[replay-guard] WaitingForPrompt: dropping notification: {:?}",
-                    std::mem::discriminant(&notification.update)
-                );
             }
 
             // ── Live phase: forward to writer, with safety-net filter ──
@@ -924,18 +872,9 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                 // Safety net: drop notifications for tool-call IDs seen during replay.
                 if let Some(id) = notification_tool_call_id(&notification.update) {
                     if replayed_tool_call_ids.contains(&id) {
-                        log::info!(
-                            "[replay-guard] Live: dropping stale notification (tool_call_id={id}): {:?}",
-                            std::mem::discriminant(&notification.update)
-                        );
                         return Ok(());
                     }
                 }
-
-                log::info!(
-                    "[replay-guard] Live: processing notification: {:?}",
-                    std::mem::discriminant(&notification.update)
-                );
 
                 match &notification.update {
                     SessionUpdate::AgentMessageChunk(chunk) => {
@@ -1017,16 +956,13 @@ async fn run_acp_protocol(
 
     // If resuming, wait for replay to complete (content match OR idle timeout).
     if acp_session_id.is_some() {
-        log::info!("[replay-guard] waiting for replay completion…");
         loop {
             tokio::select! {
                 _ = handler.replay_done.notified() => {
-                    log::info!("[replay-guard] replay complete — last DB message matched");
                     break;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
                     if handler.is_replay_idle(Duration::from_secs(1)).await {
-                        log::info!("[replay-guard] replay idle timeout — treating as complete");
                         break;
                     }
                 }
@@ -1034,8 +970,6 @@ async fn run_acp_protocol(
         }
         handler.transition_to_waiting_for_prompt().await;
     }
-
-    log::info!("[replay-guard] setup_acp_session complete — about to send prompt");
 
     let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
     for (data, mime_type) in images {
@@ -1132,8 +1066,9 @@ async fn setup_acp_session(
 }
 
 /// Strip outer markdown code fences from tool-result content.
-/// Mirrors the same logic used by the DB writer.
-fn strip_code_fences(content: &str) -> String {
+/// Agents often wrap results in ``` fences which are redundant in our `<pre>` display.
+/// The closing fence may be absent when content was truncated by the preview limit.
+pub fn strip_code_fences(content: &str) -> String {
     let trimmed = content.trim();
     if let Some(after_open) = trimmed.strip_prefix("```") {
         if let Some(nl) = after_open.find('\n') {

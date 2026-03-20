@@ -112,15 +112,6 @@ impl Store {
             })
         })?;
         let result: Vec<SessionMessage> = rows.collect::<Result<Vec<_>, _>>()?;
-        if result.len() > 1 {
-            log::info!(
-                "[msg-order] get_session_messages_since(session={}, since_id={}): returning {} messages, ids={:?}",
-                session_id,
-                since_id,
-                result.len(),
-                result.iter().map(|m| (m.id, m.role.as_str())).collect::<Vec<_>>()
-            );
-        }
         Ok(result)
     }
 }

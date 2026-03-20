@@ -17,6 +17,8 @@ use tokio::sync::Mutex;
 
 use crate::store::{MessageRole, Store};
 
+use acp_client::strip_code_fences;
+
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
 /// in memory and are written at most this often, reducing mutex contention
 /// when many sessions stream concurrently. [`MessageWriter::finalize`]
@@ -49,24 +51,6 @@ pub struct MessageWriter {
 /// Strip backticks from agent-provided tool-call titles.
 fn sanitize_title(title: &str) -> String {
     title.replace('`', "")
-}
-
-/// Strip outer markdown code fences from tool-result content.
-/// Agents often wrap results in ``` fences which are redundant in our `<pre>` display.
-/// The closing fence may be absent when content was truncated by the preview limit.
-fn strip_code_fences(content: &str) -> String {
-    let trimmed = content.trim();
-    if let Some(after_open) = trimmed.strip_prefix("```") {
-        if let Some(nl) = after_open.find('\n') {
-            let body = after_open[nl + 1..].trim_end();
-            return body
-                .strip_suffix("```")
-                .unwrap_or(body)
-                .trim_end()
-                .to_string();
-        }
-    }
-    content.to_string()
 }
 
 impl MessageWriter {
@@ -104,13 +88,8 @@ impl MessageWriter {
     /// cancellation) to ensure no text is lost.
     pub async fn finalize(&self) {
         self.flush_text().await;
-        let prev_msg_id = self.current_assistant_msg_id.lock().await.take();
+        self.current_assistant_msg_id.lock().await.take();
         *self.current_text.lock().await = String::new();
-        log::info!(
-            "[msg-order] finalize: reset assistant state session={} prev_msg_id={:?}",
-            self.session_id,
-            prev_msg_id
-        );
     }
 
     // =====================================================================
@@ -128,12 +107,6 @@ impl MessageWriter {
         // Some providers may resend ToolCall for the same ID while streaming.
         // Treat those as updates to the existing row.
         if let Some(&row_id) = self.tool_call_rows.lock().await.get(tool_call_id) {
-            log::info!(
-                "[msg-order] Dedup tool_call: updating existing row_id={} session={} tool_call_id={}",
-                row_id,
-                self.session_id,
-                tool_call_id
-            );
             let _ = self.store.update_message_content(row_id, &title);
             return;
         }
@@ -143,12 +116,6 @@ impl MessageWriter {
             .add_session_message(&self.session_id, MessageRole::ToolCall, &title)
         {
             Ok(id) => {
-                log::info!(
-                    "[msg-order] Inserted tool_call message id={} session={} tool_call_id={}",
-                    id,
-                    self.session_id,
-                    tool_call_id
-                );
                 self.tool_call_rows
                     .lock()
                     .await
@@ -172,11 +139,6 @@ impl MessageWriter {
         let content = strip_code_fences(content);
         let mut current_result_id = self.current_tool_result_msg_id.lock().await;
         if let Some(id) = *current_result_id {
-            log::info!(
-                "[msg-order] Dedup tool_result: updating existing row_id={} session={}",
-                id,
-                self.session_id
-            );
             let _ = self.store.update_message_content(id, &content);
             return;
         }
@@ -186,11 +148,6 @@ impl MessageWriter {
             .add_session_message(&self.session_id, MessageRole::ToolResult, &content)
         {
             Ok(id) => {
-                log::info!(
-                    "[msg-order] Inserted tool_result message id={} session={}",
-                    id,
-                    self.session_id
-                );
                 *current_result_id = Some(id);
             }
             Err(e) => log::error!("Failed to insert tool_result message: {e}"),
@@ -222,11 +179,6 @@ impl MessageWriter {
                     &text,
                 ) {
                     Ok(id) => {
-                        log::info!(
-                            "[msg-order] Inserted assistant message id={} session={}",
-                            id,
-                            self.session_id
-                        );
                         *msg_id = Some(id);
                     }
                     Err(e) => log::error!("Failed to insert assistant message: {e}"),

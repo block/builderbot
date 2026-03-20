@@ -119,13 +119,11 @@ impl AgentDriver for SimpleDriverWrapper {
         impl SimpleHandler {
             async fn transition_to_waiting(&self) {
                 let mut phase = self.phase.lock().await;
-                log::info!("[replay-guard] simple: transition to WaitingForPrompt");
                 *phase = SimpleHandlerPhase::WaitingForPrompt;
             }
 
             async fn transition_to_live(&self) {
                 let mut phase = self.phase.lock().await;
-                log::info!("[replay-guard] simple: transition to Live");
                 *phase = SimpleHandlerPhase::Live;
             }
         }
@@ -155,17 +153,9 @@ impl AgentDriver for SimpleDriverWrapper {
 
                 match &*phase {
                     SimpleHandlerPhase::Replaying | SimpleHandlerPhase::WaitingForPrompt => {
-                        log::info!(
-                            "[replay-guard] simple: dropping pre-live notification: {:?}",
-                            notification.update
-                        );
                         return Ok(());
                     }
                     SimpleHandlerPhase::Live => {
-                        log::info!(
-                            "[replay-guard] simple: processing LIVE notification: {:?}",
-                            notification.update
-                        );
                         // Drop the lock before calling writer
                         drop(phase);
                         match &notification.update {
@@ -267,7 +257,9 @@ impl AgentDriver for SimpleDriverWrapper {
                     vec![AcpContentBlock::Text(TextContent::new(prompt))],
                 );
 
-                handler.transition_to_live().await;
+                if is_resuming {
+                    handler.transition_to_live().await;
+                }
 
                 connection
                     .prompt(prompt_request)

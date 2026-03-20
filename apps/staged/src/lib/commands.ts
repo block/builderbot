@@ -286,38 +286,9 @@ export function pollWorkspaceStatus(branchId: string): Promise<PollWorkspaceResu
 // Timeline
 // =============================================================================
 
-type TimelineJob = {
-  branchId: string;
-  resolve: (timeline: BranchTimeline) => void;
-  reject: (error: unknown) => void;
-};
-
-const TIMELINE_MAX_CONCURRENCY = 1;
-const timelineQueue: TimelineJob[] = [];
-const timelineCache = new Map<string, { timeline: BranchTimeline }>();
+const TIMELINE_FRESH_MS = 10_000;
+const timelineCache = new Map<string, { timeline: BranchTimeline; fetchedAt: number }>();
 const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
-let activeTimelineJobs = 0;
-
-function pumpTimelineQueue() {
-  while (activeTimelineJobs < TIMELINE_MAX_CONCURRENCY && timelineQueue.length > 0) {
-    const job = timelineQueue.shift();
-    if (!job) break;
-
-    activeTimelineJobs += 1;
-    invoke<BranchTimeline>('get_branch_timeline', { branchId: job.branchId })
-      .then((timeline) => {
-        timelineCache.set(job.branchId, { timeline });
-        job.resolve(timeline);
-      })
-      .catch((error) => {
-        job.reject(error);
-      })
-      .finally(() => {
-        activeTimelineJobs = Math.max(0, activeTimelineJobs - 1);
-        pumpTimelineQueue();
-      });
-  }
-}
 
 export function invalidateBranchTimeline(branchId: string): void {
   timelineCache.delete(branchId);
@@ -343,14 +314,16 @@ export function getBranchTimeline(
     return existing;
   }
 
-  const request = new Promise<BranchTimeline>((resolve, reject) => {
-    timelineQueue.push({ branchId, resolve, reject });
-    pumpTimelineQueue();
-  }).finally(() => {
-    if (inFlightTimelines.get(branchId) === request) {
-      inFlightTimelines.delete(branchId);
-    }
-  });
+  const request = invoke<BranchTimeline>('get_branch_timeline', { branchId })
+    .then((timeline) => {
+      timelineCache.set(branchId, { timeline, fetchedAt: Date.now() });
+      return timeline;
+    })
+    .finally(() => {
+      if (inFlightTimelines.get(branchId) === request) {
+        inFlightTimelines.delete(branchId);
+      }
+    });
 
   inFlightTimelines.set(branchId, request);
   return request;
@@ -361,9 +334,10 @@ export function getBranchTimelineWithRevalidation(branchId: string): {
   fresh: Promise<BranchTimeline>;
 } {
   const entry = timelineCache.get(branchId);
+  const isFresh = entry && Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS;
   return {
     cached: entry?.timeline ?? null,
-    fresh: getBranchTimeline(branchId, { force: true }),
+    fresh: isFresh ? Promise.resolve(entry.timeline) : getBranchTimeline(branchId, { force: true }),
   };
 }
 

@@ -192,9 +192,9 @@
     padding: 8px;
     margin: 0 -8px;
     border-radius: 6px;
-    width: calc(100% + 16px);
     position: relative;
     transition: background-color 0.15s ease;
+    isolation: isolate;
   }
 
   .timeline-row:hover {
@@ -373,6 +373,7 @@
     flex-shrink: 0;
     opacity: 0;
     transition: opacity 0.1s;
+    will-change: opacity;
   }
 
   .timeline-row:hover .timeline-actions {

@@ -131,14 +131,14 @@ impl AgentDriver for SimpleDriverWrapper {
                 notification: SessionNotification,
             ) -> agent_client_protocol::Result<()> {
                 if self.replaying.load(Ordering::Acquire) {
-                    log::debug!(
+                    log::info!(
                         "[replay-guard] simple: dropping replayed notification: {:?}",
                         notification.update
                     );
                     return Ok(());
                 }
 
-                log::debug!(
+                log::info!(
                     "[replay-guard] simple: processing LIVE notification: {:?}",
                     notification.update
                 );
@@ -222,7 +222,7 @@ impl AgentDriver for SimpleDriverWrapper {
                 };
 
                 // Now we're live (not replaying)
-                log::debug!("[replay-guard] simple driver: transitioning from replaying to live");
+                log::info!("[replay-guard] simple driver: transitioning from replaying to live");
                 handler.replaying.store(false, Ordering::Release);
 
                 // Send prompt

@@ -132,7 +132,7 @@ impl MessageWriter {
             .add_session_message(&self.session_id, MessageRole::ToolCall, &title)
         {
             Ok(id) => {
-                log::debug!(
+                log::info!(
                     "[msg-order] Inserted tool_call message id={} session={} tool_call_id={}",
                     id,
                     self.session_id,
@@ -170,7 +170,7 @@ impl MessageWriter {
             .add_session_message(&self.session_id, MessageRole::ToolResult, &content)
         {
             Ok(id) => {
-                log::debug!(
+                log::info!(
                     "[msg-order] Inserted tool_result message id={} session={}",
                     id,
                     self.session_id
@@ -206,7 +206,7 @@ impl MessageWriter {
                     &text,
                 ) {
                     Ok(id) => {
-                        log::debug!(
+                        log::info!(
                             "[msg-order] Inserted assistant message id={} session={}",
                             id,
                             self.session_id

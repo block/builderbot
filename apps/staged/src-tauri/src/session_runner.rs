@@ -212,7 +212,7 @@ pub fn start_session(
             &config.image_ids,
         )
         .map_err(|e| format!("Failed to persist user message: {e}"))?;
-    log::debug!(
+    log::info!(
         "[msg-order] Persisted user message id={} for session {} (agent_session_id={:?})",
         user_msg_id,
         config.session_id,

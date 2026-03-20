@@ -594,7 +594,7 @@ impl AcpNotificationHandler {
     }
 
     fn set_live(&self) {
-        log::debug!("[replay-guard] set_live() called — transitioning from replaying to live");
+        log::info!("[replay-guard] set_live() called — transitioning from replaying to live");
         self.replaying.store(false, Ordering::Release);
     }
 }
@@ -621,14 +621,14 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
         if self.replaying.load(Ordering::Acquire) {
-            log::debug!(
+            log::info!(
                 "[replay-guard] Dropping replayed notification: {:?}",
                 notification.update
             );
             return Ok(());
         }
 
-        log::debug!(
+        log::info!(
             "[replay-guard] Processing LIVE notification: {:?}",
             notification.update
         );
@@ -701,7 +701,7 @@ async fn run_acp_protocol(
     })??;
 
     handler.set_live();
-    log::debug!(
+    log::info!(
         "[replay-guard] setup_acp_session complete, handler is now live — about to send prompt"
     );
 

@@ -359,7 +359,7 @@
         const updated = await getSessionMessagesSince(sessionId, lastId);
         if (closed) return;
         if (updated.length > 0) {
-          console.debug(
+          console.info(
             `[msg-order] poll: lastId=${lastId}, updated ids=[${updated.map((m: { id: number; role: string }) => `${m.id}(${m.role})`).join(', ')}], existing ids=[${messages.map((m: { id: number; role: string }) => `${m.id}(${m.role})`).join(', ')}]`
           );
           const prev = messages.slice(0, -1);

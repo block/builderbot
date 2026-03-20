@@ -1173,10 +1173,14 @@
           <button
             class="action-btn send-btn"
             onclick={handleSend}
-            disabled={!inputText.trim()}
+            disabled={sending || !inputText.trim()}
             title="Send message"
           >
-            <Send size={16} />
+            {#if sending}
+              <Spinner size={16} />
+            {:else}
+              <Send size={16} />
+            {/if}
           </button>
         {/if}
       </div>

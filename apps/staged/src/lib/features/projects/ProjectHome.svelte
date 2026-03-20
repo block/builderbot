@@ -448,6 +448,7 @@
         if (repo.projectId === id) nextRepos.delete(repoId);
       }
       reposById = nextRepos;
+      commands.invalidateProjectBranchTimelines(branchesToClear.map((b) => b.id));
       for (const branch of branchesToClear) {
         workspaceLifecycle.clearBranchState(branch.id);
       }
@@ -583,6 +584,7 @@
           existing.filter((b) => b.id !== branch.id)
         );
       }
+      commands.invalidateBranchTimeline(branch.id);
     } catch (e) {
       console.error('Failed to delete branch:', e);
     } finally {

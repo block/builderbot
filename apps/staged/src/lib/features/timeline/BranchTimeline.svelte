@@ -63,6 +63,8 @@
     onNewCommit?: () => void;
     onNewReview?: (e: MouseEvent) => void;
     newSessionDisabled?: boolean;
+    /** Whether the timeline is being revalidated in the background. */
+    revalidating?: boolean;
     footerActions?: Snippet;
   }
 
@@ -88,6 +90,7 @@
     onNewCommit,
     onNewReview,
     newSessionDisabled = false,
+    revalidating = false,
     footerActions,
   }: Props = $props();
 
@@ -458,7 +461,9 @@
           isLast={index === items.length - 1 &&
             !onNewNote &&
             !onNewCommit &&
-            pendingDropNotes.length === 0}
+            pendingDropNotes.length === 0 &&
+            pendingItems.length === 0 &&
+            !revalidating}
           sessionId={item.sessionId}
           deleteDisabledReason={item.deleteDisabledReason}
           {onSessionClick}
@@ -475,6 +480,7 @@
           secondaryMeta="adding..."
           isLast={index === pendingDropNotes.length - 1 &&
             pendingItems.length === 0 &&
+            !revalidating &&
             !onNewNote &&
             !onNewCommit}
         />
@@ -491,10 +497,15 @@
               fallbackHintForPendingType(item.type))
             : item.secondaryMeta}
           sessionId={item.sessionId}
-          isLast={index === pendingItems.length - 1 && !onNewNote && !onNewCommit}
+          isLast={index === pendingItems.length - 1 && !revalidating && !onNewNote && !onNewCommit}
         />
       </div>
     {/each}
+    {#if revalidating}
+      <div transition:slide={{ duration: 200 }}>
+        <TimelineRow type="revalidating" title="Looking for changes..." isLast={true} />
+      </div>
+    {/if}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}
       <div class="footer-row">
         <div class="footer-left-actions">

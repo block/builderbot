@@ -293,9 +293,8 @@ type TimelineJob = {
 };
 
 const TIMELINE_MAX_CONCURRENCY = 1;
-const TIMELINE_CACHE_MAX_AGE_MS = 30_000;
 const timelineQueue: TimelineJob[] = [];
-const timelineCache = new Map<string, { timeline: BranchTimeline; fetchedAt: number }>();
+const timelineCache = new Map<string, { timeline: BranchTimeline }>();
 const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
 let activeTimelineJobs = 0;
 
@@ -307,7 +306,7 @@ function pumpTimelineQueue() {
     activeTimelineJobs += 1;
     invoke<BranchTimeline>('get_branch_timeline', { branchId: job.branchId })
       .then((timeline) => {
-        timelineCache.set(job.branchId, { timeline, fetchedAt: Date.now() });
+        timelineCache.set(job.branchId, { timeline });
         job.resolve(timeline);
       })
       .catch((error) => {
@@ -334,7 +333,7 @@ export function getBranchTimeline(
 ): Promise<BranchTimeline> {
   if (!force) {
     const cached = timelineCache.get(branchId);
-    if (cached && Date.now() - cached.fetchedAt <= TIMELINE_CACHE_MAX_AGE_MS) {
+    if (cached) {
       return Promise.resolve(cached.timeline);
     }
   }
@@ -355,6 +354,23 @@ export function getBranchTimeline(
 
   inFlightTimelines.set(branchId, request);
   return request;
+}
+
+export function getBranchTimelineWithRevalidation(branchId: string): {
+  cached: BranchTimeline | null;
+  fresh: Promise<BranchTimeline>;
+} {
+  const entry = timelineCache.get(branchId);
+  return {
+    cached: entry?.timeline ?? null,
+    fresh: getBranchTimeline(branchId, { force: true }),
+  };
+}
+
+export function invalidateProjectBranchTimelines(branchIds: string[]): void {
+  for (const id of branchIds) {
+    timelineCache.delete(id);
+  }
 }
 
 // =============================================================================

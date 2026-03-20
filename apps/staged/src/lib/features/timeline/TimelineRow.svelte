@@ -26,7 +26,8 @@
     | 'review'
     | 'generating-review'
     | 'failed-review'
-    | 'image';
+    | 'image'
+    | 'revalidating';
 
   export type TimelineBadge = {
     icon: 'comment' | 'warning';
@@ -73,7 +74,8 @@
     deleting ||
       type === 'pending-commit' ||
       type === 'generating-note' ||
-      type === 'generating-review'
+      type === 'generating-review' ||
+      type === 'revalidating'
   );
   let isFailed = $derived(
     !deleting && (type === 'failed-commit' || type === 'failed-note' || type === 'failed-review')
@@ -107,6 +109,7 @@
   class:pending={isPending}
   class:failed={isFailed}
   class:clickable={isClickable}
+  class:compact={type === 'revalidating'}
   onclick={handleRowClick}
 >
   <div class="timeline-marker">
@@ -209,6 +212,10 @@
     cursor: default;
   }
 
+  .timeline-row.compact {
+    padding: 6px 8px;
+  }
+
   .timeline-row.failed {
     cursor: default;
   }
@@ -298,6 +305,20 @@
 
   .timeline-row.pending .timeline-icon.review-icon :global(.spinner) {
     color: var(--review-color);
+  }
+
+  .timeline-row.compact .timeline-icon {
+    background-color: var(--bg-hover);
+    border-color: var(--bg-hover);
+  }
+
+  .timeline-row.compact .timeline-icon :global(.spinner) {
+    color: var(--text-faint);
+  }
+
+  .timeline-row.compact .timeline-title {
+    color: var(--text-faint);
+    font-weight: normal;
   }
 
   .timeline-icon.failed-icon {

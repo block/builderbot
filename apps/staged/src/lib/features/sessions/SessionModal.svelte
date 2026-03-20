@@ -1172,6 +1172,7 @@
         {:else}
           <button
             class="action-btn send-btn"
+            class:sending
             onclick={handleSend}
             disabled={sending || !inputText.trim()}
             title="Send message"
@@ -1969,6 +1970,11 @@
   .send-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
+  }
+
+  .send-btn.sending {
+    opacity: 1;
+    cursor: default;
   }
 
   .stop-btn {

@@ -190,6 +190,7 @@ pub fn resume_session(
     session_id: String,
     prompt: String,
     image_ids: Option<Vec<String>>,
+    branch_id: Option<String>,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
 
@@ -212,26 +213,62 @@ pub fn resume_session(
         .flatten()
         .map(|note| note.project_id);
 
+    // If a branch_id is provided, look up the branch to get workspace_name
+    // and resolve remote_working_dir. This takes priority over the
+    // commit-based fallback below.
+    let branch_from_id = branch_id
+        .as_deref()
+        .and_then(|bid| store.get_branch(bid).ok().flatten());
+
     // If this session is linked to a commit, capture the current HEAD so we
     // can detect new or amended commits when the session completes.
     // This applies both when the commit already has a SHA (amend case) and
     // when it's still pending (no SHA — the previous run didn't produce a
     // commit, so we need to detect if this resumed run does).
-    let (pre_head_sha, workspace_name) =
-        if let Ok(Some(commit)) = store.get_commit_by_session(&session_id) {
-            let branch = store.get_branch(&commit.branch_id).ok().flatten();
-            let ws_name = branch.as_ref().and_then(|b| b.workspace_name.clone());
-            let head = if let Some(ref ws) = ws_name {
-                crate::blox::ws_exec(ws, &["git", "rev-parse", "HEAD"])
-                    .map(|s| s.trim().to_string())
-                    .ok()
-            } else {
-                crate::git::get_head_sha(&working_dir).ok()
-            };
-            (head, ws_name)
+    let (pre_head_sha, workspace_name) = if let Some(ref branch) = branch_from_id {
+        // branch_id was provided — use its workspace_name directly.
+        let ws_name = branch.workspace_name.clone();
+        let head = if let Some(ref ws) = ws_name {
+            crate::blox::ws_exec(ws, &["git", "rev-parse", "HEAD"])
+                .map(|s| s.trim().to_string())
+                .ok()
         } else {
-            (None, None)
+            crate::git::get_head_sha(&working_dir).ok()
         };
+        (head, ws_name)
+    } else if let Ok(Some(commit)) = store.get_commit_by_session(&session_id) {
+        let branch = store.get_branch(&commit.branch_id).ok().flatten();
+        let ws_name = branch.as_ref().and_then(|b| b.workspace_name.clone());
+        let head = if let Some(ref ws) = ws_name {
+            crate::blox::ws_exec(ws, &["git", "rev-parse", "HEAD"])
+                .map(|s| s.trim().to_string())
+                .ok()
+        } else {
+            crate::git::get_head_sha(&working_dir).ok()
+        };
+        (head, ws_name)
+    } else {
+        (None, None)
+    };
+
+    // For remote branches, resolve the actual workspace path so the remote
+    // agent starts in the correct repo directory.
+    let remote_working_dir = if let Some(ref branch) = branch_from_id {
+        if branch.workspace_name.is_some() {
+            let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
+            crate::branches::resolve_branch_workspace_subpath(&store, branch)
+                .ok()
+                .flatten()
+                .and_then(|subpath| {
+                    crate::branches::resolve_workspace_repo_path(&ws_name, &subpath).ok()
+                })
+                .map(PathBuf::from)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let transitioned = store
         .transition_to_running(&session_id)
@@ -274,7 +311,7 @@ pub fn resume_session(
             } else {
                 None
             },
-            remote_working_dir: None,
+            remote_working_dir,
             image_ids: image_ids.unwrap_or_default(),
         },
         store,

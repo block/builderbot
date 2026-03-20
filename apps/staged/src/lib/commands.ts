@@ -536,9 +536,15 @@ export function startSession(
 export function resumeSession(
   sessionId: string,
   prompt: string,
-  imageIds?: string[]
+  imageIds?: string[],
+  branchId?: string | null
 ): Promise<void> {
-  return invoke('resume_session', { sessionId, prompt, imageIds: imageIds ?? null });
+  return invoke('resume_session', {
+    sessionId,
+    prompt,
+    imageIds: imageIds ?? null,
+    branchId: branchId ?? null,
+  });
 }
 
 export function cancelSession(sessionId: string): Promise<void> {

@@ -424,7 +424,7 @@
     sending = true;
     error = null;
     try {
-      await resumeSession(session.id, text, imageIds);
+      await resumeSession(session.id, text, imageIds, branchId);
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = { ...session, status: 'running' };
@@ -1172,11 +1172,16 @@
         {:else}
           <button
             class="action-btn send-btn"
+            class:sending
             onclick={handleSend}
-            disabled={!inputText.trim()}
+            disabled={sending || !inputText.trim()}
             title="Send message"
           >
-            <Send size={16} />
+            {#if sending}
+              <Spinner size={16} />
+            {:else}
+              <Send size={16} />
+            {/if}
           </button>
         {/if}
       </div>
@@ -1965,6 +1970,11 @@
   .send-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
+  }
+
+  .send-btn.sending {
+    opacity: 1;
+    cursor: default;
   }
 
   .stop-btn {

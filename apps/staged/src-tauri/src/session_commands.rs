@@ -181,7 +181,7 @@ pub fn start_session(
 /// session was first created), so the frontend doesn't need to pass it.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn resume_session(
+pub async fn resume_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     action_executor: tauri::State<'_, Arc<ActionExecutor>>,
@@ -190,6 +190,7 @@ pub fn resume_session(
     session_id: String,
     prompt: String,
     image_ids: Option<Vec<String>>,
+    branch_id: Option<String>,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
 
@@ -212,17 +213,37 @@ pub fn resume_session(
         .flatten()
         .map(|note| note.project_id);
 
+    // If a branch_id is provided, look up the branch to get workspace_name
+    // and resolve remote_working_dir. This takes priority over the
+    // commit-based fallback below.
+    let branch_from_id = branch_id
+        .as_deref()
+        .and_then(|bid| store.get_branch(bid).ok().flatten());
+
     // If this session is linked to a commit, capture the current HEAD so we
     // can detect new or amended commits when the session completes.
     // This applies both when the commit already has a SHA (amend case) and
     // when it's still pending (no SHA — the previous run didn't produce a
     // commit, so we need to detect if this resumed run does).
-    let (pre_head_sha, workspace_name) =
-        if let Ok(Some(commit)) = store.get_commit_by_session(&session_id) {
-            let branch = store.get_branch(&commit.branch_id).ok().flatten();
-            let ws_name = branch.as_ref().and_then(|b| b.workspace_name.clone());
+    let (pre_head_sha, workspace_name) = {
+        // Determine the branch to use: explicit branch_id takes priority,
+        // otherwise fall back to the commit-linked branch.
+        let branch = if branch_from_id.is_some() {
+            branch_from_id.clone()
+        } else {
+            store
+                .get_commit_by_session(&session_id)
+                .ok()
+                .flatten()
+                .and_then(|commit| store.get_branch(&commit.branch_id).ok().flatten())
+        };
+
+        if let Some(ref branch) = branch {
+            let ws_name = branch.workspace_name.clone();
             let head = if let Some(ref ws) = ws_name {
-                crate::blox::ws_exec(ws, &["git", "rev-parse", "HEAD"])
+                let ws = ws.clone();
+                run_blox_blocking(move || crate::blox::ws_exec(&ws, &["git", "rev-parse", "HEAD"]))
+                    .await
                     .map(|s| s.trim().to_string())
                     .ok()
             } else {
@@ -231,7 +252,38 @@ pub fn resume_session(
             (head, ws_name)
         } else {
             (None, None)
-        };
+        }
+    };
+
+    // For remote branches, resolve the actual workspace path so the remote
+    // agent starts in the correct repo directory.
+    let remote_working_dir = if let Some(ref branch) = branch_from_id {
+        if branch.workspace_name.is_some() {
+            let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
+            let store_for_resolve = Arc::clone(&store);
+            let branch_for_resolve = branch.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                crate::branches::resolve_branch_workspace_subpath(
+                    &store_for_resolve,
+                    &branch_for_resolve,
+                )
+                .ok()
+                .flatten()
+                .and_then(|subpath| {
+                    crate::branches::resolve_workspace_repo_path(&ws_name, &subpath).ok()
+                })
+            })
+            .await
+            {
+                Ok(Some(path)) => Some(PathBuf::from(path)),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     let transitioned = store
         .transition_to_running(&session_id)
@@ -274,7 +326,7 @@ pub fn resume_session(
             } else {
                 None
             },
-            remote_working_dir: None,
+            remote_working_dir,
             image_ids: image_ids.unwrap_or_default(),
         },
         store,

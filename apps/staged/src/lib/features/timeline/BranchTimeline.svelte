@@ -63,6 +63,8 @@
     onNewCommit?: () => void;
     onNewReview?: (e: MouseEvent) => void;
     newSessionDisabled?: boolean;
+    /** Whether the timeline is being revalidated in the background. */
+    revalidating?: boolean;
     footerActions?: Snippet;
   }
 
@@ -88,6 +90,7 @@
     onNewCommit,
     onNewReview,
     newSessionDisabled = false,
+    revalidating = false,
     footerActions,
   }: Props = $props();
 
@@ -495,6 +498,13 @@
         />
       </div>
     {/each}
+    {#if revalidating}
+      <TimelineRow
+        type="pending-commit"
+        title="Looking for changes..."
+        isLast={!onNewNote && !onNewCommit && !onNewReview && !footerActions}
+      />
+    {/if}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}
       <div class="footer-row">
         <div class="footer-left-actions">

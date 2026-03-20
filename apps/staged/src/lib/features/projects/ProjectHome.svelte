@@ -448,6 +448,7 @@
         if (repo.projectId === id) nextRepos.delete(repoId);
       }
       reposById = nextRepos;
+      commands.invalidateProjectBranchTimelines(branchesToClear.map((b) => b.id));
       for (const branch of branchesToClear) {
         workspaceLifecycle.clearBranchState(branch.id);
       }
@@ -589,6 +590,7 @@
       const next = new Set(deletingBranches);
       next.delete(branch.id);
       deletingBranches = next;
+      commands.invalidateBranchTimeline(branch.id);
       workspaceLifecycle.clearBranchState(branch.id);
     }
   }

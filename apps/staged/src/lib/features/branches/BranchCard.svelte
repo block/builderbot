@@ -90,6 +90,7 @@
 
   let timeline = $state<BranchTimelineData | null>(null);
   let loading = $state(true);
+  let revalidating = $state(false);
   let error = $state<string | null>(null);
   let showBranchDiff = $state(false);
   let loadedTimelineKey = $state<string | null>(null);
@@ -283,12 +284,41 @@
     void loadTimeline();
   });
 
+  let revalidationVersion = 0;
+
   async function loadTimeline() {
     const isInitialLoad = !timeline;
+    error = null;
+
     if (isInitialLoad) {
+      const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
+      if (cached) {
+        // Show stale data immediately
+        timeline = cached;
+        prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
+        revalidating = true;
+        const version = ++revalidationVersion;
+        fresh
+          .then((next) => {
+            if (version !== revalidationVersion) return;
+            timeline = next;
+            prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
+            void loadTimelineReviewDetails(next.reviews);
+          })
+          .catch((e) => {
+            if (version !== revalidationVersion) return;
+            error = e instanceof Error ? e.message : String(e);
+          })
+          .finally(() => {
+            if (version !== revalidationVersion) return;
+            revalidating = false;
+          });
+        return;
+      }
+      // No cache — show loading spinner as before
       loading = true;
     }
-    error = null;
+
     try {
       const nextTimeline = await commands.getBranchTimeline(branch.id, { force: !isInitialLoad });
       timeline = nextTimeline;
@@ -726,6 +756,7 @@
           pendingDropNotes={isLocal ? pendingDropNotes : undefined}
           pendingItems={sessionMgr.pendingSessionItems}
           {prunedSessionIds}
+          {revalidating}
           deletingItems={timelineDeletingItems}
           reviewCommentBreakdown={timelineReviewDetailsById}
           onSessionClick={(sid) => sessionMgr.handleTimelineSessionClick(sid)}

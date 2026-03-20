@@ -967,7 +967,7 @@
               </div>
             {:else}
               <div class="message-row tool-group">
-                {#each groupByVerb(group.pairs, repoDir, !isLive || groupIdx < grouped.length - 1) as vg, vgIdx}
+                {#each groupByVerb(group.pairs, repoDir, !isLive) as vg, vgIdx}
                   {#if vg.items.length === 1}
                     {@const item = vg.items[0]}
                     {@const isExpanded = expandedTools.has(item.pair.call.id)}

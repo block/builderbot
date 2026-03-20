@@ -307,6 +307,21 @@
     color: var(--review-color);
   }
 
+  .timeline-row.compact .timeline-icon {
+    background-color: transparent;
+    border-color: transparent;
+    color: var(--text-faint);
+  }
+
+  .timeline-row.compact .timeline-icon :global(.spinner) {
+    color: var(--text-faint);
+  }
+
+  .timeline-row.compact .timeline-title {
+    color: var(--text-faint);
+    font-weight: normal;
+  }
+
   .timeline-icon.failed-icon {
     color: var(--text-muted);
     border-color: var(--border-muted);

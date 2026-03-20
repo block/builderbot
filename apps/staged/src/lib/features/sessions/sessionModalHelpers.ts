@@ -38,6 +38,7 @@ export function makePathsRelative(text: string, repoDir: string | null | undefin
 }
 
 const TOOL_VERBS: Record<string, [past: string, present: string]> = {
+  Run: ['Ran', 'Running'],
   Shell: ['Ran', 'Running'],
   Bash: ['Ran', 'Running'],
   Read: ['Read', 'Reading'],

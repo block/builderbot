@@ -967,7 +967,7 @@
               </div>
             {:else}
               <div class="message-row tool-group">
-                {#each groupByVerb(group.pairs, repoDir, !isLive || grouped
+                {#each groupByVerb(group.pairs, repoDir, !isLive || sending || grouped
                       .slice(groupIdx + 1)
                       .some((g) => g.type === 'user')) as vg, vgIdx}
                   {#if vg.items.length === 1}

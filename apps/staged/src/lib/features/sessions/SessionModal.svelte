@@ -967,9 +967,7 @@
               </div>
             {:else}
               <div class="message-row tool-group">
-                {#each groupByVerb(group.pairs, repoDir, !isLive || sending || grouped
-                      .slice(groupIdx + 1)
-                      .some((g) => g.type === 'user')) as vg, vgIdx}
+                {#each groupByVerb(group.pairs, repoDir, !isLive || sending || grouped.findIndex((g, i) => i > groupIdx && g.type === 'user') !== -1) as vg, vgIdx}
                   {#if vg.items.length === 1}
                     {@const item = vg.items[0]}
                     {@const isExpanded = expandedTools.has(item.pair.call.id)}

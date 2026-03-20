@@ -24,6 +24,7 @@
   import DiffCommitSessionLauncher from './DiffCommitSessionLauncher.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
+  import OpenInDropdown from './OpenInDropdown.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
   import { createSearchState } from '@builderbot/diff-viewer/state';
@@ -71,6 +72,8 @@
     baseBranchLabel?: string;
     /** Branch name for label display when switching to branch scope. */
     branchLabel?: string;
+    /** Worktree path for "Open In" file actions. */
+    worktreePath?: string | null;
     /** Project name to display in title bar. */
     projectName?: string;
     /** GitHub repo (e.g., "owner/repo") to display in title bar. */
@@ -92,6 +95,7 @@
     commits,
     baseBranchLabel,
     branchLabel,
+    worktreePath = null,
     projectName,
     githubRepo,
     subpath,
@@ -769,6 +773,11 @@
     <div class="modal-body">
       <!-- Diff viewer -->
       <div class="diff-viewer-container">
+        {#snippet openInSnippet(afterPath: string | null)}
+          {#if worktreePath && afterPath}
+            <OpenInDropdown filePath="{worktreePath}/{afterPath}" />
+          {/if}
+        {/snippet}
         <DiffViewer
           diff={currentDiff}
           comments={readonly ? [] : currentComments}
@@ -780,6 +789,7 @@
           annotations={revealedAnnotations}
           {annotationsRevealed}
           searchState={searchState.state}
+          afterHeaderExtra={worktreePath ? openInSnippet : undefined}
           onAddComment={readonly ? undefined : handleAddComment}
           onUpdateComment={readonly ? undefined : handleUpdateComment}
           onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}

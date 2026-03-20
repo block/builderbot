@@ -15,7 +15,7 @@
   rather than pulling from global stores.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, type Snippet } from 'svelte';
   import { MessageSquarePlus, MessageSquare, X, FileText, Code } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../utils/sanitize';
@@ -105,6 +105,9 @@
     /** Search state for highlighting matches in the diff content. */
     searchState?: SearchState;
 
+    /** Optional snippet rendered in the after-pane header (e.g. "Open In" dropdown). Receives the after path. */
+    afterHeaderExtra?: Snippet<[string | null]>;
+
     // -- Comment callbacks (all optional; without them commenting is disabled) --
     onAddComment?: (path: string, span: Span, content: string) => Promise<void>;
     onUpdateComment?: (commentId: string, content: string) => Promise<void>;
@@ -124,6 +127,7 @@
     annotations = [],
     annotationsRevealed = false,
     searchState,
+    afterHeaderExtra,
     onAddComment,
     onUpdateComment,
     onDeleteComment,
@@ -2027,6 +2031,9 @@
                 {#if markdownPreview}<Code size={14} />{:else}<FileText size={14} />{/if}
               </button>
             {/if}
+            {#if afterHeaderExtra}
+              {@render afterHeaderExtra(afterPath)}
+            {/if}
           </div>
           <div
             class="code-area"
@@ -2133,6 +2140,9 @@
           <div class="pane-header">
             <span class="pane-label">{afterLabel}</span>
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
+            {#if afterHeaderExtra}
+              {@render afterHeaderExtra(afterPath)}
+            {/if}
           </div>
           <div class="code-area" onwheel={handleAfterWheel}>
             <div class="code-container" bind:this={afterPane}>

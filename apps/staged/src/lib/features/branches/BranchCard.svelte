@@ -1189,6 +1189,7 @@
     commits={timeline?.commits}
     baseBranchLabel={formatBaseBranch(branch.baseBranch)}
     branchLabel={branch.branchName}
+    worktreePath={branch.worktreePath}
     {projectName}
     githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
     subpath={repoLabel?.subpath}
@@ -1211,6 +1212,7 @@
     commits={timeline?.commits}
     baseBranchLabel={formatBaseBranch(branch.baseBranch)}
     branchLabel={branch.branchName}
+    worktreePath={branch.worktreePath}
     {projectName}
     githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
     subpath={repoLabel?.subpath}

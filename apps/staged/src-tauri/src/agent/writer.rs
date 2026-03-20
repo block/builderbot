@@ -104,8 +104,13 @@ impl MessageWriter {
     /// cancellation) to ensure no text is lost.
     pub async fn finalize(&self) {
         self.flush_text().await;
-        *self.current_assistant_msg_id.lock().await = None;
+        let prev_msg_id = self.current_assistant_msg_id.lock().await.take();
         *self.current_text.lock().await = String::new();
+        log::info!(
+            "[msg-order] finalize: reset assistant state session={} prev_msg_id={:?}",
+            self.session_id,
+            prev_msg_id
+        );
     }
 
     // =====================================================================
@@ -123,6 +128,12 @@ impl MessageWriter {
         // Some providers may resend ToolCall for the same ID while streaming.
         // Treat those as updates to the existing row.
         if let Some(&row_id) = self.tool_call_rows.lock().await.get(tool_call_id) {
+            log::info!(
+                "[msg-order] Dedup tool_call: updating existing row_id={} session={} tool_call_id={}",
+                row_id,
+                self.session_id,
+                tool_call_id
+            );
             let _ = self.store.update_message_content(row_id, &title);
             return;
         }
@@ -161,6 +172,11 @@ impl MessageWriter {
         let content = strip_code_fences(content);
         let mut current_result_id = self.current_tool_result_msg_id.lock().await;
         if let Some(id) = *current_result_id {
+            log::info!(
+                "[msg-order] Dedup tool_result: updating existing row_id={} session={}",
+                id,
+                self.session_id
+            );
             let _ = self.store.update_message_content(id, &content);
             return;
         }

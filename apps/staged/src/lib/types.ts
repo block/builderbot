@@ -208,6 +208,7 @@ export interface Session {
   id: string;
   prompt: string;
   status: SessionStatus;
+  workingDir: string;
   agentId: string | null;
   errorMessage: string | null;
   createdAt: number;

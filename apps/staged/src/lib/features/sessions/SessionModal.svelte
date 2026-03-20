@@ -90,6 +90,10 @@
 
   let { sessionId, onClose, repoDir, branchId, projectId, noteInfo, onOpenNote }: Props = $props();
 
+  /** Effective repo directory for path shortening — prefers the explicit prop,
+   *  falls back to the session's working directory. */
+  let effectiveRepoDir = $derived(repoDir ?? session?.workingDir ?? null);
+
   // =========================================================================
   // State
   // =========================================================================
@@ -967,7 +971,7 @@
               </div>
             {:else}
               <div class="message-row tool-group">
-                {#each groupByVerb(group.pairs, repoDir, !isLive || sending || grouped.findIndex((g, i) => i > groupIdx && g.type === 'user') !== -1) as vg, vgIdx}
+                {#each groupByVerb(group.pairs, effectiveRepoDir, !isLive || sending || grouped.findIndex((g, i) => i > groupIdx && g.type === 'user') !== -1) as vg, vgIdx}
                   {#if vg.items.length === 1}
                     {@const item = vg.items[0]}
                     {@const isExpanded = expandedTools.has(item.pair.call.id)}

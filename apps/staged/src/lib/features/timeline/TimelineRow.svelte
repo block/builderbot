@@ -308,9 +308,7 @@
   }
 
   .timeline-row.compact .timeline-icon {
-    background-color: transparent;
-    border-color: transparent;
-    color: var(--text-faint);
+    opacity: 0.5;
   }
 
   .timeline-row.compact .timeline-icon :global(.spinner) {

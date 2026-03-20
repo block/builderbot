@@ -194,7 +194,7 @@
     border-radius: 6px;
     position: relative;
     transition: background-color 0.15s ease;
-    isolation: isolate;
+    will-change: transform;
   }
 
   .timeline-row:hover {

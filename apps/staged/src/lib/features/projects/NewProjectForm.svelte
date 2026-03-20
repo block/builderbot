@@ -5,7 +5,7 @@
   Used inside NewProjectModal (as a dialog) and SplashScreen (inline).
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { slide } from 'svelte/transition';
   import { GitBranch, Monitor, Cloud, X, Clock, Command } from 'lucide-svelte';
   import type { Project, RecentRepo } from '../../types';
@@ -51,6 +51,8 @@
   let checkingMonorepo = $state(false);
   let subpathApi = $state<SubpathInputApi | undefined>(undefined);
   let recentRepos = $state<RecentRepo[]>([]);
+  const SLIDE_DURATION = 150;
+
   /** BranchPicker is expensive to mount in WebKit — defer it until after the
    *  initial layout change paints so the UI feels responsive. */
   let showBranchPicker = $state(false);
@@ -62,6 +64,10 @@
     } catch {
       // Silently ignore — recents are a convenience, not critical
     }
+  });
+
+  onDestroy(() => {
+    if (branchPickerTimer) clearTimeout(branchPickerTimer);
   });
 
   async function checkIfMonorepo(repo: string) {
@@ -204,12 +210,12 @@
     subpath = selection.subpath ?? '';
     pendingPrNumber = selection.prNumber ?? null;
     pendingBranchName = selection.branchName ?? null;
-    // Mount BranchPicker after the slide animation (150ms) completes.
+    // Mount BranchPicker after the slide animation completes.
     // BranchPicker is expensive to mount in WebKit, so deferring it
     // keeps the initial repo selection feeling responsive.
     branchPickerTimer = setTimeout(() => {
       showBranchPicker = true;
-    }, 200);
+    }, SLIDE_DURATION + 50);
   }
 </script>
 
@@ -288,7 +294,7 @@
     {/if}
 
     {#if !selectedRepo && recentRepos.length > 0}
-      <div class="recent-repos" transition:slide={{ duration: 150 }}>
+      <div class="recent-repos" out:slide={{ duration: SLIDE_DURATION }}>
         {#each recentRepos.slice(0, 5) as recent, i}
           <button
             class="recent-repo-item"
@@ -313,7 +319,7 @@
   </div>
 
   {#if selectedRepo}
-    <div class="form-group" transition:slide={{ duration: 150 }}>
+    <div class="form-group" transition:slide={{ duration: SLIDE_DURATION }}>
       <label for="project-subpath"
         >Subpath
         <span class="field-badge {isMonorepo ? 'recommended' : 'optional'}"
@@ -328,7 +334,7 @@
       />
     </div>
 
-    <div class="form-group" transition:slide={{ duration: 150 }}>
+    <div class="form-group" transition:slide={{ duration: SLIDE_DURATION }}>
       <label for="project-branch"
         >PR or Branch
         <span class="field-badge {isNewBranch ? 'new-branch' : 'optional'}"
@@ -352,13 +358,14 @@
           type="text"
           placeholder="Search PRs or branches…"
           readonly
+          tabindex="-1"
         />
       {/if}
     </div>
   {/if}
 
   {#if error}
-    <div class="error-message" transition:slide={{ duration: 150 }}>{error}</div>
+    <div class="error-message" transition:slide={{ duration: SLIDE_DURATION }}>{error}</div>
   {/if}
 
   <div class="actions">

@@ -30,11 +30,27 @@ export function parseToolCall(content: string): ParsedToolCall | null {
 /**
  * Replace absolute paths that fall within `repoDir` with relative paths.
  * If repoDir is empty/null, returns the text unchanged.
+ *
+ * When the exact `repoDir` prefix isn't found in the text, ancestor directories
+ * are tried (up to 3 levels). This handles the common case where the session's
+ * working directory includes a repo subpath (e.g. `worktree_root/apps/staged`)
+ * but tool call paths reference the worktree root directly.
  */
 export function makePathsRelative(text: string, repoDir: string | null | undefined): string {
   if (!repoDir) return text;
-  const prefix = repoDir.endsWith('/') ? repoDir : repoDir + '/';
-  return text.replaceAll(prefix, '');
+
+  let dir = repoDir;
+  for (let i = 0; i < 4; i++) {
+    const prefix = dir.endsWith('/') ? dir : dir + '/';
+    if (text.includes(prefix)) {
+      return text.replaceAll(prefix, '');
+    }
+    const parentEnd = dir.lastIndexOf('/');
+    if (parentEnd <= 0) break;
+    dir = dir.slice(0, parentEnd);
+  }
+
+  return text;
 }
 
 const TOOL_VERBS: Record<string, [past: string, present: string]> = {

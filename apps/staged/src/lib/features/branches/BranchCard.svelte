@@ -295,6 +295,7 @@
       if (cached) {
         // Show stale data immediately
         timeline = cached;
+        loading = false;
         prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
         revalidating = true;
         const version = ++revalidationVersion;

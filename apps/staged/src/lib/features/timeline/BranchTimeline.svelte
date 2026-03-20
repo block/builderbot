@@ -461,7 +461,9 @@
           isLast={index === items.length - 1 &&
             !onNewNote &&
             !onNewCommit &&
-            pendingDropNotes.length === 0}
+            pendingDropNotes.length === 0 &&
+            pendingItems.length === 0 &&
+            !revalidating}
           sessionId={item.sessionId}
           deleteDisabledReason={item.deleteDisabledReason}
           {onSessionClick}
@@ -478,6 +480,7 @@
           secondaryMeta="adding..."
           isLast={index === pendingDropNotes.length - 1 &&
             pendingItems.length === 0 &&
+            !revalidating &&
             !onNewNote &&
             !onNewCommit}
         />
@@ -494,7 +497,7 @@
               fallbackHintForPendingType(item.type))
             : item.secondaryMeta}
           sessionId={item.sessionId}
-          isLast={index === pendingItems.length - 1 && !onNewNote && !onNewCommit}
+          isLast={index === pendingItems.length - 1 && !revalidating && !onNewNote && !onNewCommit}
         />
       </div>
     {/each}

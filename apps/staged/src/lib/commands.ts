@@ -294,7 +294,7 @@ type TimelineJob = {
 
 const TIMELINE_MAX_CONCURRENCY = 1;
 const timelineQueue: TimelineJob[] = [];
-const timelineCache = new Map<string, { timeline: BranchTimeline; fetchedAt: number }>();
+const timelineCache = new Map<string, { timeline: BranchTimeline }>();
 const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
 let activeTimelineJobs = 0;
 
@@ -306,7 +306,7 @@ function pumpTimelineQueue() {
     activeTimelineJobs += 1;
     invoke<BranchTimeline>('get_branch_timeline', { branchId: job.branchId })
       .then((timeline) => {
-        timelineCache.set(job.branchId, { timeline, fetchedAt: Date.now() });
+        timelineCache.set(job.branchId, { timeline });
         job.resolve(timeline);
       })
       .catch((error) => {

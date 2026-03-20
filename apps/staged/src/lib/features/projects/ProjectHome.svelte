@@ -584,13 +584,13 @@
           existing.filter((b) => b.id !== branch.id)
         );
       }
+      commands.invalidateBranchTimeline(branch.id);
     } catch (e) {
       console.error('Failed to delete branch:', e);
     } finally {
       const next = new Set(deletingBranches);
       next.delete(branch.id);
       deletingBranches = next;
-      commands.invalidateBranchTimeline(branch.id);
       workspaceLifecycle.clearBranchState(branch.id);
     }
   }

@@ -111,6 +111,16 @@ impl Store {
                 image_ids: parse_image_ids(image_ids_raw),
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let result: Vec<SessionMessage> = rows.collect::<Result<Vec<_>, _>>()?;
+        if result.len() > 1 {
+            log::debug!(
+                "[msg-order] get_session_messages_since(session={}, since_id={}): returning {} messages, ids={:?}",
+                session_id,
+                since_id,
+                result.len(),
+                result.iter().map(|m| (m.id, m.role.as_str())).collect::<Vec<_>>()
+            );
+        }
+        Ok(result)
     }
 }

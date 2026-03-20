@@ -594,6 +594,7 @@ impl AcpNotificationHandler {
     }
 
     fn set_live(&self) {
+        log::debug!("[replay-guard] set_live() called — transitioning from replaying to live");
         self.replaying.store(false, Ordering::Release);
     }
 }
@@ -620,8 +621,17 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
         if self.replaying.load(Ordering::Acquire) {
+            log::debug!(
+                "[replay-guard] Dropping replayed notification: {:?}",
+                notification.update
+            );
             return Ok(());
         }
+
+        log::debug!(
+            "[replay-guard] Processing LIVE notification: {:?}",
+            notification.update
+        );
 
         match &notification.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
@@ -691,6 +701,9 @@ async fn run_acp_protocol(
     })??;
 
     handler.set_live();
+    log::debug!(
+        "[replay-guard] setup_acp_session complete, handler is now live — about to send prompt"
+    );
 
     let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
     for (data, mime_type) in images {

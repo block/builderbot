@@ -204,7 +204,7 @@ pub fn start_session(
     // don't appear in the branch timeline. Both operations are kept together;
     // if set_images_session_id fails we log a warning rather than aborting the
     // session, since the message was already persisted.
-    store
+    let user_msg_id = store
         .add_session_message_with_images(
             &config.session_id,
             MessageRole::User,
@@ -212,6 +212,12 @@ pub fn start_session(
             &config.image_ids,
         )
         .map_err(|e| format!("Failed to persist user message: {e}"))?;
+    log::debug!(
+        "[msg-order] Persisted user message id={} for session {} (agent_session_id={:?})",
+        user_msg_id,
+        config.session_id,
+        config.agent_session_id,
+    );
 
     if !config.image_ids.is_empty() {
         if let Err(e) = store.set_images_session_id(&config.image_ids, &config.session_id) {

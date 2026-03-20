@@ -132,6 +132,12 @@ impl MessageWriter {
             .add_session_message(&self.session_id, MessageRole::ToolCall, &title)
         {
             Ok(id) => {
+                log::debug!(
+                    "[msg-order] Inserted tool_call message id={} session={} tool_call_id={}",
+                    id,
+                    self.session_id,
+                    tool_call_id
+                );
                 self.tool_call_rows
                     .lock()
                     .await
@@ -163,7 +169,14 @@ impl MessageWriter {
             .store
             .add_session_message(&self.session_id, MessageRole::ToolResult, &content)
         {
-            Ok(id) => *current_result_id = Some(id),
+            Ok(id) => {
+                log::debug!(
+                    "[msg-order] Inserted tool_result message id={} session={}",
+                    id,
+                    self.session_id
+                );
+                *current_result_id = Some(id);
+            }
             Err(e) => log::error!("Failed to insert tool_result message: {e}"),
         }
     }
@@ -192,7 +205,14 @@ impl MessageWriter {
                     MessageRole::Assistant,
                     &text,
                 ) {
-                    Ok(id) => *msg_id = Some(id),
+                    Ok(id) => {
+                        log::debug!(
+                            "[msg-order] Inserted assistant message id={} session={}",
+                            id,
+                            self.session_id
+                        );
+                        *msg_id = Some(id);
+                    }
                     Err(e) => log::error!("Failed to insert assistant message: {e}"),
                 }
             }

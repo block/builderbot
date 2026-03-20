@@ -238,7 +238,11 @@
 
 <!-- Open SessionModals — one per open session, stacked -->
 {#each [...openModals] as modalSessionId (modalSessionId)}
-  <SessionModal sessionId={modalSessionId} onClose={() => closeModal(modalSessionId)} />
+  <SessionModal
+    sessionId={modalSessionId}
+    repoDir={null}
+    onClose={() => closeModal(modalSessionId)}
+  />
 {/each}
 
 <style>

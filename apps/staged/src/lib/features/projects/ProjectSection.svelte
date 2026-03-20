@@ -663,6 +663,7 @@
   )}
   <SessionModal
     sessionId={openSessionId}
+    repoDir={branches.find((b) => b.worktreePath)?.worktreePath ?? null}
     projectId={project.id}
     noteInfo={noteForSession
       ? { id: noteForSession.id, title: noteForSession.title, content: noteForSession.content }

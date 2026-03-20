@@ -286,7 +286,8 @@ export function pollWorkspaceStatus(branchId: string): Promise<PollWorkspaceResu
 // Timeline
 // =============================================================================
 
-const timelineCache = new Map<string, { timeline: BranchTimeline }>();
+const TIMELINE_FRESH_MS = 10_000;
+const timelineCache = new Map<string, { timeline: BranchTimeline; fetchedAt: number }>();
 const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
 
 export function invalidateBranchTimeline(branchId: string): void {
@@ -315,7 +316,7 @@ export function getBranchTimeline(
 
   const request = invoke<BranchTimeline>('get_branch_timeline', { branchId })
     .then((timeline) => {
-      timelineCache.set(branchId, { timeline });
+      timelineCache.set(branchId, { timeline, fetchedAt: Date.now() });
       return timeline;
     })
     .finally(() => {
@@ -333,9 +334,10 @@ export function getBranchTimelineWithRevalidation(branchId: string): {
   fresh: Promise<BranchTimeline>;
 } {
   const entry = timelineCache.get(branchId);
+  const isFresh = entry && Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS;
   return {
     cached: entry?.timeline ?? null,
-    fresh: getBranchTimeline(branchId, { force: true }),
+    fresh: isFresh ? Promise.resolve(entry.timeline) : getBranchTimeline(branchId, { force: true }),
   };
 }
 

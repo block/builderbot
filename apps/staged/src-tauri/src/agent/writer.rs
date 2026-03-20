@@ -17,6 +17,8 @@ use tokio::sync::Mutex;
 
 use crate::store::{MessageRole, Store};
 
+use acp_client::strip_code_fences;
+
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
 /// in memory and are written at most this often, reducing mutex contention
 /// when many sessions stream concurrently. [`MessageWriter::finalize`]
@@ -49,24 +51,6 @@ pub struct MessageWriter {
 /// Strip backticks from agent-provided tool-call titles.
 fn sanitize_title(title: &str) -> String {
     title.replace('`', "")
-}
-
-/// Strip outer markdown code fences from tool-result content.
-/// Agents often wrap results in ``` fences which are redundant in our `<pre>` display.
-/// The closing fence may be absent when content was truncated by the preview limit.
-fn strip_code_fences(content: &str) -> String {
-    let trimmed = content.trim();
-    if let Some(after_open) = trimmed.strip_prefix("```") {
-        if let Some(nl) = after_open.find('\n') {
-            let body = after_open[nl + 1..].trim_end();
-            return body
-                .strip_suffix("```")
-                .unwrap_or(body)
-                .trim_end()
-                .to_string();
-        }
-    }
-    content.to_string()
 }
 
 impl MessageWriter {
@@ -104,7 +88,7 @@ impl MessageWriter {
     /// cancellation) to ensure no text is lost.
     pub async fn finalize(&self) {
         self.flush_text().await;
-        *self.current_assistant_msg_id.lock().await = None;
+        self.current_assistant_msg_id.lock().await.take();
         *self.current_text.lock().await = String::new();
     }
 
@@ -163,7 +147,9 @@ impl MessageWriter {
             .store
             .add_session_message(&self.session_id, MessageRole::ToolResult, &content)
         {
-            Ok(id) => *current_result_id = Some(id),
+            Ok(id) => {
+                *current_result_id = Some(id);
+            }
             Err(e) => log::error!("Failed to insert tool_result message: {e}"),
         }
     }
@@ -192,7 +178,9 @@ impl MessageWriter {
                     MessageRole::Assistant,
                     &text,
                 ) {
-                    Ok(id) => *msg_id = Some(id),
+                    Ok(id) => {
+                        *msg_id = Some(id);
+                    }
                     Err(e) => log::error!("Failed to insert assistant message: {e}"),
                 }
             }

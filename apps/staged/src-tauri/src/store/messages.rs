@@ -111,6 +111,7 @@ impl Store {
                 image_ids: parse_image_ids(image_ids_raw),
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let result: Vec<SessionMessage> = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok(result)
     }
 }

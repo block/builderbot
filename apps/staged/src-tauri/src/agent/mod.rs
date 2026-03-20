@@ -15,6 +15,16 @@ impl acp_client::Store for Store {
         self.set_agent_session_id(session_id, agent_session_id)
             .map_err(|e| e.to_string())
     }
+
+    fn get_session_messages(&self, session_id: &str) -> Result<Vec<(String, String)>, String> {
+        self.get_session_messages(session_id)
+            .map(|msgs| {
+                msgs.into_iter()
+                    .map(|m| (m.role.as_str().to_string(), m.content))
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
 }
 
 // Re-export writer for backward compatibility

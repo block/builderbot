@@ -308,7 +308,8 @@
   }
 
   .timeline-row.compact .timeline-icon {
-    opacity: 0.5;
+    background-color: var(--bg-hover);
+    border-color: var(--bg-hover);
   }
 
   .timeline-row.compact .timeline-icon :global(.spinner) {

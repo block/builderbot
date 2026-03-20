@@ -289,6 +289,8 @@
   async function loadTimeline() {
     const isInitialLoad = !timeline;
     error = null;
+    // Cancel any in-flight revalidation so it can't overwrite fresher data
+    revalidationVersion++;
 
     if (isInitialLoad) {
       const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
@@ -298,10 +300,11 @@
         loading = false;
         prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
         revalidating = true;
-        const version = ++revalidationVersion;
+        const version = revalidationVersion;
         fresh
           .then((next) => {
             if (version !== revalidationVersion) return;
+            error = null;
             timeline = next;
             prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
             void loadTimelineReviewDetails(next.reviews);
@@ -746,7 +749,7 @@
           <Spinner size={14} />
           <span>Loading...</span>
         </div>
-      {:else if error}
+      {:else if error && !timeline}
         <div class="error">
           <span>{error}</span>
         </div>
@@ -804,6 +807,11 @@
             {/if}
           {/snippet}
         </BranchTimeline>
+        {#if error}
+          <div class="error revalidation-error">
+            <span>{error}</span>
+          </div>
+        {/if}
       {/if}
     </div>
   {/if}
@@ -1056,6 +1064,11 @@
   .error {
     color: var(--ui-danger);
     font-size: var(--size-sm);
+  }
+
+  .revalidation-error {
+    padding: 4px 12px;
+    color: var(--text-faint);
   }
 
   /* Worktree error state */

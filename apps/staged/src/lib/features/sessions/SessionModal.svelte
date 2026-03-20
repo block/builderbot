@@ -424,7 +424,7 @@
     sending = true;
     error = null;
     try {
-      await resumeSession(session.id, text, imageIds);
+      await resumeSession(session.id, text, imageIds, branchId);
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = { ...session, status: 'running' };

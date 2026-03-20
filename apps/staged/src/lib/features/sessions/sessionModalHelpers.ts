@@ -37,20 +37,21 @@ export function makePathsRelative(text: string, repoDir: string | null | undefin
   return text.replaceAll(prefix, '');
 }
 
-const TOOL_VERBS: Record<string, string> = {
-  Shell: 'Ran',
-  Bash: 'Ran',
-  Read: 'Read',
-  ReadFile: 'Read',
-  Write: 'Wrote',
-  WriteFile: 'Wrote',
-  Grep: 'Searched',
-  Search: 'Searched',
-  Glob: 'Listed',
-  StrReplace: 'Edited',
-  Delete: 'Deleted',
-  EditNotebook: 'Edited',
-  SemanticSearch: 'Searched',
+const TOOL_VERBS: Record<string, [past: string, present: string]> = {
+  Run: ['Ran', 'Running'],
+  Shell: ['Ran', 'Running'],
+  Bash: ['Ran', 'Running'],
+  Read: ['Read', 'Reading'],
+  ReadFile: ['Read', 'Reading'],
+  Write: ['Wrote', 'Writing'],
+  WriteFile: ['Wrote', 'Writing'],
+  Grep: ['Searched', 'Searching'],
+  Search: ['Searched', 'Searching'],
+  Glob: ['Listed', 'Listing'],
+  StrReplace: ['Edited', 'Editing'],
+  Delete: ['Deleted', 'Deleting'],
+  EditNotebook: ['Edited', 'Editing'],
+  SemanticSearch: ['Searched', 'Searching'],
 };
 
 const TITLE_VERBS = new Set([
@@ -144,22 +145,32 @@ export interface VerbGroup {
 
 const VERB_NOUNS: Record<string, string> = {
   Read: 'files',
+  Reading: 'files',
   Ran: 'commands',
+  Running: 'commands',
   Searched: 'searches',
+  Searching: 'searches',
   Edited: 'files',
+  Editing: 'files',
   Wrote: 'files',
+  Writing: 'files',
   Listed: 'listings',
+  Listing: 'listings',
   Deleted: 'files',
+  Deleting: 'files',
   Explored: 'files',
+  Exploring: 'files',
 };
 
 export function groupByVerb(
   pairs: { call: { id: number; content: string }; result: { content: string } | null }[],
-  repoDir?: string | null
+  repoDir?: string | null,
+  forcePastTense?: boolean
 ): VerbGroup[] {
   const groups: VerbGroup[] = [];
   for (const pair of pairs) {
-    const { verb, detail } = formatToolDisplay(pair.call.content, repoDir);
+    const pending = !pair.result && !forcePastTense;
+    const { verb, detail } = formatToolDisplay(pair.call.content, repoDir, pending);
     const item: ToolPairDisplay = { pair, verb, detail };
     const last = groups[groups.length - 1];
     if (last && last.verb === verb) {
@@ -176,10 +187,16 @@ export function verbGroupSummary(group: VerbGroup): string {
   return `${group.items.length} ${noun}`;
 }
 
-export function formatToolDisplay(content: string, repoDir?: string | null): ToolDisplay {
+export function formatToolDisplay(
+  content: string,
+  repoDir?: string | null,
+  pending?: boolean
+): ToolDisplay {
+  const tenseIdx = pending ? 1 : 0;
   const parsed = parseToolCall(content);
   if (parsed) {
-    const verb = TOOL_VERBS[parsed.name] || parsed.name;
+    const entry = TOOL_VERBS[parsed.name];
+    const verb = entry ? entry[tenseIdx] : parsed.name;
     return { verb, detail: makePathsRelative(formatArgs(parsed.args), repoDir) };
   }
 
@@ -193,5 +210,5 @@ export function formatToolDisplay(content: string, repoDir?: string | null): Too
     return { verb: content, detail: '' };
   }
 
-  return { verb: 'Ran', detail: makePathsRelative(content, repoDir) };
+  return { verb: pending ? 'Running' : 'Ran', detail: makePathsRelative(content, repoDir) };
 }

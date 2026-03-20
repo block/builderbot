@@ -867,7 +867,7 @@
         </div>
       {:else}
         <div class="messages">
-          {#each grouped as group}
+          {#each grouped as group, groupIdx}
             {#if group.type === 'user'}
               {@const hasBlocks = hasXmlBlocks(group.message.content)}
               {@const segments = hasBlocks ? parseContentSegments(group.message.content) : []}
@@ -967,7 +967,7 @@
               </div>
             {:else}
               <div class="message-row tool-group">
-                {#each groupByVerb(group.pairs, repoDir) as vg, vgIdx}
+                {#each groupByVerb(group.pairs, repoDir, !isLive || sending || grouped.findIndex((g, i) => i > groupIdx && g.type === 'user') !== -1) as vg, vgIdx}
                   {#if vg.items.length === 1}
                     {@const item = vg.items[0]}
                     {@const isExpanded = expandedTools.has(item.pair.call.id)}
@@ -991,7 +991,7 @@
                       {#if isExpanded && item.pair.result}
                         {@const resultContent = stripCodeFences(item.pair.result.content)}
                         <div class="tool-code-block" transition:slide={{ duration: 150 }}>
-                          {#if item.verb === 'Ran' && item.detail}
+                          {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
                             <div class="tool-code-command">$ {item.detail}</div>
                           {/if}
                           {#if resultContent}
@@ -1041,7 +1041,7 @@
                           {#if isExpanded && item.pair.result}
                             {@const resultContent = stripCodeFences(item.pair.result.content)}
                             <div class="tool-code-block" transition:slide={{ duration: 150 }}>
-                              {#if item.verb === 'Ran' && item.detail}
+                              {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
                                 <div class="tool-code-command">$ {item.detail}</div>
                               {/if}
                               {#if resultContent}

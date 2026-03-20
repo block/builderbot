@@ -26,7 +26,8 @@
     | 'review'
     | 'generating-review'
     | 'failed-review'
-    | 'image';
+    | 'image'
+    | 'revalidating';
 
   export type TimelineBadge = {
     icon: 'comment' | 'warning';
@@ -73,7 +74,8 @@
     deleting ||
       type === 'pending-commit' ||
       type === 'generating-note' ||
-      type === 'generating-review'
+      type === 'generating-review' ||
+      type === 'revalidating'
   );
   let isFailed = $derived(
     !deleting && (type === 'failed-commit' || type === 'failed-note' || type === 'failed-review')
@@ -107,6 +109,7 @@
   class:pending={isPending}
   class:failed={isFailed}
   class:clickable={isClickable}
+  class:compact={type === 'revalidating'}
   onclick={handleRowClick}
 >
   <div class="timeline-marker">
@@ -207,6 +210,10 @@
 
   .timeline-row.pending {
     cursor: default;
+  }
+
+  .timeline-row.compact {
+    padding: 4px 8px;
   }
 
   .timeline-row.failed {

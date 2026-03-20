@@ -502,11 +502,7 @@
       </div>
     {/each}
     {#if revalidating}
-      <TimelineRow
-        type="pending-commit"
-        title="Looking for changes..."
-        isLast={!onNewNote && !onNewCommit && !onNewReview && !footerActions}
-      />
+      <TimelineRow type="revalidating" title="Looking for changes..." isLast={true} />
     {/if}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}
       <div class="footer-row">

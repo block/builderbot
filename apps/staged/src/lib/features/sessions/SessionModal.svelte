@@ -1309,6 +1309,7 @@
 
   .modal-content {
     flex: 1;
+    overflow-x: hidden;
     overflow-y: auto;
     padding: 16px;
     min-height: 0;
@@ -1563,7 +1564,7 @@
   }
 
   .tool-card {
-    overflow: visible;
+    overflow: hidden;
     min-width: 0;
   }
 
@@ -1581,6 +1582,7 @@
     font-size: var(--size-xs);
     transition: background-color 0.1s;
     cursor: default;
+    min-width: 0;
   }
 
   .tool-header-expandable {

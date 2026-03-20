@@ -502,7 +502,9 @@
       </div>
     {/each}
     {#if revalidating}
-      <TimelineRow type="revalidating" title="Looking for changes..." isLast={true} />
+      <div transition:slide={{ duration: 200 }}>
+        <TimelineRow type="revalidating" title="Looking for changes..." isLast={true} />
+      </div>
     {/if}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}
       <div class="footer-row">

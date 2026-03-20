@@ -360,7 +360,10 @@ impl AgentDriver for AcpDriver {
 
         let is_resuming = agent_session_id.is_some();
         let db_messages = if is_resuming {
-            store.get_session_messages(session_id).unwrap_or_default()
+            store.get_session_messages(session_id).unwrap_or_else(|e| {
+                log::warn!("Failed to load session messages for replay matching: {e}");
+                vec![]
+            })
         } else {
             vec![]
         };
@@ -663,21 +666,21 @@ impl ReplayBuffer {
     fn finalize_current(&mut self) -> bool {
         if let Some(role) = self.current_role.take() {
             if !self.current_text.is_empty() {
-                let text = std::mem::take(&mut self.current_text);
-                return self.try_match(&role, &text);
+                self.current_text.clear();
+                return self.try_match(&role);
             }
         }
         false
     }
 
-    /// Try to match a `(role, content)` pair against `db_messages[match_cursor]`.
+    /// Try to match a role against `db_messages[match_cursor]`.
     /// Returns `true` if replay is now considered complete.
-    fn try_match(&mut self, role: &str, _content: &str) -> bool {
+    fn try_match(&mut self, role: &str) -> bool {
         if self.match_cursor >= self.db_messages.len() {
             return self.is_complete();
         }
 
-        let (db_role, _db_content) = &self.db_messages[self.match_cursor];
+        let (db_role, _) = &self.db_messages[self.match_cursor];
 
         if role == db_role {
             self.match_cursor += 1;
@@ -785,126 +788,168 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
-        let mut phase = self.phase.lock().await;
+        // Determine the action to take under the lock, then drop the lock
+        // before calling into the writer to avoid holding it across await points.
+        enum LiveAction {
+            AppendText(String),
+            RecordToolCall {
+                id: String,
+                title: String,
+            },
+            ToolCallUpdate {
+                id: String,
+                title: Option<String>,
+                result: Option<String>,
+            },
+            Ignore,
+            Drop,
+        }
 
-        match &mut *phase {
-            // ── Replaying phase: accumulate chunks, match against DB ──
-            HandlerPhase::Replaying(buf) => {
-                buf.last_notification_at = Instant::now();
-                buf.received_any = true;
+        let live_action = {
+            let mut phase = self.phase.lock().await;
 
-                // Record tool-call IDs for the safety-net.
-                if let Some(id) = notification_tool_call_id(&notification.update) {
-                    buf.replayed_tool_call_ids.insert(id);
-                }
+            match &mut *phase {
+                // ── Replaying phase: accumulate chunks, match against DB ──
+                HandlerPhase::Replaying(buf) => {
+                    buf.last_notification_at = Instant::now();
+                    buf.received_any = true;
 
-                let completed = match &notification.update {
-                    SessionUpdate::AgentMessageChunk(chunk) => {
-                        if let AcpContentBlock::Text(text) = &chunk.content {
-                            // If switching from non-assistant role, finalize previous.
-                            let mut done = false;
-                            if buf.current_role.as_deref() != Some("assistant") {
-                                done = buf.finalize_current();
-                                buf.current_role = Some("assistant".to_string());
-                            }
-                            buf.current_text.push_str(&text.text);
-                            done
-                        } else {
-                            false
-                        }
+                    // Record tool-call IDs for the safety-net.
+                    if let Some(id) = notification_tool_call_id(&notification.update) {
+                        buf.replayed_tool_call_ids.insert(id);
                     }
-                    SessionUpdate::UserMessageChunk(chunk) => {
-                        if let AcpContentBlock::Text(text) = &chunk.content {
-                            let mut done = false;
-                            if buf.current_role.as_deref() != Some("user") {
-                                done = buf.finalize_current();
-                                buf.current_role = Some("user".to_string());
-                            }
-                            buf.current_text.push_str(&text.text);
-                            done
-                        } else {
-                            false
-                        }
-                    }
-                    SessionUpdate::ToolCall(tc) => {
-                        buf.finalize_current();
-                        let title = tc.title.replace('`', ""); // sanitize_title
-                        buf.try_match("tool_call", &title)
-                    }
-                    SessionUpdate::ToolCallUpdate(update) => {
-                        if let Some(ref content) = update.fields.content {
-                            buf.finalize_current();
-                            if let Some(preview) = extract_content_preview(content) {
-                                let stripped = strip_code_fences(&preview);
-                                buf.try_match("tool_result", &stripped)
+
+                    let completed = match &notification.update {
+                        SessionUpdate::AgentMessageChunk(chunk) => {
+                            if let AcpContentBlock::Text(text) = &chunk.content {
+                                // If switching from non-assistant role, finalize previous.
+                                let mut done = false;
+                                if buf.current_role.as_deref() != Some("assistant") {
+                                    done = buf.finalize_current();
+                                    buf.current_role = Some("assistant".to_string());
+                                }
+                                buf.current_text.push_str(&text.text);
+                                done
                             } else {
                                 false
                             }
-                        } else {
-                            false
                         }
-                    }
-                    SessionUpdate::AgentThoughtChunk(_) => {
-                        // Thinking is not persisted — ignore.
-                        false
-                    }
-                    _ => false,
-                };
-
-                if completed {
-                    self.replay_done.notify_one();
-                }
-            }
-
-            // ── WaitingForPrompt phase: drop everything, record tool-call IDs ──
-            HandlerPhase::WaitingForPrompt {
-                replayed_tool_call_ids,
-            } => {
-                if let Some(id) = notification_tool_call_id(&notification.update) {
-                    replayed_tool_call_ids.insert(id);
-                }
-            }
-
-            // ── Live phase: forward to writer, with safety-net filter ──
-            HandlerPhase::Live {
-                replayed_tool_call_ids,
-            } => {
-                // Safety net: drop notifications for tool-call IDs seen during replay.
-                if let Some(id) = notification_tool_call_id(&notification.update) {
-                    if replayed_tool_call_ids.contains(&id) {
-                        return Ok(());
-                    }
-                }
-
-                match &notification.update {
-                    SessionUpdate::AgentMessageChunk(chunk) => {
-                        if let AcpContentBlock::Text(text) = &chunk.content {
-                            self.writer.append_text(&text.text).await;
-                        }
-                    }
-                    SessionUpdate::ToolCall(tool_call) => {
-                        self.writer
-                            .record_tool_call(tool_call.tool_call_id.0.as_ref(), &tool_call.title)
-                            .await;
-                    }
-                    SessionUpdate::ToolCallUpdate(update) => {
-                        let tc_id = update.tool_call_id.0.to_string();
-
-                        if let Some(ref title) = update.fields.title {
-                            self.writer.update_tool_call_title(&tc_id, title).await;
-                        }
-
-                        if let Some(ref content) = update.fields.content {
-                            if let Some(preview) = extract_content_preview(content) {
-                                self.writer.record_tool_result(&preview).await;
+                        SessionUpdate::UserMessageChunk(chunk) => {
+                            if let AcpContentBlock::Text(text) = &chunk.content {
+                                let mut done = false;
+                                if buf.current_role.as_deref() != Some("user") {
+                                    done = buf.finalize_current();
+                                    buf.current_role = Some("user".to_string());
+                                }
+                                buf.current_text.push_str(&text.text);
+                                done
+                            } else {
+                                false
                             }
                         }
+                        SessionUpdate::ToolCall(_tc) => {
+                            buf.finalize_current();
+                            buf.try_match("tool_call")
+                        }
+                        SessionUpdate::ToolCallUpdate(update) => {
+                            if update.fields.content.is_some() {
+                                buf.finalize_current();
+                                buf.try_match("tool_result")
+                            } else {
+                                false
+                            }
+                        }
+                        SessionUpdate::AgentThoughtChunk(_) => {
+                            // Thinking is not persisted — ignore.
+                            false
+                        }
+                        _ => false,
+                    };
+
+                    if completed {
+                        self.replay_done.notify_one();
                     }
-                    _ => {
-                        log::debug!("Ignoring session update: {:?}", notification.update);
+                    return Ok(());
+                }
+
+                // ── WaitingForPrompt phase: drop everything, record tool-call IDs ──
+                HandlerPhase::WaitingForPrompt {
+                    replayed_tool_call_ids,
+                } => {
+                    if let Some(id) = notification_tool_call_id(&notification.update) {
+                        replayed_tool_call_ids.insert(id);
+                    }
+                    return Ok(());
+                }
+
+                // ── Live phase: determine action, then release lock ──
+                HandlerPhase::Live {
+                    replayed_tool_call_ids,
+                } => {
+                    // Safety net: drop notifications for tool-call IDs seen during replay.
+                    if let Some(id) = notification_tool_call_id(&notification.update) {
+                        if replayed_tool_call_ids.contains(&id) {
+                            return Ok(());
+                        }
+                    }
+
+                    match &notification.update {
+                        SessionUpdate::AgentMessageChunk(chunk) => {
+                            if let AcpContentBlock::Text(text) = &chunk.content {
+                                LiveAction::AppendText(text.text.clone())
+                            } else {
+                                LiveAction::Drop
+                            }
+                        }
+                        SessionUpdate::ToolCall(tool_call) => LiveAction::RecordToolCall {
+                            id: tool_call.tool_call_id.0.to_string(),
+                            title: tool_call.title.clone(),
+                        },
+                        SessionUpdate::ToolCallUpdate(update) => {
+                            let tc_id = update.tool_call_id.0.to_string();
+                            let title = update.fields.title.clone();
+                            let result = update
+                                .fields
+                                .content
+                                .as_ref()
+                                .and_then(|c| extract_content_preview(c));
+                            if title.is_some() || result.is_some() {
+                                LiveAction::ToolCallUpdate {
+                                    id: tc_id,
+                                    title,
+                                    result,
+                                }
+                            } else {
+                                LiveAction::Drop
+                            }
+                        }
+                        _ => LiveAction::Ignore,
                     }
                 }
             }
+            // phase lock is dropped here
+        };
+
+        // Execute the live action without holding the phase lock.
+        match live_action {
+            LiveAction::AppendText(text) => {
+                self.writer.append_text(&text).await;
+            }
+            LiveAction::RecordToolCall { id, title } => {
+                self.writer.record_tool_call(&id, &title).await;
+            }
+            LiveAction::ToolCallUpdate { id, title, result } => {
+                if let Some(title) = title {
+                    self.writer.update_tool_call_title(&id, &title).await;
+                }
+                if let Some(preview) = result {
+                    self.writer.record_tool_result(&preview).await;
+                }
+            }
+            LiveAction::Ignore => {
+                log::debug!("Ignoring session update: {:?}", notification.update);
+            }
+            LiveAction::Drop => {}
         }
         Ok(())
     }
@@ -955,10 +1000,17 @@ async fn run_acp_protocol(
     })??;
 
     // If resuming, wait for replay to complete (content match OR idle timeout).
+    // An absolute 10s timeout prevents a hang if the server sends zero replay
+    // notifications (e.g. the remote session was garbage-collected).
     if acp_session_id.is_some() {
+        let absolute_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             tokio::select! {
                 _ = handler.replay_done.notified() => {
+                    break;
+                }
+                _ = tokio::time::sleep_until(absolute_deadline) => {
+                    log::warn!("Replay-wait absolute timeout reached (10s) — proceeding");
                     break;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {

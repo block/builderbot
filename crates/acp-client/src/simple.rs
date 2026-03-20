@@ -107,6 +107,7 @@ impl AgentDriver for SimpleDriverWrapper {
         struct SimpleHandler {
             writer: Arc<dyn MessageWriter>,
             replaying: AtomicBool,
+            prompt_sent: AtomicBool,
         }
 
         #[async_trait(?Send)]
@@ -138,6 +139,14 @@ impl AgentDriver for SimpleDriverWrapper {
                     return Ok(());
                 }
 
+                if !self.prompt_sent.load(Ordering::Acquire) {
+                    log::info!(
+                        "[replay-guard] simple: dropping pre-prompt notification: {:?}",
+                        notification.update
+                    );
+                    return Ok(());
+                }
+
                 log::info!(
                     "[replay-guard] simple: processing LIVE notification: {:?}",
                     notification.update
@@ -161,6 +170,7 @@ impl AgentDriver for SimpleDriverWrapper {
         let handler = Arc::new(SimpleHandler {
             writer: Arc::clone(writer),
             replaying: AtomicBool::new(is_resuming),
+            prompt_sent: AtomicBool::new(false),
         });
         let handler_for_conn = Arc::clone(&handler);
 
@@ -230,6 +240,9 @@ impl AgentDriver for SimpleDriverWrapper {
                     agent_session_id,
                     vec![AcpContentBlock::Text(TextContent::new(prompt))],
                 );
+
+                log::info!("[replay-guard] simple driver: mark_prompt_sent — notifications are now live");
+                handler.prompt_sent.store(true, Ordering::Release);
 
                 connection
                     .prompt(prompt_request)

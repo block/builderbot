@@ -584,36 +584,35 @@ async fn normalize_local_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
 struct AcpNotificationHandler {
     writer: Arc<dyn MessageWriter>,
     replaying: AtomicBool,
-    /// Tool-call IDs observed during the replay phase. Used after `set_live()`
-    /// to definitively identify late-arriving replay notifications that slipped
-    /// past the `replaying` flag due to async notification delivery.
+    /// Set once the prompt has been sent to the server.  Between `set_live()`
+    /// and `mark_prompt_sent()` **all** notifications are definitively stale
+    /// because the server cannot produce new-turn output before receiving the
+    /// prompt.  This gate is deterministic and does not rely on timeouts.
+    prompt_sent: AtomicBool,
+    /// Tool-call IDs observed during the replay / pre-prompt phases.  Used as
+    /// a safety-net after the prompt is sent to catch any stale tool-call
+    /// notifications that were buffered longer than expected.
     replayed_tool_call_ids: std::sync::Mutex<HashSet<String>>,
-    /// Timestamp of the most recent stale notification dropped *after*
-    /// `set_live()`. Non-tool notifications (e.g. `AgentMessageChunk`) that
-    /// arrive within [`STALE_PROXIMITY`] of the last stale drop are also
-    /// treated as stale, since they are interleaved old assistant text.
-    last_stale_drop: std::sync::Mutex<Option<Instant>>,
 }
-
-/// Maximum time window after the last definitively-stale notification within
-/// which non-tool notifications are also considered stale.
-const STALE_PROXIMITY: Duration = Duration::from_millis(500);
 
 impl AcpNotificationHandler {
     fn new(writer: Arc<dyn MessageWriter>, replaying: bool) -> Self {
         Self {
             writer,
             replaying: AtomicBool::new(replaying),
+            prompt_sent: AtomicBool::new(false),
             replayed_tool_call_ids: std::sync::Mutex::new(HashSet::new()),
-            last_stale_drop: std::sync::Mutex::new(None),
         }
     }
 
     fn set_live(&self) {
         log::info!("[replay-guard] set_live() called — transitioning from replaying to live");
         self.replaying.store(false, Ordering::Release);
-        // Reset so the temporal filter only triggers on post-set_live stale drops.
-        *self.last_stale_drop.lock().unwrap() = None;
+    }
+
+    fn mark_prompt_sent(&self) {
+        log::info!("[replay-guard] mark_prompt_sent() — notifications are now live");
+        self.prompt_sent.store(true, Ordering::Release);
     }
 }
 
@@ -651,37 +650,27 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
             return Ok(());
         }
 
-        // — Post-replay stale-notification filter.
-        //
-        // After set_live() there is a brief window where late replay
-        // notifications can arrive because the transport delivers them
-        // asynchronously relative to the load_session response.
-        //
-        // 1. Tool calls / updates whose ID was seen during replay are
-        //    definitively stale → drop and record the drop timestamp.
-        // 2. Any other notification that arrives within STALE_PROXIMITY of the
-        //    last stale drop is almost certainly interleaved old assistant
-        //    text or an AvailableCommandsUpdate from the old turn → drop.
+        // — Pre-prompt gate: between set_live() and mark_prompt_sent() the
+        //   server has not yet received the prompt, so every notification is
+        //   a late-arriving replay artefact.  Record tool-call IDs for the
+        //   safety-net filter below, then drop.
+        if !self.prompt_sent.load(Ordering::Acquire) {
+            if let Some(id) = notification_tool_call_id(&notification.update) {
+                self.replayed_tool_call_ids.lock().unwrap().insert(id);
+            }
+            log::info!(
+                "[replay-guard] Dropping pre-prompt notification: {:?}",
+                notification.update
+            );
+            return Ok(());
+        }
+
+        // — Safety net: after the prompt is sent, any tool call / update whose
+        //   ID was seen during replay or the pre-prompt window is still stale.
         if let Some(id) = notification_tool_call_id(&notification.update) {
             if self.replayed_tool_call_ids.lock().unwrap().contains(&id) {
-                *self.last_stale_drop.lock().unwrap() = Some(Instant::now());
                 log::info!(
-                    "[replay-guard] Dropping stale post-replay notification (tool_call_id={id}): {:?}",
-                    notification.update
-                );
-                return Ok(());
-            }
-        } else {
-            let dominated_by_stale = self
-                .last_stale_drop
-                .lock()
-                .unwrap()
-                .map_or(false, |t| t.elapsed() < STALE_PROXIMITY);
-            if dominated_by_stale {
-                *self.last_stale_drop.lock().unwrap() = Some(Instant::now());
-                log::info!(
-                    "[replay-guard] Dropping likely-stale notification (within {}ms of last stale drop): {:?}",
-                    STALE_PROXIMITY.as_millis(),
+                    "[replay-guard] Dropping stale post-prompt notification (tool_call_id={id}): {:?}",
                     notification.update
                 );
                 return Ok(());
@@ -782,6 +771,8 @@ async fn run_acp_protocol(
         )));
     }
     let prompt_request = PromptRequest::new(agent_session_id, content_blocks);
+
+    handler.mark_prompt_sent();
 
     connection
         .prompt(prompt_request)

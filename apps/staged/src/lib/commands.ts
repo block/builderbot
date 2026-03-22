@@ -581,6 +581,16 @@ export function queueBranchSession(
   });
 }
 
+/** Drain queued sessions for a branch — starts the next queued session if any.
+ *  Returns true if a session was started, false if the queue was empty. */
+export function drainQueuedSessions(branchId: string): Promise<boolean> {
+  return invoke('drain_queued_sessions', {
+    branchId,
+    provider: null,
+    imageIds: null,
+  });
+}
+
 // =============================================================================
 // Timeline item deletion
 // =============================================================================

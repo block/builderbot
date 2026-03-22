@@ -33,6 +33,8 @@
     /** When true, the initial prompt is a suggestion — select all so typing replaces it. */
     prefilled?: boolean;
     remote?: boolean;
+    /** When true, the session will be queued rather than started immediately. */
+    willQueue?: boolean;
     onClose: (draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
     onSubmit: (data: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
   }
@@ -44,6 +46,7 @@
     initialImageIds = [],
     prefilled = false,
     remote = false,
+    willQueue = false,
     onClose,
     onSubmit,
   }: Props = $props();
@@ -236,7 +239,7 @@
           rows={isReview ? 4 : 12}
           disabled={starting}
         ></textarea>
-        <span class="hint">⌘ Enter to start</span>
+        <span class="hint">{willQueue ? '⌘ Enter to queue' : '⌘ Enter to start'}</span>
       </div>
 
       <ImageAttachment
@@ -260,10 +263,10 @@
           >
             {#if starting}
               <Spinner size={14} />
-              Starting…
+              {willQueue ? 'Queueing…' : 'Starting…'}
             {:else}
               <Send size={14} />
-              Start
+              {willQueue ? 'Queue' : 'Start'}
             {/if}
           </button>
         </div>

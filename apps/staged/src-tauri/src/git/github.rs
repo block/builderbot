@@ -1691,17 +1691,46 @@ pub fn fetch_pr_status(repo: &Path, pr_number: u64) -> Result<PrStatus, GitError
 /// Fetch PR status using repo slug format (owner/repo) instead of local path.
 /// Useful when you don't have a local clone.
 pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrStatus, GitError> {
-    let output = run_gh_global(&[
+    let gh_args = &[
         "pr",
         "view",
         &pr_number.to_string(),
         "-R",
         github_repo,
         "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup",
-    ])?;
+    ];
+    log::info!(
+        "fetch_pr_status_for_repo: running gh {} for repo={}, pr_number={}",
+        gh_args.join(" "),
+        github_repo,
+        pr_number
+    );
+    let output = match run_gh_global(gh_args) {
+        Ok(output) => output,
+        Err(e) => {
+            log::error!(
+                "fetch_pr_status_for_repo: gh command failed for repo={}, pr_number={}: {}",
+                github_repo,
+                pr_number,
+                e
+            );
+            return Err(e);
+        }
+    };
 
-    let item: GhPrStatusItem =
-        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+    let item: GhPrStatusItem = match serde_json::from_str(&output) {
+        Ok(item) => item,
+        Err(e) => {
+            log::error!(
+                "fetch_pr_status_for_repo: failed to parse gh output for repo={}, pr_number={}: {}. Raw output: {}",
+                github_repo,
+                pr_number,
+                e,
+                output
+            );
+            return Err(GitError::CommandFailed(e.to_string()));
+        }
+    };
 
     // Analyze status checks (same logic as fetch_pr_status)
     let mut total = 0u32;

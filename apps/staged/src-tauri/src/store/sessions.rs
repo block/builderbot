@@ -126,6 +126,49 @@ impl Store {
         Ok(())
     }
 
+    /// Update a queued session's working directory, prompt, and owner PID
+    /// when it is being drained (started for real).
+    pub fn prepare_queued_session(
+        &self,
+        id: &str,
+        working_dir: &str,
+        prompt: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET working_dir = ?1, prompt = ?2, owner_pid = ?3, updated_at = ?4 WHERE id = ?5",
+            params![working_dir, prompt, std::process::id(), now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all queued sessions for a branch, ordered by creation time (oldest first).
+    ///
+    /// Sessions are linked to branches through artifacts (commits, notes, reviews).
+    /// This query joins across all three artifact tables to find every queued session
+    /// belonging to the given branch.
+    pub fn get_queued_sessions_for_branch(
+        &self,
+        branch_id: &str,
+    ) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.created_at, s.updated_at, s.owner_pid
+             FROM sessions s
+             WHERE s.status = 'queued'
+               AND (
+                   EXISTS (SELECT 1 FROM commits c WHERE c.session_id = s.id AND c.branch_id = ?1)
+                   OR EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.branch_id = ?1)
+                   OR EXISTS (SELECT 1 FROM reviews r WHERE r.session_id = s.id AND r.branch_id = ?1)
+               )
+             ORDER BY s.created_at ASC",
+        )?;
+        let sessions = stmt
+            .query_map(params![branch_id], Self::row_to_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;

@@ -1430,6 +1430,8 @@ pub fn run() {
             session_commands::cancel_session,
             session_commands::delete_session,
             session_commands::start_branch_session,
+            session_commands::queue_branch_session,
+            session_commands::drain_queued_sessions,
             session_commands::start_project_session,
             session_commands::find_fresh_auto_review,
             session_commands::set_review_auto,

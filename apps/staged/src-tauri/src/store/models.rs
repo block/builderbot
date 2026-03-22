@@ -486,6 +486,25 @@ impl Session {
         }
     }
 
+    /// Create a queued session. The prompt is stored but no agent is spawned.
+    /// The working_dir is left empty since it will be resolved when the session
+    /// is actually started (drained).
+    pub fn new_queued(prompt: &str) -> Self {
+        let now = now_timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            prompt: prompt.to_string(),
+            status: SessionStatus::Queued,
+            working_dir: String::new(),
+            provider: None,
+            agent_id: None,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+            owner_pid: None,
+        }
+    }
+
     pub fn with_provider(mut self, provider: &str) -> Self {
         self.provider = Some(provider.to_string());
         self

@@ -416,6 +416,7 @@ impl Workdir {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
+    Queued,
     Running,
     Completed,
     Error,
@@ -425,6 +426,7 @@ pub enum SessionStatus {
 impl SessionStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Queued => "queued",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Error => "error",
@@ -434,6 +436,7 @@ impl SessionStatus {
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
+            "queued" => Some(Self::Queued),
             "running" => Some(Self::Running),
             "completed" => Some(Self::Completed),
             "error" | "failed" => Some(Self::Error),

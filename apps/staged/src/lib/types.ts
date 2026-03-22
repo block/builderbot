@@ -204,7 +204,7 @@ export interface ProjectSessionResponse {
 // Sessions
 // =============================================================================
 
-export type SessionStatus = 'running' | 'completed' | 'error' | 'cancelled';
+export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
 
 export interface Session {
   id: string;

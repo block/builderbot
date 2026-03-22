@@ -99,12 +99,18 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior: none;
+}
+
+html,
+body {
+  overflow: hidden;
+  height: 100%;
 }
 
 body {
   margin: 0;
   padding: 0;
-  min-height: 100vh;
 }
 
 ::-webkit-scrollbar {

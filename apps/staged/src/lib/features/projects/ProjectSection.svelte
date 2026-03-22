@@ -691,7 +691,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 0;
+    padding: 16px 0 8px;
     position: sticky;
     top: 0;
     z-index: 10;

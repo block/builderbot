@@ -564,6 +564,23 @@ export function startBranchSession(
   });
 }
 
+/** Queue a branch-scoped session to run after current work completes. */
+export function queueBranchSession(
+  branchId: string,
+  prompt: string,
+  sessionType: BranchSessionType,
+  provider?: string,
+  imageIds?: string[]
+): Promise<BranchSessionResponse> {
+  return invoke('queue_branch_session', {
+    branchId,
+    prompt,
+    sessionType,
+    provider: provider ?? null,
+    imageIds: imageIds ?? null,
+  });
+}
+
 // =============================================================================
 // Timeline item deletion
 // =============================================================================

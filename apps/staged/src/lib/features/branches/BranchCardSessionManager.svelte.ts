@@ -60,13 +60,14 @@ export default class BranchCardSessionManager {
     );
   });
 
-  /** True when new session actions (new commit, note, review) should be disabled. */
-  isNewSessionDisabled = $derived(
-    !this.getTimeline() ||
-      this.showNewSession ||
-      this.isSessionStartPending ||
-      this.hasRunningSession
+  /** True when a new session will be queued rather than started immediately. */
+  willQueue = $derived(
+    !this.getTimeline() || // provisioning — no timeline yet
+      this.hasRunningSession // another session is active
   );
+
+  /** True when new session actions (new commit, note, review) should be disabled. */
+  isNewSessionDisabled = $derived(this.showNewSession || this.isSessionStartPending);
 
   constructor(opts: {
     getBranch: () => Branch;
@@ -230,6 +231,72 @@ export default class BranchCardSessionManager {
     }
   }
 
+  async queueBranchSession(mode: BranchSessionType, prompt: string, imageIds: string[] = []) {
+    const branch = this.getBranch();
+    const isRemote = this.getIsRemote();
+
+    if (this.autoReviewSessionId && mode !== 'review') {
+      this.cancelAutoReview();
+    }
+
+    const pendingKey = `session-queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const queueMeta = this.getTimeline()
+      ? 'Queued \u2014 waiting for current session\u2026'
+      : 'Queued \u2014 waiting for workspace\u2026';
+
+    this.pendingSessionItems = [
+      ...this.pendingSessionItems,
+      {
+        key: pendingKey,
+        type: this.pendingSessionTypeForMode(mode),
+        title: this.pendingSessionTitleForMode(mode, prompt),
+        secondaryMeta: queueMeta,
+      },
+    ];
+
+    try {
+      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+      const result = await commands.queueBranchSession(
+        branch.id,
+        prompt,
+        mode,
+        getPreferredAgent(agents) ?? undefined,
+        imageIds.length > 0 ? imageIds : undefined
+      );
+
+      if (!result || !result.sessionId) {
+        throw new Error('Failed to queue session: no session ID returned');
+      }
+
+      this.pendingSessionItems = this.pendingSessionItems.map((item) =>
+        item.key === pendingKey
+          ? {
+              ...item,
+              sessionId: result.sessionId,
+            }
+          : item
+      );
+
+      this.loadTimeline();
+    } catch (e) {
+      this.pendingSessionItems = this.pendingSessionItems.filter((item) => item.key !== pendingKey);
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to queue session',
+        message: e instanceof Error ? e.message : String(e),
+        durationMs: 0,
+      });
+    }
+  }
+
+  async startOrQueueSession(mode: BranchSessionType, prompt: string, imageIds: string[] = []) {
+    if (this.willQueue) {
+      await this.queueBranchSession(mode, prompt, imageIds);
+    } else {
+      await this.startBranchSessionWithPendingItem(mode, prompt, imageIds);
+    }
+  }
+
   openNewSession(mode: BranchSessionType, e?: MouseEvent) {
     if (mode === 'review' && e?.altKey) {
       void this.startReviewSessionImmediately();
@@ -272,7 +339,7 @@ export default class BranchCardSessionManager {
     if (data.mode === 'review' && !data.prompt.trim()) {
       const adopted = await this.tryAdoptAutoReview();
       if (adopted) return;
-      void this.startBranchSessionWithPendingItem(
+      void this.startOrQueueSession(
         data.mode,
         'Review the code changes on this branch.',
         data.imageIds
@@ -286,7 +353,7 @@ export default class BranchCardSessionManager {
 
     const prompt =
       data.prompt || (data.mode === 'review' ? 'Review the code changes on this branch.' : '');
-    void this.startBranchSessionWithPendingItem(data.mode, prompt, data.imageIds);
+    void this.startOrQueueSession(data.mode, prompt, data.imageIds);
   }
 
   handleTimelineSessionClick(sessionId: string) {

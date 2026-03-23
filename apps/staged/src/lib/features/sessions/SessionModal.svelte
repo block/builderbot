@@ -331,15 +331,16 @@
       }
       session = s;
       messages = msgs;
-      scrollToBottom();
-      // Wait for Svelte's DOM flush (not the visual scroll) before enabling
-      // transitions so existing messages don't all slide in at once.
-      await tick();
-      animateNewMessages = true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+      // Wait for Svelte to render the messages (they only mount once loading
+      // is false) before enabling intro transitions, so existing messages
+      // don't all slide in at once.
+      await tick();
+      animateNewMessages = true;
+      scrollToBottom();
     }
   }
 
@@ -359,7 +360,7 @@
         if (closed) return;
         if (msgs.length > 0) {
           messages = msgs;
-          scrollToBottomIfNear();
+          scrollToBottomIfNear(true);
         }
       } else {
         const lastId = messages[messages.length - 1].id;
@@ -369,7 +370,7 @@
           const prev = messages.slice(0, -1);
           messages = [...prev, ...updated];
           if (updated.length > 1 || updated[0].id !== lastId) {
-            scrollToBottomIfNear();
+            scrollToBottomIfNear(true);
           }
         }
       }
@@ -547,20 +548,29 @@
     lastScrollTop = scrollTop;
   }
 
-  /** Scroll to bottom unconditionally (e.g. initial load, user sends message). */
-  function scrollToBottom() {
+  /** Scroll to bottom unconditionally (e.g. initial load, user sends message).
+   *  When afterSlide is true, also re-scrolls after the 150ms slide transition
+   *  finishes so the new content isn't hidden below the fold. */
+  function scrollToBottom(afterSlide = false) {
     tick().then(() => {
       if (messagesEl) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
         userScrolledUp = false;
       }
+      if (afterSlide) {
+        setTimeout(() => {
+          if (messagesEl) {
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          }
+        }, 160);
+      }
     });
   }
 
   /** Scroll to bottom only if the user hasn't intentionally scrolled up. */
-  function scrollToBottomIfNear() {
+  function scrollToBottomIfNear(afterSlide = false) {
     if (!userScrolledUp) {
-      scrollToBottom();
+      scrollToBottom(afterSlide);
     }
   }
 

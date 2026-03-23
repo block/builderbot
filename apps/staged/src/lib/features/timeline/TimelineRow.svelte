@@ -31,7 +31,8 @@
     | 'queued-review'
     | 'failed-review'
     | 'image'
-    | 'revalidating';
+    | 'revalidating'
+    | 'provisioning';
 
   export type TimelineBadge = {
     icon: 'comment' | 'warning';
@@ -91,7 +92,8 @@
       type === 'pending-commit' ||
       type === 'generating-note' ||
       type === 'generating-review' ||
-      type === 'revalidating'
+      type === 'revalidating' ||
+      type === 'provisioning'
   );
   let isFailed = $derived(
     !deleting && (type === 'failed-commit' || type === 'failed-note' || type === 'failed-review')

@@ -105,11 +105,23 @@
     reviewId: string;
   } | null>(null);
 
-  /** True when a local branch is still provisioning its worktree. */
-  let isProvisioning = $derived(isLocal && !branch.worktreePath && !worktreeError);
+  /** True when the branch is still provisioning (local worktree or remote workspace). */
+  let isProvisioning = $derived(
+    (isLocal && !branch.worktreePath && !worktreeError) ||
+      (isRemote && remoteWorkspaceStatus === 'starting')
+  );
 
   /** Empty timeline used during provisioning so the action buttons render. */
   const emptyTimeline: BranchTimelineData = { commits: [], notes: [], reviews: [], images: [] };
+
+  /** Label for the provisioning timeline row, if applicable. */
+  let provisioningLabel = $derived(
+    isLocal && !branch.worktreePath && !worktreeError
+      ? 'Creating worktree…'
+      : isRemote && remoteWorkspaceStatus === 'starting'
+        ? 'Provisioning workspace…'
+        : undefined
+  );
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => c.sha) ?? false);
@@ -727,13 +739,7 @@
 
     <div class="card-content">
       <ReasonBanner reason={repoLabel?.reason} onDismiss={handleDismissReason} />
-      {#if isLocal && !branch.worktreePath && !worktreeError}
-        <div class="loading">
-          <Spinner size={14} />
-          <span>Creating worktree…</span>
-        </div>
-      {/if}
-      {#if isRemote && (remoteWorkspaceStatus === 'starting' || remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'suspended' || remoteWorkspaceStatus === 'error')}
+      {#if isRemote && (remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'suspended' || remoteWorkspaceStatus === 'error')}
         <RemoteWorkspaceStatusView
           status={remoteWorkspaceStatus}
           {workspaceError}
@@ -772,6 +778,7 @@
           onNewCommit={() => sessionMgr.openNewSession('commit')}
           onNewReview={hasCodeChanges ? (e) => sessionMgr.openNewSession('review', e) : undefined}
           newSessionDisabled={sessionMgr.isNewSessionDisabled}
+          {provisioningLabel}
         >
           {#snippet footerActions()}
             {#if hasCodeChanges}

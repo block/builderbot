@@ -65,6 +65,8 @@
     newSessionDisabled?: boolean;
     /** Whether the timeline is being revalidated in the background. */
     revalidating?: boolean;
+    /** When set, a provisioning row is shown at the start of the timeline. */
+    provisioningLabel?: string;
     footerActions?: Snippet;
   }
 
@@ -91,6 +93,7 @@
     onNewReview,
     newSessionDisabled = false,
     revalidating = false,
+    provisioningLabel,
     footerActions,
   }: Props = $props();
 
@@ -331,8 +334,19 @@
       });
     }
 
+    // Provisioning row appears at the very start of the timeline
+    if (provisioningLabel) {
+      all.unshift({
+        key: 'provisioning',
+        type: 'provisioning',
+        title: provisioningLabel,
+        timestamp: 0,
+      });
+    }
+
     // Sort by timestamp ascending; pending/generating items at bottom, queued after those
     all.sort((a, b) => {
+      const isProvisioning = (item: DisplayItem) => item.type === 'provisioning';
       const isTransient = (item: DisplayItem) =>
         (item.type === 'pending-commit' ||
           item.type === 'generating-note' ||
@@ -342,14 +356,16 @@
       const isQueued = (item: DisplayItem) =>
         item.meta === 'Queued' || item.secondaryMeta === 'Queued';
 
+      const aIsProvisioning = isProvisioning(a);
+      const bIsProvisioning = isProvisioning(b);
       const aIsTransient = isTransient(a);
       const bIsTransient = isTransient(b);
       const aIsQueued = isQueued(a);
       const bIsQueued = isQueued(b);
 
-      // Completed < Active < Queued
-      const aOrder = aIsQueued ? 2 : aIsTransient ? 1 : 0;
-      const bOrder = bIsQueued ? 2 : bIsTransient ? 1 : 0;
+      // Provisioning < Completed < Active < Queued
+      const aOrder = aIsProvisioning ? -1 : aIsQueued ? 2 : aIsTransient ? 1 : 0;
+      const bOrder = bIsProvisioning ? -1 : bIsQueued ? 2 : bIsTransient ? 1 : 0;
       if (aOrder !== bOrder) return aOrder - bOrder;
       return a.timestamp - b.timestamp;
     });

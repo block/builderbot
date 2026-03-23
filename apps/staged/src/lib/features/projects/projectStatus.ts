@@ -34,15 +34,6 @@ export function getProjectStatus(
   const hasRunningSessions = projectStateStore.hasRunningSessions(projectId);
   const hasStartingWorkspace = hasProvisioningWorkspace(branches);
 
-  // A run-action in "running" phase (server is up) is the most interesting signal
-  if (runActionPhase === 'running') {
-    return {
-      kind: 'runAction',
-      runningCount: projectStateStore.getRunningSessionCount(projectId),
-      runActionPhase,
-    };
-  }
-
   // Sessions or provisioning workspaces
   if (hasRunningSessions || hasStartingWorkspace) {
     return {
@@ -62,8 +53,8 @@ export function getProjectStatus(
   }
 
   if (projectStateStore.isUnread(projectId)) {
-    return { kind: 'unread', runningCount: 0, runActionPhase: null };
+    return { kind: 'unread', runningCount: 0, runActionPhase };
   }
 
-  return { kind: 'idle', runningCount: 0, runActionPhase: null };
+  return { kind: 'idle', runningCount: 0, runActionPhase };
 }

@@ -242,7 +242,7 @@
                   </div>
                 </div>
                 <div class="row-status">
-                  {#if status.kind === 'runAction' && status.runActionPhase === 'running'}
+                  {#if status.runActionPhase === 'running' && status.kind === 'running'}
                     <span
                       class="status-running"
                       in:fade={{ duration: 300, delay: 150 }}
@@ -250,6 +250,14 @@
                     >
                       <SineWave size={12} color="var(--ui-accent)" />
                       <Spinner size={12} />
+                    </span>
+                  {:else if status.runActionPhase === 'running'}
+                    <span
+                      class="status-running"
+                      in:fade={{ duration: 300, delay: 150 }}
+                      out:fade={{ duration: 150 }}
+                    >
+                      <SineWave size={12} color="var(--ui-accent)" />
                     </span>
                   {:else if status.kind === 'runAction' || status.kind === 'running'}
                     <span

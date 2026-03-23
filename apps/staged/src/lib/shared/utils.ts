@@ -139,10 +139,10 @@ export function projectSubtitle(
 ): string {
   const repoLabel = `${repoCount} ${pluralize('repo', repoCount)}`;
 
-  // Run action phase label takes priority when no sessions are active
-  if (sessionTypes.length === 0 && runActionPhase) {
-    const phaseLabel = runActionPhase === 'running' ? 'Running' : 'Building';
-    return `${repoLabel} · ${phaseLabel}`;
+  // Show "Building" in subtitle when building with no active sessions.
+  // "Running" phase is represented by the SineWave animation instead.
+  if (sessionTypes.length === 0 && runActionPhase === 'building') {
+    return `${repoLabel} · Building`;
   }
 
   if (sessionTypes.length === 0) {

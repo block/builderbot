@@ -433,7 +433,7 @@
                     <span class="number">{index + 1}</span>
                   </div>
                 {/if}
-                {#if status.kind === 'runAction' && status.runActionPhase === 'running'}
+                {#if status.runActionPhase === 'running' && status.kind === 'running'}
                   <div
                     class="status-indicator wave-spinner"
                     in:fade={{ duration: 300, delay: 150 }}
@@ -441,6 +441,14 @@
                   >
                     <SineWave size={14} color="var(--ui-accent)" />
                     <Spinner size={14} />
+                  </div>
+                {:else if status.runActionPhase === 'running'}
+                  <div
+                    class="status-indicator wave"
+                    in:fade={{ duration: 300, delay: 150 }}
+                    out:fade={{ duration: 150 }}
+                  >
+                    <SineWave size={14} color="var(--ui-accent)" />
                   </div>
                 {:else if status.kind === 'runAction' || status.kind === 'running'}
                   <div

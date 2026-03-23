@@ -1014,6 +1014,12 @@ pub async fn drain_queued_sessions(
     // Use the provider from the queued session, falling back to the one passed in.
     let effective_provider = session.provider.or(provider);
 
+    let session_type_str = match session_type {
+        BranchSessionType::Commit => "commit",
+        BranchSessionType::Note => "note",
+        BranchSessionType::Review => "review",
+    };
+
     let _ = app_handle.emit(
         "session-status-changed",
         session_runner::SessionStatusEvent {
@@ -1021,8 +1027,8 @@ pub async fn drain_queued_sessions(
             status: "running".to_string(),
             error_message: None,
             branch_id: Some(branch_id.clone()),
-            project_id: None,
-            session_type: None,
+            project_id: Some(branch.project_id.clone()),
+            session_type: Some(session_type_str.to_string()),
             is_auto_review: false,
         },
     );

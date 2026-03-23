@@ -115,6 +115,8 @@
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
 
+  const SLIDE_DURATION = 150;
+
   /** Whether the initial load has rendered — transitions are suppressed until then. */
   let animateNewMessages = false;
 
@@ -549,7 +551,7 @@
   }
 
   /** Scroll to bottom unconditionally (e.g. initial load, user sends message).
-   *  When afterSlide is true, also re-scrolls after the 150ms slide transition
+   *  When afterSlide is true, also re-scrolls after the slide transition
    *  finishes so the new content isn't hidden below the fold. */
   function scrollToBottom(afterSlide = false) {
     tick().then(() => {
@@ -559,10 +561,10 @@
       }
       if (afterSlide) {
         setTimeout(() => {
-          if (messagesEl) {
+          if (!userScrolledUp && messagesEl) {
             messagesEl.scrollTop = messagesEl.scrollHeight;
           }
-        }, 160);
+        }, SLIDE_DURATION + 10);
       }
     });
   }
@@ -798,7 +800,9 @@
     return groups;
   });
 
-  /** Stable key for a message group — used to key the {#each} block for transitions. */
+  /** Stable key for a message group — used to key the {#each} block for transitions.
+   *  For tools groups, keys off the first pair — safe because the grouping logic
+   *  in `grouped` always pushes at least one pair before creating a tools group. */
   function groupKey(group: MessageGroup): string {
     return group.type === 'tools' ? `t-${group.pairs[0].call.id}` : `m-${group.message.id}`;
   }
@@ -806,7 +810,7 @@
   /** Slide-in transition that is suppressed during the initial load. */
   function messageSlide(node: Element) {
     if (!animateNewMessages) return { duration: 0 };
-    return slide(node, { duration: 150 });
+    return slide(node, { duration: SLIDE_DURATION });
   }
 </script>
 
@@ -1019,7 +1023,10 @@
                         </div>
                         {#if isExpanded && item.pair.result}
                           {@const resultContent = stripCodeFences(item.pair.result.content)}
-                          <div class="tool-code-block" transition:slide={{ duration: 150 }}>
+                          <div
+                            class="tool-code-block"
+                            transition:slide={{ duration: SLIDE_DURATION }}
+                          >
                             {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
                               <div class="tool-code-command">$ {item.detail}</div>
                             {/if}
@@ -1049,7 +1056,7 @@
                         </div>
                       </div>
                       {#if isGroupExpanded}
-                        <div transition:slide={{ duration: 150 }}>
+                        <div transition:slide={{ duration: SLIDE_DURATION }}>
                           {#each vg.items as item}
                             {@const isExpanded = expandedTools.has(item.pair.call.id)}
                             <div class="tool-card tool-card-nested">
@@ -1071,7 +1078,10 @@
                               </div>
                               {#if isExpanded && item.pair.result}
                                 {@const resultContent = stripCodeFences(item.pair.result.content)}
-                                <div class="tool-code-block" transition:slide={{ duration: 150 }}>
+                                <div
+                                  class="tool-code-block"
+                                  transition:slide={{ duration: SLIDE_DURATION }}
+                                >
                                   {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
                                     <div class="tool-code-command">$ {item.detail}</div>
                                   {/if}

@@ -1761,17 +1761,8 @@ fn review_timeline_entries(
         let is_old = max_commit_ts.is_some_and(|ts| review_ts_secs < ts);
 
         let heading_title = match review.title.as_deref() {
-            Some(title) => format!(
-                "{} — {} ({} scope)",
-                title,
-                short_sha,
-                review.scope.as_str(),
-            ),
-            None => format!(
-                "Code Review of {} ({} scope)",
-                short_sha,
-                review.scope.as_str(),
-            ),
+            Some(title) => format!("Code review: {} — {}", title, short_sha),
+            None => format!("Code review: {}", short_sha),
         };
 
         let content = if is_old {

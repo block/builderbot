@@ -14,6 +14,7 @@
     />
 -->
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { AlertTriangle } from 'lucide-svelte';
   import { createBackdropDismissHandlers } from './backdropDismiss';
 
@@ -47,6 +48,16 @@
       event.preventDefault();
     }
   }
+
+  // Portal the dialog to document.body so it escapes any intermediate
+  // stacking contexts (e.g. sticky headers inside scroll containers).
+  let backdropEl: HTMLDivElement;
+  onMount(() => {
+    document.body.appendChild(backdropEl);
+    return () => {
+      backdropEl?.remove();
+    };
+  });
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -57,6 +68,7 @@
   role="dialog"
   aria-modal="true"
   tabindex="-1"
+  bind:this={backdropEl}
   onpointerdown={backdropDismiss.handlePointerDown}
   onclick={backdropDismiss.handleClick}
   onkeydown={(e) => e.key === 'Escape' && onCancel()}

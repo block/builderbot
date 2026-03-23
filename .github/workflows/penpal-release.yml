@@ -136,9 +136,10 @@ jobs:
       # Compute SHA256 for the artifact
       - name: Compute artifact hash
         id: hash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          echo "sha256=$(shasum -a 256 artifacts/Penpal-${VERSION}-arm64.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "artifacts/Penpal-${VERSION}-arm64.zip" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       # Generate a token scoped to block/homebrew-tap so we can trigger
       # a cross-repo workflow_dispatch (GITHUB_TOKEN is repo-scoped).
@@ -156,6 +157,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          SHA256: ${{ steps.hash.outputs.sha256 }}
         run: |
           BASE_URL="https://github.com/block/builderbot/releases/download/penpal/v${VERSION}"
           gh workflow run bump-cask.yaml \
@@ -163,4 +165,4 @@ jobs:
             -f cask=penpal \
             -f tag="penpal/v${VERSION}" \
             -f url="${BASE_URL}/Penpal-${VERSION}-arm64.zip" \
-            -f sha256="${{ steps.hash.outputs.sha256 }}"
+            -f sha256="${SHA256}"

@@ -181,34 +181,17 @@ prepare version:
 
     # Open a PR
     gh pr create \
+        --draft \
         --title "release: penpal v{{version}}" \
-        --body "Release penpal v{{version}}. Merge this PR, then run \`just release {{version}}\` from main to tag and publish." \
+        --body "Release penpal v{{version}}. Merge this PR, then run \`just release {{version}} <merge-sha>\` to tag and publish." \
         --base main
 
     echo ""
-    echo "Release PR created. Once merged, run 'just release {{version}}' from main."
+    echo "Release PR created. Once merged, run 'just release {{version}} <merge-sha>' to tag and publish."
 
-# Tag and push to trigger the release build (run after the release PR is merged)
-release version:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    current_branch=$(git rev-parse --abbrev-ref HEAD)
-    if [ "$current_branch" != "main" ]; then
-        echo "Error: release must be run from the main branch (currently on '$current_branch')" >&2
-        exit 1
-    fi
-
-    # Find the exact release commit on main and tag it (not HEAD)
-    expected_msg="release: penpal v{{version}}"
-    release_sha=$(git log --format="%H %s" main | grep -F "$expected_msg" | head -1 | cut -d' ' -f1 || true)
-    if [ -z "$release_sha" ]; then
-        echo "Error: could not find commit '$expected_msg' on main." >&2
-        echo "Make sure the release PR has been merged and you've pulled latest main." >&2
-        exit 1
-    fi
-
-    git tag "penpal/v{{version}}" "$release_sha"
+# Tag a commit and push to trigger the release build
+release version sha:
+    git tag "penpal/v{{version}}" "{{sha}}"
     git push origin "penpal/v{{version}}"
 
     echo "Pushed tag penpal/v{{version}} — CI will build and publish the release."

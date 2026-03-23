@@ -4,6 +4,7 @@
 
 import type { Project, Branch } from '../types';
 import type { SessionType } from '../stores/sessionRegistry.svelte';
+import type { RunActionPhase } from '../stores/projectRunActions.svelte';
 
 /** Display name for a project: repo basename + optional subpath. */
 export function projectDisplayName(p: Project): string {
@@ -131,8 +132,18 @@ function pluralize(word: string, count: number): string {
  *   "1 repo · making commits and notes"
  *   "2 repos · pushing changes"
  */
-export function projectSubtitle(repoCount: number, sessionTypes: SessionType[]): string {
+export function projectSubtitle(
+  repoCount: number,
+  sessionTypes: SessionType[],
+  runActionPhase?: RunActionPhase
+): string {
   const repoLabel = `${repoCount} ${pluralize('repo', repoCount)}`;
+
+  // Run action phase label takes priority when no sessions are active
+  if (sessionTypes.length === 0 && runActionPhase) {
+    const phaseLabel = runActionPhase === 'running' ? 'Running' : 'Building';
+    return `${repoLabel} · ${phaseLabel}`;
+  }
 
   if (sessionTypes.length === 0) {
     return repoLabel;

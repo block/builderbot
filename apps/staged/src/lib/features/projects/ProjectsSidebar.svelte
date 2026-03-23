@@ -249,6 +249,7 @@
                       out:fade={{ duration: 150 }}
                     >
                       <SineWave size={12} color="var(--ui-accent)" />
+                      <Spinner size={12} />
                     </span>
                   {:else if status.kind === 'runAction' || status.kind === 'running'}
                     <span
@@ -514,6 +515,7 @@
   .status-running {
     display: inline-flex;
     align-items: center;
+    gap: 4px;
     color: var(--ui-accent);
   }
 

@@ -435,11 +435,12 @@
                 {/if}
                 {#if status.kind === 'runAction' && status.runActionPhase === 'running'}
                   <div
-                    class="status-indicator wave"
+                    class="status-indicator wave-spinner"
                     in:fade={{ duration: 300, delay: 150 }}
                     out:fade={{ duration: 150 }}
                   >
                     <SineWave size={14} color="var(--ui-accent)" />
+                    <Spinner size={14} />
                   </div>
                 {:else if status.kind === 'runAction' || status.kind === 'running'}
                   <div
@@ -736,6 +737,13 @@
   }
 
   .status-indicator.spinner {
+    color: var(--ui-accent);
+  }
+
+  .status-indicator.wave-spinner {
+    display: flex;
+    align-items: center;
+    gap: 4px;
     color: var(--ui-accent);
   }
 

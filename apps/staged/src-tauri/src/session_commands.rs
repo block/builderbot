@@ -1433,7 +1433,7 @@ fn build_branch_timeline_summary(
 // Chronological timeline helpers
 // =============================================================================
 
-/// A single entry in the branch timeline, sorted by timestamp.
+/// A single entry in the branch timeline, sorted by timestamp (Unix seconds).
 struct TimelineEntry {
     timestamp: i64,
     content: String,
@@ -1637,7 +1637,7 @@ fn note_timeline_entries(
             format_note_for_context(&note.id, &note.title, &note.content, workspace_name)
         {
             entries.push(TimelineEntry {
-                timestamp: note.created_at,
+                timestamp: note.created_at / 1000,
                 content,
             });
         }
@@ -1679,7 +1679,7 @@ fn project_note_timeline_entries(
         let content =
             format_project_note_for_context(&note.id, &note.title, &note.content, workspace_name);
         entries.push(TimelineEntry {
-            timestamp: note.created_at,
+            timestamp: note.created_at / 1000,
             content,
         });
     }
@@ -1757,7 +1757,8 @@ fn review_timeline_entries(
             continue;
         }
         let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];
-        let is_old = max_commit_ts.is_some_and(|ts| review.created_at < ts);
+        let review_ts_secs = review.created_at / 1000;
+        let is_old = max_commit_ts.is_some_and(|ts| review_ts_secs < ts);
 
         let heading_title = match review.title.as_deref() {
             Some(title) => format!(
@@ -1797,7 +1798,7 @@ fn review_timeline_entries(
         };
 
         entries.push(TimelineEntry {
-            timestamp: review.created_at,
+            timestamp: review_ts_secs,
             content,
         });
     }
@@ -1828,7 +1829,7 @@ fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEn
                 format!("{} B", img.size_bytes)
             };
             TimelineEntry {
-                timestamp: img.created_at,
+                timestamp: img.created_at / 1000,
                 content: format!(
                     "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
                     img.filename, img.mime_type, size_label

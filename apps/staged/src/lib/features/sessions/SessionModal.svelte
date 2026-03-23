@@ -115,6 +115,9 @@
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
 
+  /** Whether the initial load has rendered — transitions are suppressed until then. */
+  let animateNewMessages = false;
+
   // Image attachment state (available when project context is provided; branchId is optional)
   let canAttachImages = $derived(!!projectId);
   let replyImageIds = $state<string[]>([]);
@@ -329,6 +332,10 @@
       session = s;
       messages = msgs;
       scrollToBottom();
+      // Wait for Svelte's DOM flush (not the visual scroll) before enabling
+      // transitions so existing messages don't all slide in at once.
+      await tick();
+      animateNewMessages = true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -780,6 +787,17 @@
     }
     return groups;
   });
+
+  /** Stable key for a message group — used to key the {#each} block for transitions. */
+  function groupKey(group: MessageGroup): string {
+    return group.type === 'tools' ? `t-${group.pairs[0].call.id}` : `m-${group.message.id}`;
+  }
+
+  /** Slide-in transition that is suppressed during the initial load. */
+  function messageSlide(node: Element) {
+    if (!animateNewMessages) return { duration: 0 };
+    return slide(node, { duration: 150 });
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} onpaste={handleImagePaste} />
@@ -867,73 +885,94 @@
         </div>
       {:else}
         <div class="messages">
-          {#each grouped as group, groupIdx}
-            {#if group.type === 'user'}
-              {@const hasBlocks = hasXmlBlocks(group.message.content)}
-              {@const segments = hasBlocks ? parseContentSegments(group.message.content) : []}
-              {@const userText = hasBlocks
-                ? segments
-                    .filter((s) => s.type === 'text')
-                    .map((s) => s.text)
-                    .join('\n')
-                : group.message.content}
-              {@const xmlBlocks = segments.filter((s) => s.type === 'xml-block')}
-              <!-- Context cards (above the bubble, left-aligned like tool calls) -->
-              {#if xmlBlocks.length > 0}
-                <div class="message-row context-block-group">
-                  {#each xmlBlocks as seg, segIdx}
-                    {#if seg.type === 'xml-block'}
-                      {@const blockKey = `${group.message.id}-${segIdx}`}
-                      {@const isOpen = expandedXmlBlocks.has(blockKey)}
-                      <div class="context-card">
-                        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                        <div class="context-card-header" onclick={() => toggleXmlBlock(blockKey)}>
-                          <span class="context-chevron">
-                            {#if isOpen}
-                              <ChevronDown size={12} />
-                            {:else}
-                              <ChevronRight size={12} />
-                            {/if}
-                          </span>
-                          <seg.icon size={12} class="context-icon" />
-                          <span class="context-label">{seg.label}</span>
-                        </div>
-                        {#if isOpen}
-                          <div class="context-card-content">
-                            <pre>{seg.content}</pre>
+          {#each grouped as group, groupIdx (groupKey(group))}
+            <div in:messageSlide>
+              {#if group.type === 'user'}
+                {@const hasBlocks = hasXmlBlocks(group.message.content)}
+                {@const segments = hasBlocks ? parseContentSegments(group.message.content) : []}
+                {@const userText = hasBlocks
+                  ? segments
+                      .filter((s) => s.type === 'text')
+                      .map((s) => s.text)
+                      .join('\n')
+                  : group.message.content}
+                {@const xmlBlocks = segments.filter((s) => s.type === 'xml-block')}
+                <!-- Context cards (above the bubble, left-aligned like tool calls) -->
+                {#if xmlBlocks.length > 0}
+                  <div class="message-row context-block-group">
+                    {#each xmlBlocks as seg, segIdx}
+                      {#if seg.type === 'xml-block'}
+                        {@const blockKey = `${group.message.id}-${segIdx}`}
+                        {@const isOpen = expandedXmlBlocks.has(blockKey)}
+                        <div class="context-card">
+                          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                          <div class="context-card-header" onclick={() => toggleXmlBlock(blockKey)}>
+                            <span class="context-chevron">
+                              {#if isOpen}
+                                <ChevronDown size={12} />
+                              {:else}
+                                <ChevronRight size={12} />
+                              {/if}
+                            </span>
+                            <seg.icon size={12} class="context-icon" />
+                            <span class="context-label">{seg.label}</span>
                           </div>
-                        {/if}
-                      </div>
-                    {/if}
-                  {/each}
-                </div>
-              {/if}
-              <!-- User prompt bubble -->
-              {#if userText.trim() || (group.message.imageIds && group.message.imageIds.length > 0)}
-                <div class="message-row human-message">
-                  <div class="human-bubble">
-                    {#if userText.trim()}
-                      <span class="human-text">{userText.trim()}</span>
-                    {/if}
-                    {#if group.message.imageIds && group.message.imageIds.length > 0}
-                      <div class="message-images">
-                        {#each group.message.imageIds as imgId}
-                          {#if messageImageCache.get(imgId)}
-                            <img
-                              class="message-image-thumb"
-                              src={messageImageCache.get(imgId)}
-                              alt="attachment"
-                            />
-                          {:else}
-                            <div class="message-image-placeholder">
-                              <ImagePlus size={16} />
+                          {#if isOpen}
+                            <div class="context-card-content">
+                              <pre>{seg.content}</pre>
                             </div>
                           {/if}
-                        {/each}
-                      </div>
-                    {/if}
+                        </div>
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
+                <!-- User prompt bubble -->
+                {#if userText.trim() || (group.message.imageIds && group.message.imageIds.length > 0)}
+                  <div class="message-row human-message">
+                    <div class="human-bubble">
+                      {#if userText.trim()}
+                        <span class="human-text">{userText.trim()}</span>
+                      {/if}
+                      {#if group.message.imageIds && group.message.imageIds.length > 0}
+                        <div class="message-images">
+                          {#each group.message.imageIds as imgId}
+                            {#if messageImageCache.get(imgId)}
+                              <img
+                                class="message-image-thumb"
+                                src={messageImageCache.get(imgId)}
+                                alt="attachment"
+                              />
+                            {:else}
+                              <div class="message-image-placeholder">
+                                <ImagePlus size={16} />
+                              </div>
+                            {/if}
+                          {/each}
+                        </div>
+                      {/if}
+                      <button
+                        class="copy-btn inline-copy"
+                        onclick={() => copyContent(group.message.content, group.message.id)}
+                        title="Copy message"
+                      >
+                        {#if copiedId === group.message.id}
+                          <Check size={12} />
+                        {:else}
+                          <Copy size={12} />
+                        {/if}
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              {:else if group.type === 'assistant'}
+                <div class="message-row assistant-message">
+                  <div class="assistant-content">
+                    <div class="markdown-content">
+                      {@html renderMarkdown(group.message.content)}
+                    </div>
                     <button
-                      class="copy-btn inline-copy"
+                      class="copy-btn"
                       onclick={() => copyContent(group.message.content, group.message.id)}
                       title="Copy message"
                     >
@@ -945,124 +984,108 @@
                     </button>
                   </div>
                 </div>
-              {/if}
-            {:else if group.type === 'assistant'}
-              <div class="message-row assistant-message">
-                <div class="assistant-content">
-                  <div class="markdown-content">
-                    {@html renderMarkdown(group.message.content)}
-                  </div>
-                  <button
-                    class="copy-btn"
-                    onclick={() => copyContent(group.message.content, group.message.id)}
-                    title="Copy message"
-                  >
-                    {#if copiedId === group.message.id}
-                      <Check size={12} />
-                    {:else}
-                      <Copy size={12} />
-                    {/if}
-                  </button>
-                </div>
-              </div>
-            {:else}
-              <div class="message-row tool-group">
-                {#each groupByVerb(group.pairs, repoDir, !isLive || sending || grouped.findIndex((g, i) => i > groupIdx && g.type === 'user') !== -1) as vg, vgIdx}
-                  {#if vg.items.length === 1}
-                    {@const item = vg.items[0]}
-                    {@const isExpanded = expandedTools.has(item.pair.call.id)}
-                    <div class="tool-card">
-                      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                      <div
-                        class="tool-header"
-                        class:tool-header-expandable={!!item.pair.result}
-                        onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
-                      >
-                        <span
-                          class="tool-caret"
-                          class:tool-caret-expanded={isExpanded}
-                          class:tool-caret-hidden={!item.pair.result}>›</span
+              {:else}
+                <div class="message-row tool-group">
+                  {#each groupByVerb(group.pairs, repoDir, !isLive || sending || grouped.findIndex((g, i) => i > groupIdx && g.type === 'user') !== -1) as vg, vgIdx}
+                    {#if vg.items.length === 1}
+                      {@const item = vg.items[0]}
+                      {@const isExpanded = expandedTools.has(item.pair.call.id)}
+                      <div class="tool-card">
+                        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                        <div
+                          class="tool-header"
+                          class:tool-header-expandable={!!item.pair.result}
+                          onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
                         >
-                        <span class="tool-name">{item.verb}</span>
-                        {#if item.detail}
-                          <span class="tool-args-preview">{item.detail}</span>
+                          <span
+                            class="tool-caret"
+                            class:tool-caret-expanded={isExpanded}
+                            class:tool-caret-hidden={!item.pair.result}>›</span
+                          >
+                          <span class="tool-name">{item.verb}</span>
+                          {#if item.detail}
+                            <span class="tool-args-preview">{item.detail}</span>
+                          {/if}
+                        </div>
+                        {#if isExpanded && item.pair.result}
+                          {@const resultContent = stripCodeFences(item.pair.result.content)}
+                          <div class="tool-code-block" transition:slide={{ duration: 150 }}>
+                            {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
+                              <div class="tool-code-command">$ {item.detail}</div>
+                            {/if}
+                            {#if resultContent}
+                              <pre class="tool-code-output">{resultContent}</pre>
+                            {/if}
+                            <div class="tool-code-status">
+                              <Check size={11} /> Success
+                            </div>
+                          </div>
                         {/if}
                       </div>
-                      {#if isExpanded && item.pair.result}
-                        {@const resultContent = stripCodeFences(item.pair.result.content)}
-                        <div class="tool-code-block" transition:slide={{ duration: 150 }}>
-                          {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
-                            <div class="tool-code-command">$ {item.detail}</div>
-                          {/if}
-                          {#if resultContent}
-                            <pre class="tool-code-output">{resultContent}</pre>
-                          {/if}
-                          <div class="tool-code-status">
-                            <Check size={11} /> Success
-                          </div>
+                    {:else}
+                      {@const verbGroupKey = `${vg.items[0].pair.call.id}-${vg.verb}`}
+                      {@const isGroupExpanded = expandedVerbGroups.has(verbGroupKey)}
+                      <div class="tool-card">
+                        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                        <div
+                          class="tool-header tool-header-expandable"
+                          onclick={() => toggleVerbGroup(verbGroupKey)}
+                        >
+                          <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}
+                            >›</span
+                          >
+                          <span class="tool-name">{vg.verb}</span>
+                          <span class="tool-args-preview">{verbGroupSummary(vg)}</span>
+                        </div>
+                      </div>
+                      {#if isGroupExpanded}
+                        <div transition:slide={{ duration: 150 }}>
+                          {#each vg.items as item}
+                            {@const isExpanded = expandedTools.has(item.pair.call.id)}
+                            <div class="tool-card tool-card-nested">
+                              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                              <div
+                                class="tool-header"
+                                class:tool-header-expandable={!!item.pair.result}
+                                onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
+                              >
+                                <span
+                                  class="tool-caret"
+                                  class:tool-caret-expanded={isExpanded}
+                                  class:tool-caret-hidden={!item.pair.result}>›</span
+                                >
+                                <span class="tool-name">{item.verb}</span>
+                                {#if item.detail}
+                                  <span class="tool-args-preview">{item.detail}</span>
+                                {/if}
+                              </div>
+                              {#if isExpanded && item.pair.result}
+                                {@const resultContent = stripCodeFences(item.pair.result.content)}
+                                <div class="tool-code-block" transition:slide={{ duration: 150 }}>
+                                  {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
+                                    <div class="tool-code-command">$ {item.detail}</div>
+                                  {/if}
+                                  {#if resultContent}
+                                    <pre class="tool-code-output">{resultContent}</pre>
+                                  {/if}
+                                  <div class="tool-code-status">
+                                    <Check size={11} /> Success
+                                  </div>
+                                </div>
+                              {/if}
+                            </div>
+                          {/each}
                         </div>
                       {/if}
-                    </div>
-                  {:else}
-                    {@const groupKey = `${vg.items[0].pair.call.id}-${vg.verb}`}
-                    {@const isGroupExpanded = expandedVerbGroups.has(groupKey)}
-                    <div class="tool-card">
-                      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                      <div
-                        class="tool-header tool-header-expandable"
-                        onclick={() => toggleVerbGroup(groupKey)}
-                      >
-                        <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}>›</span
-                        >
-                        <span class="tool-name">{vg.verb}</span>
-                        <span class="tool-args-preview">{verbGroupSummary(vg)}</span>
-                      </div>
-                    </div>
-                    {#if isGroupExpanded}
-                      {#each vg.items as item}
-                        {@const isExpanded = expandedTools.has(item.pair.call.id)}
-                        <div class="tool-card tool-card-nested">
-                          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                          <div
-                            class="tool-header"
-                            class:tool-header-expandable={!!item.pair.result}
-                            onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
-                          >
-                            <span
-                              class="tool-caret"
-                              class:tool-caret-expanded={isExpanded}
-                              class:tool-caret-hidden={!item.pair.result}>›</span
-                            >
-                            <span class="tool-name">{item.verb}</span>
-                            {#if item.detail}
-                              <span class="tool-args-preview">{item.detail}</span>
-                            {/if}
-                          </div>
-                          {#if isExpanded && item.pair.result}
-                            {@const resultContent = stripCodeFences(item.pair.result.content)}
-                            <div class="tool-code-block" transition:slide={{ duration: 150 }}>
-                              {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
-                                <div class="tool-code-command">$ {item.detail}</div>
-                              {/if}
-                              {#if resultContent}
-                                <pre class="tool-code-output">{resultContent}</pre>
-                              {/if}
-                              <div class="tool-code-status">
-                                <Check size={11} /> Success
-                              </div>
-                            </div>
-                          {/if}
-                        </div>
-                      {/each}
                     {/if}
-                  {/if}
-                {/each}
-              </div>
-            {/if}
+                  {/each}
+                </div>
+              {/if}
+            </div>
           {/each}
 
           {#if isLive}
-            <div class="thinking">
+            <div class="thinking" in:messageSlide>
               <Spinner size={14} />
               <span>Thinking…</span>
             </div>
@@ -1602,7 +1625,6 @@
     display: inline-block;
     flex-shrink: 0;
     width: 8px;
-    margin-left: -8px;
     font-size: var(--size-xs);
     color: var(--text-faint);
     transition: transform 0.15s ease;

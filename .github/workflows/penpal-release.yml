@@ -2,7 +2,7 @@ name: Penpal Release
 
 on:
   push:
-    tags: ['penpal/v*']
+    tags: ['penpal-*']
   workflow_dispatch: # manual trigger runs build only (no release or Homebrew bump)
 
 env:
@@ -22,7 +22,7 @@ jobs:
       - name: Validate tag matches Cargo.toml version
         if: github.event_name == 'push'
         run: |
-          TAG_VERSION="${GITHUB_REF#refs/tags/penpal/v}"
+          TAG_VERSION="${GITHUB_REF#refs/tags/penpal-}"
           CARGO_VERSION=$(grep '^version' apps/penpal/frontend/src-tauri/Cargo.toml | head -1 | sed 's/version = "//;s/"//')
           if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
@@ -104,7 +104,7 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          TAG="${GITHUB_REF#refs/tags/penpal/v}"
+          TAG="${GITHUB_REF#refs/tags/penpal-}"
           if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
             echo "::error::Tag version '$TAG' does not match semver format"
             exit 1
@@ -116,9 +116,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
-          TAG_NAME: penpal/v${{ steps.version.outputs.version }}
+          TAG_NAME: penpal-${{ steps.version.outputs.version }}
         run: |
-          PREV_TAG=$(git describe --tags --match 'penpal/v*' --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          PREV_TAG=$(git describe --tags --match 'penpal-*' --abbrev=0 HEAD^ 2>/dev/null || echo "")
           ARGS=(--generate-notes)
           if [ -n "$PREV_TAG" ]; then
             ARGS+=(--notes-start-tag "$PREV_TAG")
@@ -154,11 +154,11 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           SHA256: ${{ steps.hash.outputs.sha256 }}
         run: |
-          BASE_URL="https://github.com/block/builderbot/releases/download/penpal/v${VERSION}"
+          BASE_URL="https://github.com/block/builderbot/releases/download/penpal-${VERSION}"
           gh workflow run bump-cask.yaml \
             -R block/homebrew-tap \
             -f repo=block/builderbot \
             -f cask=penpal \
-            -f tag="penpal/v${VERSION}" \
+            -f tag="penpal-${VERSION}" \
             -f url="${BASE_URL}/Penpal-${VERSION}-arm64.zip" \
             -f sha256="${SHA256}"

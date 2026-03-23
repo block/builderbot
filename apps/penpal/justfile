@@ -132,7 +132,7 @@ changelog version:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    LAST_TAG=$(git describe --tags --match "penpal/v*" --abbrev=0 2>/dev/null || echo "")
+    LAST_TAG=$(git describe --tags --match "penpal-*" --abbrev=0 2>/dev/null || echo "")
     if [ -n "$LAST_TAG" ]; then
         COMMITS=$(git log --oneline "$LAST_TAG"..HEAD -- .)
     else
@@ -195,7 +195,7 @@ release sha:
     set -euo pipefail
 
     version=$(grep '^version' frontend/src-tauri/Cargo.toml | head -1 | sed 's/version = "//;s/"//')
-    tag="penpal/v${version}"
+    tag="penpal-${version}"
 
     if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
         echo "Error: tag '${tag}' already exists on the remote." >&2
@@ -205,8 +205,6 @@ release sha:
     git tag "$tag" "{{sha}}"
     git push origin "$tag"
     echo "Pushed tag ${tag} — CI will build and publish the release."
-
-    echo "Pushed tag penpal/v{{version}} — CI will build and publish the release."
 
 # ============================================================================
 # Other

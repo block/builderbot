@@ -921,7 +921,7 @@
     width: 100%;
     max-width: 900px;
     margin: 0 auto;
-    padding: 42px 24px 24px;
+    padding: 0 24px 24px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;

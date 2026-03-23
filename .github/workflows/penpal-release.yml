@@ -157,6 +157,7 @@ jobs:
           BASE_URL="https://github.com/block/builderbot/releases/download/penpal/v${VERSION}"
           gh workflow run bump-cask.yaml \
             -R block/homebrew-tap \
+            -f repo=block/builderbot \
             -f cask=penpal \
             -f tag="penpal/v${VERSION}" \
             -f url="${BASE_URL}/Penpal-${VERSION}-arm64.zip" \

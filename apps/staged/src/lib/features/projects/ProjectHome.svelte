@@ -28,6 +28,7 @@
   import { alerts } from '../../shared/alerts.svelte';
   import { setHasProjects } from './projectsSidebarState.svelte';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
+  import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -83,6 +84,7 @@
       isProjectDeleting: (projectId) => deletingProjectNames.has(projectId),
     });
     checkStoreAndLoad();
+    void projectRunActionsStore.startListening();
 
     const onNewProject = () => handleNewProject();
     window.addEventListener('staged:new-project', onNewProject);
@@ -170,6 +172,7 @@
       unlistenProjectRepoAdded?.();
       unlistenPrStatus?.();
       workspaceLifecycle.stop();
+      projectRunActionsStore.stopListening();
     };
   });
 
@@ -250,6 +253,21 @@
           }
         })
       );
+
+      // Update the run-actions store with branchId → projectId mapping and hydrate
+      const branchProjectMap = new Map<string, string[]>();
+      const allBranchIds: string[] = [];
+      for (const [projectId, branches] of branchesByProject) {
+        branchProjectMap.set(
+          projectId,
+          branches.map((b) => b.id)
+        );
+        for (const b of branches) {
+          allBranchIds.push(b.id);
+        }
+      }
+      projectRunActionsStore.updateBranchProjectMap(branchProjectMap);
+      void projectRunActionsStore.hydrateFromBranches(allBranchIds);
 
       try {
         const contexts = await commands.listActionContexts();

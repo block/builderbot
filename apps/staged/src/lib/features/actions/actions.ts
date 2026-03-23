@@ -266,7 +266,9 @@ export function updateRunDetectionMode(actionId: string, mode: RunDetectionMode)
  * Returns an unlisten function to stop listening.
  */
 export function listenToRunPhaseChanged(
-  callback: (event: { payload: RunPhaseChangedEvent }) => void
+  callback: (event: RunPhaseChangedEvent) => void
 ): Promise<UnlistenFn> {
-  return listen<RunPhaseChangedEvent>('action:run-phase-changed', callback);
+  return listen<RunPhaseChangedEvent>('action:run-phase-changed', (event) => {
+    callback(event.payload);
+  });
 }

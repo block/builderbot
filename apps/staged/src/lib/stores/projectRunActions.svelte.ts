@@ -57,19 +57,17 @@ class ProjectRunActionsStore {
       }
     });
 
-    const unlistenPhase = await listenToRunPhaseChanged(
-      (event: { payload: RunPhaseChangedEvent }) => {
-        const { executionId, branchId, phase } = event.payload;
-        const existing = this.executions.get(executionId);
-        if (existing) {
-          existing.phase = phase;
-          this.version++;
-        } else {
-          // Might arrive before the status event — add it
-          this.addExecution(executionId, branchId, phase);
-        }
+    const unlistenPhase = await listenToRunPhaseChanged((event: RunPhaseChangedEvent) => {
+      const { executionId, branchId, phase } = event;
+      const existing = this.executions.get(executionId);
+      if (existing) {
+        existing.phase = phase;
+        this.version++;
+      } else {
+        // Might arrive before the status event — add it
+        this.addExecution(executionId, branchId, phase);
       }
-    );
+    });
 
     this.unlisteners.push(unlistenStatus, unlistenPhase);
   }

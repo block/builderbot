@@ -131,8 +131,9 @@ class ProjectRunActionsStore {
 
   /**
    * Get the aggregated run-action phase for a project.
-   * Returns 'running' if any action is in running phase,
-   * 'building' if any is building, null otherwise.
+   * Returns 'running' if any action is past the building phase
+   * (running, autodetectPending, noDetection — all shown as the wave
+   * animation), 'building' if any is still building, null otherwise.
    */
   getRunActionPhase(projectId: string): RunActionPhase {
     // Access version for reactivity
@@ -143,8 +144,13 @@ class ProjectRunActionsStore {
       const execProjectId = this.branchToProject.get(exec.branchId);
       if (execProjectId !== projectId) continue;
 
-      if (exec.phase.type === 'running') return 'running';
-      if (exec.phase.type === 'building') hasBuilding = true;
+      if (exec.phase.type === 'building') {
+        hasBuilding = true;
+      } else {
+        // Any non-building phase (running, autodetectPending, noDetection)
+        // means the app is up or detection is pending — show wave animation
+        return 'running';
+      }
     }
 
     return hasBuilding ? 'building' : null;

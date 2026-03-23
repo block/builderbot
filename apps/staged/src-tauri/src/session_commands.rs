@@ -1757,7 +1757,7 @@ fn review_timeline_entries(
             continue;
         }
         let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];
-        let is_old = max_commit_ts.map_or(false, |ts| review.created_at < ts);
+        let is_old = max_commit_ts.is_some_and(|ts| review.created_at < ts);
 
         let heading_title = match review.title.as_deref() {
             Some(title) => format!(

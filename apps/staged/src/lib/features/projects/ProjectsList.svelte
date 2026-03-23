@@ -150,20 +150,7 @@
       );
       projectBranches = branchesMap;
 
-      // Update the run-actions store with branchId → projectId mapping and hydrate
-      const branchProjectMap = new Map<string, string[]>();
-      const allBranchIds: string[] = [];
-      for (const [projectId, branches] of branchesMap) {
-        branchProjectMap.set(
-          projectId,
-          branches.map((b) => b.id)
-        );
-        for (const b of branches) {
-          allBranchIds.push(b.id);
-        }
-      }
-      projectRunActionsStore.updateBranchProjectMap(branchProjectMap);
-      void projectRunActionsStore.hydrateFromBranches(allBranchIds);
+      void projectRunActionsStore.hydrateFromProjectBranches(branchesMap);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -745,6 +732,10 @@
   }
 
   .status-indicator.spinner {
+    color: var(--ui-accent);
+  }
+
+  .status-indicator.wave {
     color: var(--ui-accent);
   }
 

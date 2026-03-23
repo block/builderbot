@@ -254,20 +254,7 @@
         })
       );
 
-      // Update the run-actions store with branchId → projectId mapping and hydrate
-      const branchProjectMap = new Map<string, string[]>();
-      const allBranchIds: string[] = [];
-      for (const [projectId, branches] of branchesByProject) {
-        branchProjectMap.set(
-          projectId,
-          branches.map((b) => b.id)
-        );
-        for (const b of branches) {
-          allBranchIds.push(b.id);
-        }
-      }
-      projectRunActionsStore.updateBranchProjectMap(branchProjectMap);
-      void projectRunActionsStore.hydrateFromBranches(allBranchIds);
+      void projectRunActionsStore.hydrateFromProjectBranches(branchesByProject);
 
       try {
         const contexts = await commands.listActionContexts();

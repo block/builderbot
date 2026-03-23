@@ -8,6 +8,7 @@
  */
 
 import type { UnlistenFn } from '@tauri-apps/api/event';
+import type { Branch } from '../types';
 import {
   type ActionStatusEvent,
   type RunPhase,
@@ -40,7 +41,7 @@ class ProjectRunActionsStore {
 
   /**
    * Start listening to global Tauri events.
-   * Call once when ProjectsList mounts.
+   * Called when ProjectsList or ProjectHome mounts.
    */
   async startListening(): Promise<void> {
     if (this.initialized) return;
@@ -59,14 +60,9 @@ class ProjectRunActionsStore {
 
     const unlistenPhase = await listenToRunPhaseChanged((event: RunPhaseChangedEvent) => {
       const { executionId, branchId, phase } = event;
-      const existing = this.executions.get(executionId);
-      if (existing) {
-        existing.phase = phase;
-        this.version++;
-      } else {
-        // Might arrive before the status event — add it
-        this.addExecution(executionId, branchId, phase);
-      }
+      // Always use addExecution to replace the map entry and bump version
+      // consistently — avoids relying on direct mutation of $state internals.
+      this.addExecution(executionId, branchId, phase);
     });
 
     this.unlisteners.push(unlistenStatus, unlistenPhase);
@@ -101,9 +97,30 @@ class ProjectRunActionsStore {
   }
 
   /**
+   * Update the branch→project map and hydrate run-action state from a
+   * project→branches map. Convenience wrapper used by both ProjectsList
+   * and ProjectHome after loading branch data.
+   */
+  async hydrateFromProjectBranches(branchesByProject: Map<string, Branch[]>): Promise<void> {
+    const branchProjectMap = new Map<string, string[]>();
+    const allBranchIds: string[] = [];
+    for (const [projectId, branches] of branchesByProject) {
+      branchProjectMap.set(
+        projectId,
+        branches.map((b) => b.id)
+      );
+      for (const b of branches) {
+        allBranchIds.push(b.id);
+      }
+    }
+    this.updateBranchProjectMap(branchProjectMap);
+    await this.hydrateFromBranches(allBranchIds);
+  }
+
+  /**
    * Hydrate initial state by querying running actions for all known branches.
    */
-  async hydrateFromBranches(branchIds: string[]): Promise<void> {
+  private async hydrateFromBranches(branchIds: string[]): Promise<void> {
     const results = await Promise.allSettled(
       branchIds.map(async (branchId) => {
         const actions = await getRunningBranchActions(branchId);
@@ -111,21 +128,33 @@ class ProjectRunActionsStore {
       })
     );
 
+    // Collect all run actions, then fetch their phases in parallel
+    const runActions: { executionId: string; branchId: string }[] = [];
     for (const result of results) {
       if (result.status !== 'fulfilled') continue;
-      const { actions } = result.value;
-      for (const action of actions) {
+      for (const action of result.value.actions) {
         if (action.actionType !== 'run') continue;
-        // Get the current phase for this execution
+        runActions.push({ executionId: action.executionId, branchId: action.branchId });
+      }
+    }
+
+    const phaseResults = await Promise.allSettled(
+      runActions.map(async ({ executionId, branchId }) => {
         let phase: RunPhase = { type: 'building' };
         try {
-          const currentPhase = await getRunPhase(action.executionId);
+          const currentPhase = await getRunPhase(executionId);
           if (currentPhase) phase = currentPhase;
         } catch {
           // Use default building phase
         }
-        this.addExecution(action.executionId, action.branchId, phase);
-      }
+        return { executionId, branchId, phase };
+      })
+    );
+
+    for (const result of phaseResults) {
+      if (result.status !== 'fulfilled') continue;
+      const { executionId, branchId, phase } = result.value;
+      this.addExecution(executionId, branchId, phase);
     }
   }
 

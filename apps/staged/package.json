@@ -16,7 +16,7 @@
     "release:dmg:publish": "node scripts/publish-dmg-to-github-release.mjs"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@tauri-apps/cli": "^2.10.0",
     "@tsconfig/svelte": "^5.0.6",
     "@types/node": "^24.10.1",

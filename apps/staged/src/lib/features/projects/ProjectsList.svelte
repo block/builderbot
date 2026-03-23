@@ -439,7 +439,7 @@
                     in:fade={{ duration: 300, delay: 150 }}
                     out:fade={{ duration: 150 }}
                   >
-                    <SineWave size={14} color="var(--ui-accent)" />
+                    <SineWave size={14} />
                     <Spinner size={14} />
                   </div>
                 {:else if status.runActionPhase === 'running'}
@@ -448,7 +448,7 @@
                     in:fade={{ duration: 300, delay: 150 }}
                     out:fade={{ duration: 150 }}
                   >
-                    <SineWave size={14} color="var(--ui-accent)" />
+                    <SineWave size={14} />
                   </div>
                 {:else if status.kind === 'runAction' || status.kind === 'running'}
                   <div

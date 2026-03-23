@@ -145,6 +145,14 @@ jobs:
             "${ARGS[@]}" \
             artifacts/*.zip
 
+      # Compute SHA256 for each artifact (same pattern as anchorsmd)
+      - name: Compute artifact hashes
+        id: hashes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "arm64_sha256=$(shasum -a 256 artifacts/Penpal-${VERSION}-arm64.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "intel_sha256=$(shasum -a 256 artifacts/Penpal-${VERSION}-x86_64.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
       # Generate a token scoped to block/homebrew-tap so we can trigger
       # a cross-repo workflow_dispatch (GITHUB_TOKEN is repo-scoped).
       - name: Generate token for tap release
@@ -168,4 +176,6 @@ jobs:
             -f cask=penpal \
             -f tag="penpal/v${VERSION}" \
             -f arm64_url="${BASE_URL}/Penpal-${VERSION}-arm64.zip" \
-            -f intel_url="${BASE_URL}/Penpal-${VERSION}-x86_64.zip"
+            -f arm64_sha256="${{ steps.hashes.outputs.arm64_sha256 }}" \
+            -f intel_url="${BASE_URL}/Penpal-${VERSION}-x86_64.zip" \
+            -f intel_sha256="${{ steps.hashes.outputs.intel_sha256 }}"

@@ -160,5 +160,5 @@ jobs:
             -f repo=block/builderbot \
             -f cask=penpal \
             -f tag="penpal-${VERSION}" \
-            -f url="${BASE_URL}/Penpal-${VERSION}-arm64.zip" \
+            -f artifact_url="${BASE_URL}/Penpal-${VERSION}-arm64.zip" \
             -f sha256="${SHA256}"

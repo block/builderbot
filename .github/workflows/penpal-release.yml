@@ -145,12 +145,21 @@ jobs:
             "${ARGS[@]}" \
             artifacts/*.zip
 
+      # Generate a token scoped to block/homebrew-tap so we can trigger
+      # a cross-repo workflow_dispatch (GITHUB_TOKEN is repo-scoped).
+      - name: Generate token for tap release
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BLOCK_HOMEBREW_TAP_APP_ID }}
+          private-key: ${{ secrets.BLOCK_HOMEBREW_TAP_PRIVATE_KEY }}
+          owner: block
+          repositories: homebrew-tap
+
       # Trigger cask bump on block/homebrew-tap.
-      # Uses GITHUB_TOKEN with actions:write — block org allows cross-repo
-      # workflow_dispatch (same pattern as block/qrgo → block/homebrew-tap).
       - name: Trigger Homebrew cask bump
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           BASE_URL="https://github.com/block/builderbot/releases/download/penpal/v${VERSION}"

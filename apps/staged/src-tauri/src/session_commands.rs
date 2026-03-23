@@ -1040,8 +1040,14 @@ pub(crate) fn build_branch_context(
     }
 
     // Notes and reviews from DB
+    let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
     timeline.extend(note_timeline_entries(store, branch_id, None));
-    timeline.extend(review_timeline_entries(store, branch_id));
+    timeline.extend(review_timeline_entries(
+        store,
+        branch_id,
+        None,
+        max_commit_ts,
+    ));
     timeline.extend(image_timeline_entries(store, branch_id));
 
     // Project-level notes
@@ -1097,12 +1103,18 @@ pub(crate) fn build_remote_branch_context(
     }
 
     // Notes written to temp files inside the remote workspace via ws_exec
+    let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
     timeline.extend(note_timeline_entries(
         store,
         branch_id,
         Some(workspace_name),
     ));
-    timeline.extend(review_timeline_entries(store, branch_id));
+    timeline.extend(review_timeline_entries(
+        store,
+        branch_id,
+        Some(workspace_name),
+        max_commit_ts,
+    ));
     timeline.extend(image_timeline_entries(store, branch_id));
 
     // Project-level notes
@@ -1386,8 +1398,14 @@ fn build_branch_timeline_summary(
 
     // Notes are written to temp files in the matching execution environment:
     // remote workspace when available, otherwise local temp files.
+    let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
     timeline.extend(note_timeline_entries(store, &branch.id, workspace_name));
-    timeline.extend(review_timeline_entries(store, &branch.id));
+    timeline.extend(review_timeline_entries(
+        store,
+        &branch.id,
+        workspace_name,
+        max_commit_ts,
+    ));
     timeline.extend(image_timeline_entries(store, &branch.id));
 
     if timeline.is_empty() {
@@ -1415,7 +1433,7 @@ fn build_branch_timeline_summary(
 // Chronological timeline helpers
 // =============================================================================
 
-/// A single entry in the branch timeline, sorted by timestamp.
+/// A single entry in the branch timeline, sorted by timestamp (Unix seconds).
 struct TimelineEntry {
     timestamp: i64,
     content: String,
@@ -1478,10 +1496,11 @@ fn write_note_to_remote(
     workspace_name: &str,
     note_id: &str,
     content: &str,
+    prefix: &str,
 ) -> Result<String, String> {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(content);
-    let remote_path = format!("/tmp/staged-note-{note_id}.md");
+    let remote_path = format!("/tmp/{prefix}-{note_id}.md");
 
     // For very large notes, chunk the base64 to stay under ARG_MAX (~1MB on macOS).
     // Each chunk is ~500KB of base64 (~375KB decoded), well within limits.
@@ -1536,21 +1555,37 @@ fn format_note_with_heading(
     workspace_name: Option<&str>,
     heading: &str,
 ) -> String {
+    write_content_to_temp_file(id, content, workspace_name, "staged-note", |path| {
+        format!("### {heading}: {title}\n\nSee: `{path}`")
+    })
+    .unwrap_or_else(|| format!("### {heading}: {title}\n\n{content}"))
+}
+
+/// Write content to a temp file (local or remote) and return formatted output via `fmt_ok`.
+///
+/// Returns `None` if the write fails (caller should fall back to inlining).
+fn write_content_to_temp_file(
+    id: &str,
+    content: &str,
+    workspace_name: Option<&str>,
+    prefix: &str,
+    fmt_ok: impl FnOnce(&str) -> String,
+) -> Option<String> {
     if let Some(ws_name) = workspace_name {
-        match write_note_to_remote(ws_name, id, content) {
-            Ok(remote_path) => format!("### {heading}: {title}\n\nSee: `{remote_path}`"),
+        match write_note_to_remote(ws_name, id, content, prefix) {
+            Ok(remote_path) => Some(fmt_ok(&remote_path)),
             Err(e) => {
-                log::warn!("Failed to write note to remote workspace, inlining: {e}");
-                format!("### {heading}: {title}\n\n{content}")
+                log::warn!("Failed to write to remote workspace, inlining: {e}");
+                None
             }
         }
     } else {
-        let note_path = std::env::temp_dir().join(format!("staged-note-{id}.md"));
-        match std::fs::write(&note_path, content) {
-            Ok(()) => format!("### {heading}: {title}\n\nSee: `{}`", note_path.display()),
+        let path = std::env::temp_dir().join(format!("{prefix}-{id}.md"));
+        match std::fs::write(&path, content) {
+            Ok(()) => Some(fmt_ok(&path.display().to_string())),
             Err(e) => {
-                log::warn!("Failed to write note to temp file, inlining: {e}");
-                format!("### {heading}: {title}\n\n{content}")
+                log::warn!("Failed to write to temp file, inlining: {e}");
+                None
             }
         }
     }
@@ -1602,7 +1637,7 @@ fn note_timeline_entries(
             format_note_for_context(&note.id, &note.title, &note.content, workspace_name)
         {
             entries.push(TimelineEntry {
-                timestamp: note.created_at,
+                timestamp: note.created_at / 1000,
                 content,
             });
         }
@@ -1644,15 +1679,70 @@ fn project_note_timeline_entries(
         let content =
             format_project_note_for_context(&note.id, &note.title, &note.content, workspace_name);
         entries.push(TimelineEntry {
-            timestamp: note.created_at,
+            timestamp: note.created_at / 1000,
             content,
         });
     }
     entries
 }
 
+/// Build the inline comment content for a review (used both for inlining and temp files).
+fn format_review_comments(review: &crate::store::models::Review) -> String {
+    let mut content = String::new();
+
+    // Group comments by file path
+    let mut by_path: std::collections::BTreeMap<&str, Vec<&crate::store::models::Comment>> =
+        std::collections::BTreeMap::new();
+    for comment in &review.comments {
+        by_path.entry(&comment.path).or_default().push(comment);
+    }
+
+    for (path, comments) in &by_path {
+        for comment in comments {
+            if comment.span.start == comment.span.end {
+                content.push_str(&format!(
+                    "\n- **{}** (line {}): {}",
+                    path, comment.span.start, comment.content,
+                ));
+            } else {
+                content.push_str(&format!(
+                    "\n- **{}** (lines {}–{}): {}",
+                    path, comment.span.start, comment.span.end, comment.content,
+                ));
+            }
+        }
+    }
+
+    content
+}
+
+/// Count (total_comments, issues) for a review's comments.
+fn review_summary_counts(review: &crate::store::models::Review) -> (usize, usize) {
+    let total = review.comments.len();
+    let issues = review
+        .comments
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.comment_type,
+                Some(crate::store::models::CommentType::Issue)
+            )
+        })
+        .count();
+    (total, issues)
+}
+
 /// Convert code reviews (with comments) from the DB into timeline entries.
-fn review_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEntry> {
+///
+/// When `max_commit_ts` is `Some` and a review predates the latest commit,
+/// its comments are written to a temp file (like notes) and only a summary
+/// line is included in the timeline. Recent reviews are inlined as before.
+fn review_timeline_entries(
+    store: &Arc<Store>,
+    branch_id: &str,
+    workspace_name: Option<&str>,
+    max_commit_ts: Option<i64>,
+) -> Vec<TimelineEntry> {
     let reviews = match store.list_reviews_for_branch(branch_id) {
         Ok(r) => r,
         Err(e) => {
@@ -1667,46 +1757,39 @@ fn review_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineE
             continue;
         }
         let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];
-        let heading = match review.title.as_deref() {
-            Some(title) => format!(
-                "### {} — {} ({} scope)\n",
-                title,
-                short_sha,
-                review.scope.as_str(),
-            ),
-            None => format!(
-                "### Code Review of {} ({} scope)\n",
-                short_sha,
-                review.scope.as_str(),
-            ),
+        let review_ts_secs = review.created_at / 1000;
+        let is_old = max_commit_ts.is_some_and(|ts| review_ts_secs < ts);
+
+        let heading_title = match review.title.as_deref() {
+            Some(title) => format!("Code review: {} — {}", title, short_sha),
+            None => format!("Code review: {}", short_sha),
         };
-        let mut content = heading;
 
-        // Group comments by file path
-        let mut by_path: std::collections::BTreeMap<&str, Vec<&crate::store::models::Comment>> =
-            std::collections::BTreeMap::new();
-        for comment in &review.comments {
-            by_path.entry(&comment.path).or_default().push(comment);
-        }
+        let content = if is_old {
+            let (total, issues) = review_summary_counts(review);
+            let comment_detail = format_review_comments(review);
+            let full_content = format!("### {heading_title}\n{comment_detail}");
 
-        for (path, comments) in &by_path {
-            for comment in comments {
-                if comment.span.start == comment.span.end {
-                    content.push_str(&format!(
-                        "\n- **{}** (line {}): {}",
-                        path, comment.span.start, comment.content,
-                    ));
-                } else {
-                    content.push_str(&format!(
-                        "\n- **{}** (lines {}–{}): {}",
-                        path, comment.span.start, comment.span.end, comment.content,
-                    ));
-                }
-            }
-        }
+            let summary_suffix = format!("{total} comments, {issues} issues");
+
+            write_content_to_temp_file(
+                &review.id,
+                &full_content,
+                workspace_name,
+                "staged-review",
+                |path| format!("### {heading_title} — {summary_suffix}\n\nSee: `{path}`"),
+            )
+            .unwrap_or_else(|| {
+                // Fallback: inline if file write fails
+                format!("### {heading_title}\n{comment_detail}")
+            })
+        } else {
+            let comment_detail = format_review_comments(review);
+            format!("### {heading_title}\n{comment_detail}")
+        };
 
         entries.push(TimelineEntry {
-            timestamp: review.created_at,
+            timestamp: review_ts_secs,
             content,
         });
     }
@@ -1737,7 +1820,7 @@ fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEn
                 format!("{} B", img.size_bytes)
             };
             TimelineEntry {
-                timestamp: img.created_at,
+                timestamp: img.created_at / 1000,
                 content: format!(
                     "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
                     img.filename, img.mime_type, size_label

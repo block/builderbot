@@ -195,7 +195,7 @@
         type = 'failed-commit';
         secondaryMeta = 'Session finished — no commit created';
       } else if (isQueued) {
-        type = 'pending-commit';
+        type = 'queued-commit';
         secondaryMeta = 'Queued';
       } else if (isPending || isRunning) {
         type = 'pending-commit';
@@ -234,7 +234,7 @@
         type = 'failed-note';
         secondaryMeta = 'Session finished — no note created';
       } else if (isQueued) {
-        type = 'generating-note';
+        type = 'queued-note';
         secondaryMeta = 'Queued';
       } else if (isRunning) {
         type = 'generating-note';
@@ -290,7 +290,7 @@
         type = 'failed-review';
         meta = 'Session finished — no comments created';
       } else if (isQueued) {
-        type = 'generating-review';
+        type = 'queued-review';
         meta = 'Queued';
       } else if (isRunning) {
         type = 'generating-review';

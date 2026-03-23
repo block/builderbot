@@ -13,18 +13,22 @@
     MessageSquare,
     Trash2,
     AlertTriangle,
+    Clock,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
 
   export type TimelineItemType =
     | 'commit'
     | 'pending-commit'
+    | 'queued-commit'
     | 'failed-commit'
     | 'note'
     | 'generating-note'
+    | 'queued-note'
     | 'failed-note'
     | 'review'
     | 'generating-review'
+    | 'queued-review'
     | 'failed-review'
     | 'image'
     | 'revalidating';
@@ -65,13 +69,25 @@
     deleteDisabledReason,
   }: Props = $props();
 
-  let isNote = $derived(type === 'note' || type === 'generating-note' || type === 'failed-note');
+  let isNote = $derived(
+    type === 'note' ||
+      type === 'generating-note' ||
+      type === 'queued-note' ||
+      type === 'failed-note'
+  );
   let isReview = $derived(
-    type === 'review' || type === 'generating-review' || type === 'failed-review'
+    type === 'review' ||
+      type === 'generating-review' ||
+      type === 'queued-review' ||
+      type === 'failed-review'
   );
   let isImage = $derived(type === 'image');
+  let isQueued = $derived(
+    type === 'queued-commit' || type === 'queued-note' || type === 'queued-review'
+  );
   let isPending = $derived(
     deleting ||
+      isQueued ||
       type === 'pending-commit' ||
       type === 'generating-note' ||
       type === 'generating-review' ||
@@ -115,13 +131,17 @@
   <div class="timeline-marker">
     <div
       class="timeline-icon"
-      class:commit-icon={type === 'commit' || type === 'pending-commit'}
-      class:note-icon={type === 'note' || type === 'generating-note'}
-      class:review-icon={type === 'review' || type === 'generating-review'}
+      class:commit-icon={type === 'commit' || type === 'pending-commit' || type === 'queued-commit'}
+      class:note-icon={type === 'note' || type === 'generating-note' || type === 'queued-note'}
+      class:review-icon={type === 'review' ||
+        type === 'generating-review' ||
+        type === 'queued-review'}
       class:image-icon={isImage}
       class:failed-icon={isFailed}
     >
-      {#if isPending}
+      {#if isQueued}
+        <Clock size={12} />
+      {:else if isPending}
         <Spinner size={12} />
       {:else if isFailed}
         <AlertTriangle size={12} />

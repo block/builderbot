@@ -60,10 +60,10 @@ penpal open thoughts/shared/plans/my-doc.md   # Open file in Penpal desktop app
 ```bash
 just prepare 0.2.0            # Bump version, generate changelog, open draft PR
 # Review and merge the PR on GitHub
-just release 0.2.0 abc123f    # Tag the merge commit and push → CI builds and publishes
+just release abc123f           # Tag the merge commit and push → CI builds and publishes
 ```
 
-`just prepare` creates a release branch, updates the version in `Cargo.toml` and `package.json`, generates a changelog entry using Claude, and opens a draft PR. After the PR is merged, `just release` tags the given commit and pushes it to trigger the CI release pipeline.
+`just prepare` creates a release branch, updates the version in `Cargo.toml` and `package.json`, generates a changelog entry using Claude, and opens a draft PR. After the PR is merged, `just release` reads the version from `Cargo.toml`, verifies the tag doesn't already exist, tags the given commit, and pushes it to trigger the CI release pipeline.
 
 ```mermaid
 flowchart TB
@@ -74,7 +74,7 @@ flowchart TB
 
     prepare --> E[Merge PR on GitHub]
 
-    subgraph release ["just release VERSION SHA"]
+    subgraph release ["just release SHA"]
         direction LR
         F[Create tag] --> G[Push tag]
     end

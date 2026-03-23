@@ -183,16 +183,28 @@ prepare version:
     gh pr create \
         --draft \
         --title "release: penpal v{{version}}" \
-        --body "Release penpal v{{version}}. Merge this PR, then run \`just release {{version}} <merge-sha>\` to tag and publish." \
+        --body "Release penpal v{{version}}. Merge this PR, then run \`just release <merge-sha>\` to tag and publish." \
         --base main
 
     echo ""
-    echo "Release PR created. Once merged, run 'just release {{version}} <merge-sha>' to tag and publish."
+    echo "Release PR created. Once merged, run 'just release <merge-sha>' to tag and publish."
 
 # Tag a commit and push to trigger the release build
-release version sha:
-    git tag "penpal/v{{version}}" "{{sha}}"
-    git push origin "penpal/v{{version}}"
+release sha:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    version=$(grep '^version' frontend/src-tauri/Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+    tag="penpal/v${version}"
+
+    if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
+        echo "Error: tag '${tag}' already exists on the remote." >&2
+        exit 1
+    fi
+
+    git tag "$tag" "{{sha}}"
+    git push origin "$tag"
+    echo "Pushed tag ${tag} — CI will build and publish the release."
 
     echo "Pushed tag penpal/v{{version}} — CI will build and publish the release."
 

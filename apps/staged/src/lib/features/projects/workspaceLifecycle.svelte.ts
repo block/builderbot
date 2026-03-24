@@ -175,7 +175,7 @@ class WorkspaceLifecycleController {
       : null;
   }
 
-  private collectHiddenStartingRemoteBranches(): Array<{ projectId: string; branchId: string }> {
+  private collectHiddenPollableRemoteBranches(): Array<{ projectId: string; branchId: string }> {
     const hooks = this.hooks;
     if (!hooks) return [];
 
@@ -185,7 +185,10 @@ class WorkspaceLifecycleController {
     for (const [projectId, branches] of hooks.getBranchesByProject().entries()) {
       if (visibleProjectIds.has(projectId)) continue;
       for (const branch of branches) {
-        if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
+        if (
+          branch.branchType === 'remote' &&
+          (branch.workspaceStatus === 'starting' || branch.workspaceStatus === 'running')
+        ) {
           branchTargets.push({ projectId, branchId: branch.id });
         }
       }
@@ -197,7 +200,7 @@ class WorkspaceLifecycleController {
   private async pollHiddenWorkspaceStatuses(): Promise<void> {
     if (this.workspaceStatusBackgroundPollInFlight) return;
 
-    const targets = this.collectHiddenStartingRemoteBranches();
+    const targets = this.collectHiddenPollableRemoteBranches();
     if (targets.length === 0) return;
 
     this.workspaceStatusBackgroundPollInFlight = true;

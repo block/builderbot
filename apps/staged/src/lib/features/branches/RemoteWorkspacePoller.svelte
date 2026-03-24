@@ -21,6 +21,7 @@
   let pollStartedAt: number | null = null;
   let pollInFlight = false;
   const POLL_MS = 3000;
+  const RUNNING_POLL_MS = 30_000;
   const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
   function toWorkspaceStatus(value: string): WorkspaceStatus | null {
@@ -45,7 +46,7 @@
   async function pollOnce() {
     if (pollInFlight) return;
 
-    if (pollStartedAt && Date.now() - pollStartedAt > POLL_TIMEOUT_MS) {
+    if (status === 'starting' && pollStartedAt && Date.now() - pollStartedAt > POLL_TIMEOUT_MS) {
       setStatus('error', 'poll');
       stopPolling();
       return;
@@ -58,30 +59,38 @@
       console.debug(`[RemoteWorkspacePoller] branch=${branchId} poll result=${result.status}`);
       if (!next) return;
       setStatus(next, 'poll', result.workstationId);
-      if (next !== 'starting') {
+      if (next !== 'starting' && next !== 'running') {
         stopPolling();
+      } else if (next === 'running' && pollTimer) {
+        // Switch from fast starting interval to slower running interval
+        clearInterval(pollTimer);
+        pollTimer = setInterval(() => {
+          void pollOnce();
+        }, RUNNING_POLL_MS);
       }
     } catch (e) {
-      // Keep polling while still provisioning.
-      if (status !== 'starting') {
+      // Keep polling while still provisioning or running.
+      if (status !== 'starting' && status !== 'running') {
         setStatus('error', 'poll');
         stopPolling();
       } else {
-        console.debug(`[RemoteWorkspacePoller] branch=${branchId} poll failed while starting:`, e);
+        console.debug(`[RemoteWorkspacePoller] branch=${branchId} poll failed while ${status}:`, e);
       }
     } finally {
       pollInFlight = false;
     }
   }
 
-  function startPolling() {
+  function startPolling(intervalMs: number) {
     if (pollTimer) return;
     pollStartedAt = Date.now();
-    console.debug(`[RemoteWorkspacePoller] branch=${branchId} start polling`);
+    console.debug(
+      `[RemoteWorkspacePoller] branch=${branchId} start polling (interval=${intervalMs}ms)`
+    );
     void pollOnce();
     pollTimer = setInterval(() => {
       void pollOnce();
-    }, POLL_MS);
+    }, intervalMs);
   }
 
   function stopPolling() {
@@ -106,7 +115,9 @@
 
   $effect(() => {
     if (status === 'starting') {
-      startPolling();
+      startPolling(POLL_MS);
+    } else if (status === 'running') {
+      startPolling(RUNNING_POLL_MS);
     } else {
       stopPolling();
     }

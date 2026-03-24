@@ -1408,6 +1408,21 @@ pub async fn poll_workspace_status(
                     workstation_id: cached_workstation_id(ws_name),
                 });
             }
+            // If the workspace was Running but Blox no longer knows about it
+            // (e.g. deleted externally), transition to Stopped.
+            if branch.workspace_status == Some(store::WorkspaceStatus::Running) {
+                log::debug!(
+                    "blox ws info failed for '{}' while Running, treating as Stopped: {e}",
+                    ws_name
+                );
+                store
+                    .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Stopped)
+                    .ok();
+                return Ok(PollWorkspaceResult {
+                    status: store::WorkspaceStatus::Stopped.as_str().to_string(),
+                    workstation_id: cached_workstation_id(ws_name),
+                });
+            }
             return Err(e.to_string());
         }
     };

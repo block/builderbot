@@ -33,16 +33,7 @@ pub(crate) fn resolve_branch_context(
 
         // Use the repo root (clone dir only) so all paths are consistently
         // repo-root-relative — git diff pathspecs, git show tree paths, etc.
-        let repo_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
-            if let Some(repo) = store.get_project_repo(repo_id).map_err(|e| e.to_string())? {
-                let clone_dir = branches::repo_name_from_github_repo(&repo.github_repo);
-                Some(format!("home:{clone_dir}"))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let repo_subpath = branches::resolve_branch_clone_dir(store, &branch)?;
 
         return Ok(BranchDiffContext {
             base_branch: branch.base_branch,

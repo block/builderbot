@@ -403,13 +403,18 @@
     if (item.type === 'commit' && item.commitSha && onDeleteCommit) {
       onDeleteCommit(item.commitSha, item.sessionId);
     } else if (
-      (item.type === 'failed-commit' || item.type === 'pending-commit') &&
+      (item.type === 'failed-commit' ||
+        item.type === 'pending-commit' ||
+        item.type === 'queued-commit') &&
       item.commitId &&
       onDeletePendingCommit
     ) {
       onDeletePendingCommit(item.commitId, item.sessionId);
     } else if (
-      (item.type === 'note' || item.type === 'failed-note' || item.type === 'generating-note') &&
+      (item.type === 'note' ||
+        item.type === 'failed-note' ||
+        item.type === 'generating-note' ||
+        item.type === 'queued-note') &&
       item.noteId &&
       onDeleteNote
     ) {
@@ -417,7 +422,8 @@
     } else if (
       (item.type === 'review' ||
         item.type === 'failed-review' ||
-        item.type === 'generating-review') &&
+        item.type === 'generating-review' ||
+        item.type === 'queued-review') &&
       item.reviewId &&
       onDeleteReview
     ) {

@@ -348,7 +348,9 @@ pub fn cancel_session(
     if !was_running {
         let store = get_store(&store)?;
         if let Ok(Some(session)) = store.get_session(&session_id) {
-            if session.status == store::SessionStatus::Running {
+            if session.status == store::SessionStatus::Running
+                || session.status == store::SessionStatus::Queued
+            {
                 let _ =
                     store.update_session_status(&session_id, store::SessionStatus::Cancelled, None);
                 let _ = app_handle.emit(

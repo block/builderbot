@@ -71,29 +71,36 @@ fn format_command_output(cmd_desc: &str, output: &std::process::Output) -> Strin
     raw
 }
 
-/// Format the search results for a command across all strategies.
+/// Format the search results for a command, mirroring the `find_command` strategy.
+///
+/// Tries login shell `which` first, then falls back to common paths. Stops
+/// searching once a match is found, so the output reflects the real resolution.
 fn format_search_output(cmd: &str) -> String {
-    let mut lines = vec![format!("search for '{cmd}':")];
+    let mut lines = vec![format!("resolve '{cmd}':")];
 
-    // Login shell which
+    // Strategy 1: Login shell `which` (primary)
+    lines.push("  strategy 1 — login shell `which`:".to_string());
     for shell in &["/bin/zsh", "/bin/bash"] {
         let which_cmd = format!("which {cmd}");
         match Command::new(shell).args(["-l", "-c", &which_cmd]).output() {
             Ok(output) => {
                 let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if output.status.success() && !result.is_empty() {
-                    lines.push(format!("  {shell} -l -c 'which {cmd}' => {result}"));
-                } else {
-                    lines.push(format!("  {shell} -l -c 'which {cmd}' => not found"));
+                    lines.push(format!(
+                        "    {shell} -l -c 'which {cmd}' => {result} (resolved)"
+                    ));
+                    return lines.join("\n");
                 }
+                lines.push(format!("    {shell} -l -c 'which {cmd}' => not found"));
             }
             Err(e) => {
-                lines.push(format!("  {shell} -l -c 'which {cmd}' => error: {e}"));
+                lines.push(format!("    {shell} -l -c 'which {cmd}' => error: {e}"));
             }
         }
     }
 
-    // Common paths
+    // Strategy 2: Common install paths (fallback)
+    lines.push("  strategy 2 — common install paths (fallback):".to_string());
     for dir in &[
         "/opt/homebrew/bin",
         "/usr/local/bin",
@@ -101,14 +108,14 @@ fn format_search_output(cmd: &str) -> String {
         "/home/linuxbrew/.linuxbrew/bin",
     ] {
         let path = std::path::PathBuf::from(dir).join(cmd);
-        let exists = path.exists();
-        lines.push(format!(
-            "  {} => {}",
-            path.display(),
-            if exists { "found" } else { "not found" }
-        ));
+        if path.exists() {
+            lines.push(format!("    {} => found (resolved)", path.display()));
+            return lines.join("\n");
+        }
+        lines.push(format!("    {} => not found", path.display()));
     }
 
+    lines.push("  not found in any location".to_string());
     lines.join("\n")
 }
 

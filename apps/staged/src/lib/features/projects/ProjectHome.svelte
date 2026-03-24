@@ -368,15 +368,20 @@
     if (!projects.some((p) => p.id === project.id)) {
       projects = [...projects, project];
     }
-    const [branches, repos] = await Promise.all([
-      commands.listBranchesForProject(project.id),
-      commands.listProjectRepos(project.id),
-    ]);
-    branchesByProject = new Map(branchesByProject).set(project.id, branches);
-    workspaceLifecycle.enqueueInitialSetup(project.id, branches);
-    replaceProjectRepos(project.id, repos);
     showNewProjectModal = false;
     selectProject(project.id);
+    // Hydrate branches and repos in the background so the modal closes instantly
+    try {
+      const [branches, repos] = await Promise.all([
+        commands.listBranchesForProject(project.id),
+        commands.listProjectRepos(project.id),
+      ]);
+      branchesByProject = new Map(branchesByProject).set(project.id, branches);
+      workspaceLifecycle.enqueueInitialSetup(project.id, branches);
+      replaceProjectRepos(project.id, repos);
+    } catch (e) {
+      console.error('[ProjectHome] Failed to hydrate newly created project:', e);
+    }
   }
 
   async function handleDeleteProjectRequest(project: Project) {

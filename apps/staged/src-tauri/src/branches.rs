@@ -1393,6 +1393,8 @@ pub async fn poll_workspace_status(
             return Err("Not authenticated with Blox. Run: sq login".to_string());
         }
         Err(e) => {
+            let is_not_found = matches!(&e, blox::BloxError::CommandFailed(msg) if msg.to_lowercase().contains("not found"));
+
             // During initial creation, `blox ws start` may still be running
             // when the frontend's first poll fires `blox ws info`. The
             // workspace doesn't exist yet, so the CLI returns "not found".
@@ -1408,18 +1410,33 @@ pub async fn poll_workspace_status(
                     workstation_id: cached_workstation_id(ws_name),
                 });
             }
-            // If the workspace was Running but Blox no longer knows about it
-            // (e.g. deleted externally), transition to Stopped.
+            // If the workspace was Running but Blox explicitly says "not
+            // found" (e.g. deleted externally), transition to Stopped.
+            // Other errors (network blips, timeouts, etc.) are transient —
+            // keep the Running status so the poller retries.
             if branch.workspace_status == Some(store::WorkspaceStatus::Running) {
-                log::debug!(
-                    "blox ws info failed for '{}' while Running, treating as Stopped: {e}",
+                if is_not_found {
+                    log::debug!(
+                        "blox ws info returned not-found for '{}' while Running, treating as Stopped: {e}",
+                        ws_name
+                    );
+                    store
+                        .update_branch_workspace_status(
+                            &branch_id,
+                            &store::WorkspaceStatus::Stopped,
+                        )
+                        .ok();
+                    return Ok(PollWorkspaceResult {
+                        status: store::WorkspaceStatus::Stopped.as_str().to_string(),
+                        workstation_id: cached_workstation_id(ws_name),
+                    });
+                }
+                log::warn!(
+                    "blox ws info failed for '{}' while Running, keeping Running status: {e}",
                     ws_name
                 );
-                store
-                    .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Stopped)
-                    .ok();
                 return Ok(PollWorkspaceResult {
-                    status: store::WorkspaceStatus::Stopped.as_str().to_string(),
+                    status: store::WorkspaceStatus::Running.as_str().to_string(),
                     workstation_id: cached_workstation_id(ws_name),
                 });
             }

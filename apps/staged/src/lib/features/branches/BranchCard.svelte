@@ -293,13 +293,15 @@
     revalidationVersion++;
 
     if (isInitialLoad) {
-      const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
+      const { cached, fresh, cacheIsFresh } = commands.getBranchTimelineWithRevalidation(branch.id);
       if (cached) {
         // Show stale data immediately
         timeline = cached;
         loading = false;
         prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
-        revalidating = true;
+        // Only show "Looking for changes" when actually fetching from the backend;
+        // skip it when the cache is fresh (< 10s old) to avoid a brief flash.
+        revalidating = !cacheIsFresh;
         const version = revalidationVersion;
         fresh
           .then((next) => {

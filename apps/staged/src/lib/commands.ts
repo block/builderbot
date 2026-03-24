@@ -332,12 +332,15 @@ export function getBranchTimeline(
 export function getBranchTimelineWithRevalidation(branchId: string): {
   cached: BranchTimeline | null;
   fresh: Promise<BranchTimeline>;
+  /** When true, `fresh` is already resolved from cache — no network fetch is in flight. */
+  cacheIsFresh: boolean;
 } {
   const entry = timelineCache.get(branchId);
   const isFresh = entry && Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS;
   return {
     cached: entry?.timeline ?? null,
     fresh: isFresh ? Promise.resolve(entry.timeline) : getBranchTimeline(branchId, { force: true }),
+    cacheIsFresh: !!isFresh,
   };
 }
 

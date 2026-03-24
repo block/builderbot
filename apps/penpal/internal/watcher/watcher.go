@@ -198,6 +198,15 @@ func (w *Watcher) watchProjectSources(p discovery.Project) {
 		if src.RootPath != "" {
 			w.walkAndWatch(src.RootPath)
 		}
+		// Watch directories containing individually listed files
+		for _, f := range src.Files {
+			dir := filepath.Dir(f)
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				if err := w.watcher.Add(dir); err == nil {
+					w.focusWatched = append(w.focusWatched, dir)
+				}
+			}
+		}
 	}
 	commentsDir := filepath.Join(p.Path, ".penpal", "comments")
 	if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
@@ -439,7 +448,7 @@ notAutoDetect:
 }
 
 // findProjectForPath finds which project a path belongs to by checking
-// all source roots, .penpal directories, and worktree directories.
+// all source roots, individual file paths, .penpal directories, and worktree directories.
 // Returns the qualified name.
 func (w *Watcher) findProjectForPath(path string) string {
 	for _, p := range w.cache.Projects() {
@@ -447,6 +456,12 @@ func (w *Watcher) findProjectForPath(path string) string {
 		for _, src := range p.Sources {
 			if src.RootPath != "" && strings.HasPrefix(path, src.RootPath+"/") {
 				return p.QualifiedName()
+			}
+			// Check individual file paths for "files" sources
+			for _, f := range src.Files {
+				if path == f {
+					return p.QualifiedName()
+				}
 			}
 		}
 		// Check .penpal directory

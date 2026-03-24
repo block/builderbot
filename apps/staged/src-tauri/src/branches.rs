@@ -1452,6 +1452,7 @@ pub async fn poll_workspace_status(
         Some("starting") | Some("provisioning") | Some("creating") => {
             store::WorkspaceStatus::Starting
         }
+        Some("suspended") => store::WorkspaceStatus::Suspended,
         Some("error") | Some("failed") => store::WorkspaceStatus::Error,
         // If the CLI returns an unrecognized status, keep it as Starting
         // (optimistic — the workspace may still be booting)
@@ -1490,6 +1491,50 @@ pub async fn poll_workspace_status(
         status: new_status.as_str().to_string(),
         workstation_id: cached_workstation_id(ws_name),
     })
+}
+
+/// Resume a suspended Blox workspace.
+///
+/// Transitions the branch status to Starting and calls `sq blox ws resume`.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn resume_workspace(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let ws_name = branch
+        .workspace_name
+        .as_deref()
+        .ok_or("Branch has no workspace name")?
+        .to_string();
+
+    // Transition to Starting so the UI begins polling.
+    store
+        .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Starting)
+        .map_err(|e| e.to_string())?;
+
+    // Call resume in the background (it may take a while).
+    let ws = ws_name.clone();
+    if let Err(e) = run_blox_blocking(move || blox::ws_resume(&ws)).await {
+        log::warn!(
+            "[resume_workspace] branch={} workspace={} resume failed: {}",
+            branch_id,
+            ws_name,
+            e
+        );
+        store
+            .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
+            .ok();
+        return Err(e.to_string());
+    }
+
+    Ok(())
 }
 
 #[tauri::command]

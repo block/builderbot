@@ -25,7 +25,11 @@
   const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
   function toWorkspaceStatus(value: string): WorkspaceStatus | null {
-    return value === 'starting' || value === 'running' || value === 'stopped' || value === 'error'
+    return value === 'starting' ||
+      value === 'running' ||
+      value === 'stopped' ||
+      value === 'suspended' ||
+      value === 'error'
       ? value
       : null;
   }

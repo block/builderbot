@@ -135,6 +135,26 @@ class WorkspaceLifecycleController {
     await this.setupBranchWorktree(branchId, projectId);
   }
 
+  async resumeWorkspace(projectId: string, branchId: string): Promise<void> {
+    this.handleWorkspaceStatusChange(projectId, branchId, 'starting');
+
+    try {
+      await commands.resumeWorkspace(branchId);
+    } catch (e) {
+      console.error('[workspaceLifecycle] Failed to resume workspace:', e);
+      const message = this.errorMessage(e);
+      this.workspaceErrors = new Map(this.workspaceErrors).set(branchId, message);
+      this.version++;
+      this.handleWorkspaceStatusChange(projectId, branchId, 'error');
+      alerts.show({
+        tone: 'error',
+        title: 'Unable to resume workspace',
+        message,
+        durationMs: 0,
+      });
+    }
+  }
+
   clearBranchState(branchId: string): void {
     this.pendingSetupBranches.delete(branchId);
     this.queuedSetupBranches.delete(branchId);
@@ -170,6 +190,7 @@ class WorkspaceLifecycleController {
     return status === 'starting' ||
       status === 'running' ||
       status === 'stopped' ||
+      status === 'suspended' ||
       status === 'error'
       ? status
       : null;

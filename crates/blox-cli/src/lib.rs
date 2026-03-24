@@ -75,6 +75,7 @@ fn status_code_to_string(code: u64) -> String {
         2 => "stopped".to_string(),
         3 => "running".to_string(),
         4 => "error".to_string(),
+        6 => "suspended".to_string(),
         other => format!("unknown({other})"),
     }
 }
@@ -351,6 +352,14 @@ pub fn ws_start(name: &str, source: Option<&str>) -> Result<String, BloxError> {
     }
     result?;
     Ok(name.to_string())
+}
+
+/// Resume a suspended Blox workspace.
+///
+/// Runs: `sq blox ws resume <name>`
+pub fn ws_resume(name: &str) -> Result<(), BloxError> {
+    run(&["ws", "resume", name], START_TIMEOUT)?;
+    Ok(())
 }
 
 /// Delete a Blox workspace.

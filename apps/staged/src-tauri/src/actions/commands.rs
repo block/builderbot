@@ -228,6 +228,11 @@ pub async fn run_branch_action(
                     "Workspace is stopped. Please restart it before running actions.".to_string(),
                 );
             }
+            Some(crate::store::WorkspaceStatus::Suspended) => {
+                return Err(
+                    "Workspace is suspended. Please resume it before running actions.".to_string(),
+                );
+            }
             Some(crate::store::WorkspaceStatus::Error) => {
                 return Err("Workspace is in an error state.".to_string());
             }

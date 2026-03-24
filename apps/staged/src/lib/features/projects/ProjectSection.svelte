@@ -16,6 +16,7 @@
     FileText,
     CircleCheck,
     CirclePause,
+    Pause,
     AlertCircle,
     Cloud,
     Paperclip,
@@ -65,6 +66,7 @@
     ) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void;
     onRetryWorktree?: (branchId: string) => void;
+    onResumeWorkspace?: (branchId: string) => void;
     onDismissReason?: (projectRepoId: string) => void;
   }
 
@@ -87,6 +89,7 @@
     onWorkspaceStatusChange,
     onRepoSelected,
     onRetryWorktree,
+    onResumeWorkspace,
     onDismissReason,
   }: Props = $props();
 
@@ -105,6 +108,11 @@
     project.location === 'remote'
       ? (branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null)
       : null
+  );
+
+  // For remote projects, derive workspace branch ID (any branch — they all share the same workspace)
+  let projectWorkspaceBranchId = $derived<string | null>(
+    project.location === 'remote' ? (branches.find((b) => b.workspaceStatus)?.id ?? null) : null
   );
 
   // For remote projects, derive workstation name from any branch (they all share the same workspace)
@@ -133,6 +141,8 @@
         return 'Running';
       case 'stopped':
         return 'Stopped';
+      case 'suspended':
+        return 'Suspended';
       case 'error':
         return 'Error';
       default:
@@ -463,6 +473,7 @@
           class:starting={projectWorkspaceStatus === 'starting'}
           class:running={projectWorkspaceStatus === 'running'}
           class:stopped={projectWorkspaceStatus === 'stopped'}
+          class:suspended={projectWorkspaceStatus === 'suspended'}
           class:error={projectWorkspaceStatus === 'error'}
           title={projectWorkspaceStatus === 'running' && projectWorkstationName
             ? projectWorkstationName
@@ -474,10 +485,21 @@
             <Cloud size={12} />
           {:else if projectWorkspaceStatus === 'stopped'}
             <CirclePause size={12} />
+          {:else if projectWorkspaceStatus === 'suspended'}
+            <Pause size={12} />
           {:else if projectWorkspaceStatus === 'error'}
             <AlertCircle size={12} />
           {/if}
           <span>{statusLabel(projectWorkspaceStatus)}</span>
+          {#if projectWorkspaceStatus === 'suspended' && projectWorkspaceBranchId}
+            <button
+              class="resume-button"
+              onclick={() => onResumeWorkspace?.(projectWorkspaceBranchId!)}
+              title="Resume suspended workspace"
+            >
+              Resume
+            </button>
+          {/if}
         </div>
       {/if}
     </div>
@@ -879,6 +901,26 @@
   .workspace-status-badge.stopped {
     border-color: var(--border-muted);
     color: var(--text-muted);
+  }
+
+  .workspace-status-badge.suspended {
+    border-color: var(--border-muted);
+    color: var(--text-muted);
+  }
+
+  .resume-button {
+    all: unset;
+    cursor: pointer;
+    margin-left: 4px;
+    padding: 0 4px;
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 600;
+    color: var(--ui-info);
+    border-left: 1px solid var(--border-muted);
+  }
+
+  .resume-button:hover {
+    text-decoration: underline;
   }
 
   .workspace-status-badge.error {

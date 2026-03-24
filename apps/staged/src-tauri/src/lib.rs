@@ -1329,6 +1329,7 @@ pub fn run() {
             branches::setup_worktree_from_pr,
             branches::create_remote_branch,
             branches::start_workspace,
+            branches::resume_workspace,
             branches::delete_branch,
             branches::rename_branch,
             branches::get_blox_env,

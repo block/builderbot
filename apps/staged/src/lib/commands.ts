@@ -259,6 +259,11 @@ export function startWorkspace(branchId: string): Promise<void> {
   return invoke('start_workspace', { branchId });
 }
 
+/** Resume a suspended Blox workspace. */
+export function resumeWorkspace(branchId: string): Promise<void> {
+  return invoke('resume_workspace', { branchId });
+}
+
 export function deleteBranch(branchId: string): Promise<void> {
   return invoke('delete_branch', { branchId });
 }

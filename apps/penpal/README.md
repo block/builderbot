@@ -58,33 +58,32 @@ penpal open thoughts/shared/plans/my-doc.md   # Open file in Penpal desktop app
 ### Releasing
 
 ```bash
-just prepare 0.2.0   # Bump version, generate changelog, open release PR
-# Merge the PR on GitHub
-git pull
-just release 0.2.0   # Tag and push → CI builds and publishes
+just prepare 0.2.0            # Bump version, generate changelog, open draft PR
+# Review and merge the PR on GitHub
+just release abc123f           # Tag the merge commit and push → CI builds and publishes
 ```
 
-`just prepare` creates a release branch, updates the version in `Cargo.toml` and `package.json`, generates a changelog entry using Claude, and opens a PR. After the PR is merged, `just release` creates a `penpal/v*` tag and pushes it to trigger the CI release pipeline.
+`just prepare` creates a release branch, updates the version in `Cargo.toml` and `package.json`, generates a changelog entry using Claude, and opens a draft PR. After the PR is merged, `just release` reads the version from `Cargo.toml`, verifies the tag doesn't already exist, tags the given commit, and pushes it to trigger the CI release pipeline.
 
 ```mermaid
 flowchart TB
     subgraph prepare ["just prepare"]
         direction LR
-        A[Create release branch] --> B[Bump versions] --> C[Generate changelog] --> D[Commit & open PR]
+        A[Create release branch] --> B[Bump versions] --> C[Generate changelog] --> D[Commit & open draft PR]
     end
 
     prepare --> E[Merge PR on GitHub]
 
-    subgraph release ["just release"]
+    subgraph release ["just release SHA"]
         direction LR
-        F[git pull main] --> G[Create tag] --> H[Push tag]
+        F[Create tag] --> G[Push tag]
     end
 
     E --> release
 
     subgraph ci [CI]
         direction LR
-        I[Build arm64 + x86_64] --> J[Create GitHub Release] --> K[Bump Homebrew cask]
+        I[Build arm64] --> J[Create GitHub Release] --> K[Bump Homebrew cask]
     end
 
     release --> ci

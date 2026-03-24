@@ -17,6 +17,8 @@
         return 'Running';
       case 'stopped':
         return 'Stopped';
+      case 'suspended':
+        return 'Suspended';
       case 'error':
         return 'Error';
     }

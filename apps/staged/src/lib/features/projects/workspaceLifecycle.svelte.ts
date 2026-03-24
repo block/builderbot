@@ -19,7 +19,6 @@ interface RemoteSetupTask {
 interface WorkspaceLifecycleHooks {
   getBranchesByProject: () => BranchMap;
   setBranchesByProject: (next: BranchMap) => void;
-  getVisibleProjectIds: () => Set<string>;
   isProjectDeleting: (projectId: string) => boolean;
 }
 
@@ -42,18 +41,24 @@ class WorkspaceLifecycleController {
   private localSetupTaskQueue: LocalSetupTask[] = [];
   private remoteSetupTaskQueue: RemoteSetupTask[] = [];
 
-  private readonly WORKSPACE_STATUS_BACKGROUND_POLL_MS = 5 * 60 * 1000;
-  private workspaceStatusBackgroundPollTimer: ReturnType<typeof setInterval> | null = null;
-  private workspaceStatusBackgroundPollInFlight = false;
+  // Single adaptive poller: 3s while any workspace is starting, 30s while
+  // any is running, stopped otherwise.
+  private readonly STARTING_POLL_MS = 3000;
+  private readonly RUNNING_POLL_MS = 30_000;
+  private readonly STARTING_TIMEOUT_MS = 5 * 60 * 1000;
+
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollInFlight = false;
+  private startingTimestamps = new Map<string, number>();
   private kickoffTimer: ReturnType<typeof setTimeout> | null = null;
 
   start(hooks: WorkspaceLifecycleHooks): void {
     this.hooks = hooks;
-    this.startBackgroundWorkspaceStatusPolling();
+    this.ensurePolling();
   }
 
   stop(): void {
-    this.stopBackgroundWorkspaceStatusPolling();
+    this.stopPolling();
     if (this.kickoffTimer) {
       clearTimeout(this.kickoffTimer);
       this.kickoffTimer = null;
@@ -61,6 +66,7 @@ class WorkspaceLifecycleController {
     this.pendingSetupBranches.clear();
     this.queuedSetupBranches.clear();
     this.activeRemoteWorkspaceStarts.clear();
+    this.startingTimestamps.clear();
     this.localSetupTaskQueue = [];
     this.remoteSetupTaskQueue = [];
     this.activeLocalSetupCount = 0;
@@ -129,6 +135,20 @@ class WorkspaceLifecycleController {
       this.workspaceErrors = nextWorkspaceErrors;
       this.version++;
     }
+
+    // Track starting timestamps for timeout logic.
+    if (workspaceStatus === 'starting') {
+      if (!this.startingTimestamps.has(branchId)) {
+        this.startingTimestamps.set(branchId, Date.now());
+      }
+    } else {
+      this.startingTimestamps.delete(branchId);
+    }
+
+    // Kick the poller when a workspace enters an active state.
+    if (workspaceStatus === 'starting' || workspaceStatus === 'running') {
+      this.ensurePolling();
+    }
   }
 
   async retryWorktree(branchId: string, projectId: string): Promise<void> {
@@ -158,6 +178,7 @@ class WorkspaceLifecycleController {
   clearBranchState(branchId: string): void {
     this.pendingSetupBranches.delete(branchId);
     this.queuedSetupBranches.delete(branchId);
+    this.startingTimestamps.delete(branchId);
 
     this.localSetupTaskQueue = this.localSetupTaskQueue.filter(
       (task) => task.branchId !== branchId
@@ -196,38 +217,62 @@ class WorkspaceLifecycleController {
       : null;
   }
 
-  private collectHiddenPollableRemoteBranches(): Array<{ projectId: string; branchId: string }> {
+  private collectPollableRemoteBranches(): Array<{
+    projectId: string;
+    branchId: string;
+    status: WorkspaceStatus;
+  }> {
     const hooks = this.hooks;
     if (!hooks) return [];
 
-    const visibleProjectIds = hooks.getVisibleProjectIds();
-    const branchTargets: Array<{ projectId: string; branchId: string }> = [];
+    const targets: Array<{ projectId: string; branchId: string; status: WorkspaceStatus }> = [];
 
     for (const [projectId, branches] of hooks.getBranchesByProject().entries()) {
-      if (visibleProjectIds.has(projectId)) continue;
       for (const branch of branches) {
         if (
           branch.branchType === 'remote' &&
           (branch.workspaceStatus === 'starting' || branch.workspaceStatus === 'running')
         ) {
-          branchTargets.push({ projectId, branchId: branch.id });
+          targets.push({ projectId, branchId: branch.id, status: branch.workspaceStatus });
         }
       }
     }
 
-    return branchTargets;
+    return targets;
   }
 
-  private async pollHiddenWorkspaceStatuses(): Promise<void> {
-    if (this.workspaceStatusBackgroundPollInFlight) return;
+  private async pollWorkspaceStatuses(): Promise<void> {
+    if (this.pollInFlight) return;
 
-    const targets = this.collectHiddenPollableRemoteBranches();
-    if (targets.length === 0) return;
+    const targets = this.collectPollableRemoteBranches();
+    if (targets.length === 0) {
+      this.stopPolling();
+      return;
+    }
 
-    this.workspaceStatusBackgroundPollInFlight = true;
+    // Apply 5-minute timeout to starting workspaces before polling.
+    const now = Date.now();
+    const activeBranchIds: string[] = [];
+    for (const target of targets) {
+      if (target.status === 'starting') {
+        const startedAt = this.startingTimestamps.get(target.branchId);
+        if (startedAt && now - startedAt > this.STARTING_TIMEOUT_MS) {
+          this.startingTimestamps.delete(target.branchId);
+          this.handleWorkspaceStatusChange(target.projectId, target.branchId, 'error');
+          continue;
+        }
+      }
+      activeBranchIds.push(target.branchId);
+    }
+
+    if (activeBranchIds.length === 0) {
+      this.scheduleNextPoll();
+      return;
+    }
+
+    this.pollInFlight = true;
     try {
-      const branchIds = targets.map((t) => t.branchId);
-      const resultMap = await commands.pollAllWorkspaceStatuses(branchIds);
+      const resultMap = await commands.pollAllWorkspaceStatuses(activeBranchIds);
 
       for (const target of targets) {
         const result = resultMap[target.branchId];
@@ -246,24 +291,42 @@ class WorkspaceLifecycleController {
     } catch (e) {
       console.error('[workspaceLifecycle] batch workspace status poll failed:', e);
     } finally {
-      this.workspaceStatusBackgroundPollInFlight = false;
+      this.pollInFlight = false;
     }
+
+    this.scheduleNextPoll();
   }
 
-  private startBackgroundWorkspaceStatusPolling(): void {
-    if (this.workspaceStatusBackgroundPollTimer) return;
-    void this.pollHiddenWorkspaceStatuses();
-    this.workspaceStatusBackgroundPollTimer = setInterval(() => {
-      void this.pollHiddenWorkspaceStatuses();
-    }, this.WORKSPACE_STATUS_BACKGROUND_POLL_MS);
+  private scheduleNextPoll(): void {
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
+    }
+
+    const targets = this.collectPollableRemoteBranches();
+    if (targets.length === 0) return;
+
+    const hasStarting = targets.some((t) => t.status === 'starting');
+    const intervalMs = hasStarting ? this.STARTING_POLL_MS : this.RUNNING_POLL_MS;
+
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      void this.pollWorkspaceStatuses();
+    }, intervalMs);
   }
 
-  private stopBackgroundWorkspaceStatusPolling(): void {
-    if (this.workspaceStatusBackgroundPollTimer) {
-      clearInterval(this.workspaceStatusBackgroundPollTimer);
-      this.workspaceStatusBackgroundPollTimer = null;
+  private stopPolling(): void {
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
     }
-    this.workspaceStatusBackgroundPollInFlight = false;
+    this.pollInFlight = false;
+  }
+
+  private ensurePolling(): void {
+    if (!this.pollTimer && !this.pollInFlight) {
+      void this.pollWorkspaceStatuses();
+    }
   }
 
   private kickOffPendingBranchSetup(): void {

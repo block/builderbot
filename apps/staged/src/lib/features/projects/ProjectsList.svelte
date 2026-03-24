@@ -42,9 +42,6 @@
   let deletingProjectNames = $state<Map<string, string>>(new Map());
   let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
   let repoLoadGeneration = 0;
-  const WORKSPACE_STATUS_POLL_MS = 3000;
-  let workspaceStatusPollTimer: ReturnType<typeof setInterval> | null = null;
-  let workspaceStatusPollInFlight = false;
 
   let repoCountsByProject = $derived(
     new Map(
@@ -57,7 +54,6 @@
 
   onMount(() => {
     loadProjects();
-    startWorkspaceStatusPolling();
     void projectRunActionsStore.startListening();
 
     const onNewProject = () => {
@@ -118,7 +114,6 @@
     });
 
     return () => {
-      stopWorkspaceStatusPolling();
       projectRunActionsStore.stopListening();
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:project-delete-start', onProjectDeleteStart);
@@ -191,109 +186,6 @@
   function openProject(projectId: string) {
     if (isProjectDeleting(projectId)) return;
     selectProject(projectId);
-  }
-
-  function startWorkspaceStatusPolling() {
-    if (workspaceStatusPollTimer) return;
-    void pollStartingWorkspaceStatuses();
-    workspaceStatusPollTimer = setInterval(() => {
-      void pollStartingWorkspaceStatuses();
-    }, WORKSPACE_STATUS_POLL_MS);
-  }
-
-  function stopWorkspaceStatusPolling() {
-    if (workspaceStatusPollTimer) {
-      clearInterval(workspaceStatusPollTimer);
-      workspaceStatusPollTimer = null;
-    }
-    workspaceStatusPollInFlight = false;
-  }
-
-  function collectStartingRemoteBranchIds(): string[] {
-    const branchIds: string[] = [];
-    for (const branches of projectBranches.values()) {
-      for (const branch of branches) {
-        if (branch.branchType === 'remote' && branch.workspaceStatus === 'starting') {
-          branchIds.push(branch.id);
-        }
-      }
-    }
-    return branchIds;
-  }
-
-  function toWorkspaceStatus(status: string): Branch['workspaceStatus'] {
-    return status === 'starting' ||
-      status === 'running' ||
-      status === 'stopped' ||
-      status === 'error'
-      ? status
-      : null;
-  }
-
-  function withUpdatedWorkspaceStatus(
-    branchesByProject: Map<string, Branch[]>,
-    branchId: string,
-    workspaceStatus: Branch['workspaceStatus'],
-    workstationId?: number | null
-  ): Map<string, Branch[]> {
-    for (const [projectId, branches] of branchesByProject.entries()) {
-      const branchIndex = branches.findIndex((branch) => branch.id === branchId);
-      if (branchIndex === -1) continue;
-
-      const current = branches[branchIndex];
-      if (
-        current.workspaceStatus === workspaceStatus &&
-        (workstationId == null || current.workstationId === workstationId)
-      ) {
-        return branchesByProject;
-      }
-
-      const nextBranches = [...branches];
-      nextBranches[branchIndex] = {
-        ...current,
-        workspaceStatus,
-        ...(workstationId != null ? { workstationId } : {}),
-      };
-      return new Map(branchesByProject).set(projectId, nextBranches);
-    }
-
-    return branchesByProject;
-  }
-
-  async function pollStartingWorkspaceStatuses() {
-    if (workspaceStatusPollInFlight) return;
-
-    const startingBranchIds = collectStartingRemoteBranchIds();
-    if (startingBranchIds.length === 0) return;
-
-    workspaceStatusPollInFlight = true;
-    try {
-      const resultMap = await commands.pollAllWorkspaceStatuses(startingBranchIds);
-
-      let nextProjectBranches = projectBranches;
-      for (const branchId of startingBranchIds) {
-        const result = resultMap[branchId];
-        if (!result) continue;
-
-        const nextStatus = toWorkspaceStatus(result.status);
-        if (!nextStatus) continue;
-
-        nextProjectBranches = withUpdatedWorkspaceStatus(
-          nextProjectBranches,
-          branchId,
-          nextStatus,
-          result.workstationId
-        );
-      }
-
-      if (nextProjectBranches !== projectBranches) {
-        projectBranches = nextProjectBranches;
-      }
-    } catch (e) {
-      console.error('[ProjectsList] batch workspace status poll failed:', e);
-    } finally {
-      workspaceStatusPollInFlight = false;
-    }
   }
 
   function getProjectPrStatus(

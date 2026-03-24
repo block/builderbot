@@ -21,7 +21,6 @@
     BranchTimeline as BranchTimelineData,
     ProjectRepo,
     SessionStatusPayload,
-    WorkspaceStatus,
   } from '../../types';
   import * as commands from '../../api/commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
@@ -37,7 +36,6 @@
   import BranchCardPrButton from './BranchCardPrButton.svelte';
   import BranchCardSessionManager from './BranchCardSessionManager.svelte';
   import ReasonBanner from './ReasonBanner.svelte';
-  import RemoteWorkspacePoller from './RemoteWorkspacePoller.svelte';
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { alerts } from '../../shared/alerts.svelte';
@@ -52,7 +50,6 @@
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
     onRetryWorktree?: () => void;
-    onWorkspaceStatusChange?: (status: WorkspaceStatus, workstationId?: number | null) => void;
     onDismissReason?: (projectRepoId: string) => void;
   }
 
@@ -66,14 +63,13 @@
     onDelete,
     onRename,
     onRetryWorktree,
-    onWorkspaceStatusChange,
     onDismissReason,
   }: Props = $props();
 
   // Determine if this is a local or remote branch
   const isLocal = $derived(branch.branchType === 'local');
   const isRemote = $derived(branch.branchType === 'remote');
-  let remoteWorkspaceStatus = $state<WorkspaceStatus | null>(null);
+  const remoteWorkspaceStatus = $derived(branch.workspaceStatus);
 
   function notifyError(title: string, e: unknown): void {
     alerts.show({
@@ -644,14 +640,6 @@
 </script>
 
 <svelte:window onclick={(e) => actionsBar?.handleClickOutside(e)} />
-{#if isRemote}
-  <RemoteWorkspacePoller
-    branchId={branch.id}
-    incomingStatus={branch.workspaceStatus}
-    bind:status={remoteWorkspaceStatus}
-    onStatusChange={(status, workstationId) => onWorkspaceStatusChange?.(status, workstationId)}
-  />
-{/if}
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div

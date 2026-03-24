@@ -1565,6 +1565,47 @@ pub async fn poll_all_workspace_statuses(
             None => continue,
         };
 
+        // Secondary clone setup: if this branch is Starting and shares a workspace
+        // with a Running peer (multi-repo setup), hold it at Starting until the
+        // setup command marks it as Running. This mirrors the individual
+        // poll_workspace_status logic.
+        if branch.workspace_status == Some(store::WorkspaceStatus::Starting)
+            && resolve_branch_workspace_subpath(&store, &branch)
+                .unwrap_or(None)
+                .is_some()
+        {
+            let is_secondary = if let Some(ws) = branch.workspace_name.as_deref() {
+                store
+                    .list_branches_for_project(&branch.project_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .any(|peer| {
+                        peer.id != *branch_id
+                            && peer.branch_type == store::BranchType::Remote
+                            && peer.workspace_name.as_deref() == Some(ws)
+                            && peer.workspace_status == Some(store::WorkspaceStatus::Running)
+                    })
+            } else {
+                false
+            };
+
+            if is_secondary {
+                log::debug!(
+                    "[poll_all_workspace_statuses] branch={} ws={} held at Starting for secondary clone setup",
+                    branch_id,
+                    ws_name
+                );
+                results.insert(
+                    branch_id.clone(),
+                    PollWorkspaceResult {
+                        status: store::WorkspaceStatus::Starting.as_str().to_string(),
+                        workstation_id: cached_workstation_id(ws_name),
+                    },
+                );
+                continue;
+            }
+        }
+
         // Look up the workspace in the list.
         match ws_map.get(ws_name) {
             Some(entry) => {

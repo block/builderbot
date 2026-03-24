@@ -27,6 +27,9 @@ use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
+
 use crate::types::blox_acp_command;
 
 // =============================================================================
@@ -397,6 +400,7 @@ impl AgentDriver for AcpDriver {
             _ = cancel_token.cancelled() => {
                 log::info!("Session {session_id} cancelled");
                 writer.finalize().await;
+                graceful_stop(&mut child, self.is_remote).await;
                 return Ok(());
             }
             result = run_acp_protocol(
@@ -406,10 +410,41 @@ impl AgentDriver for AcpDriver {
         };
 
         writer.finalize().await;
-        let _ = child.kill().await;
+        graceful_stop(&mut child, self.is_remote).await;
 
         protocol_result
     }
+}
+
+/// Gracefully stop the ACP child process.
+///
+/// For remote blox proxies, sends SIGINT so the Go process can run its
+/// deferred cleanup (calling `StopProcess` on the bloxlet, which marks the
+/// remote command as COMPLETE). Falls back to SIGKILL after a timeout.
+///
+/// For local processes, sends SIGKILL immediately.
+async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
+    if is_remote {
+        if let Some(pid) = child.id() {
+            if signal::kill(Pid::from_raw(pid as i32), Signal::SIGINT).is_ok() {
+                match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                    Ok(Ok(status)) => {
+                        log::info!("Remote ACP proxy exited gracefully: {status}");
+                        return;
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("Error waiting for remote ACP proxy: {e}");
+                    }
+                    Err(_) => {
+                        log::warn!(
+                            "Remote ACP proxy did not exit within 5s after SIGINT, sending SIGKILL"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let _ = child.kill().await;
 }
 
 #[derive(Debug, PartialEq, Eq)]

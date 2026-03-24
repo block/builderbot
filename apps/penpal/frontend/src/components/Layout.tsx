@@ -32,6 +32,8 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { tabs, activeTabId, openTab, closeTab, activateTab, canGoBack, canGoForward, goBack, goForward } = useTabs();
+  const tabsRef = useRef(tabs);
+  useEffect(() => { tabsRef.current = tabs; }, [tabs]);
   const [projects, setProjects] = useState<APIProject[]>([]);
   const [reviewCount, setReviewCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
@@ -95,10 +97,15 @@ export default function Layout() {
           debouncedRefreshReview();
         }
         if (event.type === 'navigate' && event.path) {
-          navigate(event.path);
+          const existing = tabs.find(t => t.path === event.path);
+          if (existing) {
+            activateTab(existing.id);
+          } else {
+            openTab(event.path);
+          }
         }
       },
-      [debouncedRefreshProjects, debouncedRefreshReview, navigate],
+      [debouncedRefreshProjects, debouncedRefreshReview, tabs, openTab, activateTab],
     ),
     useCallback(async () => {
       refreshProjects();
@@ -108,10 +115,17 @@ export default function Layout() {
         const res = await fetch(`${API_BASE}/api/navigate`);
         if (res.ok) {
           const data = await res.json();
-          if (data.url) navigate(data.url);
+          if (data.url) {
+            const existing = tabsRef.current.find(t => t.path === data.url);
+            if (existing) {
+              activateTab(existing.id);
+            } else {
+              openTab(data.url);
+            }
+          }
         }
       } catch { /* ignore */ }
-    }, [refreshProjects, refreshReviewCount, navigate]),
+    }, [refreshProjects, refreshReviewCount, openTab, activateTab]),
   );
 
   // Close sidebar menu on outside click

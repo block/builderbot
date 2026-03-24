@@ -426,7 +426,12 @@ impl AgentDriver for AcpDriver {
 async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
     if is_remote {
         if let Some(pid) = child.id() {
-            if signal::kill(Pid::from_raw(pid as i32), Signal::SIGINT).is_ok() {
+            let Ok(pid) = i32::try_from(pid) else {
+                log::warn!("PID {pid} out of i32 range, falling back to SIGKILL");
+                let _ = child.kill().await;
+                return;
+            };
+            if signal::kill(Pid::from_raw(pid), Signal::SIGINT).is_ok() {
                 match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
                     Ok(Ok(status)) => {
                         log::info!("Remote ACP proxy exited gracefully: {status}");

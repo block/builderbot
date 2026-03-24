@@ -1453,6 +1453,14 @@ pub async fn poll_workspace_status(
             store::WorkspaceStatus::Starting
         }
         Some("suspended") => store::WorkspaceStatus::Suspended,
+        Some("shutting_down") | Some("deleted") => {
+            if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
+                store::WorkspaceStatus::Starting
+            } else {
+                store::WorkspaceStatus::Stopped
+            }
+        }
+        Some("degraded") => store::WorkspaceStatus::Error,
         Some("error") | Some("failed") => store::WorkspaceStatus::Error,
         // If the CLI returns an unrecognized status, keep it as Starting
         // (optimistic — the workspace may still be booting)

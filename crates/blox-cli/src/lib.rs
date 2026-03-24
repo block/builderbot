@@ -71,11 +71,14 @@ pub struct WorkspaceListEntry {
 fn status_code_to_string(code: u64) -> String {
     match code {
         0 => "unknown".to_string(),
-        1 => "starting".to_string(),
-        2 => "stopped".to_string(),
+        1 => "stopped".to_string(),
+        2 => "starting".to_string(),
         3 => "running".to_string(),
         4 => "error".to_string(),
+        5 => "shutting_down".to_string(),
         6 => "suspended".to_string(),
+        7 => "deleted".to_string(),
+        8 => "degraded".to_string(),
         other => format!("unknown({other})"),
     }
 }

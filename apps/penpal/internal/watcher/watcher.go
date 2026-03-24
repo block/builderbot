@@ -198,9 +198,15 @@ func (w *Watcher) watchProjectSources(p discovery.Project) {
 		if src.RootPath != "" {
 			w.walkAndWatch(src.RootPath)
 		}
-		// Watch directories containing individually listed files
+		// Watch directories containing individually listed files.
+		// Skip the project root — it's already shallow-watched by Start()
+		// and must not be added to focusWatched (removeFocusWatches would
+		// inadvertently drop the baseline watch).
 		for _, f := range src.Files {
 			dir := filepath.Dir(f)
+			if dir == p.Path {
+				continue
+			}
 			if info, err := os.Stat(dir); err == nil && info.IsDir() {
 				if err := w.watcher.Add(dir); err == nil {
 					w.focusWatched = append(w.focusWatched, dir)

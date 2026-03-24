@@ -122,6 +122,16 @@ impl Store {
         Ok(())
     }
 
+    /// Return the IDs of all images linked to a session.
+    pub fn get_image_ids_for_session(&self, session_id: &str) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM images WHERE session_id = ?1")?;
+        let ids = stmt
+            .query_map(params![session_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(ids)
+    }
+
     pub fn delete_image(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM images WHERE id = ?1", params![id])?;

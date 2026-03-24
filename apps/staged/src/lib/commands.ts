@@ -587,7 +587,6 @@ export function drainQueuedSessions(branchId: string): Promise<boolean> {
   return invoke('drain_queued_sessions', {
     branchId,
     provider: null,
-    imageIds: null,
   });
 }
 

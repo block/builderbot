@@ -486,6 +486,8 @@
           }
           await commands.deleteNote(noteId, !!sessionId);
           loadTimeline();
+          // Drain the next queued session now that this one has been removed.
+          commands.drainQueuedSessions(branch.id).catch(() => {});
         } catch (e) {
           console.error('Failed to delete note:', e);
           notifyError('Failed to delete note', e);
@@ -512,6 +514,8 @@
           }
           await commands.deleteReview(reviewId, !!sessionId);
           loadTimeline();
+          // Drain the next queued session now that this one has been removed.
+          commands.drainQueuedSessions(branch.id).catch(() => {});
         } catch (e) {
           console.error('Failed to delete review:', e);
           notifyError('Failed to delete review', e);
@@ -531,6 +535,8 @@
       }
       await commands.deletePendingCommit(commitId, !!sessionId);
       loadTimeline();
+      // Drain the next queued session now that this one has been removed.
+      commands.drainQueuedSessions(branch.id).catch(() => {});
     } catch (e) {
       console.error('Failed to delete pending commit:', e);
       notifyError('Failed to delete pending commit', e);

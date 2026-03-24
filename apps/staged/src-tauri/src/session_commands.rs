@@ -788,6 +788,7 @@ pub fn queue_branch_session(
     prompt: String,
     session_type: BranchSessionType,
     provider: Option<String>,
+    image_ids: Option<Vec<String>>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
 
@@ -804,6 +805,13 @@ pub fn queue_branch_session(
         session = session.with_provider(p);
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
+
+    // Link any attached images to the queued session so they are available at drain time.
+    if let Some(ref ids) = image_ids {
+        store
+            .set_images_session_id(ids, &session.id)
+            .map_err(|e| e.to_string())?;
+    }
 
     // Create the artifact stub, following the same pattern as start_branch_session.
     let artifact_id = match session_type {
@@ -843,9 +851,17 @@ pub async fn drain_queued_sessions(
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
-    image_ids: Option<Vec<String>>,
 ) -> Result<bool, String> {
     let store = get_store(&store)?;
+
+    // Bail out if the branch already has a running session to prevent
+    // concurrent sessions on the same branch.
+    if store
+        .has_running_session_for_branch(&branch_id)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
 
     let queued = store
         .get_queued_sessions_for_branch(&branch_id)
@@ -858,21 +874,18 @@ pub async fn drain_queued_sessions(
 
     // Look up which artifact type is linked to this session so we know
     // what kind of branch session to start.
-    let (session_type, artifact_id) =
-        if let Ok(Some(commit)) = store.get_commit_by_session(&session.id) {
-            (BranchSessionType::Commit, commit.id)
-        } else if let Ok(Some(note)) = store.get_note_by_session(&session.id) {
-            (BranchSessionType::Note, note.id)
-        } else if let Ok(Some(review)) = store.get_review_by_session(&session.id) {
-            (BranchSessionType::Review, review.id)
-        } else {
-            return Err(format!(
-                "Queued session {} has no linked artifact",
-                session.id
-            ));
-        };
-    // Suppress unused-variable warning — artifact_id is available for future use.
-    let _ = artifact_id;
+    let (session_type, _) = if let Ok(Some(commit)) = store.get_commit_by_session(&session.id) {
+        (BranchSessionType::Commit, commit.id)
+    } else if let Ok(Some(note)) = store.get_note_by_session(&session.id) {
+        (BranchSessionType::Note, note.id)
+    } else if let Ok(Some(review)) = store.get_review_by_session(&session.id) {
+        (BranchSessionType::Review, review.id)
+    } else {
+        return Err(format!(
+            "Queued session {} has no linked artifact",
+            session.id
+        ));
+    };
 
     // Use the original prompt from the queued session.
     let prompt = session.prompt.clone();
@@ -952,10 +965,14 @@ pub async fn drain_queued_sessions(
         &session_type,
     );
 
-    // Transition session from queued to running.
-    store
-        .update_session_status(&session_id, store::SessionStatus::Running, None)
+    // Atomically transition session from queued to running.
+    // If another drain call already claimed this session, bail out.
+    let transitioned = store
+        .transition_to_running(&session_id)
         .map_err(|e| e.to_string())?;
+    if !transitioned {
+        return Ok(false);
+    }
 
     // Update the session's working_dir and prompt now that we have context.
     store
@@ -1016,6 +1033,11 @@ pub async fn drain_queued_sessions(
     // Use the provider from the queued session, falling back to the one passed in.
     let effective_provider = session.provider.or(provider);
 
+    // Retrieve image IDs linked to this session at queue time.
+    let image_ids = store
+        .get_image_ids_for_session(&session_id)
+        .unwrap_or_default();
+
     let session_type_str = match session_type {
         BranchSessionType::Commit => "commit",
         BranchSessionType::Note => "note",
@@ -1049,7 +1071,7 @@ pub async fn drain_queued_sessions(
             action_executor: None,
             action_registry: None,
             remote_working_dir,
-            image_ids: image_ids.unwrap_or_default(),
+            image_ids,
         },
         store,
         app_handle,

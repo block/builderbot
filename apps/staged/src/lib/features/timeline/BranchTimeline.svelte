@@ -351,10 +351,8 @@
         (item.type === 'pending-commit' ||
           item.type === 'generating-note' ||
           item.type === 'generating-review') &&
-        item.meta !== 'Queued' &&
-        item.secondaryMeta !== 'Queued';
-      const isQueued = (item: DisplayItem) =>
-        item.meta === 'Queued' || item.secondaryMeta === 'Queued';
+        !item.type.startsWith('queued-');
+      const isQueued = (item: DisplayItem) => item.type.startsWith('queued-');
 
       const aIsProvisioning = isProvisioning(a);
       const bIsProvisioning = isProvisioning(b);

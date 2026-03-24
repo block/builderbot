@@ -169,6 +169,23 @@ impl Store {
         Ok(sessions)
     }
 
+    /// Check whether a branch already has a running session.
+    pub fn has_running_session_for_branch(&self, branch_id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions s
+             WHERE s.status = 'running'
+               AND (
+                   EXISTS (SELECT 1 FROM commits c WHERE c.session_id = s.id AND c.branch_id = ?1)
+                   OR EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.branch_id = ?1)
+                   OR EXISTS (SELECT 1 FROM reviews r WHERE r.session_id = s.id AND r.branch_id = ?1)
+               )",
+            params![branch_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;

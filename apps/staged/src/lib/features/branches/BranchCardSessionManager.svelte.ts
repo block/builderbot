@@ -17,7 +17,13 @@ import { alerts } from '../../shared/alerts.svelte';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
 
-type PendingSessionItemType = 'pending-commit' | 'generating-note' | 'generating-review';
+type PendingSessionItemType =
+  | 'pending-commit'
+  | 'generating-note'
+  | 'generating-review'
+  | 'queued-commit'
+  | 'queued-note'
+  | 'queued-review';
 
 export type PendingSessionItem = {
   key: string;
@@ -112,6 +118,17 @@ export default class BranchCardSessionManager {
         return 'generating-review';
       default:
         return 'pending-commit';
+    }
+  }
+
+  private queuedSessionTypeForMode(mode: BranchSessionType): PendingSessionItemType {
+    switch (mode) {
+      case 'note':
+        return 'queued-note';
+      case 'review':
+        return 'queued-review';
+      default:
+        return 'queued-commit';
     }
   }
 
@@ -248,7 +265,7 @@ export default class BranchCardSessionManager {
       ...this.pendingSessionItems,
       {
         key: pendingKey,
-        type: this.pendingSessionTypeForMode(mode),
+        type: this.queuedSessionTypeForMode(mode),
         title: this.pendingSessionTitleForMode(mode, prompt),
         secondaryMeta: queueMeta,
       },

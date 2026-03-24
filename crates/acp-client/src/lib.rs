@@ -28,6 +28,6 @@ pub use driver::{
 };
 pub use simple::run_acp_prompt;
 pub use types::{
-    discover_providers, find_acp_agent, find_acp_agent_by_id, find_command, AcpAgent,
-    AcpProviderInfo,
+    discover_providers, find_acp_agent, find_acp_agent_by_id, find_command, known_agent_commands,
+    AcpAgent, AcpProviderInfo,
 };

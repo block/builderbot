@@ -42,7 +42,7 @@ class WorkspaceLifecycleController {
   private localSetupTaskQueue: LocalSetupTask[] = [];
   private remoteSetupTaskQueue: RemoteSetupTask[] = [];
 
-  private readonly WORKSPACE_STATUS_BACKGROUND_POLL_MS = 3000;
+  private readonly WORKSPACE_STATUS_BACKGROUND_POLL_MS = 5 * 60 * 1000;
   private workspaceStatusBackgroundPollTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceStatusBackgroundPollInFlight = false;
   private kickoffTimer: ReturnType<typeof setTimeout> | null = null;
@@ -226,24 +226,25 @@ class WorkspaceLifecycleController {
 
     this.workspaceStatusBackgroundPollInFlight = true;
     try {
-      const results = await Promise.allSettled(
-        targets.map((target) => commands.pollWorkspaceStatus(target.branchId))
-      );
+      const branchIds = targets.map((t) => t.branchId);
+      const resultMap = await commands.pollAllWorkspaceStatuses(branchIds);
 
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
-        if (result.status !== 'fulfilled') continue;
+      for (const target of targets) {
+        const result = resultMap[target.branchId];
+        if (!result) continue;
 
-        const nextStatus = this.toWorkspaceStatus(result.value.status);
+        const nextStatus = this.toWorkspaceStatus(result.status);
         if (!nextStatus) continue;
 
         this.handleWorkspaceStatusChange(
-          targets[i].projectId,
-          targets[i].branchId,
+          target.projectId,
+          target.branchId,
           nextStatus,
-          result.value.workstationId
+          result.workstationId
         );
       }
+    } catch (e) {
+      console.error('[workspaceLifecycle] batch workspace status poll failed:', e);
     } finally {
       this.workspaceStatusBackgroundPollInFlight = false;
     }

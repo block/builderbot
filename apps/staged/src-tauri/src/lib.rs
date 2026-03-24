@@ -1335,6 +1335,7 @@ pub fn run() {
             branches::get_blox_env,
             branches::get_workspace_info,
             branches::poll_workspace_status,
+            branches::poll_all_workspace_statuses,
             // Actions
             list_project_actions,
             update_project_action,

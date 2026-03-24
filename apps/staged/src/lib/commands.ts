@@ -287,6 +287,13 @@ export function pollWorkspaceStatus(branchId: string): Promise<PollWorkspaceResu
   return invoke('poll_workspace_status', { branchId });
 }
 
+/** Poll workspace statuses for multiple branches in a single `sq blox ws list` call. */
+export function pollAllWorkspaceStatuses(
+  branchIds: string[]
+): Promise<Record<string, PollWorkspaceResult>> {
+  return invoke('poll_all_workspace_statuses', { branchIds });
+}
+
 // =============================================================================
 // Timeline
 // =============================================================================

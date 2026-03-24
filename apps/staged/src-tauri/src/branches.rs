@@ -1313,6 +1313,42 @@ pub async fn get_workspace_info(
         .map_err(|e| e.to_string())
 }
 
+/// Map a raw Blox status string to our `WorkspaceStatus` enum.
+///
+/// During initial startup, Blox may briefly report "stopped" before the
+/// workspace transitions to "running". If the DB still says Starting,
+/// treat a Blox "stopped" as still Starting so we keep polling.
+fn map_blox_status_to_workspace_status(
+    blox_status: Option<&str>,
+    db_status: Option<&store::WorkspaceStatus>,
+) -> store::WorkspaceStatus {
+    let normalized = blox_status.map(|s| s.to_ascii_lowercase());
+    match normalized.as_deref() {
+        Some("running") | Some("ready") | Some("active") => store::WorkspaceStatus::Running,
+        Some("stopped") => {
+            if db_status == Some(&store::WorkspaceStatus::Starting) {
+                store::WorkspaceStatus::Starting
+            } else {
+                store::WorkspaceStatus::Stopped
+            }
+        }
+        Some("starting") | Some("provisioning") | Some("creating") => {
+            store::WorkspaceStatus::Starting
+        }
+        Some("suspended") => store::WorkspaceStatus::Suspended,
+        Some("shutting_down") | Some("deleted") => {
+            if db_status == Some(&store::WorkspaceStatus::Starting) {
+                store::WorkspaceStatus::Starting
+            } else {
+                store::WorkspaceStatus::Stopped
+            }
+        }
+        Some("degraded") => store::WorkspaceStatus::Error,
+        Some("error") | Some("failed") => store::WorkspaceStatus::Error,
+        _ => store::WorkspaceStatus::Starting,
+    }
+}
+
 /// Poll a remote branch's workspace status, update the DB, and return the new status.
 ///
 /// This is the primary mechanism for the frontend to detect when a workspace
@@ -1452,37 +1488,10 @@ pub async fn poll_workspace_status(
         info.status
     );
 
-    // Map the CLI-reported status to our enum.
-    // During initial startup, Blox may briefly report "stopped" before the
-    // workspace transitions to "running". If the DB still says Starting,
-    // treat a Blox "stopped" as still Starting so we keep polling.
-    let normalized = info.status.as_deref().map(|s| s.to_ascii_lowercase());
-    let new_status = match normalized.as_deref() {
-        Some("running") | Some("ready") | Some("active") => store::WorkspaceStatus::Running,
-        Some("stopped") => {
-            if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
-                store::WorkspaceStatus::Starting
-            } else {
-                store::WorkspaceStatus::Stopped
-            }
-        }
-        Some("starting") | Some("provisioning") | Some("creating") => {
-            store::WorkspaceStatus::Starting
-        }
-        Some("suspended") => store::WorkspaceStatus::Suspended,
-        Some("shutting_down") | Some("deleted") => {
-            if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
-                store::WorkspaceStatus::Starting
-            } else {
-                store::WorkspaceStatus::Stopped
-            }
-        }
-        Some("degraded") => store::WorkspaceStatus::Error,
-        Some("error") | Some("failed") => store::WorkspaceStatus::Error,
-        // If the CLI returns an unrecognized status, keep it as Starting
-        // (optimistic — the workspace may still be booting)
-        _ => store::WorkspaceStatus::Starting,
-    };
+    let new_status = map_blox_status_to_workspace_status(
+        info.status.as_deref(),
+        branch.workspace_status.as_ref(),
+    );
 
     let previous = branch
         .workspace_status
@@ -1516,6 +1525,127 @@ pub async fn poll_workspace_status(
         status: new_status.as_str().to_string(),
         workstation_id: cached_workstation_id(ws_name),
     })
+}
+
+/// Poll workspace statuses for multiple branches in a single `sq blox ws list` call.
+///
+/// Returns a map from branch ID to `PollWorkspaceResult`. Branches that cannot be
+/// resolved (e.g. missing workspace name, not found in store) are silently omitted
+/// from the result rather than failing the entire batch.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn poll_all_workspace_statuses(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_ids: Vec<String>,
+) -> Result<HashMap<String, PollWorkspaceResult>, String> {
+    let store = get_store(&store)?;
+
+    // Fetch all workspaces in one CLI call.
+    let entries = run_blox_blocking(blox::ws_list).await.map_err(|e| {
+        if matches!(e, blox::BloxError::NotAuthenticated) {
+            "Not authenticated with Blox. Run: sq login".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
+
+    // Build a lookup from workspace name → list entry.
+    let ws_map: HashMap<String, &blox::WorkspaceListEntry> =
+        entries.iter().map(|e| (e.name.clone(), e)).collect();
+
+    let mut results = HashMap::new();
+
+    for branch_id in &branch_ids {
+        let branch = match store.get_branch(branch_id) {
+            Ok(Some(b)) => b,
+            _ => continue,
+        };
+
+        let ws_name = match branch.workspace_name.as_deref() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        // Look up the workspace in the list.
+        match ws_map.get(ws_name) {
+            Some(entry) => {
+                let new_status = map_blox_status_to_workspace_status(
+                    entry.status.as_deref(),
+                    branch.workspace_status.as_ref(),
+                );
+
+                let previous = branch
+                    .workspace_status
+                    .as_ref()
+                    .map(|s| s.as_str())
+                    .unwrap_or("none");
+                if previous != new_status.as_str() {
+                    log::debug!(
+                        "[poll_all_workspace_statuses] branch={} ws={} transition {} -> {} (raw={:?})",
+                        branch_id,
+                        ws_name,
+                        previous,
+                        new_status.as_str(),
+                        entry.status
+                    );
+                }
+
+                // Cache the numeric workstation ID.
+                if let Some(ws_id) = entry.workstation_id {
+                    if let Ok(mut cache) = workstation_id_cache().lock() {
+                        cache.insert(ws_name.to_string(), ws_id);
+                    }
+                }
+
+                store
+                    .update_branch_workspace_status(branch_id, &new_status)
+                    .ok();
+
+                results.insert(
+                    branch_id.clone(),
+                    PollWorkspaceResult {
+                        status: new_status.as_str().to_string(),
+                        workstation_id: cached_workstation_id(ws_name),
+                    },
+                );
+            }
+            None => {
+                // Workspace not in list — same "not found" logic as individual polling.
+                if branch.workspace_status == Some(store::WorkspaceStatus::Starting) {
+                    log::debug!(
+                        "[poll_all_workspace_statuses] branch={} ws={} not in list while Starting, keeping Starting",
+                        branch_id,
+                        ws_name
+                    );
+                    results.insert(
+                        branch_id.clone(),
+                        PollWorkspaceResult {
+                            status: store::WorkspaceStatus::Starting.as_str().to_string(),
+                            workstation_id: cached_workstation_id(ws_name),
+                        },
+                    );
+                } else if branch.workspace_status == Some(store::WorkspaceStatus::Running) {
+                    log::debug!(
+                        "[poll_all_workspace_statuses] branch={} ws={} not in list while Running, treating as Stopped",
+                        branch_id,
+                        ws_name
+                    );
+                    store
+                        .update_branch_workspace_status(branch_id, &store::WorkspaceStatus::Stopped)
+                        .ok();
+                    results.insert(
+                        branch_id.clone(),
+                        PollWorkspaceResult {
+                            status: store::WorkspaceStatus::Stopped.as_str().to_string(),
+                            workstation_id: cached_workstation_id(ws_name),
+                        },
+                    );
+                }
+                // Other statuses (Stopped, Error, etc.) — omit from results, no change needed.
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 /// Resume a suspended Blox workspace.

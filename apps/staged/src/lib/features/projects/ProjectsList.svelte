@@ -268,29 +268,29 @@
 
     workspaceStatusPollInFlight = true;
     try {
-      const results = await Promise.allSettled(
-        startingBranchIds.map((branchId) => commands.pollWorkspaceStatus(branchId))
-      );
+      const resultMap = await commands.pollAllWorkspaceStatuses(startingBranchIds);
 
       let nextProjectBranches = projectBranches;
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
-        if (result.status !== 'fulfilled') continue;
+      for (const branchId of startingBranchIds) {
+        const result = resultMap[branchId];
+        if (!result) continue;
 
-        const nextStatus = toWorkspaceStatus(result.value.status);
+        const nextStatus = toWorkspaceStatus(result.status);
         if (!nextStatus) continue;
 
         nextProjectBranches = withUpdatedWorkspaceStatus(
           nextProjectBranches,
-          startingBranchIds[i],
+          branchId,
           nextStatus,
-          result.value.workstationId
+          result.workstationId
         );
       }
 
       if (nextProjectBranches !== projectBranches) {
         projectBranches = nextProjectBranches;
       }
+    } catch (e) {
+      console.error('[ProjectsList] batch workspace status poll failed:', e);
     } finally {
       workspaceStatusPollInFlight = false;
     }

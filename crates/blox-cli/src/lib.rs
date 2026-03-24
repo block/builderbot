@@ -60,6 +60,8 @@ pub struct WorkspaceInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceListEntry {
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_string_u64")]
+    pub workstation_id: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_status")]
     pub status: Option<String>,
     #[serde(flatten)]

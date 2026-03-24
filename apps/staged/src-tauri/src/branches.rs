@@ -242,15 +242,9 @@ async fn run_workspace_git_async(
     .await
 }
 
-fn workspace_home_dir(workspace_name: &str) -> Result<String, blox::BloxError> {
-    let out = blox::ws_exec(workspace_name, &["sh", "-lc", "cd ~ && pwd"])?;
-    let home = out.trim();
-    if home.is_empty() {
-        return Err(blox::BloxError::CommandFailed(
-            "Could not resolve workspace home directory".to_string(),
-        ));
-    }
-    Ok(home.to_string())
+fn workspace_home_dir(_workspace_name: &str) -> Result<String, blox::BloxError> {
+    // Blox workspaces always use /home/bloxer as the home directory.
+    Ok("/home/bloxer".to_string())
 }
 
 pub(crate) fn resolve_workspace_repo_path(

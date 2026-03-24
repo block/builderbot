@@ -246,7 +246,7 @@
   onfocusout={handleFocusOut}
 >
   <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <div class="search-input" onclick={() => inputEl?.focus()}>
+  <div class="search-input" class:disabled onclick={() => inputEl?.focus()}>
     <Search size={14} class="search-icon" />
     <input
       bind:this={inputEl}
@@ -369,6 +369,11 @@
     border-color: var(--ui-accent);
   }
 
+  .search-input.disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
   :global(.search-icon) {
     color: var(--text-faint);
     flex-shrink: 0;
@@ -390,7 +395,7 @@
   }
 
   .search-input input:disabled {
-    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .repo-dropdown {

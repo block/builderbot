@@ -194,7 +194,7 @@ release sha:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    version=$(grep '^version' frontend/src-tauri/Cargo.toml | head -1 | sed 's/version = "//;s/"//')
+    version=$(git show {{sha}}:apps/penpal/frontend/src-tauri/Cargo.toml | grep '^version' | head -1 | sed 's/version = "//;s/"//')
     tag="penpal-${version}"
 
     if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then

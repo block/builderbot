@@ -144,7 +144,7 @@ pub(crate) fn validate_workspace_subpath(subpath: &str) -> Result<String, String
 ///
 /// The name is sanitised so it is safe to use as a directory name on the
 /// workspace filesystem.
-fn repo_name_from_github_repo(github_repo: &str) -> String {
+pub(crate) fn repo_name_from_github_repo(github_repo: &str) -> String {
     let raw = github_repo.rsplit('/').next().unwrap_or(github_repo);
     let collapsed = raw
         .chars()
@@ -266,6 +266,25 @@ pub(crate) fn resolve_workspace_repo_path(
 ///
 /// Returns a `home:<dir>` string suitable for `resolve_workspace_repo_path`,
 /// or `None` when the branch has no associated project repo.
+/// Return just the repo-root clone directory as `home:<clone_dir>`.
+///
+/// This is the base path on the workspace filesystem where the repo is
+/// cloned. Use this when you need commands to run from the repo root
+/// (e.g. `git diff` in `diff_commands`).
+pub(crate) fn resolve_branch_clone_dir(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+) -> Result<Option<String>, String> {
+    let Some(repo_id) = branch.project_repo_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(repo) = store.get_project_repo(repo_id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let clone_dir = repo_name_from_github_repo(&repo.github_repo);
+    Ok(Some(format!("home:{clone_dir}")))
+}
+
 pub(crate) fn resolve_branch_workspace_subpath(
     store: &Arc<Store>,
     branch: &store::Branch,
@@ -277,22 +296,6 @@ pub(crate) fn resolve_branch_workspace_subpath(
         return Ok(None);
     };
 
-    // Backward compatibility: existing DB rows may still have the old
-    // `repo:` prefix or `repos/` path format.
-    if let Some(ref subpath) = repo.subpath {
-        let trimmed = subpath.trim().trim_matches('/');
-        if let Some(repo_dir) = trimmed.strip_prefix("repo:") {
-            let dir = validate_workspace_subpath(repo_dir)?;
-            return Ok(Some(format!("home:{dir}")));
-        }
-        if trimmed.starts_with("repos/") {
-            return Ok(Some(trimmed.to_string()));
-        }
-    }
-
-    // Current format: repo.subpath is None or a plain path relative to the
-    // repo root (e.g. "apps/staged"). Derive the workspace clone directory
-    // from github_repo.
     let clone_dir = repo_name_from_github_repo(&repo.github_repo);
     let workspace_path = match &repo.subpath {
         Some(subpath) => {

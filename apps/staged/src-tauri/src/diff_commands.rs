@@ -30,7 +30,11 @@ pub(crate) fn resolve_branch_context(
             .workspace_name
             .clone()
             .ok_or_else(|| format!("Branch has no workspace name: {branch_id}"))?;
-        let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+
+        // Use the repo root (clone dir only) so all paths are consistently
+        // repo-root-relative — git diff pathspecs, git show tree paths, etc.
+        let repo_subpath = branches::resolve_branch_clone_dir(store, &branch)?;
+
         return Ok(BranchDiffContext {
             base_branch: branch.base_branch,
             worktree_path: None,

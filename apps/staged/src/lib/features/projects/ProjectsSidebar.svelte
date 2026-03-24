@@ -20,6 +20,7 @@
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import SineWave from '../../shared/SineWave.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import { getProjectStatus } from './projectStatus';
   import {
@@ -234,12 +235,31 @@
                   <div class="row-text">
                     <span class="project-name">{projectDisplayName(project)}</span>
                     <div class="row-meta">
-                      <span class="repo-count">{projectSubtitle(repoCount, sessionTypes)}</span>
+                      <span class="repo-count"
+                        >{projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}</span
+                      >
                     </div>
                   </div>
                 </div>
                 <div class="row-status">
-                  {#if status.kind === 'running'}
+                  {#if status.runActionPhase === 'running' && status.kind === 'running'}
+                    <span
+                      class="status-running"
+                      in:fade={{ duration: 300, delay: 150 }}
+                      out:fade={{ duration: 150 }}
+                    >
+                      <SineWave size={12} />
+                      <Spinner size={12} />
+                    </span>
+                  {:else if status.runActionPhase === 'running'}
+                    <span
+                      class="status-running"
+                      in:fade={{ duration: 300, delay: 150 }}
+                      out:fade={{ duration: 150 }}
+                    >
+                      <SineWave size={12} />
+                    </span>
+                  {:else if status.kind === 'runAction' || status.kind === 'running'}
                     <span
                       class="status-running"
                       in:fade={{ duration: 300, delay: 150 }}
@@ -503,6 +523,7 @@
   .status-running {
     display: inline-flex;
     align-items: center;
+    gap: 4px;
     color: var(--ui-accent);
   }
 

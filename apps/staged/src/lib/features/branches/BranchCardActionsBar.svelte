@@ -283,8 +283,8 @@
     });
 
     listenToRunPhaseChanged((event) => {
-      if (event.payload.branchId === branchId) {
-        runPhases.set(event.payload.executionId, event.payload.phase);
+      if (event.branchId === branchId) {
+        runPhases.set(event.executionId, event.phase);
         runPhases = new Map(runPhases);
       }
     }).then((unlisten) => {

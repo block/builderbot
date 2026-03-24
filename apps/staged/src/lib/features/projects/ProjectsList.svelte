@@ -22,12 +22,14 @@
     projectSubtitle,
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
+  import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { selectProject } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import { getProjectStatus } from './projectStatus';
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import SineWave from '../../shared/SineWave.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { setHasProjects } from './projectsSidebarState.svelte';
 
@@ -56,6 +58,7 @@
   onMount(() => {
     loadProjects();
     startWorkspaceStatusPolling();
+    void projectRunActionsStore.startListening();
 
     const onNewProject = () => {
       showNewProjectModal = true;
@@ -116,6 +119,7 @@
 
     return () => {
       stopWorkspaceStatusPolling();
+      projectRunActionsStore.stopListening();
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:project-delete-start', onProjectDeleteStart);
       window.removeEventListener('staged:project-delete-end', onProjectDeleteEnd);
@@ -145,6 +149,8 @@
         })
       );
       projectBranches = branchesMap;
+
+      projectRunActionsStore.hydrateFromProjectBranches(branchesMap).catch(console.error);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -414,7 +420,24 @@
                     <span class="number">{index + 1}</span>
                   </div>
                 {/if}
-                {#if status.kind === 'running'}
+                {#if status.runActionPhase === 'running' && status.kind === 'running'}
+                  <div
+                    class="status-indicator wave-spinner"
+                    in:fade={{ duration: 300, delay: 150 }}
+                    out:fade={{ duration: 150 }}
+                  >
+                    <SineWave size={14} />
+                    <Spinner size={14} />
+                  </div>
+                {:else if status.runActionPhase === 'running'}
+                  <div
+                    class="status-indicator wave"
+                    in:fade={{ duration: 300, delay: 150 }}
+                    out:fade={{ duration: 150 }}
+                  >
+                    <SineWave size={14} />
+                  </div>
+                {:else if status.kind === 'runAction' || status.kind === 'running'}
                   <div
                     class="status-indicator spinner"
                     in:fade={{ duration: 300, delay: 150 }}
@@ -464,7 +487,7 @@
                 </div>
               </button>
               <div class="card-location">
-                {projectSubtitle(repoCount, sessionTypes)}
+                {projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}
               </div>
             </div>
           {/each}
@@ -709,6 +732,17 @@
   }
 
   .status-indicator.spinner {
+    color: var(--ui-accent);
+  }
+
+  .status-indicator.wave {
+    color: var(--ui-accent);
+  }
+
+  .status-indicator.wave-spinner {
+    display: flex;
+    align-items: center;
+    gap: 4px;
     color: var(--ui-accent);
   }
 

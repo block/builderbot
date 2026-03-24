@@ -431,6 +431,13 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 			if rootPath == "" {
 				continue
 			}
+
+			stName := source.SourceTypeName
+			if stName == "" {
+				stName = source.Name
+			}
+			st := discovery.GetSourceType(stName)
+
 			filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
 					return nil
@@ -446,6 +453,9 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 							return filepath.SkipDir
 						}
 					}
+					if st != nil && st.SkipDirs[info.Name()] {
+						return filepath.SkipDir
+					}
 					return nil
 				}
 				if !strings.HasSuffix(path, ".md") {
@@ -459,11 +469,6 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				}
 
 				fileType := "other"
-				stName := source.SourceTypeName
-				if stName == "" {
-					stName = source.Name
-				}
-				st := discovery.GetSourceType(stName)
 				if st != nil && st.ClassifyFile != nil {
 					fileType = st.ClassifyFile(relToSource)
 					if fileType == "" {

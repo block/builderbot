@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 // handleAPISearch returns search results as JSON for the React frontend.
@@ -65,14 +67,37 @@ func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			stName := source.SourceTypeName
+			if stName == "" {
+				stName = source.Name
+			}
+			st := discovery.GetSourceType(stName)
+
 			filepath.Walk(source.RootPath, func(path string, info os.FileInfo, err error) error {
-				if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+				if err != nil {
+					return nil
+				}
+				if info.IsDir() {
+					if st != nil && st.SkipDirs[info.Name()] {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if !strings.HasSuffix(path, ".md") {
 					return nil
 				}
 
 				relToProject, _ := filepath.Rel(project.Path, path)
+				relToSource, _ := filepath.Rel(source.RootPath, path)
 				fileName := filepath.Base(path)
+
 				fileType := classifyFile(relToProject)
+				if st != nil && st.ClassifyFile != nil {
+					fileType = st.ClassifyFile(relToSource)
+					if fileType == "" {
+						return nil // skip files not recognized by this source type
+					}
+				}
 
 				if strings.Contains(strings.ToLower(fileName), query) {
 					fileMatches[relToProject] = &apiMatchedFile{

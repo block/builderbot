@@ -196,7 +196,16 @@ func (w *Watcher) ClearFocus() {
 func (w *Watcher) watchProjectSources(p discovery.Project) {
 	for _, src := range p.Sources {
 		if src.RootPath != "" {
-			w.walkAndWatch(src.RootPath)
+			stName := src.SourceTypeName
+			if stName == "" {
+				stName = src.Name
+			}
+			st := discovery.GetSourceType(stName)
+			var sd map[string]bool
+			if st != nil {
+				sd = st.SkipDirs
+			}
+			w.walkAndWatch(src.RootPath, sd)
 		}
 		// Watch directories containing individually listed files
 		for _, f := range src.Files {
@@ -210,7 +219,7 @@ func (w *Watcher) watchProjectSources(p discovery.Project) {
 	}
 	commentsDir := filepath.Join(p.Path, ".penpal", "comments")
 	if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
-		w.walkAndWatch(commentsDir)
+		w.walkAndWatch(commentsDir, nil)
 	}
 
 	for _, wt := range p.Worktrees {
@@ -223,12 +232,21 @@ func (w *Watcher) watchProjectSources(p discovery.Project) {
 			}
 			wtSourceDir := filepath.Join(wt.Path, st.AutoDetectDir)
 			if info, err := os.Stat(wtSourceDir); err == nil && info.IsDir() {
-				w.walkAndWatch(wtSourceDir)
+				w.walkAndWatch(wtSourceDir, st.SkipDirs)
 			}
 		}
 		for _, src := range p.Sources {
 			if src.RootPath == "" {
 				continue
+			}
+			stName := src.SourceTypeName
+			if stName == "" {
+				stName = src.Name
+			}
+			srcSt := discovery.GetSourceType(stName)
+			var sd map[string]bool
+			if srcSt != nil {
+				sd = srcSt.SkipDirs
 			}
 			rel, err := filepath.Rel(p.Path, src.RootPath)
 			if err != nil {
@@ -236,24 +254,28 @@ func (w *Watcher) watchProjectSources(p discovery.Project) {
 			}
 			wtSourceDir := filepath.Join(wt.Path, rel)
 			if info, err := os.Stat(wtSourceDir); err == nil && info.IsDir() {
-				w.walkAndWatch(wtSourceDir)
+				w.walkAndWatch(wtSourceDir, sd)
 			}
 		}
 		wtCommentsDir := filepath.Join(wt.Path, ".penpal", "comments")
 		if info, err := os.Stat(wtCommentsDir); err == nil && info.IsDir() {
-			w.walkAndWatch(wtCommentsDir)
+			w.walkAndWatch(wtCommentsDir, nil)
 		}
 	}
 }
 
 // walkAndWatch recursively watches a directory, recording paths for later cleanup.
+// skipDirs is a set of directory names to skip (e.g., ".git", "node_modules").
 // Must be called with focusMu held.
-func (w *Watcher) walkAndWatch(dir string) {
+func (w *Watcher) walkAndWatch(dir string, skipDirs map[string]bool) {
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
 		if info.IsDir() {
+			if skipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
 			if err := w.watcher.Add(path); err == nil {
 				w.focusWatched = append(w.focusWatched, path)
 			}
@@ -358,21 +380,30 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		}
 	}
 
-	// Check if a new auto-detectable source directory was created/removed
-	// under a project root (e.g., someone creates thoughts/ or .rp1/).
-	// For Create events, verify it's actually a directory (not a file with
-	// the same name). For Remove/Rename the path is already gone so we
-	// can't stat it — just trigger the rescan and let DetectSources sort it out.
+	// Check if a new auto-detectable source was created/removed under a
+	// project root (e.g., someone creates thoughts/, .rp1/, or ANCHORS.md).
+	// For Create events, stat to distinguish dirs from files.
+	// For Remove/Rename the path is already gone so we can't stat it —
+	// just trigger the rescan and let DetectSources sort it out.
 	if event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+		baseName := filepath.Base(path)
+		isNewDir := false
 		if event.Op&fsnotify.Create != 0 {
-			if info, err := os.Stat(path); err != nil || !info.IsDir() {
-				goto notAutoDetect
+			if info, err := os.Stat(path); err == nil {
+				isNewDir = info.IsDir()
 			}
 		}
-		dirName := filepath.Base(path)
 		for _, st := range discovery.AllSourceTypes() {
-			if st.AutoDetectDir != "" && st.AutoDetectDir == dirName {
-				// Check if parent is a project root
+			matched := false
+			if event.Op&fsnotify.Create != 0 {
+				matched = (isNewDir && st.AutoDetectDir != "" && st.AutoDetectDir == baseName) ||
+					(!isNewDir && st.AutoDetectFile != "" && st.AutoDetectFile == baseName)
+			} else {
+				// Remove/Rename: path is gone, match either mechanism
+				matched = (st.AutoDetectDir != "" && st.AutoDetectDir == baseName) ||
+					(st.AutoDetectFile != "" && st.AutoDetectFile == baseName)
+			}
+			if matched {
 				for _, p := range w.cache.Projects() {
 					if parentDir == p.Path {
 						w.debounceRefresh("sources:"+p.QualifiedName(), func() {
@@ -393,7 +424,6 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			}
 		}
 	}
-notAutoDetect:
 
 	// Find which project this path belongs to
 	projectName := w.findProjectForPath(path)

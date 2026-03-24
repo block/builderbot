@@ -311,6 +311,151 @@ func TestDeduplicateWorktreeProjects(t *testing.T) {
 	}
 }
 
+func TestClassifyAnchorsFile(t *testing.T) {
+	st := GetSourceType("anchors")
+	if st == nil || st.ClassifyFile == nil {
+		t.Fatal("anchors source type not registered or has no ClassifyFile")
+	}
+
+	tests := []struct {
+		path     string
+		expected string
+	}{
+		{"ANCHORS.md", "anchors"},
+		{"PRODUCT.md", "product"},
+		{"ERD.md", "engineering"},
+		{"TESTING.md", "testing"},
+		{"DEPENDENCIES.md", "dependencies"},
+		// nested module
+		{"auth/ANCHORS.md", "anchors"},
+		{"auth/PRODUCT.md", "product"},
+		{"auth/ERD.md", "engineering"},
+		{"services/payments/TESTING.md", "testing"},
+		// non-ANCHORS files are skipped
+		{"README.md", ""},
+		{"docs/guide.md", ""},
+		{"src/main.go", ""},
+		{"auth/design.md", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := st.ClassifyFile(tt.path)
+			if got != tt.expected {
+				t.Errorf("ClassifyFile(%q) = %q, want %q", tt.path, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGroupAnchorsPaths(t *testing.T) {
+	st := GetSourceType("anchors")
+	if st == nil || st.GroupFiles == nil {
+		t.Fatal("anchors source type not registered or has no GroupFiles")
+	}
+
+	tests := []struct {
+		name     string
+		paths    []string
+		expected []FileGroup
+	}{
+		{
+			name:     "empty input",
+			paths:    nil,
+			expected: nil,
+		},
+		{
+			name: "single root module",
+			paths: []string{
+				"ANCHORS.md",
+				"PRODUCT.md",
+				"ERD.md",
+			},
+			expected: []FileGroup{
+				{Name: "(root)", Paths: []string{"ANCHORS.md", "PRODUCT.md", "ERD.md"}},
+			},
+		},
+		{
+			name: "root module file ordering",
+			paths: []string{
+				"DEPENDENCIES.md",
+				"PRODUCT.md",
+				"ANCHORS.md",
+				"TESTING.md",
+				"ERD.md",
+			},
+			expected: []FileGroup{
+				{Name: "(root)", Paths: []string{
+					"ANCHORS.md", "PRODUCT.md", "ERD.md", "TESTING.md", "DEPENDENCIES.md",
+				}},
+			},
+		},
+		{
+			name: "nested modules sorted alphabetically",
+			paths: []string{
+				"payments/ANCHORS.md",
+				"payments/PRODUCT.md",
+				"auth/ANCHORS.md",
+				"auth/PRODUCT.md",
+				"auth/ERD.md",
+			},
+			expected: []FileGroup{
+				{Name: "auth", Paths: []string{"auth/ANCHORS.md", "auth/PRODUCT.md", "auth/ERD.md"}},
+				{Name: "payments", Paths: []string{"payments/ANCHORS.md", "payments/PRODUCT.md"}},
+			},
+		},
+		{
+			name: "root and nested modules together",
+			paths: []string{
+				"ANCHORS.md",
+				"PRODUCT.md",
+				"services/auth/ANCHORS.md",
+				"services/auth/ERD.md",
+			},
+			expected: []FileGroup{
+				{Name: "(root)", Paths: []string{"ANCHORS.md", "PRODUCT.md"}},
+				{Name: "services/auth", Paths: []string{"services/auth/ANCHORS.md", "services/auth/ERD.md"}},
+			},
+		},
+		{
+			name: "files without sibling ANCHORS.md are dropped",
+			paths: []string{
+				"ANCHORS.md",
+				"PRODUCT.md",
+				"stray/PRODUCT.md",
+			},
+			expected: []FileGroup{
+				{Name: "(root)", Paths: []string{"ANCHORS.md", "PRODUCT.md"}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := st.GroupFiles(tt.paths)
+
+			if len(got) != len(tt.expected) {
+				t.Fatalf("expected %d groups, got %d: %+v", len(tt.expected), len(got), got)
+			}
+
+			for i, eg := range tt.expected {
+				if got[i].Name != eg.Name {
+					t.Errorf("group %d: expected name %q, got %q", i, eg.Name, got[i].Name)
+				}
+				if len(got[i].Paths) != len(eg.Paths) {
+					t.Errorf("group %d (%s): expected %d paths, got %d: %v", i, eg.Name, len(eg.Paths), len(got[i].Paths), got[i].Paths)
+					continue
+				}
+				for j, ep := range eg.Paths {
+					if got[i].Paths[j] != ep {
+						t.Errorf("group %d (%s), path %d: expected %q, got %q", i, eg.Name, j, ep, got[i].Paths[j])
+					}
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkGroupRP1Paths(b *testing.B) {
 	st := GetSourceType("rp1")
 	if st == nil || st.GroupFiles == nil {

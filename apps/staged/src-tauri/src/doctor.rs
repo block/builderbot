@@ -41,6 +41,9 @@ pub struct DoctorCheck {
     pub fix_command: Option<String>,
     /// If non-None, the resolved path to the executable on disk.
     pub path: Option<String>,
+    /// Raw debug output: command stdout/stderr, search paths tried, etc.
+    /// Used by the "Copy debug info" feature for support diagnostics.
+    pub raw_output: Option<String>,
 }
 
 /// The full report returned to the frontend.
@@ -54,15 +57,76 @@ pub struct DoctorReport {
 // Individual checks
 // =============================================================================
 
+/// Format the raw output of a command invocation for debug diagnostics.
+fn format_command_output(cmd_desc: &str, output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut raw = format!("$ {cmd_desc}\nexit code: {}", output.status);
+    if !stdout.trim().is_empty() {
+        raw.push_str(&format!("\nstdout:\n{}", stdout.trim()));
+    }
+    if !stderr.trim().is_empty() {
+        raw.push_str(&format!("\nstderr:\n{}", stderr.trim()));
+    }
+    raw
+}
+
+/// Format the search results for a command across all strategies.
+fn format_search_output(cmd: &str) -> String {
+    let mut lines = vec![format!("search for '{cmd}':")];
+
+    // Login shell which
+    for shell in &["/bin/zsh", "/bin/bash"] {
+        let which_cmd = format!("which {cmd}");
+        match Command::new(shell).args(["-l", "-c", &which_cmd]).output() {
+            Ok(output) => {
+                let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if output.status.success() && !result.is_empty() {
+                    lines.push(format!("  {shell} -l -c 'which {cmd}' => {result}"));
+                } else {
+                    lines.push(format!("  {shell} -l -c 'which {cmd}' => not found"));
+                }
+            }
+            Err(e) => {
+                lines.push(format!("  {shell} -l -c 'which {cmd}' => error: {e}"));
+            }
+        }
+    }
+
+    // Common paths
+    for dir in &[
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/home/linuxbrew/.linuxbrew/bin",
+    ] {
+        let path = std::path::PathBuf::from(dir).join(cmd);
+        let exists = path.exists();
+        lines.push(format!(
+            "  {} => {}",
+            path.display(),
+            if exists { "found" } else { "not found" }
+        ));
+    }
+
+    lines.join("\n")
+}
+
 /// Check that `git` is installed and reachable.
 fn check_git() -> DoctorCheck {
     let label = "Git".to_string();
     let id = "git".to_string();
+    let search = format_search_output("git");
 
     match Command::new("git").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let path = find_command("git").map(|p| p.to_string_lossy().to_string());
+            let raw = format!(
+                "{}\n{}",
+                format_command_output("git --version", &output),
+                search
+            );
             DoctorCheck {
                 id,
                 label,
@@ -71,9 +135,27 @@ fn check_git() -> DoctorCheck {
                 fix_url: None,
                 fix_command: None,
                 path,
+                raw_output: Some(raw),
             }
         }
-        _ => DoctorCheck {
+        Ok(output) => {
+            let raw = format!(
+                "{}\n{}",
+                format_command_output("git --version", &output),
+                search
+            );
+            DoctorCheck {
+                id,
+                label,
+                status: CheckStatus::Fail,
+                message: "Git not found".to_string(),
+                fix_url: Some("https://git-scm.com/downloads".to_string()),
+                fix_command: None,
+                path: None,
+                raw_output: Some(raw),
+            }
+        }
+        Err(e) => DoctorCheck {
             id,
             label,
             status: CheckStatus::Fail,
@@ -81,6 +163,7 @@ fn check_git() -> DoctorCheck {
             fix_url: Some("https://git-scm.com/downloads".to_string()),
             fix_command: None,
             path: None,
+            raw_output: Some(format!("$ git --version\nerror: {e}\n{search}")),
         },
     }
 }
@@ -89,12 +172,18 @@ fn check_git() -> DoctorCheck {
 fn check_gh() -> DoctorCheck {
     let label = "GitHub CLI".to_string();
     let id = "gh".to_string();
+    let search = format_search_output("gh");
 
     match Command::new("gh").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
             let first_line = version.lines().next().unwrap_or("gh").trim().to_string();
             let path = find_command("gh").map(|p| p.to_string_lossy().to_string());
+            let raw = format!(
+                "{}\n{}",
+                format_command_output("gh --version", &output),
+                search
+            );
             DoctorCheck {
                 id,
                 label,
@@ -103,9 +192,27 @@ fn check_gh() -> DoctorCheck {
                 fix_url: None,
                 fix_command: None,
                 path,
+                raw_output: Some(raw),
             }
         }
-        _ => DoctorCheck {
+        Ok(output) => {
+            let raw = format!(
+                "{}\n{}",
+                format_command_output("gh --version", &output),
+                search
+            );
+            DoctorCheck {
+                id,
+                label,
+                status: CheckStatus::Fail,
+                message: "GitHub CLI not found".to_string(),
+                fix_url: Some("https://cli.github.com".to_string()),
+                fix_command: None,
+                path: None,
+                raw_output: Some(raw),
+            }
+        }
+        Err(e) => DoctorCheck {
             id,
             label,
             status: CheckStatus::Fail,
@@ -113,6 +220,7 @@ fn check_gh() -> DoctorCheck {
             fix_url: Some("https://cli.github.com".to_string()),
             fix_command: None,
             path: None,
+            raw_output: Some(format!("$ gh --version\nerror: {e}\n{search}")),
         },
     }
 }
@@ -123,6 +231,12 @@ fn check_gh_auth() -> DoctorCheck {
     let id = "gh-auth".to_string();
 
     let auth = git::check_github_auth();
+    // Capture raw gh auth status output for diagnostics.
+    let raw = match Command::new("gh").args(["auth", "status"]).output() {
+        Ok(output) => format_command_output("gh auth status", &output),
+        Err(e) => format!("$ gh auth status\nerror: {e}"),
+    };
+
     if auth.authenticated {
         DoctorCheck {
             id,
@@ -132,6 +246,7 @@ fn check_gh_auth() -> DoctorCheck {
             fix_url: None,
             fix_command: None,
             path: None,
+            raw_output: Some(raw),
         }
     } else {
         DoctorCheck {
@@ -144,6 +259,7 @@ fn check_gh_auth() -> DoctorCheck {
             fix_url: Some("https://cli.github.com/manual/gh_auth_login".to_string()),
             fix_command: None,
             path: None,
+            raw_output: Some(raw),
         }
     }
 }
@@ -152,11 +268,17 @@ fn check_gh_auth() -> DoctorCheck {
 fn check_git_lfs() -> DoctorCheck {
     let label = "Git LFS".to_string();
     let id = "git-lfs".to_string();
+    let search = format_search_output("git-lfs");
 
     match Command::new("git").args(["lfs", "version"]).output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let path = find_command("git-lfs").map(|p| p.to_string_lossy().to_string());
+            let raw = format!(
+                "{}\n{}",
+                format_command_output("git lfs version", &output),
+                search
+            );
             DoctorCheck {
                 id,
                 label,
@@ -165,9 +287,27 @@ fn check_git_lfs() -> DoctorCheck {
                 fix_url: None,
                 fix_command: None,
                 path,
+                raw_output: Some(raw),
             }
         }
-        _ => DoctorCheck {
+        Ok(output) => {
+            let raw = format!(
+                "{}\n{}",
+                format_command_output("git lfs version", &output),
+                search
+            );
+            DoctorCheck {
+                id,
+                label,
+                status: CheckStatus::Warn,
+                message: "Git LFS not installed (optional, needed for large files)".to_string(),
+                fix_url: Some("https://git-lfs.com".to_string()),
+                fix_command: None,
+                path: None,
+                raw_output: Some(raw),
+            }
+        }
+        Err(e) => DoctorCheck {
             id,
             label,
             status: CheckStatus::Warn,
@@ -175,6 +315,7 @@ fn check_git_lfs() -> DoctorCheck {
             fix_url: Some("https://git-lfs.com".to_string()),
             fix_command: None,
             path: None,
+            raw_output: Some(format!("$ git lfs version\nerror: {e}\n{search}")),
         },
     }
 }
@@ -193,6 +334,7 @@ fn check_clonefile() -> DoctorCheck {
         .output()
     {
         Ok(output) if output.status.success() => {
+            let raw = format_command_output("git config --global core.clonefile", &output);
             let value = String::from_utf8_lossy(&output.stdout)
                 .trim()
                 .to_lowercase();
@@ -205,6 +347,7 @@ fn check_clonefile() -> DoctorCheck {
                     fix_url: None,
                     fix_command: None,
                     path: None,
+                    raw_output: Some(raw),
                 }
             } else {
                 DoctorCheck {
@@ -216,11 +359,25 @@ fn check_clonefile() -> DoctorCheck {
                     fix_url: None,
                     fix_command: Some(fix_cmd),
                     path: None,
+                    raw_output: Some(raw),
                 }
             }
         }
         // Key not set — treat as not enabled
-        _ => DoctorCheck {
+        Ok(output) => {
+            let raw = format_command_output("git config --global core.clonefile", &output);
+            DoctorCheck {
+                id,
+                label,
+                status: CheckStatus::Warn,
+                message: "Not set — enable to reduce disk space used by new worktrees".to_string(),
+                fix_url: None,
+                fix_command: Some(fix_cmd),
+                path: None,
+                raw_output: Some(raw),
+            }
+        }
+        Err(e) => DoctorCheck {
             id,
             label,
             status: CheckStatus::Warn,
@@ -228,6 +385,7 @@ fn check_clonefile() -> DoctorCheck {
             fix_url: None,
             fix_command: Some(fix_cmd),
             path: None,
+            raw_output: Some(format!("$ git config --global core.clonefile\nerror: {e}")),
         },
     }
 }
@@ -289,6 +447,14 @@ fn agent_installed(info: &AgentCheckInfo) -> bool {
 /// agents get `Warn`; otherwise the first missing agent gets `Warn` too since
 /// only one agent is required overall.
 fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> DoctorCheck {
+    // Collect search output for all commands.
+    let search_lines: Vec<String> = info
+        .commands
+        .iter()
+        .map(|cmd| format_search_output(cmd))
+        .collect();
+    let search = search_lines.join("\n");
+
     // Resolve the path for the first matching command.
     let resolved_path = info
         .commands
@@ -300,17 +466,29 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
         // Special handling for Goose: verify ACP subcommand is available
         if info.id == "ai-agent-goose" {
             match Command::new("goose").arg("acp").arg("--help").output() {
-                Ok(output) if output.status.success() => DoctorCheck {
-                    id: info.id.to_string(),
-                    label: info.label.to_string(),
-                    status: CheckStatus::Pass,
-                    message: "Installed".to_string(),
-                    fix_url: None,
-                    fix_command: None,
-                    path: resolved_path,
-                },
-                _ => {
-                    // Goose is installed but ACP subcommand is not available
+                Ok(output) if output.status.success() => {
+                    let raw = format!(
+                        "{}\n{}",
+                        format_command_output("goose acp --help", &output),
+                        search
+                    );
+                    DoctorCheck {
+                        id: info.id.to_string(),
+                        label: info.label.to_string(),
+                        status: CheckStatus::Pass,
+                        message: "Installed".to_string(),
+                        fix_url: None,
+                        fix_command: None,
+                        path: resolved_path,
+                        raw_output: Some(raw),
+                    }
+                }
+                Ok(output) => {
+                    let raw = format!(
+                        "{}\n{}",
+                        format_command_output("goose acp --help", &output),
+                        search
+                    );
                     DoctorCheck {
                         id: info.id.to_string(),
                         label: info.label.to_string(),
@@ -320,8 +498,19 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                         fix_url: Some("https://github.com/block/goose".to_string()),
                         fix_command: None,
                         path: resolved_path,
+                        raw_output: Some(raw),
                     }
                 }
+                Err(e) => DoctorCheck {
+                    id: info.id.to_string(),
+                    label: info.label.to_string(),
+                    status: CheckStatus::Fail,
+                    message: "Goose ACP subcommand not available — upgrade required".to_string(),
+                    fix_url: Some("https://github.com/block/goose".to_string()),
+                    fix_command: None,
+                    path: resolved_path,
+                    raw_output: Some(format!("$ goose acp --help\nerror: {e}\n{search}")),
+                },
             }
         } else {
             DoctorCheck {
@@ -332,6 +521,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                 fix_url: None,
                 fix_command: None,
                 path: resolved_path,
+                raw_output: Some(search),
             }
         }
     } else {
@@ -347,6 +537,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
             fix_url: info.install_url.map(|s| s.to_string()),
             fix_command: None,
             path: None,
+            raw_output: Some(search),
         }
     }
 }

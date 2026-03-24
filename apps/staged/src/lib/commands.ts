@@ -331,13 +331,13 @@ export function getBranchTimeline(
 
 export function getBranchTimelineWithRevalidation(branchId: string): {
   cached: BranchTimeline | null;
-  fresh: Promise<BranchTimeline>;
+  fresh: Promise<BranchTimeline> | null;
 } {
   const entry = timelineCache.get(branchId);
   const isFresh = entry && Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS;
   return {
     cached: entry?.timeline ?? null,
-    fresh: isFresh ? Promise.resolve(entry.timeline) : getBranchTimeline(branchId, { force: true }),
+    fresh: isFresh ? null : getBranchTimeline(branchId, { force: true }),
   };
 }
 

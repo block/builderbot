@@ -299,24 +299,28 @@
         timeline = cached;
         loading = false;
         prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
-        revalidating = true;
-        const version = revalidationVersion;
-        fresh
-          .then((next) => {
-            if (version !== revalidationVersion) return;
-            error = null;
-            timeline = next;
-            prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
-            void loadTimelineReviewDetails(next.reviews);
-          })
-          .catch((e) => {
-            if (version !== revalidationVersion) return;
-            error = e instanceof Error ? e.message : String(e);
-          })
-          .finally(() => {
-            if (version !== revalidationVersion) return;
-            revalidating = false;
-          });
+        if (!fresh) {
+          void loadTimelineReviewDetails(cached.reviews);
+        } else {
+          revalidating = true;
+          const version = revalidationVersion;
+          fresh
+            .then((next) => {
+              if (version !== revalidationVersion) return;
+              error = null;
+              timeline = next;
+              prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
+              void loadTimelineReviewDetails(next.reviews);
+            })
+            .catch((e) => {
+              if (version !== revalidationVersion) return;
+              error = e instanceof Error ? e.message : String(e);
+            })
+            .finally(() => {
+              if (version !== revalidationVersion) return;
+              revalidating = false;
+            });
+        }
         return;
       }
       // No cache — show loading spinner as before

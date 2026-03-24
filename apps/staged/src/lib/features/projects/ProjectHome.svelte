@@ -254,7 +254,7 @@
         })
       );
 
-      void projectRunActionsStore.hydrateFromProjectBranches(branchesByProject);
+      projectRunActionsStore.hydrateFromProjectBranches(branchesByProject).catch(console.error);
 
       try {
         const contexts = await commands.listActionContexts();

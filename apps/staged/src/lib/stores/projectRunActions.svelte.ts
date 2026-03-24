@@ -38,6 +38,7 @@ class ProjectRunActionsStore {
 
   private unlisteners: UnlistenFn[] = [];
   private initialized = false;
+  private generation = 0;
 
   /**
    * Start listening to global Tauri events.
@@ -46,17 +47,28 @@ class ProjectRunActionsStore {
   async startListening(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
+    const gen = ++this.generation;
 
     const unlistenStatus = await listenToActionStatus((event: ActionStatusEvent) => {
       if (event.actionType !== 'run') return;
 
       if (event.status === 'running') {
-        this.addExecution(event.executionId, event.branchId, { type: 'building' });
+        // Only add if not already tracked — avoids regressing an execution
+        // whose phase-changed event arrived before the action_status event.
+        if (!this.executions.has(event.executionId)) {
+          this.addExecution(event.executionId, event.branchId, { type: 'building' });
+        }
       } else {
         // completed, failed, stopped — remove
         this.removeExecution(event.executionId);
       }
     });
+
+    // If stopListening() was called while we were awaiting, clean up immediately.
+    if (gen !== this.generation) {
+      unlistenStatus();
+      return;
+    }
 
     const unlistenPhase = await listenToRunPhaseChanged((event: RunPhaseChangedEvent) => {
       const { executionId, branchId, phase } = event;
@@ -64,6 +76,12 @@ class ProjectRunActionsStore {
       // consistently — avoids relying on direct mutation of $state internals.
       this.addExecution(executionId, branchId, phase);
     });
+
+    if (gen !== this.generation) {
+      unlistenStatus();
+      unlistenPhase();
+      return;
+    }
 
     this.unlisteners.push(unlistenStatus, unlistenPhase);
   }
@@ -79,6 +97,7 @@ class ProjectRunActionsStore {
     this.executions = new Map();
     this.branchToProject = new Map();
     this.initialized = false;
+    this.generation++;
     this.version++;
   }
 

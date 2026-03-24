@@ -150,7 +150,7 @@
       );
       projectBranches = branchesMap;
 
-      void projectRunActionsStore.hydrateFromProjectBranches(branchesMap);
+      projectRunActionsStore.hydrateFromProjectBranches(branchesMap).catch(console.error);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

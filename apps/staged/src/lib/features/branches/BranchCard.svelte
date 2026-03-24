@@ -293,32 +293,32 @@
     revalidationVersion++;
 
     if (isInitialLoad) {
-      const { cached, fresh, cacheIsFresh } = commands.getBranchTimelineWithRevalidation(branch.id);
+      const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
       if (cached) {
         // Show stale data immediately
         timeline = cached;
         loading = false;
         prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
-        // Only show "Looking for changes" when actually fetching from the backend;
-        // skip it when the cache is fresh (< 10s old) to avoid a brief flash.
-        revalidating = !cacheIsFresh;
-        const version = revalidationVersion;
-        fresh
-          .then((next) => {
-            if (version !== revalidationVersion) return;
-            error = null;
-            timeline = next;
-            prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
-            void loadTimelineReviewDetails(next.reviews);
-          })
-          .catch((e) => {
-            if (version !== revalidationVersion) return;
-            error = e instanceof Error ? e.message : String(e);
-          })
-          .finally(() => {
-            if (version !== revalidationVersion) return;
-            revalidating = false;
-          });
+        if (fresh) {
+          revalidating = true;
+          const version = revalidationVersion;
+          fresh
+            .then((next) => {
+              if (version !== revalidationVersion) return;
+              error = null;
+              timeline = next;
+              prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
+              void loadTimelineReviewDetails(next.reviews);
+            })
+            .catch((e) => {
+              if (version !== revalidationVersion) return;
+              error = e instanceof Error ? e.message : String(e);
+            })
+            .finally(() => {
+              if (version !== revalidationVersion) return;
+              revalidating = false;
+            });
+        }
         return;
       }
       // No cache — show loading spinner as before

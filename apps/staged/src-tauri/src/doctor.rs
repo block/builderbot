@@ -126,10 +126,26 @@ fn check_git() -> DoctorCheck {
     let search = format_search_output("git");
     let header = "# Check: Git — verify git is installed and reachable";
 
-    match Command::new("git").arg("--version").output() {
+    let git_path = match find_command("git") {
+        Some(p) => p,
+        None => {
+            return DoctorCheck {
+                id,
+                label,
+                status: CheckStatus::Fail,
+                message: "Git not found".to_string(),
+                fix_url: Some("https://git-scm.com/downloads".to_string()),
+                fix_command: None,
+                path: None,
+                raw_output: Some(format!("{header}\nnot found via find_command\n{search}")),
+            };
+        }
+    };
+    let path_str = git_path.to_string_lossy().to_string();
+
+    match Command::new(&git_path).arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let path = find_command("git").map(|p| p.to_string_lossy().to_string());
             let raw = format!(
                 "{header}\n{}\n{}",
                 format_command_output("git --version", &output),
@@ -142,7 +158,7 @@ fn check_git() -> DoctorCheck {
                 message: version,
                 fix_url: None,
                 fix_command: None,
-                path,
+                path: Some(path_str),
                 raw_output: Some(raw),
             }
         }
@@ -159,7 +175,7 @@ fn check_git() -> DoctorCheck {
                 message: "Git not found".to_string(),
                 fix_url: Some("https://git-scm.com/downloads".to_string()),
                 fix_command: None,
-                path: None,
+                path: Some(path_str),
                 raw_output: Some(raw),
             }
         }
@@ -170,7 +186,7 @@ fn check_git() -> DoctorCheck {
             message: "Git not found".to_string(),
             fix_url: Some("https://git-scm.com/downloads".to_string()),
             fix_command: None,
-            path: None,
+            path: Some(path_str),
             raw_output: Some(format!("{header}\n$ git --version\nerror: {e}\n{search}")),
         },
     }
@@ -183,11 +199,27 @@ fn check_gh() -> DoctorCheck {
     let search = format_search_output("gh");
     let header = "# Check: GitHub CLI — verify gh is installed";
 
-    match Command::new("gh").arg("--version").output() {
+    let gh_path = match find_command("gh") {
+        Some(p) => p,
+        None => {
+            return DoctorCheck {
+                id,
+                label,
+                status: CheckStatus::Fail,
+                message: "GitHub CLI not found".to_string(),
+                fix_url: Some("https://cli.github.com".to_string()),
+                fix_command: None,
+                path: None,
+                raw_output: Some(format!("{header}\nnot found via find_command\n{search}")),
+            };
+        }
+    };
+    let path_str = gh_path.to_string_lossy().to_string();
+
+    match Command::new(&gh_path).arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
             let first_line = version.lines().next().unwrap_or("gh").trim().to_string();
-            let path = find_command("gh").map(|p| p.to_string_lossy().to_string());
             let raw = format!(
                 "{header}\n{}\n{}",
                 format_command_output("gh --version", &output),
@@ -200,7 +232,7 @@ fn check_gh() -> DoctorCheck {
                 message: first_line,
                 fix_url: None,
                 fix_command: None,
-                path,
+                path: Some(path_str),
                 raw_output: Some(raw),
             }
         }
@@ -217,7 +249,7 @@ fn check_gh() -> DoctorCheck {
                 message: "GitHub CLI not found".to_string(),
                 fix_url: Some("https://cli.github.com".to_string()),
                 fix_command: None,
-                path: None,
+                path: Some(path_str),
                 raw_output: Some(raw),
             }
         }
@@ -228,7 +260,7 @@ fn check_gh() -> DoctorCheck {
             message: "GitHub CLI not found".to_string(),
             fix_url: Some("https://cli.github.com".to_string()),
             fix_command: None,
-            path: None,
+            path: Some(path_str),
             raw_output: Some(format!("{header}\n$ gh --version\nerror: {e}\n{search}")),
         },
     }
@@ -241,13 +273,17 @@ fn check_gh_auth() -> DoctorCheck {
     let header = "# Check: GitHub Auth — verify user is logged in to GitHub";
 
     let auth = git::check_github_auth();
-    // Capture raw gh auth status output for diagnostics.
-    let raw = match Command::new("gh").args(["auth", "status"]).output() {
-        Ok(output) => format!(
-            "{header}\n{}",
-            format_command_output("gh auth status", &output)
-        ),
-        Err(e) => format!("{header}\n$ gh auth status\nerror: {e}"),
+    // Capture raw gh auth status output for diagnostics, using find_command
+    // to mirror the resolution strategy used at runtime.
+    let raw = match find_command("gh") {
+        Some(gh_path) => match Command::new(&gh_path).args(["auth", "status"]).output() {
+            Ok(output) => format!(
+                "{header}\n{}",
+                format_command_output("gh auth status", &output)
+            ),
+            Err(e) => format!("{header}\n$ gh auth status\nerror: {e}"),
+        },
+        None => format!("{header}\ngh not found via find_command"),
     };
 
     if auth.authenticated {
@@ -285,7 +321,26 @@ fn check_git_lfs() -> DoctorCheck {
     let header =
         "# Check: Git LFS — verify git-lfs is installed (optional, needed for large files)";
 
-    match Command::new("git").args(["lfs", "version"]).output() {
+    // Resolve git via find_command so we use the same binary the app uses at runtime.
+    let git_path = match find_command("git") {
+        Some(p) => p,
+        None => {
+            return DoctorCheck {
+                id,
+                label,
+                status: CheckStatus::Warn,
+                message: "Git LFS not installed (optional, needed for large files)".to_string(),
+                fix_url: Some("https://git-lfs.com".to_string()),
+                fix_command: None,
+                path: None,
+                raw_output: Some(format!(
+                    "{header}\ngit not found via find_command\n{search}"
+                )),
+            };
+        }
+    };
+
+    match Command::new(&git_path).args(["lfs", "version"]).output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let path = find_command("git-lfs").map(|p| p.to_string_lossy().to_string());
@@ -345,7 +400,10 @@ fn check_clonefile() -> DoctorCheck {
     let fix_cmd = "git config --global core.clonefile true".to_string();
     let header = "# Check: Copy on Write Git Clones — verify core.clonefile is enabled for disk space savings";
 
-    match Command::new("git")
+    // Resolve git via find_command so we use the same binary the app uses at runtime.
+    let git_path = find_command("git").unwrap_or_else(|| "git".into());
+
+    match Command::new(&git_path)
         .args(["config", "--global", "core.clonefile"])
         .output()
     {
@@ -490,10 +548,10 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
         .find_map(|cmd| find_command(cmd))
         .map(|p| p.to_string_lossy().to_string());
 
-    if resolved_path.is_some() {
+    if let Some(ref path_str) = resolved_path {
         // Special handling for Goose: verify ACP subcommand is available
         if info.id == "ai-agent-goose" {
-            match Command::new("goose").arg("acp").arg("--help").output() {
+            match Command::new(path_str).arg("acp").arg("--help").output() {
                 Ok(output) if output.status.success() => {
                     let raw = format!(
                         "{header}\n{}\n{}",

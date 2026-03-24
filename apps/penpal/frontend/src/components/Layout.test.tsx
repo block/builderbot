@@ -3,6 +3,7 @@ import { render, screen, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { api } from '../api';
 import { useSSE } from '../hooks/useSSE';
+import type { SSEEvent } from '../types';
 
 // Polyfill CSS Highlight API for test environment (used by FindBar)
 if (typeof globalThis.Highlight === 'undefined') {
@@ -170,5 +171,83 @@ describe('Layout', () => {
       expect(api.listProjects).toHaveBeenCalledTimes(1);
       expect(api.getInReview).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('opens a new tab on SSE navigate event', async () => {
+    render(
+      <MemoryRouter initialEntries={['/recent']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(api.listProjects).toHaveBeenCalled();
+    });
+
+    // Should start with one tab
+    const tabBar = screen.getByTestId('topbar-tabs');
+    expect(tabBar.querySelectorAll('.tab-bar-tab')).toHaveLength(1);
+
+    // Get the onEvent callback (1st argument to useSSE)
+    const useSSEMock = vi.mocked(useSSE);
+    const onEvent = useSSEMock.mock.calls[0]?.[0];
+    expect(onEvent).toBeDefined();
+
+    // Simulate a navigate SSE event for a new path
+    act(() => {
+      onEvent!({ type: 'navigate', path: '/file/project/doc.md' } as SSEEvent);
+    });
+
+    // Should now have two tabs
+    await waitFor(() => {
+      expect(tabBar.querySelectorAll('.tab-bar-tab')).toHaveLength(2);
+    });
+  });
+
+  it('activates existing tab on SSE navigate event for already-open path', async () => {
+    render(
+      <MemoryRouter initialEntries={['/recent']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(api.listProjects).toHaveBeenCalled();
+    });
+
+    const tabBar = screen.getByTestId('topbar-tabs');
+
+    // Get the onEvent callback
+    const useSSEMock = vi.mocked(useSSE);
+    const onEvent = useSSEMock.mock.calls[0]?.[0];
+
+    // Open a second tab via navigate event
+    act(() => {
+      onEvent!({ type: 'navigate', path: '/file/project/doc.md' } as SSEEvent);
+    });
+
+    await waitFor(() => {
+      expect(tabBar.querySelectorAll('.tab-bar-tab')).toHaveLength(2);
+    });
+
+    // Switch back to first tab by clicking it
+    act(() => {
+      (tabBar.querySelector('.tab-bar-tab') as HTMLElement)?.click();
+    });
+
+    // Now navigate to the same path again — should NOT create a third tab
+    // We need to get the latest callback since tabs state changed
+    const latestOnEvent = useSSEMock.mock.calls[useSSEMock.mock.calls.length - 1]?.[0];
+    act(() => {
+      latestOnEvent!({ type: 'navigate', path: '/file/project/doc.md' } as SSEEvent);
+    });
+
+    // Should still have exactly two tabs
+    await waitFor(() => {
+      expect(tabBar.querySelectorAll('.tab-bar-tab')).toHaveLength(2);
+    });
+    // The second tab should be active
+    const activeTab = tabBar.querySelector('.tab-bar-tab.active .tab-title');
+    expect(activeTab?.textContent).toBe('doc.md');
   });
 });

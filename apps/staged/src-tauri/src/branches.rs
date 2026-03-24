@@ -144,7 +144,7 @@ pub(crate) fn validate_workspace_subpath(subpath: &str) -> Result<String, String
 ///
 /// The name is sanitised so it is safe to use as a directory name on the
 /// workspace filesystem.
-fn repo_name_from_github_repo(github_repo: &str) -> String {
+pub(crate) fn repo_name_from_github_repo(github_repo: &str) -> String {
     let raw = github_repo.rsplit('/').next().unwrap_or(github_repo);
     let collapsed = raw
         .chars()
@@ -283,22 +283,9 @@ pub(crate) fn resolve_branch_workspace_subpath(
         return Ok(None);
     };
 
-    // Backward compatibility: existing DB rows may still have the old
-    // `repo:` prefix or `repos/` path format.
-    if let Some(ref subpath) = repo.subpath {
-        let trimmed = subpath.trim().trim_matches('/');
-        if let Some(repo_dir) = trimmed.strip_prefix("repo:") {
-            let dir = validate_workspace_subpath(repo_dir)?;
-            return Ok(Some(format!("home:{dir}")));
-        }
-        if trimmed.starts_with("repos/") {
-            return Ok(Some(trimmed.to_string()));
-        }
-    }
-
-    // Current format: repo.subpath is None or a plain path relative to the
-    // repo root (e.g. "apps/staged"). Derive the workspace clone directory
-    // from github_repo.
+    // repo.subpath is None or a plain path relative to the repo root
+    // (e.g. "apps/staged"). Derive the workspace clone directory from
+    // github_repo.
     let clone_dir = repo_name_from_github_repo(&repo.github_repo);
     let workspace_path = match &repo.subpath {
         Some(subpath) => {

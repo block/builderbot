@@ -3,29 +3,11 @@
 //! This module provides a concrete implementation of the `AiProvider` trait
 //! using the acp-client crate to communicate with ACP agents.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
-
-use acp_client::{AcpDriver, AgentDriver, BasicMessageWriter, MessageWriter, Store};
 
 use crate::detector::AiProvider;
-
-/// Minimal store implementation for simple prompting (no persistence).
-struct NoOpStore;
-
-#[async_trait]
-impl Store for NoOpStore {
-    fn set_agent_session_id(
-        &self,
-        _session_id: &str,
-        _agent_session_id: &str,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-}
 
 /// AI provider that uses ACP agents (like Goose or Claude Code)
 pub struct AcpAiProvider {
@@ -45,7 +27,7 @@ impl AcpAiProvider {
     pub fn new(working_dir: PathBuf) -> Result<Self> {
         // Verify an agent is available
         acp_client::find_acp_agent()
-            .ok_or_else(|| anyhow::anyhow!("No ACP agent found (tried goose, claude-agent-acp)"))?;
+            .ok_or_else(|| anyhow::anyhow!("No ACP agent found (tried goose, claude-code-acp)"))?;
         Ok(Self { working_dir })
     }
 
@@ -67,44 +49,9 @@ impl AcpAiProvider {
 #[async_trait]
 impl AiProvider for AcpAiProvider {
     async fn prompt(&self, prompt: String) -> Result<String> {
-        let driver =
-            AcpDriver::first_available().map_err(|e| anyhow::anyhow!("No ACP agent found: {e}"))?;
+        let agent =
+            acp_client::find_acp_agent().ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
 
-        let working_dir = self.working_dir.clone();
-
-        // Run the ACP session in a blocking task with its own runtime
-        // because ACP uses !Send futures (LocalSet)
-        tokio::task::spawn_blocking(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("Failed to create runtime")?;
-
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, async move {
-                let writer_impl = Arc::new(BasicMessageWriter::new());
-                let writer = writer_impl.clone() as Arc<dyn MessageWriter>;
-                let store = Arc::new(NoOpStore) as Arc<dyn Store>;
-                let cancel_token = CancellationToken::new();
-
-                driver
-                    .run(
-                        "simple-session",
-                        &prompt,
-                        &[],
-                        &working_dir,
-                        &store,
-                        &writer,
-                        &cancel_token,
-                        None,
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("ACP driver error: {e}"))?;
-
-                Ok(writer_impl.get_text().await)
-            })
-        })
-        .await
-        .context("Task join error")?
+        acp_client::run_acp_prompt(&agent, &self.working_dir, &prompt).await
     }
 }

@@ -17,7 +17,7 @@ default:
 
 # First-time setup
 setup:
-    lefthook install
+    lefthook check-install || lefthook install
     pnpm install
 
 # ============================================================================

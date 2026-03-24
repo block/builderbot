@@ -117,13 +117,14 @@ fn check_git() -> DoctorCheck {
     let label = "Git".to_string();
     let id = "git".to_string();
     let search = format_search_output("git");
+    let header = "# Check: Git — verify git is installed and reachable";
 
     match Command::new("git").arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let path = find_command("git").map(|p| p.to_string_lossy().to_string());
             let raw = format!(
-                "{}\n{}",
+                "{header}\n{}\n{}",
                 format_command_output("git --version", &output),
                 search
             );
@@ -140,7 +141,7 @@ fn check_git() -> DoctorCheck {
         }
         Ok(output) => {
             let raw = format!(
-                "{}\n{}",
+                "{header}\n{}\n{}",
                 format_command_output("git --version", &output),
                 search
             );
@@ -163,7 +164,7 @@ fn check_git() -> DoctorCheck {
             fix_url: Some("https://git-scm.com/downloads".to_string()),
             fix_command: None,
             path: None,
-            raw_output: Some(format!("$ git --version\nerror: {e}\n{search}")),
+            raw_output: Some(format!("{header}\n$ git --version\nerror: {e}\n{search}")),
         },
     }
 }
@@ -173,6 +174,7 @@ fn check_gh() -> DoctorCheck {
     let label = "GitHub CLI".to_string();
     let id = "gh".to_string();
     let search = format_search_output("gh");
+    let header = "# Check: GitHub CLI — verify gh is installed";
 
     match Command::new("gh").arg("--version").output() {
         Ok(output) if output.status.success() => {
@@ -180,7 +182,7 @@ fn check_gh() -> DoctorCheck {
             let first_line = version.lines().next().unwrap_or("gh").trim().to_string();
             let path = find_command("gh").map(|p| p.to_string_lossy().to_string());
             let raw = format!(
-                "{}\n{}",
+                "{header}\n{}\n{}",
                 format_command_output("gh --version", &output),
                 search
             );
@@ -197,7 +199,7 @@ fn check_gh() -> DoctorCheck {
         }
         Ok(output) => {
             let raw = format!(
-                "{}\n{}",
+                "{header}\n{}\n{}",
                 format_command_output("gh --version", &output),
                 search
             );
@@ -220,7 +222,7 @@ fn check_gh() -> DoctorCheck {
             fix_url: Some("https://cli.github.com".to_string()),
             fix_command: None,
             path: None,
-            raw_output: Some(format!("$ gh --version\nerror: {e}\n{search}")),
+            raw_output: Some(format!("{header}\n$ gh --version\nerror: {e}\n{search}")),
         },
     }
 }
@@ -229,12 +231,16 @@ fn check_gh() -> DoctorCheck {
 fn check_gh_auth() -> DoctorCheck {
     let label = "GitHub Auth".to_string();
     let id = "gh-auth".to_string();
+    let header = "# Check: GitHub Auth — verify user is logged in to GitHub";
 
     let auth = git::check_github_auth();
     // Capture raw gh auth status output for diagnostics.
     let raw = match Command::new("gh").args(["auth", "status"]).output() {
-        Ok(output) => format_command_output("gh auth status", &output),
-        Err(e) => format!("$ gh auth status\nerror: {e}"),
+        Ok(output) => format!(
+            "{header}\n{}",
+            format_command_output("gh auth status", &output)
+        ),
+        Err(e) => format!("{header}\n$ gh auth status\nerror: {e}"),
     };
 
     if auth.authenticated {
@@ -269,13 +275,15 @@ fn check_git_lfs() -> DoctorCheck {
     let label = "Git LFS".to_string();
     let id = "git-lfs".to_string();
     let search = format_search_output("git-lfs");
+    let header =
+        "# Check: Git LFS — verify git-lfs is installed (optional, needed for large files)";
 
     match Command::new("git").args(["lfs", "version"]).output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let path = find_command("git-lfs").map(|p| p.to_string_lossy().to_string());
             let raw = format!(
-                "{}\n{}",
+                "{header}\n{}\n{}",
                 format_command_output("git lfs version", &output),
                 search
             );
@@ -292,7 +300,7 @@ fn check_git_lfs() -> DoctorCheck {
         }
         Ok(output) => {
             let raw = format!(
-                "{}\n{}",
+                "{header}\n{}\n{}",
                 format_command_output("git lfs version", &output),
                 search
             );
@@ -315,7 +323,7 @@ fn check_git_lfs() -> DoctorCheck {
             fix_url: Some("https://git-lfs.com".to_string()),
             fix_command: None,
             path: None,
-            raw_output: Some(format!("$ git lfs version\nerror: {e}\n{search}")),
+            raw_output: Some(format!("{header}\n$ git lfs version\nerror: {e}\n{search}")),
         },
     }
 }
@@ -328,13 +336,17 @@ fn check_clonefile() -> DoctorCheck {
     let label = "Copy on Write Git Clones".to_string();
     let id = "git-clonefile".to_string();
     let fix_cmd = "git config --global core.clonefile true".to_string();
+    let header = "# Check: Copy on Write Git Clones — verify core.clonefile is enabled for disk space savings";
 
     match Command::new("git")
         .args(["config", "--global", "core.clonefile"])
         .output()
     {
         Ok(output) if output.status.success() => {
-            let raw = format_command_output("git config --global core.clonefile", &output);
+            let raw = format!(
+                "{header}\n{}",
+                format_command_output("git config --global core.clonefile", &output)
+            );
             let value = String::from_utf8_lossy(&output.stdout)
                 .trim()
                 .to_lowercase();
@@ -365,7 +377,10 @@ fn check_clonefile() -> DoctorCheck {
         }
         // Key not set — treat as not enabled
         Ok(output) => {
-            let raw = format_command_output("git config --global core.clonefile", &output);
+            let raw = format!(
+                "{header}\n{}",
+                format_command_output("git config --global core.clonefile", &output)
+            );
             DoctorCheck {
                 id,
                 label,
@@ -385,7 +400,9 @@ fn check_clonefile() -> DoctorCheck {
             fix_url: None,
             fix_command: Some(fix_cmd),
             path: None,
-            raw_output: Some(format!("$ git config --global core.clonefile\nerror: {e}")),
+            raw_output: Some(format!(
+                "{header}\n$ git config --global core.clonefile\nerror: {e}"
+            )),
         },
     }
 }
@@ -447,6 +464,10 @@ fn agent_installed(info: &AgentCheckInfo) -> bool {
 /// agents get `Warn`; otherwise the first missing agent gets `Warn` too since
 /// only one agent is required overall.
 fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> DoctorCheck {
+    let header = format!(
+        "# Check: {} — verify {} agent is installed",
+        info.label, info.label
+    );
     // Collect search output for all commands.
     let search_lines: Vec<String> = info
         .commands
@@ -468,7 +489,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
             match Command::new("goose").arg("acp").arg("--help").output() {
                 Ok(output) if output.status.success() => {
                     let raw = format!(
-                        "{}\n{}",
+                        "{header}\n{}\n{}",
                         format_command_output("goose acp --help", &output),
                         search
                     );
@@ -485,7 +506,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                 }
                 Ok(output) => {
                     let raw = format!(
-                        "{}\n{}",
+                        "{header}\n{}\n{}",
                         format_command_output("goose acp --help", &output),
                         search
                     );
@@ -509,7 +530,9 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                     fix_url: Some("https://github.com/block/goose".to_string()),
                     fix_command: None,
                     path: resolved_path,
-                    raw_output: Some(format!("$ goose acp --help\nerror: {e}\n{search}")),
+                    raw_output: Some(format!(
+                        "{header}\n$ goose acp --help\nerror: {e}\n{search}"
+                    )),
                 },
             }
         } else {
@@ -521,7 +544,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                 fix_url: None,
                 fix_command: None,
                 path: resolved_path,
-                raw_output: Some(search),
+                raw_output: Some(format!("{header}\n{search}")),
             }
         }
     } else {
@@ -537,7 +560,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
             fix_url: info.install_url.map(|s| s.to_string()),
             fix_command: None,
             path: None,
-            raw_output: Some(search),
+            raw_output: Some(format!("{header}\n{search}")),
         }
     }
 }

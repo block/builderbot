@@ -380,7 +380,9 @@ export default function Layout() {
   // Intercept clicks on links:
   // - External links (http/https) → open in default browser (desktop only)
   // - Cmd/Ctrl+click on internal links → new tab or new window
+  // - Regular click on internal links → client-side navigation (preserves tab history)
   function handleAppClick(e: React.MouseEvent) {
+    if (e.defaultPrevented) return; // Already handled (e.g. React Router <Link>)
     const target = (e.target as HTMLElement).closest('a');
     if (!target) return;
     const href = target.getAttribute('href');
@@ -396,17 +398,31 @@ export default function Layout() {
       return;
     }
 
-    // Internal links: only intercept cmd/ctrl+click
-    if (!e.metaKey && !e.ctrlKey) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const title = deriveTitleFromPath(href);
+    // Hash-only links: use default browser behavior (scroll to anchor)
+    // Non-HTTP schemes (mailto:, tel:, etc.): let the browser/OS handle them
+    if (href.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
 
-    if (e.shiftKey) {
-      openInNewWindow(href, title);
-    } else {
-      openTab(href, title, { background: true });
+    // Resolve relative hrefs (e.g. ./other-file.md) to absolute paths
+    const resolved = new URL(target.href);
+    const resolvedPath = resolved.pathname + resolved.search + resolved.hash;
+
+    // Cmd/Ctrl+click → new tab or new window
+    if (e.metaKey || e.ctrlKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      const title = deriveTitleFromPath(resolvedPath);
+      if (e.shiftKey) {
+        openInNewWindow(resolvedPath, title);
+      } else {
+        openTab(resolvedPath, title, { background: true });
+      }
+      return;
     }
+
+    // Regular click on internal link: use client-side navigation to preserve
+    // SPA state (tab history, etc.) instead of a full page reload.
+    e.preventDefault();
+    navigate(resolvedPath);
   }
 
   function renderSidebarMenu(id: string, items: { label: string; className?: string; onClick: () => void }[]) {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { AlertCircle, CheckCircle, CirclePause } from 'lucide-svelte';
+  import { AlertCircle, CheckCircle, CirclePause, Pause } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import type { WorkspaceStatus } from '../../types';
 
@@ -31,6 +31,7 @@
     class:starting={status === 'starting'}
     class:running={status === 'running'}
     class:stopped={status === 'stopped'}
+    class:suspended={status === 'suspended'}
     class:error={status === 'error'}
   >
     {#if status === 'starting'}
@@ -39,6 +40,8 @@
       <CheckCircle size={12} />
     {:else if status === 'stopped'}
       <CirclePause size={12} />
+    {:else if status === 'suspended'}
+      <Pause size={12} />
     {:else if status === 'error'}
       <AlertCircle size={12} />
     {/if}
@@ -73,6 +76,11 @@
   }
 
   .workspace-status-badge.stopped {
+    border-color: var(--border-muted);
+    color: var(--text-muted);
+  }
+
+  .workspace-status-badge.suspended {
     border-color: var(--border-muted);
     color: var(--text-muted);
   }

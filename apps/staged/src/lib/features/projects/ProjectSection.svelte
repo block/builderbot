@@ -97,17 +97,14 @@
         : 'Add repository to project'
   );
 
-  // For remote projects, derive workspace status from any branch (they all share the same workspace)
+  // For remote projects, derive workspace info from any branch (they all share the same workspace)
+  let workspaceBranch = $derived(
+    project.location === 'remote' ? (branches.find((b) => b.workspaceStatus) ?? null) : null
+  );
   let projectWorkspaceStatus = $derived<WorkspaceStatus | null>(
-    project.location === 'remote'
-      ? (branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null)
-      : null
+    workspaceBranch?.workspaceStatus ?? null
   );
-
-  // For remote projects, derive workspace branch ID (any branch — they all share the same workspace)
-  let projectWorkspaceBranchId = $derived<string | null>(
-    project.location === 'remote' ? (branches.find((b) => b.workspaceStatus)?.id ?? null) : null
-  );
+  let projectWorkspaceBranchId = $derived<string | null>(workspaceBranch?.id ?? null);
 
   // For remote projects, derive workstation name from any branch (they all share the same workspace)
   let projectWorkstationName = $derived<string | null>(

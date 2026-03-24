@@ -112,6 +112,26 @@ impl Store {
         Ok(())
     }
 
+    /// Update workspace status for all branches sharing a given workspace name.
+    /// Returns the IDs of all updated branches.
+    pub fn update_workspace_status_by_workspace_name(
+        &self,
+        workspace_name: &str,
+        status: &WorkspaceStatus,
+    ) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        conn.execute(
+            "UPDATE branches SET workspace_status = ?1, updated_at = ?2 WHERE workspace_name = ?3",
+            params![status.as_str(), now, workspace_name],
+        )?;
+        let mut stmt = conn.prepare("SELECT id FROM branches WHERE workspace_name = ?1")?;
+        let ids = stmt
+            .query_map(params![workspace_name], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
     /// Update the PR number for a branch.
     pub fn update_branch_pr_number(
         &self,

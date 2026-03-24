@@ -61,7 +61,7 @@
     onRenameBranch?: (branchId: string, branchName: string) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void;
     onRetryWorktree?: (branchId: string) => void;
-    onResumeWorkspace?: (branchId: string) => void;
+    onResumeWorkspace?: (workspaceName: string) => void;
     onDismissReason?: (projectRepoId: string) => void;
   }
 
@@ -104,8 +104,6 @@
   let projectWorkspaceStatus = $derived<WorkspaceStatus | null>(
     workspaceBranch?.workspaceStatus ?? null
   );
-  let projectWorkspaceBranchId = $derived<string | null>(workspaceBranch?.id ?? null);
-
   // For remote projects, derive workstation name from any branch (they all share the same workspace)
   let projectWorkstationName = $derived<string | null>(
     project.location === 'remote'
@@ -482,10 +480,10 @@
             <AlertCircle size={12} />
           {/if}
           <span>{statusLabel(projectWorkspaceStatus)}</span>
-          {#if projectWorkspaceStatus === 'suspended' && projectWorkspaceBranchId}
+          {#if projectWorkspaceStatus === 'suspended' && projectWorkstationName}
             <button
               class="resume-button"
-              onclick={() => onResumeWorkspace?.(projectWorkspaceBranchId!)}
+              onclick={() => onResumeWorkspace?.(projectWorkstationName!)}
               title="Resume suspended workspace"
             >
               Resume

@@ -1691,46 +1691,45 @@ pub async fn poll_all_workspace_statuses(
 
 /// Resume a suspended Blox workspace.
 ///
-/// Transitions the branch status to Starting and calls `sq blox ws resume`.
+/// Transitions all branches sharing this workspace to Starting and calls
+/// `sq blox ws resume`. Returns the IDs of all affected branches.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn resume_workspace(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
-) -> Result<(), String> {
+    workspace_name: String,
+) -> Result<Vec<String>, String> {
     let store = get_store(&store)?;
 
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let ws_name = branch
-        .workspace_name
-        .as_deref()
-        .ok_or("Branch has no workspace name")?
-        .to_string();
-
-    // Transition to Starting so the UI begins polling.
-    store
-        .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Starting)
+    // Transition all peer branches to Starting so the UI begins polling.
+    let branch_ids = store
+        .update_workspace_status_by_workspace_name(
+            &workspace_name,
+            &store::WorkspaceStatus::Starting,
+        )
         .map_err(|e| e.to_string())?;
 
+    if branch_ids.is_empty() {
+        return Err(format!("No branches found for workspace: {workspace_name}"));
+    }
+
     // Call resume in the background (it may take a while).
-    let ws = ws_name.clone();
+    let ws = workspace_name.clone();
     if let Err(e) = run_blox_blocking(move || blox::ws_resume(&ws)).await {
         log::warn!(
-            "[resume_workspace] branch={} workspace={} resume failed: {}",
-            branch_id,
-            ws_name,
+            "[resume_workspace] workspace={} resume failed: {}",
+            workspace_name,
             e
         );
         store
-            .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
+            .update_workspace_status_by_workspace_name(
+                &workspace_name,
+                &store::WorkspaceStatus::Error,
+            )
             .ok();
         return Err(e.to_string());
     }
 
-    Ok(())
+    Ok(branch_ids)
 }
 
 #[tauri::command]

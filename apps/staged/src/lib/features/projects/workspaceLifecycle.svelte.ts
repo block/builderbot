@@ -155,17 +155,30 @@ class WorkspaceLifecycleController {
     await this.setupBranchWorktree(branchId, projectId);
   }
 
-  async resumeWorkspace(projectId: string, branchId: string): Promise<void> {
-    this.handleWorkspaceStatusChange(projectId, branchId, 'starting');
+  async resumeWorkspace(projectId: string, workspaceName: string): Promise<void> {
+    // Optimistically transition all peer branches sharing this workspace.
+    const hooks = this.hooks;
+    const peerBranchIds: string[] = [];
+    if (hooks) {
+      const branches = hooks.getBranchesByProject().get(projectId) ?? [];
+      for (const b of branches) {
+        if (b.workspaceName === workspaceName) {
+          peerBranchIds.push(b.id);
+          this.handleWorkspaceStatusChange(projectId, b.id, 'starting');
+        }
+      }
+    }
 
     try {
-      await commands.resumeWorkspace(branchId);
+      await commands.resumeWorkspace(workspaceName);
     } catch (e) {
       console.error('[workspaceLifecycle] Failed to resume workspace:', e);
       const message = this.errorMessage(e);
-      this.workspaceErrors = new Map(this.workspaceErrors).set(branchId, message);
+      for (const id of peerBranchIds) {
+        this.workspaceErrors = new Map(this.workspaceErrors).set(id, message);
+        this.handleWorkspaceStatusChange(projectId, id, 'error');
+      }
       this.version++;
-      this.handleWorkspaceStatusChange(projectId, branchId, 'error');
       alerts.show({
         tone: 'error',
         title: 'Unable to resume workspace',

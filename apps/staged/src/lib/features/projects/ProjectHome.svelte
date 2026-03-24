@@ -690,8 +690,8 @@
             )}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
-            onResumeWorkspace={(branchId) =>
-              workspaceLifecycle.resumeWorkspace(project.id, branchId)}
+            onResumeWorkspace={(workspaceName) =>
+              workspaceLifecycle.resumeWorkspace(project.id, workspaceName)}
             onDismissReason={(projectRepoId) => {
               const repo = reposById.get(projectRepoId);
               if (repo) {

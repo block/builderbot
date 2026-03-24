@@ -299,7 +299,9 @@
         timeline = cached;
         loading = false;
         prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
-        if (fresh) {
+        if (!fresh) {
+          void loadTimelineReviewDetails(cached.reviews);
+        } else {
           revalidating = true;
           const version = revalidationVersion;
           fresh

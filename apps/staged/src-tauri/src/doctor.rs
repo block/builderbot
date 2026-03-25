@@ -783,8 +783,12 @@ pub async fn run_doctor_fix(command: String) -> Result<(), String> {
         } else {
             ("/bin/bash", vec!["-l", "-c", &command])
         };
+        // Run from the user's home directory to avoid directory-local tool
+        // managers (e.g. Hermit) intercepting the install command.
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         let output = Command::new(shell)
             .args(&args)
+            .current_dir(home)
             .output()
             .map_err(|e| format!("Failed to run command: {e}"))?;
 

@@ -97,6 +97,34 @@ export function selectProjectAndBranch(projectId: string, branchId: string): voi
   }
 }
 
+/** Navigate to the previous project in the list. */
+export async function selectPreviousProject(): Promise<void> {
+  if (!navigation.selectedProjectId) return;
+  try {
+    const projects = await commands.listProjects();
+    const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
+    if (currentIndex > 0) {
+      selectProject(projects[currentIndex - 1].id);
+    }
+  } catch {
+    // Ignore — stay on the current project
+  }
+}
+
+/** Navigate to the next project in the list. */
+export async function selectNextProject(): Promise<void> {
+  if (!navigation.selectedProjectId) return;
+  try {
+    const projects = await commands.listProjects();
+    const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
+    if (currentIndex >= 0 && currentIndex < projects.length - 1) {
+      selectProject(projects[currentIndex + 1].id);
+    }
+  } catch {
+    // Ignore — stay on the current project
+  }
+}
+
 /** Navigate back to the projects list (landing page). */
 export function goHome(): void {
   showWorkspaceView();

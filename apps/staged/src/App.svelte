@@ -29,6 +29,8 @@
     navigation,
     initNavigation,
     openSettings,
+    selectPreviousProject,
+    selectNextProject,
   } from './lib/features/layout/navigation.svelte';
   import {
     initializeShortcutBindings,
@@ -331,6 +333,22 @@
         modifiers: { meta: true },
         allowInInputs: true,
         handler: resetSize,
+      },
+      {
+        id: 'app-previous-project',
+        description: 'Previous project',
+        category: 'app',
+        keys: ['ArrowUp'],
+        modifiers: { meta: true },
+        handler: () => void selectPreviousProject(),
+      },
+      {
+        id: 'app-next-project',
+        description: 'Next project',
+        category: 'app',
+        keys: ['ArrowDown'],
+        modifiers: { meta: true },
+        handler: () => void selectNextProject(),
       },
     ]);
 

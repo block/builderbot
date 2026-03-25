@@ -268,7 +268,7 @@
       {/if}</label
     >
     {#if selectedRepo}
-      <div class="repo-info">
+      <div class="repo-info" class:disabled={saving}>
         <GitBranch size={14} class="repo-info-icon" />
         <div class="repo-details">
           <span class="repo-name">{selectedRepo}</span>
@@ -454,6 +454,11 @@
     color: var(--bg-deepest);
     border: 1.5px solid var(--text-primary);
     border-radius: 10px;
+  }
+
+  .repo-info.disabled {
+    opacity: 0.6;
+    pointer-events: none;
   }
 
   .repo-info :global(.repo-info-icon) {

@@ -17,6 +17,7 @@
   } from '../projects/projectsSidebarState.svelte';
 
   let showThemeModal = $state(false);
+  const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
   onMount(() => {
     void hydrateProjectsSidebarState();
@@ -57,6 +58,9 @@
   <div class="drag-spacer"></div>
 
   <div class="top-bar-actions">
+    {#if devBranch}
+      <span class="branch-badge">{devBranch}</span>
+    {/if}
     <button
       class="icon-btn"
       onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
@@ -118,6 +122,20 @@
     display: flex;
     align-items: center;
     gap: 4px;
+  }
+
+  .branch-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: white;
+    background: rgb(102, 179, 255, 0.85);
+    padding: 2px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    -webkit-app-region: no-drag;
   }
 
   .icon-btn {

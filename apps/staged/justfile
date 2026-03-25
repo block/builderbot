@@ -43,6 +43,7 @@ dev repo="":
 
             if swift ../../scripts/generate-dev-icon.swift src-tauri/icons/icon.icns "$DEV_ICON" "$WORKTREE_LABEL"; then
                 echo "🌳 Worktree: ${WORKTREE_LABEL}"
+                export VITE_DEV_BRANCH="$WORKTREE_LABEL"
                 TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${VITE_PORT}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${VITE_PORT} --strictPort\"},\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
             fi
         fi

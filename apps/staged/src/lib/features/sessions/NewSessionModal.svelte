@@ -61,9 +61,9 @@
 
   // Animated placeholder for note mode — cycles through example prompts
   const notePlaceholders = [
-    'Plan a feature where…',
+    'Plan a feature that…',
     'Research how this works…',
-    'Look into this bug could occur…',
+    'Look into why this bug could occur…',
   ];
   let notePlaceholderIndex = $state(0);
   let notePlaceholderCharIndex = $state(0);

@@ -76,8 +76,8 @@
     }
   });
 
-  // Unpushed-commits state (only relevant when PR already exists)
-  let hasUnpushed = $state(false);
+  // PR head SHA — updated from events and branch prop
+  let prHeadSha = $state<string | null>(branch.prHeadSha);
 
   // PR status polling state
   let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -90,6 +90,16 @@
   let prStatusMergeable = $state<boolean | null>(null);
   let prStatusDraft = $state<boolean | null>(null);
 
+  // Derive hasUnpushed by comparing the latest timeline commit SHA with the PR head SHA.
+  // This replaces the old approach of shelling out to `git rev-list`.
+  let hasUnpushed = $derived.by(() => {
+    if (!branch.prNumber || !timeline) return false;
+    // Find the first commit with a real (non-empty) SHA — pending commits have sha: ""
+    const latestCommit = timeline.commits.find((c) => c.sha && c.sha.length > 0);
+    if (!latestCommit || !prHeadSha) return false;
+    return latestCommit.sha !== prHeadSha;
+  });
+
   // Sync local PR status state when branch prop changes
   $effect(() => {
     prStatusState = branch.prState;
@@ -97,6 +107,7 @@
     prStatusReviewDecision = branch.prReviewDecision;
     prStatusMergeable = branch.prMergeable;
     prStatusDraft = branch.prDraft;
+    prHeadSha = branch.prHeadSha;
   });
 
   // =========================================================================
@@ -129,17 +140,19 @@
       prReviewDecision: string | null;
       prMergeable: boolean;
       prDraft: boolean;
+      prHeadSha: string | null;
     }>('pr-status-changed', (event) => {
       const payload = event.payload;
       if (payload.branchId === branchId) {
         console.info(
-          `[BranchCardPrButton] pr-status-changed received for branch=${branchId}: state=${payload.prState}, checks=${payload.prChecksStatus}, mergeable=${payload.prMergeable}, draft=${payload.prDraft}`
+          `[BranchCardPrButton] pr-status-changed received for branch=${branchId}: state=${payload.prState}, checks=${payload.prChecksStatus}, mergeable=${payload.prMergeable}, draft=${payload.prDraft}, headSha=${payload.prHeadSha}`
         );
         prStatusState = payload.prState;
         prStatusChecks = payload.prChecksStatus;
         prStatusReviewDecision = payload.prReviewDecision;
         prStatusMergeable = payload.prMergeable;
         prStatusDraft = payload.prDraft;
+        prHeadSha = payload.prHeadSha;
       }
     }).then((unlisten) => {
       unlistenPrStatus = unlisten;
@@ -153,6 +166,7 @@
         prStatusReviewDecision = null;
         prStatusMergeable = null;
         prStatusDraft = null;
+        prHeadSha = null;
       }
     }).then((unlisten) => {
       unlistenPrStatusCleared = unlisten;
@@ -207,29 +221,6 @@
     }, 5_000);
 
     return () => clearInterval(interval);
-  });
-
-  // Re-check unpushed commits whenever the timeline refreshes and a PR exists.
-  // For remote branches the backend uses spawn_blocking so this won't freeze
-  // the UI — the button just shows "View PR" until the check completes.
-  $effect(() => {
-    if (timeline && branch.prNumber) {
-      console.info(`[BranchCardPrButton] Checking hasUnpushedCommits for branch=${branch.id}`);
-      commands
-        .hasUnpushedCommits(branch.id)
-        .then((v) => {
-          console.info(
-            `[BranchCardPrButton] hasUnpushedCommits result for branch=${branch.id}: ${v}`
-          );
-          hasUnpushed = v;
-        })
-        .catch((e) => {
-          console.error(
-            `[BranchCardPrButton] hasUnpushedCommits failed for branch=${branch.id}:`,
-            e
-          );
-        });
-    }
   });
 
   // PR status polling: adaptive intervals based on status
@@ -508,7 +499,13 @@
           pushStateStore.setPushError(branch.id, '', true);
         } else {
           pushStateStore.setPushDone(branch.id);
-          hasUnpushed = false;
+          // Optimistically update prHeadSha to the latest timeline commit
+          // so hasUnpushed becomes false immediately, before the next PR
+          // status refresh picks up the new head SHA from GitHub.
+          const latestCommit = timeline?.commits.find((c) => c.sha && c.sha.length > 0);
+          if (latestCommit) {
+            prHeadSha = latestCommit.sha;
+          }
           setTimeout(() => {
             pushStateStore.clearPushState(branch.id);
           }, 1_500);

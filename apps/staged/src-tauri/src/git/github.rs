@@ -54,6 +54,8 @@ pub struct PrStatus {
     pub review_decision: Option<String>,
     /// Summary of status checks
     pub checks_summary: ChecksSummary,
+    /// The SHA of the PR's head commit on GitHub
+    pub head_sha: Option<String>,
 }
 
 /// Summary of CI/status checks for a PR
@@ -1598,6 +1600,8 @@ struct GhPrStatusItem {
     review_decision: Option<String>,
     #[serde(rename = "statusCheckRollup")]
     status_check_rollup: Vec<GhStatusCheck>,
+    #[serde(rename = "headRefOid")]
+    head_ref_oid: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1621,7 +1625,7 @@ pub fn fetch_pr_status(repo: &Path, pr_number: u64) -> Result<PrStatus, GitError
             "pr",
             "view",
             &pr_number.to_string(),
-            "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup",
+            "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid",
         ],
     )?;
 
@@ -1685,6 +1689,7 @@ pub fn fetch_pr_status(repo: &Path, pr_number: u64) -> Result<PrStatus, GitError
             pending,
             state: checks_state,
         },
+        head_sha: item.head_ref_oid,
     })
 }
 
@@ -1697,7 +1702,7 @@ pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrS
         &pr_number.to_string(),
         "-R",
         github_repo,
-        "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup",
+        "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid",
     ];
     log::info!(
         "fetch_pr_status_for_repo: running gh {} for repo={}, pr_number={}",
@@ -1785,6 +1790,7 @@ pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrS
             pending,
             state: checks_state,
         },
+        head_sha: item.head_ref_oid,
     })
 }
 

@@ -432,7 +432,23 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				continue
 			}
 			filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
-				if err != nil || info.IsDir() || !strings.HasSuffix(path, ".md") {
+				if err != nil {
+					return nil
+				}
+				if info.IsDir() {
+					// Skip nested git worktrees and submodules: they contain a
+					// .git file (not directory) pointing at the real gitdir.
+					// Without this, tree sources rooted at "." walk into
+					// .claude/worktrees/<branch>/ and surface duplicate files.
+					if path != rootPath {
+						gitEntry := filepath.Join(path, ".git")
+						if fi, err := os.Lstat(gitEntry); err == nil && !fi.IsDir() {
+							return filepath.SkipDir
+						}
+					}
+					return nil
+				}
+				if !strings.HasSuffix(path, ".md") {
 					return nil
 				}
 				relToSource, _ := filepath.Rel(rootPath, path)

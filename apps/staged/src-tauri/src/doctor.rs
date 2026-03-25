@@ -478,10 +478,14 @@ struct AgentCheckInfo {
     id: &'static str,
     /// Human-readable label, e.g. "Goose".
     label: &'static str,
-    /// CLI command names to search for (first entry is preferred/current).
+    /// ACP bridge binary names to search for (first entry is preferred/current).
     commands: &'static [&'static str],
-    /// URL to open when the agent is not found (None if no install page).
+    /// Main CLI tool name (e.g. "claude"), if separate from the ACP bridge.
+    main_command: Option<&'static str>,
+    /// URL to install the main tool.
     install_url: Option<&'static str>,
+    /// URL to install the ACP bridge, when the main tool is present but the bridge is not.
+    bridge_install_url: Option<&'static str>,
 }
 
 /// All AI agents we check for individually.
@@ -491,31 +495,41 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         id: "ai-agent-goose",
         label: "Goose",
         commands: &["goose"],
+        main_command: None,
         install_url: Some("https://github.com/block/goose"),
+        bridge_install_url: None,
     },
     AgentCheckInfo {
         id: "ai-agent-claude",
         label: "Claude Code",
         commands: &["claude-agent-acp"],
-        install_url: Some("https://github.com/zed-industries/claude-agent-acp#installation"),
+        main_command: Some("claude"),
+        install_url: Some("https://docs.anthropic.com/en/docs/claude-code/overview"),
+        bridge_install_url: Some("https://github.com/anthropics/claude-agent-acp#installation"),
     },
     AgentCheckInfo {
         id: "ai-agent-codex",
         label: "Codex",
         commands: &["codex-acp"],
+        main_command: Some("codex"),
         install_url: Some("https://github.com/openai/codex#getting-started"),
+        bridge_install_url: Some("https://github.com/openai/codex-acp#installation"),
     },
     AgentCheckInfo {
         id: "ai-agent-pi",
         label: "Pi",
         commands: &["pi-acp"],
+        main_command: Some("pi"),
         install_url: None,
+        bridge_install_url: None,
     },
     AgentCheckInfo {
         id: "ai-agent-amp",
         label: "Amp",
         commands: &["amp-acp"],
-        install_url: Some("https://www.npmjs.com/package/amp-acp"),
+        main_command: Some("amp"),
+        install_url: Some("https://ampcode.com"),
+        bridge_install_url: Some("https://www.npmjs.com/package/amp-acp"),
     },
 ];
 
@@ -613,6 +627,46 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
             }
         }
     } else {
+        // Bridge not found — check if the main CLI tool is installed (partial install).
+        if let Some(main_cmd) = info.main_command {
+            let main_search = format_search_output(main_cmd);
+            if let Some(main_path) = find_command(main_cmd) {
+                let bridge_cmd = info.commands[0];
+                return DoctorCheck {
+                    id: info.id.to_string(),
+                    label: info.label.to_string(),
+                    status: CheckStatus::Warn,
+                    message: format!(
+                        "{} is installed but {} also needs to be installed",
+                        info.label, bridge_cmd
+                    ),
+                    fix_url: info
+                        .bridge_install_url
+                        .or(info.install_url)
+                        .map(|s| s.to_string()),
+                    fix_command: None,
+                    path: Some(main_path.to_string_lossy().to_string()),
+                    raw_output: Some(format!("{header}\n{search}\n{main_search}")),
+                };
+            }
+            // Main tool also not found — fall through to fully-missing case,
+            // but include main_search in the debug output.
+            return DoctorCheck {
+                id: info.id.to_string(),
+                label: info.label.to_string(),
+                status: CheckStatus::Warn,
+                message: if any_agent_found {
+                    "Not installed (optional)".to_string()
+                } else {
+                    "Not installed — at least one AI agent is needed".to_string()
+                },
+                fix_url: info.install_url.map(|s| s.to_string()),
+                fix_command: None,
+                path: None,
+                raw_output: Some(format!("{header}\n{search}\n{main_search}")),
+            };
+        }
+
         DoctorCheck {
             id: info.id.to_string(),
             label: info.label.to_string(),

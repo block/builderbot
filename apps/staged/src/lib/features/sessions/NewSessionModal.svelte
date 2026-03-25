@@ -312,7 +312,8 @@
           type="button"
         >
           <span class="header-icon {currentModeInfo.iconClass}">
-            <svelte:component this={currentModeInfo.icon} size={14} />
+            {@const Icon = currentModeInfo.icon}
+            <Icon size={14} />
           </span>
           <span>{currentModeInfo.label}</span>
           <ChevronDown size={14} />
@@ -327,7 +328,8 @@
                 onclick={() => switchMode(m.value)}
               >
                 <span class="header-icon {m.iconClass}">
-                  <svelte:component this={m.icon} size={14} />
+                  {@const ModeIcon = m.icon}
+                  <ModeIcon size={14} />
                 </span>
                 <span>{m.label}</span>
               </button>

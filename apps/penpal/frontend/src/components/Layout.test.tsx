@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { api } from '../api';
 import { useSSE } from '../hooks/useSSE';
@@ -249,5 +249,39 @@ describe('Layout', () => {
     // The second tab should be active
     const activeTab = tabBar.querySelector('.tab-bar-tab.active .tab-title');
     expect(activeTab?.textContent).toBe('doc.md');
+  });
+
+  it('uses client-side navigation for internal link clicks (preserves back button)', async () => {
+    render(
+      <MemoryRouter initialEntries={['/recent']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(api.listProjects).toHaveBeenCalled();
+    });
+
+    // Back button should be disabled initially
+    expect(screen.getByLabelText('Go back')).toBeDisabled();
+
+    // Add a plain <a> tag (simulating a markdown-rendered link) inside the layout
+    const appDiv = screen.getByTestId('app-layout');
+    const link = document.createElement('a');
+    link.setAttribute('href', '/file/ws1/project-a/notes.md');
+    link.textContent = 'Notes';
+    appDiv.appendChild(link);
+
+    // Click the link — should use client-side navigation, not full page reload
+    await act(async () => {
+      fireEvent.click(link);
+    });
+
+    // Back button should be enabled: client-side navigation preserved tab history
+    await waitFor(() => {
+      expect(screen.getByLabelText('Go back')).not.toBeDisabled();
+    });
+
+    link.remove();
   });
 });

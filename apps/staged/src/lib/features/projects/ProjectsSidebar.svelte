@@ -11,7 +11,7 @@
     GitPullRequestDraft,
     GitBranch,
   } from 'lucide-svelte';
-  import type { Project, Branch } from '../../types';
+  import type { Project, Branch, WorkspaceStatus } from '../../types';
   import { goHome, navigation, selectProject } from '../layout/navigation.svelte';
   import {
     projectDisplayName,
@@ -75,6 +75,26 @@
   ): 'merged' | 'open' | 'closed' | 'checks_failing' | 'conflict' | null {
     const branches = projectBranches.get(projectId) || [];
     return aggregateProjectPrStatus(branches);
+  }
+
+  function getProjectWorkspaceStatus(projectId: string): WorkspaceStatus | null {
+    const branches = projectBranches.get(projectId) || [];
+    return branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null;
+  }
+
+  function cloudStatusClass(status: WorkspaceStatus | null): string {
+    switch (status) {
+      case 'running':
+        return 'cloud-running';
+      case 'starting':
+        return 'cloud-starting';
+      case 'error':
+        return 'cloud-error';
+      case 'stopped':
+      case 'suspended':
+      default:
+        return 'cloud-inactive';
+    }
   }
 
   let resizing = $state(false);
@@ -207,6 +227,8 @@
               )}
               {@const repoCount = repoCountForProject(project)}
               {@const prStatus = getProjectPrStatus(project.id)}
+              {@const workspaceStatus =
+                project.location === 'remote' ? getProjectWorkspaceStatus(project.id) : null}
               {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
               <button
                 class="project-row"
@@ -218,7 +240,7 @@
               >
                 <div class="row-main">
                   {#if project.location === 'remote'}
-                    <Cloud size={14} class="project-location-remote" />
+                    <Cloud size={14} class={cloudStatusClass(workspaceStatus)} />
                   {:else if prStatus === 'merged'}
                     <GitPullRequest size={14} class="pr-status-merged" />
                   {:else if prStatus === 'checks_failing'}
@@ -478,8 +500,20 @@
     stroke: var(--text-faint);
   }
 
-  .row-main :global(svg.project-location-remote) {
+  .row-main :global(svg.cloud-running) {
     stroke: var(--ui-accent);
+  }
+
+  .row-main :global(svg.cloud-starting) {
+    stroke: var(--ui-info);
+  }
+
+  .row-main :global(svg.cloud-error) {
+    stroke: var(--ui-danger);
+  }
+
+  .row-main :global(svg.cloud-inactive) {
+    stroke: var(--text-muted);
   }
 
   .row-text {

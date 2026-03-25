@@ -14,7 +14,7 @@
     GitPullRequestDraft,
     Plus,
   } from 'lucide-svelte';
-  import type { Project, ProjectRepo, Branch } from '../../types';
+  import type { Project, ProjectRepo, Branch, WorkspaceStatus } from '../../types';
   import * as commands from '../../api/commands';
   import {
     projectDisplayName,
@@ -195,6 +195,26 @@
     return aggregateProjectPrStatus(branches);
   }
 
+  function getProjectWorkspaceStatus(projectId: string): WorkspaceStatus | null {
+    const branches = projectBranches.get(projectId) || [];
+    return branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null;
+  }
+
+  function cloudStatusClass(status: WorkspaceStatus | null): string {
+    switch (status) {
+      case 'running':
+        return 'cloud-running';
+      case 'starting':
+        return 'cloud-starting';
+      case 'error':
+        return 'cloud-error';
+      case 'stopped':
+      case 'suspended':
+      default:
+        return 'cloud-inactive';
+    }
+  }
+
   function verifyCommandKeyState(e: KeyboardEvent | MouseEvent) {
     // Verify the command key is actually held down by checking the event's metaKey/ctrlKey
     const actuallyHeld = e.metaKey || e.ctrlKey;
@@ -298,6 +318,8 @@
             {@const repos = reposByProject.get(project.id) ?? []}
             {@const repoCount = repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0)}
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
+            {@const workspaceStatus =
+              project.location === 'remote' ? getProjectWorkspaceStatus(project.id) : null}
             <div class="project-card-wrapper">
               <button
                 class="project-card"
@@ -346,7 +368,7 @@
                 {/if}
                 <div class="card-header">
                   {#if project.location === 'remote'}
-                    <Cloud size={16} class="project-location-remote" />
+                    <Cloud size={16} class={cloudStatusClass(workspaceStatus)} />
                   {:else if prStatus === 'merged'}
                     <GitPullRequest size={16} class="pr-status-merged" />
                   {:else if prStatus === 'checks_failing'}
@@ -558,8 +580,20 @@
     stroke: var(--text-muted);
   }
 
-  .card-header :global(svg.project-location-remote) {
+  .card-header :global(svg.cloud-running) {
     stroke: var(--ui-accent);
+  }
+
+  .card-header :global(svg.cloud-starting) {
+    stroke: var(--ui-info);
+  }
+
+  .card-header :global(svg.cloud-error) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.cloud-inactive) {
+    stroke: var(--text-muted);
   }
 
   .repo {

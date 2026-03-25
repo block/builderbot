@@ -54,22 +54,6 @@ class WorkspaceLifecycleController {
 
   start(hooks: WorkspaceLifecycleHooks): void {
     this.hooks = hooks;
-    const branches = hooks.getBranchesByProject();
-    console.log(
-      '[workspaceLifecycle] start() called, branchesByProject size:',
-      branches.size,
-      'entries:',
-      [...branches.entries()].map(([pid, bs]) => ({
-        projectId: pid,
-        branches: bs.map((b) => ({
-          id: b.id,
-          name: b.branchName,
-          type: b.branchType,
-          wsStatus: b.workspaceStatus,
-          wsName: b.workspaceName,
-        })),
-      }))
-    );
     this.ensurePolling();
   }
 
@@ -102,19 +86,6 @@ class WorkspaceLifecycleController {
 
   enqueueInitialSetup(projectId: string, branches: Branch[]): void {
     let hasActiveRemote = false;
-    const remoteBranches = branches.filter((b) => b.branchType === 'remote');
-    console.log(
-      '[workspaceLifecycle] enqueueInitialSetup projectId=%s branches=%d remote=%d',
-      projectId,
-      branches.length,
-      remoteBranches.length,
-      remoteBranches.map((b) => ({
-        id: b.id,
-        name: b.branchName,
-        wsStatus: b.workspaceStatus,
-        wsName: b.workspaceName,
-      }))
-    );
     for (const branch of branches) {
       this.enqueueBranchSetup(projectId, branch);
       if (
@@ -129,9 +100,6 @@ class WorkspaceLifecycleController {
     // with a stale "running" status would never be re-polled because the
     // poller was already stopped (no branches were loaded when start() ran).
     if (hasActiveRemote) {
-      console.log(
-        '[workspaceLifecycle] enqueueInitialSetup: hasActiveRemote=true, calling ensurePolling'
-      );
       this.ensurePolling();
     }
   }
@@ -151,36 +119,11 @@ class WorkspaceLifecycleController {
     workstationId?: number | null
   ): void {
     const hooks = this.hooks;
-    if (!hooks) {
-      console.log(
-        '[workspaceLifecycle] handleWorkspaceStatusChange: no hooks, skipping branch=%s status=%s',
-        branchId,
-        workspaceStatus
-      );
-      return;
-    }
+    if (!hooks) return;
 
     const current = hooks.getBranchesByProject();
     const branches = current.get(projectId);
-    if (!branches) {
-      console.log(
-        '[workspaceLifecycle] handleWorkspaceStatusChange: no branches for project=%s branch=%s status=%s',
-        projectId,
-        branchId,
-        workspaceStatus
-      );
-      return;
-    }
-
-    const existingBranch = branches.find((b) => b.id === branchId);
-    console.log(
-      '[workspaceLifecycle] handleWorkspaceStatusChange: branch=%s project=%s current=%s next=%s found=%s',
-      branchId,
-      projectId,
-      existingBranch?.workspaceStatus,
-      workspaceStatus,
-      !!existingBranch
-    );
+    if (!branches) return;
 
     let changed = false;
     const nextBranches = branches.map((branch) => {
@@ -197,12 +140,6 @@ class WorkspaceLifecycleController {
     });
 
     if (changed) {
-      console.log(
-        '[workspaceLifecycle] handleWorkspaceStatusChange: updating branchesByProject for branch=%s %s -> %s',
-        branchId,
-        existingBranch?.workspaceStatus,
-        workspaceStatus
-      );
       hooks.setBranchesByProject(new Map(current).set(projectId, nextBranches));
     }
 
@@ -328,24 +265,14 @@ class WorkspaceLifecycleController {
       }
     }
 
-    console.log(
-      '[workspaceLifecycle] collectPollableRemoteBranches: found %d targets',
-      targets.length,
-      targets.map((t) => ({ projectId: t.projectId, branchId: t.branchId, status: t.status }))
-    );
-
     return targets;
   }
 
   private async pollWorkspaceStatuses(): Promise<void> {
-    if (this.pollInFlight) {
-      console.log('[workspaceLifecycle] pollWorkspaceStatuses: skipped, already in flight');
-      return;
-    }
+    if (this.pollInFlight) return;
 
     const targets = this.collectPollableRemoteBranches();
     if (targets.length === 0) {
-      console.log('[workspaceLifecycle] pollWorkspaceStatuses: no targets, stopping poller');
       this.stopPolling();
       return;
     }
@@ -366,41 +293,19 @@ class WorkspaceLifecycleController {
     }
 
     if (activeBranchIds.length === 0) {
-      console.log('[workspaceLifecycle] pollWorkspaceStatuses: all timed out, scheduling next');
       this.scheduleNextPoll();
       return;
     }
-
-    console.log(
-      '[workspaceLifecycle] pollWorkspaceStatuses: calling backend with branchIds=',
-      activeBranchIds
-    );
 
     this.pollInFlight = true;
     try {
       const resultMap = await commands.pollAllWorkspaceStatuses(activeBranchIds);
 
-      console.log('[workspaceLifecycle] pollWorkspaceStatuses: backend returned', resultMap);
-
       for (const target of targets) {
         const result = resultMap[target.branchId];
-        if (!result) {
-          console.log(
-            '[workspaceLifecycle] pollWorkspaceStatuses: no result for branch=%s (current=%s)',
-            target.branchId,
-            target.status
-          );
-          continue;
-        }
+        if (!result) continue;
 
         const nextStatus = this.toWorkspaceStatus(result.status);
-        console.log(
-          '[workspaceLifecycle] pollWorkspaceStatuses: branch=%s current=%s raw=%s parsed=%s',
-          target.branchId,
-          target.status,
-          result.status,
-          nextStatus
-        );
         if (!nextStatus) continue;
 
         this.handleWorkspaceStatusChange(
@@ -446,13 +351,7 @@ class WorkspaceLifecycleController {
   }
 
   private ensurePolling(): void {
-    console.log(
-      '[workspaceLifecycle] ensurePolling: pollTimer=%s pollInFlight=%s',
-      this.pollTimer != null,
-      this.pollInFlight
-    );
     if (!this.pollTimer && !this.pollInFlight) {
-      console.log('[workspaceLifecycle] ensurePolling: starting pollWorkspaceStatuses');
       void this.pollWorkspaceStatuses();
     }
   }

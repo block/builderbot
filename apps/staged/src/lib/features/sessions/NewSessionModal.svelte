@@ -126,8 +126,8 @@
     icon: typeof GitCommitVertical;
     iconClass: string;
   }[] = [
-    { value: 'commit', label: 'New commit', icon: GitCommitVertical, iconClass: 'commit-icon' },
     { value: 'note', label: 'New note', icon: FileText, iconClass: 'note-icon' },
+    { value: 'commit', label: 'New commit', icon: GitCommitVertical, iconClass: 'commit-icon' },
     { value: 'review', label: 'New code review', icon: FileSearch, iconClass: 'review-icon' },
   ];
 

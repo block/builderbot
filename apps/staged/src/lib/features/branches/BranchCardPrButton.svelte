@@ -478,6 +478,8 @@
           if (latestCommit) {
             prHeadSha = latestCommit.sha;
           }
+          // Immediately refresh PR status so checks update right away
+          commands.refreshPrStatus(branch.id).catch(() => {});
           setTimeout(() => {
             pushStateStore.clearPushState(branch.id);
           }, 1_500);

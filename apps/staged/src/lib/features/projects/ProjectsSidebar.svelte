@@ -358,13 +358,14 @@
   .branch-badge {
     font-size: 10px;
     font-weight: 600;
-    color: white;
-    background: rgb(102 179 255 / 0.85);
+    color: var(--text-primary);
+    background: var(--ui-accent);
     padding: 1px 6px;
     border-radius: 4px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    max-width: 120px;
     min-width: 0;
   }
 

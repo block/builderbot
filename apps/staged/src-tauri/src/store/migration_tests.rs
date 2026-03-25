@@ -92,7 +92,7 @@ fn test_check_db_compatibility_detects_newer_schema_version() {
     let conn = Connection::open(&path).unwrap();
     conn.execute_batch(
         "
-        PRAGMA user_version = 2;
+        PRAGMA user_version = 3;
         CREATE TABLE app_metadata (
             id          INTEGER PRIMARY KEY CHECK (id = 1),
             app_version TEXT NOT NULL
@@ -133,7 +133,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));

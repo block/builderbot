@@ -86,6 +86,7 @@ pub struct BranchWithWorkdir {
     pub pr_url: Option<String>,
     pub pr_updated_at: Option<i64>,
     pub pr_fetched_at: Option<i64>,
+    pub setup_complete: bool,
     pub worktree_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -445,6 +446,12 @@ fn create_project(
                     }
                 }
 
+                // Mark setup complete regardless of whether prerun actions
+                // succeeded — the branch has been fully initialized.
+                if let Err(e) = store_bg.mark_branch_setup_complete(&branch_id) {
+                    log::warn!("[create_project] failed to mark setup complete: {e}");
+                }
+
                 // If the repo already has commits on this branch, kick off
                 // an automatic code review so the user gets immediate feedback.
                 maybe_trigger_auto_review_for_new_repo(
@@ -584,6 +591,10 @@ async fn add_project_repo(
                     Err(e) => {
                         log::warn!("[add_project_repo] prerun actions failed: {e}");
                     }
+                }
+
+                if let Err(e) = store.mark_branch_setup_complete(&branch.id) {
+                    log::warn!("[add_project_repo] failed to mark setup complete: {e}");
                 }
 
                 // If the repo already has commits on this branch, kick off

@@ -714,6 +714,12 @@ impl ProjectToolsHandler {
                         );
                     }
                 }
+
+                if let Err(e) = self.store.mark_branch_setup_complete(&branch.id) {
+                    log::warn!(
+                        "[project_mcp] add_project_repo: failed to mark setup complete: {e}"
+                    );
+                }
             } else {
                 log::debug!(
                     "[project_mcp] add_project_repo: no action executor available, skipping prerun actions"

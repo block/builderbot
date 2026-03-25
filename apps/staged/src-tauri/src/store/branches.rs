@@ -12,8 +12,8 @@ impl Store {
             "INSERT INTO branches (id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                 branch_type, workspace_name, workspace_status,
                 pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
-                pr_url, pr_updated_at, pr_fetched_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 branch.id,
                 branch.project_id,
@@ -32,6 +32,8 @@ impl Store {
                 branch.pr_url,
                 branch.pr_updated_at,
                 branch.pr_fetched_at,
+                branch.pr_head_sha,
+                if branch.setup_complete { 1 } else { 0 },
                 branch.created_at,
                 branch.updated_at,
             ],
@@ -59,7 +61,7 @@ impl Store {
             "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                     branch_type, workspace_name, workspace_status,
                     pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
-                    pr_url, pr_updated_at, pr_fetched_at, pr_head_sha,
+                    pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete,
                     created_at, updated_at
              FROM branches WHERE id = ?1",
             params![id],
@@ -72,7 +74,7 @@ impl Store {
             "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                     branch_type, workspace_name, workspace_status,
                     pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
-                    pr_url, pr_updated_at, pr_fetched_at, pr_head_sha,
+                    pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete,
                     created_at, updated_at
              FROM branches WHERE project_id = ?1 ORDER BY created_at ASC",
         )?;
@@ -192,6 +194,17 @@ impl Store {
         Ok(())
     }
 
+    /// Mark a branch as having completed its initial setup (worktree created
+    /// and prerun actions have had the opportunity to run).
+    pub fn mark_branch_setup_complete(&self, id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE branches SET setup_complete = 1, updated_at = ?1 WHERE id = ?2",
+            params![now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_branch(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM branches WHERE id = ?1", params![id])?;
@@ -204,6 +217,7 @@ impl Store {
         let workspace_status_str: Option<String> = row.get(8)?;
         let pr_mergeable: Option<i64> = row.get(12)?;
         let pr_draft: Option<i64> = row.get(13)?;
+        let setup_complete: i64 = row.get(18)?;
         Ok(Branch {
             id: row.get(0)?,
             project_id: row.get(1)?,
@@ -223,8 +237,9 @@ impl Store {
             pr_updated_at: row.get(15)?,
             pr_fetched_at: row.get(16)?,
             pr_head_sha: row.get(17)?,
-            created_at: row.get(18)?,
-            updated_at: row.get(19)?,
+            setup_complete: setup_complete != 0,
+            created_at: row.get(19)?,
+            updated_at: row.get(20)?,
         })
     }
 

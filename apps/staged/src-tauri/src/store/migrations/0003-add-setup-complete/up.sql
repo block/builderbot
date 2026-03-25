@@ -1,0 +1,1 @@
+ALTER TABLE branches ADD COLUMN setup_complete INTEGER NOT NULL DEFAULT 0;

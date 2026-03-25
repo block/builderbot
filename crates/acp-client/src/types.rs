@@ -111,6 +111,11 @@ pub fn find_acp_agent_by_id(provider_id: &str) -> Option<AcpAgent> {
         })
 }
 
+/// Return the CLI command names of all known agents (for error messages).
+pub fn known_agent_commands() -> Vec<&'static str> {
+    KNOWN_AGENTS.iter().map(|a| a.command).collect()
+}
+
 /// Find the first available ACP agent.
 ///
 /// Tries each known agent in order and returns the first one found.

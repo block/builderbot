@@ -397,9 +397,7 @@ pub fn start_session(
                 .map(|q| !q.is_empty())
                 .unwrap_or(false);
 
-            if has_queued {
-                log::info!("Skipping auto review for branch {branch_id}: queued sessions pending");
-            } else {
+            if !has_queued {
                 let store_for_auto = Arc::clone(&store_for_status);
                 let registry_for_auto = Arc::clone(&registry);
                 let app_handle_for_auto = app_handle.clone();

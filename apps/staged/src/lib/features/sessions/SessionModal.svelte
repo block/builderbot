@@ -1484,6 +1484,10 @@
     padding-left: 2px;
   }
 
+  .context-block-group + .human-message {
+    margin-top: 12px;
+  }
+
   .context-card {
     border: 1px solid var(--border-subtle);
     border-radius: 8px;

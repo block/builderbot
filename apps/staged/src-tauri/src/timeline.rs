@@ -345,18 +345,39 @@ pub async fn delete_commit(
                 "head=$(git rev-parse HEAD) && ",
                 "case \"$head\" in \"$2\"*) ;; *) case \"$2\" in \"$head\"*) ;; *) ",
                 "echo \"NOT_HEAD:$head\" >&2; exit 1 ;; esac ;; esac && ",
+                "if ! git rev-parse \"$2^\" >/dev/null 2>&1; then ",
+                "echo \"INITIAL_COMMIT\" >&2; exit 1; fi && ",
                 "parent=$(git rev-parse \"$2^\") && ",
-                "git reset --hard \"$parent\" && ",
-                "echo \"$parent\""
+                "git reset --hard \"$parent\""
             );
 
-            let output = blox::ws_exec(
+            blox::ws_exec(
                 ws_name,
                 &["sh", "-c", script, "_", &resolved_path, &commit_sha],
             )
-            .map_err(|e| format!("Remote delete failed: {e}"))?;
-
-            let _parent_sha = output.trim();
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("NOT_HEAD:") {
+                    // Extract the actual HEAD sha from the error
+                    if let Some(head) = msg.split("NOT_HEAD:").nth(1) {
+                        let head = head
+                            .trim()
+                            .trim_end_matches(|c: char| !c.is_ascii_hexdigit());
+                        let short_commit = &commit_sha[..7.min(commit_sha.len())];
+                        let short_head = &head[..7.min(head.len())];
+                        format!(
+                            "Can only delete the latest commit. {} is not HEAD ({})",
+                            short_commit, short_head
+                        )
+                    } else {
+                        format!("Remote delete failed: {e}")
+                    }
+                } else if msg.contains("INITIAL_COMMIT") {
+                    "Cannot delete the initial commit".to_string()
+                } else {
+                    format!("Remote delete failed: {e}")
+                }
+            })?;
         } else {
             // Local branch: use local worktree
             let workdir = store

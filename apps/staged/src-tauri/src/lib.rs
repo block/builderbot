@@ -396,7 +396,11 @@ fn create_project(
         };
 
         if is_local {
-            // Spawn background worktree + prerun-actions setup for local branches.
+            // Spawn background worktree setup for local branches.
+            // NOTE: prerun actions are NOT triggered here — the frontend
+            // workspace-lifecycle controller calls `runPrerunActions` after
+            // worktree setup completes, so running them here as well would
+            // cause duplicate executions.
             let project_id = project.id.clone();
             let store_bg = Arc::clone(&store);
             tauri::async_runtime::spawn(async move {
@@ -424,26 +428,6 @@ fn create_project(
                         return;
                     }
                 };
-
-                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
-                let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                match branches::run_prerun_actions_for_branch(
-                    &store_bg,
-                    &app_handle,
-                    &branch_id,
-                    &executor,
-                    &act_registry,
-                )
-                .await
-                {
-                    Ok(count) => {
-                        log::info!("[create_project] ran {count} prerun actions");
-                        let _ = app_handle.emit("project-setup-progress", project_id);
-                    }
-                    Err(e) => {
-                        log::warn!("[create_project] prerun actions failed: {e}");
-                    }
-                }
 
                 // If the repo already has commits on this branch, kick off
                 // an automatic code review so the user gets immediate feedback.
@@ -542,7 +526,7 @@ async fn add_project_repo(
             };
 
             if branch.workspace_name.is_none() {
-                // Local branch: set up git worktree and run prerun actions.
+                // Local branch: set up git worktree.
                 let branch_id = branch.id.clone();
                 let store_clone = Arc::clone(&store);
                 let worktree_result = tauri::async_runtime::spawn_blocking(move || {
@@ -550,6 +534,10 @@ async fn add_project_repo(
                 })
                 .await;
 
+                // NOTE: prerun actions are NOT triggered here — the frontend
+                // workspace-lifecycle controller calls `runPrerunActions` after
+                // worktree setup completes, so running them here as well would
+                // cause duplicate executions.
                 let worktree_path = match worktree_result {
                     Ok(Ok(path)) => {
                         log::info!("[add_project_repo] worktree ready at {path}");
@@ -565,26 +553,6 @@ async fn add_project_repo(
                         return;
                     }
                 };
-
-                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
-                let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                match branches::run_prerun_actions_for_branch(
-                    &store,
-                    &app_handle,
-                    &branch.id,
-                    &executor,
-                    &act_registry,
-                )
-                .await
-                {
-                    Ok(count) => {
-                        log::info!("[add_project_repo] ran {count} prerun actions");
-                        let _ = app_handle.emit("project-setup-progress", project_id);
-                    }
-                    Err(e) => {
-                        log::warn!("[add_project_repo] prerun actions failed: {e}");
-                    }
-                }
 
                 // If the repo already has commits on this branch, kick off
                 // an automatic code review so the user gets immediate feedback.

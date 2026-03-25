@@ -1,13 +1,29 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { RefreshCw, Stethoscope } from 'lucide-svelte';
+  import { RefreshCw, Stethoscope, ClipboardCopy, Check } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import DoctorCheckRow from '../doctor/DoctorCheckRow.svelte';
-  import { doctorState, runChecks } from '../doctor/doctor.svelte';
+  import { doctorState, runChecks, formatDebugReport } from '../doctor/doctor.svelte';
+  import { refreshProviders } from '../agents/agent.svelte';
+
+  let mounted = true;
 
   onMount(() => {
-    void runChecks();
+    runChecksAndRefresh();
+    return () => {
+      mounted = false;
+    };
   });
+
+  /** Run checks, then refresh the agent selector if still mounted. */
+  async function runChecksAndRefresh() {
+    await runChecks();
+    if (mounted) {
+      // Re-discover providers so newly-installed agents are immediately
+      // available in the agent selector without requiring an app reload.
+      refreshProviders();
+    }
+  }
 
   /** Tool checks (non-agent). */
   const toolChecks = $derived(
@@ -18,6 +34,16 @@
   const agentChecks = $derived(
     doctorState.report?.checks.filter((c) => c.id.startsWith('ai-agent-')) ?? []
   );
+
+  let copied = $state(false);
+
+  async function copyDebugInfo() {
+    if (!doctorState.report) return;
+    const text = formatDebugReport(doctorState.report);
+    await navigator.clipboard.writeText(text);
+    copied = true;
+    setTimeout(() => (copied = false), 2000);
+  }
 </script>
 
 <div class="doctor-settings-panel">
@@ -30,14 +56,26 @@
       <p>Verify required tools and agent availability for Staged.</p>
     </div>
 
-    <button class="refresh-btn" disabled={doctorState.loading} onclick={runChecks}>
-      {#if doctorState.loading}
-        <Spinner size={14} />
-      {:else}
-        <RefreshCw size={14} />
+    <div class="header-actions">
+      {#if doctorState.report && !doctorState.loading}
+        <button class="refresh-btn" onclick={copyDebugInfo}>
+          {#if copied}
+            <Check size={14} />
+            Copied
+          {:else}
+            <ClipboardCopy size={14} />
+            Copy details
+          {/if}
+        </button>
       {/if}
-      Re-run
-    </button>
+
+      {#if !doctorState.loading}
+        <button class="refresh-btn" onclick={runChecksAndRefresh}>
+          <RefreshCw size={14} />
+          Re-run
+        </button>
+      {/if}
+    </div>
   </div>
 
   <div class="panel-body">
@@ -51,7 +89,7 @@
         <h3 class="section-label">Tools</h3>
         <div class="checks-list">
           {#each toolChecks as check (check.id)}
-            <DoctorCheckRow {check} onFixed={runChecks} />
+            <DoctorCheckRow {check} onFixed={runChecksAndRefresh} />
           {/each}
         </div>
       </div>
@@ -61,7 +99,7 @@
           <h3 class="section-label">Agents</h3>
           <div class="checks-list">
             {#each agentChecks as check (check.id)}
-              <DoctorCheckRow {check} onFixed={runChecks} />
+              <DoctorCheckRow {check} onFixed={runChecksAndRefresh} />
             {/each}
           </div>
         </div>
@@ -155,6 +193,13 @@
     gap: 8px;
     min-height: 160px;
     font-size: var(--size-sm);
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .refresh-btn {

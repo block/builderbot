@@ -24,6 +24,9 @@
     confirmLabel?: string;
     cancelLabel?: string;
     danger?: boolean;
+    confirmDisabled?: boolean;
+    cancelDisabled?: boolean;
+    error?: string | null;
     onConfirm: () => void;
     onCancel: () => void;
   }
@@ -34,16 +37,21 @@
     confirmLabel = 'Confirm',
     cancelLabel = 'Cancel',
     danger = false,
+    confirmDisabled = false,
+    cancelDisabled = false,
+    error = null,
     onConfirm,
     onCancel,
   }: Props = $props();
-  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onCancel() });
+  const backdropDismiss = createBackdropDismissHandlers({
+    onDismiss: () => !cancelDisabled && onCancel(),
+  });
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
+    if (event.key === 'Escape' && !cancelDisabled) {
       onCancel();
       event.preventDefault();
-    } else if (event.key === 'Enter') {
+    } else if (event.key === 'Enter' && !confirmDisabled) {
       onConfirm();
       event.preventDefault();
     }
@@ -71,7 +79,7 @@
   bind:this={backdropEl}
   onpointerdown={backdropDismiss.handlePointerDown}
   onclick={backdropDismiss.handleClick}
-  onkeydown={(e) => e.key === 'Escape' && onCancel()}
+  onkeydown={(e) => e.key === 'Escape' && !cancelDisabled && onCancel()}
 >
   <div class="modal" class:danger>
     <div class="modal-content">
@@ -83,14 +91,23 @@
       <div class="text-content">
         <h2>{title}</h2>
         <p>{message}</p>
+        {#if error}
+          <p class="error-text">{error}</p>
+        {/if}
       </div>
     </div>
 
     <div class="modal-actions">
-      <button class="btn btn-secondary" onclick={onCancel}>
+      <button class="btn btn-secondary" onclick={onCancel} disabled={cancelDisabled}>
         {cancelLabel}
       </button>
-      <button class="btn" class:btn-danger={danger} class:btn-primary={!danger} onclick={onConfirm}>
+      <button
+        class="btn"
+        class:btn-danger={danger}
+        class:btn-primary={!danger}
+        onclick={onConfirm}
+        disabled={confirmDisabled}
+      >
         {confirmLabel}
       </button>
     </div>
@@ -154,6 +171,11 @@
     line-height: 1.5;
   }
 
+  .text-content .error-text {
+    margin-top: 8px;
+    color: var(--color-danger, #f85149);
+  }
+
   .modal-actions {
     display: flex;
     justify-content: flex-end;
@@ -180,7 +202,7 @@
     color: var(--text-primary);
   }
 
-  .btn-secondary:hover {
+  .btn-secondary:hover:not(:disabled) {
     background: var(--border-subtle);
   }
 
@@ -189,7 +211,7 @@
     color: var(--bg-primary);
   }
 
-  .btn-primary:hover {
+  .btn-primary:hover:not(:disabled) {
     background: var(--ui-accent-hover);
   }
 
@@ -198,7 +220,12 @@
     color: white;
   }
 
-  .btn-danger:hover {
+  .btn-danger:hover:not(:disabled) {
     filter: brightness(1.1);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 </style>

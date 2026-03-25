@@ -187,10 +187,10 @@
   let viewImageId = $state<string | null>(null);
   let viewImageFilename = $state<string>('');
   let deletingImageIds = $state<Set<string>>(new Set());
-  let deletingCommitSha = $state<string | null>(null);
+  let deletingCommitKeys = $state<Set<string>>(new Set());
   let timelineDeletingItems = $derived([
     ...[...deletingImageIds].map((id) => ({ type: 'image' as const, id })),
-    ...(deletingCommitSha ? [{ type: 'commit' as const, id: deletingCommitSha }] : []),
+    ...[...deletingCommitKeys].map((id) => ({ type: 'commit' as const, id })),
   ]);
 
   /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */
@@ -459,15 +459,15 @@
         (sessionId ? ' The linked session will also be deleted.' : ''),
       onConfirm: async () => {
         confirmDelete = null;
-        deletingCommitSha = sha;
+        deletingCommitKeys = new Set([...deletingCommitKeys, sha]);
         try {
           await commands.deleteCommit(branch.id, sha, !!sessionId);
-          loadTimeline();
+          await loadTimeline();
         } catch (e) {
           console.error('Failed to delete commit:', e);
           notifyError('Failed to delete commit', e);
         } finally {
-          deletingCommitSha = null;
+          deletingCommitKeys = new Set([...deletingCommitKeys].filter((k) => k !== sha));
         }
       },
     };
@@ -534,6 +534,7 @@
   }
 
   async function handleDeletePendingCommit(commitId: string, sessionId?: string) {
+    deletingCommitKeys = new Set([...deletingCommitKeys, commitId]);
     try {
       if (sessionId) {
         try {
@@ -543,7 +544,7 @@
         }
       }
       await commands.deletePendingCommit(commitId, !!sessionId);
-      loadTimeline();
+      await loadTimeline();
       // Drain the next queued session now that this one has been removed.
       commands
         .drainQueuedSessions(branch.id)
@@ -551,6 +552,8 @@
     } catch (e) {
       console.error('Failed to delete pending commit:', e);
       notifyError('Failed to delete pending commit', e);
+    } finally {
+      deletingCommitKeys = new Set([...deletingCommitKeys].filter((k) => k !== commitId));
     }
   }
 

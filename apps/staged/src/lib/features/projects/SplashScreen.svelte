@@ -17,9 +17,10 @@
     onCreated: (project: Project) => void;
     requestOpen?: boolean;
     onFormOpenChange?: (open: boolean) => void;
+    initialUrl?: string | null;
   }
 
-  let { onCreated, requestOpen = false, onFormOpenChange }: Props = $props();
+  let { onCreated, requestOpen = false, onFormOpenChange, initialUrl = null }: Props = $props();
 
   let showForm = $state(false);
 
@@ -103,6 +104,7 @@
           bind:location={formLocation}
           bind:selectedRepo={formSelectedRepo}
           bind:subpath={formSubpath}
+          {initialUrl}
         />
       </div>
     {/if}

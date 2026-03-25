@@ -15,6 +15,7 @@
     "dialog:default",
     "process:allow-restart",
     "updater:default",
-    "log:default"
+    "log:default",
+    "deep-link:default"
   ]
 }

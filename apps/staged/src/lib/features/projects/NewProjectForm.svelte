@@ -30,6 +30,7 @@
     location?: 'local' | 'remote';
     selectedRepo?: string | null;
     subpath?: string;
+    initialUrl?: string | null;
   }
 
   let {
@@ -39,6 +40,7 @@
     location = $bindable('local'),
     selectedRepo = $bindable(null),
     subpath = $bindable(''),
+    initialUrl = null,
   }: Props = $props();
 
   let branchName = $state('');
@@ -63,6 +65,14 @@
       recentRepos = await commands.listRecentRepos(9);
     } catch {
       // Silently ignore — recents are a convenience, not critical
+    }
+
+    // If opened via a deep link, parse the URL and prefill the form.
+    if (initialUrl) {
+      const parsed = parseGitHubUrl(initialUrl);
+      if (parsed) {
+        handleRepoSelected(parsed);
+      }
     }
   });
 

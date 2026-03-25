@@ -12,9 +12,10 @@
   interface Props {
     onCreated: (project: Project) => void;
     onClose: () => void;
+    initialUrl?: string | null;
   }
 
-  let { onCreated, onClose }: Props = $props();
+  let { onCreated, onClose, initialUrl = null }: Props = $props();
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
 
   function handleKeydown(e: KeyboardEvent) {
@@ -46,7 +47,7 @@
     </div>
 
     <div class="modal-body">
-      <NewProjectForm {onCreated} onCancel={onClose} />
+      <NewProjectForm {onCreated} onCancel={onClose} {initialUrl} />
     </div>
   </div>
 </div>

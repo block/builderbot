@@ -38,6 +38,7 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let showNewProjectModal = $state(false);
+  let deepLinkUrl = $state<string | null>(null);
   let isCommandKeyHeld = $state(false);
   let deletingProjectNames = $state<Map<string, string>>(new Map());
   let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
@@ -59,6 +60,13 @@
     const onNewProject = () => {
       showNewProjectModal = true;
     };
+    const onNewProjectWithUrl = (event: Event) => {
+      const detail = (event as CustomEvent<{ url?: string }>).detail;
+      if (detail?.url) {
+        deepLinkUrl = detail.url;
+        showNewProjectModal = true;
+      }
+    };
     const onProjectDeleteStart = (event: Event) => {
       const detail = (event as CustomEvent<{ projectId?: string; name?: string }>).detail;
       const projectId = detail?.projectId;
@@ -77,6 +85,7 @@
       loadProjects();
     };
     window.addEventListener('staged:new-project', onNewProject);
+    window.addEventListener('staged:new-project-with-url', onNewProjectWithUrl);
     window.addEventListener('staged:project-delete-start', onProjectDeleteStart);
     window.addEventListener('staged:project-delete-end', onProjectDeleteEnd);
 
@@ -118,6 +127,7 @@
     return () => {
       projectRunActionsStore.stopListening();
       window.removeEventListener('staged:new-project', onNewProject);
+      window.removeEventListener('staged:new-project-with-url', onNewProjectWithUrl);
       window.removeEventListener('staged:project-delete-start', onProjectDeleteStart);
       window.removeEventListener('staged:project-delete-end', onProjectDeleteEnd);
       unlistenPrStatus?.();
@@ -178,6 +188,7 @@
     }
     void hydrateRepos(projects);
     showNewProjectModal = false;
+    deepLinkUrl = null;
     selectProject(project.id);
   }
 
@@ -299,7 +310,11 @@
         <SplashScreen
           onCreated={handleProjectCreated}
           requestOpen={showNewProjectModal && projects.length === 0}
-          onFormOpenChange={(open) => (showNewProjectModal = open)}
+          onFormOpenChange={(open) => {
+            showNewProjectModal = open;
+            if (!open) deepLinkUrl = null;
+          }}
+          initialUrl={deepLinkUrl}
         />
       {:else}
         <div class="title-row">
@@ -414,7 +429,14 @@
 </div>
 
 {#if showNewProjectModal && projects.length > 0}
-  <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
+  <NewProjectModal
+    onCreated={handleProjectCreated}
+    onClose={() => {
+      showNewProjectModal = false;
+      deepLinkUrl = null;
+    }}
+    initialUrl={deepLinkUrl}
+  />
 {/if}
 
 <style>

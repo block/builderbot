@@ -442,7 +442,7 @@
     if (afterPane) updateContentWidths();
   });
 
-  // Re-measure on pane resize (e.g., divider drag)
+  // Re-measure on pane resize (e.g., divider drag) or font CSS variable changes
   $effect(() => {
     if (!beforePane && !afterPane) return;
 
@@ -453,7 +453,20 @@
     if (beforePane) resizeObserver.observe(beforePane);
     if (afterPane) resizeObserver.observe(afterPane);
 
-    return () => resizeObserver.disconnect();
+    // Watch for CSS variable changes (e.g. --code-font-size, --font-mono) that
+    // affect line metrics without triggering a resize event.
+    const styleObserver = new MutationObserver(() => {
+      updateContentWidths();
+    });
+    styleObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['style'],
+    });
+
+    return () => {
+      resizeObserver.disconnect();
+      styleObserver.disconnect();
+    };
   });
 
   // ==========================================================================
@@ -2230,7 +2243,7 @@
   }
 
   .status-text {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
     font-size: var(--size-lg);
     font-weight: 500;
     text-transform: uppercase;
@@ -2269,14 +2282,14 @@
   }
 
   .pane-label {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
     font-size: var(--size-xs);
     color: var(--text-faint);
     flex-shrink: 0;
   }
 
   .pane-path {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
     font-size: var(--size-sm);
     color: var(--text-muted);
     overflow: hidden;
@@ -2352,7 +2365,7 @@
     padding: 0.2em 0.4em;
     background-color: var(--bg-primary);
     border-radius: 4px;
-    font-family: var(--font-mono);
+    font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
     font-size: 0.9em;
   }
 
@@ -2488,8 +2501,8 @@
   .code-container {
     flex: 1;
     overflow: hidden;
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: var(--size-md);
+    font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
+    font-size: var(--code-font-size, var(--size-md));
     line-height: 1.5;
     min-width: 0;
     user-select: none;

@@ -26,6 +26,7 @@
     Check,
     Trash2,
     ListChecks,
+    Settings,
   } from 'lucide-svelte';
   import {
     DiffViewer,
@@ -56,6 +57,7 @@
   import type { DiffSpec, RepoInfo, CommitInfo, RecentRepo } from './lib/commands';
   import FolderPickerModal from './lib/FolderPickerModal.svelte';
   import ThemePicker from './lib/ThemePicker.svelte';
+  import SettingsPanel from './lib/SettingsPanel.svelte';
   import GitTreeAnimation from './lib/GitTreeAnimation.svelte';
   import DifferIcon from './lib/DifferIcon.svelte';
   import { initPreferences } from './lib/preferences.svelte';
@@ -134,6 +136,7 @@
 
   let showFolderPicker = $state(false);
   let showThemePicker = $state(false);
+  let showSettingsPanel = $state(false);
   let suggestedRepos = $state<RecentRepo[]>([]);
   let loadingSuggestedRepos = $state(true);
 
@@ -630,10 +633,23 @@
         {/if}
         <button
           class="theme-btn"
-          onclick={() => (showThemePicker = !showThemePicker)}
+          onclick={() => {
+            showThemePicker = !showThemePicker;
+            showSettingsPanel = false;
+          }}
           title="Change theme"
         >
           <Palette size={14} />
+        </button>
+        <button
+          class="theme-btn settings-btn"
+          onclick={() => {
+            showSettingsPanel = !showSettingsPanel;
+            showThemePicker = false;
+          }}
+          title="Font settings"
+        >
+          <Settings size={14} />
         </button>
       </div>
     </div>
@@ -893,6 +909,10 @@
 
   {#if showThemePicker}
     <ThemePicker onClose={() => (showThemePicker = false)} />
+  {/if}
+
+  {#if showSettingsPanel}
+    <SettingsPanel onClose={() => (showSettingsPanel = false)} />
   {/if}
 {/if}
 
@@ -1511,7 +1531,7 @@
 
   .comment-line {
     flex-shrink: 0;
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
     font-size: calc(var(--size-xs) - 1px);
     color: var(--text-faint);
   }

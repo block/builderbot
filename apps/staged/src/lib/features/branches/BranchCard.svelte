@@ -187,9 +187,11 @@
   let viewImageId = $state<string | null>(null);
   let viewImageFilename = $state<string>('');
   let deletingImageIds = $state<Set<string>>(new Set());
-  let timelineDeletingItems = $derived(
-    [...deletingImageIds].map((id) => ({ type: 'image' as const, id }))
-  );
+  let deletingCommitSha = $state<string | null>(null);
+  let timelineDeletingItems = $derived([
+    ...[...deletingImageIds].map((id) => ({ type: 'image' as const, id })),
+    ...(deletingCommitSha ? [{ type: 'commit' as const, id: deletingCommitSha }] : []),
+  ]);
 
   /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */
   let prunedSessionIds = $state<Set<string>>(new Set());
@@ -457,12 +459,15 @@
         (sessionId ? ' The linked session will also be deleted.' : ''),
       onConfirm: async () => {
         confirmDelete = null;
+        deletingCommitSha = sha;
         try {
           await commands.deleteCommit(branch.id, sha, !!sessionId);
           loadTimeline();
         } catch (e) {
           console.error('Failed to delete commit:', e);
           notifyError('Failed to delete commit', e);
+        } finally {
+          deletingCommitSha = null;
         }
       },
     };

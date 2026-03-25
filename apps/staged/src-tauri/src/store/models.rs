@@ -416,6 +416,7 @@ impl Workdir {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
+    Queued,
     Running,
     Completed,
     Error,
@@ -425,6 +426,7 @@ pub enum SessionStatus {
 impl SessionStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Queued => "queued",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Error => "error",
@@ -434,6 +436,7 @@ impl SessionStatus {
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
+            "queued" => Some(Self::Queued),
             "running" => Some(Self::Running),
             "completed" => Some(Self::Completed),
             "error" | "failed" => Some(Self::Error),
@@ -480,6 +483,25 @@ impl Session {
             created_at: now,
             updated_at: now,
             owner_pid: Some(std::process::id()),
+        }
+    }
+
+    /// Create a queued session. The prompt is stored but no agent is spawned.
+    /// The working_dir is left empty since it will be resolved when the session
+    /// is actually started (drained).
+    pub fn new_queued(prompt: &str) -> Self {
+        let now = now_timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            prompt: prompt.to_string(),
+            status: SessionStatus::Queued,
+            working_dir: String::new(),
+            provider: None,
+            agent_id: None,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+            owner_pid: None,
         }
     }
 

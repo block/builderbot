@@ -388,35 +388,46 @@ pub fn start_session(
             emit_status(&app_handle, &session_id_for_status, new_status, error_msg);
         }
 
-        // Trigger auto review when a commit session completes successfully.
-        // Spawned on the Tauri async runtime so the blocking session thread
-        // can exit immediately.
+        // Trigger auto review when a commit session completes successfully,
+        // but only if there are no queued sessions waiting for this branch.
+        // Queued sessions take priority — the next one will be drained instead.
         if let Some(branch_id) = committed_branch_id {
-            let store_for_auto = Arc::clone(&store_for_status);
-            let registry_for_auto = Arc::clone(&registry);
-            let app_handle_for_auto = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                match crate::session_commands::trigger_auto_review(
-                    store_for_auto,
-                    registry_for_auto,
-                    app_handle_for_auto,
-                    branch_id.clone(),
-                    None,
-                )
-                .await
-                {
-                    Ok(resp) => {
-                        log::info!(
-                            "Auto review triggered for branch {branch_id}: session={}, review={}",
-                            resp.session_id,
-                            resp.artifact_id,
-                        );
+            let has_queued = store_for_status
+                .get_queued_sessions_for_branch(&branch_id)
+                .map(|q| !q.is_empty())
+                .unwrap_or(false);
+
+            if has_queued {
+                log::info!("Skipping auto review for branch {branch_id}: queued sessions pending");
+            } else {
+                let store_for_auto = Arc::clone(&store_for_status);
+                let registry_for_auto = Arc::clone(&registry);
+                let app_handle_for_auto = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    match crate::session_commands::trigger_auto_review(
+                        store_for_auto,
+                        registry_for_auto,
+                        app_handle_for_auto,
+                        branch_id.clone(),
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(resp) => {
+                            log::info!(
+                                "Auto review triggered for branch {branch_id}: session={}, review={}",
+                                resp.session_id,
+                                resp.artifact_id,
+                            );
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "Failed to trigger auto review for branch {branch_id}: {e}"
+                            );
+                        }
                     }
-                    Err(e) => {
-                        log::error!("Failed to trigger auto review for branch {branch_id}: {e}");
-                    }
-                }
-            });
+                });
+            }
         }
     });
 

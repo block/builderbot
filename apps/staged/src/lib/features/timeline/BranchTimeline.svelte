@@ -22,7 +22,7 @@
 
   type PendingItem = {
     key: string;
-    type: PendingHintItemType;
+    type: PendingHintItemType | 'queued-commit' | 'queued-note' | 'queued-review';
     title: string;
     secondaryMeta?: string;
     sessionId?: string;
@@ -65,6 +65,8 @@
     newSessionDisabled?: boolean;
     /** Whether the timeline is being revalidated in the background. */
     revalidating?: boolean;
+    /** When set, a provisioning row is shown at the start of the timeline. */
+    provisioningLabel?: string;
     footerActions?: Snippet;
   }
 
@@ -91,6 +93,7 @@
     onNewReview,
     newSessionDisabled = false,
     revalidating = false,
+    provisioningLabel,
     footerActions,
   }: Props = $props();
 
@@ -183,7 +186,8 @@
     for (const commit of timeline.commits) {
       const isPending = !commit.sha;
       const isRunning = commit.sessionStatus === 'running';
-      const isFailed = isPending && !isRunning && !!commit.sessionId;
+      const isQueued = commit.sessionStatus === 'queued';
+      const isFailed = isPending && !isRunning && !isQueued && !!commit.sessionId;
       const isDeleting = !!commit.id && deletingCommitIds.has(commit.id);
       const liveHint = commit.sessionId ? liveSessionHints[commit.sessionId] : undefined;
 
@@ -193,6 +197,9 @@
       if (isFailed) {
         type = 'failed-commit';
         secondaryMeta = 'Session finished — no commit created';
+      } else if (isQueued) {
+        type = 'queued-commit';
+        secondaryMeta = 'Queued';
       } else if (isPending || isRunning) {
         type = 'pending-commit';
         secondaryMeta = liveHint ?? 'Generating commit';
@@ -218,7 +225,8 @@
 
     for (const note of timeline.notes) {
       const isRunning = note.sessionStatus === 'running';
-      const isFailed = !isRunning && !!note.sessionId && !note.content?.trim();
+      const isQueued = note.sessionStatus === 'queued';
+      const isFailed = !isRunning && !isQueued && !!note.sessionId && !note.content?.trim();
       const isDeleting = deletingNoteIds.has(note.id);
       const liveHint = note.sessionId ? liveSessionHints[note.sessionId] : undefined;
 
@@ -228,6 +236,9 @@
       if (isFailed) {
         type = 'failed-note';
         secondaryMeta = 'Session finished — no note created';
+      } else if (isQueued) {
+        type = 'queued-note';
+        secondaryMeta = 'Queued';
       } else if (isRunning) {
         type = 'generating-note';
         secondaryMeta = liveHint ?? 'Generating note';
@@ -258,7 +269,8 @@
       const annotationCount = breakdown?.annotations ?? 0;
       const totalCount = commentCount + annotationCount;
       const isRunning = review.sessionStatus === 'running';
-      const isFailed = !isRunning && !!review.sessionId && totalCount === 0;
+      const isQueued = review.sessionStatus === 'queued';
+      const isFailed = !isRunning && !isQueued && !!review.sessionId && totalCount === 0;
       const isDeleting = deletingReviewIds.has(review.id);
       const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
 
@@ -280,6 +292,9 @@
       if (isFailed) {
         type = 'failed-review';
         meta = 'Session finished — no comments created';
+      } else if (isQueued) {
+        type = 'queued-review';
+        meta = 'Queued';
       } else if (isRunning) {
         type = 'generating-review';
         meta = liveHint ?? 'Generating review';
@@ -319,17 +334,36 @@
       });
     }
 
-    // Sort by timestamp ascending; pending/generating items at bottom
+    // Provisioning row appears at the very start of the timeline
+    if (provisioningLabel) {
+      all.unshift({
+        key: 'provisioning',
+        type: 'provisioning',
+        title: provisioningLabel,
+        timestamp: 0,
+      });
+    }
+
+    // Sort by timestamp ascending; pending/generating items at bottom, queued after those
     all.sort((a, b) => {
-      const aIsTransient =
-        a.type === 'pending-commit' ||
-        a.type === 'generating-note' ||
-        a.type === 'generating-review';
-      const bIsTransient =
-        b.type === 'pending-commit' ||
-        b.type === 'generating-note' ||
-        b.type === 'generating-review';
-      if (aIsTransient !== bIsTransient) return aIsTransient ? 1 : -1;
+      const isProvisioning = (item: DisplayItem) => item.type === 'provisioning';
+      const isTransient = (item: DisplayItem) =>
+        item.type === 'pending-commit' ||
+        item.type === 'generating-note' ||
+        item.type === 'generating-review';
+      const isQueued = (item: DisplayItem) => item.type.startsWith('queued-');
+
+      const aIsProvisioning = isProvisioning(a);
+      const bIsProvisioning = isProvisioning(b);
+      const aIsTransient = isTransient(a);
+      const bIsTransient = isTransient(b);
+      const aIsQueued = isQueued(a);
+      const bIsQueued = isQueued(b);
+
+      // Provisioning < Completed < Active < Queued
+      const aOrder = aIsProvisioning ? -1 : aIsQueued ? 2 : aIsTransient ? 1 : 0;
+      const bOrder = bIsProvisioning ? -1 : bIsQueued ? 2 : bIsTransient ? 1 : 0;
+      if (aOrder !== bOrder) return aOrder - bOrder;
       return a.timestamp - b.timestamp;
     });
 
@@ -366,13 +400,18 @@
     if (item.type === 'commit' && item.commitSha && onDeleteCommit) {
       onDeleteCommit(item.commitSha, item.sessionId);
     } else if (
-      (item.type === 'failed-commit' || item.type === 'pending-commit') &&
+      (item.type === 'failed-commit' ||
+        item.type === 'pending-commit' ||
+        item.type === 'queued-commit') &&
       item.commitId &&
       onDeletePendingCommit
     ) {
       onDeletePendingCommit(item.commitId, item.sessionId);
     } else if (
-      (item.type === 'note' || item.type === 'failed-note' || item.type === 'generating-note') &&
+      (item.type === 'note' ||
+        item.type === 'failed-note' ||
+        item.type === 'generating-note' ||
+        item.type === 'queued-note') &&
       item.noteId &&
       onDeleteNote
     ) {
@@ -380,7 +419,8 @@
     } else if (
       (item.type === 'review' ||
         item.type === 'failed-review' ||
-        item.type === 'generating-review') &&
+        item.type === 'generating-review' ||
+        item.type === 'queued-review') &&
       item.reviewId &&
       onDeleteReview
     ) {

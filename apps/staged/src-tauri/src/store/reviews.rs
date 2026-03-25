@@ -316,6 +316,16 @@ impl Store {
         Ok(())
     }
 
+    /// Update the `commit_sha` of a review.
+    pub fn update_review_commit_sha(&self, id: &str, commit_sha: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE reviews SET commit_sha = ?1, updated_at = ?2 WHERE id = ?3",
+            params![commit_sha, now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     /// Update the `is_auto` flag on a review.
     pub fn set_review_auto(&self, id: &str, is_auto: bool) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();

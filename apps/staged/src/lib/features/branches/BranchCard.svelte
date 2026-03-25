@@ -105,6 +105,24 @@
     reviewId: string;
   } | null>(null);
 
+  /** True when the branch is still provisioning (local worktree or remote workspace). */
+  let isProvisioning = $derived(
+    (isLocal && !branch.worktreePath && !worktreeError) ||
+      (isRemote && remoteWorkspaceStatus === 'starting')
+  );
+
+  /** Empty timeline used during provisioning so the action buttons render. */
+  const emptyTimeline: BranchTimelineData = { commits: [], notes: [], reviews: [], images: [] };
+
+  /** Label for the provisioning timeline row, if applicable. */
+  let provisioningLabel = $derived(
+    isLocal && !branch.worktreePath && !worktreeError
+      ? 'Creating worktree…'
+      : isRemote && remoteWorkspaceStatus === 'starting'
+        ? 'Provisioning workspace…'
+        : undefined
+  );
+
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => c.sha) ?? false);
 
@@ -468,6 +486,10 @@
           }
           await commands.deleteNote(noteId, !!sessionId);
           loadTimeline();
+          // Drain the next queued session now that this one has been removed.
+          commands
+            .drainQueuedSessions(branch.id)
+            .catch((e) => console.error('Failed to drain queued sessions:', e));
         } catch (e) {
           console.error('Failed to delete note:', e);
           notifyError('Failed to delete note', e);
@@ -494,6 +516,10 @@
           }
           await commands.deleteReview(reviewId, !!sessionId);
           loadTimeline();
+          // Drain the next queued session now that this one has been removed.
+          commands
+            .drainQueuedSessions(branch.id)
+            .catch((e) => console.error('Failed to drain queued sessions:', e));
         } catch (e) {
           console.error('Failed to delete review:', e);
           notifyError('Failed to delete review', e);
@@ -513,6 +539,10 @@
       }
       await commands.deletePendingCommit(commitId, !!sessionId);
       loadTimeline();
+      // Drain the next queued session now that this one has been removed.
+      commands
+        .drainQueuedSessions(branch.id)
+        .catch((e) => console.error('Failed to drain queued sessions:', e));
     } catch (e) {
       console.error('Failed to delete pending commit:', e);
       notifyError('Failed to delete pending commit', e);
@@ -655,36 +685,27 @@
       <Spinner size={16} />
       <span>Deleting…</span>
     </div>
-  {:else if isLocal && !branch.worktreePath}
+  {:else if isLocal && !branch.worktreePath && worktreeError}
     <div class="card-header">
       <BranchCardHeaderInfo
         branchName={branch.branchName}
         {repoLabel}
         secondaryLabel={formatBaseBranch(branch.baseBranch)}
       />
-      {#if worktreeError}
-        <div class="header-actions">
-          <button class="more-button" onclick={() => onDelete?.()} title="Delete branch">
-            <Trash2 size={16} />
-          </button>
-        </div>
-      {/if}
+      <div class="header-actions">
+        <button class="more-button" onclick={() => onDelete?.()} title="Delete branch">
+          <Trash2 size={16} />
+        </button>
+      </div>
     </div>
     <div class="card-content">
-      {#if worktreeError}
-        <div class="worktree-error">
-          <div class="worktree-error-message">
-            <AlertCircle size={14} />
-            <span>Failed to create worktree: {worktreeError}</span>
-          </div>
-          <button class="worktree-retry-btn" onclick={() => onRetryWorktree?.()}> Retry </button>
+      <div class="worktree-error">
+        <div class="worktree-error-message">
+          <AlertCircle size={14} />
+          <span>Failed to create worktree: {worktreeError}</span>
         </div>
-      {:else}
-        <div class="loading">
-          <Spinner size={14} />
-          <span>Creating worktree…</span>
-        </div>
-      {/if}
+        <button class="worktree-retry-btn" onclick={() => onRetryWorktree?.()}> Retry </button>
+      </div>
     </div>
   {:else}
     <div class="card-header">
@@ -699,7 +720,7 @@
           : formatBaseBranch(branch.baseBranch)}
       />
       <div class="header-actions">
-        {#if isRemote && remoteWorkspaceStatus !== 'running'}
+        {#if isRemote && remoteWorkspaceStatus !== 'running' && remoteWorkspaceStatus !== 'starting'}
           <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
         {/if}
         <BranchCardActionsBar
@@ -730,13 +751,13 @@
 
     <div class="card-content">
       <ReasonBanner reason={repoLabel?.reason} onDismiss={handleDismissReason} />
-      {#if isRemote && (remoteWorkspaceStatus === 'starting' || remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'suspended' || remoteWorkspaceStatus === 'error')}
+      {#if isRemote && (remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'suspended' || remoteWorkspaceStatus === 'error')}
         <RemoteWorkspaceStatusView
           status={remoteWorkspaceStatus}
           {workspaceError}
           fallbackError={error}
         />
-      {:else if loading}
+      {:else if loading && !isProvisioning}
         <div class="loading">
           <Spinner size={14} />
           <span>Loading...</span>
@@ -745,9 +766,9 @@
         <div class="error">
           <span>{error}</span>
         </div>
-      {:else if timeline}
+      {:else if timeline || isProvisioning}
         <BranchTimeline
-          {timeline}
+          timeline={timeline ?? emptyTimeline}
           repoDir={branch.worktreePath}
           pendingDropNotes={isLocal ? pendingDropNotes : undefined}
           pendingItems={sessionMgr.pendingSessionItems}
@@ -769,6 +790,7 @@
           onNewCommit={() => sessionMgr.openNewSession('commit')}
           onNewReview={hasCodeChanges ? (e) => sessionMgr.openNewSession('review', e) : undefined}
           newSessionDisabled={sessionMgr.isNewSessionDisabled}
+          {provisioningLabel}
         >
           {#snippet footerActions()}
             {#if hasCodeChanges}
@@ -888,6 +910,7 @@
     initialImageIds={sessionMgr.draftImageIds}
     prefilled={usePrefill}
     remote={isRemote}
+    willQueue={sessionMgr.willQueue}
     onClose={(draft) => {
       // Don't persist prefilled text as a draft — it should be re-evaluated
       // each time the dialog opens based on the current timeline state.

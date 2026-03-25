@@ -348,7 +348,9 @@ pub fn cancel_session(
     if !was_running {
         let store = get_store(&store)?;
         if let Ok(Some(session)) = store.get_session(&session_id) {
-            if session.status == store::SessionStatus::Running {
+            if session.status == store::SessionStatus::Running
+                || session.status == store::SessionStatus::Queued
+            {
                 let _ =
                     store.update_session_status(&session_id, store::SessionStatus::Cancelled, None);
                 let _ = app_handle.emit(
@@ -768,6 +770,334 @@ pub async fn start_branch_session(
         session_id: session.id,
         artifact_id,
     })
+}
+
+// =============================================================================
+// Queued session commands
+// =============================================================================
+
+/// Queue a branch session for later execution.
+///
+/// Creates a session with `Queued` status and links it to an artifact stub
+/// (commit or note), but does NOT resolve working directory, git context,
+/// or spawn an agent. The session will be started later via `drain_queued_sessions`.
+#[tauri::command(rename_all = "camelCase")]
+pub fn queue_branch_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    prompt: String,
+    session_type: BranchSessionType,
+    provider: Option<String>,
+    image_ids: Option<Vec<String>>,
+) -> Result<BranchSessionResponse, String> {
+    let store = get_store(&store)?;
+
+    // Validate that the branch exists.
+    let _branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    // Create the queued session — prompt is stored raw (not enriched with
+    // context) since context will be built when the session is drained.
+    let mut session = store::Session::new_queued(&prompt);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
+    }
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    // Link any attached images to the queued session so they are available at drain time.
+    if let Some(ref ids) = image_ids {
+        store
+            .set_images_session_id(ids, &session.id)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Create the artifact stub, following the same pattern as start_branch_session.
+    let artifact_id = match session_type {
+        BranchSessionType::Note => {
+            let note = store::Note::new(&branch_id, &prompt, "").with_session(&session.id);
+            store.create_note(&note).map_err(|e| e.to_string())?;
+            note.id
+        }
+        BranchSessionType::Commit => {
+            let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
+            store.create_commit(&commit).map_err(|e| e.to_string())?;
+            commit.id
+        }
+        BranchSessionType::Review => {
+            let review = store::Review::new(&branch_id, "", store::ReviewScope::Branch)
+                .with_session(&session.id);
+            store.create_review(&review).map_err(|e| e.to_string())?;
+            review.id
+        }
+    };
+
+    Ok(BranchSessionResponse {
+        session_id: session.id,
+        artifact_id,
+    })
+}
+
+/// Drain the oldest queued session for a branch by starting it.
+///
+/// Queries all queued sessions for the given branch and starts only the first
+/// one (oldest by `created_at`). Returns whether a session was started.
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+pub async fn drain_queued_sessions(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+) -> Result<bool, String> {
+    let store = get_store(&store)?;
+
+    // Bail out if the branch already has a running session to prevent
+    // concurrent sessions on the same branch.
+    if store
+        .has_running_session_for_branch(&branch_id)
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
+    let queued = store
+        .get_queued_sessions_for_branch(&branch_id)
+        .map_err(|e| e.to_string())?;
+
+    let session = match queued.into_iter().next() {
+        Some(s) => s,
+        None => return Ok(false),
+    };
+
+    // Look up which artifact type is linked to this session so we know
+    // what kind of branch session to start.
+    let (session_type, review_id) =
+        if let Ok(Some(_commit)) = store.get_commit_by_session(&session.id) {
+            (BranchSessionType::Commit, None)
+        } else if let Ok(Some(_note)) = store.get_note_by_session(&session.id) {
+            (BranchSessionType::Note, None)
+        } else if let Ok(Some(review)) = store.get_review_by_session(&session.id) {
+            (BranchSessionType::Review, Some(review.id))
+        } else {
+            return Err(format!(
+                "Queued session {} has no linked artifact",
+                session.id
+            ));
+        };
+
+    // Use the original prompt from the queued session.
+    let prompt = session.prompt.clone();
+    let session_id = session.id.clone();
+
+    // Resolve branch → project (same as start_branch_session).
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let is_remote = branch.workspace_name.is_some();
+
+    // Resolve working directory and branch context.
+    let (working_dir, branch_context) = if is_remote {
+        let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
+            .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let base_branch = branch.base_branch.clone();
+        let store_for_context = Arc::clone(&store);
+        let branch_id_for_context = branch_id.clone();
+        let project_id_for_context = branch.project_id.clone();
+        let ctx = tauri::async_runtime::spawn_blocking(move || {
+            build_remote_branch_context(
+                &workspace_name,
+                &base_branch,
+                &store_for_context,
+                &branch_id_for_context,
+                &project_id_for_context,
+            )
+        })
+        .await
+        .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
+        (fallback_dir, ctx)
+    } else {
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+        let mut worktree_path = PathBuf::from(&workdir.path);
+        let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
+            store
+                .get_project_repo(repo_id)
+                .ok()
+                .flatten()
+                .and_then(|repo| repo.subpath)
+        } else {
+            project.subpath.clone()
+        };
+        if let Some(ref subpath) = effective_subpath {
+            worktree_path = worktree_path.join(subpath);
+        }
+
+        let ctx = build_branch_context(
+            &worktree_path,
+            &branch.base_branch,
+            &store,
+            &branch_id,
+            &branch.project_id,
+        );
+        (worktree_path, ctx)
+    };
+
+    // Build the full prompt with context.
+    let project_information = build_project_context(&store, &project, &branch);
+    let full_prompt = build_full_prompt(
+        &prompt,
+        &project_information,
+        &branch_context,
+        &session_type,
+    );
+
+    // Atomically transition session from queued to running.
+    // If another drain call already claimed this session, bail out.
+    let transitioned = store
+        .transition_to_running(&session_id)
+        .map_err(|e| e.to_string())?;
+    if !transitioned {
+        return Ok(false);
+    }
+
+    // Update the session's working_dir and prompt now that we have context.
+    store
+        .prepare_queued_session(&session_id, &working_dir.to_string_lossy(), &full_prompt)
+        .map_err(|e| e.to_string())?;
+
+    // Update the review's commit_sha now that we have the working directory.
+    // At queue time, reviews are created with an empty commit_sha since the
+    // workspace may not exist yet.
+    if let Some(ref review_id) = review_id {
+        let tip_sha = if is_remote {
+            let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+            run_blox_blocking(move || blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"]))
+                .await
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        } else {
+            git::get_head_sha(&working_dir).map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
+        };
+        store
+            .update_review_commit_sha(review_id, &tip_sha)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Compute pre-head SHA for commit sessions.
+    let pre_head_sha = match session_type {
+        BranchSessionType::Commit => {
+            if is_remote {
+                let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+                match run_blox_blocking(move || {
+                    blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
+                })
+                .await
+                {
+                    Ok(sha) => Some(sha.trim().to_string()),
+                    Err(e) => {
+                        log::warn!("Failed to get remote HEAD SHA via ws_exec: {e}");
+                        None
+                    }
+                }
+            } else {
+                Some(
+                    git::get_head_sha(&working_dir)
+                        .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?,
+                )
+            }
+        }
+        _ => None,
+    };
+
+    // Resolve remote working dir for remote branches.
+    let remote_working_dir = if is_remote {
+        let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let store_for_resolve = Arc::clone(&store);
+        let branch_for_resolve = branch.clone();
+        match tauri::async_runtime::spawn_blocking(move || {
+            crate::branches::resolve_branch_workspace_subpath(
+                &store_for_resolve,
+                &branch_for_resolve,
+            )
+            .ok()
+            .flatten()
+            .and_then(|subpath| {
+                crate::branches::resolve_workspace_repo_path(&ws_name, &subpath).ok()
+            })
+        })
+        .await
+        {
+            Ok(Some(path)) => Some(PathBuf::from(path)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // Use the provider from the queued session, falling back to the one passed in.
+    let effective_provider = session.provider.or(provider);
+
+    // Retrieve image IDs linked to this session at queue time.
+    let image_ids = store
+        .get_image_ids_for_session(&session_id)
+        .unwrap_or_default();
+
+    let session_type_str = match session_type {
+        BranchSessionType::Commit => "commit",
+        BranchSessionType::Note => "note",
+        BranchSessionType::Review => "review",
+    };
+
+    let _ = app_handle.emit(
+        "session-status-changed",
+        session_runner::SessionStatusEvent {
+            session_id: session_id.clone(),
+            status: "running".to_string(),
+            error_message: None,
+            branch_id: Some(branch_id.clone()),
+            project_id: Some(branch.project_id.clone()),
+            session_type: Some(session_type_str.to_string()),
+            is_auto_review: false,
+        },
+    );
+
+    session_runner::start_session(
+        SessionConfig {
+            session_id: session_id.clone(),
+            prompt: full_prompt,
+            working_dir,
+            agent_session_id: None,
+            pre_head_sha,
+            provider: effective_provider,
+            workspace_name: branch.workspace_name.clone(),
+            extra_env: vec![],
+            mcp_project_id: None,
+            action_executor: None,
+            action_registry: None,
+            remote_working_dir,
+            image_ids,
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(true)
 }
 
 // =============================================================================

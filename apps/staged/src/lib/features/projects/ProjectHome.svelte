@@ -243,6 +243,18 @@
             branchesByProject = new Map(branchesByProject).set(project.id, branches);
             workspaceLifecycle.enqueueInitialSetup(project.id, branches);
             replaceProjectRepos(project.id, repos);
+
+            // On startup, drain queued sessions for branches that are already ready.
+            for (const branch of branches) {
+              const isLocalReady = branch.branchType === 'local' && branch.worktreePath;
+              const isRemoteReady =
+                branch.branchType === 'remote' && branch.workspaceStatus === 'running';
+              if (isLocalReady || isRemoteReady) {
+                commands.drainQueuedSessions(branch.id).catch((e) => {
+                  console.error('[ProjectHome] Failed to drain queued sessions on startup:', e);
+                });
+              }
+            }
           } catch (e) {
             console.error(`[ProjectHome] Failed to hydrate project '${project.id}':`, e);
           }

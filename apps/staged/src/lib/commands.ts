@@ -564,6 +564,32 @@ export function startBranchSession(
   });
 }
 
+/** Queue a branch-scoped session to run after current work completes. */
+export function queueBranchSession(
+  branchId: string,
+  prompt: string,
+  sessionType: BranchSessionType,
+  provider?: string,
+  imageIds?: string[]
+): Promise<BranchSessionResponse> {
+  return invoke('queue_branch_session', {
+    branchId,
+    prompt,
+    sessionType,
+    provider: provider ?? null,
+    imageIds: imageIds ?? null,
+  });
+}
+
+/** Drain queued sessions for a branch — starts the next queued session if any.
+ *  Returns true if a session was started, false if the queue was empty. */
+export function drainQueuedSessions(branchId: string): Promise<boolean> {
+  return invoke('drain_queued_sessions', {
+    branchId,
+    provider: null,
+  });
+}
+
 // =============================================================================
 // Timeline item deletion
 // =============================================================================

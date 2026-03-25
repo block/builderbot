@@ -416,11 +416,6 @@ impl AgentDriver for AcpDriver {
             ) => result,
         };
 
-        log::info!(
-            "ACP session {session_id} finished (is_remote={}, success={})",
-            self.is_remote,
-            protocol_result.is_ok()
-        );
         writer.finalize().await;
         graceful_stop(&mut child, self.is_remote).await;
 
@@ -439,37 +434,22 @@ async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
     if is_remote {
         if let Some(pid) = child.id() {
             let Ok(pid) = i32::try_from(pid) else {
-                log::warn!("PID {pid} out of i32 range, falling back to SIGKILL");
                 let _ = child.kill().await;
                 return;
             };
             // Send SIGINT to the process group (negative PID) so both `sq`
             // and its child processes (the blox acp proxy) receive the signal.
             // The process was spawned with process_group(0) so its PGID == PID.
-            log::info!("Sending SIGINT to remote ACP proxy process group (pgid={pid})");
             if signal::kill(Pid::from_raw(-pid), Signal::SIGINT).is_ok() {
                 match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                    Ok(Ok(status)) => {
-                        log::info!("Remote ACP proxy exited gracefully after SIGINT: {status}");
+                    Ok(Ok(_status)) => {
                         return;
                     }
-                    Ok(Err(e)) => {
-                        log::warn!("Error waiting for remote ACP proxy after SIGINT: {e}");
-                    }
-                    Err(_) => {
-                        log::warn!(
-                            "Remote ACP proxy did not exit within 5s after SIGINT, sending SIGKILL"
-                        );
-                    }
+                    Ok(Err(_)) | Err(_) => {}
                 }
-            } else {
-                log::warn!("Failed to send SIGINT to remote ACP proxy (pid={pid}), falling back to SIGKILL");
             }
-        } else {
-            log::warn!("Remote ACP proxy has no PID, falling back to SIGKILL");
         }
     }
-    log::info!("Sending SIGKILL to ACP process (is_remote={is_remote})");
     let _ = child.kill().await;
 }
 
@@ -849,8 +829,6 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
-        log::info!("ACP session notification: {:?}", notification.update);
-
         // Determine the action to take under the lock, then drop the lock
         // before calling into the writer to avoid holding it across await points.
         enum LiveAction {

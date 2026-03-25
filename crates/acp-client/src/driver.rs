@@ -444,11 +444,10 @@ async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
         // and its child processes (the blox acp proxy) receive the signal.
         // The process was spawned with process_group(0) so its PGID == PID.
         if signal::kill(Pid::from_raw(-pid), Signal::SIGINT).is_ok() {
-            match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                Ok(Ok(_status)) => {
-                    return;
-                }
-                Ok(Err(_)) | Err(_) => {}
+            if let Ok(Ok(_status)) =
+                tokio::time::timeout(Duration::from_secs(5), child.wait()).await
+            {
+                return;
             }
         }
         let _ = child.kill().await;

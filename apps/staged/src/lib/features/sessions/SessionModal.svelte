@@ -900,7 +900,7 @@
       {:else}
         <div class="messages">
           {#each grouped as group, groupIdx (groupKey(group))}
-            <div in:messageSlide>
+            <div in:messageSlide class={group.type === 'user' ? 'user-group' : ''}>
               {#if group.type === 'user'}
                 {@const hasBlocks = hasXmlBlocks(group.message.content)}
                 {@const segments = hasBlocks ? parseContentSegments(group.message.content) : []}
@@ -1484,8 +1484,10 @@
     padding-left: 2px;
   }
 
-  .context-block-group + .human-message {
-    margin-top: 12px;
+  .user-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
   .context-card {

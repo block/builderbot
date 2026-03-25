@@ -215,7 +215,7 @@
         type,
         title: stripXmlTags(commit.subject),
         meta: isDeleting ? 'Deleting...' : secondaryMeta,
-        secondaryMeta: !isRunning ? commit.shortSha || undefined : undefined,
+        secondaryMeta: isDeleting || isRunning ? undefined : commit.shortSha || undefined,
         deleting: isDeleting,
         timestamp: commit.timestamp,
         sessionId: commit.sessionId ?? undefined,

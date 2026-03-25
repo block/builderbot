@@ -4,10 +4,26 @@
   import Spinner from '../../shared/Spinner.svelte';
   import DoctorCheckRow from '../doctor/DoctorCheckRow.svelte';
   import { doctorState, runChecks, formatDebugReport } from '../doctor/doctor.svelte';
+  import { refreshProviders } from '../agents/agent.svelte';
+
+  let mounted = true;
 
   onMount(() => {
-    void runChecks();
+    runChecksAndRefresh();
+    return () => {
+      mounted = false;
+    };
   });
+
+  /** Run checks, then refresh the agent selector if still mounted. */
+  async function runChecksAndRefresh() {
+    await runChecks();
+    if (mounted) {
+      // Re-discover providers so newly-installed agents are immediately
+      // available in the agent selector without requiring an app reload.
+      refreshProviders();
+    }
+  }
 
   /** Tool checks (non-agent). */
   const toolChecks = $derived(
@@ -54,7 +70,7 @@
       {/if}
 
       {#if !doctorState.loading}
-        <button class="refresh-btn" onclick={runChecks}>
+        <button class="refresh-btn" onclick={runChecksAndRefresh}>
           <RefreshCw size={14} />
           Re-run
         </button>
@@ -73,7 +89,7 @@
         <h3 class="section-label">Tools</h3>
         <div class="checks-list">
           {#each toolChecks as check (check.id)}
-            <DoctorCheckRow {check} onFixed={runChecks} />
+            <DoctorCheckRow {check} onFixed={runChecksAndRefresh} />
           {/each}
         </div>
       </div>
@@ -83,7 +99,7 @@
           <h3 class="section-label">Agents</h3>
           <div class="checks-list">
             {#each agentChecks as check (check.id)}
-              <DoctorCheckRow {check} onFixed={runChecks} />
+              <DoctorCheckRow {check} onFixed={runChecksAndRefresh} />
             {/each}
           </div>
         </div>

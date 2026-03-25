@@ -5,7 +5,6 @@
  * that calls the Tauri `run_doctor` command.
  */
 import { runDoctor, type DoctorCheck, type DoctorReport } from '../../api/commands';
-import { refreshProviders } from '../agents/agent.svelte';
 
 interface DoctorState {
   /** The most recent report, or null if not yet run. */
@@ -55,16 +54,18 @@ export function formatDebugReport(report: DoctorReport): string {
   return lines.join('\n');
 }
 
-/** Run all checks and update the reactive state. */
+/**
+ * Run all checks and update the reactive state.
+ *
+ * Returns a promise that resolves once the report is ready.
+ * Does NOT call refreshProviders — callers that care about
+ * updating the agent selector should do so themselves after
+ * awaiting this function.
+ */
 export async function runChecks(): Promise<void> {
   doctorState.loading = true;
   try {
     doctorState.report = await runDoctor();
-    // Re-discover providers so newly-installed agents are immediately
-    // available in the agent selector without requiring an app reload.
-    // Fire-and-forget: the agent selector updates reactively once the
-    // promise resolves, so no need to delay showing the doctor report.
-    refreshProviders();
   } catch (e) {
     console.error('[Doctor] Failed to run checks:', e);
   } finally {

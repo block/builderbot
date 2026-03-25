@@ -5,11 +5,9 @@
 //! URL the user can visit to install or configure the dependency.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Command;
-
-use acp_client::find_command;
-
-use crate::git;
 
 // =============================================================================
 // Types
@@ -54,28 +52,21 @@ pub struct DoctorReport {
 }
 
 // =============================================================================
-// Individual checks
+// Binary resolution
 // =============================================================================
 
-/// Format the raw output of a command invocation for debug diagnostics.
-fn format_command_output(cmd_desc: &str, output: &std::process::Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut raw = format!("$ {cmd_desc}\nexit code: {}", output.status);
-    if !stdout.trim().is_empty() {
-        raw.push_str(&format!("\nstdout:\n{}", stdout.trim()));
-    }
-    if !stderr.trim().is_empty() {
-        raw.push_str(&format!("\nstderr:\n{}", stderr.trim()));
-    }
-    raw
+/// A resolved binary: the path (if found) and the diagnostic search trace.
+#[derive(Clone)]
+struct ResolvedBinary {
+    path: Option<PathBuf>,
+    search_output: String,
 }
 
-/// Format the search results for a command, mirroring the `find_command` strategy.
+/// Resolve a binary by trying login shell `which` then common install paths.
 ///
-/// Tries login shell `which` first, then falls back to common paths. Stops
-/// searching once a match is found, so the output reflects the real resolution.
-fn format_search_output(cmd: &str) -> String {
+/// Combines the work of `find_command` and diagnostic search output into a
+/// single pass, so each binary only needs to be resolved once.
+fn resolve_binary(cmd: &str) -> ResolvedBinary {
     let mut lines = vec![format!("resolve '{cmd}':")];
 
     // Strategy 1: Login shell `which` (primary)
@@ -89,7 +80,10 @@ fn format_search_output(cmd: &str) -> String {
                     lines.push(format!(
                         "    {shell} -l -c 'which {cmd}' => {result} (resolved)"
                     ));
-                    return lines.join("\n");
+                    return ResolvedBinary {
+                        path: Some(PathBuf::from(&result)),
+                        search_output: lines.join("\n"),
+                    };
                 }
                 lines.push(format!("    {shell} -l -c 'which {cmd}' => not found"));
             }
@@ -107,26 +101,50 @@ fn format_search_output(cmd: &str) -> String {
         "/usr/bin",
         "/home/linuxbrew/.linuxbrew/bin",
     ] {
-        let path = std::path::PathBuf::from(dir).join(cmd);
+        let path = PathBuf::from(dir).join(cmd);
         if path.exists() {
             lines.push(format!("    {} => found (resolved)", path.display()));
-            return lines.join("\n");
+            return ResolvedBinary {
+                path: Some(path),
+                search_output: lines.join("\n"),
+            };
         }
         lines.push(format!("    {} => not found", path.display()));
     }
 
     lines.push("  not found in any location".to_string());
-    lines.join("\n")
+    ResolvedBinary {
+        path: None,
+        search_output: lines.join("\n"),
+    }
+}
+
+// =============================================================================
+// Individual checks
+// =============================================================================
+
+/// Format the raw output of a command invocation for debug diagnostics.
+fn format_command_output(cmd_desc: &str, output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut raw = format!("$ {cmd_desc}\nexit code: {}", output.status);
+    if !stdout.trim().is_empty() {
+        raw.push_str(&format!("\nstdout:\n{}", stdout.trim()));
+    }
+    if !stderr.trim().is_empty() {
+        raw.push_str(&format!("\nstderr:\n{}", stderr.trim()));
+    }
+    raw
 }
 
 /// Check that `git` is installed and reachable.
-fn check_git() -> DoctorCheck {
+fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
     let label = "Git".to_string();
     let id = "git".to_string();
-    let search = format_search_output("git");
+    let search = &resolved.search_output;
     let header = "# Check: Git — verify git is installed and reachable";
 
-    let git_path = match find_command("git") {
+    let git_path = match &resolved.path {
         Some(p) => p,
         None => {
             return DoctorCheck {
@@ -137,13 +155,13 @@ fn check_git() -> DoctorCheck {
                 fix_url: Some("https://git-scm.com/downloads".to_string()),
                 fix_command: None,
                 path: None,
-                raw_output: Some(format!("{header}\nnot found via find_command\n{search}")),
+                raw_output: Some(format!("{header}\nnot found via resolve_binary\n{search}")),
             };
         }
     };
     let path_str = git_path.to_string_lossy().to_string();
 
-    match Command::new(&git_path).arg("--version").output() {
+    match Command::new(git_path).arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let raw = format!(
@@ -193,13 +211,13 @@ fn check_git() -> DoctorCheck {
 }
 
 /// Check that the GitHub CLI (`gh`) is installed.
-fn check_gh() -> DoctorCheck {
+fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
     let label = "GitHub CLI".to_string();
     let id = "gh".to_string();
-    let search = format_search_output("gh");
+    let search = &resolved.search_output;
     let header = "# Check: GitHub CLI — verify gh is installed";
 
-    let gh_path = match find_command("gh") {
+    let gh_path = match &resolved.path {
         Some(p) => p,
         None => {
             return DoctorCheck {
@@ -210,13 +228,13 @@ fn check_gh() -> DoctorCheck {
                 fix_url: Some("https://cli.github.com".to_string()),
                 fix_command: None,
                 path: None,
-                raw_output: Some(format!("{header}\nnot found via find_command\n{search}")),
+                raw_output: Some(format!("{header}\nnot found via resolve_binary\n{search}")),
             };
         }
     };
     let path_str = gh_path.to_string_lossy().to_string();
 
-    match Command::new(&gh_path).arg("--version").output() {
+    match Command::new(gh_path).arg("--version").output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
             let first_line = version.lines().next().unwrap_or("gh").trim().to_string();
@@ -267,62 +285,89 @@ fn check_gh() -> DoctorCheck {
 }
 
 /// Check that `gh auth status` succeeds (user is logged in).
-fn check_gh_auth() -> DoctorCheck {
+///
+/// Uses the pre-resolved `gh` path to run `gh auth status` directly,
+/// avoiding a redundant binary resolution and command invocation.
+fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
     let label = "GitHub Auth".to_string();
     let id = "gh-auth".to_string();
     let header = "# Check: GitHub Auth — verify user is logged in to GitHub";
 
-    let auth = git::check_github_auth();
-    // Capture raw gh auth status output for diagnostics, using find_command
-    // to mirror the resolution strategy used at runtime.
-    let raw = match find_command("gh") {
-        Some(gh_path) => match Command::new(&gh_path).args(["auth", "status"]).output() {
-            Ok(output) => format!(
-                "{header}\n{}",
-                format_command_output("gh auth status", &output)
-            ),
-            Err(e) => format!("{header}\n$ gh auth status\nerror: {e}"),
-        },
-        None => format!("{header}\ngh not found via find_command"),
+    let gh_path = match &gh.path {
+        Some(p) => p,
+        None => {
+            return DoctorCheck {
+                id,
+                label,
+                status: CheckStatus::Fail,
+                message: "GitHub CLI not found — install gh first".to_string(),
+                fix_url: Some("https://cli.github.com".to_string()),
+                fix_command: None,
+                path: None,
+                raw_output: Some(format!("{header}\ngh not found via resolve_binary")),
+            };
+        }
     };
 
-    if auth.authenticated {
-        DoctorCheck {
-            id,
-            label,
-            status: CheckStatus::Pass,
-            message: "Authenticated".to_string(),
-            fix_url: None,
-            fix_command: None,
-            path: None,
-            raw_output: Some(raw),
+    match Command::new(gh_path).args(["auth", "status"]).output() {
+        Ok(output) => {
+            let raw = format!(
+                "{header}\n{}",
+                format_command_output("gh auth status", &output)
+            );
+            if output.status.success() {
+                DoctorCheck {
+                    id,
+                    label,
+                    status: CheckStatus::Pass,
+                    message: "Authenticated".to_string(),
+                    fix_url: None,
+                    fix_command: None,
+                    path: None,
+                    raw_output: Some(raw),
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let hint = if stderr.contains("not logged in") || stderr.contains("no oauth token")
+                {
+                    "Not authenticated — run `gh auth login`".to_string()
+                } else {
+                    "Not authenticated".to_string()
+                };
+                DoctorCheck {
+                    id,
+                    label,
+                    status: CheckStatus::Fail,
+                    message: hint,
+                    fix_url: Some("https://cli.github.com/manual/gh_auth_login".to_string()),
+                    fix_command: None,
+                    path: None,
+                    raw_output: Some(raw),
+                }
+            }
         }
-    } else {
-        DoctorCheck {
+        Err(e) => DoctorCheck {
             id,
             label,
             status: CheckStatus::Fail,
-            message: auth
-                .setup_hint
-                .unwrap_or_else(|| "Not authenticated".to_string()),
+            message: "Not authenticated".to_string(),
             fix_url: Some("https://cli.github.com/manual/gh_auth_login".to_string()),
             fix_command: None,
             path: None,
-            raw_output: Some(raw),
-        }
+            raw_output: Some(format!("{header}\n$ gh auth status\nerror: {e}")),
+        },
     }
 }
 
 /// Check that Git LFS is installed.
-fn check_git_lfs() -> DoctorCheck {
+fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCheck {
     let label = "Git LFS".to_string();
     let id = "git-lfs".to_string();
-    let search = format_search_output("git-lfs");
+    let search = &git_lfs.search_output;
     let header =
         "# Check: Git LFS — verify git-lfs is installed (optional, needed for large files)";
 
-    // Resolve git via find_command so we use the same binary the app uses at runtime.
-    let git_path = match find_command("git") {
+    let git_path = match &git.path {
         Some(p) => p,
         None => {
             return DoctorCheck {
@@ -334,16 +379,19 @@ fn check_git_lfs() -> DoctorCheck {
                 fix_command: None,
                 path: None,
                 raw_output: Some(format!(
-                    "{header}\ngit not found via find_command\n{search}"
+                    "{header}\ngit not found via resolve_binary\n{search}"
                 )),
             };
         }
     };
 
-    match Command::new(&git_path).args(["lfs", "version"]).output() {
+    match Command::new(git_path).args(["lfs", "version"]).output() {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let path = find_command("git-lfs").map(|p| p.to_string_lossy().to_string());
+            let path = git_lfs
+                .path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string());
             let raw = format!(
                 "{header}\n{}\n{}",
                 format_command_output("git lfs version", &output),
@@ -394,16 +442,29 @@ fn check_git_lfs() -> DoctorCheck {
 ///
 /// On macOS (APFS), `core.clonefile = true` enables copy-on-write clones
 /// which makes git worktrees use significantly less disk space.
-fn check_clonefile() -> DoctorCheck {
+fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
     let label = "Copy on Write Git Clones".to_string();
     let id = "git-clonefile".to_string();
     let fix_cmd = "git config --global core.clonefile true".to_string();
     let header = "# Check: Copy on Write Git Clones — verify core.clonefile is enabled for disk space savings";
 
-    // Resolve git via find_command so we use the same binary the app uses at runtime.
-    let git_path = find_command("git").unwrap_or_else(|| "git".into());
+    let git_path = match &git.path {
+        Some(p) => p,
+        None => {
+            return DoctorCheck {
+                id,
+                label,
+                status: CheckStatus::Warn,
+                message: "Git not found — cannot check clonefile setting".to_string(),
+                fix_url: Some("https://git-scm.com/downloads".to_string()),
+                fix_command: None,
+                path: None,
+                raw_output: Some(format!("{header}\ngit not found via resolve_binary")),
+            };
+        }
+    };
 
-    match Command::new(&git_path)
+    match Command::new(git_path)
         .args(["config", "--global", "core.clonefile"])
         .output()
     {
@@ -540,33 +601,33 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
     },
 ];
 
-fn agent_installed(info: &AgentCheckInfo) -> bool {
-    info.commands.iter().any(|cmd| find_command(cmd).is_some())
-}
-
 /// Check whether a single AI agent is installed.
 ///
-/// If at least one other agent is already found (`any_agent_found`), missing
-/// agents get `Warn`; otherwise the first missing agent gets `Warn` too since
-/// only one agent is required overall.
-fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> DoctorCheck {
+/// Uses pre-resolved binaries from the resolution phase. If at least one other
+/// agent is already found (`any_agent_found`), missing agents get `Warn`;
+/// otherwise the first missing agent gets `Warn` too since only one agent is
+/// required overall.
+fn check_single_ai_agent(
+    info: &AgentCheckInfo,
+    any_agent_found: bool,
+    resolved_cmds: &[ResolvedBinary],
+    resolved_main: Option<&ResolvedBinary>,
+) -> DoctorCheck {
     let header = format!(
         "# Check: {} — verify {} agent is installed",
         info.label, info.label
     );
-    // Collect search output for all commands.
-    let search_lines: Vec<String> = info
-        .commands
+    // Collect search output from pre-resolved binaries.
+    let search_lines: Vec<&str> = resolved_cmds
         .iter()
-        .map(|cmd| format_search_output(cmd))
+        .map(|rb| rb.search_output.as_str())
         .collect();
     let search = search_lines.join("\n");
 
-    // Resolve the path for the first matching command.
-    let resolved_path = info
-        .commands
+    // Find the first resolved path among the bridge commands.
+    let resolved_path = resolved_cmds
         .iter()
-        .find_map(|cmd| find_command(cmd))
+        .find_map(|rb| rb.path.as_ref())
         .map(|p| p.to_string_lossy().to_string());
 
     if let Some(ref path_str) = resolved_path {
@@ -635,9 +696,9 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
         }
     } else {
         // Bridge not found — check if the main CLI tool is installed (partial install).
-        if let Some(main_cmd) = info.main_command {
-            let main_search = format_search_output(main_cmd);
-            if let Some(main_path) = find_command(main_cmd) {
+        if let Some(resolved_main) = resolved_main {
+            let main_search = &resolved_main.search_output;
+            if let Some(ref main_path) = resolved_main.path {
                 let bridge_cmd = info.commands[0];
                 return DoctorCheck {
                     id: info.id.to_string(),
@@ -696,10 +757,10 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
 // =============================================================================
 
 /// Fallback check returned when a spawn_blocking task panics.
-fn empty_check(id: &str) -> DoctorCheck {
+fn empty_check(id: &str, label: &str) -> DoctorCheck {
     DoctorCheck {
         id: id.to_string(),
-        label: id.to_string(),
+        label: label.to_string(),
         status: CheckStatus::Fail,
         message: "Check failed to run".to_string(),
         fix_url: None,
@@ -711,44 +772,116 @@ fn empty_check(id: &str) -> DoctorCheck {
 
 /// Run all health checks and return the report.
 ///
-/// All checks run concurrently so the total wall time is roughly the
-/// duration of the slowest individual check, not the sum of all of them.
+/// Binary resolution is done once upfront for all unique command names, then
+/// all checks run concurrently using the pre-resolved paths. This avoids
+/// redundant login shell spawns when multiple checks need the same binary.
 #[tauri::command]
 pub async fn run_doctor() -> DoctorReport {
-    // Phase 1: spawn every system check and the agent-installed scan in parallel.
-    let git = tokio::task::spawn_blocking(check_git);
-    let gh = tokio::task::spawn_blocking(check_gh);
-    let gh_auth = tokio::task::spawn_blocking(check_gh_auth);
-    let git_lfs = tokio::task::spawn_blocking(check_git_lfs);
-    let clonefile = tokio::task::spawn_blocking(check_clonefile);
-    let any_agent = tokio::task::spawn_blocking(|| AI_AGENT_CHECKS.iter().any(agent_installed));
+    // Phase 0: Resolve all unique binaries concurrently.
+    // Collect every command name we'll need across all checks.
+    let mut binary_names: Vec<&'static str> = vec!["git", "gh", "git-lfs"];
+    for info in AI_AGENT_CHECKS {
+        for cmd in info.commands {
+            if !binary_names.contains(cmd) {
+                binary_names.push(cmd);
+            }
+        }
+        if let Some(main) = info.main_command {
+            if !binary_names.contains(&main) {
+                binary_names.push(main);
+            }
+        }
+    }
 
-    let (git, gh, gh_auth, git_lfs, clonefile, any_agent) =
-        tokio::join!(git, gh, gh_auth, git_lfs, clonefile, any_agent);
+    let handles: Vec<_> = binary_names
+        .iter()
+        .map(|&name| tokio::task::spawn_blocking(move || (name, resolve_binary(name))))
+        .collect();
 
-    let any_agent_found = any_agent.unwrap_or(false);
+    let mut resolved: HashMap<&str, ResolvedBinary> = HashMap::new();
+    for handle in handles {
+        if let Ok((name, rb)) = handle.await {
+            resolved.insert(name, rb);
+        }
+    }
 
-    // Phase 2: spawn individual agent checks in parallel (needs any_agent_found).
+    let fallback = ResolvedBinary {
+        path: None,
+        search_output: "resolution task panicked".to_string(),
+    };
+    let r_git = resolved
+        .get("git")
+        .cloned()
+        .unwrap_or_else(|| fallback.clone());
+    let r_gh = resolved
+        .get("gh")
+        .cloned()
+        .unwrap_or_else(|| fallback.clone());
+    let r_git_lfs = resolved
+        .get("git-lfs")
+        .cloned()
+        .unwrap_or_else(|| fallback.clone());
+
+    // Determine if any agent is installed from the already-resolved data.
+    let any_agent_found = AI_AGENT_CHECKS.iter().any(|info| {
+        info.commands
+            .iter()
+            .any(|cmd| resolved.get(cmd).map_or(false, |rb| rb.path.is_some()))
+    });
+
+    // Phase 1: Run all checks concurrently using pre-resolved binaries.
+    let git_r = r_git.clone();
+    let gh_r = r_gh.clone();
+    let gh_r2 = r_gh.clone();
+    let git_r2 = r_git.clone();
+    let git_lfs_r = r_git_lfs;
+    let git_r3 = r_git;
+
+    let c_git = tokio::task::spawn_blocking(move || check_git(&git_r));
+    let c_gh = tokio::task::spawn_blocking(move || check_gh(&gh_r));
+    let c_gh_auth = tokio::task::spawn_blocking(move || check_gh_auth(&gh_r2));
+    let c_git_lfs = tokio::task::spawn_blocking(move || check_git_lfs(&git_r2, &git_lfs_r));
+    let c_clonefile = tokio::task::spawn_blocking(move || check_clonefile(&git_r3));
+
     let agent_handles: Vec<_> = AI_AGENT_CHECKS
         .iter()
         .map(|info| {
             let found = any_agent_found;
-            tokio::task::spawn_blocking(move || check_single_ai_agent(info, found))
+            let cmds: Vec<ResolvedBinary> = info
+                .commands
+                .iter()
+                .map(|cmd| {
+                    resolved
+                        .get(cmd)
+                        .cloned()
+                        .unwrap_or_else(|| fallback.clone())
+                })
+                .collect();
+            let main = info.main_command.and_then(|cmd| resolved.get(cmd).cloned());
+            tokio::task::spawn_blocking(move || {
+                check_single_ai_agent(info, found, &cmds, main.as_ref())
+            })
         })
         .collect();
 
+    let (c_git, c_gh, c_gh_auth, c_git_lfs, c_clonefile) =
+        tokio::join!(c_git, c_gh, c_gh_auth, c_git_lfs, c_clonefile);
+
     let mut checks = vec![
-        git.unwrap_or_else(|_| empty_check("git")),
-        gh.unwrap_or_else(|_| empty_check("gh")),
-        gh_auth.unwrap_or_else(|_| empty_check("gh-auth")),
-        git_lfs.unwrap_or_else(|_| empty_check("git-lfs")),
-        clonefile.unwrap_or_else(|_| empty_check("clonefile")),
+        c_git.unwrap_or_else(|_| empty_check("git", "Git")),
+        c_gh.unwrap_or_else(|_| empty_check("gh", "GitHub CLI")),
+        c_gh_auth.unwrap_or_else(|_| empty_check("gh-auth", "GitHub Auth")),
+        c_git_lfs.unwrap_or_else(|_| empty_check("git-lfs", "Git LFS")),
+        c_clonefile.unwrap_or_else(|_| empty_check("git-clonefile", "Copy on Write Git Clones")),
     ];
 
-    for handle in agent_handles {
-        if let Ok(check) = handle.await {
-            checks.push(check);
-        }
+    for (i, handle) in agent_handles.into_iter().enumerate() {
+        let info = &AI_AGENT_CHECKS[i];
+        checks.push(
+            handle
+                .await
+                .unwrap_or_else(|_| empty_check(info.id, info.label)),
+        );
     }
 
     DoctorReport { checks }

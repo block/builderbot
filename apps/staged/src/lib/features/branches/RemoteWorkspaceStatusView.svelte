@@ -24,6 +24,12 @@
     <span class="status-text">Workspace stopped</span>
     <span class="status-hint">Start a new branch to reprovision this workspace.</span>
   </div>
+{:else if status === 'suspended'}
+  <div class="status-view suspended-view">
+    <CirclePause size={20} />
+    <span class="status-text">Workspace suspended</span>
+    <span class="status-hint">Resume this workspace from the project header.</span>
+  </div>
 {:else if status === 'error'}
   <div class="status-view error-view">
     <AlertCircle size={20} />
@@ -61,6 +67,10 @@
 
   .stopped-view :global(svg) {
     color: var(--text-muted);
+  }
+
+  .suspended-view :global(svg) {
+    color: var(--ui-warning);
   }
 
   .error-view :global(svg) {

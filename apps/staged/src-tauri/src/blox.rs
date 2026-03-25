@@ -65,6 +65,9 @@ pub fn check_auth() -> Result<(), BloxError> {
     blox_cli::check_auth()
 }
 
-// Phase 3: Pause/resume lifecycle — workspaces auto-suspend after idle;
-// use `sq blox ws resume <name>` to bring them back. There is no explicit
-// `sq blox ws stop` command. Deletion is a single `sq blox ws delete` call.
+/// Resume a suspended Blox workspace.
+///
+/// Runs: `sq blox ws resume <name>`
+pub fn ws_resume(name: &str) -> Result<(), BloxError> {
+    blox_cli::ws_resume(name)
+}

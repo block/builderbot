@@ -60,6 +60,8 @@ pub struct WorkspaceInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceListEntry {
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_string_u64")]
+    pub workstation_id: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_status")]
     pub status: Option<String>,
     #[serde(flatten)]
@@ -71,10 +73,14 @@ pub struct WorkspaceListEntry {
 fn status_code_to_string(code: u64) -> String {
     match code {
         0 => "unknown".to_string(),
-        1 => "starting".to_string(),
-        2 => "stopped".to_string(),
+        1 => "stopped".to_string(),
+        2 => "starting".to_string(),
         3 => "running".to_string(),
         4 => "error".to_string(),
+        5 => "shutting_down".to_string(),
+        6 => "suspended".to_string(),
+        7 => "deleted".to_string(),
+        8 => "degraded".to_string(),
         other => format!("unknown({other})"),
     }
 }
@@ -351,6 +357,14 @@ pub fn ws_start(name: &str, source: Option<&str>) -> Result<String, BloxError> {
     }
     result?;
     Ok(name.to_string())
+}
+
+/// Resume a suspended Blox workspace.
+///
+/// Runs: `sq blox ws resume <name>`
+pub fn ws_resume(name: &str) -> Result<(), BloxError> {
+    run(&["ws", "resume", name], START_TIMEOUT)?;
+    Ok(())
 }
 
 /// Delete a Blox workspace.

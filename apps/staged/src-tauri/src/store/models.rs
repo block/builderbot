@@ -203,6 +203,8 @@ pub enum WorkspaceStatus {
     Running,
     /// Workspace has been stopped (can be restarted).
     Stopped,
+    /// Workspace has been suspended due to inactivity (can be resumed).
+    Suspended,
     /// Workspace encountered an error.
     Error,
 }
@@ -213,6 +215,7 @@ impl WorkspaceStatus {
             Self::Starting => "starting",
             Self::Running => "running",
             Self::Stopped => "stopped",
+            Self::Suspended => "suspended",
             Self::Error => "error",
         }
     }
@@ -226,6 +229,7 @@ impl FromStr for WorkspaceStatus {
             "starting" => Ok(Self::Starting),
             "running" => Ok(Self::Running),
             "stopped" => Ok(Self::Stopped),
+            "suspended" => Ok(Self::Suspended),
             "error" => Ok(Self::Error),
             other => Err(format!("unknown workspace status: {other}")),
         }

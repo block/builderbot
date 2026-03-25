@@ -259,6 +259,11 @@ export function startWorkspace(branchId: string): Promise<void> {
   return invoke('start_workspace', { branchId });
 }
 
+/** Resume a suspended Blox workspace. Returns IDs of all affected branches. */
+export function resumeWorkspace(workspaceName: string): Promise<string[]> {
+  return invoke('resume_workspace', { workspaceName });
+}
+
 export function deleteBranch(branchId: string): Promise<void> {
   return invoke('delete_branch', { branchId });
 }
@@ -280,6 +285,13 @@ export function getWorkspaceInfo(branchId: string): Promise<WorkspaceInfo> {
 /** Poll a remote branch's workspace status and return updated status + workstation ID. */
 export function pollWorkspaceStatus(branchId: string): Promise<PollWorkspaceResult> {
   return invoke('poll_workspace_status', { branchId });
+}
+
+/** Poll workspace statuses for multiple branches in a single `sq blox ws list` call. */
+export function pollAllWorkspaceStatuses(
+  branchIds: string[]
+): Promise<Record<string, PollWorkspaceResult>> {
+  return invoke('poll_all_workspace_statuses', { branchIds });
 }
 
 // =============================================================================

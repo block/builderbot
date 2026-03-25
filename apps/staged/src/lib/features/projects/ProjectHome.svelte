@@ -8,13 +8,7 @@
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import type {
-    Project,
-    ProjectRepo,
-    Branch,
-    StoreIncompatibility,
-    WorkspaceStatus,
-  } from '../../types';
+  import type { Project, ProjectRepo, Branch, StoreIncompatibility } from '../../types';
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
@@ -80,7 +74,6 @@
       setBranchesByProject: (next) => {
         branchesByProject = next;
       },
-      getVisibleProjectIds: () => new Set(visibleProjects.map((project) => project.id)),
       isProjectDeleting: (projectId) => deletingProjectNames.has(projectId),
     });
     checkStoreAndLoad();
@@ -533,20 +526,6 @@
     return 'Workspace must be running before adding another repo.';
   }
 
-  function handleWorkspaceStatusChange(
-    projectId: string,
-    branchId: string,
-    workspaceStatus: WorkspaceStatus,
-    workstationId?: number | null
-  ) {
-    workspaceLifecycle.handleWorkspaceStatusChange(
-      projectId,
-      branchId,
-      workspaceStatus,
-      workstationId
-    );
-  }
-
   $effect(() => {
     branchesByProject;
     if (!loading) {
@@ -704,8 +683,6 @@
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onRenameBranch={(branchId, branchName) =>
               handleRenameBranch(branchId, project.id, branchName)}
-            onWorkspaceStatusChange={(branchId, workspaceStatus, workstationId) =>
-              handleWorkspaceStatusChange(project.id, branchId, workspaceStatus, workstationId)}
             excludeRepos={new Set(
               [...reposById.values()]
                 .filter((r) => r.projectId === project.id)
@@ -713,6 +690,8 @@
             )}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
+            onResumeWorkspace={(workspaceName) =>
+              workspaceLifecycle.resumeWorkspace(project.id, workspaceName)}
             onDismissReason={(projectRepoId) => {
               const repo = reposById.get(projectRepoId);
               if (repo) {

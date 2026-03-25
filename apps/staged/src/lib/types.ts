@@ -44,7 +44,7 @@ export interface GitHubRepo {
 }
 
 export type BranchType = 'local' | 'remote';
-export type WorkspaceStatus = 'starting' | 'running' | 'stopped' | 'error';
+export type WorkspaceStatus = 'starting' | 'running' | 'stopped' | 'suspended' | 'error';
 
 export interface Branch {
   id: string;

@@ -44,17 +44,12 @@ function persistLastProject(projectId: string | null): void {
  * user is sent to the home screen instead.
  */
 export async function initNavigation(): Promise<void> {
-  const t0 = performance.now();
-  console.log('[perf:nav] initNavigation START');
   const lastProjectId = await getStoreValue<string | null>(LAST_PROJECT_STORE_KEY);
-  console.log(`[perf:nav] initNavigation getStoreValue ${Math.round(performance.now() - t0)}ms`);
   if (!lastProjectId) return;
 
   // Validate the project still exists before navigating to it
   try {
-    const t1 = performance.now();
     const projects = await commands.listProjects();
-    console.log(`[perf:nav] initNavigation listProjects ${Math.round(performance.now() - t1)}ms`);
     const existingIds = new Set(projects.map((p) => p.id));
     if (existingIds.has(lastProjectId)) {
       navigation.selectedProjectId = lastProjectId;
@@ -68,13 +63,10 @@ export async function initNavigation(): Promise<void> {
     // If we can't list projects (e.g. store error), stay on home
     console.warn('[Navigation] Could not verify last project, falling back to home');
   }
-  console.log(`[perf:nav] initNavigation END ${Math.round(performance.now() - t0)}ms`);
 }
 
 /** Navigate to a specific project's detail view. */
 export function selectProject(projectId: string): void {
-  const t0 = performance.now();
-  console.log(`[perf:nav] selectProject START projectId=${projectId}`);
   showWorkspaceView();
   navigation.selectedProjectId = projectId;
   persistLastProject(projectId);
@@ -82,7 +74,6 @@ export function selectProject(projectId: string): void {
   if (projectStateStore.isUnread(projectId)) {
     projectStateStore.markAsRead(projectId);
   }
-  console.log(`[perf:nav] selectProject END ${Math.round(performance.now() - t0)}ms`);
 }
 
 /** Navigate to a project and scroll to a specific branch card. */

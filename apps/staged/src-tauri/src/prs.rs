@@ -409,12 +409,6 @@ pub async fn has_unpushed_commits(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<bool, String> {
-    let t0 = std::time::Instant::now();
-    log::info!(
-        "[perf:backend] has_unpushed_commits START branch={}",
-        branch_id
-    );
-
     let store = get_store(&store)?;
 
     let branch = store
@@ -430,12 +424,10 @@ pub async fn has_unpushed_commits(
             .to_string();
         let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)?;
         let branch_name = branch.branch_name.clone();
-        let bid = branch_id.clone();
 
         // Run the blocking SSH calls on a background thread so we don't
         // block the Tauri IPC thread and freeze the UI.
         let result = tauri::async_runtime::spawn_blocking(move || {
-            let t_ssh = std::time::Instant::now();
             let remote_ref = format!("origin/{}", branch_name);
             // Remote tracking branch doesn't exist — all commits are unpushed
             if crate::branches::run_workspace_git(
@@ -445,7 +437,6 @@ pub async fn has_unpushed_commits(
             )
             .is_err()
             {
-                log::info!("[perf:backend] has_unpushed_commits branch={} remote rev-parse failed (all unpushed) {}ms", bid, t_ssh.elapsed().as_millis());
                 return Ok(true);
             }
             let rev_range = format!("{remote_ref}..HEAD");
@@ -455,16 +446,10 @@ pub async fn has_unpushed_commits(
                 &["rev-list", &rev_range],
             )
             .map_err(|e| e.to_string())?;
-            log::info!("[perf:backend] has_unpushed_commits branch={} remote git ops {}ms", bid, t_ssh.elapsed().as_millis());
             Ok(!output.trim().is_empty())
         })
         .await
         .map_err(|e| format!("has_unpushed_commits task failed: {e}"))?;
-        log::info!(
-            "[perf:backend] has_unpushed_commits END branch={} (remote) total={}ms",
-            branch_id,
-            t0.elapsed().as_millis()
-        );
         return result;
     }
 
@@ -473,14 +458,8 @@ pub async fn has_unpushed_commits(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
-    let result = git::has_unpushed_commits(Path::new(&workdir.path), &branch.branch_name)
-        .map_err(|e| e.to_string());
-    log::info!(
-        "[perf:backend] has_unpushed_commits END branch={} (local) total={}ms",
-        branch_id,
-        t0.elapsed().as_millis()
-    );
-    result
+    git::has_unpushed_commits(Path::new(&workdir.path), &branch.branch_name)
+        .map_err(|e| e.to_string())
 }
 
 /// Push a branch to its remote by kicking off an agent session.

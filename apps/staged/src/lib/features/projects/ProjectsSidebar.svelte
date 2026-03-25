@@ -32,6 +32,8 @@
     SIDEBAR_MIN_WIDTH,
   } from './projectsSidebarState.svelte';
 
+  const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
+
   interface Props {
     projects: Project[];
     loading?: boolean;
@@ -191,6 +193,9 @@
         <span class="brand-logo">
           <StagedIcon size={26} />
           <span class="brand-text">Staged</span>
+          {#if devBranch}
+            <span class="branch-badge">{devBranch}</span>
+          {/if}
         </span>
       </div>
     </div>
@@ -370,6 +375,20 @@
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.02em;
+  }
+
+  .branch-badge {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-tertiary);
+    background: var(--bg-elevated);
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 120px;
+    min-width: 0;
   }
 
   .plus-icon {

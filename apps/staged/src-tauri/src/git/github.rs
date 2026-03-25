@@ -1704,12 +1704,6 @@ pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrS
         github_repo,
         "--json=state,isDraft,mergeable,reviewDecision,statusCheckRollup,headRefOid",
     ];
-    log::info!(
-        "fetch_pr_status_for_repo: running gh {} for repo={}, pr_number={}",
-        gh_args.join(" "),
-        github_repo,
-        pr_number
-    );
     let output = match run_gh_global(gh_args) {
         Ok(output) => output,
         Err(e) => {

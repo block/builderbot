@@ -131,8 +131,6 @@
 
   $effect(() => {
     const branchId = branch.id;
-    console.info(`[BranchCardPrButton] Setting up event listeners for branch=${branchId}`);
-
     listen<{
       branchId: string;
       prState: string;
@@ -144,9 +142,6 @@
     }>('pr-status-changed', (event) => {
       const payload = event.payload;
       if (payload.branchId === branchId) {
-        console.info(
-          `[BranchCardPrButton] pr-status-changed received for branch=${branchId}: state=${payload.prState}, checks=${payload.prChecksStatus}, mergeable=${payload.prMergeable}, draft=${payload.prDraft}, headSha=${payload.prHeadSha}`
-        );
         prStatusState = payload.prState;
         prStatusChecks = payload.prChecksStatus;
         prStatusReviewDecision = payload.prReviewDecision;
@@ -160,7 +155,6 @@
 
     listen<string>('pr-status-cleared', (event) => {
       if (event.payload === branchId) {
-        console.info(`[BranchCardPrButton] pr-status-cleared received for branch=${branchId}`);
         prStatusState = null;
         prStatusChecks = null;
         prStatusReviewDecision = null;
@@ -173,7 +167,6 @@
     });
 
     return () => {
-      console.info(`[BranchCardPrButton] Tearing down event listeners for branch=${branchId}`);
       unlistenPrStatus?.();
       unlistenPrStatusCleared?.();
     };
@@ -228,9 +221,6 @@
     const shouldPoll = branch.prNumber && isWindowFocused;
 
     if (prStatusState === 'MERGED' || prStatusState === 'CLOSED') {
-      console.info(
-        `[BranchCardPrButton] Polling stopped for branch=${branch.id}: status=${prStatusState}`
-      );
       if (prStatusPollTimer) {
         clearInterval(prStatusPollTimer);
         prStatusPollTimer = null;
@@ -246,25 +236,17 @@
     }
 
     if (shouldPoll) {
-      console.info(
-        `[BranchCardPrButton] Polling started for branch=${branch.id}, interval=${pollInterval}ms, prNumber=${branch.prNumber}, focused=${isWindowFocused}`
-      );
       if (prStatusPollTimer) {
         clearInterval(prStatusPollTimer);
       }
 
       prStatusPollTimer = setInterval(async () => {
         if (prStatusRefreshing) {
-          console.info(
-            `[BranchCardPrButton] Poll tick skipped for branch=${branch.id}: refresh already in progress`
-          );
           return;
         }
         try {
-          console.info(`[BranchCardPrButton] Poll tick firing for branch=${branch.id}`);
           prStatusRefreshing = true;
           await commands.refreshPrStatus(branch.id);
-          console.info(`[BranchCardPrButton] Poll refresh completed for branch=${branch.id}`);
         } catch (e) {
           console.error(`[BranchCardPrButton] Poll refresh failed for branch=${branch.id}:`, e);
         } finally {
@@ -272,9 +254,6 @@
         }
       }, pollInterval);
     } else {
-      console.info(
-        `[BranchCardPrButton] Polling stopped for branch=${branch.id}: prNumber=${branch.prNumber}, focused=${isWindowFocused}`
-      );
       if (prStatusPollTimer) {
         clearInterval(prStatusPollTimer);
         prStatusPollTimer = null;
@@ -290,17 +269,11 @@
   });
 
   onMount(() => {
-    console.info(
-      `[BranchCardPrButton] Mounted: branch=${branch.id}, hasCodeChanges=${hasCodeChanges}, prNumber=${branch.prNumber}`
-    );
     window.addEventListener('keydown', handleOptionDown);
     window.addEventListener('keyup', handleOptionUp);
 
     handleFocus = () => {
       isWindowFocused = true;
-      console.info(
-        `[BranchCardPrButton] Window focused: branch=${branch.id}, prNumber=${branch.prNumber}, refreshing=${prStatusRefreshing}`
-      );
       if (branch.prNumber && !prStatusRefreshing) {
         commands
           .refreshPrStatus(branch.id)
@@ -308,7 +281,6 @@
       }
     };
     handleBlur = () => {
-      console.info(`[BranchCardPrButton] Window blurred: branch=${branch.id}`);
       isWindowFocused = false;
     };
     window.addEventListener('focus', handleFocus);

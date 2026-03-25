@@ -242,13 +242,6 @@ pub async fn refresh_pr_status(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
     let (github_repo, _) = resolve_branch_repo_and_subpath(&store, &project, &branch)?;
 
-    log::info!(
-        "refresh_pr_status: branch_id={}, pr_number={}, github_repo={}",
-        branch_id,
-        pr_number,
-        github_repo
-    );
-
     let pr_status = match git::fetch_pr_status_for_repo(&github_repo, pr_number) {
         Ok(status) => status,
         Err(e) => {
@@ -262,15 +255,6 @@ pub async fn refresh_pr_status(
         }
     };
     let mergeable = pr_status.mergeable == "MERGEABLE";
-
-    log::info!(
-        "refresh_pr_status result: branch_id={}, state={}, checks={}, mergeable={}, draft={}",
-        branch_id,
-        pr_status.state,
-        pr_status.checks_summary.state,
-        mergeable,
-        pr_status.is_draft
-    );
 
     store
         .update_branch_pr_status(
@@ -406,7 +390,6 @@ pub fn clear_branch_pr_status(
     app_handle: tauri::AppHandle,
     branch_id: String,
 ) -> Result<(), String> {
-    log::info!("clear_branch_pr_status: branch_id={}", branch_id);
     let store = get_store(&store)?;
 
     store
@@ -433,12 +416,6 @@ pub async fn has_unpushed_commits(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-    log::info!(
-        "has_unpushed_commits: branch_id={}, branch_type={:?}",
-        branch_id,
-        branch.branch_type
-    );
-
     if branch.branch_type == store::BranchType::Remote {
         let workspace_name = branch
             .workspace_name
@@ -450,7 +427,6 @@ pub async fn has_unpushed_commits(
 
         // Run the blocking SSH calls on a background thread so we don't
         // block the Tauri IPC thread and freeze the UI.
-        let bid = branch_id.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
             let remote_ref = format!("origin/{}", branch_name);
             // Remote tracking branch doesn't exist — all commits are unpushed
@@ -474,11 +450,6 @@ pub async fn has_unpushed_commits(
         })
         .await
         .map_err(|e| format!("has_unpushed_commits task failed: {e}"))?;
-        log::info!(
-            "has_unpushed_commits result: branch_id={}, result={:?}",
-            bid,
-            result
-        );
         return result;
     }
 
@@ -487,14 +458,8 @@ pub async fn has_unpushed_commits(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
-    let result = git::has_unpushed_commits(Path::new(&workdir.path), &branch.branch_name)
-        .map_err(|e| e.to_string());
-    log::info!(
-        "has_unpushed_commits result: branch_id={}, result={:?}",
-        branch_id,
-        result
-    );
-    result
+    git::has_unpushed_commits(Path::new(&workdir.path), &branch.branch_name)
+        .map_err(|e| e.to_string())
 }
 
 /// Push a branch to its remote by kicking off an agent session.

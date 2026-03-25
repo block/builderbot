@@ -20,11 +20,13 @@ type SourceType struct {
 	BadgeActiveBg    string                           // CSS background when sidebar item is active
 	BadgeActiveColor string                           // CSS color when sidebar item is active
 	AutoDetectDir    string                           // directory name to look for (e.g., "thoughts", ".rp1")
+	AutoDetectFile   string                           // filename to look for at project root (e.g., "ANCHORS.md")
 	ScanMode         string                           // "tree" (walk for .md) or "files" (explicit list)
 	DetectAtWSRoot   bool                             // also detect at workspace root level
 	ClassifyFile     func(path string) string         // returns file type for a path within the source
 	GroupFiles       func(paths []string) []FileGroup // optional: groups files for display; if nil, single flat list
 	ShowDirHeadings  bool                             // show directory headings above files in each subdirectory
+	SkipDirs         map[string]bool                  // directory names to skip during tree scan (e.g., node_modules)
 }
 
 // FileGroup represents a named group of files within a source for display.
@@ -128,6 +130,22 @@ func init() {
 	})
 
 	RegisterSourceType(&SourceType{
+		Name:             "anchors",
+		DisplayName:      "ANCHORS",
+		BadgeColor:       "#0d9488",
+		BadgeBg:          "#f0fdfa",
+		BadgeActiveBg:    "#ccfbf1",
+		BadgeActiveColor: "#0f766e",
+		AutoDetectFile:   "ANCHORS.md",
+		ScanMode:         "tree",
+		ClassifyFile:     classifyAnchorsFile,
+		GroupFiles:       groupAnchorsPaths,
+		SkipDirs: map[string]bool{
+			".git": true, "node_modules": true, ".hg": true, ".svn": true,
+		},
+	})
+
+	RegisterSourceType(&SourceType{
 		Name:            "manual",
 		ShowDirHeadings: true,
 	})
@@ -195,6 +213,87 @@ func isRP1TopLevelReport(path string) bool {
 	default:
 		return false
 	}
+}
+
+// classifyAnchorsFile classifies a file by its name within an ANCHORS module.
+// Only known ANCHORS document filenames are kept; everything else is skipped.
+func classifyAnchorsFile(path string) string {
+	base := filepath.Base(path)
+	switch base {
+	case "ANCHORS.md":
+		return "anchors"
+	case "PRODUCT.md":
+		return "product"
+	case "ERD.md":
+		return "engineering"
+	case "TESTING.md":
+		return "testing"
+	case "DEPENDENCIES.md":
+		return "dependencies"
+	default:
+		return "" // skip non-ANCHORS files
+	}
+}
+
+// anchorsFileOrder defines the display order for files within a module.
+var anchorsFileOrder = map[string]int{
+	"ANCHORS.md":      0,
+	"PRODUCT.md":      1,
+	"ERD.md":          2,
+	"TESTING.md":      3,
+	"DEPENDENCIES.md": 4,
+}
+
+// groupAnchorsPaths groups ANCHORS source-relative paths by module directory.
+// Only files in directories that contain an ANCHORS.md marker are included.
+func groupAnchorsPaths(paths []string) []FileGroup {
+	// First pass: find directories that contain an ANCHORS.md marker
+	modules := make(map[string]bool)
+	for _, p := range paths {
+		if filepath.Base(p) == "ANCHORS.md" {
+			dir := filepath.Dir(p)
+			if dir == "." {
+				dir = ""
+			}
+			modules[dir] = true
+		}
+	}
+
+	// Second pass: group files by module directory
+	groups := make(map[string][]string)
+	for _, p := range paths {
+		dir := filepath.Dir(p)
+		if dir == "." {
+			dir = ""
+		}
+		if modules[dir] {
+			groups[dir] = append(groups[dir], p)
+		}
+	}
+
+	// Sort module names; root ("") sorts first naturally
+	names := make([]string, 0, len(groups))
+	for name := range groups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	result := make([]FileGroup, 0, len(names))
+	for _, name := range names {
+		files := groups[name]
+		// Sort files within each module by canonical order
+		sort.Slice(files, func(i, j int) bool {
+			oi := anchorsFileOrder[filepath.Base(files[i])]
+			oj := anchorsFileOrder[filepath.Base(files[j])]
+			return oi < oj
+		})
+		displayName := name
+		if displayName == "" {
+			displayName = "(root)"
+		}
+		result = append(result, FileGroup{Name: displayName, Paths: files})
+	}
+	return result
 }
 
 // Badge holds rendering metadata for a source type badge.
@@ -286,22 +385,32 @@ func (p *Project) QualifiedName() string {
 }
 
 // DetectSources finds auto-detectable file sources in a project directory
-// by checking for all registered source types with an AutoDetectDir.
+// by checking for all registered source types with an AutoDetectDir or AutoDetectFile.
 func DetectSources(projectPath string) []FileSource {
 	var sources []FileSource
 	for _, st := range AllSourceTypes() {
-		if st.AutoDetectDir == "" {
-			continue
-		}
-		dirPath := filepath.Join(projectPath, st.AutoDetectDir)
-		if info, err := os.Stat(dirPath); err == nil && info.IsDir() {
-			sources = append(sources, FileSource{
-				Name:           st.Name,
-				Type:           st.ScanMode,
-				SourceTypeName: st.Name,
-				RootPath:       dirPath,
-				Auto:           true,
-			})
+		if st.AutoDetectDir != "" {
+			dirPath := filepath.Join(projectPath, st.AutoDetectDir)
+			if info, err := os.Stat(dirPath); err == nil && info.IsDir() {
+				sources = append(sources, FileSource{
+					Name:           st.Name,
+					Type:           st.ScanMode,
+					SourceTypeName: st.Name,
+					RootPath:       dirPath,
+					Auto:           true,
+				})
+			}
+		} else if st.AutoDetectFile != "" {
+			filePath := filepath.Join(projectPath, st.AutoDetectFile)
+			if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+				sources = append(sources, FileSource{
+					Name:           st.Name,
+					Type:           st.ScanMode,
+					SourceTypeName: st.Name,
+					RootPath:       projectPath,
+					Auto:           true,
+				})
+			}
 		}
 	}
 	return sources

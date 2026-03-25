@@ -168,3 +168,12 @@ export function findRecentRepos(hoursAgo?: number, limit?: number): Promise<Rece
 export function listSystemFonts(): Promise<string[]> {
   return invoke('list_system_fonts');
 }
+
+export interface CustomTheme {
+  name: string;
+  json: string;
+}
+
+export function listCustomThemes(): Promise<CustomTheme[]> {
+  return invoke('list_custom_themes');
+}

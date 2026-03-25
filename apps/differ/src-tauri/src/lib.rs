@@ -734,6 +734,57 @@ fn list_system_fonts() -> Vec<String> {
     Vec::new()
 }
 
+// =============================================================================
+// Commands: Custom themes
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomTheme {
+    name: String,
+    json: String,
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn list_custom_themes() -> Vec<CustomTheme> {
+    let themes_dir = match dirs::home_dir() {
+        Some(home) => home.join(".differ").join("themes"),
+        None => return Vec::new(),
+    };
+
+    if !themes_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let mut themes = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&themes_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                // Skip template file
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if stem.starts_with('_') {
+                        continue;
+                    }
+                }
+                if let Ok(json) = std::fs::read_to_string(&path) {
+                    // Extract name from the JSON (look for "name" field)
+                    // Use the filename as fallback
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    themes.push(CustomTheme { name, json });
+                }
+            }
+        }
+    }
+
+    themes.sort_by(|a, b| a.name.cmp(&b.name));
+    themes
+}
+
 fn resolve_repo_path() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     let mut iter = args.iter().skip(1);
@@ -785,6 +836,7 @@ pub fn run() {
             preferences_store_path,
             find_recent_repos,
             list_system_fonts,
+            list_custom_themes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

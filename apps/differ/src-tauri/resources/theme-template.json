@@ -1,0 +1,72 @@
+{
+  "name": "my-custom-theme",
+  "displayName": "My Custom Theme",
+  "type": "dark",
+  "colors": {
+    "editor.background": "#1a1b26",
+    "editor.foreground": "#c0caf5",
+    "editor.selectionBackground": "#33467c",
+    "editor.lineHighlightBackground": "#1e202e",
+    "editorCursor.foreground": "#c0caf5",
+    "editorLineNumber.foreground": "#3b4261",
+    "editorLineNumber.activeForeground": "#737aa2",
+    "editorIndentGuide.background1": "#292e42",
+
+    "gitDecoration.addedResourceForeground": "#9ece6a",
+    "gitDecoration.deletedResourceForeground": "#f7768e",
+    "gitDecoration.modifiedResourceForeground": "#e0af68",
+
+    "diffEditor.insertedTextBackground": "#9ece6a20",
+    "diffEditor.removedTextBackground": "#f7768e20"
+  },
+  "settings": [
+    {
+      "scope": ["source", "text"],
+      "settings": { "foreground": "#c0caf5" }
+    },
+    {
+      "scope": ["comment", "punctuation.definition.comment"],
+      "settings": { "foreground": "#565f89", "fontStyle": "italic" }
+    },
+    {
+      "scope": ["keyword", "keyword.control", "storage.modifier", "storage.type"],
+      "settings": { "foreground": "#bb9af7" }
+    },
+    {
+      "scope": ["entity.name.function", "support.function"],
+      "settings": { "foreground": "#7aa2f7" }
+    },
+    {
+      "scope": ["entity.name.type", "entity.name.class", "support.type"],
+      "settings": { "foreground": "#2ac3de" }
+    },
+    {
+      "scope": ["string", "string.quoted"],
+      "settings": { "foreground": "#9ece6a" }
+    },
+    {
+      "scope": ["constant.numeric"],
+      "settings": { "foreground": "#ff9e64" }
+    },
+    {
+      "scope": ["constant.language"],
+      "settings": { "foreground": "#ff9e64" }
+    },
+    {
+      "scope": ["variable", "variable.other"],
+      "settings": { "foreground": "#c0caf5" }
+    },
+    {
+      "scope": ["entity.name.tag"],
+      "settings": { "foreground": "#f7768e" }
+    },
+    {
+      "scope": ["entity.other.attribute-name"],
+      "settings": { "foreground": "#bb9af7" }
+    },
+    {
+      "scope": ["punctuation"],
+      "settings": { "foreground": "#9abdf5" }
+    }
+  ]
+}

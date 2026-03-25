@@ -1,6 +1,5 @@
 import type { Branch, WorkspaceStatus } from '../../types';
 import * as commands from '../../api/commands';
-import { runPrerunActions } from '../actions/actions';
 import { alerts } from '../../shared/alerts.svelte';
 
 type BranchMap = Map<string, Branch[]>;
@@ -166,7 +165,7 @@ class WorkspaceLifecycleController {
   }
 
   async retryWorktree(branchId: string, projectId: string): Promise<void> {
-    await this.setupBranchWorktree(branchId, projectId);
+    await this.setupBranchWorktree(branchId, projectId, { runPrerun: true });
   }
 
   async resumeWorkspace(projectId: string, workspaceName: string): Promise<void> {
@@ -475,7 +474,11 @@ class WorkspaceLifecycleController {
     }
   }
 
-  private async setupBranchWorktree(branchId: string, projectId: string): Promise<void> {
+  private async setupBranchWorktree(
+    branchId: string,
+    projectId: string,
+    opts?: { runPrerun?: boolean }
+  ): Promise<void> {
     if (this.pendingSetupBranches.has(branchId)) return;
     this.pendingSetupBranches.add(branchId);
 
@@ -487,7 +490,9 @@ class WorkspaceLifecycleController {
     }
 
     try {
-      const updated = await commands.setupWorktree(branchId);
+      const updated = opts?.runPrerun
+        ? await commands.setupWorktreeAndRunPrerun(branchId)
+        : await commands.setupWorktree(branchId);
       const hooks = this.hooks;
       if (hooks) {
         const current = hooks.getBranchesByProject();
@@ -500,11 +505,9 @@ class WorkspaceLifecycleController {
         );
       }
 
-      setTimeout(() => {
-        runPrerunActions(branchId).catch((e) => {
-          console.error('[workspaceLifecycle] Failed to run prerun actions:', e);
-        });
-      }, 150);
+      // NOTE: prerun actions are only triggered here when opts.runPrerun
+      // is set (e.g. the retry path). The normal creation paths run them
+      // in the backend (create_project / add_project_repo / MCP).
     } catch (e) {
       console.error('[workspaceLifecycle] Failed to setup worktree:', e);
       const errMsg = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);

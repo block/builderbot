@@ -86,6 +86,7 @@ pub struct BranchWithWorkdir {
     pub pr_url: Option<String>,
     pub pr_updated_at: Option<i64>,
     pub pr_fetched_at: Option<i64>,
+    pub setup_complete: bool,
     pub worktree_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -396,7 +397,7 @@ fn create_project(
         };
 
         if is_local {
-            // Spawn background worktree + prerun-actions setup for local branches.
+            // Spawn background worktree setup + prerun actions for local branches.
             let project_id = project.id.clone();
             let store_bg = Arc::clone(&store);
             tauri::async_runtime::spawn(async move {
@@ -427,21 +428,36 @@ fn create_project(
 
                 let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
                 let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                match branches::run_prerun_actions_for_branch(
-                    &store_bg,
-                    &app_handle,
-                    &branch_id,
-                    &executor,
-                    &act_registry,
-                )
-                .await
-                {
-                    Ok(count) => {
-                        log::info!("[create_project] ran {count} prerun actions");
-                        let _ = app_handle.emit("project-setup-progress", project_id);
+
+                // Atomically claim setup ownership before running prerun actions.
+                match store_bg.mark_branch_setup_complete(&branch_id) {
+                    Ok(true) => {
+                        match branches::run_prerun_actions_for_branch(
+                            &store_bg,
+                            &app_handle,
+                            &branch_id,
+                            &executor,
+                            &act_registry,
+                        )
+                        .await
+                        {
+                            Ok(count) => {
+                                log::info!("[create_project] ran {count} prerun actions");
+                                let _ = app_handle.emit("project-setup-progress", project_id);
+                            }
+                            Err(e) => {
+                                log::warn!("[create_project] prerun actions failed: {e}");
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        log::info!(
+                            "[create_project] branch {} already setup complete, skipping prerun",
+                            branch_id
+                        );
                     }
                     Err(e) => {
-                        log::warn!("[create_project] prerun actions failed: {e}");
+                        log::warn!("[create_project] failed to mark setup complete: {e}");
                     }
                 }
 
@@ -568,21 +584,36 @@ async fn add_project_repo(
 
                 let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
                 let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                match branches::run_prerun_actions_for_branch(
-                    &store,
-                    &app_handle,
-                    &branch.id,
-                    &executor,
-                    &act_registry,
-                )
-                .await
-                {
-                    Ok(count) => {
-                        log::info!("[add_project_repo] ran {count} prerun actions");
-                        let _ = app_handle.emit("project-setup-progress", project_id);
+                // Atomically claim setup ownership before running prerun actions.
+                match store.mark_branch_setup_complete(&branch.id) {
+                    Ok(true) => {
+                        match branches::run_prerun_actions_for_branch(
+                            &store,
+                            &app_handle,
+                            &branch.id,
+                            &executor,
+                            &act_registry,
+                        )
+                        .await
+                        {
+                            Ok(count) => {
+                                log::info!("[add_project_repo] ran {count} prerun actions");
+                                let _ =
+                                    app_handle.emit("project-setup-progress", project_id.clone());
+                            }
+                            Err(e) => {
+                                log::warn!("[add_project_repo] prerun actions failed: {e}");
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        log::info!(
+                            "[add_project_repo] branch {} already setup complete, skipping prerun",
+                            branch.id
+                        );
                     }
                     Err(e) => {
-                        log::warn!("[add_project_repo] prerun actions failed: {e}");
+                        log::warn!("[add_project_repo] failed to mark setup complete: {e}");
                     }
                 }
 
@@ -1326,6 +1357,7 @@ pub fn run() {
             branches::list_branches_for_project,
             branches::create_branch,
             branches::setup_worktree,
+            branches::setup_worktree_and_run_prerun,
             branches::setup_worktree_from_pr,
             branches::create_remote_branch,
             branches::start_workspace,

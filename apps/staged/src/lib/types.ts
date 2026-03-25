@@ -57,6 +57,7 @@ export interface Branch {
   workspaceName: string | null;
   workstationId: number | null;
   workspaceStatus: WorkspaceStatus | null;
+  setupComplete: boolean;
   worktreePath: string | null;
   createdAt: number;
   updatedAt: number;

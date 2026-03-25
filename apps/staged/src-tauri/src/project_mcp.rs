@@ -685,32 +685,48 @@ impl ProjectToolsHandler {
             if let (Some(executor), Some(act_registry)) =
                 (self.action_executor.as_ref(), self.action_registry.as_ref())
             {
-                log::debug!(
-                    "[project_mcp] add_project_repo: running prerun actions for branch {}",
-                    branch.id
-                );
-                let prerun_result = crate::branches::run_prerun_actions_for_branch(
-                    &self.store,
-                    &self.app_handle,
-                    &branch.id,
-                    executor,
-                    act_registry,
-                )
-                .await;
-                match prerun_result {
-                    Ok(count) => {
+                // Atomically claim setup ownership before running prerun actions.
+                match self.store.mark_branch_setup_complete(&branch.id) {
+                    Ok(true) => {
                         log::debug!(
-                            "[project_mcp] add_project_repo: ran {count} prerun actions for branch {}",
+                            "[project_mcp] add_project_repo: running prerun actions for branch {}",
                             branch.id
                         );
-                        // Notify UI that prerun actions finished
-                        let _ = self
-                            .app_handle
-                            .emit("project-setup-progress", self.project_id.clone());
+                        match crate::branches::run_prerun_actions_for_branch(
+                            &self.store,
+                            &self.app_handle,
+                            &branch.id,
+                            executor,
+                            act_registry,
+                        )
+                        .await
+                        {
+                            Ok(count) => {
+                                log::debug!(
+                                    "[project_mcp] add_project_repo: ran {count} prerun actions for branch {}",
+                                    branch.id
+                                );
+                                // Notify UI that prerun actions finished
+                                let _ = self
+                                    .app_handle
+                                    .emit("project-setup-progress", self.project_id.clone());
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "[project_mcp] add_project_repo: prerun actions failed (continuing): {e}"
+                                );
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        log::debug!(
+                            "[project_mcp] add_project_repo: branch {} already setup complete, skipping prerun",
+                            branch.id
+                        );
                     }
                     Err(e) => {
                         log::warn!(
-                            "[project_mcp] add_project_repo: prerun actions failed (continuing): {e}"
+                            "[project_mcp] add_project_repo: failed to mark setup complete: {e}"
                         );
                     }
                 }

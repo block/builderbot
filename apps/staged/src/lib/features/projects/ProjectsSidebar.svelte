@@ -357,9 +357,9 @@
 
   .branch-badge {
     font-size: 10px;
-    font-weight: 600;
-    color: var(--text-primary);
-    background: var(--ui-accent);
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
     padding: 1px 6px;
     border-radius: 4px;
     white-space: nowrap;

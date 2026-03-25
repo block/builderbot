@@ -711,23 +711,63 @@ fn check_ai_agents() -> Vec<DoctorCheck> {
 // Tauri commands
 // =============================================================================
 
+/// Fallback check returned when a spawn_blocking task panics.
+fn empty_check(id: &str) -> DoctorCheck {
+    DoctorCheck {
+        id: id.to_string(),
+        label: id.to_string(),
+        status: CheckStatus::Fail,
+        message: "Check failed to run".to_string(),
+        fix_url: None,
+        fix_command: None,
+        path: None,
+        raw_output: None,
+    }
+}
+
 /// Run all health checks and return the report.
+///
+/// All checks run concurrently so the total wall time is roughly the
+/// duration of the slowest individual check, not the sum of all of them.
 #[tauri::command]
 pub async fn run_doctor() -> DoctorReport {
-    // Run checks on a blocking thread since they shell out.
-    tokio::task::spawn_blocking(|| {
-        let mut checks = vec![
-            check_git(),
-            check_gh(),
-            check_gh_auth(),
-            check_git_lfs(),
-            check_clonefile(),
-        ];
-        checks.extend(check_ai_agents());
-        DoctorReport { checks }
-    })
-    .await
-    .unwrap_or_else(|_| DoctorReport { checks: vec![] })
+    // Phase 1: spawn every system check and the agent-installed scan in parallel.
+    let git = tokio::task::spawn_blocking(check_git);
+    let gh = tokio::task::spawn_blocking(check_gh);
+    let gh_auth = tokio::task::spawn_blocking(check_gh_auth);
+    let git_lfs = tokio::task::spawn_blocking(check_git_lfs);
+    let clonefile = tokio::task::spawn_blocking(check_clonefile);
+    let any_agent = tokio::task::spawn_blocking(|| AI_AGENT_CHECKS.iter().any(agent_installed));
+
+    let (git, gh, gh_auth, git_lfs, clonefile, any_agent) =
+        tokio::join!(git, gh, gh_auth, git_lfs, clonefile, any_agent);
+
+    let any_agent_found = any_agent.unwrap_or(false);
+
+    // Phase 2: spawn individual agent checks in parallel (needs any_agent_found).
+    let agent_handles: Vec<_> = AI_AGENT_CHECKS
+        .iter()
+        .map(|info| {
+            let found = any_agent_found;
+            tokio::task::spawn_blocking(move || check_single_ai_agent(info, found))
+        })
+        .collect();
+
+    let mut checks = vec![
+        git.unwrap_or_else(|_| empty_check("git")),
+        gh.unwrap_or_else(|_| empty_check("gh")),
+        gh_auth.unwrap_or_else(|_| empty_check("gh-auth")),
+        git_lfs.unwrap_or_else(|_| empty_check("git-lfs")),
+        clonefile.unwrap_or_else(|_| empty_check("clonefile")),
+    ];
+
+    for handle in agent_handles {
+        if let Ok(check) = handle.await {
+            checks.push(check);
+        }
+    }
+
+    DoctorReport { checks }
 }
 
 /// Run a fix command from a doctor check.

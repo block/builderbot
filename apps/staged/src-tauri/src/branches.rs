@@ -1573,7 +1573,7 @@ pub async fn poll_all_workspace_statuses(
         if branch.workspace_status == Some(store::WorkspaceStatus::Starting)
             && resolve_branch_workspace_subpath(&store, &branch)
                 .unwrap_or_else(|e| {
-                    tracing::warn!(
+                    log::warn!(
                         "Failed to resolve workspace subpath for branch {}: {e}",
                         branch_id
                     );

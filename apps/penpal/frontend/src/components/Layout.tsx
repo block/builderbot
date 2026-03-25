@@ -404,7 +404,13 @@ export default function Layout() {
 
     // Resolve relative hrefs (e.g. ./other-file.md) to absolute paths
     const resolved = new URL(target.href);
-    const resolvedPath = resolved.pathname + resolved.search + resolved.hash;
+    const fullPath = resolved.pathname + resolved.search + resolved.hash;
+    // Strip the router basename so navigate/openTab receive router-relative paths
+    // (the browser pathname includes the deploy prefix, but the router already prepends it)
+    const base = import.meta.env.BASE_URL.replace(/\/+$/, '');
+    const resolvedPath = base && fullPath.startsWith(base)
+      ? fullPath.slice(base.length) || '/'
+      : fullPath;
 
     // Cmd/Ctrl+click → new tab or new window
     if (e.metaKey || e.ctrlKey) {

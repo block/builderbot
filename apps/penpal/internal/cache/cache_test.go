@@ -311,6 +311,66 @@ func TestCache_EnrichTitles(t *testing.T) {
 	}
 }
 
+func TestScanProjectSources_SkipsNestedWorktrees(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a "." tree source rooted at the project root
+	os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# README"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "thoughts"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "thoughts", "plan.md"), []byte("# Plan"), 0644)
+
+	// Create a nested worktree at .claude/worktrees/my-branch.
+	// Real git worktrees have a .git FILE (not directory) containing "gitdir: ...".
+	wtDir := filepath.Join(tmpDir, ".claude", "worktrees", "my-branch")
+	os.MkdirAll(wtDir, 0755)
+	os.WriteFile(filepath.Join(wtDir, ".git"), []byte("gitdir: /fake/path/.git/worktrees/my-branch\n"), 0644)
+	os.MkdirAll(filepath.Join(wtDir, "thoughts"), 0755)
+	os.WriteFile(filepath.Join(wtDir, "thoughts", "plan.md"), []byte("# Worktree Plan"), 0644)
+	os.WriteFile(filepath.Join(wtDir, "README.md"), []byte("# Worktree README"), 0644)
+
+	project := &discovery.Project{
+		Name: "test-project",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{
+				Name:           "all",
+				Type:           "tree",
+				SourceTypeName: "manual",
+				RootPath:       tmpDir,
+				Auto:           false,
+			},
+		},
+	}
+
+	files := scanProjectSources(project)
+
+	// Should only see the main project's files, not the worktree's duplicates
+	names := map[string]bool{}
+	for _, f := range files {
+		names[f.FullPath] = true
+	}
+
+	if !names["README.md"] {
+		t.Error("expected README.md from project root")
+	}
+	if !names["thoughts/plan.md"] {
+		t.Error("expected thoughts/plan.md from project root")
+	}
+	// Files inside the nested worktree should be skipped
+	if names[".claude/worktrees/my-branch/README.md"] {
+		t.Error("worktree README.md should not appear in scan")
+	}
+	if names[".claude/worktrees/my-branch/thoughts/plan.md"] {
+		t.Error("worktree thoughts/plan.md should not appear in scan")
+	}
+	if len(files) != 2 {
+		t.Errorf("expected 2 files, got %d", len(files))
+		for _, f := range files {
+			t.Logf("  %s", f.FullPath)
+		}
+	}
+}
+
 func TestCache_FindFile(t *testing.T) {
 	c := New()
 	projectName := "test/project"

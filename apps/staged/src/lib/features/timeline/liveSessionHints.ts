@@ -138,15 +138,18 @@ function mergeHintMessages(
   return merged.slice(-MAX_HINT_MESSAGES);
 }
 
-export function fallbackHintForPendingType(type: PendingHintItemType): string {
+export function fallbackHintForPendingType(type: string): string {
   if (type === 'pending-commit') return 'Generating commit';
   if (type === 'generating-review') return 'Generating review';
+  if (type === 'queued-commit') return 'Queued commit';
+  if (type === 'queued-review') return 'Queued review';
+  if (type === 'queued-note') return 'Queued note';
   return 'Generating note';
 }
 
 export function collectRunningSessionIds(
   timeline: BranchTimeline,
-  pendingItems: PendingHintItem[]
+  pendingItems: { sessionId?: string }[]
 ): string[] {
   const ids = new Set<string>();
 

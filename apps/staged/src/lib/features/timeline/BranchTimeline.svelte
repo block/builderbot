@@ -22,7 +22,7 @@
 
   type PendingItem = {
     key: string;
-    type: PendingHintItemType;
+    type: PendingHintItemType | 'queued-commit' | 'queued-note' | 'queued-review';
     title: string;
     secondaryMeta?: string;
     sessionId?: string;
@@ -348,10 +348,9 @@
     all.sort((a, b) => {
       const isProvisioning = (item: DisplayItem) => item.type === 'provisioning';
       const isTransient = (item: DisplayItem) =>
-        (item.type === 'pending-commit' ||
-          item.type === 'generating-note' ||
-          item.type === 'generating-review') &&
-        !item.type.startsWith('queued-');
+        item.type === 'pending-commit' ||
+        item.type === 'generating-note' ||
+        item.type === 'generating-review';
       const isQueued = (item: DisplayItem) => item.type.startsWith('queued-');
 
       const aIsProvisioning = isProvisioning(a);

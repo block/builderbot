@@ -874,18 +874,19 @@ pub async fn drain_queued_sessions(
 
     // Look up which artifact type is linked to this session so we know
     // what kind of branch session to start.
-    let (session_type, _) = if let Ok(Some(commit)) = store.get_commit_by_session(&session.id) {
-        (BranchSessionType::Commit, commit.id)
-    } else if let Ok(Some(note)) = store.get_note_by_session(&session.id) {
-        (BranchSessionType::Note, note.id)
-    } else if let Ok(Some(review)) = store.get_review_by_session(&session.id) {
-        (BranchSessionType::Review, review.id)
-    } else {
-        return Err(format!(
-            "Queued session {} has no linked artifact",
-            session.id
-        ));
-    };
+    let (session_type, review_id) =
+        if let Ok(Some(_commit)) = store.get_commit_by_session(&session.id) {
+            (BranchSessionType::Commit, None)
+        } else if let Ok(Some(_note)) = store.get_note_by_session(&session.id) {
+            (BranchSessionType::Note, None)
+        } else if let Ok(Some(review)) = store.get_review_by_session(&session.id) {
+            (BranchSessionType::Review, Some(review.id))
+        } else {
+            return Err(format!(
+                "Queued session {} has no linked artifact",
+                session.id
+            ));
+        };
 
     // Use the original prompt from the queued session.
     let prompt = session.prompt.clone();
@@ -978,6 +979,24 @@ pub async fn drain_queued_sessions(
     store
         .prepare_queued_session(&session_id, &working_dir.to_string_lossy(), &full_prompt)
         .map_err(|e| e.to_string())?;
+
+    // Update the review's commit_sha now that we have the working directory.
+    // At queue time, reviews are created with an empty commit_sha since the
+    // workspace may not exist yet.
+    if let Some(ref review_id) = review_id {
+        let tip_sha = if is_remote {
+            let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+            run_blox_blocking(move || blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"]))
+                .await
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        } else {
+            git::get_head_sha(&working_dir).map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
+        };
+        store
+            .update_review_commit_sha(review_id, &tip_sha)
+            .map_err(|e| e.to_string())?;
+    }
 
     // Compute pre-head SHA for commit sessions.
     let pre_head_sha = match session_type {

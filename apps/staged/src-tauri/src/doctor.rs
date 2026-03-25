@@ -826,7 +826,7 @@ pub async fn run_doctor() -> DoctorReport {
     let any_agent_found = AI_AGENT_CHECKS.iter().any(|info| {
         info.commands
             .iter()
-            .any(|cmd| resolved.get(cmd).map_or(false, |rb| rb.path.is_some()))
+            .any(|cmd| resolved.get(cmd).is_some_and(|rb| rb.path.is_some()))
     });
 
     // Phase 1: Run all checks concurrently using pre-resolved binaries.

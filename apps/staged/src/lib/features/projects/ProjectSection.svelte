@@ -31,7 +31,7 @@
   import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
-  import GitHubRepoPicker from './GitHubRepoPicker.svelte';
+  import AddRepoModal from './AddRepoModal.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import TimelineRow from '../timeline/TimelineRow.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
@@ -111,16 +111,7 @@
       : null
   );
 
-  let dropdownOpen = $state(false);
-  let wrapperRef: HTMLDivElement | undefined = $state();
-
-  function toggleDropdown() {
-    dropdownOpen = !dropdownOpen;
-  }
-
-  function closeDropdown() {
-    dropdownOpen = false;
-  }
+  let addRepoModalOpen = $state(false);
 
   function statusLabel(status: WorkspaceStatus | null): string {
     switch (status) {
@@ -140,22 +131,9 @@
   }
 
   function handleRepoSelected(selection: RepoPickerSelection) {
-    dropdownOpen = false;
+    addRepoModalOpen = false;
     onRepoSelected?.(selection);
   }
-
-  $effect(() => {
-    if (!dropdownOpen) return;
-
-    function onPointerDown(e: PointerEvent) {
-      if (wrapperRef && !wrapperRef.contains(e.target as Node)) {
-        dropdownOpen = false;
-      }
-    }
-
-    window.addEventListener('pointerdown', onPointerDown);
-    return () => window.removeEventListener('pointerdown', onPointerDown);
-  });
 
   function repoForBranch(branch: Branch): ProjectRepo | null {
     if (!branch.projectRepoId) return null;
@@ -494,27 +472,17 @@
     </div>
     {#if !deleting}
       <div class="header-actions">
-        <div class="add-repo-wrapper" bind:this={wrapperRef}>
-          <button
-            class="header-action-button"
-            onclick={toggleDropdown}
-            disabled={addRepoDisabled}
-            title={addRepoTitle}
-          >
-            <span class="action-icon"><Plus size={12} /></span>
-            Add Repo
-          </button>
-          {#if dropdownOpen}
-            <div class="repo-picker-dropdown">
-              <GitHubRepoPicker
-                onSelect={handleRepoSelected}
-                onBack={closeDropdown}
-                {excludeRepos}
-                showHeader={false}
-              />
-            </div>
-          {/if}
-        </div>
+        <button
+          class="header-action-button"
+          onclick={() => {
+            addRepoModalOpen = true;
+          }}
+          disabled={addRepoDisabled}
+          title={addRepoTitle}
+        >
+          <span class="action-icon"><Plus size={12} /></span>
+          Add Repo
+        </button>
         <button
           class="header-action-button danger"
           class:safe-delete={safeToDelete}
@@ -685,6 +653,16 @@
     onClose={() => {
       openSessionId = null;
       loadProjectNotes();
+    }}
+  />
+{/if}
+
+{#if addRepoModalOpen}
+  <AddRepoModal
+    {excludeRepos}
+    onAdded={handleRepoSelected}
+    onClose={() => {
+      addRepoModalOpen = false;
     }}
   />
 {/if}
@@ -1151,31 +1129,6 @@
   .branches-list.deleting {
     opacity: 0.65;
     pointer-events: none;
-  }
-
-  .add-repo-wrapper {
-    position: relative;
-  }
-
-  .repo-picker-dropdown {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
-    width: 420px;
-    max-height: min(60vh, 420px);
-    background-color: var(--bg-chrome);
-    border: 1px solid var(--border-muted);
-    border-radius: 12px;
-    box-shadow: var(--shadow-elevated);
-    z-index: 100;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-
-  .repo-picker-dropdown :global(.repo-picker) {
-    min-height: 0;
-    flex: 1;
   }
 
   @media (max-width: 720px) {

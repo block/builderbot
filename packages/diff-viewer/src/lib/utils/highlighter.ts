@@ -56,6 +56,19 @@ let currentTheme: HighlighterTheme | null = null;
 let currentThemeName: string = 'laserwave';
 let initPromise: Promise<void> | null = null;
 
+// =============================================================================
+// Theme Registry
+// =============================================================================
+
+export interface SyntaxThemeDescriptor {
+  name: string;
+  appearance?: 'light' | 'dark';
+  source: 'builtin' | 'external';
+  load: () => Promise<ThemeRegistrationRaw>;
+}
+
+const themeRegistry = new Map<string, SyntaxThemeDescriptor>();
+
 // Available syntax themes (all Shiki bundled themes, alphabetically sorted)
 export const SYNTAX_THEMES = [
   'andromeeda',
@@ -151,6 +164,8 @@ const LIGHT_THEMES: Set<SyntaxThemeName> = new Set([
  * For the active/loaded theme, prefer getTheme().isDark which uses luminance.
  */
 export function isLightTheme(themeName: string): boolean {
+  const desc = themeRegistry.get(themeName);
+  if (desc) return desc.appearance === 'light';
   return LIGHT_THEMES.has(themeName as SyntaxThemeName);
 }
 
@@ -217,6 +232,53 @@ const themeImports: Record<SyntaxThemeName, () => Promise<{ default: ThemeRegist
   'vitesse-dark': () => import('shiki/themes/vitesse-dark.mjs'),
   'vitesse-light': () => import('shiki/themes/vitesse-light.mjs'),
 };
+
+// Register all built-in themes
+for (const name of SYNTAX_THEMES) {
+  themeRegistry.set(name, {
+    name,
+    appearance: LIGHT_THEMES.has(name) ? 'light' : 'dark',
+    source: 'builtin',
+    load: async () => {
+      const { default: theme } = await themeImports[name]();
+      return theme;
+    },
+  });
+}
+
+/**
+ * Register external themes (e.g. from user's theme directory).
+ * Must be called before initHighlighter().
+ */
+export function registerExternalThemes(themes: Array<{ name: string; theme: ThemeRegistrationRaw }>): void {
+  for (const { name, theme } of themes) {
+    const bg = (theme.colors?.['editor.background'] as string) || '';
+    themeRegistry.set(name, {
+      name,
+      appearance: bg ? (luminance(bg) < 0.5 ? 'dark' : 'light') : 'dark',
+      source: 'external',
+      load: async () => theme,
+    });
+  }
+}
+
+/**
+ * Get all registered theme descriptors (built-in + external).
+ */
+export function getRegisteredThemes(): Array<{ name: string; appearance: string; source: string }> {
+  return [...themeRegistry.values()].map(({ name, appearance, source }) => ({
+    name,
+    appearance: appearance || 'dark',
+    source,
+  }));
+}
+
+/**
+ * Check if a theme name is registered.
+ */
+export function hasTheme(name: string): boolean {
+  return themeRegistry.has(name);
+}
 
 // Track which languages we've attempted to load (to avoid repeated failures)
 const loadedLanguages = new Set<string>();
@@ -665,8 +727,17 @@ export async function initHighlighter(themeName: string = 'laserwave'): Promise<
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
+    // For external/custom themes, load the definition first
+    const descriptor = themeRegistry.get(themeName);
+    const themes: (string | ThemeRegistrationRaw)[] = [];
+    if (descriptor && descriptor.source === 'external') {
+      themes.push(await descriptor.load());
+    } else {
+      themes.push(themeName);
+    }
+
     highlighter = await createHighlighter({
-      themes: [themeName],
+      themes,
       langs: CORE_LANGUAGES,
     });
 
@@ -819,7 +890,7 @@ export function getSyntaxThemeName(): string {
  * Switch to a different syntax theme (bundled).
  * Loads the theme if not already loaded, then updates currentTheme.
  */
-export async function setSyntaxTheme(themeName: SyntaxThemeName): Promise<void> {
+export async function setSyntaxTheme(themeName: string): Promise<void> {
   if (!highlighter) {
     await initHighlighter(themeName);
     return;
@@ -828,9 +899,9 @@ export async function setSyntaxTheme(themeName: SyntaxThemeName): Promise<void> 
   // Load the theme if not already loaded
   const loadedThemes = highlighter.getLoadedThemes();
   if (!loadedThemes.includes(themeName)) {
-    const themeImport = themeImports[themeName];
-    if (themeImport) {
-      const { default: themeDefinition } = await themeImport();
+    const descriptor = themeRegistry.get(themeName);
+    if (descriptor) {
+      const themeDefinition = await descriptor.load();
       await highlighter.loadTheme(themeDefinition);
     }
   }

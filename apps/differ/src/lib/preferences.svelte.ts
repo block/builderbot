@@ -7,14 +7,17 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import {
-  SYNTAX_THEMES,
   setSyntaxTheme,
   getTheme,
   isLightTheme,
   initHighlighter,
+  registerExternalThemes,
+  hasTheme,
+  getRegisteredThemes,
   type SyntaxThemeName,
 } from '@builderbot/diff-viewer/utils';
 import { load, type Store } from '@tauri-apps/plugin-store';
+import { listCustomThemes } from './commands';
 import { createAdaptiveTheme, themeToVarMap } from '../../../staged/src/lib/theme';
 
 // Re-export for convenience
@@ -110,8 +113,37 @@ function applyFontPreferences() {
 export async function initPreferences(): Promise<void> {
   await initStore();
 
+  // Load and register custom themes before validating saved preferences
+  try {
+    const customThemes = await listCustomThemes();
+    if (customThemes.length > 0) {
+      const parsed = customThemes
+        .map((t) => {
+          try {
+            const theme = JSON.parse(t.json);
+            const name =
+              typeof theme.name === 'string' && theme.name.trim() ? theme.name.trim() : t.name;
+            if (hasTheme(name)) {
+              console.warn(`Skipping custom theme "${name}": conflicts with existing theme`);
+              return null;
+            }
+            return { name, theme: { ...theme, name } };
+          } catch {
+            console.warn(`Failed to parse custom theme: ${t.name}`);
+            return null;
+          }
+        })
+        .filter((t): t is NonNullable<typeof t> => t !== null);
+      if (parsed.length > 0) {
+        registerExternalThemes(parsed);
+      }
+    }
+  } catch {
+    // Custom themes directory may not exist yet — that's fine
+  }
+
   const savedTheme = await getStoreValue<string>(SYNTAX_THEME_STORE_KEY);
-  if (savedTheme && SYNTAX_THEMES.includes(savedTheme as SyntaxThemeName)) {
+  if (savedTheme && hasTheme(savedTheme)) {
     preferences.syntaxTheme = savedTheme;
   }
 
@@ -137,7 +169,7 @@ export async function initPreferences(): Promise<void> {
 // =============================================================================
 
 export function getAvailableSyntaxThemes(): ThemeEntry[] {
-  return SYNTAX_THEMES.map((name) => ({ name }));
+  return getRegisteredThemes().map(({ name }) => ({ name }));
 }
 
 export async function selectSyntaxTheme(name: string): Promise<void> {

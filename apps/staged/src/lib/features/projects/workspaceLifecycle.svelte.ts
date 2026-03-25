@@ -1,6 +1,5 @@
 import type { Branch, WorkspaceStatus } from '../../types';
 import * as commands from '../../api/commands';
-import { runPrerunActions } from '../actions/actions';
 import { alerts } from '../../shared/alerts.svelte';
 
 type BranchMap = Map<string, Branch[]>;
@@ -500,11 +499,10 @@ class WorkspaceLifecycleController {
         );
       }
 
-      setTimeout(() => {
-        runPrerunActions(branchId).catch((e) => {
-          console.error('[workspaceLifecycle] Failed to run prerun actions:', e);
-        });
-      }, 150);
+      // NOTE: prerun actions are NOT triggered here — the backend
+      // (create_project / add_project_repo / MCP add_project_repo) runs
+      // them after worktree setup so they work even when the frontend
+      // is not viewing the project.
     } catch (e) {
       console.error('[workspaceLifecycle] Failed to setup worktree:', e);
       const errMsg = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);

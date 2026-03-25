@@ -714,7 +714,7 @@
           : formatBaseBranch(branch.baseBranch)}
       />
       <div class="header-actions">
-        {#if isRemote && remoteWorkspaceStatus !== 'running'}
+        {#if isRemote && remoteWorkspaceStatus !== 'running' && remoteWorkspaceStatus !== 'starting'}
           <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
         {/if}
         <BranchCardActionsBar

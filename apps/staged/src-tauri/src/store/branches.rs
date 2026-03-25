@@ -194,15 +194,19 @@ impl Store {
         Ok(())
     }
 
-    /// Mark a branch as having completed its initial setup (worktree created
-    /// and prerun actions have had the opportunity to run).
-    pub fn mark_branch_setup_complete(&self, id: &str) -> Result<(), StoreError> {
+    /// Atomically mark a branch as having completed its initial setup (worktree
+    /// created and prerun actions have had the opportunity to run).
+    ///
+    /// Returns `true` if the flag was actually flipped (i.e. this caller
+    /// "won" the race), `false` if the branch was already marked complete.
+    /// Callers should only run prerun actions when this returns `true`.
+    pub fn mark_branch_setup_complete(&self, id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE branches SET setup_complete = 1, updated_at = ?1 WHERE id = ?2",
+        let rows = conn.execute(
+            "UPDATE branches SET setup_complete = 1, updated_at = ?1 WHERE id = ?2 AND setup_complete = 0",
             params![now_timestamp(), id],
         )?;
-        Ok(())
+        Ok(rows > 0)
     }
 
     pub fn delete_branch(&self, id: &str) -> Result<(), StoreError> {

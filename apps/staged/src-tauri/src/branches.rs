@@ -948,38 +948,35 @@ pub async fn setup_worktree_and_run_prerun(
 
     let store = get_store(&store)?;
 
-    // Only run prerun actions if the branch hasn't already completed setup.
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Branch not found".to_string())?;
-
-    if branch.setup_complete {
-        log::info!(
-            "[setup_worktree_and_run_prerun] branch {} already setup complete, skipping prerun",
-            branch_id
-        );
-    } else {
-        let executor = app_handle.state::<Arc<ActionExecutor>>();
-        let act_registry = app_handle.state::<Arc<ActionRegistry>>();
-        match run_prerun_actions_for_branch(
-            &store,
-            &app_handle,
-            &branch_id,
-            &executor,
-            &act_registry,
-        )
-        .await
-        {
-            Ok(count) => {
-                log::info!("[setup_worktree_and_run_prerun] ran {count} prerun actions");
-            }
-            Err(e) => {
-                log::warn!("[setup_worktree_and_run_prerun] prerun actions failed: {e}");
+    // Atomically claim setup ownership — only run prerun actions if we win.
+    match store.mark_branch_setup_complete(&branch_id) {
+        Ok(true) => {
+            let executor = app_handle.state::<Arc<ActionExecutor>>();
+            let act_registry = app_handle.state::<Arc<ActionRegistry>>();
+            match run_prerun_actions_for_branch(
+                &store,
+                &app_handle,
+                &branch_id,
+                &executor,
+                &act_registry,
+            )
+            .await
+            {
+                Ok(count) => {
+                    log::info!("[setup_worktree_and_run_prerun] ran {count} prerun actions");
+                }
+                Err(e) => {
+                    log::warn!("[setup_worktree_and_run_prerun] prerun actions failed: {e}");
+                }
             }
         }
-
-        if let Err(e) = store.mark_branch_setup_complete(&branch_id) {
+        Ok(false) => {
+            log::info!(
+                "[setup_worktree_and_run_prerun] branch {} already setup complete, skipping prerun",
+                branch_id
+            );
+        }
+        Err(e) => {
             log::warn!("[setup_worktree_and_run_prerun] failed to mark setup complete: {e}");
         }
     }

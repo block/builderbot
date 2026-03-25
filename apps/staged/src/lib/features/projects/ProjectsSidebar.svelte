@@ -505,6 +505,8 @@
     font-size: calc(var(--size-xs) - 1px);
     color: var(--text-faint);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .repo-count {

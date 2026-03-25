@@ -129,8 +129,10 @@
   // =========================================================================
   // Remote endpoint URL rewriting
   // =========================================================================
+  let canResolveEndpoint = $derived(!isRemote || !!branch.workstationId);
+
   function getEndpointCopyUrl(endpoint: string): string {
-    if (!isRemote || !branch.workstationId) return endpoint;
+    if (!canResolveEndpoint) return endpoint;
     try {
       const parsed = new URL(endpoint);
       const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
@@ -615,7 +617,7 @@
     {@const isStopping = execution && stoppingExecutions.has(execution.executionId)}
     {@const showStopIcon = altHeld && isRunning && !isStopping}
     {@const phase = execution ? runPhases.get(execution.executionId) : undefined}
-    {@const hasEndpoint = phase?.type === 'running' && !!phase.endpoint}
+    {@const hasEndpoint = phase?.type === 'running' && !!phase.endpoint && canResolveEndpoint}
     {@const copyUrl =
       hasEndpoint && phase?.type === 'running' && phase.endpoint
         ? getEndpointCopyUrl(phase.endpoint)

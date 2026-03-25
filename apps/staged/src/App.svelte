@@ -217,14 +217,12 @@
     // regardless of which view the user is on. See sessionStatusListener.ts.
     unlistenSessionStatus = await listenForSessionStatus();
 
-    const t0 = performance.now();
     try {
       await initPreferences();
     } catch (e) {
       console.error('Failed to initialize preferences, rendering with defaults:', e);
       preferences.loaded = true;
     }
-    console.debug(`[Staged] preferences ready in ${Math.round(performance.now() - t0)}ms`);
 
     // Restore the last viewed project (persistent store is now ready).
     try {

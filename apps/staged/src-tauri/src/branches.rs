@@ -694,39 +694,10 @@ pub fn list_branches_for_project(
         .list_branches_for_project(&project_id)
         .map_err(|e| e.to_string())?;
 
-    // Eagerly populate the workstation ID cache for any remote workspace
-    // names we haven't seen yet, so the frontend has IDs on first load.
-    {
-        let cache = workstation_id_cache().lock().unwrap();
-        let missing: Vec<String> = branches
-            .iter()
-            .filter(|b| b.branch_type == store::BranchType::Remote)
-            .filter_map(|b| b.workspace_name.clone())
-            .filter(|name| !cache.contains_key(name))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        drop(cache);
-        for name in missing {
-            match blox::ws_info(&name) {
-                Ok(info) => {
-                    log::debug!(
-                        "[list_branches] ws_info({}) returned workstation_id={:?}",
-                        name,
-                        info.workstation_id,
-                    );
-                    if let Some(ws_id) = info.workstation_id {
-                        if let Ok(mut cache) = workstation_id_cache().lock() {
-                            cache.insert(name, ws_id);
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::debug!("[list_branches] ws_info({}) failed: {}", name, e);
-                }
-            }
-        }
-    }
+    // NOTE: workstation IDs for remote branches are populated lazily by
+    // poll_all_workspace_statuses (a single batched `ws_list` call) rather
+    // than eagerly here. Eager per-workspace `ws_info` calls were serial and
+    // each took ~1s, causing multi-second UI freezes on project load.
 
     let mut result = Vec::with_capacity(branches.len());
     for branch in branches {

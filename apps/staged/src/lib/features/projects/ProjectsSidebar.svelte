@@ -359,9 +359,8 @@
     font-size: 10px;
     font-weight: 500;
     color: var(--text-tertiary);
-    background: transparent;
-    border: 1px solid var(--text-tertiary);
-    padding: 0px 5px;
+    background: var(--bg-elevated);
+    padding: 1px 6px;
     border-radius: 4px;
     white-space: nowrap;
     overflow: hidden;

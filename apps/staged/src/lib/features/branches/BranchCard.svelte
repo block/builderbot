@@ -730,7 +730,7 @@
 
     <div class="card-content">
       <ReasonBanner reason={repoLabel?.reason} onDismiss={handleDismissReason} />
-      {#if isRemote && (remoteWorkspaceStatus === 'starting' || remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'error')}
+      {#if isRemote && (remoteWorkspaceStatus === 'starting' || remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'suspended' || remoteWorkspaceStatus === 'error')}
         <RemoteWorkspaceStatusView
           status={remoteWorkspaceStatus}
           {workspaceError}

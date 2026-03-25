@@ -1336,7 +1336,8 @@ fn map_blox_status_to_workspace_status(
             store::WorkspaceStatus::Starting
         }
         Some("suspended") => store::WorkspaceStatus::Suspended,
-        Some("shutting_down") | Some("deleted") => {
+        Some("deleted") => store::WorkspaceStatus::Stopped,
+        Some("shutting_down") => {
             if db_status == Some(&store::WorkspaceStatus::Starting) {
                 store::WorkspaceStatus::Starting
             } else {
@@ -1571,7 +1572,13 @@ pub async fn poll_all_workspace_statuses(
         // poll_workspace_status logic.
         if branch.workspace_status == Some(store::WorkspaceStatus::Starting)
             && resolve_branch_workspace_subpath(&store, &branch)
-                .unwrap_or(None)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to resolve workspace subpath for branch {}: {e}",
+                        branch_id
+                    );
+                    None
+                })
                 .is_some()
         {
             let is_secondary = if let Some(ws) = branch.workspace_name.as_deref() {

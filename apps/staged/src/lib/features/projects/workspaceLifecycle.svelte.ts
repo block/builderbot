@@ -189,8 +189,8 @@ class WorkspaceLifecycleController {
       console.error('[workspaceLifecycle] Failed to resume workspace:', e);
       const message = this.errorMessage(e);
       for (const id of peerBranchIds) {
-        this.workspaceErrors = new Map(this.workspaceErrors).set(id, message);
         this.handleWorkspaceStatusChange(projectId, id, 'error');
+        this.workspaceErrors = new Map(this.workspaceErrors).set(id, message);
       }
       this.version++;
       alerts.show({

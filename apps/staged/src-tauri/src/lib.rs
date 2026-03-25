@@ -1326,6 +1326,7 @@ pub fn run() {
             branches::list_branches_for_project,
             branches::create_branch,
             branches::setup_worktree,
+            branches::setup_worktree_and_run_prerun,
             branches::setup_worktree_from_pr,
             branches::create_remote_branch,
             branches::start_workspace,

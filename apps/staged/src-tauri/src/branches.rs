@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::actions::events::TauriExecutionListener;
 use crate::actions::{ActionExecutor, ActionMetadata, ActionRegistry, ActionType};
@@ -931,6 +931,36 @@ pub async fn setup_worktree(
     }
 
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
+}
+
+/// Like [`setup_worktree`], but also runs prerun actions after the worktree is
+/// ready.  Used by the frontend retry path so that a failed initial setup
+/// (which skips prerun actions) can be fully recovered by the user.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn setup_worktree_and_run_prerun(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: AppHandle,
+    branch_id: String,
+) -> Result<BranchWithWorkdir, String> {
+    // Delegate to the existing setup_worktree command for worktree creation.
+    let result = setup_worktree(store.clone(), branch_id.clone()).await?;
+
+    // Then run prerun actions on the now-ready worktree.
+    let store = get_store(&store)?;
+    let executor = app_handle.state::<Arc<ActionExecutor>>();
+    let act_registry = app_handle.state::<Arc<ActionRegistry>>();
+    match run_prerun_actions_for_branch(&store, &app_handle, &branch_id, &executor, &act_registry)
+        .await
+    {
+        Ok(count) => {
+            log::info!("[setup_worktree_and_run_prerun] ran {count} prerun actions");
+        }
+        Err(e) => {
+            log::warn!("[setup_worktree_and_run_prerun] prerun actions failed: {e}");
+        }
+    }
+
+    Ok(result)
 }
 
 /// Import a GitHub PR as a local branch with a worktree.

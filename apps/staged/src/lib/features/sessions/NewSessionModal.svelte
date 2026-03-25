@@ -2,22 +2,24 @@
   NewSessionModal.svelte — Start a new branch session on a branch
 
   A focused modal with a prompt textarea. The mode (commit/note/review) is
-  determined by the caller and displayed as a static title in the header.
-  On close, returns whatever text was typed and the current mode so the
-  caller can restore state if the user re-opens the modal.
+  switchable via a clickable dropdown in the header. On close, returns
+  whatever text was typed and the current mode so the caller can restore
+  state if the user re-opens the modal.
 
   Props:
     branch        — the branch to create a session on
-    mode          — 'commit', 'note', or 'review' (shown as title, not togglable)
+    mode          — 'commit', 'note', or 'review' (initial mode)
+    repoLabel     — optional repo label for display (githubRepo + subpath)
     initialPrompt — pre-fill the textarea (e.g. from a previous close)
     onClose       — called with { prompt, mode, imageIds } when dismissed
     onSubmit      — called with { prompt, mode, imageIds } when submit is pressed
 -->
 <script lang="ts">
-  import { X, GitCommitVertical, FileText, FileSearch, GitBranch, Send } from 'lucide-svelte';
+  import { X, GitCommitVertical, FileText, FileSearch, Send, ChevronDown } from 'lucide-svelte';
   import { tick, untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
-  import type { Branch, BranchSessionType } from '../../types';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
+  import type { Branch, BranchSessionType, ProjectRepo } from '../../types';
   import AgentSelector from '../agents/AgentSelector.svelte';
   import ImageAttachment from './ImageAttachment.svelte';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
@@ -28,10 +30,13 @@
   interface Props {
     branch: Branch;
     mode: BranchSessionType;
+    repoLabel?: ProjectRepo | null;
     initialPrompt?: string;
     initialImageIds?: string[];
     /** When true, the initial prompt is a suggestion — select all so typing replaces it. */
     prefilled?: boolean;
+    /** Commit-mode prefill text — used when switching to commit mode with no user draft. */
+    commitPrefill?: string;
     remote?: boolean;
     /** When true, the session will be queued rather than started immediately. */
     willQueue?: boolean;
@@ -42,9 +47,11 @@
   let {
     branch,
     mode,
+    repoLabel = null,
     initialPrompt = '',
     initialImageIds = [],
     prefilled = false,
+    commitPrefill = '',
     remote = false,
     willQueue = false,
     onClose,
@@ -108,6 +115,58 @@
     }, delay);
     return () => clearTimeout(t);
   });
+
+  // Mode switcher dropdown state
+  let modeMenuOpen = $state(false);
+  let modeMenuEl: HTMLDivElement | undefined = $state();
+
+  const allModes: {
+    value: BranchSessionType;
+    label: string;
+    icon: typeof GitCommitVertical;
+    iconClass: string;
+  }[] = [
+    { value: 'note', label: 'New note', icon: FileText, iconClass: 'note-icon' },
+    { value: 'commit', label: 'New commit', icon: GitCommitVertical, iconClass: 'commit-icon' },
+    { value: 'review', label: 'New code review', icon: FileSearch, iconClass: 'review-icon' },
+  ];
+
+  let currentModeInfo = $derived(allModes.find((m) => m.value === currentMode)!);
+
+  function switchMode(newMode: BranchSessionType) {
+    modeMenuOpen = false;
+    if (newMode === currentMode) return;
+
+    // Replicate the close-and-reopen prefill behaviour:
+    // If the prompt is still the commit prefill (user didn't type anything custom),
+    // treat it as empty so prefill can be reconsidered for the new mode.
+    const isPromptPrefill = commitPrefill && prompt === commitPrefill;
+    const userDraft = isPromptPrefill ? '' : prompt;
+
+    currentMode = newMode;
+
+    // Apply commit prefill when switching to commit with no user draft
+    if (newMode === 'commit' && !userDraft && commitPrefill) {
+      prompt = commitPrefill;
+      // Select all so typing replaces the suggestion
+      tick().then(() => {
+        if (textareaEl && textareaEl.value.length > 0) {
+          textareaEl.selectionStart = 0;
+          textareaEl.selectionEnd = textareaEl.value.length;
+          textareaEl.focus();
+        }
+      });
+    } else {
+      prompt = userDraft;
+    }
+  }
+
+  // Close mode menu on outside click
+  function handleDocumentClick(e: MouseEvent) {
+    if (modeMenuOpen && modeMenuEl && !modeMenuEl.contains(e.target as Node)) {
+      modeMenuOpen = false;
+    }
+  }
 
   // Image attachment state
   let imageIds = $state<string[]>([]);
@@ -176,10 +235,6 @@
     }
   }
 
-  function formatBaseBranch(baseBranch: string): string {
-    return baseBranch.replace(/^origin\//, '');
-  }
-
   // =========================================================================
   // Drag-and-drop images (via Tauri native drag-drop events)
   // =========================================================================
@@ -229,7 +284,7 @@
   });
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onclick={handleDocumentClick} />
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
@@ -250,16 +305,34 @@
     onclick={(e) => e.stopPropagation()}
   >
     <header class="modal-header">
-      <div class="header-title">
-        {#if isReview}
-          <span class="header-icon review-icon"><FileSearch size={14} /></span>
-          <span>New code review</span>
-        {:else if isCommit}
-          <span class="header-icon commit-icon"><GitCommitVertical size={14} /></span>
-          <span>New commit</span>
-        {:else}
-          <span class="header-icon note-icon"><FileText size={14} /></span>
-          <span>New note</span>
+      <div class="mode-switcher" bind:this={modeMenuEl}>
+        <button
+          class="mode-switcher-btn"
+          onclick={() => (modeMenuOpen = !modeMenuOpen)}
+          type="button"
+        >
+          <span class="header-icon {currentModeInfo.iconClass}">
+            <currentModeInfo.icon size={14} />
+          </span>
+          <span>{currentModeInfo.label}</span>
+          <ChevronDown size={14} />
+        </button>
+        {#if modeMenuOpen}
+          <div class="mode-menu">
+            {#each allModes as m}
+              <button
+                class="mode-menu-item"
+                class:active={m.value === currentMode}
+                type="button"
+                onclick={() => switchMode(m.value)}
+              >
+                <span class="header-icon {m.iconClass}">
+                  <m.icon size={14} />
+                </span>
+                <span>{m.label}</span>
+              </button>
+            {/each}
+          </div>
         {/if}
       </div>
       <button class="close-btn" onclick={handleClose} title="Close (Esc)">
@@ -268,12 +341,11 @@
     </header>
 
     <form class="modal-body" onsubmit={handleSubmit}>
-      <div class="branch-info">
-        <GitBranch size={14} />
-        <span class="branch-name">{branch.branchName}</span>
-        <span class="branch-sep">›</span>
-        <span class="base-name">{formatBaseBranch(branch.baseBranch)}</span>
-      </div>
+      {#if repoLabel}
+        <div class="repo-info">
+          <RepoLabel githubRepo={repoLabel.githubRepo} subpath={repoLabel.subpath} />
+        </div>
+      {/if}
 
       <div class="form-group">
         <textarea
@@ -365,13 +437,71 @@
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .header-title {
+  .mode-switcher {
+    position: relative;
+  }
+
+  .mode-switcher-btn {
     display: flex;
     align-items: center;
     gap: 6px;
     font-size: var(--size-sm);
     font-weight: 600;
     color: var(--text-primary);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px 8px;
+    cursor: pointer;
+    transition: all 0.1s;
+  }
+
+  .mode-switcher-btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-subtle);
+  }
+
+  .mode-switcher-btn > :global(svg:last-child) {
+    color: var(--text-muted);
+    margin-left: 2px;
+  }
+
+  .mode-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    box-shadow: var(--shadow-elevated);
+    padding: 4px;
+    z-index: 10;
+    min-width: 180px;
+  }
+
+  .mode-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 6px 10px;
+    font-size: var(--size-sm);
+    font-weight: 500;
+    color: var(--text-primary);
+    background: none;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.1s;
+  }
+
+  .mode-menu-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .mode-menu-item.active {
+    background: var(--bg-hover);
   }
 
   .header-icon {
@@ -431,32 +561,14 @@
     gap: 14px;
   }
 
-  .branch-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .repo-info {
     padding: 8px 10px;
     background: var(--bg-hover);
     border-radius: 6px;
     font-size: var(--size-sm);
-  }
-
-  .branch-info :global(svg) {
-    color: var(--branch-color);
-    flex-shrink: 0;
-  }
-
-  .branch-name {
-    font-weight: 500;
-    color: var(--text-primary);
-  }
-
-  .branch-sep {
-    color: var(--text-faint);
-  }
-
-  .base-name {
-    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .form-group {

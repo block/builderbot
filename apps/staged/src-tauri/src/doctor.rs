@@ -486,6 +486,8 @@ struct AgentCheckInfo {
     install_url: Option<&'static str>,
     /// URL to install the ACP bridge, when the main tool is present but the bridge is not.
     bridge_install_url: Option<&'static str>,
+    /// Shell command to install the ACP bridge (used as fix_command for partial installs).
+    bridge_fix_command: Option<&'static str>,
 }
 
 /// All AI agents we check for individually.
@@ -498,6 +500,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         main_command: None,
         install_url: Some("https://github.com/block/goose"),
         bridge_install_url: None,
+        bridge_fix_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-claude",
@@ -506,6 +509,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         main_command: Some("claude"),
         install_url: Some("https://docs.anthropic.com/en/docs/claude-code/overview"),
         bridge_install_url: Some("https://github.com/anthropics/claude-agent-acp#installation"),
+        bridge_fix_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-codex",
@@ -514,6 +518,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         main_command: Some("codex"),
         install_url: Some("https://github.com/openai/codex#getting-started"),
         bridge_install_url: Some("https://github.com/openai/codex-acp#installation"),
+        bridge_fix_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-pi",
@@ -522,6 +527,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         main_command: Some("pi"),
         install_url: None,
         bridge_install_url: None,
+        bridge_fix_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-amp",
@@ -529,7 +535,8 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         commands: &["amp-acp"],
         main_command: Some("amp"),
         install_url: Some("https://ampcode.com"),
-        bridge_install_url: Some("https://www.npmjs.com/package/amp-acp"),
+        bridge_install_url: None,
+        bridge_fix_command: Some("npm install -g amp-acp"),
     },
 ];
 
@@ -644,7 +651,7 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
                         .bridge_install_url
                         .or(info.install_url)
                         .map(|s| s.to_string()),
-                    fix_command: None,
+                    fix_command: info.bridge_fix_command.map(|s| s.to_string()),
                     path: Some(main_path.to_string_lossy().to_string()),
                     raw_output: Some(format!("{header}\n{search}\n{main_search}")),
                 };

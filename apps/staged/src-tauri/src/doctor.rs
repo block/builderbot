@@ -691,22 +691,6 @@ fn check_single_ai_agent(info: &AgentCheckInfo, any_agent_found: bool) -> Doctor
     }
 }
 
-/// Produce a `DoctorCheck` for each known AI agent.
-///
-/// Each agent gets its own row. At least one must be installed for full
-/// functionality, but each individual missing agent is only a warning.
-fn check_ai_agents() -> Vec<DoctorCheck> {
-    // First pass: determine which agents are installed.
-    let installed: Vec<bool> = AI_AGENT_CHECKS.iter().map(agent_installed).collect();
-    let any_found = installed.iter().any(|&b| b);
-
-    // Second pass: build the checks with appropriate messaging.
-    AI_AGENT_CHECKS
-        .iter()
-        .map(|info| check_single_ai_agent(info, any_found))
-        .collect()
-}
-
 // =============================================================================
 // Tauri commands
 // =============================================================================

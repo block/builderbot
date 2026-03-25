@@ -615,7 +615,8 @@
     {@const isStopping = execution && stoppingExecutions.has(execution.executionId)}
     {@const showStopIcon = altHeld && isRunning && !isStopping}
     {@const phase = execution ? runPhases.get(execution.executionId) : undefined}
-    {@const hasEndpoint = phase?.type === 'running' && !!phase.endpoint}
+    {@const hasEndpoint =
+      phase?.type === 'running' && !!phase.endpoint && (!isRemote || !!branch.workstationId)}
     {@const copyUrl =
       hasEndpoint && phase?.type === 'running' && phase.endpoint
         ? getEndpointCopyUrl(phase.endpoint)

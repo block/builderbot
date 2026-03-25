@@ -57,6 +57,54 @@
 
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
+  let isNote = $derived(!isCommit && !isReview);
+
+  // Animated placeholder for note mode — cycles through example prompts
+  const notePlaceholders = [
+    'Plan a feature that…',
+    'Research how this works…',
+    'Look into why this bug could occur…',
+  ];
+  let notePlaceholderIndex = $state(0);
+  let notePlaceholderCharIndex = $state(0);
+  let notePlaceholderPhase = $state<'typing' | 'holding' | 'erasing'>('typing');
+
+  let notePlaceholder = $derived(
+    notePlaceholders[notePlaceholderIndex].slice(0, notePlaceholderCharIndex)
+  );
+
+  $effect(() => {
+    if (!isNote || prompt) return;
+    const text = notePlaceholders[notePlaceholderIndex];
+    let delay: number;
+    if (notePlaceholderPhase === 'typing') {
+      delay = notePlaceholderCharIndex < text.length ? 40 : -1;
+      if (delay === -1) {
+        // Done typing — hold before erasing
+        const t = setTimeout(() => {
+          notePlaceholderPhase = 'erasing';
+        }, 2000);
+        return () => clearTimeout(t);
+      }
+    } else if (notePlaceholderPhase === 'erasing') {
+      delay = notePlaceholderCharIndex > 0 ? 20 : -1;
+      if (delay === -1) {
+        // Done erasing — move to next prompt
+        const t = setTimeout(() => {
+          notePlaceholderIndex = (notePlaceholderIndex + 1) % notePlaceholders.length;
+          notePlaceholderPhase = 'typing';
+        }, 400);
+        return () => clearTimeout(t);
+      }
+    } else {
+      return;
+    }
+    const step = notePlaceholderPhase === 'typing' ? 1 : -1;
+    const t = setTimeout(() => {
+      notePlaceholderCharIndex += step;
+    }, delay);
+    return () => clearTimeout(t);
+  });
 
   // Image attachment state
   let imageIds = $state<string[]>([]);
@@ -232,7 +280,7 @@
             ? 'Optional: focus the review on specific areas…'
             : isCommit
               ? 'Describe the change…'
-              : 'Describe the note…'}
+              : notePlaceholder}
           rows={isReview ? 4 : 12}
           disabled={starting}
         ></textarea>

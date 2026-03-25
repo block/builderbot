@@ -164,3 +164,7 @@ export function getHomeDir(): Promise<string> {
 export function findRecentRepos(hoursAgo?: number, limit?: number): Promise<RecentRepo[]> {
   return invoke('find_recent_repos', { hoursAgo, limit });
 }
+
+export function listSystemFonts(): Promise<string[]> {
+  return invoke('list_system_fonts');
+}

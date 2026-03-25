@@ -23,3 +23,7 @@ dirs = "5.0"
 
 # Shared crate for diff computation
 git-diff = { path = "../../../crates/git-diff" }
+
+# macOS font enumeration
+[target.'cfg(target_os = "macos")'.dependencies]
+core-text = "20"

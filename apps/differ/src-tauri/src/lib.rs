@@ -699,6 +699,41 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|e| e.to_string())
 }
 
+// =============================================================================
+// Commands: System fonts
+// =============================================================================
+
+#[cfg(target_os = "macos")]
+#[tauri::command(rename_all = "camelCase")]
+fn list_system_fonts() -> Vec<String> {
+    use core_text::font_collection::create_for_all_families;
+
+    let collection = create_for_all_families();
+    let descriptors = collection.get_descriptors();
+    let mut families: Vec<String> = Vec::new();
+
+    if let Some(descs) = descriptors {
+        for i in 0..descs.len() {
+            if let Some(desc) = descs.get(i) {
+                let name = desc.family_name();
+                if !name.starts_with('.') {
+                    families.push(name);
+                }
+            }
+        }
+    }
+
+    families.sort_by_key(|a| a.to_lowercase());
+    families.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    families
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command(rename_all = "camelCase")]
+fn list_system_fonts() -> Vec<String> {
+    Vec::new()
+}
+
 fn resolve_repo_path() -> PathBuf {
     let args: Vec<String> = std::env::args().collect();
     let mut iter = args.iter().skip(1);
@@ -749,6 +784,7 @@ pub fn run() {
             get_home_dir,
             preferences_store_path,
             find_recent_repos,
+            list_system_fonts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

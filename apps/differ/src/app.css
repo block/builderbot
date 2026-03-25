@@ -51,6 +51,9 @@
   --shadow-overlay: rgba(0, 0, 0, 0.6);
   --shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.4);
 
+  --font-mono: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+  --code-font-size: 13px;
+
   --size-base: 13px;
   --size-xs: calc(var(--size-base) * 0.846);
   --size-sm: calc(var(--size-base) * 0.923);

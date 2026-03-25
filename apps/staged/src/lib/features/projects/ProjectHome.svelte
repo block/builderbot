@@ -172,9 +172,13 @@
   });
 
   async function checkStoreAndLoad() {
+    const t0 = performance.now();
+    console.log('[perf:project] checkStoreAndLoad START');
     loading = true;
     try {
+      const t1 = performance.now();
       const status = await commands.getStoreStatus();
+      console.log(`[perf:project] getStoreStatus ${Math.round(performance.now() - t1)}ms`);
       if (status) {
         storeIncompat = status;
         loading = false;
@@ -185,6 +189,7 @@
       error = e instanceof Error ? e.message : String(e);
       loading = false;
     }
+    console.log(`[perf:project] checkStoreAndLoad END ${Math.round(performance.now() - t0)}ms`);
   }
 
   async function handleResetStore() {
@@ -205,13 +210,19 @@
   }
 
   async function loadData() {
+    const t0 = performance.now();
+    console.log('[perf:project] loadData START');
     const generation = ++loadGeneration;
     if (projects.length === 0) {
       loading = true;
     }
     error = null;
     try {
+      let t1 = performance.now();
       const projectList = await commands.listProjects();
+      console.log(
+        `[perf:project] loadData listProjects ${Math.round(performance.now() - t1)}ms (${projectList.length} projects)`
+      );
       if (generation !== loadGeneration) return;
       projects = projectList;
       setHasProjects(projectList.length > 0);
@@ -232,13 +243,18 @@
       }
       reposById = prunedRepos;
 
+      t1 = performance.now();
       await Promise.all(
         projectList.map(async (project) => {
           try {
+            const tp = performance.now();
             const [branches, repos] = await Promise.all([
               commands.listBranchesForProject(project.id),
               commands.listProjectRepos(project.id),
             ]);
+            console.log(
+              `[perf:project] loadData hydrate project=${project.id} ${Math.round(performance.now() - tp)}ms (${branches.length} branches, ${repos.length} repos)`
+            );
             if (generation !== loadGeneration) return;
             branchesByProject = new Map(branchesByProject).set(project.id, branches);
             workspaceLifecycle.enqueueInitialSetup(project.id, branches);
@@ -260,11 +276,18 @@
           }
         })
       );
+      console.log(
+        `[perf:project] loadData hydrate ALL projects ${Math.round(performance.now() - t1)}ms`
+      );
 
       projectRunActionsStore.hydrateFromProjectBranches(branchesByProject).catch(console.error);
 
       try {
+        t1 = performance.now();
         const contexts = await commands.listActionContexts();
+        console.log(
+          `[perf:project] loadData listActionContexts ${Math.round(performance.now() - t1)}ms`
+        );
         if (generation !== loadGeneration) return;
         detectingProjectIds = new Set(
           projectList
@@ -289,6 +312,7 @@
         loading = false;
       }
     }
+    console.log(`[perf:project] loadData END ${Math.round(performance.now() - t0)}ms`);
   }
 
   let visibleProjects = $derived(
@@ -320,6 +344,9 @@
   // and the result is only consumed in the visibleProjects render loop.
   $effect(() => {
     const updateSafeStatus = async () => {
+      const t0 = performance.now();
+      const projectIds = visibleProjects.map((p) => p.id);
+      console.log(`[perf:project] safeToDelete effect START projects=[${projectIds.join(',')}]`);
       const nextSafe = new Set<string>();
 
       for (const project of visibleProjects) {
@@ -344,7 +371,11 @@
               if (branch.branchType === 'remote') return true;
 
               try {
+                const tb = performance.now();
                 const hasUnpushed = await commands.hasUnpushedCommits(branch.id);
+                console.log(
+                  `[perf:project] hasUnpushedCommits branch=${branch.id} ${Math.round(performance.now() - tb)}ms result=${hasUnpushed}`
+                );
                 return !hasUnpushed;
               } catch (e) {
                 return false;
@@ -359,6 +390,7 @@
       }
 
       safeToDeleteProjects = nextSafe;
+      console.log(`[perf:project] safeToDelete effect END ${Math.round(performance.now() - t0)}ms`);
     };
 
     updateSafeStatus();

@@ -187,7 +187,13 @@ pub(crate) fn get_store(
 /// Returns null if the store is ready, or version info if a reset is needed.
 #[tauri::command]
 fn get_store_status(db_state: tauri::State<'_, DbState>) -> Option<StoreIncompatibility> {
-    db_state.needs_reset.lock().unwrap().clone()
+    let t0 = std::time::Instant::now();
+    let result = db_state.needs_reset.lock().unwrap().clone();
+    log::info!(
+        "[perf:backend] get_store_status {}ms",
+        t0.elapsed().as_millis()
+    );
+    result
 }
 
 /// Delete the old database and create a fresh store.
@@ -277,9 +283,15 @@ pub(crate) async fn maybe_trigger_auto_review_for_new_repo(
 fn list_projects(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
 ) -> Result<Vec<store::Project>, String> {
-    get_store(&store)?
+    let t0 = std::time::Instant::now();
+    let result = get_store(&store)?
         .list_projects()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    log::info!(
+        "[perf:backend] list_projects {}ms",
+        t0.elapsed().as_millis()
+    );
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -491,10 +503,17 @@ fn list_project_repos(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
 ) -> Result<Vec<store::ProjectRepo>, String> {
+    let t0 = std::time::Instant::now();
     let store = get_store(&store)?;
-    store
+    let result = store
         .list_project_repos(&project_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    log::info!(
+        "[perf:backend] list_project_repos project={} {}ms",
+        project_id,
+        t0.elapsed().as_millis()
+    );
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]

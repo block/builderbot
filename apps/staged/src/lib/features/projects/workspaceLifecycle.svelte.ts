@@ -84,6 +84,10 @@ class WorkspaceLifecycleController {
   }
 
   enqueueInitialSetup(projectId: string, branches: Branch[]): void {
+    const t0 = performance.now();
+    console.log(
+      `[perf:lifecycle] enqueueInitialSetup START project=${projectId} branches=${branches.length}`
+    );
     let hasActiveRemote = false;
     for (const branch of branches) {
       this.enqueueBranchSetup(projectId, branch);
@@ -101,6 +105,7 @@ class WorkspaceLifecycleController {
     if (hasActiveRemote) {
       this.ensurePolling();
     }
+    console.log(`[perf:lifecycle] enqueueInitialSetup END ${Math.round(performance.now() - t0)}ms`);
   }
 
   scheduleKickoff(): void {
@@ -280,9 +285,14 @@ class WorkspaceLifecycleController {
   private async pollWorkspaceStatuses(): Promise<void> {
     if (this.pollInFlight) return;
 
+    const t0 = performance.now();
+    console.log('[perf:lifecycle] pollWorkspaceStatuses START');
     const targets = this.collectPollableRemoteBranches();
     if (targets.length === 0) {
       this.stopPolling();
+      console.log(
+        `[perf:lifecycle] pollWorkspaceStatuses END (no targets) ${Math.round(performance.now() - t0)}ms`
+      );
       return;
     }
 
@@ -330,6 +340,9 @@ class WorkspaceLifecycleController {
       this.pollInFlight = false;
     }
 
+    console.log(
+      `[perf:lifecycle] pollWorkspaceStatuses END ${Math.round(performance.now() - t0)}ms`
+    );
     this.scheduleNextPoll();
   }
 
@@ -490,6 +503,10 @@ class WorkspaceLifecycleController {
     opts?: { runPrerun?: boolean }
   ): Promise<void> {
     if (this.pendingSetupBranches.has(branchId)) return;
+    const t0 = performance.now();
+    console.log(
+      `[perf:lifecycle] setupBranchWorktree START branch=${branchId} project=${projectId}`
+    );
     this.pendingSetupBranches.add(branchId);
 
     if (this.worktreeErrors.has(branchId)) {
@@ -534,6 +551,9 @@ class WorkspaceLifecycleController {
       throw e;
     } finally {
       this.pendingSetupBranches.delete(branchId);
+      console.log(
+        `[perf:lifecycle] setupBranchWorktree END branch=${branchId} ${Math.round(performance.now() - t0)}ms`
+      );
     }
   }
 }

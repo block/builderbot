@@ -684,15 +684,27 @@ pub fn list_branches_for_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_id: String,
 ) -> Result<Vec<BranchWithWorkdir>, String> {
+    let t0 = std::time::Instant::now();
+    log::info!(
+        "[perf:backend] list_branches_for_project START project={}",
+        project_id
+    );
+
     let store = get_store(&store)?;
     let _project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
+    let t1 = std::time::Instant::now();
     let branches = store
         .list_branches_for_project(&project_id)
         .map_err(|e| e.to_string())?;
+    log::info!(
+        "[perf:backend] list_branches_for_project db_query {}ms ({} branches)",
+        t1.elapsed().as_millis(),
+        branches.len()
+    );
 
     // Eagerly populate the workstation ID cache for any remote workspace
     // names we haven't seen yet, so the frontend has IDs on first load.
@@ -707,27 +719,41 @@ pub fn list_branches_for_project(
             .into_iter()
             .collect();
         drop(cache);
-        for name in missing {
-            match blox::ws_info(&name) {
+        if !missing.is_empty() {
+            log::info!(
+                "[perf:backend] list_branches_for_project ws_info cache misses: {:?}",
+                missing
+            );
+        }
+        for name in &missing {
+            let tw = std::time::Instant::now();
+            match blox::ws_info(name) {
                 Ok(info) => {
-                    log::debug!(
-                        "[list_branches] ws_info({}) returned workstation_id={:?}",
+                    log::info!(
+                        "[perf:backend] list_branches_for_project ws_info({}) {}ms workstation_id={:?}",
                         name,
+                        tw.elapsed().as_millis(),
                         info.workstation_id,
                     );
                     if let Some(ws_id) = info.workstation_id {
                         if let Ok(mut cache) = workstation_id_cache().lock() {
-                            cache.insert(name, ws_id);
+                            cache.insert(name.clone(), ws_id);
                         }
                     }
                 }
                 Err(e) => {
-                    log::debug!("[list_branches] ws_info({}) failed: {}", name, e);
+                    log::info!(
+                        "[perf:backend] list_branches_for_project ws_info({}) FAILED {}ms: {}",
+                        name,
+                        tw.elapsed().as_millis(),
+                        e
+                    );
                 }
             }
         }
     }
 
+    let t2 = std::time::Instant::now();
     let mut result = Vec::with_capacity(branches.len());
     for branch in branches {
         let workdir = store
@@ -737,6 +763,15 @@ pub fn list_branches_for_project(
         let bw = to_branch_with_workdir(branch, workdir.map(|w| w.path));
         result.push(bw);
     }
+    log::info!(
+        "[perf:backend] list_branches_for_project workdir_lookup {}ms",
+        t2.elapsed().as_millis()
+    );
+    log::info!(
+        "[perf:backend] list_branches_for_project END project={} total={}ms",
+        project_id,
+        t0.elapsed().as_millis()
+    );
     Ok(result)
 }
 
@@ -1589,9 +1624,15 @@ pub async fn poll_all_workspace_statuses(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_ids: Vec<String>,
 ) -> Result<HashMap<String, PollWorkspaceResult>, String> {
+    let t0 = std::time::Instant::now();
+    log::info!(
+        "[perf:backend] poll_all_workspace_statuses START branches={}",
+        branch_ids.len()
+    );
     let store = get_store(&store)?;
 
     // Fetch all workspaces in one CLI call.
+    let t1 = std::time::Instant::now();
     let entries = run_blox_blocking(blox::ws_list).await.map_err(|e| {
         if matches!(e, blox::BloxError::NotAuthenticated) {
             "Not authenticated with Blox. Run: sq login".to_string()
@@ -1599,6 +1640,11 @@ pub async fn poll_all_workspace_statuses(
             e.to_string()
         }
     })?;
+    log::info!(
+        "[perf:backend] poll_all_workspace_statuses ws_list {}ms ({} entries)",
+        t1.elapsed().as_millis(),
+        entries.len()
+    );
 
     // Build a lookup from workspace name → list entry.
     let ws_map: HashMap<String, &blox::WorkspaceListEntry> =
@@ -1744,6 +1790,11 @@ pub async fn poll_all_workspace_statuses(
         }
     }
 
+    log::info!(
+        "[perf:backend] poll_all_workspace_statuses END total={}ms ({} results)",
+        t0.elapsed().as_millis(),
+        results.len()
+    );
     Ok(results)
 }
 

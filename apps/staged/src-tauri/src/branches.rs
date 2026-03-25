@@ -706,52 +706,10 @@ pub fn list_branches_for_project(
         branches.len()
     );
 
-    // Eagerly populate the workstation ID cache for any remote workspace
-    // names we haven't seen yet, so the frontend has IDs on first load.
-    {
-        let cache = workstation_id_cache().lock().unwrap();
-        let missing: Vec<String> = branches
-            .iter()
-            .filter(|b| b.branch_type == store::BranchType::Remote)
-            .filter_map(|b| b.workspace_name.clone())
-            .filter(|name| !cache.contains_key(name))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        drop(cache);
-        if !missing.is_empty() {
-            log::info!(
-                "[perf:backend] list_branches_for_project ws_info cache misses: {:?}",
-                missing
-            );
-        }
-        for name in &missing {
-            let tw = std::time::Instant::now();
-            match blox::ws_info(name) {
-                Ok(info) => {
-                    log::info!(
-                        "[perf:backend] list_branches_for_project ws_info({}) {}ms workstation_id={:?}",
-                        name,
-                        tw.elapsed().as_millis(),
-                        info.workstation_id,
-                    );
-                    if let Some(ws_id) = info.workstation_id {
-                        if let Ok(mut cache) = workstation_id_cache().lock() {
-                            cache.insert(name.clone(), ws_id);
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::info!(
-                        "[perf:backend] list_branches_for_project ws_info({}) FAILED {}ms: {}",
-                        name,
-                        tw.elapsed().as_millis(),
-                        e
-                    );
-                }
-            }
-        }
-    }
+    // NOTE: workstation IDs for remote branches are populated lazily by
+    // poll_all_workspace_statuses (a single batched `ws_list` call) rather
+    // than eagerly here. Eager per-workspace `ws_info` calls were serial and
+    // each took ~1s, causing multi-second UI freezes on project load.
 
     let t2 = std::time::Instant::now();
     let mut result = Vec::with_capacity(branches.len());

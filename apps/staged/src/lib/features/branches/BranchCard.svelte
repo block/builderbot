@@ -906,9 +906,11 @@
   <NewSessionModal
     {branch}
     mode={sessionMgr.newSessionMode}
+    {repoLabel}
     initialPrompt={usePrefill ? commitPrefill : sessionMgr.draftPrompt}
     initialImageIds={sessionMgr.draftImageIds}
     prefilled={usePrefill}
+    {commitPrefill}
     remote={isRemote}
     willQueue={sessionMgr.willQueue}
     onClose={(draft) => {

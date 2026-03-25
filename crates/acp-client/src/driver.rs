@@ -849,6 +849,8 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
+        log::info!("ACP session notification: {:?}", notification.update);
+
         // Determine the action to take under the lock, then drop the lock
         // before calling into the writer to avoid holding it across await points.
         enum LiveAction {

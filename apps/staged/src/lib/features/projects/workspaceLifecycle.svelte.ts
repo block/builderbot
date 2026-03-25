@@ -85,8 +85,22 @@ class WorkspaceLifecycleController {
   }
 
   enqueueInitialSetup(projectId: string, branches: Branch[]): void {
+    let hasActiveRemote = false;
     for (const branch of branches) {
       this.enqueueBranchSetup(projectId, branch);
+      if (
+        branch.branchType === 'remote' &&
+        (branch.workspaceStatus === 'starting' || branch.workspaceStatus === 'running')
+      ) {
+        hasActiveRemote = true;
+      }
+    }
+    // Kick the poller so stale running/starting statuses get reconciled
+    // against the Blox backend. Without this, branches loaded from the DB
+    // with a stale "running" status would never be re-polled because the
+    // poller was already stopped (no branches were loaded when start() ran).
+    if (hasActiveRemote) {
+      this.ensurePolling();
     }
   }
 

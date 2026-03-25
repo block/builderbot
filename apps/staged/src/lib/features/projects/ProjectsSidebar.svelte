@@ -360,7 +360,7 @@
     font-weight: 500;
     color: var(--text-tertiary);
     background: transparent;
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--text-tertiary);
     padding: 0px 5px;
     border-radius: 4px;
     white-space: nowrap;

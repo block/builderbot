@@ -129,7 +129,7 @@
   // =========================================================================
   // Remote endpoint URL rewriting
   // =========================================================================
-  $: canResolveEndpoint = !isRemote || !!branch.workstationId;
+  let canResolveEndpoint = $derived(!isRemote || !!branch.workstationId);
 
   function getEndpointCopyUrl(endpoint: string): string {
     if (!canResolveEndpoint) return endpoint;

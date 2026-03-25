@@ -42,7 +42,7 @@ pub struct DoctorCheck {
     /// If non-None, the resolved path to the executable on disk.
     pub path: Option<String>,
     /// Raw debug output: command stdout/stderr, search paths tried, etc.
-    /// Used by the "Copy debug info" feature for support diagnostics.
+    /// Used by the "Copy details" feature for support diagnostics.
     pub raw_output: Option<String>,
 }
 

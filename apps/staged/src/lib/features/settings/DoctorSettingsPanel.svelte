@@ -48,7 +48,7 @@
             Copied
           {:else}
             <ClipboardCopy size={14} />
-            Copy debug info
+            Copy details
           {/if}
         </button>
       {/if}

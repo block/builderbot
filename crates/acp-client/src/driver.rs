@@ -409,6 +409,11 @@ impl AgentDriver for AcpDriver {
             ) => result,
         };
 
+        log::info!(
+            "ACP session {session_id} finished (is_remote={}, success={})",
+            self.is_remote,
+            protocol_result.is_ok()
+        );
         writer.finalize().await;
         graceful_stop(&mut child, self.is_remote).await;
 
@@ -431,14 +436,15 @@ async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
                 let _ = child.kill().await;
                 return;
             };
+            log::info!("Sending SIGINT to remote ACP proxy (pid={pid})");
             if signal::kill(Pid::from_raw(pid), Signal::SIGINT).is_ok() {
                 match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
                     Ok(Ok(status)) => {
-                        log::info!("Remote ACP proxy exited gracefully: {status}");
+                        log::info!("Remote ACP proxy exited gracefully after SIGINT: {status}");
                         return;
                     }
                     Ok(Err(e)) => {
-                        log::warn!("Error waiting for remote ACP proxy: {e}");
+                        log::warn!("Error waiting for remote ACP proxy after SIGINT: {e}");
                     }
                     Err(_) => {
                         log::warn!(
@@ -446,9 +452,14 @@ async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
                         );
                     }
                 }
+            } else {
+                log::warn!("Failed to send SIGINT to remote ACP proxy (pid={pid}), falling back to SIGKILL");
             }
+        } else {
+            log::warn!("Remote ACP proxy has no PID, falling back to SIGKILL");
         }
     }
+    log::info!("Sending SIGKILL to ACP process (is_remote={is_remote})");
     let _ = child.kill().await;
 }
 

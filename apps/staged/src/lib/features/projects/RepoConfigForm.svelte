@@ -38,8 +38,14 @@
     // Optional callbacks
     onBranchSelected?: (selection: BranchSelection) => void;
 
-    // Exposed API for parent validation
-    api?: { waitForSubpathValidation: () => Promise<boolean> };
+    // Show "Required" badge on Repository label (for remote location in NewProjectForm)
+    repoRequired?: boolean;
+
+    // Exposed API for parent validation and programmatic repo selection
+    api?: {
+      waitForSubpathValidation: () => Promise<boolean>;
+      selectRepo: (selection: RepoSelection) => void;
+    };
   }
 
   let {
@@ -51,8 +57,15 @@
     disabled = false,
     excludeRepos,
     autofocus = false,
+    repoRequired = false,
     onBranchSelected,
-    api = $bindable<{ waitForSubpathValidation: () => Promise<boolean> } | undefined>(undefined),
+    api = $bindable<
+      | {
+          waitForSubpathValidation: () => Promise<boolean>;
+          selectRepo: (selection: RepoSelection) => void;
+        }
+      | undefined
+    >(undefined),
   }: Props = $props();
 
   let isMonorepo = $state(false);
@@ -108,9 +121,12 @@
 
   // Expose validation API to parent
   $effect(() => {
-    api = subpathApi
-      ? { waitForSubpathValidation: () => subpathApi!.waitForValidation() }
-      : undefined;
+    api = {
+      waitForSubpathValidation: subpathApi
+        ? () => subpathApi!.waitForValidation()
+        : () => Promise.resolve(true),
+      selectRepo: handleRepoSelected,
+    };
   });
 
   let filteredRecentRepos = $derived(
@@ -152,7 +168,12 @@
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="form-group">
-  <label for="project-repo-select">Repository</label>
+  <label for="project-repo-select"
+    >Repository
+    {#if repoRequired && !selectedRepo}
+      <span class="field-badge required">Required</span>
+    {/if}</label
+  >
   {#if selectedRepo}
     <div class="repo-info" class:disabled>
       <GitBranch size={14} class="repo-info-icon" />
@@ -275,6 +296,11 @@
 
   .field-badge.recommended {
     background-color: var(--ui-accent);
+    color: var(--bg-deepest);
+  }
+
+  .field-badge.required {
+    background-color: var(--ui-danger);
     color: var(--bg-deepest);
   }
 

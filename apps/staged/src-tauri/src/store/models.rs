@@ -274,6 +274,8 @@ pub struct Branch {
     pub pr_updated_at: Option<i64>,
     /// When we last fetched PR status from GitHub (milliseconds since epoch)
     pub pr_fetched_at: Option<i64>,
+    /// The SHA of the PR's head commit on GitHub
+    pub pr_head_sha: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -300,6 +302,7 @@ impl Branch {
             pr_url: None,
             pr_updated_at: None,
             pr_fetched_at: None,
+            pr_head_sha: None,
             created_at: now,
             updated_at: now,
         }
@@ -331,6 +334,7 @@ impl Branch {
             pr_url: None,
             pr_updated_at: None,
             pr_fetched_at: None,
+            pr_head_sha: None,
             created_at: now,
             updated_at: now,
         }

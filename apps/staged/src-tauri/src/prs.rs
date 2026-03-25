@@ -41,6 +41,7 @@ struct PrStatusEvent {
     pr_review_decision: Option<String>,
     pr_mergeable: bool,
     pr_draft: bool,
+    pr_head_sha: Option<String>,
 }
 
 /// Create a pull request for a branch by kicking off an agent session.
@@ -241,8 +242,18 @@ pub async fn refresh_pr_status(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
     let (github_repo, _) = resolve_branch_repo_and_subpath(&store, &project, &branch)?;
 
-    let pr_status =
-        git::fetch_pr_status_for_repo(&github_repo, pr_number).map_err(|e| e.to_string())?;
+    let pr_status = match git::fetch_pr_status_for_repo(&github_repo, pr_number) {
+        Ok(status) => status,
+        Err(e) => {
+            log::error!(
+                "refresh_pr_status failed for branch_id={}, pr_number={}: {}",
+                branch_id,
+                pr_number,
+                e
+            );
+            return Err(e.to_string());
+        }
+    };
     let mergeable = pr_status.mergeable == "MERGEABLE";
 
     store
@@ -255,6 +266,7 @@ pub async fn refresh_pr_status(
             Some(pr_status.is_draft),
             None,
             None,
+            pr_status.head_sha.clone(),
         )
         .map_err(|e| e.to_string())?;
 
@@ -268,6 +280,7 @@ pub async fn refresh_pr_status(
                 pr_review_decision: pr_status.review_decision,
                 pr_mergeable: mergeable,
                 pr_draft: pr_status.is_draft,
+                pr_head_sha: pr_status.head_sha,
             },
         )
         .map_err(|e| format!("Failed to emit event: {}", e))?;
@@ -325,6 +338,7 @@ pub async fn refresh_all_pr_statuses(
                     Some(pr_status.is_draft),
                     None,
                     None,
+                    pr_status.head_sha.clone(),
                 ) {
                     log::warn!("Failed to update PR status for branch {}: {}", branch.id, e);
                     continue;
@@ -341,6 +355,7 @@ pub async fn refresh_all_pr_statuses(
                         pr_review_decision: pr_status.review_decision,
                         pr_mergeable: mergeable,
                         pr_draft: pr_status.is_draft,
+                        pr_head_sha: pr_status.head_sha,
                     },
                 ) {
                     log::warn!("Failed to emit pr-status-changed event: {}", e);
@@ -378,7 +393,7 @@ pub fn clear_branch_pr_status(
     let store = get_store(&store)?;
 
     store
-        .update_branch_pr_status(&branch_id, None, None, None, None, None, None, None)
+        .update_branch_pr_status(&branch_id, None, None, None, None, None, None, None, None)
         .map_err(|e| e.to_string())?;
 
     app_handle
@@ -412,7 +427,7 @@ pub async fn has_unpushed_commits(
 
         // Run the blocking SSH calls on a background thread so we don't
         // block the Tauri IPC thread and freeze the UI.
-        return tauri::async_runtime::spawn_blocking(move || {
+        let result = tauri::async_runtime::spawn_blocking(move || {
             let remote_ref = format!("origin/{}", branch_name);
             // Remote tracking branch doesn't exist — all commits are unpushed
             if crate::branches::run_workspace_git(
@@ -435,6 +450,7 @@ pub async fn has_unpushed_commits(
         })
         .await
         .map_err(|e| format!("has_unpushed_commits task failed: {e}"))?;
+        return result;
     }
 
     let workdir = store

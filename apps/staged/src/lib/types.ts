@@ -69,6 +69,7 @@ export interface Branch {
   prUrl: string | null;
   prUpdatedAt: number | null;
   prFetchedAt: number | null;
+  prHeadSha: string | null;
 }
 
 // PR status types

@@ -59,7 +59,7 @@ impl Store {
             "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                     branch_type, workspace_name, workspace_status,
                     pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
-                    pr_url, pr_updated_at, pr_fetched_at,
+                    pr_url, pr_updated_at, pr_fetched_at, pr_head_sha,
                     created_at, updated_at
              FROM branches WHERE id = ?1",
             params![id],
@@ -72,7 +72,7 @@ impl Store {
             "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                     branch_type, workspace_name, workspace_status,
                     pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
-                    pr_url, pr_updated_at, pr_fetched_at,
+                    pr_url, pr_updated_at, pr_fetched_at, pr_head_sha,
                     created_at, updated_at
              FROM branches WHERE project_id = ?1 ORDER BY created_at ASC",
         )?;
@@ -158,6 +158,7 @@ impl Store {
         pr_draft: Option<bool>,
         pr_url: Option<String>,
         pr_updated_at: Option<i64>,
+        pr_head_sha: Option<String>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
@@ -171,8 +172,9 @@ impl Store {
                 pr_url = ?6,
                 pr_updated_at = ?7,
                 pr_fetched_at = ?8,
-                updated_at = ?9
-             WHERE id = ?10",
+                pr_head_sha = ?9,
+                updated_at = ?10
+             WHERE id = ?11",
             params![
                 pr_state,
                 pr_checks_status,
@@ -182,6 +184,7 @@ impl Store {
                 pr_url,
                 pr_updated_at,
                 now,
+                pr_head_sha,
                 now,
                 id
             ],
@@ -219,8 +222,9 @@ impl Store {
             pr_url: row.get(14)?,
             pr_updated_at: row.get(15)?,
             pr_fetched_at: row.get(16)?,
-            created_at: row.get(17)?,
-            updated_at: row.get(18)?,
+            pr_head_sha: row.get(17)?,
+            created_at: row.get(18)?,
+            updated_at: row.get(19)?,
         })
     }
 

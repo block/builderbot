@@ -89,6 +89,7 @@
       prReviewDecision: string | null;
       prMergeable: boolean;
       prDraft: boolean;
+      prHeadSha: string | null;
     }>('pr-status-changed', (event) => {
       const payload = event.payload;
       // Find the project that contains this branch
@@ -104,6 +105,7 @@
             prReviewDecision: payload.prReviewDecision,
             prMergeable: payload.prMergeable,
             prDraft: payload.prDraft,
+            prHeadSha: payload.prHeadSha,
           };
           projectBranches = new Map(projectBranches).set(projectId, updatedBranches);
           break;

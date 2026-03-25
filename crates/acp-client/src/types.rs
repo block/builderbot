@@ -77,16 +77,24 @@ pub struct AcpProviderInfo {
 /// Scan the system for all known ACP agents that are installed.
 ///
 /// Returns only agents whose CLI binary can be found. The order matches
-/// `KNOWN_AGENTS` (display order).
+/// `KNOWN_AGENTS` (display order). All agents are probed concurrently.
 pub fn discover_providers() -> Vec<AcpProviderInfo> {
-    KNOWN_AGENTS
-        .iter()
-        .filter(|agent| find_known_agent_binary(agent).is_some())
-        .map(|agent| AcpProviderInfo {
-            id: agent.id.to_string(),
-            label: agent.label.to_string(),
-        })
-        .collect()
+    std::thread::scope(|s| {
+        let handles: Vec<_> = KNOWN_AGENTS
+            .iter()
+            .map(|agent| s.spawn(move || (agent, find_known_agent_binary(agent).is_some())))
+            .collect();
+
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .filter(|(_, found)| *found)
+            .map(|(agent, _)| AcpProviderInfo {
+                id: agent.id.to_string(),
+                label: agent.label.to_string(),
+            })
+            .collect()
+    })
 }
 
 /// Find a specific ACP agent by provider ID (e.g., "goose", "claude").

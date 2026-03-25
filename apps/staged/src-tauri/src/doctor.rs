@@ -737,8 +737,14 @@ pub async fn run_doctor() -> DoctorReport {
 #[tauri::command]
 pub async fn run_doctor_fix(command: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
-        let output = Command::new("sh")
-            .args(["-c", &command])
+        // Use a login shell so commands like `npm` installed via nvm are visible.
+        let (shell, args) = if std::path::Path::new("/bin/zsh").exists() {
+            ("/bin/zsh", vec!["-l", "-c", &command])
+        } else {
+            ("/bin/bash", vec!["-l", "-c", &command])
+        };
+        let output = Command::new(shell)
+            .args(&args)
             .output()
             .map_err(|e| format!("Failed to run command: {e}"))?;
 

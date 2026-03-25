@@ -461,7 +461,7 @@
     border-color: var(--border-subtle);
   }
 
-  .mode-switcher-btn :global(svg:last-child) {
+  .mode-switcher-btn > :global(svg:last-child) {
     color: var(--text-muted);
     margin-left: 2px;
   }

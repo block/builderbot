@@ -188,7 +188,9 @@
       const isRunning = commit.sessionStatus === 'running';
       const isQueued = commit.sessionStatus === 'queued';
       const isFailed = isPending && !isRunning && !isQueued && !!commit.sessionId;
-      const isDeleting = !!commit.id && deletingCommitIds.has(commit.id);
+      const isDeleting =
+        (!!commit.id && deletingCommitIds.has(commit.id)) ||
+        (!!commit.sha && deletingCommitIds.has(commit.sha));
       const liveHint = commit.sessionId ? liveSessionHints[commit.sessionId] : undefined;
 
       let type: TimelineItemType;
@@ -213,7 +215,7 @@
         type,
         title: stripXmlTags(commit.subject),
         meta: isDeleting ? 'Deleting...' : secondaryMeta,
-        secondaryMeta: !isRunning ? commit.shortSha || undefined : undefined,
+        secondaryMeta: isDeleting || isRunning ? undefined : commit.shortSha || undefined,
         deleting: isDeleting,
         timestamp: commit.timestamp,
         sessionId: commit.sessionId ?? undefined,

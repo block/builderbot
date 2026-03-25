@@ -4,7 +4,7 @@ use crate::git;
 use crate::session_runner;
 use crate::store::Store;
 use crate::{
-    branches, BranchTimeline, CommitTimelineItem, ImageTimelineItem, NoteTimelineItem,
+    blox, branches, BranchTimeline, CommitTimelineItem, ImageTimelineItem, NoteTimelineItem,
     ReviewTimelineItem,
 };
 use std::path::Path;
@@ -312,7 +312,7 @@ pub fn delete_pending_commit(
 /// Only works for the tip commit (HEAD) of the branch's worktree.
 /// Returns an error if the commit is not the current HEAD.
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_commit(
+pub async fn delete_commit(
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
@@ -320,49 +320,111 @@ pub fn delete_commit(
     delete_session: Option<bool>,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
+    let registry = Arc::clone(&registry);
 
-    // Get the worktree path for this branch
-    let workdir = store
-        .get_workdir_for_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-    let worktree = Path::new(&workdir.path);
+        if let Some(ref ws_name) = branch.workspace_name {
+            // Remote branch: use blox::ws_exec with a single atomic shell command
+            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)
+                .map_err(|e| e.to_string())?;
+            let resolved_path = match repo_subpath.as_deref() {
+                Some(subpath) => branches::resolve_workspace_repo_path(ws_name, subpath)
+                    .map_err(|e| e.to_string())?,
+                None => ".".to_string(),
+            };
 
-    // Verify the commit is the current HEAD
-    let head_sha = git::get_head_sha(worktree).map_err(|e| e.to_string())?;
-    if !head_sha.starts_with(&commit_sha)
-        && !commit_sha.starts_with(&head_sha)
-        && head_sha != commit_sha
-    {
-        return Err(format!(
-            "Can only delete the latest commit. {} is not HEAD ({})",
-            &commit_sha[..7.min(commit_sha.len())],
-            &head_sha[..7.min(head_sha.len())]
-        ));
-    }
+            // Single round-trip script: verify HEAD, get parent, reset.
+            // Passing commit_sha as an argument avoids TOCTOU races.
+            let script = concat!(
+                "cd \"$1\" && ",
+                "head=$(git rev-parse HEAD) && ",
+                "case \"$head\" in \"$2\"*) ;; *) case \"$2\" in \"$head\"*) ;; *) ",
+                "echo \"NOT_HEAD:$head\" >&2; exit 1 ;; esac ;; esac && ",
+                "if ! git rev-parse \"$2^\" >/dev/null 2>&1; then ",
+                "echo \"INITIAL_COMMIT\" >&2; exit 1; fi && ",
+                "parent=$(git rev-parse \"$2^\") && ",
+                "git reset --hard \"$parent\""
+            );
 
-    // Find the parent commit
-    let parent = git::get_parent_commit(worktree, &commit_sha)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Cannot delete the initial commit".to_string())?;
+            blox::ws_exec(
+                ws_name,
+                &["sh", "-c", script, "_", &resolved_path, &commit_sha],
+            )
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("NOT_HEAD:") {
+                    // Extract the actual HEAD sha from the error
+                    if let Some(head) = msg.split("NOT_HEAD:").nth(1) {
+                        let head = head
+                            .trim()
+                            .trim_end_matches(|c: char| !c.is_ascii_hexdigit());
+                        let short_commit = &commit_sha[..7.min(commit_sha.len())];
+                        let short_head = &head[..7.min(head.len())];
+                        format!(
+                            "Can only delete the latest commit. {} is not HEAD ({})",
+                            short_commit, short_head
+                        )
+                    } else {
+                        format!("Remote delete failed: {e}")
+                    }
+                } else if msg.contains("INITIAL_COMMIT") {
+                    "Cannot delete the initial commit".to_string()
+                } else {
+                    format!("Remote delete failed: {e}")
+                }
+            })?;
+        } else {
+            // Local branch: use local worktree
+            let workdir = store
+                .get_workdir_for_branch(&branch_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
-    // Reset to parent — this removes the commit from the branch
-    git::reset_to_commit(worktree, &parent).map_err(|e| e.to_string())?;
+            let worktree = Path::new(&workdir.path);
 
-    // Clean up DB record if one exists
-    if let Ok(Some(db_commit)) = store.get_commit_by_sha(&branch_id, &commit_sha) {
-        // Clean up reviews created at or after this commit
-        cleanup_reviews_after_commit(&store, &registry, &db_commit);
+            // Verify the commit is the current HEAD
+            let head_sha = git::get_head_sha(worktree).map_err(|e| e.to_string())?;
+            if !head_sha.starts_with(&commit_sha)
+                && !commit_sha.starts_with(&head_sha)
+                && head_sha != commit_sha
+            {
+                return Err(format!(
+                    "Can only delete the latest commit. {} is not HEAD ({})",
+                    &commit_sha[..7.min(commit_sha.len())],
+                    &head_sha[..7.min(head_sha.len())]
+                ));
+            }
 
-        let _ = store.delete_commit(&db_commit.id);
+            // Find the parent commit
+            let parent = git::get_parent_commit(worktree, &commit_sha)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Cannot delete the initial commit".to_string())?;
 
-        if delete_session.unwrap_or(false) {
-            if let Some(sid) = db_commit.session_id {
-                let _ = store.delete_session(&sid);
+            // Reset to parent — this removes the commit from the branch
+            git::reset_to_commit(worktree, &parent).map_err(|e| e.to_string())?;
+        }
+
+        // Clean up DB record if one exists
+        if let Ok(Some(db_commit)) = store.get_commit_by_sha(&branch_id, &commit_sha) {
+            // Clean up reviews created at or after this commit
+            cleanup_reviews_after_commit(&store, &registry, &db_commit);
+
+            let _ = store.delete_commit(&db_commit.id);
+
+            if delete_session.unwrap_or(false) {
+                if let Some(sid) = db_commit.session_id {
+                    let _ = store.delete_session(&sid);
+                }
             }
         }
-    }
 
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Delete task failed: {e}"))?
 }

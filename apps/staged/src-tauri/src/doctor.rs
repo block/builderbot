@@ -783,12 +783,18 @@ pub async fn run_doctor_fix(command: String) -> Result<(), String> {
         } else {
             ("/bin/bash", vec!["-l", "-c", &command])
         };
-        // Run from the user's home directory to avoid directory-local tool
-        // managers (e.g. Hermit) intercepting the install command.
+        // Clear the inherited environment so directory-local tool managers
+        // (e.g. Hermit) don't intercept the command. The login shell will
+        // rebuild PATH etc. from the user's profile.
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        let user = std::env::var("USER").unwrap_or_default();
         let output = Command::new(shell)
             .args(&args)
-            .current_dir(home)
+            .env_clear()
+            .env("HOME", &home)
+            .env("USER", &user)
+            .env("TERM", "xterm-256color")
+            .current_dir(&home)
             .output()
             .map_err(|e| format!("Failed to run command: {e}"))?;
 

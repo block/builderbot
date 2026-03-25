@@ -726,16 +726,6 @@
   </div>
 </div>
 
-{#if deletingProjectNames.size > 0}
-  <div class="delete-toast" role="status" aria-live="polite">
-    {#if deletingProjectNames.size === 1}
-      Deleting project “{[...deletingProjectNames.values()][0]}”…
-    {:else}
-      Deleting {deletingProjectNames.size} projects…
-    {/if}
-  </div>
-{/if}
-
 <!-- New project modal (only when projects exist; splash screen handles inline form otherwise) -->
 {#if showNewProjectModal && hasContent}
   <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
@@ -786,20 +776,6 @@
 
   .main-panel.no-pad {
     padding: 0;
-  }
-
-  .delete-toast {
-    position: fixed;
-    right: 20px;
-    bottom: 20px;
-    z-index: 1200;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    box-shadow: var(--shadow-elevated);
-    border-radius: 8px;
-    padding: 10px 12px;
-    color: var(--text-primary);
-    font-size: var(--size-sm);
   }
 
   .error-state {

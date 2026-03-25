@@ -14,6 +14,7 @@
 
   interface Props {
     suggestedRepos?: RecentRepo[];
+    loadingSuggestions?: boolean;
     onSelect: (path: string) => void;
     onClose: () => void;
     currentPath?: string | null;
@@ -21,6 +22,7 @@
 
   let {
     suggestedRepos: suggestedReposProp = [],
+    loadingSuggestions = false,
     onSelect,
     onClose,
     currentPath = null,
@@ -316,10 +318,13 @@
       {:else if error && !isSearching}
         <div class="empty-state error">{error}</div>
       {:else}
-        {#if filteredSuggested.length > 0 && (isSearching || currentDir === homeDir)}
+        {#if (filteredSuggested.length > 0 || loadingSuggestions) && (isSearching || currentDir === homeDir)}
           <div class="section-header">
             <GitBranch size={12} />
             <span>Suggested</span>
+            {#if loadingSuggestions}
+              <Loader2 size={12} class="spinner" />
+            {/if}
           </div>
           {#each filteredSuggested as repo, i (repo.path)}
             {@const isCurrent = repo.path === currentPath}

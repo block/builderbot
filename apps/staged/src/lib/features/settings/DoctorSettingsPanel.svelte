@@ -53,14 +53,12 @@
         </button>
       {/if}
 
-      <button class="refresh-btn" disabled={doctorState.loading} onclick={runChecks}>
-        {#if doctorState.loading}
-          <Spinner size={14} />
-        {:else}
+      {#if !doctorState.loading}
+        <button class="refresh-btn" onclick={runChecks}>
           <RefreshCw size={14} />
-        {/if}
-        Re-run
-      </button>
+          Re-run
+        </button>
+      {/if}
     </div>
   </div>
 

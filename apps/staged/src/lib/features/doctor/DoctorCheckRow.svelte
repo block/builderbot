@@ -9,6 +9,7 @@
   import { CheckCircle, AlertTriangle, XCircle, ExternalLink, Wrench } from 'lucide-svelte';
   import { openUrl, runDoctorFix } from '../../api/commands';
   import type { DoctorCheck } from '../../api/commands';
+  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
 
   let {
     check,
@@ -20,8 +21,16 @@
 
   let fixing = $state(false);
   let fixError = $state<string | null>(null);
+  let showFixConfirm = $state(false);
 
-  async function handleFix() {
+  function promptFix() {
+    if (!check.fixCommand) return;
+    fixError = null;
+    showFixConfirm = true;
+  }
+
+  async function confirmFix() {
+    showFixConfirm = false;
     if (!check.fixCommand) return;
     fixing = true;
     fixError = null;
@@ -64,7 +73,7 @@
   </div>
 
   {#if check.fixCommand && check.status !== 'pass'}
-    <button class="fix-btn" onclick={handleFix} disabled={fixing}>
+    <button class="fix-btn" onclick={promptFix} disabled={fixing}>
       <Wrench size={14} />
       {fixing ? 'Fixing…' : 'Fix'}
     </button>
@@ -76,6 +85,17 @@
     </button>
   {/if}
 </div>
+
+{#if showFixConfirm}
+  <ConfirmDialog
+    title="Run fix command?"
+    message={check.fixCommand!}
+    confirmLabel="Run"
+    cancelLabel="Cancel"
+    onConfirm={confirmFix}
+    onCancel={() => (showFixConfirm = false)}
+  />
+{/if}
 
 <style>
   .check-row {

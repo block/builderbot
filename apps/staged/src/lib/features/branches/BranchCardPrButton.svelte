@@ -77,7 +77,7 @@
   });
 
   // PR head SHA — updated from events and branch prop
-  let prHeadSha = $state<string | null>(branch.prHeadSha);
+  let prHeadSha = $state<string | null>(null);
 
   // PR status polling state
   let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;

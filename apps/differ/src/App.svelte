@@ -135,6 +135,7 @@
   let showFolderPicker = $state(false);
   let showThemePicker = $state(false);
   let suggestedRepos = $state<RecentRepo[]>([]);
+  let loadingSuggestedRepos = $state(true);
 
   // ==========================================================================
   // Derived
@@ -160,7 +161,10 @@
         .then((repos) => {
           suggestedRepos = repos;
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          loadingSuggestedRepos = false;
+        });
 
       // Check CLI launch args
       const args = await commands.getLaunchArgs();
@@ -880,6 +884,7 @@
   {#if showFolderPicker}
     <FolderPickerModal
       {suggestedRepos}
+      loadingSuggestions={loadingSuggestedRepos}
       currentPath={repoInfo?.path}
       onSelect={handleFolderSelect}
       onClose={() => (showFolderPicker = false)}

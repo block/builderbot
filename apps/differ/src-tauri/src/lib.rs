@@ -570,7 +570,17 @@ const EXCLUDE_PATTERNS: &[&str] = &[
 ];
 
 #[tauri::command(rename_all = "camelCase")]
-fn find_recent_repos(hours_ago: Option<u32>, limit: Option<usize>) -> Vec<RecentRepo> {
+async fn find_recent_repos(
+    hours_ago: Option<u32>,
+    limit: Option<usize>,
+) -> Result<Vec<RecentRepo>, String> {
+    // Spawn on a blocking thread so mdfind doesn't block the main/command thread
+    tauri::async_runtime::spawn_blocking(move || find_recent_repos_sync(hours_ago, limit))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn find_recent_repos_sync(hours_ago: Option<u32>, limit: Option<usize>) -> Vec<RecentRepo> {
     let hours_ago = hours_ago.unwrap_or(24);
     let limit = limit.unwrap_or(10);
 

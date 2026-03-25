@@ -286,6 +286,13 @@ impl AgentDriver for AcpDriver {
             // the actions executor does) and logging it to aid debugging.
             .stderr(Stdio::null())
             .kill_on_drop(true);
+        // Put remote proxies in their own process group so we can send SIGINT
+        // to the entire group (sq + its child processes) for graceful shutdown.
+        // Without this, only `sq` receives SIGINT and hangs waiting for its
+        // child (the blox acp proxy) which never got the signal.
+        if self.is_remote {
+            cmd.process_group(0);
+        }
         // For local shells extra_env is set on the clean environment; for
         // remote spawns it augments the inherited environment.
         for (k, v) in &self.extra_env {
@@ -436,8 +443,11 @@ async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
                 let _ = child.kill().await;
                 return;
             };
-            log::info!("Sending SIGINT to remote ACP proxy (pid={pid})");
-            if signal::kill(Pid::from_raw(pid), Signal::SIGINT).is_ok() {
+            // Send SIGINT to the process group (negative PID) so both `sq`
+            // and its child processes (the blox acp proxy) receive the signal.
+            // The process was spawned with process_group(0) so its PGID == PID.
+            log::info!("Sending SIGINT to remote ACP proxy process group (pgid={pid})");
+            if signal::kill(Pid::from_raw(-pid), Signal::SIGINT).is_ok() {
                 match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
                     Ok(Ok(status)) => {
                         log::info!("Remote ACP proxy exited gracefully after SIGINT: {status}");

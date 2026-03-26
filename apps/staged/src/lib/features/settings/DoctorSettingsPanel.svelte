@@ -167,6 +167,9 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    max-width: 560px;
+    margin: 0 auto;
+    width: 100%;
   }
 
   .section-label {
@@ -182,7 +185,6 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 280px;
   }
 
   .loading-state,

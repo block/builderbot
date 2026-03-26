@@ -316,14 +316,14 @@ export default class BranchCardSessionManager {
 
   openNewSession(mode: BranchSessionType, e?: MouseEvent) {
     if (mode === 'review' && e?.altKey) {
-      void this.startReviewSessionImmediately();
+      void this.startReviewSessionWithoutDialog();
       return;
     }
     this.newSessionMode = mode;
     this.showNewSession = true;
   }
 
-  async startReviewSessionImmediately() {
+  async startReviewSessionWithoutDialog() {
     this.newSessionMode = 'review';
     this.showNewSession = false;
     this.draftPrompt = '';

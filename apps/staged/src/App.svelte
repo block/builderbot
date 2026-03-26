@@ -340,7 +340,7 @@
         category: 'app',
         keys: ['ArrowUp'],
         modifiers: { meta: true },
-        handler: () => void selectPreviousProject(),
+        handler: () => selectPreviousProject(),
       },
       {
         id: 'app-next-project',
@@ -348,7 +348,7 @@
         category: 'app',
         keys: ['ArrowDown'],
         modifiers: { meta: true },
-        handler: () => void selectNextProject(),
+        handler: () => selectNextProject(),
       },
     ]);
 

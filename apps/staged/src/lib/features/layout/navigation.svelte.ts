@@ -13,6 +13,7 @@
 import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import * as commands from '../../api/commands';
 import { projectStateStore } from '../../stores/projectState.svelte';
+import { projectsList } from '../projects/projectsSidebarState.svelte';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
@@ -50,6 +51,7 @@ export async function initNavigation(): Promise<void> {
   // Validate the project still exists before navigating to it
   try {
     const projects = await commands.listProjects();
+    projectsList.current = projects;
     const existingIds = new Set(projects.map((p) => p.id));
     if (existingIds.has(lastProjectId)) {
       navigation.selectedProjectId = lastProjectId;
@@ -103,32 +105,24 @@ function isModalOpen(): boolean {
 }
 
 /** Navigate to the previous project in the list. */
-export async function selectPreviousProject(): Promise<void> {
+export function selectPreviousProject(): void {
   if (!navigation.selectedProjectId || navigation.activeView !== 'workspace' || isModalOpen())
     return;
-  try {
-    const projects = await commands.listProjects();
-    const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
-    if (currentIndex > 0) {
-      selectProject(projects[currentIndex - 1].id);
-    }
-  } catch {
-    // Ignore — stay on the current project
+  const projects = projectsList.current;
+  const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
+  if (currentIndex > 0) {
+    selectProject(projects[currentIndex - 1].id);
   }
 }
 
 /** Navigate to the next project in the list. */
-export async function selectNextProject(): Promise<void> {
+export function selectNextProject(): void {
   if (!navigation.selectedProjectId || navigation.activeView !== 'workspace' || isModalOpen())
     return;
-  try {
-    const projects = await commands.listProjects();
-    const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
-    if (currentIndex >= 0 && currentIndex < projects.length - 1) {
-      selectProject(projects[currentIndex + 1].id);
-    }
-  } catch {
-    // Ignore — stay on the current project
+  const projects = projectsList.current;
+  const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
+  if (currentIndex >= 0 && currentIndex < projects.length - 1) {
+    selectProject(projects[currentIndex + 1].id);
   }
 }
 

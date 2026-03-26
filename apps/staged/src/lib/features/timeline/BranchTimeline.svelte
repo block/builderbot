@@ -384,6 +384,11 @@
     return all;
   });
 
+  /** True when the timeline has no content and action buttons should be enlarged. */
+  let actionButtonsEnlarged = $derived(
+    items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0
+  );
+
   // ── Handlers ──────────────────────────────────────────────────────────
 
   function handleItemClick(item: DisplayItem) {
@@ -454,40 +459,6 @@
 
 {#if items.length === 0 && !onNewNote && !onNewCommit && !onNewReview && pendingDropNotes.length === 0 && pendingItems.length === 0}
   <p class="no-items">No commits or notes yet</p>
-{:else if items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0}
-  <!-- Empty state: large action buttons -->
-  <div class="empty-state">
-    {#if onNewNote}
-      <button
-        class="empty-action-btn note-action"
-        onclick={onNewNote}
-        disabled={newSessionDisabled}
-      >
-        <FileText size={18} />
-        <span>New note</span>
-      </button>
-    {/if}
-    {#if onNewCommit}
-      <button
-        class="empty-action-btn commit-action"
-        onclick={onNewCommit}
-        disabled={newSessionDisabled}
-      >
-        <GitCommitVertical size={18} />
-        <span>New commit</span>
-      </button>
-    {/if}
-    {#if onNewReview}
-      <button
-        class="empty-action-btn review-action"
-        onclick={(e) => onNewReview?.(e)}
-        disabled={newSessionDisabled}
-      >
-        <FileSearch size={18} />
-        <span>New code review</span>
-      </button>
-    {/if}
-  </div>
 {:else}
   <!-- Unified timeline (vertical) -->
   <div class="timeline">
@@ -548,43 +519,46 @@
       </div>
     {/if}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}
-      <div class="footer-row">
-        <div class="footer-left-actions">
+      <div class="footer-row" class:footer-row-enlarged={actionButtonsEnlarged}>
+        <div class="footer-left-actions" class:footer-left-actions-enlarged={actionButtonsEnlarged}>
           {#if onNewNote}
             <button
               class="add-item-btn note-btn"
+              class:add-item-btn-enlarged={actionButtonsEnlarged}
               onclick={onNewNote}
               disabled={newSessionDisabled}
               title="New note"
             >
-              <FileText size={13} />
+              <FileText size={18} />
               <span>New note</span>
             </button>
           {/if}
           {#if onNewCommit}
             <button
               class="add-item-btn commit-btn"
+              class:add-item-btn-enlarged={actionButtonsEnlarged}
               onclick={onNewCommit}
               disabled={newSessionDisabled}
               title="New commit"
             >
-              <GitCommitVertical size={13} />
+              <GitCommitVertical size={18} />
               <span>New commit</span>
             </button>
           {/if}
           {#if onNewReview}
             <button
               class="add-item-btn review-btn"
+              class:add-item-btn-enlarged={actionButtonsEnlarged}
               onclick={(e) => onNewReview?.(e)}
               disabled={newSessionDisabled}
               title="New code review"
             >
-              <FileSearch size={13} />
+              <FileSearch size={18} />
               <span>New code review</span>
             </button>
           {/if}
         </div>
-        {#if footerActions}
+        {#if footerActions && !actionButtonsEnlarged}
           {@render footerActions()}
         {/if}
       </div>
@@ -609,66 +583,6 @@
     text-align: center;
   }
 
-  /* ── Empty state ────────────────────────────────────────────────────── */
-
-  .empty-state {
-    display: flex;
-    gap: 10px;
-    padding: 4px 0;
-  }
-
-  .empty-action-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    flex: 1;
-    padding: 10px 6px;
-    border-radius: 8px;
-    border: none;
-    background: var(--bg-elevated);
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      background-color 0.15s;
-  }
-
-  /* Colored icons only in passive state */
-  .empty-action-btn.note-action :global(svg) {
-    color: var(--note-color);
-  }
-
-  .empty-action-btn.commit-action :global(svg) {
-    color: var(--commit-color);
-  }
-
-  .empty-action-btn.review-action :global(svg) {
-    color: var(--review-color);
-  }
-
-  .empty-action-btn.note-action:hover:not(:disabled) {
-    color: var(--note-color);
-    background-color: var(--note-bg);
-  }
-
-  .empty-action-btn.commit-action:hover:not(:disabled) {
-    color: var(--commit-color);
-    background-color: var(--commit-bg);
-  }
-
-  .empty-action-btn.review-action:hover:not(:disabled) {
-    color: var(--review-color);
-    background-color: var(--review-bg);
-  }
-
-  .empty-action-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
   /* ── Footer row with inline add buttons ─────────────────────────────── */
 
   .footer-row {
@@ -680,12 +594,28 @@
     margin: 0 -8px;
     position: relative;
     z-index: 1;
+    transition:
+      gap 0.3s ease,
+      padding 0.3s ease,
+      margin 0.3s ease;
+  }
+
+  .footer-row-enlarged {
+    gap: 10px;
+    padding: 4px 0;
+    margin: 0;
   }
 
   .footer-left-actions {
     display: flex;
     align-items: center;
     gap: 6px;
+    transition: gap 0.3s ease;
+  }
+
+  .footer-left-actions-enlarged {
+    gap: 10px;
+    flex: 1;
   }
 
   .add-item-btn {
@@ -695,7 +625,7 @@
     padding: 4px 10px;
     border-radius: 6px;
     border: 1px dashed var(--border-subtle);
-    background: none;
+    background: transparent;
     color: var(--text-muted);
     font-size: var(--size-xs);
     font-weight: 500;
@@ -703,7 +633,53 @@
     transition:
       color 0.15s,
       border-color 0.15s,
-      background-color 0.15s;
+      background-color 0.15s,
+      padding 0.3s ease,
+      border-radius 0.3s ease,
+      gap 0.3s ease,
+      font-size 0.3s ease,
+      flex 0.3s ease,
+      border-style 0.3s ease;
+  }
+
+  .add-item-btn :global(svg) {
+    transition:
+      width 0.3s ease,
+      height 0.3s ease;
+    width: 13px;
+    height: 13px;
+  }
+
+  .add-item-btn-enlarged {
+    flex: 1;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 6px;
+    border-radius: 8px;
+    border-color: transparent;
+    border-style: solid;
+    background: var(--bg-elevated);
+    font-size: var(--size-sm);
+  }
+
+  .add-item-btn-enlarged :global(svg) {
+    width: 18px;
+    height: 18px;
+  }
+
+  .add-item-btn-enlarged.note-btn:hover:not(:disabled) {
+    color: var(--note-color);
+    background-color: var(--note-bg);
+  }
+
+  .add-item-btn-enlarged.commit-btn:hover:not(:disabled) {
+    color: var(--commit-color);
+    background-color: var(--commit-bg);
+  }
+
+  .add-item-btn-enlarged.review-btn:hover:not(:disabled) {
+    color: var(--review-color);
+    background-color: var(--review-bg);
   }
 
   /* Colored icons only in passive state */

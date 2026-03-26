@@ -307,6 +307,9 @@ pub struct CommitInfo {
     pub subject: String,
     pub author: String,
     pub timestamp: i64,
+    /// Position in git's topological order (0 = oldest on the branch).
+    /// Used as a tiebreaker when multiple commits share the same second-level timestamp.
+    pub order: i64,
 }
 
 /// Get commits between base and head.
@@ -341,8 +344,15 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
                 subject: parts[2].to_string(),
                 author: parts[3].to_string(),
                 timestamp: parts[4].parse().unwrap_or(0),
+                order: 0, // placeholder, assigned below
             });
         }
+    }
+
+    // git log returns newest-first; assign order so that 0 = oldest.
+    let len = commits.len() as i64;
+    for (i, commit) in commits.iter_mut().enumerate() {
+        commit.order = len - 1 - i as i64;
     }
 
     Ok(commits)

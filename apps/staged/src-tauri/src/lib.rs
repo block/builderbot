@@ -111,6 +111,9 @@ pub struct CommitTimelineItem {
     pub subject: String,
     pub author: String,
     pub timestamp: i64,
+    /// Position in git's topological order (0 = oldest on the branch).
+    /// Used as a tiebreaker when multiple commits share the same second-level timestamp.
+    pub order: i64,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
 }

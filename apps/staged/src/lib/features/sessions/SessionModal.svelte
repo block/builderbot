@@ -593,7 +593,7 @@
     const segments: ContentSegment[] = [];
     let remaining = content;
 
-    const tagPattern = /<(action|branch-history)>([\s\S]*?)<\/\1>/g;
+    const tagPattern = /<(action|branch-history)>([\s\S]*)<\/\1>/g;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
 

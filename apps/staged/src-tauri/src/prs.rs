@@ -111,15 +111,18 @@ fn pre_compute_git_context(
     }
 }
 
-/// Truncate a diff to `DIFF_TRUNCATION_LIMIT` characters, appending a note
+/// Truncate a diff to `DIFF_TRUNCATION_LIMIT` bytes, appending a note
 /// about the omitted content.
 fn truncate_diff(diff: String) -> String {
     if diff.len() <= DIFF_TRUNCATION_LIMIT {
         return diff;
     }
-    let truncated = &diff[..DIFF_TRUNCATION_LIMIT];
+    // Find the nearest char boundary at or before the limit to avoid
+    // panicking on multi-byte UTF-8 sequences.
+    let safe_limit = diff.floor_char_boundary(DIFF_TRUNCATION_LIMIT);
+    let truncated = &diff[..safe_limit];
     // Try to cut at a newline boundary for cleaner output.
-    let cut = truncated.rfind('\n').unwrap_or(DIFF_TRUNCATION_LIMIT);
+    let cut = truncated.rfind('\n').unwrap_or(safe_limit);
     let remaining_lines = diff[cut..].lines().count();
     format!(
         "{}\n\n(truncated, ~{} more lines — run the command yourself to see the full diff)",

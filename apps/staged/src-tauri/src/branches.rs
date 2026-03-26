@@ -1582,17 +1582,6 @@ fn bootstrap_command_type_name(command_type: u32) -> &'static str {
     }
 }
 
-/// Sort key for bootstrap command types so that checkout (type 1) is displayed
-/// as the final step.  Lower values sort first.
-fn bootstrap_sort_order(command_type: u32) -> u32 {
-    match command_type {
-        4 => 0, // provision_workspace first
-        3 => 1, // project_bootstrap second
-        1 => 2, // checkout last
-        _ => 1, // unknown types slot in the middle
-    }
-}
-
 /// Derive workspace setup progress from bootstrap commands and emit events
 /// for all branches sharing the workspace.
 fn emit_workspace_setup_progress(
@@ -1616,19 +1605,16 @@ fn emit_workspace_setup_progress(
         return;
     }
 
-    // Sort bootstrap commands by display order to assign step numbers.
-    let mut sorted: Vec<&blox::WorkspaceCommand> = bootstrap.clone();
-    sorted.sort_by_key(|c| (bootstrap_sort_order(c.command_type), c.command_id.clone()));
-
-    // Find the step number of the first non-completed command in display order.
-    let (step_index, current_cmd) = sorted
+    // Pick the first currently-running command (status 2).  If none are
+    // running yet, fall back to the first non-completed command.
+    let current_cmd = bootstrap
         .iter()
-        .enumerate()
-        .find(|(_, c)| c.status != 3)
-        .unwrap_or((completed, sorted.last().unwrap()));
+        .find(|c| c.status == 2)
+        .or_else(|| bootstrap.iter().find(|c| c.status != 3))
+        .unwrap();
 
     let phase = bootstrap_command_type_name(current_cmd.command_type);
-    let detail = Some(format!("Step {} of {}", step_index + 1, total));
+    let detail = Some(format!("Step {} of {}", completed + 1, total));
 
     // Collect branch IDs that share this workspace.
     let peer_branch_ids: Vec<String> = branch_ids

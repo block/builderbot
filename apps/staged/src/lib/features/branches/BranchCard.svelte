@@ -169,27 +169,31 @@
       return 'Setting up…';
     }
     if (isRemote && remoteWorkspaceStatus === 'starting') {
-      if (setupPhase) {
-        const remoteLabels: Record<string, string> = {
-          checkout: 'Git checkout',
-          execute_process: 'Executing process',
-          project_bootstrap: 'Project bootstrap',
-          provision_workspace: 'Provision workspace',
-        };
-        return remoteLabels[setupPhase] ?? 'Setting up…';
-      }
-      return 'Provisioning workspace…';
+      return 'Starting workspace…';
     }
     return undefined;
   });
 
-  /** Detail text for the provisioning row (e.g. git progress percentages). */
-  let provisioningDetail = $derived(
-    (isLocal && !branch.worktreePath && !worktreeError) ||
-      (isRemote && remoteWorkspaceStatus === 'starting')
-      ? setupDetail
-      : null
-  );
+  /** Map blox orchestrator CommandType enum names to display labels. */
+  const remoteCommandLabels: Record<string, string> = {
+    checkout: 'Git checkout',
+    execute_process: 'Executing process',
+    project_bootstrap: 'Project bootstrap',
+    provision_workspace: 'Provision workspace',
+  };
+
+  /** Detail text for the provisioning row (e.g. git progress percentages or step info). */
+  let provisioningDetail = $derived.by(() => {
+    if (isLocal && !branch.worktreePath && !worktreeError) return setupDetail;
+    if (isRemote && remoteWorkspaceStatus === 'starting') {
+      if (setupDetail && setupPhase) {
+        const label = remoteCommandLabels[setupPhase] ?? setupPhase;
+        return `${setupDetail} · ${label}`;
+      }
+      return setupDetail;
+    }
+    return null;
+  });
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => c.sha) ?? false);

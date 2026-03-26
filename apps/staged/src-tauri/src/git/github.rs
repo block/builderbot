@@ -778,7 +778,7 @@ fn spawn_streaming<F>(
 where
     F: FnMut(&str),
 {
-    use std::io::Read;
+    use std::io::{BufReader, Read};
     use std::process::Stdio;
 
     let mut cmd = std::process::Command::new(program);
@@ -795,7 +795,7 @@ where
 
     if let Some(stderr) = child.stderr.take() {
         let mut buf = Vec::new();
-        for byte in stderr.bytes() {
+        for byte in BufReader::new(stderr).bytes() {
             let byte = byte.map_err(|e| GitError::CommandFailed(e.to_string()))?;
             if byte == b'\r' || byte == b'\n' {
                 if !buf.is_empty() {

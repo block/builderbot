@@ -333,7 +333,7 @@ export default class BranchCardSessionManager {
     if (adopted) return;
 
     const reviewPrompt = 'Review the code changes on this branch.';
-    await this.startBranchSessionWithPendingItem('review', reviewPrompt);
+    await this.startOrQueueSession('review', reviewPrompt);
   }
 
   handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) {

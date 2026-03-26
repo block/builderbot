@@ -73,6 +73,9 @@
     {#if check.path}
       <span class="check-path">{check.path}</span>
     {/if}
+    {#if check.bridgePath}
+      <span class="check-path">{check.bridgePath}</span>
+    {/if}
   </div>
 
   {#if check.fixCommand && check.status !== 'pass'}

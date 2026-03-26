@@ -38,6 +38,7 @@ export function formatDebugReport(report: DoctorReport): string {
     lines.push(`${icon} [${check.status.toUpperCase()}] ${check.label} (${check.id})`);
     lines.push(`  Message: ${check.message}`);
     if (check.path) lines.push(`  Path: ${check.path}`);
+    if (check.bridgePath) lines.push(`  Bridge path: ${check.bridgePath}`);
     if (check.fixUrl) lines.push(`  Fix URL: ${check.fixUrl}`);
     if (check.fixCommand) lines.push(`  Fix command: ${check.fixCommand}`);
     if (check.rawOutput) {

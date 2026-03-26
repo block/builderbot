@@ -115,6 +115,26 @@
 </div>
 
 <style>
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes scaleIn {
+    from {
+      opacity: 0;
+      transform: scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -123,6 +143,7 @@
     align-items: center;
     justify-content: center;
     z-index: 1000;
+    animation: fadeIn 0.15s ease;
   }
 
   .modal {
@@ -132,6 +153,7 @@
     width: 400px;
     max-width: 90vw;
     overflow: hidden;
+    animation: scaleIn 0.15s ease;
   }
 
   .modal-content {
@@ -183,18 +205,21 @@
     padding: 16px 24px;
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-primary);
+    /* Prevent layout shift when button labels change width */
+    align-items: center;
   }
 
   .btn {
     padding: 8px 16px;
+    min-width: 80px;
     border: none;
     border-radius: 6px;
     font-size: var(--size-sm);
     font-weight: 500;
     cursor: pointer;
     transition:
-      background-color 0.1s,
-      opacity 0.1s;
+      background-color 0.15s ease,
+      opacity 0.15s ease;
   }
 
   .btn-secondary {

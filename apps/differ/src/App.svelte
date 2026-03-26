@@ -27,6 +27,10 @@
     Trash2,
     ListChecks,
     Settings,
+    Layers,
+    AlertTriangle,
+    ArrowUp,
+    ArrowDown,
   } from 'lucide-svelte';
   import {
     DiffViewer,
@@ -54,7 +58,7 @@
   import type { FileDiff, FileDiffSummary, Comment, Span } from '@builderbot/diff-viewer/types';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import * as commands from './lib/commands';
-  import type { DiffSpec, RepoInfo, CommitInfo, RecentRepo } from './lib/commands';
+  import type { DiffSpec, RepoInfo, CommitInfo, RecentRepo, StackInfo, StackBranchInfo } from './lib/commands';
   import FolderPickerModal from './lib/FolderPickerModal.svelte';
   import ThemePicker from './lib/ThemePicker.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
@@ -79,7 +83,7 @@
   // State: Diff mode
   // ==========================================================================
 
-  type DiffMode = 'all' | 'staged' | 'branch' | 'commit';
+  type DiffMode = 'all' | 'staged' | 'branch' | 'commit' | 'stack';
 
   let diffMode = $state<DiffMode>('all');
   let diffSpec = $state<DiffSpec>(commands.specUncommitted());
@@ -90,6 +94,11 @@
   let showCommitPicker = $state(false);
   let loadingCommits = $state(false);
   let selectedCommit = $state<CommitInfo | null>(null);
+
+  // Stack picker
+  let stackInfo = $state<StackInfo | null>(null);
+  let showStackPicker = $state(false);
+  let stackViewTarget = $state<StackBranchInfo | null>(null);
 
   // ==========================================================================
   // State: Diff viewer
@@ -171,6 +180,15 @@
 
       // Check CLI launch args
       const args = await commands.getLaunchArgs();
+
+      // Fetch repo info and detect Graphite stack before triggering
+      // any diff load — avoids a race where multiple loadDiff() calls
+      // resolve out of order.
+      repoInfo = await commands.getRepoInfo();
+      const si = await commands.getStackInfo();
+      stackInfo = si;
+
+      // Now pick the initial mode and trigger a single loadDiff()
       if (args.mode) {
         switch (args.mode) {
           case 'all':
@@ -192,9 +210,11 @@
           default:
             setMode('all');
         }
+      } else if (si) {
+        setMode('stack');
+      } else {
+        setMode('all');
       }
-
-      await loadRepoInfo();
     } catch (e) {
       console.error('Failed to initialize:', e);
     } finally {
@@ -225,6 +245,7 @@
 
   function setMode(mode: DiffMode, commit?: CommitInfo) {
     showCommitPicker = false;
+    showStackPicker = false;
     diffMode = mode;
 
     switch (mode) {
@@ -232,11 +253,13 @@
         diffSpec = commands.specUncommitted();
         diffLabel = 'All Changes';
         selectedCommit = null;
+        stackViewTarget = null;
         break;
       case 'staged':
         diffSpec = commands.specStaged();
         diffLabel = 'Staged';
         selectedCommit = null;
+        stackViewTarget = null;
         break;
       case 'branch':
         diffSpec = commands.specBranch();
@@ -244,12 +267,22 @@
           ? `Branch vs ${repoInfo.defaultBranch.replace('origin/', '')}`
           : 'Full Branch';
         selectedCommit = null;
+        stackViewTarget = null;
         break;
       case 'commit':
         if (commit) {
           diffSpec = commands.specCommit(commit.sha);
           diffLabel = `Commit ${commit.shortSha}`;
           selectedCommit = commit;
+        }
+        stackViewTarget = null;
+        break;
+      case 'stack':
+        if (stackInfo) {
+          diffSpec = commands.specStack(stackInfo.parentBranch);
+          diffLabel = `Stack vs ${stackInfo.parentBranch.split('/').pop()}`;
+          stackViewTarget = null;
+          selectedCommit = null;
         }
         break;
     }
@@ -277,6 +310,7 @@
   }
 
   async function toggleCommitPicker() {
+    showStackPicker = false;
     showCommitPicker = !showCommitPicker;
     if (showCommitPicker && commits.length === 0) {
       loadingCommits = true;
@@ -288,6 +322,42 @@
         loadingCommits = false;
       }
     }
+  }
+
+  function toggleStackPicker() {
+    showCommitPicker = false;
+    showStackPicker = !showStackPicker;
+  }
+
+  function selectStackBranch(branch: StackBranchInfo) {
+    stackViewTarget = branch;
+    diffSpec = commands.specStackBranch(branch.name, branch.parentRef);
+    diffLabel = `Stack: ${branch.name.split('/').pop()}`;
+    diffMode = 'stack';
+    showStackPicker = false;
+
+    files = [];
+    diffCache = new Map();
+    selectedFile = null;
+    localComments = [];
+    error = null;
+    loadDiff();
+  }
+
+  function selectStackCommittedOnly() {
+    if (!stackInfo) return;
+    stackViewTarget = null;
+    diffSpec = commands.specStackCommitted(stackInfo.parentBranch);
+    diffLabel = `Stack vs ${stackInfo.parentBranch.split('/').pop()} (committed)`;
+    diffMode = 'stack';
+    showStackPicker = false;
+
+    files = [];
+    diffCache = new Map();
+    selectedFile = null;
+    localComments = [];
+    error = null;
+    loadDiff();
   }
 
   // ==========================================================================
@@ -432,7 +502,10 @@
       repoInfo = null;
       commits = [];
       showCommitPicker = false;
+      showStackPicker = false;
       selectedCommit = null;
+      stackInfo = null;
+      stackViewTarget = null;
       diffMode = 'all';
       diffSpec = commands.specUncommitted();
       diffLabel = 'All Changes';
@@ -441,7 +514,21 @@
       selectedFile = null;
       localComments = [];
       error = null;
-      await loadRepoInfo();
+
+      // Fetch repo info without triggering a diff load yet —
+      // we need to check for a Graphite stack first to avoid a race
+      // where loadRepoInfo's loadDiff() and setMode('stack')'s loadDiff()
+      // resolve out of order.
+      repoInfo = await commands.getRepoInfo();
+
+      // Re-detect stack for new repo
+      const si = await commands.getStackInfo();
+      stackInfo = si;
+      if (si) {
+        setMode('stack');
+      } else {
+        loadDiff();
+      }
     } catch (e) {
       console.error('Failed to open repo:', e);
     }
@@ -562,6 +649,87 @@
             <ListChecks size={12} />
             <span>Staged</span>
           </button>
+          {#if stackInfo}
+            <div class="stack-picker-wrap">
+              <button
+                class="mode-seg"
+                class:active={diffMode === 'stack'}
+                onclick={toggleStackPicker}
+                title="Stack diff (this PR only)"
+              >
+                <Layers size={12} />
+                <span>{stackViewTarget ? stackViewTarget.name.split('/').pop() : 'Stack'}</span>
+                {#if stackInfo.needsRestack}
+                  <AlertTriangle size={10} class="restack-warn" />
+                {/if}
+                <ChevronDown size={11} class="chevron" />
+              </button>
+
+              {#if showStackPicker}
+                <div class="stack-dropdown">
+                  <div class="stack-section-label">THIS BRANCH</div>
+                  <button
+                    class="stack-row"
+                    class:active={diffMode === 'stack' && !stackViewTarget && diffSpec.head.type === 'WorkingTree'}
+                    onclick={() => setMode('stack')}
+                  >
+                    <span class="stack-star">★</span>
+                    <span class="stack-row-text">vs parent (+ uncommitted)</span>
+                  </button>
+                  <button
+                    class="stack-row"
+                    class:active={diffMode === 'stack' && !stackViewTarget && diffSpec.head.type === 'Rev'}
+                    onclick={selectStackCommittedOnly}
+                  >
+                    <span class="stack-star-spacer"></span>
+                    <span class="stack-row-text">vs parent (committed only)</span>
+                  </button>
+
+                  {#if stackInfo.upstack.length > 0}
+                    <div class="stack-section-label">UPSTACK ↑</div>
+                    {#each stackInfo.upstack.slice(0, 5) as branch (branch.name)}
+                      <button
+                        class="stack-row"
+                        class:active={stackViewTarget?.name === branch.name}
+                        onclick={() => selectStackBranch(branch)}
+                      >
+                        <ArrowUp size={11} class="stack-dir-icon" />
+                        <span class="stack-row-text">{branch.name.split('/').pop()}</span>
+                      </button>
+                    {/each}
+                    {#if stackInfo.upstack.length > 5}
+                      <div class="stack-more">↑ ... ({stackInfo.upstack.length - 5} more)</div>
+                    {/if}
+                  {/if}
+
+                  {#if stackInfo.downstack.length > 0}
+                    <div class="stack-section-label">DOWNSTACK ↓</div>
+                    {#each stackInfo.downstack.slice(0, 5) as branch (branch.name)}
+                      <button
+                        class="stack-row"
+                        class:active={stackViewTarget?.name === branch.name}
+                        onclick={() => selectStackBranch(branch)}
+                      >
+                        <ArrowDown size={11} class="stack-dir-icon" />
+                        <span class="stack-row-text">{branch.name.split('/').pop()}</span>
+                      </button>
+                    {/each}
+                    {#if stackInfo.downstack.length > 5}
+                      <div class="stack-more">↓ ... ({stackInfo.downstack.length - 5} more)</div>
+                    {/if}
+                  {/if}
+
+                  {#if stackInfo.needsRestack}
+                    <div class="stack-restack-warn">
+                      <AlertTriangle size={12} />
+                      <span>needs restack</span>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
+
           <button
             class="mode-seg"
             class:active={diffMode === 'branch'}
@@ -1094,6 +1262,109 @@
   .commit-time {
     flex-shrink: 0;
     font-size: var(--size-xs);
+    color: var(--text-faint);
+  }
+
+  /* Stack picker */
+  .stack-picker-wrap {
+    position: relative;
+    display: flex;
+  }
+
+  .stack-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: 300px;
+    max-height: 400px;
+    overflow-y: auto;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    box-shadow: var(--shadow-elevated);
+    z-index: 100;
+    padding: 4px 0;
+  }
+
+  .stack-section-label {
+    padding: 8px 12px 4px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--text-faint);
+    text-transform: uppercase;
+  }
+
+  .stack-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 12px;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: var(--size-sm);
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.1s;
+  }
+
+  .stack-row:hover {
+    background-color: var(--bg-hover);
+  }
+
+  .stack-row.active {
+    background-color: var(--ui-selection);
+  }
+
+  .stack-star {
+    flex-shrink: 0;
+    width: 14px;
+    text-align: center;
+    color: var(--text-accent);
+    font-size: 11px;
+  }
+
+  .stack-star-spacer {
+    flex-shrink: 0;
+    width: 14px;
+  }
+
+  .stack-row-text {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .stack-more {
+    padding: 4px 12px 4px 34px;
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+  }
+
+  .stack-restack-warn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    margin-top: 4px;
+    border-top: 1px solid var(--border-subtle);
+    font-size: var(--size-xs);
+    color: var(--ui-warning, #e5a100);
+  }
+
+  .mode-seg :global(.restack-warn) {
+    color: var(--ui-warning, #e5a100);
+    margin-left: -2px;
+  }
+
+  .mode-seg :global(.stack-dir-icon) {
+    flex-shrink: 0;
     color: var(--text-faint);
   }
 

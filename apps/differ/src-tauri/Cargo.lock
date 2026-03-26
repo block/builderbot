@@ -557,6 +557,7 @@ dependencies = [
  "dirs 5.0.1",
  "git-diff",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-store",

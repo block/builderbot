@@ -46,6 +46,21 @@ export interface RecentRepo {
   path: string;
 }
 
+export interface StackBranchInfo {
+  name: string;
+  parentRef: string;
+}
+
+export interface StackInfo {
+  currentBranch: string;
+  parentBranch: string;
+  parentSha: string;
+  isTrunkChild: boolean;
+  needsRestack: boolean;
+  downstack: StackBranchInfo[];
+  upstack: StackBranchInfo[];
+}
+
 /** Matches the git-diff crate's GitRef enum (tagged union). */
 export type GitRef =
   | { type: 'WorkingTree' }
@@ -103,12 +118,40 @@ export function specRange(fromSha: string): DiffSpec {
   };
 }
 
+/** This PR's diff: parent branch → working tree (includes uncommitted) */
+export function specStack(parentBranch: string): DiffSpec {
+  return {
+    base: { type: 'MergeBaseOf', value: [parentBranch, 'HEAD'] },
+    head: { type: 'WorkingTree' },
+  };
+}
+
+/** This PR's committed diff only: parent branch → HEAD */
+export function specStackCommitted(parentBranch: string): DiffSpec {
+  return {
+    base: { type: 'MergeBaseOf', value: [parentBranch, 'HEAD'] },
+    head: { type: 'Rev', value: 'HEAD' },
+  };
+}
+
+/** View another branch in the stack (read-only, no checkout needed) */
+export function specStackBranch(branchName: string, parentBranch: string): DiffSpec {
+  return {
+    base: { type: 'MergeBaseOf', value: [parentBranch, branchName] },
+    head: { type: 'Rev', value: branchName },
+  };
+}
+
 // =============================================================================
 // Commands
 // =============================================================================
 
 export function getRepoInfo(): Promise<RepoInfo> {
   return invoke('get_repo_info');
+}
+
+export function getStackInfo(): Promise<StackInfo | null> {
+  return invoke('get_stack_info');
 }
 
 export function listRecentCommits(count?: number): Promise<CommitInfo[]> {

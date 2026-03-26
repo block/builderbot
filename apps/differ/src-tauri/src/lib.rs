@@ -71,6 +71,25 @@ struct RecentRepo {
     path: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StackBranchInfo {
+    name: String,
+    parent_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StackInfo {
+    current_branch: String,
+    parent_branch: String,
+    parent_sha: String,
+    is_trunk_child: bool,
+    needs_restack: bool,
+    downstack: Vec<StackBranchInfo>,
+    upstack: Vec<StackBranchInfo>,
+}
+
 // =============================================================================
 // Commands: Git info
 // =============================================================================
@@ -164,7 +183,7 @@ fn get_file_diff(
 ) -> Result<git_diff::FileDiff, String> {
     let state = state.lock().unwrap();
     let repo = &state.repo_path;
-    let file_path = Path::new(&path);
+    let file_path = validate_repo_relative_path(&path)?;
 
     git_diff::get_file_diff(repo, &spec, file_path).map_err(|e| e.to_string())
 }
@@ -177,6 +196,7 @@ fn get_file_at_ref(
 ) -> Result<git_diff::File, String> {
     let state = state.lock().unwrap();
     let repo = &state.repo_path;
+    validate_repo_relative_path(&path)?;
 
     git_diff::get_file_at_ref(repo, &ref_name, &path).map_err(|e| e.to_string())
 }
@@ -681,8 +701,199 @@ fn find_git_root(path: &Path, home: &Path) -> Option<PathBuf> {
 }
 
 // =============================================================================
+// Commands: Stack info
+// =============================================================================
+
+fn walk_downstack(state_json: &serde_json::Value, start_ref: &str) -> Vec<StackBranchInfo> {
+    let mut result = Vec::new();
+    let mut current = start_ref.to_string();
+
+    loop {
+        let branch_info = match state_json.get(&current) {
+            Some(b) => b,
+            None => break,
+        };
+
+        // Stop if this is trunk
+        if branch_info
+            .get("trunk")
+            .and_then(|t| t.as_bool())
+            .unwrap_or(false)
+        {
+            break;
+        }
+
+        let parents = match branch_info.get("parents").and_then(|p| p.as_array()) {
+            Some(p) => p,
+            None => break,
+        };
+
+        let parent = match parents.first() {
+            Some(p) => p,
+            None => break,
+        };
+
+        let parent_ref = match parent.get("ref").and_then(|r| r.as_str()) {
+            Some(r) => r.to_string(),
+            None => break,
+        };
+
+        result.push(StackBranchInfo {
+            name: current.clone(),
+            parent_ref: parent_ref.clone(),
+        });
+
+        current = parent_ref;
+    }
+
+    result
+}
+
+fn walk_upstack(state_json: &serde_json::Value, branch: &str) -> Vec<StackBranchInfo> {
+    let mut result = Vec::new();
+    let mut current_branches = vec![branch.to_string()];
+
+    loop {
+        let mut next_branches = Vec::new();
+
+        for (name, info) in state_json.as_object().into_iter().flatten() {
+            if info.get("trunk").and_then(|t| t.as_bool()).unwrap_or(false) {
+                continue;
+            }
+
+            if let Some(parents) = info.get("parents").and_then(|p| p.as_array()) {
+                for parent in parents {
+                    if let Some(parent_ref) = parent.get("ref").and_then(|r| r.as_str()) {
+                        if current_branches.contains(&parent_ref.to_string()) {
+                            result.push(StackBranchInfo {
+                                name: name.clone(),
+                                parent_ref: parent_ref.to_string(),
+                            });
+                            next_branches.push(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if next_branches.is_empty() {
+            break;
+        }
+        current_branches = next_branches;
+    }
+
+    result
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_stack_info(state: tauri::State<'_, Mutex<AppState>>) -> Option<StackInfo> {
+    let state = state.lock().unwrap();
+    let repo = &state.repo_path;
+
+    // 1. Get current branch name
+    let branch = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+    let branch = branch.trim();
+
+    // 2. Run `gt state` and parse JSON
+    let gt = find_gt()?;
+    let output = Command::new(gt)
+        .args(["state"])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let state_json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+
+    // 3. Find current branch in state
+    let branch_info = state_json.get(branch)?;
+    if branch_info.get("trunk")?.as_bool()? {
+        return None;
+    }
+
+    // 4. Extract parent
+    let parents = branch_info.get("parents")?.as_array()?;
+    let parent = parents.first()?;
+    let parent_ref = parent.get("ref")?.as_str()?;
+    let parent_sha = parent.get("sha")?.as_str()?;
+    let is_trunk_child = state_json
+        .get(parent_ref)
+        .and_then(|p| p.get("trunk"))
+        .and_then(|t| t.as_bool())
+        .unwrap_or(false);
+    let needs_restack = branch_info
+        .get("needs_restack")
+        .and_then(|n| n.as_bool())
+        .unwrap_or(false);
+
+    // 5. Walk downstack (parents chain until trunk)
+    let downstack = walk_downstack(&state_json, parent_ref);
+
+    // 6. Walk upstack (find children of current branch)
+    let upstack = walk_upstack(&state_json, branch);
+
+    Some(StackInfo {
+        current_branch: branch.to_string(),
+        parent_branch: parent_ref.to_string(),
+        parent_sha: parent_sha.to_string(),
+        is_trunk_child,
+        needs_restack,
+        downstack,
+        upstack,
+    })
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
+
+/// Locate the `gt` (Graphite CLI) binary by searching PATH plus well-known
+/// install directories. macOS `.app` bundles inherit a minimal PATH that
+/// excludes Homebrew, so we also check common install locations directly.
+fn find_gt() -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+
+    for extra in [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/home/linuxbrew/.linuxbrew/bin",
+    ] {
+        dirs.push(PathBuf::from(extra));
+    }
+
+    dirs.into_iter()
+        .map(|d: PathBuf| d.join("gt"))
+        .find(|p: &PathBuf| p.is_file())
+}
+
+fn validate_repo_relative_path(path: &str) -> Result<&Path, String> {
+    use std::path::Component;
+    let p = Path::new(path);
+
+    if p.is_absolute() {
+        return Err("path must be repo-relative".into());
+    }
+
+    for c in p.components() {
+        match c {
+            Component::Normal(os) if os == ".git" => {
+                return Err("refusing .git-internal path".into());
+            }
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("path must not escape repository root".into());
+            }
+        }
+    }
+
+    Ok(p)
+}
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<String, String> {
     let output = std::process::Command::new("git")
@@ -837,6 +1048,7 @@ pub fn run() {
             find_recent_repos,
             list_system_fonts,
             list_custom_themes,
+            get_stack_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

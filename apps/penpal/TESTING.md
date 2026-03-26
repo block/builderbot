@@ -95,7 +95,7 @@ see-also:
 | Theme (P-PENPAL-THEME) | — | useTheme.test.ts | — | — |
 | SPA Serving (E-PENPAL-SPA-SERVE) | — | — | spa_test.go | react-app.spec.ts |
 | Path Traversal (E-PENPAL-PATH-TRAVERSAL) | — | — | pathutil_test.go, spa_test.go | — |
-| View Tracking (P-PENPAL-RECENT) | — | — | — | view-tracking.spec.ts |
+| View Tracking (E-PENPAL-ACTIVITY) | — | — | — | view-tracking.spec.ts |
 
 ## Known Coverage Gaps
 

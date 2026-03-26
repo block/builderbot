@@ -24,6 +24,22 @@ see-also:
 
 ---
 
+## Workspace & Project Management
+
+- <a id="E-PENPAL-REMOVE-WORKSPACE"></a>**E-PENPAL-REMOVE-WORKSPACE**: `DELETE /api/workspaces` accepts `{"path": string}`. Removes the workspace entry from config, deletes associated `ProjectSources` entries, then calls `refreshAfterConfigChange()` (save config → re-discover → refresh cache → broadcast `EventProjectsChanged`).
+  ← [P-PENPAL-REMOVE-WORKSPACE](PRODUCT.md#P-PENPAL-REMOVE-WORKSPACE)
+
+- <a id="E-PENPAL-CLOSE-PROJECT"></a>**E-PENPAL-CLOSE-PROJECT**: `DELETE /api/projects` accepts `{"path": string}`. Finds and removes the standalone entry from `s.cfg.Projects`, then calls `refreshAfterConfigChange()`. Does not delete files on disk.
+  ← [P-PENPAL-CLOSE-PROJECT](PRODUCT.md#P-PENPAL-CLOSE-PROJECT)
+
+- <a id="E-PENPAL-DELETE-PROJECT"></a>**E-PENPAL-DELETE-PROJECT**: Two endpoints: `GET /api/project-info?name=<qn>` returns `{fileCount, dirty, unpushedCommits}` (live `git status --porcelain` and `git rev-list @{upstream}..HEAD --count`); `POST /api/delete-project?name=<qn>` calls `os.RemoveAll(project.Path)`, removes from config if standalone, deletes `ProjectSources` entry, calls `cache.RemoveProject()`, broadcasts `EventProjectsChanged`. Deletion of the `(root)` project is blocked.
+  ← [P-PENPAL-DELETE-PROJECT](PRODUCT.md#P-PENPAL-DELETE-PROJECT)
+
+- <a id="E-PENPAL-DELETE-FILE"></a>**E-PENPAL-DELETE-FILE**: `POST /api/delete-file?project=<qn>&path=<relpath>` deletes the file via `os.Remove()`, removes its comment sidecar at `{project}/.penpal/comments/{filePath}.json`, calls `removeEmptyParents()` on both the file's parent and the sidecar's parent (walks up removing empty directories via `os.Remove()` until a non-empty directory is reached), removes the file from any "files" source in config, refreshes the project cache, and broadcasts `EventFilesChanged`.
+  ← [P-PENPAL-DELETE-FILE](PRODUCT.md#P-PENPAL-DELETE-FILE)
+
+---
+
 ## Configuration & Storage
 
 - <a id="E-PENPAL-CONFIG"></a>**E-PENPAL-CONFIG**: Configuration is stored at `~/.config/penpal/config.json`. Writes are atomic (write `.tmp`, rename). Contains workspaces, standalone projects, per-project source overrides, and the remembered claude binary path.
@@ -49,10 +65,10 @@ see-also:
 ## Project Discovery
 
 - <a id="E-PENPAL-DISCOVERY"></a>**E-PENPAL-DISCOVERY**: `DiscoverWorkspace()` reads all non-hidden immediate subdirectories as projects, calls `DetectSources()` on each, then `DiscoverWorktrees()`. Deduplicates projects that are git worktrees of each other.
-  ← [P-PENPAL-WORKSPACE](PRODUCT.md#P-PENPAL-WORKSPACE), [P-PENPAL-DEDUP](PRODUCT.md#P-PENPAL-DEDUP)
+  ← [P-PENPAL-WORKSPACE](PRODUCT.md#P-PENPAL-WORKSPACE), [P-PENPAL-DEDUP](PRODUCT.md#P-PENPAL-DEDUP), [P-PENPAL-WS-ROOT](PRODUCT.md#P-PENPAL-WS-ROOT)
 
 - <a id="E-PENPAL-SOURCE-REGISTRY"></a>**E-PENPAL-SOURCE-REGISTRY**: Source types are registered in a pluggable `SourceType` registry via `init()`. Each `SourceType` entry defines: `AutoDetectDir` or `AutoDetectFile` (trigger), `DetectAtWSRoot` (workspace-level detection), `ScanMode` ("tree" or "files"), `SkipDirs`, `ClassifyFile()` (returns type string or `""` to hide), and optional `GroupFiles()` (returns named sections). `DetectSources()` iterates all registered types and checks for triggers at the project root.
-  ← [P-PENPAL-SRC-DETECT](PRODUCT.md#P-PENPAL-SRC-DETECT), [P-PENPAL-SRC-CLASSIFY](PRODUCT.md#P-PENPAL-SRC-CLASSIFY), [P-PENPAL-SRC-GROUP](PRODUCT.md#P-PENPAL-SRC-GROUP), [P-PENPAL-SRC-SKIP](PRODUCT.md#P-PENPAL-SRC-SKIP)
+  ← [P-PENPAL-SRC-DETECT](PRODUCT.md#P-PENPAL-SRC-DETECT), [P-PENPAL-SRC-CLASSIFY](PRODUCT.md#P-PENPAL-SRC-CLASSIFY), [P-PENPAL-SRC-GROUP](PRODUCT.md#P-PENPAL-SRC-GROUP), [P-PENPAL-SRC-SKIP](PRODUCT.md#P-PENPAL-SRC-SKIP), [P-PENPAL-AUTO-DETECT](PRODUCT.md#P-PENPAL-AUTO-DETECT), [P-PENPAL-SRC-BADGE](PRODUCT.md#P-PENPAL-SRC-BADGE)
 
 - <a id="E-PENPAL-SRC-THOUGHTS"></a>**E-PENPAL-SRC-THOUGHTS**: The `thoughts` source type auto-detects `thoughts/` directory. `DetectAtWSRoot: true` enables workspace-root detection. Classifies files as `research`, `plan`, or `other`. No custom `GroupFiles` — files appear in a single flat group named after the source. No `SkipDirs`.
   ← [P-PENPAL-SRC-THOUGHTS](PRODUCT.md#P-PENPAL-SRC-THOUGHTS), [P-PENPAL-SRC-THOUGHTS-WSROOT](PRODUCT.md#P-PENPAL-SRC-THOUGHTS-WSROOT)
@@ -230,14 +246,56 @@ see-also:
 - <a id="E-PENPAL-FRONTEND-STACK"></a>**E-PENPAL-FRONTEND-STACK**: React 19 + TypeScript + Vite + Tailwind v4. Router: react-router-dom v7 (browser router with `/app/` basename in production). Markdown: react-markdown v10 with remark-gfm, rehype-raw. Diagrams: mermaid v11. Desktop: Tauri v2.
   ← [P-PENPAL-RENDER](PRODUCT.md#P-PENPAL-RENDER)
 
-- <a id="E-PENPAL-TABS"></a>**E-PENPAL-TABS**: `useTabs` hook maintains per-tab history stacks. `PUSH` navigation truncates forward history. `REPLACE` replaces current entry. `POP` events (browser back/forward) are matched against tab history. Each tab derives its title from the current URL path.
-  ← [P-PENPAL-TABS](PRODUCT.md#P-PENPAL-TABS)
+- <a id="E-PENPAL-TABS"></a>**E-PENPAL-TABS**: `useTabs` hook maintains per-tab history stacks. `PUSH` navigation truncates forward history. `REPLACE` replaces current entry. `POP` events (browser back/forward) are matched against tab history. Each tab derives its title from the current URL path. Tauri native menu items dispatch `CustomEvent`s (`menu-new-tab`, `menu-close-tab`, `menu-prev-tab`, `menu-next-tab`, `menu-go-back`, `menu-go-forward`) which the frontend handles via `window.addEventListener`. Cmd+Click on internal links calls `openTab(path, title, { background: true })`. Cmd+Shift+Click calls `openInNewWindow()` via Tauri `WebviewWindow`. Middle-click on a tab fires `onAuxClick` with `button === 1` to close. In browser mode, Cmd+[/] keydown handlers provide back/forward.
+  ← [P-PENPAL-TABS](PRODUCT.md#P-PENPAL-TABS), [P-PENPAL-TAB-KEYS](PRODUCT.md#P-PENPAL-TAB-KEYS), [P-PENPAL-CMD-CLICK](PRODUCT.md#P-PENPAL-CMD-CLICK)
 
 - <a id="E-PENPAL-WINDOW-ID"></a>**E-PENPAL-WINDOW-ID**: Each browser window gets a unique ID: in browser mode via `sessionStorage` (UUID), in desktop mode via Tauri window label. Sent as `?window=` param on all `/api/focus` calls.
   ← [P-PENPAL-FOCUS](PRODUCT.md#P-PENPAL-FOCUS)
 
 - <a id="E-PENPAL-MD-RENDER"></a>**E-PENPAL-MD-RENDER**: Each rendered block is tagged with `data-source-line` (1-indexed). Heading IDs use the same slugification algorithm as Go's goldmark renderer. Mermaid blocks produce `.mermaid-container` divs with `data-mermaid-source`.
   ← [P-PENPAL-GFM](PRODUCT.md#P-PENPAL-GFM), [P-PENPAL-MERMAID](PRODUCT.md#P-PENPAL-MERMAID)
+
+- <a id="E-PENPAL-PROJECT-CARD"></a>**E-PENPAL-PROJECT-CARD**: `WorkspacePage.tsx` `renderProjectCard()` composes: project name as `<Link>`, `APIBadge` spans (text, color, bg from source type registry), agent dot (when `agentConnected || agentRunning`), review count badge (when `reviewCount > 0`, populated server-side from `ListFilesInReview()`), age string, branch with `*` dirty suffix, worktree count (non-main worktrees from `worktrees` array), and a three-dot menu (copy-path, close/delete). Standalone projects section rendered unconditionally when `standaloneProjects.length > 0` under a "Standalone Projects" heading.
+  ← [P-PENPAL-PROJECT-CARD](PRODUCT.md#P-PENPAL-PROJECT-CARD), [P-PENPAL-STANDALONE-SECTION](PRODUCT.md#P-PENPAL-STANDALONE-SECTION)
+
+- <a id="E-PENPAL-HOME-REDIRECT"></a>**E-PENPAL-HOME-REDIRECT**: `IndexRedirect` component at route `/` calls `api.listProjects()` on mount and navigates with `{ replace: true }`: first workspace-origin project → `/workspace/{workspace}`, else first standalone-origin project → `/project/{qn}`, else `/recent`.
+  ← [P-PENPAL-HOME-REDIRECT](PRODUCT.md#P-PENPAL-HOME-REDIRECT)
+
+- <a id="E-PENPAL-SIDEBAR-LAYOUT"></a>**E-PENPAL-SIDEBAR-LAYOUT**: Non-project mode: renders workspace `NavLink`s with agent dots and three-dot menu ("Remove workspace"), standalone project `NavLink`s with badges and three-dot menu ("Close project"), divider, "In Review" link with `(count)` suffix (computed from `api.getInReview()` sum of `g.files.length`), "Recent" link, and "+ Add workspace or project" button. Project mode: "← Home" link (to workspace page or `/`), workspace name link, worktree sub-items (with branch names, linking to `/project/{qn}` or `/project/{qn}@{name}`), and a "Sources" card injected by `ProjectPage` listing sources as `<a href="#source-{name}">` anchor links.
+  ← [P-PENPAL-SIDEBAR](PRODUCT.md#P-PENPAL-SIDEBAR), [P-PENPAL-SIDEBAR-PROJECT](PRODUCT.md#P-PENPAL-SIDEBAR-PROJECT)
+
+- <a id="E-PENPAL-IN-REVIEW-SECTION"></a>**E-PENPAL-IN-REVIEW-SECTION**: `ProjectPage` fetches `GET /api/reviews?project=<qn>` on mount and on `comments` SSE events. When `reviewPaths.length > 0`, renders an "In Review" section before source groups. Files are matched back to cached groups to display name, title, age, and type. Shows `WorkingIndicator` (pulsing dot) when `review.workingThreads > 0`.
+  ← [P-PENPAL-IN-REVIEW-SECTION](PRODUCT.md#P-PENPAL-IN-REVIEW-SECTION)
+
+- <a id="E-PENPAL-SOURCE-ACTIONS"></a>**E-PENPAL-SOURCE-ACTIONS**: Source group header three-dot menu in `ProjectPage` offers: "Copy relative paths" (joins `@` + path with newlines), "Copy absolute paths", "Publish" (parallel `api.publish()` calls), "Remove from Penpal" (only for non-auto sources; calls `api.removeSource()` per file for "files" sources, or once for tree sources), "Delete from disk" (triggers delete confirmation modal). Auto-detected sources show `(auto)` badge and hide the remove option.
+  ← [P-PENPAL-SOURCE-ACTIONS](PRODUCT.md#P-PENPAL-SOURCE-ACTIONS)
+
+- <a id="E-PENPAL-BATCH-OPS"></a>**E-PENPAL-BATCH-OPS**: `ProjectPage` maintains a `Set<string>` selection state. File row checkboxes toggle individual paths; source header checkboxes toggle all files in a source (with indeterminate state for partial selection). Selection bar appears when `selected.size > 0` with actions: "Copy markdown" (`Promise.all` of `api.getRawFile()` joined with `\n\n---\n\n`), "Copy paths" (joins `@` + path), "Publish" (parallel), "Delete" (triggers modal), and "Clear".
+  ← [P-PENPAL-BATCH-OPS](PRODUCT.md#P-PENPAL-BATCH-OPS)
+
+- <a id="E-PENPAL-SORT"></a>**E-PENPAL-SORT**: `useProjectSort` hook uses `useSyncExternalStore` backed by localStorage key `penpal-project-sort` (default `'alpha'`). Subscribes to `storage` events for cross-tab sync. `WorkspacePage` sorts by `localeCompare` for alpha or uses server order (sorted by `cache.ProjectsSortedByModTime()`) for recent. Projects with `fileCount === 0` always sort last. Sidebar also uses the same hook for consistent ordering.
+  ← [P-PENPAL-SORT](PRODUCT.md#P-PENPAL-SORT)
+
+- <a id="E-PENPAL-FRONTMATTER-STRIP"></a>**E-PENPAL-FRONTMATTER-STRIP**: `markdown.StripFrontmatter()` checks for `---` prefix, finds the next `\n---` occurrence, and returns content after it with leading newlines trimmed. Applied in `handleRawFile` before serving content and in `publish/render.go` during publishing. The frontend renders the already-stripped content.
+  ← [P-PENPAL-FRONTMATTER](PRODUCT.md#P-PENPAL-FRONTMATTER)
+
+- <a id="E-PENPAL-TOC"></a>**E-PENPAL-TOC**: Frontend: `MarkdownViewer` queries `h1, h2, h3` elements after render, extracts `textContent` and `id` (or generates via `generateHeadingId()`), and passes `Heading[]` to `onHeadingsExtracted`. `TableOfContents` component renders a sidebar card with "On this page" heading and `<a href="#{id}">` links. Go: `markdown.ExtractHeadings()` regex-parses rendered HTML for `<h1>`/`<h2>`/`<h3>` with IDs (used by publisher). Both use the same ID algorithm: prefix `penpal-md-`, lowercase alphanum, spaces/hyphens/underscores become `-`.
+  ← [P-PENPAL-TOC](PRODUCT.md#P-PENPAL-TOC)
+
+- <a id="E-PENPAL-COPY-MD"></a>**E-PENPAL-COPY-MD**: `getSelectionMarkdown()` in `SelectionToolbar` finds `startLine` and `endLine` from `data-source-line` DOM attributes on selection boundaries, determines the end region from the next `data-source-line` value, then extracts `rawMarkdown.split('\n').slice(startLine - 1, endOfRegion)` (full source lines). Trailing blank lines are trimmed. Result is written to `navigator.clipboard`.
+  ← [P-PENPAL-COPY-MD-SELECTION](PRODUCT.md#P-PENPAL-COPY-MD-SELECTION)
+
+- <a id="E-PENPAL-SVG-HIGHLIGHT"></a>**E-PENPAL-SVG-HIGHLIGHT**: `applySvgHighlights()` in `SelectionToolbar` clears existing `.penpal-svg-highlight` elements, then for each non-resolved thread with `anchor.svgRect`, calls `showSvgHighlight()`. This locates the mermaid container by `data-source-line` (with index fallback), creates an SVG `<rect>` element with coordinates from `anchor.svgRect` and class `penpal-svg-highlight` with `data-thread-id`, and appends it to the container's `<svg>`.
+  ← [P-PENPAL-SVG-HIGHLIGHT](PRODUCT.md#P-PENPAL-SVG-HIGHLIGHT)
+
+- <a id="E-PENPAL-COMMENT-RENDER"></a>**E-PENPAL-COMMENT-RENDER**: `CommentBody` component renders comment body text using `<ReactMarkdown remarkPlugins={[remarkGfm]}>` for full GFM support (tables, task lists, strikethrough, autolinks).
+  ← [P-PENPAL-COMMENT-MD](PRODUCT.md#P-PENPAL-COMMENT-MD)
+
+- <a id="E-PENPAL-COMMENT-FORM"></a>**E-PENPAL-COMMENT-FORM**: Both `NewThreadForm` and `ReplyForm` in `CommentsPanel` implement identical `onKeyDown` handlers on their `<textarea>` elements: Escape calls `onCancel()`, Enter with metaKey or ctrlKey calls `handleSubmit()`. Author name is read from `localStorage.getItem('penpal-author')` on mount and saved via `localStorage.setItem('penpal-author', name)` on submit.
+  ← [P-PENPAL-COMMENT-KEYS](PRODUCT.md#P-PENPAL-COMMENT-KEYS), [P-PENPAL-AUTHOR-PERSIST](PRODUCT.md#P-PENPAL-AUTHOR-PERSIST)
+
+- <a id="E-PENPAL-SUGGESTED-REPLIES"></a>**E-PENPAL-SUGGESTED-REPLIES**: Suggested reply pills render in `CommentsPanel` when `lastComment.role === 'agent' && lastComment.suggestedReplies?.length > 0 && thread.status === 'open'`. Each pill is a `<button class="suggested-reply-pill">`. Clicking calls `handleSuggestedReply(text)` which reads saved author from localStorage and calls `api.replyToThread()` directly (if no author saved, opens the reply form instead). `SuggestedReplies` is a `[]string` field on the `Comment` model.
+  ← [P-PENPAL-SUGGESTED-REPLIES](PRODUCT.md#P-PENPAL-SUGGESTED-REPLIES)
 
 - <a id="E-PENPAL-FIND-BAR"></a>**E-PENPAL-FIND-BAR**: The Find bar uses the CSS Custom Highlight API (`CSS.highlights`) for non-destructive highlighting. Case-insensitive substring matching via TreeWalker over `.main-content`. Two highlight groups: `find-matches` (all) and `find-active` (current).
   ← [P-PENPAL-FIND](PRODUCT.md#P-PENPAL-FIND)
@@ -248,6 +306,16 @@ see-also:
 
 - <a id="E-PENPAL-SEARCH"></a>**E-PENPAL-SEARCH**: Search matches project names (substring), filenames, and file content (case-insensitive line scan). Results capped at 100 files. Name matches sort before content matches within a project. Files not recognized by a source type's classifier are excluded.
   ← [P-PENPAL-SEARCH](PRODUCT.md#P-PENPAL-SEARCH)
+
+---
+
+## Review Workflow
+
+- <a id="E-PENPAL-IN-REVIEW-PAGE"></a>**E-PENPAL-IN-REVIEW-PAGE**: `GET /api/in-review` calls `listAllReviewGroups()` which groups files with open threads by `{project QN, source name}`. Each group includes workspace, project name, source badge data (from registered `SourceType`), agent active status (from `agents.Status(qn).Running`), working thread count, and per-file metadata from cache. Frontend `InReviewPage` renders each group with source badge, breadcrumb links (workspace → project → source anchor), `WorkingIndicator`, and file row links.
+  ← [P-PENPAL-IN-REVIEW](PRODUCT.md#P-PENPAL-IN-REVIEW)
+
+- <a id="E-PENPAL-REVIEW-COUNT"></a>**E-PENPAL-REVIEW-COUNT**: Sidebar `refreshReviewCount()` calls `api.getInReview()` and sums `g.files.length` across all groups. Updated on `comments` SSE events (debounced 200ms). Displayed as `In Review (count)` in the sidebar nav link; link gets class `no-reviews` when count is zero.
+  ← [P-PENPAL-REVIEW-COUNT](PRODUCT.md#P-PENPAL-REVIEW-COUNT)
 
 ---
 
@@ -298,6 +366,22 @@ see-also:
 
 - <a id="E-PENPAL-INSTALL-DISMISS"></a>**E-PENPAL-INSTALL-DISMISS**: The install modal dismiss flag is keyed to `BUILD_ID`, so it reappears on every new build until tools are installed and current.
   ← [P-PENPAL-INSTALL](PRODUCT.md#P-PENPAL-INSTALL)
+
+---
+
+## Desktop App
+
+- <a id="E-PENPAL-CLAUDE-PATH"></a>**E-PENPAL-CLAUDE-PATH**: `GET /api/claude-path` returns `{path, version}`. `PUT /api/claude-path` accepts `{path}`, validates with `claudepath.IsExecutable()`, saves to `s.cfg.ClaudePath`, and persists config. `s.resolveClaudePath()` reads config, passes to `claudepath.Resolve()`, and auto-persists if the resolved path differs. Frontend `InstallToolsModal` shows a text input when no claude binary is found; `handleSetClaudePath()` calls `api.setClaudePath(path)` then retries install.
+  ← [P-PENPAL-CLAUDE-PATH](PRODUCT.md#P-PENPAL-CLAUDE-PATH)
+
+- <a id="E-PENPAL-NEW-WINDOW"></a>**E-PENPAL-NEW-WINDOW**: Tauri `MenuItem` `new_window` (Cmd+N) creates a `WebviewWindow` with label `win-{timestamp}` at `WebviewUrl::App("/")`, size 1200×800. On `WindowEvent::Destroyed` with no windows remaining, `WINDOW_CLOSED` atomic is set to `true`. `ExitRequested` event checks this flag and calls `api.prevent_exit()` to keep the app alive. `RunEvent::Reopen` (dock click) creates a new main window if none are open.
+  ← [P-PENPAL-NEW-WINDOW](PRODUCT.md#P-PENPAL-NEW-WINDOW)
+
+- <a id="E-PENPAL-THEME"></a>**E-PENPAL-THEME**: `useTheme` hook reads `localStorage.getItem('penpal-theme')` on init; if not set, checks `window.matchMedia('(prefers-color-scheme: dark)').matches`; defaults to `'light'`. On toggle, sets/removes `data-theme="dark"` on `document.documentElement` and writes to localStorage. Toggle button in sidebar shows `☾`/`☀` icons.
+  ← [P-PENPAL-THEME](PRODUCT.md#P-PENPAL-THEME)
+
+- <a id="E-PENPAL-EXTERNAL-LINKS"></a>**E-PENPAL-EXTERNAL-LINKS**: `handleAppClick()` in `Layout` intercepts clicks on `<a>` elements. For links starting with `http://`, `https://`, or `//`: if `isDesktopApp` (detected via `'__TAURI__' in window`), prevents default, stops propagation, dynamically imports `@tauri-apps/plugin-shell`, and calls `open(href)` to open in the system browser. In browser mode, falls through to default behavior.
+  ← [P-PENPAL-EXTERNAL-LINKS](PRODUCT.md#P-PENPAL-EXTERNAL-LINKS)
 
 ---
 

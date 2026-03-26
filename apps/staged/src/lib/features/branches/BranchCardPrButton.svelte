@@ -94,6 +94,8 @@
   // This replaces the old approach of shelling out to `git rev-list`.
   let hasUnpushed = $derived.by(() => {
     if (!branch.prNumber || !timeline) return false;
+    // Don't show push changes on merged or closed PRs
+    if (branch.prState === 'MERGED' || branch.prState === 'CLOSED') return false;
     // Find the first commit with a real (non-empty) SHA — pending commits have sha: ""
     const latestCommit = timeline.commits.find((c) => c.sha && c.sha.length > 0);
     if (!latestCommit || !prHeadSha) return false;

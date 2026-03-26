@@ -15,6 +15,7 @@ function jsonResponse(data: unknown, status = 200) {
 
 beforeEach(() => {
   mockFetch.mockReset();
+  window.sessionStorage.clear();
 });
 
 describe('api', () => {
@@ -110,5 +111,26 @@ describe('api', () => {
       expect.objectContaining({ method: 'POST' }),
     );
     expect(result).toEqual(status);
+  });
+
+  it('uses a stable per-window focus ID for focus endpoints', async () => {
+    mockFetch
+      .mockReturnValueOnce(jsonResponse({ ok: true }))
+      .mockReturnValueOnce(jsonResponse({ ok: true }))
+      .mockReturnValueOnce(jsonResponse({ ok: true }));
+
+    await api.focusProject('ws/proj');
+    await api.focusFile('ws/proj', 'thoughts/plan.md', 'wt1');
+    await api.clearFocus();
+
+    const urls = mockFetch.mock.calls.map(([url]) => new URL(String(url), 'http://localhost'));
+    const windowIDs = urls.map((url) => url.searchParams.get('window'));
+
+    expect(windowIDs[0]).toBeTruthy();
+    expect(windowIDs[1]).toBe(windowIDs[0]);
+    expect(windowIDs[2]).toBe(windowIDs[0]);
+    expect(urls[0].searchParams.get('project')).toBe('ws/proj');
+    expect(urls[1].searchParams.get('path')).toBe('thoughts/plan.md');
+    expect(urls[1].searchParams.get('worktree')).toBe('wt1');
   });
 });

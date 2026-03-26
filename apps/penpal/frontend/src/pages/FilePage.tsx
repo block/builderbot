@@ -222,10 +222,8 @@ export default function FilePage() {
     }
   }, [project, startAgentPolling]);
 
-  // Fetch file metadata
-  useEffect(() => {
+  const fetchFileMetadata = useCallback(async () => {
     if (!project || !path) return;
-    // Get file metadata from project files list
     api.getProjectFiles(project, worktree || undefined).then((groups) => {
       for (const group of (groups || [])) {
         for (const file of (group.files || [])) {
@@ -237,18 +235,25 @@ export default function FilePage() {
           }
         }
       }
-      // Fallback
+      setFileType('');
+      setSourceType('');
       setDisplayName(path.split('/').pop() || path);
     }).catch(() => {
+      setFileType('');
+      setSourceType('');
       setDisplayName(path.split('/').pop() || path);
     });
 
-    // Get project path
     api.listProjects().then((projects) => {
       const p = projects.find((pr) => pr.qualifiedName === project);
-      if (p) setProjectPath(p.projectPath);
+      setProjectPath(p?.projectPath || '');
     }).catch(() => {});
   }, [project, path, worktree]);
+
+  // Fetch file metadata
+  useEffect(() => {
+    fetchFileMetadata();
+  }, [fetchFileMetadata]);
 
   // Tell the server to watch just this file's directory
   useEffect(() => {
@@ -287,16 +292,21 @@ export default function FilePage() {
       (event) => {
         if (event.project && event.project !== project) return;
         if (event.type === 'comments') fetchThreads();
-        if (event.type === 'files') fetchContent();
+        if (event.type === 'files') {
+          fetchContent();
+          fetchFileMetadata();
+        }
         if (event.type === 'agents') fetchAgentStatus();
       },
-      [project, fetchThreads, fetchContent, fetchAgentStatus],
+      [project, fetchThreads, fetchContent, fetchFileMetadata, fetchAgentStatus],
     ),
     useCallback(() => {
+      if (project && path) api.focusFile(project, path, worktree || undefined).catch(() => {});
       fetchContent({ silent: true });
+      fetchFileMetadata();
       fetchAgentStatus();
       fetchThreads();
-    }, [fetchContent, fetchAgentStatus, fetchThreads]),
+    }, [project, path, worktree, fetchContent, fetchFileMetadata, fetchAgentStatus, fetchThreads]),
   );
 
   const handleComment = useCallback((anchor: Anchor, selectedText: string) => {

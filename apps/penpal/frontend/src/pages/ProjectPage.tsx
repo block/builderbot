@@ -112,6 +112,13 @@ export default function ProjectPage() {
       },
       [qn, debouncedRefreshFiles, debouncedRefreshReviews, refreshAgent, refreshProjectStatus],
     ),
+    useCallback(() => {
+      if (qn) api.focusProject(qn).catch(() => {});
+      refreshFiles();
+      refreshReviews();
+      refreshAgent();
+      refreshProjectStatus();
+    }, [qn, refreshFiles, refreshReviews, refreshAgent, refreshProjectStatus]),
   );
 
   // Push sidebar card listing sources (with In Review if applicable)

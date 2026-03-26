@@ -32,6 +32,27 @@ func TestAPIFocus_File(t *testing.T) {
 	}
 }
 
+func TestAPIFocus_WindowScoped(t *testing.T) {
+	s, _, _ := testServer(t)
+	seedProject(s.cache, "ws/proj", t.TempDir(), nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/focus?window=win-1&project=ws/proj&path=thoughts/plan.md", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/focus?window=win-1", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAPIFocus_Clear(t *testing.T) {
 	s, _, _ := testServer(t)
 

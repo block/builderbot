@@ -315,14 +315,17 @@ func (s *Server) routes() {
 
 }
 
-// handleFocus tells the watcher what to deep-watch based on current view.
+// handleFocus tells the watcher what to deep-watch based on the active tab in
+// a given window.
 //
-//	POST /api/focus?project=X            — watch project sources (ProjectPage)
-//	POST /api/focus?project=X&path=Y     — watch file directory only (FilePage)
-//	DELETE /api/focus                     — clear all deep watches
+//	POST /api/focus?window=W&project=X            — watch project sources (ProjectPage)
+//	POST /api/focus?window=W&project=X&path=Y     — watch file directory only (FilePage)
+//	DELETE /api/focus?window=W                     — clear deep watches for one window
+//	DELETE /api/focus                              — clear all deep watches (legacy)
 func (s *Server) handleFocus(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
+		windowID := r.URL.Query().Get("window")
 		project := r.URL.Query().Get("project")
 		if project == "" {
 			http.Error(w, "missing project parameter", http.StatusBadRequest)
@@ -331,14 +334,27 @@ func (s *Server) handleFocus(w http.ResponseWriter, r *http.Request) {
 		filePath := r.URL.Query().Get("path")
 		worktree := r.URL.Query().Get("worktree")
 		if filePath != "" {
-			s.watcher.FocusFile(project, filePath, worktree)
+			if windowID != "" {
+				s.watcher.SetWindowFocusFile(windowID, project, filePath, worktree)
+			} else {
+				s.watcher.FocusFile(project, filePath, worktree)
+			}
 		} else {
-			s.watcher.FocusProject(project)
+			if windowID != "" {
+				s.watcher.SetWindowFocusProject(windowID, project)
+			} else {
+				s.watcher.FocusProject(project)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	case http.MethodDelete:
-		s.watcher.ClearFocus()
+		windowID := r.URL.Query().Get("window")
+		if windowID != "" {
+			s.watcher.ClearWindowFocus(windowID)
+		} else {
+			s.watcher.ClearFocus()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
 	default:

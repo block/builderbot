@@ -21,6 +21,8 @@ export const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export const isDesktopApp = typeof window !== 'undefined' && '__TAURI__' in window;
 
+const WINDOW_FOCUS_KEY = 'penpal-window-focus-id';
+
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -40,6 +42,25 @@ async function apiVoid(path: string, options?: RequestInit): Promise<void> {
 
 function wtParam(worktree?: string): string {
   return worktree ? `&worktree=${encodeURIComponent(worktree)}` : '';
+}
+
+function getWindowFocusID(): string {
+  if (typeof window === 'undefined') return 'server';
+  try {
+    const existing = window.sessionStorage.getItem(WINDOW_FOCUS_KEY);
+    if (existing) return existing;
+    const generated = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `win-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    window.sessionStorage.setItem(WINDOW_FOCUS_KEY, generated);
+    return generated;
+  } catch {
+    return 'browser';
+  }
+}
+
+function focusWindowParam(): string {
+  return `window=${encodeURIComponent(getWindowFocusID())}`;
 }
 
 export const api = {
@@ -154,11 +175,11 @@ export const api = {
 
   // Focus (tells server what to deep-watch for the current view)
   focusProject: (project: string) =>
-    apiVoid(`/api/focus?project=${encodeURIComponent(project)}`, { method: 'POST' }),
+    apiVoid(`/api/focus?${focusWindowParam()}&project=${encodeURIComponent(project)}`, { method: 'POST' }),
   focusFile: (project: string, path: string, worktree?: string) =>
-    apiVoid(`/api/focus?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}${wtParam(worktree)}`, { method: 'POST' }),
+    apiVoid(`/api/focus?${focusWindowParam()}&project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}${wtParam(worktree)}`, { method: 'POST' }),
   clearFocus: () =>
-    apiVoid('/api/focus', { method: 'DELETE' }),
+    apiVoid(`/api/focus?${focusWindowParam()}`, { method: 'DELETE' }),
 
   // Misc
   open: (path: string) =>

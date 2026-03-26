@@ -231,6 +231,51 @@ func TestClearFocusRemovesAllWatches(t *testing.T) {
 	assertWatched(t, w, thoughtsDir, false, "after clear")
 }
 
+func TestWindowFocusUnionAcrossWindows(t *testing.T) {
+	projDir1 := t.TempDir()
+	thoughtsDir1 := filepath.Join(projDir1, "thoughts")
+	os.MkdirAll(thoughtsDir1, 0o755)
+
+	projDir2 := t.TempDir()
+	thoughtsDir2 := filepath.Join(projDir2, "thoughts")
+	os.MkdirAll(thoughtsDir2, 0o755)
+
+	proj1 := discovery.Project{
+		Name: "proj1", Path: projDir1,
+		Sources: []discovery.FileSource{{
+			Name: "thoughts", Type: "tree", SourceTypeName: "thoughts",
+			RootPath: thoughtsDir1, Auto: true,
+		}},
+	}
+	proj2 := discovery.Project{
+		Name: "proj2", Path: projDir2,
+		Sources: []discovery.FileSource{{
+			Name: "thoughts", Type: "tree", SourceTypeName: "thoughts",
+			RootPath: thoughtsDir2, Auto: true,
+		}},
+	}
+
+	c := cache.New()
+	c.SetProjects([]discovery.Project{proj1, proj2})
+
+	w, err := New(c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	w.SetWindowFocusProject("win-a", "proj1")
+	w.SetWindowFocusProject("win-b", "proj2")
+
+	assertWatched(t, w, thoughtsDir1, true, "window A keeps proj1 watched")
+	assertWatched(t, w, thoughtsDir2, true, "window B keeps proj2 watched")
+
+	w.ClearWindowFocus("win-a")
+
+	assertWatched(t, w, thoughtsDir1, false, "clearing window A removes proj1 watch")
+	assertWatched(t, w, thoughtsDir2, true, "window B still keeps proj2 watched")
+}
+
 func assertWatched(t *testing.T, w *Watcher, dir string, expected bool, context string) {
 	t.Helper()
 	watched := w.watcher.WatchList()

@@ -2,6 +2,8 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, Outlet } from 'react-router-dom';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import ProjectPage from './ProjectPage';
+import { api } from '../api';
+import { useSSE } from '../hooks/useSSE';
 
 vi.mock('../api', () => ({
   api: {
@@ -112,6 +114,36 @@ describe('ProjectPage', () => {
     await waitFor(() => {
       expect(screen.getByText('My Plan')).toBeTruthy();
       expect(screen.getByText('plan.md')).toBeTruthy();
+    });
+  });
+
+  it('reasserts focus and refreshes on SSE reconnect', async () => {
+    renderPage();
+
+    await waitFor(() => {
+      expect(api.getProjectFiles).toHaveBeenCalledTimes(1);
+      expect(api.getReviews).toHaveBeenCalledTimes(1);
+      expect(api.getAgentStatus).toHaveBeenCalledTimes(1);
+    });
+
+    const useSSEMock = vi.mocked(useSSE);
+    const onReconnect = useSSEMock.mock.calls[0]?.[1];
+    expect(onReconnect).toBeDefined();
+
+    vi.mocked(api.focusProject).mockClear();
+    vi.mocked(api.getProjectFiles).mockClear();
+    vi.mocked(api.getReviews).mockClear();
+    vi.mocked(api.getAgentStatus).mockClear();
+    vi.mocked(api.listProjects).mockClear();
+
+    onReconnect?.();
+
+    await waitFor(() => {
+      expect(api.focusProject).toHaveBeenCalledWith('ws/proj');
+      expect(api.getProjectFiles).toHaveBeenCalledTimes(1);
+      expect(api.getReviews).toHaveBeenCalledTimes(1);
+      expect(api.getAgentStatus).toHaveBeenCalledTimes(1);
+      expect(api.listProjects).toHaveBeenCalledTimes(1);
     });
   });
 });

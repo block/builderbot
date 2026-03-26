@@ -21,9 +21,7 @@ pub(crate) struct WorktreeSetupProgress {
 }
 
 /// Default idle timeout (in minutes) for Staged workstations.
-/// Keeps workstations alive longer than the Blox default so that users don't
-/// lose their session during normal editing pauses.
-const WORKSPACE_IDLE_TIMEOUT_MINUTES: u32 = 60;
+const WORKSPACE_IDLE_TIMEOUT_MINUTES: u32 = 10080;
 
 // In-memory cache: workspace name → numeric workstation ID.
 // Populated by `poll_workspace_status` and `start_workspace` when `blox ws info`

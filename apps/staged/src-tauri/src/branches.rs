@@ -1624,12 +1624,7 @@ fn emit_workspace_setup_progress(
         .unwrap_or((completed, sorted.last().unwrap()));
 
     let phase = bootstrap_phase_label(current_cmd.command_type);
-    let detail = Some(format!(
-        "Step {} of {} · {}",
-        step_index + 1,
-        total,
-        current_cmd.command_id
-    ));
+    let detail = Some(format!("Step {} of {} · {}", step_index + 1, total, phase));
 
     // Collect branch IDs that share this workspace.
     let peer_branch_ids: Vec<String> = branch_ids

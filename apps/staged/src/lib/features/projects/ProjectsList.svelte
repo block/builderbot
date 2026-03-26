@@ -432,13 +432,11 @@
     flex: 1;
     min-width: 0;
     min-height: 0;
-    display: flex;
-    flex-direction: column;
+    overflow: auto;
   }
 
   .content {
     flex: 1;
-    overflow: auto;
     padding: var(--sidebar-title-offset) 24px 24px;
     max-width: 900px;
     width: 100%;

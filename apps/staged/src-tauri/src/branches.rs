@@ -20,6 +20,11 @@ pub(crate) struct WorktreeSetupProgress {
     pub detail: Option<String>,
 }
 
+/// Default idle timeout (in minutes) for Staged workstations.
+/// Keeps workstations alive longer than the Blox default so that users don't
+/// lose their session during normal editing pauses.
+const WORKSPACE_IDLE_TIMEOUT_MINUTES: u32 = 60;
+
 // In-memory cache: workspace name → numeric workstation ID.
 // Populated by `poll_workspace_status` and `start_workspace` when `blox ws info`
 // returns an ID; read by `to_branch_with_workdir` when serializing for the frontend.
@@ -1189,8 +1194,14 @@ pub async fn start_workspace(
         repo_slug, ref_name
     ));
     let start_command_preview = match resolved_source.as_deref() {
-        Some(source) => format!("sq blox ws start {} {}", ws_name, source),
-        None => format!("sq blox ws start {}", ws_name),
+        Some(source) => format!(
+            "sq blox ws start {} --idle-timeout {} {}",
+            ws_name, WORKSPACE_IDLE_TIMEOUT_MINUTES, source
+        ),
+        None => format!(
+            "sq blox ws start {} --idle-timeout {}",
+            ws_name, WORKSPACE_IDLE_TIMEOUT_MINUTES
+        ),
     };
     log::info!(
         "[start_workspace] branch={} workspace={} invoking command=\"{}\"",
@@ -1203,7 +1214,7 @@ pub async fn start_workspace(
     match run_blox_blocking({
         let ws_name = ws_name.to_string();
         let source = resolved_source.clone();
-        move || blox::ws_start(&ws_name, source.as_deref())
+        move || blox::ws_start(&ws_name, source.as_deref(), Some(WORKSPACE_IDLE_TIMEOUT_MINUTES))
     })
     .await
     {

@@ -317,17 +317,32 @@ fn run(args: &[&str], timeout: Duration) -> Result<String, BloxError> {
 
 /// Start a new Blox workspace.
 ///
-/// Runs: `sq blox ws start <name> [<source>]`
+/// Runs: `sq blox ws start <name> [--idle-timeout <minutes>] [<source>]`
 ///
 /// Returns the workspace name on success.
-pub fn ws_start(name: &str, source: Option<&str>) -> Result<String, BloxError> {
+pub fn ws_start(
+    name: &str,
+    source: Option<&str>,
+    idle_timeout_minutes: Option<u32>,
+) -> Result<String, BloxError> {
+    let timeout_str = idle_timeout_minutes.map(|m| m.to_string());
     let mut args = vec!["ws", "start", name];
+    if let Some(ref val) = timeout_str {
+        args.push("--idle-timeout");
+        args.push(val);
+    }
     if let Some(src) = source {
         args.push(src);
     }
-    let command_preview = match source {
-        Some(src) => format!("sq blox ws start {name} {src}"),
-        None => format!("sq blox ws start {name}"),
+    let command_preview = {
+        let mut parts = format!("sq blox ws start {name}");
+        if let Some(ref val) = timeout_str {
+            parts.push_str(&format!(" --idle-timeout {val}"));
+        }
+        if let Some(src) = source {
+            parts.push_str(&format!(" {src}"));
+        }
+        parts
     };
     log::info!(
         "[blox-cli] workspace start begin: workspace={} command=\"{}\"",

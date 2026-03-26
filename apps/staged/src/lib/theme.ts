@@ -378,10 +378,10 @@ export function createAdaptiveTheme(
 
     diff: {
       // Very subtle tints - the syntax highlighting should dominate
-      addedBg: overlay(accentGreen, isDark ? 0.08 : 0.1),
-      removedBg: overlay(accentRed, isDark ? 0.08 : 0.1),
+      addedBg: overlay(accentGreen, isDark ? 0.15 : 0.18),
+      removedBg: overlay(accentRed, isDark ? 0.15 : 0.18),
       // Neutral highlight for changed lines - subtle foreground tint
-      changedBg: overlay(syntaxFg, isDark ? 0.04 : 0.06),
+      changedBg: overlay(syntaxFg, isDark ? 0.08 : 0.1),
       // Range borders need to be visible but not distracting
       rangeBorder: mix(primaryBg, syntaxFg, isDark ? 0.2 : 0.15),
       // Comment highlight - uses blue accent for "annotation" semantic

@@ -2533,9 +2533,18 @@
     white-space: pre;
   }
 
-  /* Changed line highlight */
+  /* Changed line highlight — neutral fallback */
   .line.content-changed {
     background-color: var(--diff-changed-bg);
+  }
+
+  /* Per-pane diff colors: deletions in before, additions in after */
+  .before-pane .line.content-changed {
+    background-color: var(--diff-removed-bg);
+  }
+
+  .after-pane .line.content-changed {
+    background-color: var(--diff-added-bg);
   }
 
   /* Range boundary markers */

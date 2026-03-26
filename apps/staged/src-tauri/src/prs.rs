@@ -44,13 +44,9 @@ struct PrStatusEvent {
     pr_head_sha: Option<String>,
 }
 
-/// Maximum character length for the full diff output before truncation.
-const DIFF_TRUNCATION_LIMIT: usize = 50_000;
-
 struct GitContext {
     log: String,
     stat: String,
-    diff: String,
 }
 
 /// Run the three deterministic git analysis commands in parallel and return
@@ -83,52 +79,23 @@ fn pre_compute_git_context(
         let stat_output =
             crate::branches::run_workspace_git(ws_name, sp, &["diff", &diff_range, "--stat"])
                 .ok()?;
-        let diff_output =
-            crate::branches::run_workspace_git(ws_name, sp, &["diff", &diff_range]).ok()?;
 
         Some(GitContext {
             log: log_output,
             stat: stat_output,
-            diff: truncate_diff(diff_output),
         })
     } else {
-        let (log_result, stat_result, diff_result) = std::thread::scope(|s| {
+        let (log_result, stat_result) = std::thread::scope(|s| {
             let log = s.spawn(|| git::cli::run(working_dir, &["log", "--oneline", &log_range]));
             let stat = s.spawn(|| git::cli::run(working_dir, &["diff", &diff_range, "--stat"]));
-            let diff = s.spawn(|| git::cli::run(working_dir, &["diff", &diff_range]));
-            (
-                log.join().unwrap(),
-                stat.join().unwrap(),
-                diff.join().unwrap(),
-            )
+            (log.join().unwrap(), stat.join().unwrap())
         });
 
         Some(GitContext {
             log: log_result.ok()?,
             stat: stat_result.ok()?,
-            diff: truncate_diff(diff_result.ok()?),
         })
     }
-}
-
-/// Truncate a diff to `DIFF_TRUNCATION_LIMIT` bytes, appending a note
-/// about the omitted content.
-fn truncate_diff(diff: String) -> String {
-    if diff.len() <= DIFF_TRUNCATION_LIMIT {
-        return diff;
-    }
-    // Find the nearest char boundary at or before the limit to avoid
-    // panicking on multi-byte UTF-8 sequences.
-    let safe_limit = diff.floor_char_boundary(DIFF_TRUNCATION_LIMIT);
-    let truncated = &diff[..safe_limit];
-    // Try to cut at a newline boundary for cleaner output.
-    let cut = truncated.rfind('\n').unwrap_or(safe_limit);
-    let remaining_lines = diff[cut..].lines().count();
-    format!(
-        "{}\n\n(truncated, ~{} more lines — run the command yourself to see the full diff)",
-        &diff[..cut],
-        remaining_lines,
-    )
 }
 
 /// Create a pull request for a branch by kicking off an agent session.
@@ -217,9 +184,6 @@ $ git log --oneline origin/{base_branch}..HEAD
 $ git diff origin/{base_branch}...HEAD --stat
 {stat_output}
 
-$ git diff origin/{base_branch}...HEAD
-{diff_output}
-
 Steps:
 1. Push the current branch to the remote: `git push -u origin {branch_name}`
 2. Create a PR using the GitHub CLI: `gh pr create --base {base_branch} --fill-first{draft_flag}`
@@ -238,7 +202,6 @@ This is critical - the application parses this to link the PR.
             draft_flag = draft_flag,
             log_output = ctx.log,
             stat_output = ctx.stat,
-            diff_output = ctx.diff,
         )
     } else {
         format!(

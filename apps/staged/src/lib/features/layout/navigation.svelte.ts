@@ -97,9 +97,15 @@ export function selectProjectAndBranch(projectId: string, branchId: string): voi
   }
 }
 
+/** Returns true when a modal or diff overlay is open. */
+function isModalOpen(): boolean {
+  return !!document.querySelector('[role="dialog"], .diff-modal-backdrop');
+}
+
 /** Navigate to the previous project in the list. */
 export async function selectPreviousProject(): Promise<void> {
-  if (!navigation.selectedProjectId) return;
+  if (!navigation.selectedProjectId || navigation.activeView !== 'workspace' || isModalOpen())
+    return;
   try {
     const projects = await commands.listProjects();
     const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
@@ -113,7 +119,8 @@ export async function selectPreviousProject(): Promise<void> {
 
 /** Navigate to the next project in the list. */
 export async function selectNextProject(): Promise<void> {
-  if (!navigation.selectedProjectId) return;
+  if (!navigation.selectedProjectId || navigation.activeView !== 'workspace' || isModalOpen())
+    return;
   try {
     const projects = await commands.listProjects();
     const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);

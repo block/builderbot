@@ -44,6 +44,28 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn get_action_context(&self, id: &str) -> Result<Option<ActionContext>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, created_at, updated_at
+             FROM action_contexts WHERE id = ?1",
+            params![id],
+            Self::row_to_action_context,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn count_action_contexts_for_repo(&self, github_repo: &str) -> Result<i64, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM action_contexts WHERE github_repo = ?1",
+            params![github_repo],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn get_action_context_by_repo_and_subpath(
         &self,
         github_repo: &str,

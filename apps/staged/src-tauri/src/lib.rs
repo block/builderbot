@@ -1052,9 +1052,40 @@ fn delete_action_context(
     context_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+
+    // Look up the context before deleting so we can clean up the clone directory.
+    let context = store
+        .get_action_context(&context_id)
+        .map_err(|e| e.to_string())?;
+
     store
         .delete_action_context(&context_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Clean up the git clone directory if no other action contexts reference the same repo.
+    if let Some(ctx) = context {
+        let remaining = store
+            .count_action_contexts_for_repo(&ctx.github_repo)
+            .unwrap_or(1);
+        if remaining == 0 {
+            if let Some(clone_path) = crate::paths::clone_path_for(&ctx.github_repo) {
+                if clone_path.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&clone_path) {
+                        log::warn!(
+                            "Failed to remove clone directory {}: {e}",
+                            clone_path.display()
+                        );
+                    }
+                }
+                // Try to remove the parent owner directory if it's now empty.
+                if let Some(parent) = clone_path.parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // =============================================================================

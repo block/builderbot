@@ -180,6 +180,23 @@ pub(crate) fn get_store(
         .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
 }
 
+/// Emit a `worktree-setup-progress` event for a given branch and phase.
+fn emit_setup_progress(
+    handle: &tauri::AppHandle,
+    branch_id: &str,
+    phase: &str,
+    detail: Option<String>,
+) {
+    let _ = handle.emit(
+        "worktree-setup-progress",
+        branches::WorktreeSetupProgress {
+            branch_id: branch_id.to_string(),
+            phase: phase.to_string(),
+            detail,
+        },
+    );
+}
+
 // =============================================================================
 // Store status commands
 // =============================================================================
@@ -405,8 +422,13 @@ fn create_project(
 
                 let store_clone = Arc::clone(&store_bg);
                 let branch_id_clone = branch_id.clone();
+                let app_handle_clone = app_handle.clone();
                 let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                    branches::setup_worktree_sync(&store_clone, &branch_id_clone)
+                    branches::setup_worktree_sync(
+                        &store_clone,
+                        &branch_id_clone,
+                        Some(&app_handle_clone),
+                    )
                 })
                 .await;
 
@@ -432,6 +454,7 @@ fn create_project(
                 // Atomically claim setup ownership before running prerun actions.
                 match store_bg.mark_branch_setup_complete(&branch_id) {
                     Ok(true) => {
+                        emit_setup_progress(&app_handle, &branch_id, "running_setup_actions", None);
                         match branches::run_prerun_actions_for_branch(
                             &store_bg,
                             &app_handle,
@@ -561,8 +584,9 @@ async fn add_project_repo(
                 // Local branch: set up git worktree and run prerun actions.
                 let branch_id = branch.id.clone();
                 let store_clone = Arc::clone(&store);
+                let app_handle_clone = app_handle.clone();
                 let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                    branches::setup_worktree_sync(&store_clone, &branch_id)
+                    branches::setup_worktree_sync(&store_clone, &branch_id, Some(&app_handle_clone))
                 })
                 .await;
 
@@ -587,6 +611,7 @@ async fn add_project_repo(
                 // Atomically claim setup ownership before running prerun actions.
                 match store.mark_branch_setup_complete(&branch.id) {
                     Ok(true) => {
+                        emit_setup_progress(&app_handle, &branch.id, "running_setup_actions", None);
                         match branches::run_prerun_actions_for_branch(
                             &store,
                             &app_handle,

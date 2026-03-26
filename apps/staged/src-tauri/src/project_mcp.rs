@@ -649,7 +649,7 @@ impl ProjectToolsHandler {
             let worktree_result = tauri::async_runtime::spawn_blocking(move || {
                 // We need to run the worktree setup synchronously
                 // Reuse the core logic from branches::setup_worktree
-                crate::branches::setup_worktree_sync(&store, &branch_id)
+                crate::branches::setup_worktree_sync(&store, &branch_id, None)
             })
             .await;
 

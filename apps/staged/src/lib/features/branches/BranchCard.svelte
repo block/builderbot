@@ -114,13 +114,67 @@
   /** Empty timeline used during provisioning so the action buttons render. */
   const emptyTimeline: BranchTimelineData = { commits: [], notes: [], reviews: [], images: [] };
 
+  // =========================================================================
+  // Worktree setup progress (event-driven phases)
+  // =========================================================================
+
+  let setupPhase: string | undefined = $state(undefined);
+  let setupDetail: string | null = $state(null);
+
+  $effect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+
+    listen<{ branchId: string; phase: string; detail: string | null }>(
+      'worktree-setup-progress',
+      (event) => {
+        if (event.payload.branchId === branch.id) {
+          setupPhase = event.payload.phase;
+          setupDetail = event.payload.detail;
+        }
+      }
+    ).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  });
+
+  // Reset setup state when provisioning completes
+  $effect(() => {
+    if (branch.worktreePath) {
+      setupPhase = undefined;
+      setupDetail = null;
+    }
+  });
+
   /** Label for the provisioning timeline row, if applicable. */
-  let provisioningLabel = $derived(
-    isLocal && !branch.worktreePath && !worktreeError
-      ? 'Creating worktree…'
-      : isRemote && remoteWorkspaceStatus === 'starting'
-        ? 'Provisioning workspace…'
-        : undefined
+  let provisioningLabel = $derived.by(() => {
+    if (isLocal && !branch.worktreePath && !worktreeError) {
+      if (setupPhase) {
+        const labels: Record<string, string> = {
+          cloning: 'Cloning repository…',
+          fetching: 'Fetching latest changes…',
+          creating_worktree: 'Creating worktree…',
+          running_setup_actions: 'Running setup actions…',
+        };
+        return labels[setupPhase] ?? 'Setting up…';
+      }
+      return 'Setting up…';
+    }
+    if (isRemote && remoteWorkspaceStatus === 'starting') {
+      return 'Provisioning workspace…';
+    }
+    return undefined;
+  });
+
+  /** Detail text for the provisioning row (e.g. git progress percentages). */
+  let provisioningDetail = $derived(
+    isLocal && !branch.worktreePath && !worktreeError ? setupDetail : null
   );
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
@@ -793,6 +847,7 @@
           onNewReview={hasCodeChanges ? (e) => sessionMgr.openNewSession('review', e) : undefined}
           newSessionDisabled={sessionMgr.isNewSessionDisabled}
           {provisioningLabel}
+          {provisioningDetail}
         >
           {#snippet footerActions()}
             {#if hasCodeChanges}

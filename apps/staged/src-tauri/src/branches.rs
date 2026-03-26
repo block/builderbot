@@ -12,6 +12,14 @@ use crate::git;
 use crate::store::{self, Store};
 use crate::{BranchWithWorkdir, PollWorkspaceResult};
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorktreeSetupProgress {
+    pub branch_id: String,
+    pub phase: String,
+    pub detail: Option<String>,
+}
+
 // In-memory cache: workspace name → numeric workstation ID.
 // Populated by `poll_workspace_status` and `start_workspace` when `blox ws info`
 // returns an ID; read by `to_branch_with_workdir` when serializing for the frontend.
@@ -1867,11 +1875,50 @@ pub async fn rename_branch(
     Ok(to_branch_with_workdir(updated, workdir))
 }
 
+/// Parse a git/gh progress line into a phase name and percentage.
+///
+/// Examples:
+/// - `"remote: Counting objects:   3% (62/2054)"` -> `("Counting objects", 3)`
+/// - `"Receiving objects:  27% (11893/44046), 6.93 MiB | 13.84 MiB/s"` -> `("Receiving objects", 27)`
+fn parse_git_progress_line(line: &str) -> Option<(String, u32)> {
+    // Strip optional "remote: " prefix
+    let line = line.strip_prefix("remote: ").unwrap_or(line);
+    // Find the colon separator
+    let colon_pos = line.find(':')?;
+    let phase_name = line[..colon_pos].trim().to_string();
+    if phase_name.is_empty() {
+        return None;
+    }
+    // Find percentage
+    let rest = &line[colon_pos + 1..];
+    let pct_pos = rest.find('%')?;
+    let num_start = rest[..pct_pos].rfind(|c: char| !c.is_ascii_digit())? + 1;
+    let pct: u32 = rest[num_start..pct_pos].parse().ok()?;
+    Some((phase_name, pct))
+}
+
 /// Set up a git worktree for a branch synchronously.
 ///
 /// This replicates the core logic from `branches::setup_worktree` without
 /// requiring Tauri state, so it can be called from the MCP server.
-pub(crate) fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result<String, String> {
+pub(crate) fn setup_worktree_sync(
+    store: &Arc<Store>,
+    branch_id: &str,
+    app_handle: Option<&tauri::AppHandle>,
+) -> Result<String, String> {
+    let emit_progress = |phase: &str, detail: Option<String>| {
+        if let Some(handle) = app_handle {
+            let _ = handle.emit(
+                "worktree-setup-progress",
+                WorktreeSetupProgress {
+                    branch_id: branch_id.to_string(),
+                    phase: phase.to_string(),
+                    detail,
+                },
+            );
+        }
+    };
+
     let branch = store
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
@@ -1892,7 +1939,33 @@ pub(crate) fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result
 
     // Resolve the repo slug for this branch
     let repo_slug = resolve_branch_repo_slug(store, &project, &branch)?;
-    let repo_path = crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
+    emit_progress("cloning", None);
+    let repo_path = if let Some(handle) = app_handle {
+        let handle = handle.clone();
+        let bid = branch_id.to_string();
+        let mut last_emit = std::time::Instant::now();
+        crate::git::ensure_local_clone_with_progress(&repo_slug, |line| {
+            if let Some((phase_name, pct)) = parse_git_progress_line(line) {
+                let now = std::time::Instant::now();
+                if now.duration_since(last_emit) >= std::time::Duration::from_millis(250) {
+                    last_emit = now;
+                    let detail = format!("{phase_name} \u{2014} {pct}%");
+                    let _ = handle.emit(
+                        "worktree-setup-progress",
+                        WorktreeSetupProgress {
+                            branch_id: bid.clone(),
+                            phase: "cloning".to_string(),
+                            detail: Some(detail),
+                        },
+                    );
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?
+    } else {
+        crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?
+    };
+    emit_progress("fetching", None);
     crate::git::fetch_for_worktree(
         &repo_path,
         &repo_slug,
@@ -1904,6 +1977,7 @@ pub(crate) fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result
         crate::git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
 
+    emit_progress("creating_worktree", None);
     // Reuse any existing worktree for this branch; otherwise create one.
     let existing_worktree_path = crate::git::list_worktrees(&repo_path)
         .map_err(|e| e.to_string())?

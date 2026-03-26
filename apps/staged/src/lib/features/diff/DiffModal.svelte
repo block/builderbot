@@ -385,6 +385,19 @@
       onClose();
       return;
     }
+    // Command+Up/Down Arrow to navigate between files
+    if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && event.metaKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      const currentPath = diffViewer.state.selectedFile;
+      const idx = fileEntries.findIndex((f) => f.path === currentPath);
+      if (event.key === 'ArrowUp' && idx > 0) {
+        selectFile(fileEntries[idx - 1]);
+      } else if (event.key === 'ArrowDown' && idx < fileEntries.length - 1) {
+        selectFile(fileEntries[idx + 1]);
+      }
+      return;
+    }
     // Escape to dismiss layers, then close modal (skip if focused on an input/textarea)
     if (event.key === 'Escape') {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)

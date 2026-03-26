@@ -35,6 +35,7 @@ export default function FilePage() {
   const contentRef = useRef<HTMLDivElement>(null);
   const mermaidDraggingRef = useRef(false);
   const agentPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastAutoStartRef = useRef<number>(0);
   const [chatWidth, setChatWidth] = useState(() => {
     const saved = localStorage.getItem('chatPanelWidth');
     return saved ? parseInt(saved, 10) : 340;
@@ -204,7 +205,12 @@ export default function FilePage() {
     try {
       const status = await api.getAgentStatus(project);
       setAgentStatus(status);
-      if (status.needsAgent && !status.running) {
+      if (status.needsAgent && !status.running && !status.cooldown) {
+        // Rate limit: don't auto-start if we attempted one recently.
+        // This prevents rapid restart loops when the agent keeps crashing.
+        const now = Date.now();
+        if (now - lastAutoStartRef.current < 30_000) return;
+        lastAutoStartRef.current = now;
         // Auto-start, then fetch updated status to show the running dot
         try {
           await api.startAgent(project);

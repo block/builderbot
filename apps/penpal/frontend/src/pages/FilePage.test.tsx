@@ -433,6 +433,45 @@ describe('FilePage', () => {
     });
   });
 
+  it('does not auto-start agent when server reports cooldown', async () => {
+    vi.mocked(api.getAgentStatus).mockResolvedValue({
+      ...agentNotRunning,
+      needsAgent: true,
+      cooldown: true,
+    });
+
+    renderFilePage();
+
+    await waitFor(() => {
+      expect(api.getAgentStatus).toHaveBeenCalled();
+    });
+
+    expect(api.startAgent).not.toHaveBeenCalled();
+  });
+
+  it('rate-limits auto-start attempts to prevent rapid restart loops', async () => {
+    // First call: needsAgent triggers auto-start
+    vi.mocked(api.getAgentStatus)
+      .mockResolvedValueOnce({ ...agentNotRunning, needsAgent: true })
+      .mockResolvedValue({ ...agentNotRunning, needsAgent: true });
+    vi.mocked(api.startAgent).mockResolvedValue(agentNotRunning);
+
+    renderFilePage();
+
+    await waitFor(() => {
+      expect(api.startAgent).toHaveBeenCalledTimes(1);
+    });
+
+    // Simulate SSE agent event triggering another fetchAgentStatus
+    const { onEvent } = getSSECallbacks();
+    await act(async () => {
+      onEvent!({ type: 'agents', project: 'ws/proj' });
+    });
+
+    // Should NOT have auto-started again (rate limited to 30s)
+    expect(api.startAgent).toHaveBeenCalledTimes(1);
+  });
+
   it('refreshes content on SSE files event', async () => {
     vi.mocked(api.getAgentStatus).mockResolvedValue(agentNotRunning);
 

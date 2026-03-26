@@ -30,23 +30,34 @@ type Agent struct {
 	numTurns      int     // number of assistant turns
 }
 
+// quickExitThreshold is the minimum run time to consider an agent exit
+// "normal". Exits faster than this are tracked as quick exits to prevent
+// rapid restart loops.
+const quickExitThreshold = 15 * time.Second
+
+// restartCooldown is the minimum time to wait after a quick exit before
+// allowing another agent start for the same project.
+const restartCooldown = 30 * time.Second
+
 // Manager manages Claude Code agent processes, one per project.
 type Manager struct {
-	mu        sync.Mutex
-	agents    map[string]*Agent // key: qualified project name
-	cache     *cache.Cache
-	comments  *comments.Store
-	port      int
-	onChange  func(projectName string) // called when agent starts or stops
-	claudeBin func() string            // returns resolved path to claude binary
+	mu            sync.Mutex
+	agents        map[string]*Agent    // key: qualified project name
+	lastQuickExit map[string]time.Time // key: project name -> time of last quick exit
+	cache         *cache.Cache
+	comments      *comments.Store
+	port          int
+	onChange      func(projectName string) // called when agent starts or stops
+	claudeBin     func() string            // returns resolved path to claude binary
 }
 
 func New(c *cache.Cache, cs *comments.Store, port int) *Manager {
 	return &Manager{
-		agents:   make(map[string]*Agent),
-		cache:    c,
-		comments: cs,
-		port:     port,
+		agents:        make(map[string]*Agent),
+		lastQuickExit: make(map[string]time.Time),
+		cache:         c,
+		comments:      cs,
+		port:          port,
 	}
 }
 
@@ -65,7 +76,8 @@ func (m *Manager) SetOnChange(fn func(projectName string)) {
 }
 
 // Start launches a Claude agent for the given project.
-// Returns nil if an agent is already running for this project.
+// Returns nil if an agent is already running for this project or if the
+// project is in a restart cooldown (last agent exited quickly).
 func (m *Manager) Start(projectName string) (*Agent, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -78,6 +90,13 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 		default:
 			return nil, nil // already running
 		}
+	}
+
+	// Prevent rapid restart loops: if the last agent for this project
+	// exited quickly (crashed), wait before allowing another start.
+	if t, ok := m.lastQuickExit[projectName]; ok && time.Since(t) < restartCooldown {
+		log.Printf("Agent start for %s blocked: cooldown after quick exit (%s ago)", projectName, time.Since(t).Round(time.Second))
+		return nil, nil
 	}
 
 	proj := m.cache.FindProject(projectName)
@@ -161,7 +180,17 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 		logFile.Close()
 		os.Remove(mcpConfigPath)
 		close(agent.done)
-		log.Printf("Agent exited for %s (PID %d): %v", projectName, agent.PID, agent.exitErr)
+
+		runDuration := time.Since(agent.StartedAt)
+		log.Printf("Agent exited for %s (PID %d, ran %s): %v", projectName, agent.PID, runDuration.Round(time.Second), agent.exitErr)
+
+		// Track quick exits to prevent rapid restart loops
+		if runDuration < quickExitThreshold {
+			m.mu.Lock()
+			m.lastQuickExit[projectName] = time.Now()
+			m.mu.Unlock()
+			log.Printf("Agent for %s exited quickly (%s) — restart cooldown active for %s", projectName, runDuration.Round(time.Millisecond), restartCooldown)
+		}
 
 		m.comments.ClearProjectHeartbeats(projectName)
 		m.comments.ClearProjectWorking(projectName)
@@ -219,6 +248,7 @@ type AgentStatus struct {
 	PID            int       `json:"pid"`
 	StartedAt      time.Time `json:"startedAt"`
 	Running        bool      `json:"running"`
+	Cooldown       bool      `json:"cooldown,omitempty"` // true when agent recently crashed and restarts are blocked
 	ContextWindow  int       `json:"contextWindow"`
 	ContextUsed    int       `json:"contextUsed"`
 	ContextPercent float64   `json:"contextPercent"`
@@ -233,6 +263,13 @@ func (m *Manager) Status(projectName string) *AgentStatus {
 
 	agent, ok := m.agents[projectName]
 	if !ok {
+		// No agent exists — check if we're in cooldown
+		if t, ok := m.lastQuickExit[projectName]; ok && time.Since(t) < restartCooldown {
+			return &AgentStatus{
+				Project:  projectName,
+				Cooldown: true,
+			}
+		}
 		return nil
 	}
 
@@ -282,6 +319,15 @@ func (m *Manager) SimulateFinished(projectName string) {
 		done:          done,
 		contextWindow: 200000,
 	}
+}
+
+// SetQuickExit records a quick exit for the given project, activating the
+// restart cooldown. This is intended for testing the cooldown behavior
+// without requiring an actual agent process.
+func (m *Manager) SetQuickExit(projectName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastQuickExit[projectName] = time.Now()
 }
 
 // StopAll terminates all running agents (for server shutdown).

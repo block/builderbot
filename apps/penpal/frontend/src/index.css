@@ -953,6 +953,7 @@ a:hover { text-decoration: underline; }
   margin-left: auto;
   margin-right: 8px;
 }
+.agent-indicator.hidden { visibility: hidden; }
 .agent-indicator .agent-dot {
   display: inline-block;
   width: 7px;
@@ -985,6 +986,7 @@ a:hover { text-decoration: underline; }
   color: var(--accent-success);
   font-size: 0.85em;
 }
+.thread-working.hidden { visibility: hidden; }
 .thread-working .agent-dot {
   display: inline-block;
   width: 7px;

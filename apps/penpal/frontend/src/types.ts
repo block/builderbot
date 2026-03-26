@@ -155,6 +155,7 @@ export interface AgentStatus {
   pid: number;
   startedAt: string;
   running: boolean;
+  cooldown?: boolean;
   contextWindow: number;
   contextUsed: number;
   contextPercent: number;

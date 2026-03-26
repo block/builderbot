@@ -316,14 +316,14 @@ export default class BranchCardSessionManager {
 
   openNewSession(mode: BranchSessionType, e?: MouseEvent) {
     if (mode === 'review' && e?.altKey) {
-      void this.startReviewSessionImmediately();
+      void this.startReviewSessionWithoutDialog();
       return;
     }
     this.newSessionMode = mode;
     this.showNewSession = true;
   }
 
-  async startReviewSessionImmediately() {
+  async startReviewSessionWithoutDialog() {
     this.newSessionMode = 'review';
     this.showNewSession = false;
     this.draftPrompt = '';
@@ -333,7 +333,7 @@ export default class BranchCardSessionManager {
     if (adopted) return;
 
     const reviewPrompt = 'Review the code changes on this branch.';
-    await this.startBranchSessionWithPendingItem('review', reviewPrompt);
+    await this.startOrQueueSession('review', reviewPrompt);
   }
 
   handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) {

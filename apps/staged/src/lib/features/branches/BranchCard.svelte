@@ -123,30 +123,31 @@
 
   $effect(() => {
     let cancelled = false;
-    let unlisten: (() => void) | undefined;
 
-    listen<{ branchId: string; phase: string; detail: string | null }>(
-      'worktree-setup-progress',
-      (event) => {
+    const eventNames = ['worktree-setup-progress', 'workspace-setup-progress'] as const;
+    const unlisteners: (() => void)[] = [];
+
+    for (const eventName of eventNames) {
+      listen<{ branchId: string; phase: string; detail: string | null }>(eventName, (event) => {
         if (event.payload.branchId === branch.id) {
           setupPhase = event.payload.phase;
           setupDetail = event.payload.detail;
         }
-      }
-    ).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
-    });
+      }).then((fn) => {
+        if (cancelled) fn();
+        else unlisteners.push(fn);
+      });
+    }
 
     return () => {
       cancelled = true;
-      unlisten?.();
+      for (const fn of unlisteners) fn();
     };
   });
 
   // Reset setup state when provisioning completes
   $effect(() => {
-    if (branch.worktreePath) {
+    if (branch.worktreePath || (isRemote && remoteWorkspaceStatus === 'running')) {
       setupPhase = undefined;
       setupDetail = null;
     }
@@ -167,15 +168,31 @@
       return 'Setting up…';
     }
     if (isRemote && remoteWorkspaceStatus === 'starting') {
-      return 'Provisioning workspace…';
+      return 'Starting workspace…';
     }
     return undefined;
   });
 
-  /** Detail text for the provisioning row (e.g. git progress percentages). */
-  let provisioningDetail = $derived(
-    isLocal && !branch.worktreePath && !worktreeError ? setupDetail : null
-  );
+  /** Map blox orchestrator CommandType enum names to display labels. */
+  const remoteCommandLabels: Record<string, string> = {
+    checkout: 'Git checkout',
+    execute_process: 'Executing process',
+    project_bootstrap: 'Project bootstrap',
+    provision_workspace: 'Provision workspace',
+  };
+
+  /** Detail text for the provisioning row (e.g. git progress percentages or step info). */
+  let provisioningDetail = $derived.by(() => {
+    if (isLocal && !branch.worktreePath && !worktreeError) return setupDetail;
+    if (isRemote && remoteWorkspaceStatus === 'starting') {
+      if (setupDetail && setupPhase) {
+        const label = remoteCommandLabels[setupPhase] ?? setupPhase;
+        return `${setupDetail} · ${label}`;
+      }
+      return setupDetail;
+    }
+    return null;
+  });
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => c.sha) ?? false);

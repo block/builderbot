@@ -23,12 +23,27 @@ pub(crate) async fn add_project_repo_impl(
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
-    let resolved_branch_name = branch_name
+    let mut resolved_branch_name = branch_name
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| branches::infer_branch_name(&project.name));
+    // If this github_repo is already attached to the project (i.e. being added
+    // again with a different subpath), make the branch name unique by appending
+    // a subpath-derived suffix.  Without this, `git worktree add -b <branch>`
+    // would fail because the branch is already checked out in the first worktree.
+    let existing_repos = store
+        .list_project_repos(&project_id)
+        .map_err(|e| e.to_string())?;
+    let repo_already_attached = existing_repos.iter().any(|r| r.github_repo == github_repo);
+    if repo_already_attached && branch_name.is_none() {
+        let suffix = match &subpath {
+            Some(sub) => sub.trim_matches('/').replace('/', "-"),
+            None => "root".to_owned(),
+        };
+        resolved_branch_name = format!("{resolved_branch_name}-{suffix}");
+    }
     // Validate that the subpath exists as a directory in the repo before
     // creating anything. This prevents repos being added with invalid
     // subpaths that would fail later during worktree setup.

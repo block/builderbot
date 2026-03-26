@@ -249,6 +249,26 @@
   let needsReviewTree = $derived(compactTree(buildTree(needsReview)));
   let reviewedTree = $derived(compactTree(buildTree(reviewed)));
 
+  /** Flatten tree nodes depth-first to get the visual file order in the sidebar. */
+  function flattenTreeFiles(nodes: TreeNode[]): FileEntry[] {
+    const result: FileEntry[] = [];
+    for (const node of nodes) {
+      if (node.isDir) {
+        result.push(...flattenTreeFiles(node.children));
+      } else if (node.file) {
+        result.push(node.file);
+      }
+    }
+    return result;
+  }
+
+  /** Files in sidebar visual order: needs-review tree then reviewed tree (or readonly tree). */
+  let orderedFiles = $derived(
+    readonly
+      ? flattenTreeFiles(readonlyTree)
+      : [...flattenTreeFiles(needsReviewTree), ...flattenTreeFiles(reviewedTree)]
+  );
+
   // ==========================================================================
   // Sidebar interactions
   // ==========================================================================
@@ -390,11 +410,11 @@
       event.preventDefault();
       event.stopPropagation();
       const currentPath = diffViewer.state.selectedFile;
-      const idx = fileEntries.findIndex((f) => f.path === currentPath);
+      const idx = orderedFiles.findIndex((f) => f.path === currentPath);
       if (event.key === 'ArrowUp' && idx > 0) {
-        selectFile(fileEntries[idx - 1]);
-      } else if (event.key === 'ArrowDown' && idx < fileEntries.length - 1) {
-        selectFile(fileEntries[idx + 1]);
+        selectFile(orderedFiles[idx - 1]);
+      } else if (event.key === 'ArrowDown' && idx < orderedFiles.length - 1) {
+        selectFile(orderedFiles[idx + 1]);
       }
       return;
     }

@@ -766,19 +766,32 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
 ///
 /// Git (and gh) write progress output to stderr using `\r` for in-place
 /// updates, so we split on both `\r` and `\n`.
-fn spawn_streaming<F>(program: &str, args: &[&str], on_line: &mut F) -> Result<(), GitError>
+///
+/// Stderr is also accumulated so that callers can inspect error output on
+/// failure (e.g. for auth-specific error detection).
+fn spawn_streaming<F>(
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    on_line: &mut F,
+) -> Result<(), GitError>
 where
     F: FnMut(&str),
 {
     use std::io::Read;
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new(program)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).stdout(Stdio::null()).stderr(Stdio::piped());
+    for &(key, val) in envs {
+        cmd.env(key, val);
+    }
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| GitError::CommandFailed(format!("Failed to run {program}: {e}")))?;
+
+    let mut all_stderr = String::new();
 
     if let Some(stderr) = child.stderr.take() {
         let mut buf = Vec::new();
@@ -787,6 +800,8 @@ where
             if byte == b'\r' || byte == b'\n' {
                 if !buf.is_empty() {
                     if let Ok(line) = std::str::from_utf8(&buf) {
+                        all_stderr.push_str(line);
+                        all_stderr.push('\n');
                         on_line(line);
                     }
                     buf.clear();
@@ -797,6 +812,8 @@ where
         }
         if !buf.is_empty() {
             if let Ok(line) = std::str::from_utf8(&buf) {
+                all_stderr.push_str(line);
+                all_stderr.push('\n');
                 on_line(line);
             }
         }
@@ -806,10 +823,7 @@ where
         .wait()
         .map_err(|e| GitError::CommandFailed(e.to_string()))?;
     if !status.success() {
-        return Err(GitError::CommandFailed(format!(
-            "{} command failed with status {}",
-            program, status
-        )));
+        return Err(GitError::CommandFailed(all_stderr));
     }
     Ok(())
 }
@@ -853,6 +867,8 @@ where
     let clone_str = clone_path.to_string_lossy().to_string();
 
     // Prefer `gh repo clone` first (works well when gh auth is configured).
+    // If this fails (e.g. gh is set to SSH protocol and org requires SSH certs),
+    // fall back to plain HTTPS git clone.
     let gh_clone_result = (|| -> Result<(), GitError> {
         let gh_path = find_gh().ok_or_else(|| {
             GitError::CommandFailed(
@@ -861,16 +877,25 @@ where
         })?;
 
         let gh_str = gh_path.to_string_lossy().to_string();
-        spawn_streaming(
+        let result = spawn_streaming(
             &gh_str,
             &["repo", "clone", github_repo, &clone_str, "--", "--progress"],
+            &[("GH_GIT_PROTOCOL", "https")],
             &mut on_stderr_line,
-        )
-    })();
+        );
 
-    if gh_clone_result.is_ok() && clone_path.join(".git").exists() {
-        return Ok(clone_path);
-    }
+        // Surface auth-specific errors with a helpful message instead of
+        // falling through to the generic HTTPS fallback.
+        if let Err(GitError::CommandFailed(ref stderr)) = result {
+            if stderr.contains("not logged in") || stderr.contains("no oauth token") {
+                return Err(GitError::CommandFailed(
+                    "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
+                ));
+            }
+        }
+
+        result
+    })();
 
     if gh_clone_result.is_err() || !clone_path.join(".git").exists() {
         log::warn!(
@@ -886,6 +911,7 @@ where
         spawn_streaming(
             "git",
             &["clone", "--progress", &https_url, &clone_str],
+            &[],
             &mut on_stderr_line,
         )?;
     }

@@ -545,6 +545,8 @@ struct AgentCheckInfo {
     main_command: Option<&'static str>,
     /// URL to install the main tool.
     install_url: Option<&'static str>,
+    /// Shell command to install the main tool.
+    install_command: Option<&'static str>,
     /// URL to install the ACP bridge, when the main tool is present but the bridge is not.
     bridge_install_url: Option<&'static str>,
     /// Shell command to install the ACP bridge (used as fix_command for partial installs).
@@ -560,6 +562,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         commands: &["goose"],
         main_command: None,
         install_url: Some("https://github.com/block/goose"),
+        install_command: None,
         bridge_install_url: None,
         bridge_fix_command: None,
     },
@@ -569,6 +572,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         commands: &["claude-agent-acp"],
         main_command: Some("claude"),
         install_url: Some("https://code.claude.com/docs/en/overview"),
+        install_command: None,
         bridge_install_url: Some("https://github.com/zed-industries/claude-agent-acp#installation"),
         bridge_fix_command: None,
     },
@@ -578,6 +582,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         commands: &["codex-acp"],
         main_command: Some("codex"),
         install_url: Some("https://github.com/openai/codex#quickstart"),
+        install_command: Some("brew install --cask codex"),
         bridge_install_url: Some("https://github.com/zed-industries/codex-acp#installation"),
         bridge_fix_command: None,
     },
@@ -587,6 +592,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         commands: &["pi-acp"],
         main_command: Some("pi"),
         install_url: None,
+        install_command: None,
         bridge_install_url: None,
         bridge_fix_command: None,
     },
@@ -596,6 +602,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         commands: &["amp-acp"],
         main_command: Some("amp"),
         install_url: Some("https://ampcode.com"),
+        install_command: None,
         bridge_install_url: None,
         bridge_fix_command: Some("npm install -g amp-acp"),
     },
@@ -729,7 +736,7 @@ fn check_single_ai_agent(
                     "Not installed — at least one AI agent is needed".to_string()
                 },
                 fix_url: info.install_url.map(|s| s.to_string()),
-                fix_command: None,
+                fix_command: info.install_command.map(|s| s.to_string()),
                 path: None,
                 raw_output: Some(format!("{header}\n{search}\n{main_search}")),
             };
@@ -745,7 +752,7 @@ fn check_single_ai_agent(
                 "Not installed — at least one AI agent is needed".to_string()
             },
             fix_url: info.install_url.map(|s| s.to_string()),
-            fix_command: None,
+            fix_command: info.install_command.map(|s| s.to_string()),
             path: None,
             raw_output: Some(format!("{header}\n{search}")),
         }

@@ -219,8 +219,7 @@
     cursor: pointer;
     transition:
       background-color 0.15s ease,
-      opacity 0.15s ease,
-      min-width 0.15s ease;
+      opacity 0.15s ease;
   }
 
   .btn-secondary {

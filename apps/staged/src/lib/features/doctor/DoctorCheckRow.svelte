@@ -96,7 +96,7 @@
   <ConfirmDialog
     title="Run fix command?"
     message={check.fixCommand!}
-    confirmLabel={fixError ? 'Retry' : 'Run'}
+    confirmLabel={fixing ? 'Running' : fixError ? 'Retry' : 'Run'}
     cancelLabel="Cancel"
     confirmDisabled={fixing}
     cancelDisabled={fixing}

@@ -12,6 +12,14 @@ use crate::git;
 use crate::store::{self, Store};
 use crate::{BranchWithWorkdir, PollWorkspaceResult};
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorktreeSetupProgress {
+    pub branch_id: String,
+    pub phase: String,
+    pub detail: Option<String>,
+}
+
 // In-memory cache: workspace name → numeric workstation ID.
 // Populated by `poll_workspace_status` and `start_workspace` when `blox ws info`
 // returns an ID; read by `to_branch_with_workdir` when serializing for the frontend.
@@ -1871,7 +1879,24 @@ pub async fn rename_branch(
 ///
 /// This replicates the core logic from `branches::setup_worktree` without
 /// requiring Tauri state, so it can be called from the MCP server.
-pub(crate) fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result<String, String> {
+pub(crate) fn setup_worktree_sync(
+    store: &Arc<Store>,
+    branch_id: &str,
+    app_handle: Option<&tauri::AppHandle>,
+) -> Result<String, String> {
+    let emit_progress = |phase: &str, detail: Option<String>| {
+        if let Some(handle) = app_handle {
+            let _ = handle.emit(
+                "worktree-setup-progress",
+                WorktreeSetupProgress {
+                    branch_id: branch_id.to_string(),
+                    phase: phase.to_string(),
+                    detail,
+                },
+            );
+        }
+    };
+
     let branch = store
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
@@ -1892,7 +1917,9 @@ pub(crate) fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result
 
     // Resolve the repo slug for this branch
     let repo_slug = resolve_branch_repo_slug(store, &project, &branch)?;
+    emit_progress("cloning", None);
     let repo_path = crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
+    emit_progress("fetching", None);
     crate::git::fetch_for_worktree(
         &repo_path,
         &repo_slug,
@@ -1904,6 +1931,7 @@ pub(crate) fn setup_worktree_sync(store: &Arc<Store>, branch_id: &str) -> Result
         crate::git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
 
+    emit_progress("creating_worktree", None);
     // Reuse any existing worktree for this branch; otherwise create one.
     let existing_worktree_path = crate::git::list_worktrees(&repo_path)
         .map_err(|e| e.to_string())?

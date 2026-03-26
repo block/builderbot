@@ -762,6 +762,137 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
     Ok(clone_path)
 }
 
+/// Spawn a command and stream its stderr line-by-line to a callback.
+///
+/// Git (and gh) write progress output to stderr using `\r` for in-place
+/// updates, so we split on both `\r` and `\n`.
+fn spawn_streaming<F>(program: &str, args: &[&str], on_line: &mut F) -> Result<(), GitError>
+where
+    F: FnMut(&str),
+{
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| GitError::CommandFailed(format!("Failed to run {program}: {e}")))?;
+
+    if let Some(stderr) = child.stderr.take() {
+        let mut buf = Vec::new();
+        for byte in stderr.bytes() {
+            let byte = byte.map_err(|e| GitError::CommandFailed(e.to_string()))?;
+            if byte == b'\r' || byte == b'\n' {
+                if !buf.is_empty() {
+                    if let Ok(line) = std::str::from_utf8(&buf) {
+                        on_line(line);
+                    }
+                    buf.clear();
+                }
+            } else {
+                buf.push(byte);
+            }
+        }
+        if !buf.is_empty() {
+            if let Ok(line) = std::str::from_utf8(&buf) {
+                on_line(line);
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| GitError::CommandFailed(e.to_string()))?;
+    if !status.success() {
+        return Err(GitError::CommandFailed(format!(
+            "{} command failed with status {}",
+            program, status
+        )));
+    }
+    Ok(())
+}
+
+/// Like [`ensure_local_clone`] but streams stderr progress lines to a callback.
+///
+/// This allows callers to report detailed clone progress (e.g.
+/// "Receiving objects — 27%") to the UI.
+pub fn ensure_local_clone_with_progress<F>(
+    github_repo: &str,
+    mut on_stderr_line: F,
+) -> Result<std::path::PathBuf, GitError>
+where
+    F: FnMut(&str),
+{
+    let repo_lock = clone_lock_for_repo(github_repo);
+    let _clone_guard = repo_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let repos = crate::paths::repos_dir()
+        .ok_or_else(|| GitError::CommandFailed("Cannot determine data directory".to_string()))?;
+
+    let clone_path = repos.join(github_repo);
+    let https_url = format!("https://github.com/{github_repo}.git");
+
+    if clone_path.join(".git").exists() {
+        return Ok(clone_path);
+    }
+
+    // If a previous clone attempt failed, clear the stale directory so clone can retry.
+    remove_stale_clone_dir(&clone_path)?;
+
+    // Create parent directory
+    if let Some(parent) = clone_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            GitError::CommandFailed(format!("Failed to create clone directory: {e}"))
+        })?;
+    }
+
+    let clone_str = clone_path.to_string_lossy().to_string();
+
+    // Prefer `gh repo clone` first (works well when gh auth is configured).
+    let gh_clone_result = (|| -> Result<(), GitError> {
+        let gh_path = find_gh().ok_or_else(|| {
+            GitError::CommandFailed(
+                "GitHub CLI not found. Install with: brew install gh".to_string(),
+            )
+        })?;
+
+        let gh_str = gh_path.to_string_lossy().to_string();
+        spawn_streaming(
+            &gh_str,
+            &["repo", "clone", github_repo, &clone_str, "--", "--progress"],
+            &mut on_stderr_line,
+        )
+    })();
+
+    if gh_clone_result.is_ok() && clone_path.join(".git").exists() {
+        return Ok(clone_path);
+    }
+
+    if gh_clone_result.is_err() || !clone_path.join(".git").exists() {
+        log::warn!(
+            "gh repo clone failed for '{}', retrying with direct HTTPS git clone",
+            github_repo
+        );
+        remove_stale_clone_dir(&clone_path)?;
+        if let Some(parent) = clone_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                GitError::CommandFailed(format!("Failed to create clone directory: {e}"))
+            })?;
+        }
+        spawn_streaming(
+            "git",
+            &["clone", "--progress", &https_url, &clone_str],
+            &mut on_stderr_line,
+        )?;
+    }
+
+    Ok(clone_path)
+}
+
 /// Fetch only the refs needed for worktree creation.
 ///
 /// Fetches `base_branch` (always required, always present on the remote) and

@@ -1563,28 +1563,32 @@ pub async fn poll_workspace_status(
 /// Returns a map from branch ID to `PollWorkspaceResult`. Branches that cannot be
 /// resolved (e.g. missing workspace name, not found in store) are silently omitted
 /// from the result rather than failing the entire batch.
-/// Best-effort label for a bootstrap command type.
+/// Map a numeric `CommandType` (from the blox orchestrator proto) to a stable
+/// string identifier that the frontend can map to a display label.
 ///
-/// These numeric types are undocumented in the blox-cli crate, so we map the
-/// ones we've observed and fall back to a generic label for anything new.
-/// Display order is chosen so that cloning (type 1) sorts last — it tends to
-/// be the longest step for most users.
-fn bootstrap_phase_label(command_type: u32) -> &'static str {
+/// Proto enum values:
+///   0 = COMMAND_TYPE_UNSPECIFIED
+///   1 = COMMAND_TYPE_CHECKOUT
+///   2 = COMMAND_TYPE_EXECUTE_PROCESS
+///   3 = COMMAND_TYPE_PROJECT_BOOTSTRAP
+///   4 = COMMAND_TYPE_PROVISION_WORKSPACE
+fn bootstrap_command_type_name(command_type: u32) -> &'static str {
     match command_type {
-        4 => "Starting services…",
-        3 => "Running setup…",
-        1 => "Cloning repository…",
-        _ => "Setting up…",
+        1 => "checkout",
+        2 => "execute_process",
+        3 => "project_bootstrap",
+        4 => "provision_workspace",
+        _ => "unknown",
     }
 }
 
-/// Sort key for bootstrap command types so that cloning (type 1) is displayed
+/// Sort key for bootstrap command types so that checkout (type 1) is displayed
 /// as the final step.  Lower values sort first.
 fn bootstrap_sort_order(command_type: u32) -> u32 {
     match command_type {
-        4 => 0, // services first
-        3 => 1, // setup second
-        1 => 2, // cloning last
+        4 => 0, // provision_workspace first
+        3 => 1, // project_bootstrap second
+        1 => 2, // checkout last
         _ => 1, // unknown types slot in the middle
     }
 }
@@ -1623,8 +1627,8 @@ fn emit_workspace_setup_progress(
         .find(|(_, c)| c.status != 3)
         .unwrap_or((completed, sorted.last().unwrap()));
 
-    let phase = bootstrap_phase_label(current_cmd.command_type);
-    let detail = Some(format!("Step {} of {} · {}", step_index + 1, total, phase));
+    let phase = bootstrap_command_type_name(current_cmd.command_type);
+    let detail = Some(format!("Step {} of {}", step_index + 1, total));
 
     // Collect branch IDs that share this workspace.
     let peer_branch_ids: Vec<String> = branch_ids

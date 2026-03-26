@@ -169,7 +169,16 @@
       return 'Setting up…';
     }
     if (isRemote && remoteWorkspaceStatus === 'starting') {
-      return setupPhase ?? 'Provisioning workspace…';
+      if (setupPhase) {
+        const remoteLabels: Record<string, string> = {
+          checkout: 'Git checkout',
+          execute_process: 'Executing process',
+          project_bootstrap: 'Project bootstrap',
+          provision_workspace: 'Provision workspace',
+        };
+        return remoteLabels[setupPhase] ?? 'Setting up…';
+      }
+      return 'Provisioning workspace…';
     }
     return undefined;
   });

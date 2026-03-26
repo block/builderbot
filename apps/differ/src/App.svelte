@@ -71,7 +71,12 @@
   import SettingsPanel from './lib/SettingsPanel.svelte';
   import GitTreeAnimation from './lib/GitTreeAnimation.svelte';
   import DifferIcon from './lib/DifferIcon.svelte';
-  import { initPreferences } from './lib/preferences.svelte';
+  import {
+    initPreferences,
+    preferences,
+    setUiFontSize,
+    setCodeFontSize,
+  } from './lib/preferences.svelte';
 
   // ==========================================================================
   // State: App initialization
@@ -606,6 +611,22 @@
   // Keyboard shortcuts
   // ==========================================================================
 
+  function selectNextFile() {
+    if (files.length === 0) return;
+    const paths = files.map((f) => f.after ?? f.before ?? '');
+    const idx = selectedFile ? paths.indexOf(selectedFile) : -1;
+    const next = idx + 1 < paths.length ? paths[idx + 1] : paths[0];
+    selectFile(next);
+  }
+
+  function selectPrevFile() {
+    if (files.length === 0) return;
+    const paths = files.map((f) => f.after ?? f.before ?? '');
+    const idx = selectedFile ? paths.indexOf(selectedFile) : -1;
+    const prev = idx > 0 ? paths[idx - 1] : paths[paths.length - 1];
+    selectFile(prev);
+  }
+
   // Set up keyboard navigation for diff viewer and search
   $effect(() => {
     // Create search navigation handlers
@@ -625,7 +646,53 @@
       onPrevSearchResult,
     });
 
-    return cleanup;
+    function handleAppKeydown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement;
+      const meta = event.metaKey;
+      const ctrl = event.ctrlKey;
+
+      // Cmd+= / Cmd++ — increase font size
+      if ((event.key === '=' || event.key === '+') && (meta || ctrl)) {
+        event.preventDefault();
+        setUiFontSize(preferences.uiFontSize + 1);
+        setCodeFontSize(preferences.codeFontSize + 1);
+        return;
+      }
+
+      // Cmd+- — decrease font size
+      if (event.key === '-' && (meta || ctrl)) {
+        event.preventDefault();
+        setUiFontSize(preferences.uiFontSize - 1);
+        setCodeFontSize(preferences.codeFontSize - 1);
+        return;
+      }
+
+      // Skip [ ] shortcuts when focus is in an input, textarea, or contenteditable
+      const inInput =
+        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+      if (inInput) return;
+
+      // ] — next file
+      if (event.key === ']' && !meta && !ctrl && !event.shiftKey && !event.altKey) {
+        event.preventDefault();
+        selectNextFile();
+        return;
+      }
+
+      // [ — previous file
+      if (event.key === '[' && !meta && !ctrl && !event.shiftKey && !event.altKey) {
+        event.preventDefault();
+        selectPrevFile();
+        return;
+      }
+    }
+
+    window.addEventListener('keydown', handleAppKeydown);
+
+    return () => {
+      cleanup();
+      window.removeEventListener('keydown', handleAppKeydown);
+    };
   });
 </script>
 

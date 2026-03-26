@@ -341,9 +341,11 @@
   async function handleSelectComment(comment: Comment) {
     selectedCommentId = comment.id;
     const resolvedPath = resolveCommentPath(comment.path);
-    await diffViewer.selectFile(resolvedPath);
+    // Set jumpToComment BEFORE awaiting selectFile so the auto-scroll effect
+    // sees the pending token and defers to the explicit comment navigation.
     commentJumpToken += 1;
     jumpToComment = { id: comment.id, token: commentJumpToken };
+    await diffViewer.selectFile(resolvedPath);
   }
 
   // Wrapper for search that returns the loaded diff without changing selection

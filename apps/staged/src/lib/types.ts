@@ -97,6 +97,8 @@ export interface CommitTimelineItem {
   author: string;
   /** Unix timestamp in seconds */
   timestamp: number;
+  /** Position in git's topological order (0 = oldest). Tiebreaker for same-second timestamps. */
+  order: number;
   sessionId: string | null;
   sessionStatus: string | null;
 }

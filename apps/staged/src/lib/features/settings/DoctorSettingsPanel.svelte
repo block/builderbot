@@ -182,7 +182,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-width: 560px;
+    max-width: 280px;
   }
 
   .loading-state,

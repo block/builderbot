@@ -67,6 +67,8 @@
     revalidating?: boolean;
     /** When set, a provisioning row is shown at the start of the timeline. */
     provisioningLabel?: string;
+    /** Optional detail text for the provisioning row (e.g. git progress). */
+    provisioningDetail?: string | null;
     footerActions?: Snippet;
   }
 
@@ -94,6 +96,7 @@
     newSessionDisabled = false,
     revalidating = false,
     provisioningLabel,
+    provisioningDetail,
     footerActions,
   }: Props = $props();
 
@@ -342,6 +345,7 @@
         key: 'provisioning',
         type: 'provisioning',
         title: provisioningLabel,
+        secondaryMeta: provisioningDetail ?? undefined,
         timestamp: 0,
       });
     }

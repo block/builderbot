@@ -797,15 +797,11 @@
 
       <div class="titlebar-right">
         {#if repoInfo}
-          <span class="repo-info">
+          <span class="repo-info" title={repoInfo.branch}>
             <GitBranch size={12} />
             <span class="branch-name">{repoInfo.branch}</span>
           </span>
-          <button
-            class="repo-btn"
-            onclick={() => (showFolderPicker = true)}
-            title="Switch repository"
-          >
+          <button class="repo-btn" onclick={() => (showFolderPicker = true)} title={repoName}>
             <FolderOpen size={13} />
             <span>{repoName}</span>
           </button>
@@ -1121,7 +1117,8 @@
 
   .titlebar-center {
     position: relative;
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1158,7 +1155,7 @@
     border-radius: 5px;
     color: var(--text-faint);
     cursor: pointer;
-    font-size: var(--size-xs);
+    font-size: var(--size-sm);
     font-family: inherit;
     transition:
       color 0.15s,
@@ -1299,8 +1296,8 @@
   }
 
   .stack-section-label {
-    padding: 8px 12px 4px;
-    font-size: 9px;
+    padding: 10px 12px 6px;
+    font-size: var(--size-xs);
     font-weight: 600;
     letter-spacing: 0.5px;
     color: var(--text-faint);
@@ -1312,7 +1309,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 6px 12px;
+    padding: 8px 12px;
     background: none;
     border: none;
     color: var(--text-primary);
@@ -1386,10 +1383,17 @@
     gap: 4px;
     color: var(--text-muted);
     font-size: var(--size-xs);
+    min-width: 0;
+    flex-shrink: 1;
+    overflow: hidden;
   }
 
   .branch-name {
     color: var(--text-accent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 160px;
   }
 
   .repo-btn {
@@ -1404,9 +1408,17 @@
     cursor: pointer;
     font-size: var(--size-xs);
     font-family: inherit;
+    overflow: hidden;
+    max-width: 160px;
     transition:
       color 0.1s,
       background-color 0.1s;
+  }
+
+  .repo-btn span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .repo-btn:hover {
@@ -1632,7 +1644,7 @@
   }
 
   .divider-label {
-    font-size: 9px;
+    font-size: var(--size-xs);
     font-weight: 600;
     letter-spacing: 0.5px;
     color: var(--text-muted);
@@ -1649,7 +1661,7 @@
     background-color: var(--bg-primary);
     color: var(--text-primary);
     border-radius: 7px;
-    font-size: 9px;
+    font-size: var(--size-xs);
     font-weight: 600;
   }
 

@@ -6,7 +6,12 @@
 -->
 <script lang="ts">
   import { Settings, Type, Minus, Plus, Search } from 'lucide-svelte';
-  import { preferences, setCodeFontFamily, setCodeFontSize } from './preferences.svelte';
+  import {
+    preferences,
+    setCodeFontFamily,
+    setCodeFontSize,
+    setUiFontSize,
+  } from './preferences.svelte';
   import { listSystemFonts } from './commands';
 
   interface Props {
@@ -88,6 +93,13 @@
     const next = Math.min(20, Math.max(10, preferences.codeFontSize + delta));
     if (next !== preferences.codeFontSize) {
       setCodeFontSize(next);
+    }
+  }
+
+  function adjustUiFontSize(delta: number) {
+    const next = Math.min(18, Math.max(10, preferences.uiFontSize + delta));
+    if (next !== preferences.uiFontSize) {
+      setUiFontSize(next);
     }
   }
 
@@ -204,6 +216,33 @@
         onclick={() => adjustCodeFontSize(1)}
         disabled={preferences.codeFontSize >= 20}
         aria-label="Increase code font size"
+      >
+        <Plus size={12} />
+      </button>
+    </div>
+  </div>
+
+  <!-- UI Font Size -->
+  <div class="section">
+    <div class="section-label">
+      <Type size={13} />
+      <span>UI Font Size</span>
+    </div>
+    <div class="stepper">
+      <button
+        class="stepper-btn"
+        onclick={() => adjustUiFontSize(-1)}
+        disabled={preferences.uiFontSize <= 10}
+        aria-label="Decrease UI font size"
+      >
+        <Minus size={12} />
+      </button>
+      <span class="stepper-value">{preferences.uiFontSize}px</span>
+      <button
+        class="stepper-btn"
+        onclick={() => adjustUiFontSize(1)}
+        disabled={preferences.uiFontSize >= 18}
+        aria-label="Increase UI font size"
       >
         <Plus size={12} />
       </button>

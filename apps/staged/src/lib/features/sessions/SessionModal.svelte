@@ -840,7 +840,7 @@
       <div class="header-content">
         <span class="header-title">
           {session?.prompt
-            ? session.prompt.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim() ||
+            ? session.prompt.replace(/<(action|branch-history)>[\s\S]*<\/\1>/g, '').trim() ||
               'Session'
             : 'Session'}
         </span>

@@ -49,7 +49,7 @@ struct GitContext {
     stat: String,
 }
 
-/// Run the three deterministic git analysis commands in parallel and return
+/// Run the two deterministic git analysis commands in parallel and return
 /// their output. Returns `None` if any command fails so the caller can fall
 /// back to letting the agent run them itself.
 fn pre_compute_git_context(
@@ -65,9 +65,10 @@ fn pre_compute_git_context(
 
     if is_remote {
         let ws_name = workspace_name?;
-        let repo_subpath = crate::branches::resolve_branch_workspace_subpath(store, branch)
-            .ok()
-            .flatten();
+        let repo_subpath = match crate::branches::resolve_branch_workspace_subpath(store, branch) {
+            Ok(sp) => sp,
+            Err(_) => return None,
+        };
         let sp = repo_subpath.as_deref();
 
         // For remote branches, run_workspace_git goes over SSH and cannot

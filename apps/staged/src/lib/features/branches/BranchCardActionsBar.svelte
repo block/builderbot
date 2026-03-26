@@ -132,6 +132,7 @@
   let canResolveEndpoint = $derived(!isRemote || !!branch.workstationId);
 
   function getEndpointCopyUrl(endpoint: string): string {
+    if (!isRemote) return endpoint;
     if (!canResolveEndpoint) return endpoint;
     try {
       const parsed = new URL(endpoint);

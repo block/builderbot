@@ -47,6 +47,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             repo_subpath.as_deref(),
             &["log", format_arg, &range],
         ) {
+            // git log returns newest-first; parse then assign order so 0 = oldest.
             for line in output.lines() {
                 if line.is_empty() {
                     continue;
@@ -66,10 +67,15 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                         subject: parts[2].to_string(),
                         author: parts[3].to_string(),
                         timestamp: parts[4].parse().unwrap_or(0),
+                        order: 0, // placeholder, assigned below
                         session_id,
                         session_status,
                     });
                 }
+            }
+            let len = commits.len() as i64;
+            for (i, commit) in commits.iter_mut().enumerate() {
+                commit.order = len - 1 - i as i64;
             }
         }
     } else if let Some(ref wd) = workdir {
@@ -93,6 +99,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     subject: gc.subject,
                     author: gc.author,
                     timestamp: gc.timestamp,
+                    order: gc.order,
                     session_id,
                     session_status,
                 });
@@ -125,6 +132,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     .unwrap_or_else(|| "Pending commit".to_string()),
                 author: String::new(),
                 timestamp: dc.created_at / 1000, // convert ms to seconds
+                order: 0, // pending commits have unique ms timestamps; order irrelevant
                 session_id,
                 session_status,
             });

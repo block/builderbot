@@ -141,6 +141,8 @@
     secondaryMeta?: string;
     deleting?: boolean;
     timestamp: number;
+    /** Position in git's topological order (0 = oldest). Tiebreaker for same-second timestamps. */
+    order: number;
     sessionId?: string;
     commitSha?: string;
     commitId?: string;
@@ -221,6 +223,7 @@
         secondaryMeta: isDeleting || isRunning ? undefined : commit.shortSha || undefined,
         deleting: isDeleting,
         timestamp: commit.timestamp,
+        order: commit.order,
         sessionId: commit.sessionId ?? undefined,
         commitSha: commit.sha || undefined,
         commitId: commit.id ?? undefined,
@@ -260,6 +263,7 @@
         deleting: isDeleting,
         // Note timestamps are in milliseconds, convert to seconds for sorting
         timestamp: Math.floor(note.createdAt / 1000),
+        order: 0,
         sessionId: note.sessionId ?? undefined,
         noteId: note.id,
         noteTitle: stripXmlTags(note.title),
@@ -316,6 +320,7 @@
         badges: badges.length > 0 ? badges : undefined,
         deleting: isDeleting,
         timestamp: Math.floor(review.createdAt / 1000),
+        order: 0,
         sessionId: review.sessionId ?? undefined,
         reviewId: review.id,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
@@ -332,6 +337,7 @@
         secondaryMeta: isDeleting ? 'Deleting...' : formatRelativeTimeMs(image.createdAt),
         deleting: isDeleting,
         timestamp: Math.floor(image.createdAt / 1000),
+        order: 0,
         sessionId: image.sessionId ?? undefined,
         imageId: image.id,
         imageFilename: image.filename,
@@ -347,6 +353,7 @@
         title: provisioningLabel,
         secondaryMeta: provisioningDetail ?? undefined,
         timestamp: 0,
+        order: 0,
       });
     }
 
@@ -370,7 +377,8 @@
       const aOrder = aIsProvisioning ? -1 : aIsQueued ? 2 : aIsTransient ? 1 : 0;
       const bOrder = bIsProvisioning ? -1 : bIsQueued ? 2 : bIsTransient ? 1 : 0;
       if (aOrder !== bOrder) return aOrder - bOrder;
-      return a.timestamp - b.timestamp;
+      if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+      return a.order - b.order;
     });
 
     // Only the latest (HEAD) commit can be deleted via git reset.

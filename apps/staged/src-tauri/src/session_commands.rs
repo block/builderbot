@@ -1745,7 +1745,7 @@ fn build_branch_timeline_summary(
         return String::new();
     }
 
-    timeline.sort_by_key(|e| e.timestamp);
+    timeline.sort_by_key(|e| (e.timestamp, e.order));
 
     let mut section = String::new();
     if let Some(err) = commit_error {
@@ -1766,6 +1766,9 @@ fn build_branch_timeline_summary(
 /// A single entry in the branch timeline, sorted by timestamp (Unix seconds).
 struct TimelineEntry {
     timestamp: i64,
+    /// Position in git's topological order (0 = oldest). Used as a tiebreaker
+    /// when multiple commits share the same second-level timestamp.
+    order: i64,
     content: String,
 }
 
@@ -1781,7 +1784,7 @@ fn render_timeline(mut timeline: Vec<TimelineEntry>, error: Option<String>) -> S
         return s;
     }
 
-    timeline.sort_by_key(|e| e.timestamp);
+    timeline.sort_by_key(|e| (e.timestamp, e.order));
 
     let mut section = String::from("## Branch History (oldest first)\n");
     if let Some(err) = error {
@@ -1801,6 +1804,8 @@ fn render_timeline(mut timeline: Vec<TimelineEntry>, error: Option<String>) -> S
 /// `\0<unix_ts>\x01<display_text>` per commit.
 fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     let mut entries = Vec::new();
+    // The log is produced with --reverse (oldest-first), so index 0 = oldest.
+    let mut order: i64 = 0;
     for record in output.split('\0') {
         let record = record.trim();
         if record.is_empty() {
@@ -1810,8 +1815,10 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
             if let Ok(ts) = ts_str.trim().parse::<i64>() {
                 entries.push(TimelineEntry {
                     timestamp: ts,
+                    order,
                     content: display.trim().to_string(),
                 });
+                order += 1;
             }
         }
     }
@@ -1968,6 +1975,7 @@ fn note_timeline_entries(
         {
             entries.push(TimelineEntry {
                 timestamp: note.created_at / 1000,
+                order: 0,
                 content,
             });
         }
@@ -2010,6 +2018,7 @@ fn project_note_timeline_entries(
             format_project_note_for_context(&note.id, &note.title, &note.content, workspace_name);
         entries.push(TimelineEntry {
             timestamp: note.created_at / 1000,
+            order: 0,
             content,
         });
     }
@@ -2120,6 +2129,7 @@ fn review_timeline_entries(
 
         entries.push(TimelineEntry {
             timestamp: review_ts_secs,
+            order: 0,
             content,
         });
     }
@@ -2151,6 +2161,7 @@ fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEn
             };
             TimelineEntry {
                 timestamp: img.created_at / 1000,
+                order: 0,
                 content: format!(
                     "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
                     img.filename, img.mime_type, size_label

@@ -123,7 +123,6 @@
 
   $effect(() => {
     let cancelled = false;
-    let unlisten: (() => void) | undefined;
 
     const eventNames = ['worktree-setup-progress', 'workspace-setup-progress'] as const;
     const unlisteners: (() => void)[] = [];

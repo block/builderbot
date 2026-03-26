@@ -1558,11 +1558,6 @@ pub async fn poll_workspace_status(
     })
 }
 
-/// Poll workspace statuses for multiple branches in a single `sq blox ws list` call.
-///
-/// Returns a map from branch ID to `PollWorkspaceResult`. Branches that cannot be
-/// resolved (e.g. missing workspace name, not found in store) are silently omitted
-/// from the result rather than failing the entire batch.
 /// Map a numeric `CommandType` (from the blox orchestrator proto) to a stable
 /// string identifier that the frontend can map to a display label.
 ///
@@ -1586,8 +1581,6 @@ fn bootstrap_command_type_name(command_type: u32) -> &'static str {
 /// for all branches sharing the workspace.
 fn emit_workspace_setup_progress(
     app_handle: &AppHandle,
-    store: &Arc<Store>,
-    ws_name: &str,
     branch_ids: &[String],
     commands: &[blox::WorkspaceCommand],
 ) {
@@ -1607,6 +1600,8 @@ fn emit_workspace_setup_progress(
 
     // Pick the first currently-running command (status 2).  If none are
     // running yet, fall back to the first non-completed command.
+    // Safety: `bootstrap` is non-empty (checked above) and `completed < total`,
+    // so at least one command has status != 3 (completed).
     let current_cmd = bootstrap
         .iter()
         .find(|c| c.status == 2)
@@ -1616,26 +1611,11 @@ fn emit_workspace_setup_progress(
     let phase = bootstrap_command_type_name(current_cmd.command_type);
     let detail = Some(format!("Step {} of {}", completed + 1, total));
 
-    // Collect branch IDs that share this workspace.
-    let peer_branch_ids: Vec<String> = branch_ids
-        .iter()
-        .filter(|bid| {
-            store
-                .get_branch(bid)
-                .ok()
-                .flatten()
-                .and_then(|b| b.workspace_name)
-                .as_deref()
-                == Some(ws_name)
-        })
-        .cloned()
-        .collect();
-
-    for bid in peer_branch_ids {
+    for bid in branch_ids {
         let _ = app_handle.emit(
             "workspace-setup-progress",
             WorktreeSetupProgress {
-                branch_id: bid,
+                branch_id: bid.clone(),
                 phase: phase.to_string(),
                 detail: detail.clone(),
             },
@@ -1643,6 +1623,11 @@ fn emit_workspace_setup_progress(
     }
 }
 
+/// Poll workspace statuses for multiple branches in a single `sq blox ws list` call.
+///
+/// Returns a map from branch ID to `PollWorkspaceResult`. Branches that cannot be
+/// resolved (e.g. missing workspace name, not found in store) are silently omitted
+/// from the result rather than failing the entire batch.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn poll_all_workspace_statuses(
     app_handle: AppHandle,
@@ -1664,9 +1649,9 @@ pub async fn poll_all_workspace_statuses(
     let ws_map: HashMap<String, &blox::WorkspaceListEntry> =
         entries.iter().map(|e| (e.name.clone(), e)).collect();
 
-    // Collect workspace names that are currently in "starting" state so we can
-    // fetch their bootstrap command progress.
-    let mut starting_workspaces: Vec<String> = Vec::new();
+    // Map workspace name → branch IDs for workspaces in "starting" state so we
+    // can fetch their bootstrap command progress and emit events.
+    let mut starting_workspaces: HashMap<String, Vec<String>> = HashMap::new();
 
     let mut results = HashMap::new();
 
@@ -1764,10 +1749,11 @@ pub async fn poll_all_workspace_statuses(
                     .ok();
 
                 // Track workspaces still starting so we can fetch bootstrap progress.
-                if new_status == store::WorkspaceStatus::Starting
-                    && !starting_workspaces.contains(&ws_name.to_string())
-                {
-                    starting_workspaces.push(ws_name.to_string());
+                if new_status == store::WorkspaceStatus::Starting {
+                    starting_workspaces
+                        .entry(ws_name.to_string())
+                        .or_default()
+                        .push(branch_id.clone());
                 }
 
                 results.insert(
@@ -1786,9 +1772,10 @@ pub async fn poll_all_workspace_statuses(
                         branch_id,
                         ws_name
                     );
-                    if !starting_workspaces.contains(&ws_name.to_string()) {
-                        starting_workspaces.push(ws_name.to_string());
-                    }
+                    starting_workspaces
+                        .entry(ws_name.to_string())
+                        .or_default()
+                        .push(branch_id.clone());
                     results.insert(
                         branch_id.clone(),
                         PollWorkspaceResult {
@@ -1821,23 +1808,15 @@ pub async fn poll_all_workspace_statuses(
     // For workspaces that are still starting, fetch bootstrap command progress
     // and emit events so the UI can show which step is running.
     if !starting_workspaces.is_empty() {
-        let branch_ids_owned: Vec<String> = branch_ids.clone();
-        let store_clone = store.clone();
         let app_handle_clone = app_handle.clone();
 
         // Fetch commands for each starting workspace in a blocking task to
         // avoid holding up the response.
         tauri::async_runtime::spawn_blocking(move || {
-            for ws_name in starting_workspaces {
-                match blox::ws_commands(&ws_name) {
+            for (ws_name, branch_ids) in &starting_workspaces {
+                match blox::ws_commands(ws_name) {
                     Ok(cmds) => {
-                        emit_workspace_setup_progress(
-                            &app_handle_clone,
-                            &store_clone,
-                            &ws_name,
-                            &branch_ids_owned,
-                            &cmds,
-                        );
+                        emit_workspace_setup_progress(&app_handle_clone, branch_ids, &cmds);
                     }
                     Err(e) => {
                         log::debug!(

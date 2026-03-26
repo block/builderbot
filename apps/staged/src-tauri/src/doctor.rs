@@ -572,7 +572,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         commands: &["claude-agent-acp"],
         main_command: Some("claude"),
         install_url: Some("https://code.claude.com/docs/en/overview"),
-        install_command: None,
+        install_command: Some("curl -fsSL https://claude.ai/install.sh | bash"),
         bridge_install_url: Some("https://github.com/zed-industries/claude-agent-acp#installation"),
         bridge_fix_command: None,
     },

@@ -132,7 +132,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     .unwrap_or_else(|| "Pending commit".to_string()),
                 author: String::new(),
                 timestamp: dc.created_at / 1000, // convert ms to seconds
-                order: 0, // pending commits have unique ms timestamps; order irrelevant
+                order: 0, // created_at is ms divided by 1000, so two pending commits in the same second could tie; rare in practice since they're created one at a time
                 session_id,
                 session_status,
             });

@@ -352,7 +352,7 @@
         type: 'provisioning',
         title: provisioningLabel,
         secondaryMeta: provisioningDetail ?? undefined,
-        timestamp: 0,
+        timestamp: 0, // only one provisioning item exists, so order is irrelevant
         order: 0,
       });
     }

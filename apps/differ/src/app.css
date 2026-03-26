@@ -24,9 +24,9 @@
   --status-renamed: #58a6ff;
   --status-untracked: #91889b;
 
-  --diff-added-bg: rgba(63, 185, 80, 0.08);
-  --diff-removed-bg: rgba(248, 81, 73, 0.08);
-  --diff-changed-bg: rgba(255, 255, 255, 0.04);
+  --diff-added-bg: rgba(63, 185, 80, 0.15);
+  --diff-removed-bg: rgba(248, 81, 73, 0.15);
+  --diff-changed-bg: rgba(255, 255, 255, 0.08);
   --diff-range-border: #524d58;
   --diff-comment-highlight: rgba(88, 166, 255, 0.5);
 

@@ -20,7 +20,7 @@
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import SplashScreen from './SplashScreen.svelte';
   import { alerts } from '../../shared/alerts.svelte';
-  import { setHasProjects } from './projectsSidebarState.svelte';
+  import { setProjects } from './projectsSidebarState.svelte';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
 
@@ -115,6 +115,7 @@
           commands.listBranchesForProject(projectId),
           commands.listProjectRepos(projectId),
         ]);
+        setProjects(projectsList);
         projects = projectsList;
         branchesByProject = new Map(branchesByProject).set(projectId, branches);
         workspaceLifecycle.enqueueInitialSetup(projectId, branches);
@@ -214,7 +215,7 @@
       const projectList = await commands.listProjects();
       if (generation !== loadGeneration) return;
       projects = projectList;
-      setHasProjects(projectList.length > 0);
+      setProjects(projectList);
       loading = false;
 
       // Seed maps so project sections can render immediately.
@@ -456,7 +457,7 @@
     try {
       await commands.deleteProject(id);
       projects = projects.filter((p) => p.id !== id);
-      setHasProjects(projects.length > 0);
+      setProjects(projects);
       const nextBranches = new Map(branchesByProject);
       nextBranches.delete(id);
       branchesByProject = nextBranches;
@@ -506,6 +507,7 @@
         commands.listBranchesForProject(projectId),
         commands.listProjectRepos(projectId),
       ]);
+      setProjects(projectsList);
       projects = projectsList;
       branchesByProject = new Map(branchesByProject).set(projectId, branches);
       workspaceLifecycle.enqueueInitialSetup(projectId, branches);
@@ -575,6 +577,7 @@
           commands.listBranchesForProject(branch.projectId),
           commands.listProjectRepos(branch.projectId),
         ]);
+        setProjects(projectsList);
         projects = projectsList;
         branchesByProject = new Map(branchesByProject).set(branch.projectId, branches);
         replaceProjectRepos(branch.projectId, repos);

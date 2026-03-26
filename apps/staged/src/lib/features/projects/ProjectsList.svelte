@@ -31,7 +31,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import { setHasProjects } from './projectsSidebarState.svelte';
+  import { setProjects } from './projectsSidebarState.svelte';
 
   let projects = $state<Project[]>([]);
   let projectBranches = $state<Map<string, Branch[]>>(new Map());
@@ -130,7 +130,7 @@
     try {
       const loadedProjects = await commands.listProjects();
       projects = loadedProjects;
-      setHasProjects(loadedProjects.length > 0);
+      setProjects(loadedProjects);
       void hydrateRepos(loadedProjects);
       // Load branches for each project to calculate PR status
       const branchesMap = new Map<string, Branch[]>();

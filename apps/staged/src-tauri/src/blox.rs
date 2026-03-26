@@ -12,11 +12,15 @@ pub fn is_sq_available() -> bool {
 
 /// Start a new Blox workspace.
 ///
-/// Runs: `sq blox ws start <name> [<source>]`
+/// Runs: `sq blox ws start <name> [--idle-timeout <minutes>] [<source>]`
 ///
 /// Returns the workspace name on success.
-pub fn ws_start(name: &str, source: Option<&str>) -> Result<String, BloxError> {
-    blox_cli::ws_start(name, source)
+pub fn ws_start(
+    name: &str,
+    source: Option<&str>,
+    idle_timeout_minutes: Option<u32>,
+) -> Result<String, BloxError> {
+    blox_cli::ws_start(name, source, idle_timeout_minutes)
 }
 
 /// Delete a Blox workspace.

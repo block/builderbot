@@ -1212,7 +1212,13 @@ pub async fn start_workspace(
     match run_blox_blocking({
         let ws_name = ws_name.to_string();
         let source = resolved_source.clone();
-        move || blox::ws_start(&ws_name, source.as_deref(), Some(WORKSPACE_IDLE_TIMEOUT_MINUTES))
+        move || {
+            blox::ws_start(
+                &ws_name,
+                source.as_deref(),
+                Some(WORKSPACE_IDLE_TIMEOUT_MINUTES),
+            )
+        }
     })
     .await
     {

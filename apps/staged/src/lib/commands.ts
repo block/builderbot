@@ -840,6 +840,7 @@ export interface DoctorCheck {
   fixUrl: string | null;
   fixCommand: string | null;
   path: string | null;
+  bridgePath: string | null;
   rawOutput: string | null;
 }
 

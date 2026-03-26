@@ -37,8 +37,10 @@ pub struct DoctorCheck {
     pub fix_url: Option<String>,
     /// If non-None, the UI shows a "Fix" button that runs this shell command.
     pub fix_command: Option<String>,
-    /// If non-None, the resolved path to the executable on disk.
+    /// If non-None, the resolved path to the main executable on disk.
     pub path: Option<String>,
+    /// If non-None, the resolved path to the ACP bridge executable on disk.
+    pub bridge_path: Option<String>,
     /// Raw debug output: command stdout/stderr, search paths tried, etc.
     /// Used by the "Copy details" feature for support diagnostics.
     pub raw_output: Option<String>,
@@ -155,6 +157,7 @@ fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
                 fix_url: Some("https://git-scm.com/downloads".to_string()),
                 fix_command: None,
                 path: None,
+                bridge_path: None,
                 raw_output: Some(format!("{header}\nnot found via resolve_binary\n{search}")),
             };
         }
@@ -177,6 +180,7 @@ fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
                 fix_url: None,
                 fix_command: None,
                 path: Some(path_str),
+                bridge_path: None,
                 raw_output: Some(raw),
             }
         }
@@ -194,6 +198,7 @@ fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
                 fix_url: Some("https://git-scm.com/downloads".to_string()),
                 fix_command: None,
                 path: Some(path_str),
+                bridge_path: None,
                 raw_output: Some(raw),
             }
         }
@@ -205,6 +210,7 @@ fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
             fix_url: Some("https://git-scm.com/downloads".to_string()),
             fix_command: None,
             path: Some(path_str),
+            bridge_path: None,
             raw_output: Some(format!("{header}\n$ git --version\nerror: {e}\n{search}")),
         },
     }
@@ -228,6 +234,7 @@ fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
                 fix_url: Some("https://cli.github.com".to_string()),
                 fix_command: None,
                 path: None,
+                bridge_path: None,
                 raw_output: Some(format!("{header}\nnot found via resolve_binary\n{search}")),
             };
         }
@@ -251,6 +258,7 @@ fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
                 fix_url: None,
                 fix_command: None,
                 path: Some(path_str),
+                bridge_path: None,
                 raw_output: Some(raw),
             }
         }
@@ -268,6 +276,7 @@ fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
                 fix_url: Some("https://cli.github.com".to_string()),
                 fix_command: None,
                 path: Some(path_str),
+                bridge_path: None,
                 raw_output: Some(raw),
             }
         }
@@ -279,6 +288,7 @@ fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
             fix_url: Some("https://cli.github.com".to_string()),
             fix_command: None,
             path: Some(path_str),
+            bridge_path: None,
             raw_output: Some(format!("{header}\n$ gh --version\nerror: {e}\n{search}")),
         },
     }
@@ -304,6 +314,7 @@ fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
                 fix_url: Some("https://cli.github.com".to_string()),
                 fix_command: None,
                 path: None,
+                bridge_path: None,
                 raw_output: Some(format!("{header}\ngh not found via resolve_binary")),
             };
         }
@@ -324,6 +335,7 @@ fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
                     fix_url: None,
                     fix_command: None,
                     path: None,
+                    bridge_path: None,
                     raw_output: Some(raw),
                 }
             } else {
@@ -342,6 +354,7 @@ fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
                     fix_url: Some("https://cli.github.com/manual/gh_auth_login".to_string()),
                     fix_command: None,
                     path: None,
+                    bridge_path: None,
                     raw_output: Some(raw),
                 }
             }
@@ -354,6 +367,7 @@ fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
             fix_url: Some("https://cli.github.com/manual/gh_auth_login".to_string()),
             fix_command: None,
             path: None,
+            bridge_path: None,
             raw_output: Some(format!("{header}\n$ gh auth status\nerror: {e}")),
         },
     }
@@ -378,6 +392,7 @@ fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCheck 
                 fix_url: Some("https://git-lfs.com".to_string()),
                 fix_command: None,
                 path: None,
+                bridge_path: None,
                 raw_output: Some(format!(
                     "{header}\ngit not found via resolve_binary\n{search}"
                 )),
@@ -405,6 +420,7 @@ fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCheck 
                 fix_url: None,
                 fix_command: None,
                 path,
+                bridge_path: None,
                 raw_output: Some(raw),
             }
         }
@@ -422,6 +438,7 @@ fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCheck 
                 fix_url: Some("https://git-lfs.com".to_string()),
                 fix_command: None,
                 path: None,
+                bridge_path: None,
                 raw_output: Some(raw),
             }
         }
@@ -433,6 +450,7 @@ fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCheck 
             fix_url: Some("https://git-lfs.com".to_string()),
             fix_command: None,
             path: None,
+            bridge_path: None,
             raw_output: Some(format!("{header}\n$ git lfs version\nerror: {e}\n{search}")),
         },
     }
@@ -459,6 +477,7 @@ fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                 fix_url: Some("https://git-scm.com/downloads".to_string()),
                 fix_command: None,
                 path: None,
+                bridge_path: None,
                 raw_output: Some(format!("{header}\ngit not found via resolve_binary")),
             };
         }
@@ -485,6 +504,7 @@ fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                     fix_url: None,
                     fix_command: None,
                     path: None,
+                    bridge_path: None,
                     raw_output: Some(raw),
                 }
             } else {
@@ -497,6 +517,7 @@ fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                     fix_url: None,
                     fix_command: Some(fix_cmd),
                     path: None,
+                    bridge_path: None,
                     raw_output: Some(raw),
                 }
             }
@@ -515,6 +536,7 @@ fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                 fix_url: None,
                 fix_command: Some(fix_cmd),
                 path: None,
+                bridge_path: None,
                 raw_output: Some(raw),
             }
         }
@@ -526,6 +548,7 @@ fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
             fix_url: None,
             fix_command: Some(fix_cmd),
             path: None,
+            bridge_path: None,
             raw_output: Some(format!(
                 "{header}\n$ git config --global core.clonefile\nerror: {e}"
             )),
@@ -655,6 +678,7 @@ fn check_single_ai_agent(
                         fix_url: None,
                         fix_command: None,
                         path: resolved_path,
+                        bridge_path: None,
                         raw_output: Some(raw),
                     }
                 }
@@ -673,6 +697,7 @@ fn check_single_ai_agent(
                         fix_url: Some("https://github.com/block/goose".to_string()),
                         fix_command: None,
                         path: resolved_path,
+                        bridge_path: None,
                         raw_output: Some(raw),
                     }
                 }
@@ -684,12 +709,22 @@ fn check_single_ai_agent(
                     fix_url: Some("https://github.com/block/goose".to_string()),
                     fix_command: None,
                     path: resolved_path,
+                    bridge_path: None,
                     raw_output: Some(format!(
                         "{header}\n$ goose acp --help\nerror: {e}\n{search}"
                     )),
                 },
             }
         } else {
+            // For agents with a separate main command, show main path + bridge path.
+            let (main_path, bridge_path) = if info.main_command.is_some() {
+                let main_p = resolved_main
+                    .and_then(|rb| rb.path.as_ref())
+                    .map(|p| p.to_string_lossy().to_string());
+                (main_p, resolved_path)
+            } else {
+                (resolved_path, None)
+            };
             DoctorCheck {
                 id: info.id.to_string(),
                 label: info.label.to_string(),
@@ -697,7 +732,8 @@ fn check_single_ai_agent(
                 message: "Installed".to_string(),
                 fix_url: None,
                 fix_command: None,
-                path: resolved_path,
+                path: main_path,
+                bridge_path,
                 raw_output: Some(format!("{header}\n{search}")),
             }
         }
@@ -721,6 +757,7 @@ fn check_single_ai_agent(
                         .map(|s| s.to_string()),
                     fix_command: info.bridge_install_command.map(|s| s.to_string()),
                     path: Some(main_path.to_string_lossy().to_string()),
+                    bridge_path: None,
                     raw_output: Some(format!("{header}\n{search}\n{main_search}")),
                 };
             }
@@ -738,6 +775,7 @@ fn check_single_ai_agent(
                 fix_url: info.install_url.map(|s| s.to_string()),
                 fix_command: info.install_command.map(|s| s.to_string()),
                 path: None,
+                bridge_path: None,
                 raw_output: Some(format!("{header}\n{search}\n{main_search}")),
             };
         }
@@ -754,6 +792,7 @@ fn check_single_ai_agent(
             fix_url: info.install_url.map(|s| s.to_string()),
             fix_command: info.install_command.map(|s| s.to_string()),
             path: None,
+            bridge_path: None,
             raw_output: Some(format!("{header}\n{search}")),
         }
     }
@@ -773,6 +812,7 @@ fn empty_check(id: &str, label: &str) -> DoctorCheck {
         fix_url: None,
         fix_command: None,
         path: None,
+        bridge_path: None,
         raw_output: None,
     }
 }

@@ -568,8 +568,8 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         label: "Claude Code",
         commands: &["claude-agent-acp"],
         main_command: Some("claude"),
-        install_url: Some("https://docs.anthropic.com/en/docs/claude-code/overview"),
-        bridge_install_url: Some("https://github.com/anthropics/claude-agent-acp#installation"),
+        install_url: Some("https://code.claude.com/docs/en/overview"),
+        bridge_install_url: Some("https://github.com/zed-industries/claude-agent-acp#installation"),
         bridge_fix_command: None,
     },
     AgentCheckInfo {
@@ -577,8 +577,8 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         label: "Codex",
         commands: &["codex-acp"],
         main_command: Some("codex"),
-        install_url: Some("https://github.com/openai/codex#getting-started"),
-        bridge_install_url: Some("https://github.com/openai/codex-acp#installation"),
+        install_url: Some("https://github.com/openai/codex#quickstart"),
+        bridge_install_url: Some("https://github.com/zed-industries/codex-acp#installation"),
         bridge_fix_command: None,
     },
     AgentCheckInfo {

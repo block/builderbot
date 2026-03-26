@@ -173,6 +173,22 @@ describe('Layout', () => {
     });
   });
 
+  it('clears window focus on pagehide', async () => {
+    render(
+      <MemoryRouter>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    act(() => {
+      window.dispatchEvent(new Event('pagehide'));
+    });
+
+    await waitFor(() => {
+      expect(api.clearFocus).toHaveBeenCalledWith({ keepalive: true });
+    });
+  });
+
   it('opens a new tab on SSE navigate event', async () => {
     render(
       <MemoryRouter initialEntries={['/recent']}>

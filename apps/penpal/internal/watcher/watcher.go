@@ -33,6 +33,21 @@ type Event struct {
 	Worktree string    `json:"worktree,omitempty"`
 }
 
+type focusKind string
+
+const (
+	focusKindProject     focusKind = "project"
+	focusKindFile        focusKind = "file"
+	defaultFocusWindowID           = "__default__"
+)
+
+type focusTarget struct {
+	Kind     focusKind
+	Project  string
+	Path     string
+	Worktree string
+}
+
 // Watcher watches for filesystem changes and updates the cache
 type Watcher struct {
 	cache    *cache.Cache
@@ -50,10 +65,11 @@ type Watcher struct {
 	workspacePaths []string
 	discoverFn     func() ([]discovery.Project, error) // called on workspace change
 
-	// Focus tracking: only deep-watch what the user is looking at
-	focusMu      sync.Mutex
-	focusKey     string   // dedup key for the current focus (e.g. "project:X" or "file:X/path")
-	focusWatched []string // paths added for the current focus (for cleanup)
+	// Focus tracking: union deep watches across focused windows/tabs.
+	focusMu        sync.Mutex
+	windowFocuses  map[string]focusTarget
+	baseWatched    map[string]struct{}
+	dynamicWatched map[string]struct{}
 }
 
 // New creates a new watcher
@@ -64,12 +80,15 @@ func New(c *cache.Cache, act *activity.Tracker) (*Watcher, error) {
 	}
 
 	w := &Watcher{
-		cache:    c,
-		activity: act,
-		watcher:  fw,
-		done:     make(chan struct{}),
-		subs:     make(map[chan Event]struct{}),
-		debounce: make(map[string]*time.Timer),
+		cache:          c,
+		activity:       act,
+		watcher:        fw,
+		done:           make(chan struct{}),
+		subs:           make(map[chan Event]struct{}),
+		debounce:       make(map[string]*time.Timer),
+		windowFocuses:  make(map[string]focusTarget),
+		baseWatched:    make(map[string]struct{}),
+		dynamicWatched: make(map[string]struct{}),
 	}
 
 	return w, nil
@@ -82,19 +101,10 @@ func (w *Watcher) Start(workspacePaths []string, discoverFn func() ([]discovery.
 	w.workspacePaths = workspacePaths
 	w.discoverFn = discoverFn
 
-	// Watch all workspace directories for new/removed projects
-	for _, ws := range workspacePaths {
-		if err := w.watcher.Add(ws); err != nil {
-			log.Printf("Warning: could not watch workspace %s: %v", ws, err)
-		}
-	}
-
-	// Watch each project root (shallow — just for detecting new source dirs)
-	for _, p := range w.cache.Projects() {
-		if err := w.watcher.Add(p.Path); err != nil {
-			log.Printf("Warning: could not watch project root %s: %v", p.Path, err)
-		}
-	}
+	w.focusMu.Lock()
+	w.syncBaseWatchesLocked(workspacePaths, w.cache.Projects())
+	w.syncDynamicWatchesLocked()
+	w.focusMu.Unlock()
 
 	go w.loop()
 	return nil
@@ -104,96 +114,90 @@ func (w *Watcher) Start(workspacePaths []string, discoverFn func() ([]discovery.
 // Called after config changes (add/remove workspace or project).
 func (w *Watcher) Refresh(workspacePaths []string, projects []discovery.Project) {
 	w.workspacePaths = workspacePaths
-	for _, ws := range workspacePaths {
-		if err := w.watcher.Add(ws); err != nil {
-			log.Printf("Warning: could not watch workspace %s: %v", ws, err)
-		}
-	}
-	for _, p := range projects {
-		if err := w.watcher.Add(p.Path); err != nil {
-			log.Printf("Warning: could not watch project root %s: %v", p.Path, err)
-		}
-	}
+	w.focusMu.Lock()
+	w.syncBaseWatchesLocked(workspacePaths, projects)
+	w.syncDynamicWatchesLocked()
+	w.focusMu.Unlock()
 }
 
-// FocusProject watches a project's sources and comments directories.
-// Use this when the user is on a ProjectPage.
+// FocusProject watches a project's sources and comments directories using the
+// shared legacy focus slot.
 func (w *Watcher) FocusProject(name string) {
-	key := "project:" + name
-	w.focusMu.Lock()
-	defer w.focusMu.Unlock()
-
-	if w.focusKey == key {
-		return
-	}
-	w.removeFocusWatches()
-	w.focusKey = key
-
-	project := w.cache.FindProject(name)
-	if project == nil {
-		return
-	}
-
-	w.focusWatched = nil
-	w.watchProjectSources(*project)
-	log.Printf("Focus: watching project %s sources (%d dirs)", name, len(w.focusWatched))
+	w.SetWindowFocusProject(defaultFocusWindowID, name)
 }
 
-// FocusFile watches only the directory containing a specific file and its
-// comments directory. Use this when the user is on a FilePage.
+// SetWindowFocusProject watches a project's sources and comments directories
+// for a specific window.
+func (w *Watcher) SetWindowFocusProject(windowID, name string) {
+	w.setWindowFocus(normalizeWindowID(windowID), focusTarget{
+		Kind:    focusKindProject,
+		Project: name,
+	})
+}
+
+// FocusFile watches only the directory containing a specific file using the
+// shared legacy focus slot.
 func (w *Watcher) FocusFile(projectName, filePath, worktree string) {
-	key := "file:" + projectName + "/" + worktree + "/" + filePath
-	w.focusMu.Lock()
-	defer w.focusMu.Unlock()
-
-	if w.focusKey == key {
-		return
-	}
-	w.removeFocusWatches()
-	w.focusKey = key
-
-	project := w.cache.FindProject(projectName)
-	if project == nil {
-		return
-	}
-
-	w.focusWatched = nil
-
-	// Determine the base path (main project or worktree)
-	basePath := project.Path
-	if worktree != "" {
-		for _, wt := range project.Worktrees {
-			if wt.Name == worktree {
-				basePath = wt.Path
-				break
-			}
-		}
-	}
-
-	// Watch only the directory containing the file (for external edits).
-	// Comments are broadcast via the API — no fs watch needed.
-	absFile := filepath.Join(basePath, filePath)
-	fileDir := filepath.Dir(absFile)
-	if info, err := os.Stat(fileDir); err == nil && info.IsDir() {
-		if err := w.watcher.Add(fileDir); err == nil {
-			w.focusWatched = append(w.focusWatched, fileDir)
-		}
-	}
-
-	log.Printf("Focus: watching file %s/%s (%d dirs)", projectName, filePath, len(w.focusWatched))
+	w.SetWindowFocusFile(defaultFocusWindowID, projectName, filePath, worktree)
 }
 
-// ClearFocus removes all deep watches.
+// SetWindowFocusFile watches only the directory containing a specific file for
+// a specific window.
+func (w *Watcher) SetWindowFocusFile(windowID, projectName, filePath, worktree string) {
+	w.setWindowFocus(normalizeWindowID(windowID), focusTarget{
+		Kind:     focusKindFile,
+		Project:  projectName,
+		Path:     filePath,
+		Worktree: worktree,
+	})
+}
+
+// ClearFocus removes all deep watches for legacy callers.
 func (w *Watcher) ClearFocus() {
-	w.focusMu.Lock()
-	defer w.focusMu.Unlock()
-	w.removeFocusWatches()
-	w.focusKey = ""
+	w.ClearAllFocus()
 }
 
-// watchProjectSources adds watches for all sources and comments of a project.
-// Must be called with focusMu held.
-func (w *Watcher) watchProjectSources(p discovery.Project) {
+// ClearWindowFocus removes deep watches for a specific window.
+func (w *Watcher) ClearWindowFocus(windowID string) {
+	windowID = normalizeWindowID(windowID)
+	w.focusMu.Lock()
+	defer w.focusMu.Unlock()
+	if _, ok := w.windowFocuses[windowID]; !ok {
+		return
+	}
+	delete(w.windowFocuses, windowID)
+	w.syncDynamicWatchesLocked()
+}
+
+// ClearAllFocus removes all deep watches across every window.
+func (w *Watcher) ClearAllFocus() {
+	w.focusMu.Lock()
+	defer w.focusMu.Unlock()
+	clear(w.windowFocuses)
+	w.syncDynamicWatchesLocked()
+}
+
+func (w *Watcher) setWindowFocus(windowID string, target focusTarget) {
+	w.focusMu.Lock()
+	defer w.focusMu.Unlock()
+	if current, ok := w.windowFocuses[windowID]; ok && current == target {
+		return
+	}
+	w.windowFocuses[windowID] = target
+	w.syncDynamicWatchesLocked()
+}
+
+func normalizeWindowID(windowID string) string {
+	if windowID == "" {
+		return defaultFocusWindowID
+	}
+	return windowID
+}
+
+// collectProjectWatchDirs returns all directories that should be watched for a
+// project-level focus target.
+func (w *Watcher) collectProjectWatchDirs(p discovery.Project) map[string]struct{} {
+	dirs := make(map[string]struct{})
 	for _, src := range p.Sources {
 		if src.RootPath != "" {
 			stName := src.SourceTypeName
@@ -205,27 +209,25 @@ func (w *Watcher) watchProjectSources(p discovery.Project) {
 			if st != nil {
 				sd = st.SkipDirs
 			}
-			w.walkAndWatch(src.RootPath, sd)
+			collectWalkDirs(src.RootPath, sd, dirs)
 		}
 		// Watch directories containing individually listed files.
 		// Skip the project root — it's already shallow-watched by Start()
 		// and must not be added to focusWatched (removeFocusWatches would
 		// inadvertently drop the baseline watch).
 		for _, f := range src.Files {
-			dir := filepath.Dir(f)
-			if dir == p.Path {
+			dir := filepath.Clean(filepath.Dir(f))
+			if dir == filepath.Clean(p.Path) {
 				continue
 			}
 			if info, err := os.Stat(dir); err == nil && info.IsDir() {
-				if err := w.watcher.Add(dir); err == nil {
-					w.focusWatched = append(w.focusWatched, dir)
-				}
+				dirs[dir] = struct{}{}
 			}
 		}
 	}
 	commentsDir := filepath.Join(p.Path, ".penpal", "comments")
 	if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {
-		w.walkAndWatch(commentsDir, nil)
+		collectWalkDirs(commentsDir, nil, dirs)
 	}
 
 	for _, wt := range p.Worktrees {
@@ -238,7 +240,7 @@ func (w *Watcher) watchProjectSources(p discovery.Project) {
 			}
 			wtSourceDir := filepath.Join(wt.Path, st.AutoDetectDir)
 			if info, err := os.Stat(wtSourceDir); err == nil && info.IsDir() {
-				w.walkAndWatch(wtSourceDir, st.SkipDirs)
+				collectWalkDirs(wtSourceDir, st.SkipDirs, dirs)
 			}
 		}
 		for _, src := range p.Sources {
@@ -260,43 +262,149 @@ func (w *Watcher) watchProjectSources(p discovery.Project) {
 			}
 			wtSourceDir := filepath.Join(wt.Path, rel)
 			if info, err := os.Stat(wtSourceDir); err == nil && info.IsDir() {
-				w.walkAndWatch(wtSourceDir, sd)
+				collectWalkDirs(wtSourceDir, sd, dirs)
 			}
 		}
 		wtCommentsDir := filepath.Join(wt.Path, ".penpal", "comments")
 		if info, err := os.Stat(wtCommentsDir); err == nil && info.IsDir() {
-			w.walkAndWatch(wtCommentsDir, nil)
+			collectWalkDirs(wtCommentsDir, nil, dirs)
 		}
 	}
+	return dirs
 }
 
-// walkAndWatch recursively watches a directory, recording paths for later cleanup.
+// collectFileWatchDirs returns directories that should be watched for a file
+// focus target.
+func (w *Watcher) collectFileWatchDirs(target focusTarget) map[string]struct{} {
+	dirs := make(map[string]struct{})
+	project := w.cache.FindProject(target.Project)
+	if project == nil {
+		return dirs
+	}
+
+	basePath := project.Path
+	if target.Worktree != "" {
+		for _, wt := range project.Worktrees {
+			if wt.Name == target.Worktree {
+				basePath = wt.Path
+				break
+			}
+		}
+	}
+
+	fileDir := filepath.Clean(filepath.Dir(filepath.Join(basePath, target.Path)))
+	if info, err := os.Stat(fileDir); err == nil && info.IsDir() {
+		dirs[fileDir] = struct{}{}
+	}
+	return dirs
+}
+
+// collectWalkDirs recursively collects a directory and all subdirectories.
 // skipDirs is a set of directory names to skip (e.g., ".git", "node_modules").
-// Must be called with focusMu held.
-func (w *Watcher) walkAndWatch(dir string, skipDirs map[string]bool) {
+func collectWalkDirs(dir string, skipDirs map[string]bool, out map[string]struct{}) {
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
 		if info.IsDir() {
-			if skipDirs[info.Name()] {
+			if skipDirs != nil && skipDirs[info.Name()] {
 				return filepath.SkipDir
 			}
-			if err := w.watcher.Add(path); err == nil {
-				w.focusWatched = append(w.focusWatched, path)
-			}
+			out[filepath.Clean(path)] = struct{}{}
 		}
 		return nil
 	})
 }
 
-// removeFocusWatches removes all watches added by addFocusWatch.
-// Must be called with focusMu held.
-func (w *Watcher) removeFocusWatches() {
-	for _, path := range w.focusWatched {
-		w.watcher.Remove(path)
+func (w *Watcher) syncBaseWatchesLocked(workspacePaths []string, projects []discovery.Project) {
+	desired := make(map[string]struct{}, len(workspacePaths)+len(projects))
+	for _, ws := range workspacePaths {
+		desired[filepath.Clean(ws)] = struct{}{}
 	}
-	w.focusWatched = nil
+	for _, p := range projects {
+		desired[filepath.Clean(p.Path)] = struct{}{}
+	}
+
+	for path := range w.baseWatched {
+		if _, ok := desired[path]; ok {
+			continue
+		}
+		delete(w.baseWatched, path)
+		if _, keep := w.dynamicWatched[path]; keep {
+			continue
+		}
+		if err := w.watcher.Remove(path); err != nil {
+			log.Printf("Warning: could not unwatch base path %s: %v", path, err)
+		}
+	}
+
+	for path := range desired {
+		if _, ok := w.baseWatched[path]; ok {
+			continue
+		}
+		if _, alreadyDynamic := w.dynamicWatched[path]; !alreadyDynamic {
+			if err := w.watcher.Add(path); err != nil {
+				log.Printf("Warning: could not watch base path %s: %v", path, err)
+				continue
+			}
+		}
+		w.baseWatched[path] = struct{}{}
+	}
+}
+
+func (w *Watcher) syncDynamicWatchesLocked() {
+	desired := make(map[string]struct{})
+	for _, target := range w.windowFocuses {
+		switch target.Kind {
+		case focusKindProject:
+			project := w.cache.FindProject(target.Project)
+			if project == nil {
+				continue
+			}
+			for path := range w.collectProjectWatchDirs(*project) {
+				desired[path] = struct{}{}
+			}
+		case focusKindFile:
+			for path := range w.collectFileWatchDirs(target) {
+				desired[path] = struct{}{}
+			}
+		}
+	}
+
+	for path := range w.dynamicWatched {
+		if _, ok := desired[path]; ok {
+			continue
+		}
+		delete(w.dynamicWatched, path)
+		if _, keep := w.baseWatched[path]; keep {
+			continue
+		}
+		if err := w.watcher.Remove(path); err != nil {
+			log.Printf("Warning: could not unwatch focused path %s: %v", path, err)
+		}
+	}
+
+	for path := range desired {
+		if _, ok := w.dynamicWatched[path]; ok {
+			continue
+		}
+		if _, alreadyBase := w.baseWatched[path]; !alreadyBase {
+			if err := w.watcher.Add(path); err != nil {
+				log.Printf("Warning: could not watch focused path %s: %v", path, err)
+				continue
+			}
+		}
+		w.dynamicWatched[path] = struct{}{}
+	}
+}
+
+func (w *Watcher) hasProjectFocusLocked(projectName string) bool {
+	for _, target := range w.windowFocuses {
+		if target.Kind == focusKindProject && target.Project == projectName {
+			return true
+		}
+	}
+	return false
 }
 
 // Stop stops the watcher and closes all subscriber channels
@@ -363,21 +471,21 @@ func (w *Watcher) loop() {
 }
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {
-	path := event.Name
+	path := filepath.Clean(event.Name)
 
 	// Check if this is a change in a workspace directory (new/removed project)
-	parentDir := filepath.Dir(path)
+	parentDir := filepath.Clean(filepath.Dir(path))
 	for _, ws := range w.workspacePaths {
-		if parentDir == ws {
+		if parentDir == filepath.Clean(ws) {
 			w.debounceRefresh("workspace:"+ws, func() {
 				if w.discoverFn != nil {
 					projects, err := w.discoverFn()
 					if err == nil {
 						w.cache.RescanWith(projects)
-						// Shallow-watch new project roots
-						for _, p := range projects {
-							w.watcher.Add(p.Path)
-						}
+						w.focusMu.Lock()
+						w.syncBaseWatchesLocked(w.workspacePaths, projects)
+						w.syncDynamicWatchesLocked()
+						w.focusMu.Unlock()
 						w.Broadcast(Event{Type: EventProjectsChanged})
 					}
 				}
@@ -411,15 +519,16 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			}
 			if matched {
 				for _, p := range w.cache.Projects() {
-					if parentDir == p.Path {
+					if parentDir == filepath.Clean(p.Path) {
 						w.debounceRefresh("sources:"+p.QualifiedName(), func() {
 							if w.discoverFn != nil {
 								projects, err := w.discoverFn()
 								if err == nil {
 									w.cache.RescanWith(projects)
-									for _, proj := range projects {
-										w.watcher.Add(proj.Path)
-									}
+									w.focusMu.Lock()
+									w.syncBaseWatchesLocked(w.workspacePaths, projects)
+									w.syncDynamicWatchesLocked()
+									w.focusMu.Unlock()
 									w.Broadcast(Event{Type: EventProjectsChanged})
 								}
 							}
@@ -437,17 +546,22 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// If a new directory was created inside a focused project's sources, watch it
-	if event.Op&fsnotify.Create != 0 {
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			w.focusMu.Lock()
-			if w.focusKey == "project:"+projectName {
-				if err := w.watcher.Add(path); err == nil {
-					w.focusWatched = append(w.focusWatched, path)
-				}
+	// Keep deep watches in sync when a focused directory tree changes.
+	if event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+		w.focusMu.Lock()
+		shouldSync := false
+		if event.Op&fsnotify.Create != 0 && w.hasProjectFocusLocked(projectName) {
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				shouldSync = true
 			}
-			w.focusMu.Unlock()
 		}
+		if !shouldSync {
+			_, shouldSync = w.dynamicWatched[path]
+		}
+		if shouldSync {
+			w.syncDynamicWatchesLocked()
+		}
+		w.focusMu.Unlock()
 	}
 
 	// Handle changes in .penpal/comments/ directories

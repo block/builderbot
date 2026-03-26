@@ -399,14 +399,18 @@ describe('FilePage', () => {
     vi.mocked(api.getAgentStatus).mockClear();
     vi.mocked(api.getThreads).mockClear();
     vi.mocked(api.getRawFile).mockClear();
+    vi.mocked(api.getProjectFiles).mockClear();
+    vi.mocked(api.focusFile).mockClear();
     act(() => {
       onReconnect!();
     });
 
     await waitFor(() => {
+      expect(api.focusFile).toHaveBeenCalledWith('ws/proj', 'thoughts/plan.md', undefined);
       expect(api.getRawFile).toHaveBeenCalledTimes(1);
       expect(api.getAgentStatus).toHaveBeenCalledTimes(1);
       expect(api.getThreads).toHaveBeenCalledTimes(1);
+      expect(api.getProjectFiles).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -450,12 +454,14 @@ describe('FilePage', () => {
 
     // Simulate a 'files' SSE event for our project
     vi.mocked(api.getRawFile).mockClear();
+    vi.mocked(api.getProjectFiles).mockClear();
     act(() => {
       onEvent!({ type: 'files', project: 'ws/proj' });
     });
 
     await waitFor(() => {
       expect(api.getRawFile).toHaveBeenCalledTimes(1);
+      expect(api.getProjectFiles).toHaveBeenCalledTimes(1);
     });
   });
 });

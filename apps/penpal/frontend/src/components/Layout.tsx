@@ -73,10 +73,47 @@ export default function Layout() {
     }).catch(() => {});
   }, []);
 
+  const clearWindowFocusOnClose = useCallback(
+    (options?: RequestInit) => api.clearFocus(options).catch(() => {}),
+    [],
+  );
+
   useEffect(() => {
     refreshProjects();
     refreshReviewCount();
   }, [refreshProjects, refreshReviewCount]);
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      clearWindowFocusOnClose({ keepalive: true });
+    };
+
+    window.addEventListener('pagehide', handlePageHide);
+
+    let cancelled = false;
+    let unlistenCloseRequested: (() => void) | undefined;
+
+    if (isDesktopApp) {
+      import('@tauri-apps/api/window')
+        .then(({ getCurrentWindow }) => getCurrentWindow().onCloseRequested(async () => {
+          await clearWindowFocusOnClose();
+        }))
+        .then((unlisten) => {
+          if (cancelled) {
+            unlisten();
+            return;
+          }
+          unlistenCloseRequested = unlisten;
+        })
+        .catch(() => {});
+    }
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('pagehide', handlePageHide);
+      unlistenCloseRequested?.();
+    };
+  }, [clearWindowFocusOnClose]);
 
   const debouncedRefreshProjects = useCallback(
     () => debounce(refreshProjects, 200)(),
@@ -164,6 +201,7 @@ export default function Layout() {
     async function handleCloseTab() {
       if (tabs.length <= 1) {
         // Last tab — close the window
+        await clearWindowFocusOnClose();
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         getCurrentWindow().close();
       } else {
@@ -204,7 +242,7 @@ export default function Layout() {
       window.removeEventListener('menu-go-back', goBack);
       window.removeEventListener('menu-go-forward', goForward);
     };
-  }, [activeTabId, closeTab, openTab, activateTab, tabs, workspaces, standaloneProjects, goBack, goForward]);
+  }, [activeTabId, clearWindowFocusOnClose, closeTab, openTab, activateTab, tabs, workspaces, standaloneProjects, goBack, goForward]);
 
   // Listen for find bar toggle (Tauri menu event only — in browser, native Cmd+F works)
   useEffect(() => {

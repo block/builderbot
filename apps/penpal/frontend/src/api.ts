@@ -21,6 +21,11 @@ export const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export const isDesktopApp = typeof window !== 'undefined' && '__TAURI__' in window;
 
+const WINDOW_FOCUS_KEY = 'penpal-window-focus-id';
+let inMemoryWindowFocusID: string | null = null;
+let resolvedWindowFocusID: string | null = null;
+let windowFocusIDPromise: Promise<string> | null = null;
+
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -40,6 +45,54 @@ async function apiVoid(path: string, options?: RequestInit): Promise<void> {
 
 function wtParam(worktree?: string): string {
   return worktree ? `&worktree=${encodeURIComponent(worktree)}` : '';
+}
+
+function generateWindowFocusID(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `win-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function getBrowserWindowFocusID(): string {
+  if (resolvedWindowFocusID) return resolvedWindowFocusID;
+  try {
+    const existing = window.sessionStorage.getItem(WINDOW_FOCUS_KEY);
+    if (existing) {
+      resolvedWindowFocusID = existing;
+      return existing;
+    }
+    const generated = generateWindowFocusID();
+    window.sessionStorage.setItem(WINDOW_FOCUS_KEY, generated);
+    resolvedWindowFocusID = generated;
+    return generated;
+  } catch {
+    if (!inMemoryWindowFocusID) inMemoryWindowFocusID = generateWindowFocusID();
+    resolvedWindowFocusID = inMemoryWindowFocusID;
+    return inMemoryWindowFocusID;
+  }
+}
+
+async function getWindowFocusID(): Promise<string> {
+  if (resolvedWindowFocusID) return resolvedWindowFocusID;
+  if (typeof window === 'undefined') {
+    resolvedWindowFocusID = generateWindowFocusID();
+    return resolvedWindowFocusID;
+  }
+  if (!isDesktopApp) return getBrowserWindowFocusID();
+  if (!windowFocusIDPromise) {
+    windowFocusIDPromise = import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) => {
+        const label = getCurrentWindow().label || generateWindowFocusID();
+        resolvedWindowFocusID = label;
+        return label;
+      })
+      .catch(() => getBrowserWindowFocusID());
+  }
+  return windowFocusIDPromise;
+}
+
+async function focusWindowParam(): Promise<string> {
+  return `window=${encodeURIComponent(await getWindowFocusID())}`;
 }
 
 export const api = {
@@ -153,12 +206,12 @@ export const api = {
     }),
 
   // Focus (tells server what to deep-watch for the current view)
-  focusProject: (project: string) =>
-    apiVoid(`/api/focus?project=${encodeURIComponent(project)}`, { method: 'POST' }),
-  focusFile: (project: string, path: string, worktree?: string) =>
-    apiVoid(`/api/focus?project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}${wtParam(worktree)}`, { method: 'POST' }),
-  clearFocus: () =>
-    apiVoid('/api/focus', { method: 'DELETE' }),
+  focusProject: async (project: string) =>
+    apiVoid(`/api/focus?${await focusWindowParam()}&project=${encodeURIComponent(project)}`, { method: 'POST' }),
+  focusFile: async (project: string, path: string, worktree?: string) =>
+    apiVoid(`/api/focus?${await focusWindowParam()}&project=${encodeURIComponent(project)}&path=${encodeURIComponent(path)}${wtParam(worktree)}`, { method: 'POST' }),
+  clearFocus: async (options?: RequestInit) =>
+    apiVoid(`/api/focus?${await focusWindowParam()}`, { method: 'DELETE', ...options }),
 
   // Misc
   open: (path: string) =>

@@ -742,15 +742,9 @@
           {onRename}
           onNoteCreated={() => loadTimeline()}
           onRebaseBranch={() =>
-            sessionMgr.startBranchSessionWithPendingItem(
-              'commit',
-              'Rebase this branch. Do not push the branch.'
-            )}
+            sessionMgr.startOrQueueSession('commit', 'Rebase this branch. Do not push the branch.')}
           onCollapseCommits={() =>
-            sessionMgr.startBranchSessionWithPendingItem(
-              'commit',
-              "Collapse this branch's commits"
-            )}
+            sessionMgr.startOrQueueSession('commit', "Collapse this branch's commits")}
           newCommitDisabled={sessionMgr.isNewSessionDisabled}
           {commitCount}
         />

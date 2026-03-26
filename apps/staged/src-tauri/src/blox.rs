@@ -3,7 +3,7 @@
 //! Thin wrappers around shared `blox-cli` helpers so existing Staged code can
 //! keep using `crate::blox::*`.
 
-pub use blox_cli::{BloxError, WorkspaceInfo, WorkspaceListEntry};
+pub use blox_cli::{BloxError, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry};
 
 /// Check whether the `sq` CLI is available on this system.
 pub fn is_sq_available() -> bool {
@@ -63,6 +63,13 @@ pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
 /// `Err(BloxError::NotAuthenticated)` if the CLI reports an auth failure.
 pub fn check_auth() -> Result<(), BloxError> {
     blox_cli::check_auth()
+}
+
+/// List bootstrap commands for a Blox workspace.
+///
+/// Runs: `sq blox ws commands <name> --json`
+pub fn ws_commands(name: &str) -> Result<Vec<WorkspaceCommand>, BloxError> {
+    blox_cli::ws_commands(name)
 }
 
 /// Resume a suspended Blox workspace.

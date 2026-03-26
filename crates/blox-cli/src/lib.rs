@@ -412,6 +412,28 @@ pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
     run_bytes(&full_args, EXEC_TIMEOUT)
 }
 
+/// A bootstrap command returned by `sq blox ws commands <name> --json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceCommand {
+    pub command_id: String,
+    pub command_type: u32,
+    pub status: u32, // 1=pending, 2=running, 3=completed
+    pub is_bootstrap: bool,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    /// Catch-all for any other fields the CLI returns.
+    #[serde(flatten)]
+    pub extra: serde_json::Value,
+}
+
+/// List bootstrap commands for a Blox workspace.
+///
+/// Runs: `sq blox ws commands <name> --json`
+pub fn ws_commands(name: &str) -> Result<Vec<WorkspaceCommand>, BloxError> {
+    let stdout = run(&["ws", "commands", name, "--json"], QUICK_TIMEOUT)?;
+    serde_json::from_str(&stdout).map_err(|e| BloxError::ParseError(format!("{e}\nRaw: {stdout}")))
+}
+
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.
 ///
 /// Returns `Ok(())` if the user appears to be authenticated, or

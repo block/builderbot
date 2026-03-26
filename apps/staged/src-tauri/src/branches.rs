@@ -1563,8 +1563,99 @@ pub async fn poll_workspace_status(
 /// Returns a map from branch ID to `PollWorkspaceResult`. Branches that cannot be
 /// resolved (e.g. missing workspace name, not found in store) are silently omitted
 /// from the result rather than failing the entire batch.
+/// Best-effort label for a bootstrap command type.
+///
+/// These numeric types are undocumented in the blox-cli crate, so we map the
+/// ones we've observed and fall back to a generic label for anything new.
+/// Display order is chosen so that cloning (type 1) sorts last — it tends to
+/// be the longest step for most users.
+fn bootstrap_phase_label(command_type: u32) -> &'static str {
+    match command_type {
+        4 => "Starting services…",
+        3 => "Running setup…",
+        1 => "Cloning repository…",
+        _ => "Setting up…",
+    }
+}
+
+/// Sort key for bootstrap command types so that cloning (type 1) is displayed
+/// as the final step.  Lower values sort first.
+fn bootstrap_sort_order(command_type: u32) -> u32 {
+    match command_type {
+        4 => 0, // services first
+        3 => 1, // setup second
+        1 => 2, // cloning last
+        _ => 1, // unknown types slot in the middle
+    }
+}
+
+/// Derive workspace setup progress from bootstrap commands and emit events
+/// for all branches sharing the workspace.
+fn emit_workspace_setup_progress(
+    app_handle: &AppHandle,
+    store: &Arc<Store>,
+    ws_name: &str,
+    branch_ids: &[String],
+    commands: &[blox::WorkspaceCommand],
+) {
+    let bootstrap: Vec<&blox::WorkspaceCommand> =
+        commands.iter().filter(|c| c.is_bootstrap).collect();
+    if bootstrap.is_empty() {
+        return;
+    }
+
+    let total = bootstrap.len();
+    let completed = bootstrap.iter().filter(|c| c.status == 3).count();
+
+    // All done — workspace will transition to running, no need to emit.
+    if completed == total {
+        return;
+    }
+
+    // Sort bootstrap commands by display order to assign step numbers.
+    let mut sorted: Vec<&blox::WorkspaceCommand> = bootstrap.clone();
+    sorted.sort_by_key(|c| (bootstrap_sort_order(c.command_type), c.command_id.clone()));
+
+    // Find the step number of the first non-completed command in display order.
+    let (step_index, current_cmd) = sorted
+        .iter()
+        .enumerate()
+        .find(|(_, c)| c.status != 3)
+        .unwrap_or((completed, sorted.last().unwrap()));
+
+    let phase = bootstrap_phase_label(current_cmd.command_type);
+    let detail = Some(format!("Step {} of {}", step_index + 1, total));
+
+    // Collect branch IDs that share this workspace.
+    let peer_branch_ids: Vec<String> = branch_ids
+        .iter()
+        .filter(|bid| {
+            store
+                .get_branch(bid)
+                .ok()
+                .flatten()
+                .and_then(|b| b.workspace_name)
+                .as_deref()
+                == Some(ws_name)
+        })
+        .cloned()
+        .collect();
+
+    for bid in peer_branch_ids {
+        let _ = app_handle.emit(
+            "workspace-setup-progress",
+            WorktreeSetupProgress {
+                branch_id: bid,
+                phase: phase.to_string(),
+                detail: detail.clone(),
+            },
+        );
+    }
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn poll_all_workspace_statuses(
+    app_handle: AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_ids: Vec<String>,
 ) -> Result<HashMap<String, PollWorkspaceResult>, String> {
@@ -1582,6 +1673,10 @@ pub async fn poll_all_workspace_statuses(
     // Build a lookup from workspace name → list entry.
     let ws_map: HashMap<String, &blox::WorkspaceListEntry> =
         entries.iter().map(|e| (e.name.clone(), e)).collect();
+
+    // Collect workspace names that are currently in "starting" state so we can
+    // fetch their bootstrap command progress.
+    let mut starting_workspaces: Vec<String> = Vec::new();
 
     let mut results = HashMap::new();
 
@@ -1678,6 +1773,13 @@ pub async fn poll_all_workspace_statuses(
                     .update_branch_workspace_status(branch_id, &new_status)
                     .ok();
 
+                // Track workspaces still starting so we can fetch bootstrap progress.
+                if new_status == store::WorkspaceStatus::Starting
+                    && !starting_workspaces.contains(&ws_name.to_string())
+                {
+                    starting_workspaces.push(ws_name.to_string());
+                }
+
                 results.insert(
                     branch_id.clone(),
                     PollWorkspaceResult {
@@ -1694,6 +1796,9 @@ pub async fn poll_all_workspace_statuses(
                         branch_id,
                         ws_name
                     );
+                    if !starting_workspaces.contains(&ws_name.to_string()) {
+                        starting_workspaces.push(ws_name.to_string());
+                    }
                     results.insert(
                         branch_id.clone(),
                         PollWorkspaceResult {
@@ -1721,6 +1826,39 @@ pub async fn poll_all_workspace_statuses(
                 // Other statuses (Stopped, Error, etc.) — omit from results, no change needed.
             }
         }
+    }
+
+    // For workspaces that are still starting, fetch bootstrap command progress
+    // and emit events so the UI can show which step is running.
+    if !starting_workspaces.is_empty() {
+        let branch_ids_owned: Vec<String> = branch_ids.clone();
+        let store_clone = store.clone();
+        let app_handle_clone = app_handle.clone();
+
+        // Fetch commands for each starting workspace in a blocking task to
+        // avoid holding up the response.
+        tauri::async_runtime::spawn_blocking(move || {
+            for ws_name in starting_workspaces {
+                match blox::ws_commands(&ws_name) {
+                    Ok(cmds) => {
+                        emit_workspace_setup_progress(
+                            &app_handle_clone,
+                            &store_clone,
+                            &ws_name,
+                            &branch_ids_owned,
+                            &cmds,
+                        );
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "[poll_all_workspace_statuses] ws_commands({}) failed: {}",
+                            ws_name,
+                            e
+                        );
+                    }
+                }
+            }
+        });
     }
 
     Ok(results)

@@ -19,9 +19,10 @@
   interface Props {
     onSelect: (selection: RepoSelection) => void;
     disabled?: boolean;
+    excludeRepos?: Set<string>;
   }
 
-  let { onSelect, disabled = false }: Props = $props();
+  let { onSelect, disabled = false, excludeRepos = new Set() }: Props = $props();
 
   let recentRepos = $state<RecentRepo[]>([]);
   let repos = $state<GitHubRepo[]>([]);
@@ -66,13 +67,13 @@
     const seen = new Set<string>();
     const result: Array<{ type: 'recent' | 'repo'; data: RecentRepo | GitHubRepo }> = [];
 
-    if (directFetchRepo) {
+    if (directFetchRepo && !excludeRepos.has(directFetchRepo.nameWithOwner)) {
       result.push({ type: 'repo', data: directFetchRepo });
       seen.add(directFetchRepo.nameWithOwner);
     }
 
     for (const r of searchResults) {
-      if (!seen.has(r.nameWithOwner)) {
+      if (!seen.has(r.nameWithOwner) && !excludeRepos.has(r.nameWithOwner)) {
         result.push({ type: 'repo', data: r });
         seen.add(r.nameWithOwner);
       }
@@ -88,7 +89,7 @@
       : repos;
 
     for (const r of filtered) {
-      if (!seen.has(r.nameWithOwner)) {
+      if (!seen.has(r.nameWithOwner) && !excludeRepos.has(r.nameWithOwner)) {
         result.push({ type: 'repo', data: r });
         seen.add(r.nameWithOwner);
       }
@@ -99,7 +100,8 @@
 
   let filteredRecentRepos = $derived.by(() => {
     const q = query.toLowerCase().trim();
-    return q ? recentRepos.filter((r) => r.githubRepo.toLowerCase().includes(q)) : recentRepos;
+    const base = recentRepos.filter((r) => !excludeRepos.has(r.githubRepo));
+    return q ? base.filter((r) => r.githubRepo.toLowerCase().includes(q)) : base;
   });
 
   onMount(async () => {

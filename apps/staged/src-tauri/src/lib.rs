@@ -1052,9 +1052,52 @@ fn delete_action_context(
     context_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+
+    // Look up the context before deleting so we can clean up the clone directory.
+    let context = store
+        .get_action_context(&context_id)
+        .map_err(|e| e.to_string())?;
+
     store
         .delete_action_context(&context_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Clean up the git clone directory if no other action contexts reference the same repo.
+    // This runs on a background thread so the UI isn't blocked by large repo deletions.
+    if let Some(ctx) = context {
+        let remaining = store
+            .count_action_contexts_for_repo(&ctx.github_repo)
+            .unwrap_or(1);
+        if remaining == 0 {
+            if let Some(clone_path) = crate::paths::clone_path_for(&ctx.github_repo) {
+                std::thread::spawn(move || {
+                    if clone_path.exists() {
+                        // Rename to a temporary path first so that concurrent filesystem
+                        // activity (e.g. Spotlight indexing) doesn't cause "Directory not
+                        // empty" errors during removal.
+                        let trash_path = clone_path.with_extension("deleting");
+                        let target = if std::fs::rename(&clone_path, &trash_path).is_ok() {
+                            trash_path
+                        } else {
+                            clone_path.clone()
+                        };
+                        if let Err(e) = std::fs::remove_dir_all(&target) {
+                            log::warn!(
+                                "Failed to remove clone directory {}: {e}",
+                                target.display()
+                            );
+                        }
+                    }
+                    // Try to remove the parent owner directory if it's now empty.
+                    if let Some(parent) = clone_path.parent() {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // =============================================================================

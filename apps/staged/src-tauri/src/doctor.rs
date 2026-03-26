@@ -584,7 +584,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         install_url: Some("https://github.com/openai/codex#quickstart"),
         install_command: Some("brew install --cask codex"),
         bridge_install_url: Some("https://github.com/zed-industries/codex-acp#installation"),
-        bridge_install_command: None,
+        bridge_install_command: Some("npm install -g @zed-industries/codex-acp"),
     },
     AgentCheckInfo {
         id: "ai-agent-pi",

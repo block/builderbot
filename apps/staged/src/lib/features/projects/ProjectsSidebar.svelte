@@ -68,6 +68,15 @@
     window.dispatchEvent(new CustomEvent('staged:new-project'));
   }
 
+  function scrollIfActive(node: HTMLElement, active: boolean) {
+    if (active) node.scrollIntoView({ block: 'nearest' });
+    return {
+      update(active: boolean) {
+        if (active) node.scrollIntoView({ block: 'nearest' });
+      },
+    };
+  }
+
   function repoCountForProject(project: Project): number {
     return repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0);
   }
@@ -237,6 +246,7 @@
               {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
               <button
                 class="project-row"
+                use:scrollIfActive={navigation.selectedProjectId === project.id}
                 class:active={navigation.selectedProjectId === project.id}
                 class:deleting={status.kind === 'deleting'}
                 onclick={() => openProject(project.id)}

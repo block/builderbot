@@ -37,11 +37,12 @@ pub(crate) async fn add_project_repo_impl(
         .list_project_repos(&project_id)
         .map_err(|e| e.to_string())?;
     let repo_already_attached = existing_repos.iter().any(|r| r.github_repo == github_repo);
-    if repo_already_attached {
-        if let Some(sub) = &subpath {
-            let suffix = sub.replace('/', "-");
-            resolved_branch_name = format!("{resolved_branch_name}-{suffix}");
-        }
+    if repo_already_attached && branch_name.is_none() {
+        let suffix = match &subpath {
+            Some(sub) => sub.trim_matches('/').replace('/', "-"),
+            None => "root".to_owned(),
+        };
+        resolved_branch_name = format!("{resolved_branch_name}-{suffix}");
     }
     // Validate that the subpath exists as a directory in the repo before
     // creating anything. This prevents repos being added with invalid

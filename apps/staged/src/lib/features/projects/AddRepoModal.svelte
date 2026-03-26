@@ -156,7 +156,7 @@
                 <span>Adding...</span>
               </span>
             {:else}
-              Add Repository
+              Add
             {/if}
           </FormButton>
         </div>

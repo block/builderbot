@@ -115,6 +115,7 @@
           commands.listBranchesForProject(projectId),
           commands.listProjectRepos(projectId),
         ]);
+        setProjects(projectsList);
         projects = projectsList;
         branchesByProject = new Map(branchesByProject).set(projectId, branches);
         workspaceLifecycle.enqueueInitialSetup(projectId, branches);
@@ -506,6 +507,7 @@
         commands.listBranchesForProject(projectId),
         commands.listProjectRepos(projectId),
       ]);
+      setProjects(projectsList);
       projects = projectsList;
       branchesByProject = new Map(branchesByProject).set(projectId, branches);
       workspaceLifecycle.enqueueInitialSetup(projectId, branches);
@@ -575,6 +577,7 @@
           commands.listBranchesForProject(branch.projectId),
           commands.listProjectRepos(branch.projectId),
         ]);
+        setProjects(projectsList);
         projects = projectsList;
         branchesByProject = new Map(branchesByProject).set(branch.projectId, branches);
         replaceProjectRepos(branch.projectId, repos);

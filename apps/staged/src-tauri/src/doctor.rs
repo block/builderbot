@@ -602,7 +602,7 @@ const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         commands: &["amp-acp"],
         main_command: Some("amp"),
         install_url: Some("https://ampcode.com"),
-        install_command: None,
+        install_command: Some("curl -fsSL https://ampcode.com/install.sh | bash"),
         bridge_install_url: None,
         bridge_install_command: Some("npm install -g amp-acp"),
     },

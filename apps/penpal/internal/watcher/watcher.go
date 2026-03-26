@@ -211,19 +211,19 @@ func (w *Watcher) collectProjectWatchDirs(p discovery.Project) map[string]struct
 			}
 			collectWalkDirs(src.RootPath, sd, dirs)
 		}
-			// Watch directories containing individually listed files.
-			// Skip the project root — it's already shallow-watched by Start()
-			// and must not be added to focusWatched (removeFocusWatches would
-			// inadvertently drop the baseline watch).
-			for _, f := range src.Files {
-				dir := filepath.Clean(filepath.Dir(f))
-				if dir == filepath.Clean(p.Path) {
-					continue
-				}
-				if info, err := os.Stat(dir); err == nil && info.IsDir() {
-					dirs[dir] = struct{}{}
-				}
+		// Watch directories containing individually listed files.
+		// Skip the project root — it's already shallow-watched by Start()
+		// and must not be added to focusWatched (removeFocusWatches would
+		// inadvertently drop the baseline watch).
+		for _, f := range src.Files {
+			dir := filepath.Clean(filepath.Dir(f))
+			if dir == filepath.Clean(p.Path) {
+				continue
 			}
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				dirs[dir] = struct{}{}
+			}
+		}
 	}
 	commentsDir := filepath.Join(p.Path, ".penpal", "comments")
 	if info, err := os.Stat(commentsDir); err == nil && info.IsDir() {

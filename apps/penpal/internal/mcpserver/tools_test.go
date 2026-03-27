@@ -453,6 +453,69 @@ func TestReply_ClearsWorkingIndicator(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-WORKING: verifies reply sets InReplyTo and WorkingStartedAt from working entry.
+func TestReply_SetsInReplyToAndWorkingStartedAt(t *testing.T) {
+	env, cleanup := setup(t)
+	defer cleanup()
+
+	thread := createTestThread(t, env, "thoughts/reply-order.md", "Please review")
+	origCommentID := thread.Comments[0].ID
+
+	// Agent reads the thread — sets working indicator with afterCommentID
+	callTool(t, env, "penpal_read_thread", map[string]any{
+		"project":  env.projName,
+		"path":     "thoughts/reply-order.md",
+		"threadId": thread.ID,
+	})
+
+	// Verify working entry stores the afterCommentID
+	afterID := env.store.WorkingAfterCommentID(env.projName, "thoughts/reply-order.md", thread.ID)
+	if afterID != origCommentID {
+		t.Fatalf("afterCommentID = %q, want %q", afterID, origCommentID)
+	}
+
+	// Human adds a new comment while agent is working
+	env.store.AddComment(env.projName, "thoughts/reply-order.md", thread.ID,
+		comments.Comment{Author: "human", Role: "human", Body: "Also check this"})
+
+	// Agent replies
+	text := callTool(t, env, "penpal_reply", map[string]any{
+		"project":  env.projName,
+		"path":     "thoughts/reply-order.md",
+		"threadId": thread.ID,
+		"body":     "Looks good",
+	})
+
+	var result comments.Thread
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(result.Comments) != 3 {
+		t.Fatalf("comments = %d, want 3", len(result.Comments))
+	}
+
+	agentReply := result.Comments[2] // last added
+	if agentReply.InReplyTo != origCommentID {
+		t.Errorf("agent reply InReplyTo = %q, want %q (original comment)", agentReply.InReplyTo, origCommentID)
+	}
+	if agentReply.WorkingStartedAt == nil {
+		t.Fatal("agent reply WorkingStartedAt should be set")
+	}
+
+	// Verify ordering: agent reply should come before the human's new comment
+	ordered := comments.OrderComments(result.Comments)
+	if len(ordered) != 3 {
+		t.Fatalf("ordered = %d, want 3", len(ordered))
+	}
+	// root (human), agent-reply (workingStartedAt), human-new (createdAt after agent started)
+	if ordered[1].Role != "agent" {
+		t.Errorf("ordered[1].Role = %q, want agent (reply should come before human's new comment)", ordered[1].Role)
+	}
+	if ordered[2].Body != "Also check this" {
+		t.Errorf("ordered[2].Body = %q, want 'Also check this' (human's new comment should be last)", ordered[2].Body)
+	}
+}
+
 // E-PENPAL-MCP-WORKING: verifies no oldest pending when agent already replied.
 func TestFilesInReview_NoOldestPendingWhenAgentReplied(t *testing.T) {
 	env, cleanup := setup(t)

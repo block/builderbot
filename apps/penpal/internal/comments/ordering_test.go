@@ -126,3 +126,37 @@ func TestOrderComments_SiblingSortByTime(t *testing.T) {
 	result := OrderComments(cs)
 	assertOrder(t, result, []string{"a", "b", "c", "d"})
 }
+
+// E-PENPAL-COMMENT-ORDER: verifies WorkingStartedAt is used as effective time for sibling sort.
+// Scenario: agent starts working at T1, human adds comment at T2, agent replies at T3.
+// Agent reply should appear before human's comment because WorkingStartedAt (T1) < CreatedAt (T2).
+func TestOrderComments_WorkingStartedAtAffectsSiblingOrder(t *testing.T) {
+	t1 := time.Date(2025, 1, 1, 0, 0, 1, 0, time.UTC) // agent started working
+	t2 := time.Date(2025, 1, 1, 0, 0, 2, 0, time.UTC) // human added comment
+	t3 := time.Date(2025, 1, 1, 0, 0, 3, 0, time.UTC) // agent replied
+
+	cs := []Comment{
+		makeComment("root", "", 0),
+		makeComment("human-orig", "root", 1), // original human comment
+		{ID: "human-new", InReplyTo: "human-orig", CreatedAt: t2, // new comment added while agent was working
+			Author: "user", Role: "human", Body: "followup"},
+		{ID: "agent-reply", InReplyTo: "human-orig", CreatedAt: t3, // agent reply posted later
+			Author: "claude", Role: "agent", Body: "done",
+			WorkingStartedAt: &t1}, // but started working at t1
+	}
+
+	result := OrderComments(cs)
+	// agent-reply should come before human-new because t1 < t2
+	assertOrder(t, result, []string{"root", "human-orig", "agent-reply", "human-new"})
+}
+
+// E-PENPAL-COMMENT-ORDER: verifies comments without WorkingStartedAt still sort by CreatedAt.
+func TestOrderComments_WorkingStartedAtNilFallsBackToCreatedAt(t *testing.T) {
+	cs := []Comment{
+		makeComment("a", "", 1),
+		makeComment("c", "a", 3), // later
+		makeComment("b", "a", 2), // earlier
+	}
+	result := OrderComments(cs)
+	assertOrder(t, result, []string{"a", "b", "c"})
+}

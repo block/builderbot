@@ -184,7 +184,7 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-SUGGESTED-REPLIES"></a>**P-PENPAL-SUGGESTED-REPLIES**: When the last comment in a thread is from an agent and includes suggested replies, clickable pill buttons appear. Clicking a pill submits that text as a human reply.
 
-- <a id="P-PENPAL-WORKING"></a>**P-PENPAL-WORKING**: A pulsing dot animation shows when an agent has read a thread and is composing a reply.
+- <a id="P-PENPAL-WORKING"></a>**P-PENPAL-WORKING**: A pulsing dot animation shows when an agent has read a thread and is composing a reply. The dot appears after the specific comment the agent is responding to, not at the end of the thread. If a human adds a new comment while the agent is working, the dot stays in place. When the agent replies, its response is ordered after the comment it was replying to (before any comments added while it was working).
 
 ---
 

@@ -421,24 +421,48 @@ function ThreadCard({
         <div className="orphaned-warning">Anchor text not found in document</div>
       )}
 
-      {/* Comments */}
+      {/* Comments with inline working indicator */}
       {ordered.map((c, i) => (
-        <div key={c.id} className="thread-comment" id={`comment-${c.id}`}>
-          {c.inReplyTo && byId[c.inReplyTo] && i > 0 && ordered[i - 1].id !== c.inReplyTo && (
-            <div className="comment-reply-marker">
-              in reply to @{byId[c.inReplyTo].author}
+        <div key={c.id}>
+          <div className="thread-comment" id={`comment-${c.id}`}>
+            {c.inReplyTo && byId[c.inReplyTo] && i > 0 && ordered[i - 1].id !== c.inReplyTo && (
+              <div className="comment-reply-marker">
+                in reply to @{byId[c.inReplyTo].author}
+              </div>
+            )}
+            <div className="comment-header">
+              <span className="comment-author">{c.author}</span>
+              {c.role && <span className={`comment-role ${c.role}`}>{c.role}</span>}
+              <span className="comment-time">{formatTime(c.createdAt)}</span>
+            </div>
+            <div className="comment-body">
+              <CommentBody text={c.body} />
+            </div>
+          </div>
+          {/* E-PENPAL-WORKING: render indicator after the specific comment the agent is responding to */}
+          {thread.agentWorking && thread.workingAfterCommentId === c.id && (
+            <div className="thread-working">
+              <span className="agent-dot" />
+              <span className="working-dots">
+                <span>.</span>
+                <span>.</span>
+                <span>.</span>
+              </span>
             </div>
           )}
-          <div className="comment-header">
-            <span className="comment-author">{c.author}</span>
-            {c.role && <span className={`comment-role ${c.role}`}>{c.role}</span>}
-            <span className="comment-time">{formatTime(c.createdAt)}</span>
-          </div>
-          <div className="comment-body">
-            <CommentBody text={c.body} />
-          </div>
         </div>
       ))}
+      {/* Fallback: show at end if workingAfterCommentId is unset or not found */}
+      {thread.agentWorking && (!thread.workingAfterCommentId || !ordered.some(c => c.id === thread.workingAfterCommentId)) && (
+        <div className="thread-working">
+          <span className="agent-dot" />
+          <span className="working-dots">
+            <span>.</span>
+            <span>.</span>
+            <span>.</span>
+          </span>
+        </div>
+      )}
 
       {/* Suggested replies */}
       {showSuggestions && (
@@ -455,18 +479,6 @@ function ThreadCard({
               {suggestion}
             </button>
           ))}
-        </div>
-      )}
-
-      {/* Working indicator */}
-      {thread.agentWorking && (
-        <div className="thread-working">
-          <span className="agent-dot" />
-          <span className="working-dots">
-            <span>.</span>
-            <span>.</span>
-            <span>.</span>
-          </span>
         </div>
       )}
 

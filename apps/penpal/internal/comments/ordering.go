@@ -1,6 +1,9 @@
 package comments
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // OrderComments sorts comments within a thread by reply relationship
 // and timestamp. Comments are grouped under their parent (InReplyTo),
@@ -33,8 +36,15 @@ func OrderComments(comments []Comment) []Comment {
 		roots = append(roots, c)
 	}
 
+	// E-PENPAL-COMMENT-ORDER: use WorkingStartedAt as effective time when present.
+	effectiveTime := func(c Comment) time.Time {
+		if c.WorkingStartedAt != nil {
+			return *c.WorkingStartedAt
+		}
+		return c.CreatedAt
+	}
 	byTime := func(a, b Comment) bool {
-		return a.CreatedAt.Before(b.CreatedAt)
+		return effectiveTime(a).Before(effectiveTime(b))
 	}
 
 	sort.Slice(roots, func(i, j int) bool { return byTime(roots[i], roots[j]) })

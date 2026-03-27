@@ -117,9 +117,11 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 }
 
 // threadResponse wraps a Thread with ephemeral UI state.
+// E-PENPAL-WORKING: includes workingAfterCommentId for correct indicator positioning.
 type threadResponse struct {
 	comments.Thread
-	AgentWorking bool `json:"agentWorking,omitempty"`
+	AgentWorking          bool   `json:"agentWorking,omitempty"`
+	WorkingAfterCommentID string `json:"workingAfterCommentId,omitempty"`
 }
 
 // handleListThreads handles GET /api/threads?project=X&path=Y[&status=open][&agent=true][&worktree=Z].
@@ -180,9 +182,11 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		tr := threadResponse{Thread: t}
 		if s.comments.IsWorking(projectName, filePath, t.ID) {
 			tr.AgentWorking = true
+			tr.WorkingAfterCommentID = s.comments.WorkingAfterCommentID(projectName, filePath, t.ID)
 		} else if agentRunning && s.comments.HasWorkingEntry(projectName, filePath, t.ID) {
 			// Agent is running—don't let the 60s timeout hide the indicator
 			tr.AgentWorking = true
+			tr.WorkingAfterCommentID = s.comments.WorkingAfterCommentID(projectName, filePath, t.ID)
 		}
 		result = append(result, tr)
 	}

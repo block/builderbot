@@ -365,7 +365,17 @@
     // sees the pending token and defers to the explicit comment navigation.
     commentJumpToken += 1;
     jumpToComment = { id: comment.id, token: commentJumpToken };
+    console.info(
+      '[jump-comment] handleSelectComment: commentId=%s token=%d path=%s',
+      comment.id,
+      commentJumpToken,
+      resolvedPath
+    );
     await diffViewer.selectFile(resolvedPath);
+    console.info(
+      '[jump-comment] handleSelectComment: selectFile resolved for path=%s',
+      resolvedPath
+    );
   }
 
   // Wrapper for search that returns the loaded diff without changing selection

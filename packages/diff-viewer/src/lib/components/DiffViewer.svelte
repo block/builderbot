@@ -331,6 +331,7 @@
   // Update scroll controller with active alignments
   $effect(() => {
     const filePath = diff ? getFilePath(diff) : null;
+    console.info('[jump-comment] setAlignments effect: filePath=%s alignmentCount=%d', filePath, activeAlignments.length);
     scrollController.setAlignments(activeAlignments, filePath);
   });
 
@@ -342,15 +343,20 @@
     if (changedAlignments.length === 0) return;
     if (!afterPane && !beforePane) return;
     // Skip auto-scroll if a comment or line jump is pending – explicit navigation takes priority
-    if (jumpToComment && jumpToComment.token !== lastHandledJumpToken) return;
+    if (jumpToComment && jumpToComment.token !== lastHandledJumpToken) {
+      console.info('[jump-comment] auto-scroll effect: SKIPPED (pending jumpToComment token=%d lastHandled=%d) filePath=%s', jumpToComment.token, lastHandledJumpToken, filePath);
+      return;
+    }
     if (jumpToLine && jumpToLine.token !== lastHandledJumpLineToken) return;
     lastAutoScrolledFile = filePath;
+    console.info('[jump-comment] auto-scroll effect: scheduling rAF for first hunk, filePath=%s', filePath);
     // Wait for next frame to ensure dimensions are set
     requestAnimationFrame(() => {
       const firstHunk = changedAlignments[0].alignment;
       // Scroll to first change in the after pane (or before pane for deleted files)
       const side = isDeletedFile ? 'before' : 'after';
       const startRow = side === 'before' ? firstHunk.before.start : firstHunk.after.start;
+      console.info('[jump-comment] auto-scroll rAF: scrollToRow(%d, %s) filePath=%s', startRow, side, filePath);
       scrollController.scrollToRow(startRow, side);
     });
   });
@@ -360,13 +366,15 @@
     if (beforePane && beforeLines.length > 0) {
       const lineHeight = measureLineHeight(beforePane);
       const contentWidth = measureContentWidth(beforePane);
-      scrollController.setDimensions('before', {
+      const dims = {
         viewportHeight: beforePane.clientHeight,
         contentHeight: beforeLines.length * lineHeight,
         lineHeight,
         viewportWidth: beforePane.clientWidth,
         contentWidth,
-      });
+      };
+      console.info('[jump-comment] setDimensions(before): viewportH=%d contentH=%d lineH=%d lines=%d', dims.viewportHeight, dims.contentHeight, dims.lineHeight, beforeLines.length);
+      scrollController.setDimensions('before', dims);
     }
   });
 
@@ -374,13 +382,15 @@
     if (afterPane && afterLines.length > 0) {
       const lineHeight = measureLineHeight(afterPane);
       const contentWidth = measureContentWidth(afterPane);
-      scrollController.setDimensions('after', {
+      const dims = {
         viewportHeight: afterPane.clientHeight,
         contentHeight: afterLines.length * lineHeight,
         lineHeight,
         viewportWidth: afterPane.clientWidth,
         contentWidth,
-      });
+      };
+      console.info('[jump-comment] setDimensions(after): viewportH=%d contentH=%d lineH=%d lines=%d', dims.viewportHeight, dims.contentHeight, dims.lineHeight, afterLines.length);
+      scrollController.setDimensions('after', dims);
     }
   });
 
@@ -1063,6 +1073,7 @@
     if (!displayRange) return;
     const { start, end } = displayRange;
 
+    console.info('[jump-comment] focusCommentInViewer: commentId=%s scrollToRow(%d, after) span=%o displayRange=%o', comment.id, start, comment.span, displayRange);
     scrollController.scrollToRow(start, 'after');
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
@@ -1120,11 +1131,13 @@
     if (!request || !afterPane) return;
     if (lastHandledJumpToken === request.token) return;
     const comment = findCommentById(currentFileComments, request.id);
-    if (!comment) return;
+    if (!comment) {
+      console.info('[jump-comment] jump-to-comment effect: comment NOT FOUND in currentFileComments, id=%s token=%d', request.id, request.token);
+      return;
+    }
     lastHandledJumpToken = request.token;
-    requestAnimationFrame(() => {
-      focusCommentInViewer(comment);
-    });
+    console.info('[jump-comment] jump-to-comment effect: FIRING token=%d commentId=%s', request.token, comment.id);
+    focusCommentInViewer(comment);
   });
 
   // Jump to a line requested by search results.
@@ -1133,9 +1146,7 @@
     if (!request || !afterPane) return;
     if (lastHandledJumpLineToken === request.token) return;
     lastHandledJumpLineToken = request.token;
-    requestAnimationFrame(() => {
-      scrollController.scrollToRow(request.lineIndex, 'after');
-    });
+    scrollController.scrollToRow(request.lineIndex, 'after');
   });
 
   // ==========================================================================

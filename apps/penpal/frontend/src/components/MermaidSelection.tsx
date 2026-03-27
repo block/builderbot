@@ -118,7 +118,7 @@ function computeHeadingPath(el: HTMLElement, contentEl: HTMLElement): string {
  * Finds the source line number of the nth mermaid fence in the raw markdown.
  * Returns 1-indexed line number, or 0 if not found.
  */
-function findMermaidFenceLine(rawMarkdown: string, containerIndex: number): number {
+export function findMermaidFenceLine(rawMarkdown: string, containerIndex: number): number {
   const lines = rawMarkdown.split('\n');
   let mermaidIdx = 0;
   let inFence = false;

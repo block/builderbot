@@ -313,7 +313,7 @@ export default function SelectionToolbar({
 /**
  * Extracts the raw markdown corresponding to the current text selection.
  */
-function getSelectionMarkdown(rawMarkdown: string, contentEl: HTMLElement): string | null {
+export function getSelectionMarkdown(rawMarkdown: string, contentEl: HTMLElement): string | null {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || !sel.toString().trim()) return null;
   if (!contentEl.contains(sel.anchorNode) || !contentEl.contains(sel.focusNode)) return null;

@@ -7,6 +7,7 @@ pub mod actions;
 pub mod agent;
 pub mod blox;
 pub mod branches;
+pub mod diff_cache;
 pub mod diff_commands;
 pub mod doctor;
 pub mod git;

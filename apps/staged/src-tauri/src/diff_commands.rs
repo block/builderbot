@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 /// Context needed to compute diffs for a branch.
 pub(crate) struct BranchDiffContext {
     pub base_branch: String,
+    pub project_id: String,
+    pub project_location: crate::store::ProjectLocation,
     pub worktree_path: Option<String>,
     pub workspace_name: Option<String>,
     pub repo_subpath: Option<String>,
@@ -25,6 +27,11 @@ pub(crate) fn resolve_branch_context(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
     if branch.branch_type == crate::store::BranchType::Remote {
         let workspace_name = branch
             .workspace_name
@@ -37,6 +44,8 @@ pub(crate) fn resolve_branch_context(
 
         return Ok(BranchDiffContext {
             base_branch: branch.base_branch,
+            project_id: project.id,
+            project_location: project.location,
             worktree_path: None,
             workspace_name: Some(workspace_name),
             repo_subpath,
@@ -50,13 +59,15 @@ pub(crate) fn resolve_branch_context(
 
     Ok(BranchDiffContext {
         base_branch: branch.base_branch,
+        project_id: project.id,
+        project_location: project.location,
         worktree_path: Some(workdir.path),
         workspace_name: None,
         repo_subpath: None,
     })
 }
 
-fn run_remote_git(ctx: &BranchDiffContext, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_remote_git(ctx: &BranchDiffContext, args: &[&str]) -> Result<String, String> {
     let workspace = ctx
         .workspace_name
         .as_deref()
@@ -111,97 +122,8 @@ fn build_diff_spec(
     }
 }
 
-/// Build explicit base/head refs for a remote branch diff.
-///
-/// Returns `(base_sha, head_sha, resolved_sha)`.
-fn build_remote_diff_refs(
-    ctx: &BranchDiffContext,
-    commit_sha: Option<&str>,
-    scope: &str,
-) -> Result<(String, String, String), String> {
-    match scope {
-        "commit" => {
-            let head = commit_sha
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or("commit_sha required for commit scope")?
-                .to_string();
-            let parent = run_remote_git(ctx, &["rev-parse", &format!("{head}^")])
-                .map(|s| s.trim().to_string())
-                .map_err(|_| format!("No parent commit for {head}"))?;
-            Ok((parent, head.clone(), head))
-        }
-        _ => {
-            let head = match commit_sha.map(str::trim).filter(|s| !s.is_empty()) {
-                Some(sha) => sha.to_string(),
-                None => run_remote_git(ctx, &["rev-parse", "HEAD"])?
-                    .trim()
-                    .to_string(),
-            };
-            let base = run_remote_git(ctx, &["merge-base", &ctx.base_branch, &head])?
-                .trim()
-                .to_string();
-            Ok((base, head.clone(), head))
-        }
-    }
-}
-
-/// Parse `git diff --name-status -z` output.
-fn parse_name_status_z(output: &str) -> Vec<git::FileDiffSummary> {
-    let mut results = Vec::new();
-    let mut parts = output.split('\0').peekable();
-
-    while let Some(status) = parts.next() {
-        if status.is_empty() {
-            continue;
-        }
-
-        let status_char = status.chars().next().unwrap_or(' ');
-
-        match status_char {
-            'A' => {
-                if let Some(path) = parts.next() {
-                    results.push(git::FileDiffSummary {
-                        before: None,
-                        after: Some(path.into()),
-                    });
-                }
-            }
-            'D' => {
-                if let Some(path) = parts.next() {
-                    results.push(git::FileDiffSummary {
-                        before: Some(path.into()),
-                        after: None,
-                    });
-                }
-            }
-            'M' | 'T' => {
-                if let Some(path) = parts.next() {
-                    results.push(git::FileDiffSummary {
-                        before: Some(path.into()),
-                        after: Some(path.into()),
-                    });
-                }
-            }
-            'R' | 'C' => {
-                if let (Some(old), Some(new)) = (parts.next(), parts.next()) {
-                    results.push(git::FileDiffSummary {
-                        before: Some(old.into()),
-                        after: Some(new.into()),
-                    });
-                }
-            }
-            _ => {
-                parts.next();
-            }
-        }
-    }
-
-    results
-}
-
 #[derive(Debug, Clone, Copy)]
-struct RemoteHunk {
+pub(crate) struct RemoteHunk {
     old_start: u32,
     old_lines: u32,
     new_start: u32,
@@ -219,7 +141,7 @@ fn parse_hunk_range(raw: &str) -> Option<(u32, u32)> {
     Some((start_zero, lines))
 }
 
-fn parse_unified_hunks(diff_text: &str) -> Vec<RemoteHunk> {
+pub(crate) fn parse_unified_hunks(diff_text: &str) -> Vec<RemoteHunk> {
     let mut hunks = Vec::new();
 
     for line in diff_text.lines() {
@@ -254,7 +176,7 @@ fn parse_unified_hunks(diff_text: &str) -> Vec<RemoteHunk> {
     hunks
 }
 
-fn file_content_from_bytes(bytes: &[u8], path: &str) -> git::FileContent {
+pub(crate) fn file_content_from_bytes(bytes: &[u8], path: &str) -> git::FileContent {
     let check_len = bytes.len().min(8192);
     if bytes[..check_len].contains(&0) {
         return file_content_binary_or_image(bytes, path);
@@ -306,7 +228,7 @@ fn is_missing_object_error(msg: &str) -> bool {
         || lower.contains("path '")
 }
 
-fn load_remote_file_at_ref(
+pub(crate) fn load_remote_file_at_ref(
     ctx: &BranchDiffContext,
     ref_name: &str,
     path: &str,
@@ -341,7 +263,7 @@ fn remote_file_len(file: &Option<git::File>) -> u32 {
     }
 }
 
-fn compute_remote_alignments(
+pub(crate) fn compute_remote_alignments(
     hunks: &[RemoteHunk],
     before: &Option<git::File>,
     after: &Option<git::File>,
@@ -422,6 +344,62 @@ pub struct DiffFilesResponse {
     files: Vec<git::FileDiffSummary>,
 }
 
+/// Resolve head SHA, gather commit SHAs, and run `collect_and_cache` to ensure
+/// the diff cache is populated for the given branch/scope. Returns the full
+/// collection result so callers can extract whatever they need.
+fn ensure_cache_populated(
+    ctx: &BranchDiffContext,
+    store: &Arc<Store>,
+    branch_id: &str,
+    scope: &str,
+    commit_sha: Option<&str>,
+) -> Result<crate::diff_cache::CollectedDiffs, String> {
+    let workspace_name = ctx
+        .workspace_name
+        .as_deref()
+        .ok_or("Missing remote workspace context")?;
+
+    let latest_sha = store
+        .list_commits_for_branch(branch_id)
+        .ok()
+        .and_then(|commits| commits.into_iter().rev().find_map(|c| c.sha));
+
+    let head_sha = commit_sha
+        .filter(|s| !s.is_empty() && scope == "branch")
+        .or(latest_sha.as_deref())
+        .map(|s| Ok(s.to_string()))
+        .unwrap_or_else(|| {
+            run_remote_git(ctx, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())
+        })?;
+
+    let mut all_commit_shas: Vec<String> = store
+        .list_commits_for_branch(branch_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|c| c.sha)
+        .collect();
+
+    if scope == "commit" {
+        if let Some(sha) = commit_sha {
+            if !all_commit_shas.contains(&sha.to_string()) {
+                all_commit_shas.push(sha.to_string());
+            }
+        }
+    }
+
+    crate::diff_cache::collect_and_cache(
+        ctx.project_location,
+        &ctx.project_id,
+        branch_id,
+        workspace_name,
+        ctx.repo_subpath.as_deref(),
+        &ctx.base_branch,
+        &head_sha,
+        &all_commit_shas,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// List files changed in a branch or commit diff.
 ///
 /// For branch scope: merge-base(base, tip)..tip
@@ -437,22 +415,76 @@ pub async fn get_diff_files(
 ) -> Result<DiffFilesResponse, String> {
     let store = crate::get_store(&store)?;
     let ctx = resolve_branch_context(&store, &branch_id)?;
-    let (files, resolved_sha) = if let Some(worktree_path) = ctx.worktree_path.as_deref() {
+    if let Some(worktree_path) = ctx.worktree_path.as_deref() {
         let worktree = Path::new(worktree_path);
         let (spec, resolved_sha) =
             build_diff_spec(worktree, &ctx.base_branch, commit_sha.as_deref(), &scope)?;
         let files = git::list_diff_files(worktree, &spec).map_err(|e| e.to_string())?;
-        (files, resolved_sha)
-    } else {
-        let (base, head, resolved_sha) =
-            build_remote_diff_refs(&ctx, commit_sha.as_deref(), &scope)?;
-        let output = run_remote_git(&ctx, &["diff", "--name-status", "-z", &base, &head])?;
-        (parse_name_status_z(&output), resolved_sha)
-    };
+        return Ok(DiffFilesResponse {
+            commit_sha: resolved_sha,
+            files,
+        });
+    }
+
+    // Remote branch — check cache, then collect on miss.
+    let latest_sha = store
+        .list_commits_for_branch(&branch_id)
+        .ok()
+        .and_then(|commits| commits.into_iter().rev().find_map(|c| c.sha));
+
+    if scope == "branch" {
+        if let Some(ref sha) = latest_sha {
+            let check_sha = commit_sha.as_deref().unwrap_or(sha.as_str());
+            if check_sha == sha {
+                if let Some(cached) = crate::diff_cache::load_cache_index(
+                    ctx.project_location,
+                    &ctx.project_id,
+                    &branch_id,
+                    sha,
+                ) {
+                    return Ok(DiffFilesResponse {
+                        commit_sha: sha.clone(),
+                        files: cached.files,
+                    });
+                }
+            }
+        }
+    }
+    if scope == "commit" {
+        if let Some(ref sha) = commit_sha {
+            if let Some(cached) = crate::diff_cache::load_commit_index(
+                ctx.project_location,
+                &ctx.project_id,
+                &branch_id,
+                sha,
+            ) {
+                return Ok(DiffFilesResponse {
+                    commit_sha: sha.clone(),
+                    files: cached.files,
+                });
+            }
+        }
+    }
+
+    let (index, _, commit_results) =
+        ensure_cache_populated(&ctx, &store, &branch_id, &scope, commit_sha.as_deref())?;
+
+    if scope == "commit" {
+        let sha = commit_sha.ok_or("commit_sha required for commit scope")?;
+        let files = commit_results
+            .iter()
+            .find(|(ci, _)| ci.sha == sha)
+            .map(|(ci, _)| ci.files.clone())
+            .unwrap_or_default();
+        return Ok(DiffFilesResponse {
+            commit_sha: sha,
+            files,
+        });
+    }
 
     Ok(DiffFilesResponse {
-        commit_sha: resolved_sha,
-        files,
+        commit_sha: index.head_sha,
+        files: index.files,
     })
 }
 
@@ -474,30 +506,48 @@ pub async fn get_file_diff(
         return git::get_file_diff(worktree, &spec, file_path).map_err(|e| e.to_string());
     }
 
-    let (base, head, _) = build_remote_diff_refs(&ctx, Some(&commit_sha), &scope)?;
-    let before = load_remote_file_at_ref(&ctx, &base, &path)?;
-    let after = load_remote_file_at_ref(&ctx, &head, &path)?;
-    let patch = run_remote_git(
-        &ctx,
-        &[
-            "-c",
-            "color.ui=never",
-            "diff",
-            "--unified=0",
-            &base,
-            &head,
-            "--",
+    // Check cache for branch-scope diffs.
+    if scope == "branch" {
+        if let Some(file_diff) = crate::diff_cache::load_cached_file_diff(
+            ctx.project_location,
+            &ctx.project_id,
+            &branch_id,
+            &commit_sha,
             &path,
-        ],
-    )?;
-    let hunks = parse_unified_hunks(&patch);
-    let alignments = compute_remote_alignments(&hunks, &before, &after);
+        ) {
+            return Ok(file_diff);
+        }
+    }
 
-    Ok(git::FileDiff {
-        before,
-        after,
-        alignments,
-    })
+    // Check cache for commit-scope diffs.
+    if scope == "commit" {
+        if let Some(file_diff) = crate::diff_cache::load_commit_file_diff(
+            ctx.project_location,
+            &ctx.project_id,
+            &branch_id,
+            &commit_sha,
+            &path,
+        ) {
+            return Ok(file_diff);
+        }
+    }
+
+    let (_, branch_file_diffs, commit_results) =
+        ensure_cache_populated(&ctx, &store, &branch_id, &scope, Some(&commit_sha))?;
+
+    if scope == "commit" {
+        if let Some(diff) = commit_results
+            .iter()
+            .find(|(ci, _)| ci.sha == commit_sha)
+            .and_then(|(_, diffs)| diffs.get(&path))
+        {
+            return Ok(diff.clone());
+        }
+    } else if let Some(diff) = branch_file_diffs.get(&path) {
+        return Ok(diff.clone());
+    }
+
+    Err(format!("File not found in diff: {path}"))
 }
 
 /// Get file content at a specific ref (for reference files).

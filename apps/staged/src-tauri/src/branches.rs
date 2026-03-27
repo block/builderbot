@@ -580,13 +580,23 @@ pub(crate) fn cleanup_branch_resources(
     store: &Arc<Store>,
     branch: &store::Branch,
 ) -> Result<(), String> {
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    // Clean up any cached diffs for this branch.
+    if let Err(e) =
+        crate::diff_cache::delete_branch_cache(project.location, &project.id, &branch.id)
+    {
+        log::warn!(
+            "Failed to clean up diff cache for branch {}: {e}",
+            branch.id
+        );
+    }
+
     match branch.branch_type {
         store::BranchType::Local => {
-            let project = store
-                .get_project(&branch.project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
             let workdir = store
                 .get_workdir_for_branch(&branch.id)
                 .map_err(|e| e.to_string())?;

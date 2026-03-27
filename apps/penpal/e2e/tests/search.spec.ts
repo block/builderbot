@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
 
+// SPA routes require the Vite dev server (Go server serves the SPA at /app/).
+test.use({ baseURL: 'http://localhost:18924' });
+
 // E-PENPAL-SEARCH: verifies search page loads and displays search UI.
 test('search page shows results form', async ({ page }) => {
   await page.goto('/search');

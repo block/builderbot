@@ -31,7 +31,7 @@ use std::path::PathBuf;
 
 /// Result of collecting diffs for a branch: the branch index, branch-level
 /// file diffs, and per-commit indices with their file diffs.
-type CollectedDiffs = (
+pub type CollectedDiffs = (
     CachedBranchIndex,
     HashMap<String, git_diff::FileDiff>,
     Vec<(CachedCommitIndex, HashMap<String, git_diff::FileDiff>)>,

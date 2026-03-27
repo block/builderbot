@@ -344,6 +344,62 @@ pub struct DiffFilesResponse {
     files: Vec<git::FileDiffSummary>,
 }
 
+/// Resolve head SHA, gather commit SHAs, and run `collect_and_cache` to ensure
+/// the diff cache is populated for the given branch/scope. Returns the full
+/// collection result so callers can extract whatever they need.
+fn ensure_cache_populated(
+    ctx: &BranchDiffContext,
+    store: &Arc<Store>,
+    branch_id: &str,
+    scope: &str,
+    commit_sha: Option<&str>,
+) -> Result<crate::diff_cache::CollectedDiffs, String> {
+    let workspace_name = ctx
+        .workspace_name
+        .as_deref()
+        .ok_or("Missing remote workspace context")?;
+
+    let latest_sha = store
+        .list_commits_for_branch(branch_id)
+        .ok()
+        .and_then(|commits| commits.into_iter().rev().find_map(|c| c.sha));
+
+    let head_sha = commit_sha
+        .filter(|s| !s.is_empty() && scope == "branch")
+        .or(latest_sha.as_deref())
+        .map(|s| Ok(s.to_string()))
+        .unwrap_or_else(|| {
+            run_remote_git(ctx, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())
+        })?;
+
+    let mut all_commit_shas: Vec<String> = store
+        .list_commits_for_branch(branch_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|c| c.sha)
+        .collect();
+
+    if scope == "commit" {
+        if let Some(sha) = commit_sha {
+            if !all_commit_shas.contains(&sha.to_string()) {
+                all_commit_shas.push(sha.to_string());
+            }
+        }
+    }
+
+    crate::diff_cache::collect_and_cache(
+        ctx.project_location,
+        &ctx.project_id,
+        branch_id,
+        workspace_name,
+        ctx.repo_subpath.as_deref(),
+        &ctx.base_branch,
+        &head_sha,
+        &all_commit_shas,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// List files changed in a branch or commit diff.
 ///
 /// For branch scope: merge-base(base, tip)..tip
@@ -410,49 +466,8 @@ pub async fn get_diff_files(
         }
     }
 
-    // Cache miss — collect and cache synchronously via the single-round-trip
-    // collection script, then serve from the freshly-populated results.
-    let workspace_name = ctx
-        .workspace_name
-        .as_deref()
-        .ok_or("Missing remote workspace context")?;
-
-    let head_sha = commit_sha
-        .as_deref()
-        .filter(|s| !s.is_empty() && scope == "branch")
-        .or(latest_sha.as_deref())
-        .map(|s| Ok(s.to_string()))
-        .unwrap_or_else(|| {
-            run_remote_git(&ctx, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())
-        })?;
-
-    let mut all_commit_shas: Vec<String> = store
-        .list_commits_for_branch(&branch_id)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|c| c.sha)
-        .collect();
-
-    // Ensure the requested commit is included for commit scope.
-    if scope == "commit" {
-        if let Some(ref sha) = commit_sha {
-            if !all_commit_shas.contains(sha) {
-                all_commit_shas.push(sha.clone());
-            }
-        }
-    }
-
-    let (index, _, commit_results) = crate::diff_cache::collect_and_cache(
-        ctx.project_location,
-        &ctx.project_id,
-        &branch_id,
-        workspace_name,
-        ctx.repo_subpath.as_deref(),
-        &ctx.base_branch,
-        &head_sha,
-        &all_commit_shas,
-    )
-    .map_err(|e| e.to_string())?;
+    let (index, _, commit_results) =
+        ensure_cache_populated(&ctx, &store, &branch_id, &scope, commit_sha.as_deref())?;
 
     if scope == "commit" {
         let sha = commit_sha.ok_or("commit_sha required for commit scope")?;
@@ -517,47 +532,8 @@ pub async fn get_file_diff(
         }
     }
 
-    // Cache miss — collect and cache synchronously, then serve the file diff.
-    let workspace_name = ctx
-        .workspace_name
-        .as_deref()
-        .ok_or("Missing remote workspace context")?;
-
-    let tip_sha = store
-        .list_commits_for_branch(&branch_id)
-        .ok()
-        .and_then(|commits| commits.into_iter().rev().find_map(|c| c.sha));
-
-    let head_sha = if scope == "branch" {
-        commit_sha.clone()
-    } else {
-        tip_sha.map(Ok).unwrap_or_else(|| {
-            run_remote_git(&ctx, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string())
-        })?
-    };
-
-    let mut all_commit_shas: Vec<String> = store
-        .list_commits_for_branch(&branch_id)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|c| c.sha)
-        .collect();
-
-    if scope == "commit" && !all_commit_shas.contains(&commit_sha) {
-        all_commit_shas.push(commit_sha.clone());
-    }
-
-    let (_, branch_file_diffs, commit_results) = crate::diff_cache::collect_and_cache(
-        ctx.project_location,
-        &ctx.project_id,
-        &branch_id,
-        workspace_name,
-        ctx.repo_subpath.as_deref(),
-        &ctx.base_branch,
-        &head_sha,
-        &all_commit_shas,
-    )
-    .map_err(|e| e.to_string())?;
+    let (_, branch_file_diffs, commit_results) =
+        ensure_cache_populated(&ctx, &store, &branch_id, &scope, Some(&commit_sha))?;
 
     if scope == "commit" {
         if let Some(diff) = commit_results

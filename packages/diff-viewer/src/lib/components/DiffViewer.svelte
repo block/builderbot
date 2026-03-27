@@ -342,8 +342,14 @@
     if (changedAlignments.length === 0) return;
     if (!afterPane && !beforePane) return;
     // Skip auto-scroll if a comment or line jump is pending – explicit navigation takes priority
-    if (jumpToComment && jumpToComment.token !== lastHandledJumpToken) return;
-    if (jumpToLine && jumpToLine.token !== lastHandledJumpLineToken) return;
+    if (jumpToComment && jumpToComment.token !== lastHandledJumpToken) {
+      lastAutoScrolledFile = filePath;
+      return;
+    }
+    if (jumpToLine && jumpToLine.token !== lastHandledJumpLineToken) {
+      lastAutoScrolledFile = filePath;
+      return;
+    }
     lastAutoScrolledFile = filePath;
     // Wait for next frame to ensure dimensions are set
     requestAnimationFrame(() => {

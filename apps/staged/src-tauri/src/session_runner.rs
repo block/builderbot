@@ -536,6 +536,23 @@ fn run_post_completion_hooks(
                         log::error!("Failed to update commit SHA: {e}");
                     }
                     committed_branch_id = Some(commit.branch_id.clone());
+
+                    // Spawn background diff caching for remote branches.
+                    if let Some(ws_name) = workspace_name {
+                        let commit_shas: Vec<String> = store
+                            .list_commits_for_branch(&commit.branch_id)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|c| c.sha)
+                            .collect();
+                        crate::diff_cache::spawn_cache_branch_diff(
+                            Arc::clone(store),
+                            commit.branch_id.clone(),
+                            ws_name.to_string(),
+                            current_head.clone(),
+                            commit_shas,
+                        );
+                    }
                 }
                 Ok(_) => {
                     if commit.sha.is_none() {

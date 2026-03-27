@@ -36,6 +36,15 @@ pub fn worktrees_dir() -> Option<PathBuf> {
     workspaces_dir().map(|d| d.join("local"))
 }
 
+/// Per-project data directory, scoped by location:
+/// `~/.staged/workspaces/<local|remote>/projects/<project_id>/`
+pub fn project_data_dir(
+    location: crate::store::ProjectLocation,
+    project_id: &str,
+) -> Option<PathBuf> {
+    workspaces_dir().map(|d| d.join(location.as_str()).join("projects").join(project_id))
+}
+
 /// Path for the SQLite database: `~/.staged/data.db`
 pub fn db_path() -> Option<PathBuf> {
     data_dir().map(|d| d.join("data.db"))

@@ -28,6 +28,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Result of collecting diffs for a branch: the branch index, branch-level
+/// file diffs, and per-commit indices with their file diffs.
+type CollectedDiffs = (
+    CachedBranchIndex,
+    HashMap<String, git_diff::FileDiff>,
+    Vec<(CachedCommitIndex, HashMap<String, git_diff::FileDiff>)>,
+);
 use std::sync::Arc;
 
 /// Index for a cached branch diff at a specific revision.
@@ -549,11 +557,7 @@ pub fn collect_branch_diff(
     branch_id: &str,
     head_sha: &str,
     commit_shas: &[String],
-) -> Result<(
-    CachedBranchIndex,
-    HashMap<String, git_diff::FileDiff>,
-    Vec<(CachedCommitIndex, HashMap<String, git_diff::FileDiff>)>,
-)> {
+) -> Result<CollectedDiffs> {
     // Execute the collection script in a single remote call.
     let script = build_collect_script(repo_subpath, base_branch, head_sha, commit_shas);
     let output = crate::blox::ws_exec(workspace_name, &["bash", "-c", &script])
@@ -598,6 +602,7 @@ pub fn collect_branch_diff(
 /// Executes the collection script, saves branch and commit caches to disk,
 /// cleans up stale entries, and returns the results so the caller can serve
 /// them immediately.
+#[allow(clippy::too_many_arguments)]
 pub fn collect_and_cache(
     location: ProjectLocation,
     project_id: &str,
@@ -607,11 +612,7 @@ pub fn collect_and_cache(
     base_branch: &str,
     head_sha: &str,
     commit_shas: &[String],
-) -> Result<(
-    CachedBranchIndex,
-    HashMap<String, git_diff::FileDiff>,
-    Vec<(CachedCommitIndex, HashMap<String, git_diff::FileDiff>)>,
-)> {
+) -> Result<CollectedDiffs> {
     // Filter to commits not already cached.
     let uncached_shas: Vec<String> = commit_shas
         .iter()

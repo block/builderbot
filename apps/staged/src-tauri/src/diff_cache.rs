@@ -453,6 +453,7 @@ while IFS= read -r -d '' sf; do
 done < <(g diff --name-status -z "$MB" "$HD")
 }}
 cf | jq -s '.' > "$TD/bf.json"
+BR_HD="$HD" BR_MB="$MB"
 CS=({commit_shas_bash})
 : > "$TD/ca_parts.json"
 for cs in "${{CS[@]}}"; do
@@ -461,7 +462,7 @@ for cs in "${{CS[@]}}"; do
   jq -nc --arg s "$cs" --arg p "$pp" --slurpfile f "$TD/cf.json" '{{sha:$s,parent:$p,files:$f[0]}}' >> "$TD/ca_parts.json"
 done
 jq -s '.' "$TD/ca_parts.json" > "$TD/ca.json"
-jq -nc --arg head "$HD" --arg base "$MB" --slurpfile files "$TD/bf.json" --slurpfile commits "$TD/ca.json" '{{head:$head,base:$base,files:$files[0],commits:$commits[0]}}'
+jq -nc --arg head "$BR_HD" --arg base "$BR_MB" --slurpfile files "$TD/bf.json" --slurpfile commits "$TD/ca.json" '{{head:$head,base:$base,files:$files[0],commits:$commits[0]}}'
 "##
     )
 }

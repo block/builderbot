@@ -1072,3 +1072,21 @@ impl Comment {
         self
     }
 }
+
+// =============================================================================
+// Repo Badges
+// =============================================================================
+
+/// A persistent short-name + color badge for a repository (optionally scoped by subpath).
+///
+/// Badges are shared across all projects — the same repo+subpath always gets the
+/// same badge regardless of which project references it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoBadge {
+    pub github_repo: String,
+    pub subpath: String,
+    pub short_name: String,
+    pub hue: f64,
+    pub created_at: i64,
+}

@@ -138,25 +138,44 @@ export function projectSubtitle(
   runActionPhase?: RunActionPhase
 ): string {
   const repoLabel = `${repoCount} ${pluralize('repo', repoCount)}`;
+  const activity = projectActivity(sessionTypes, runActionPhase);
+  if (!activity) return repoLabel;
+  return `${repoLabel} · ${activity}`;
+}
 
-  // Show "Building" in subtitle when building with no active sessions.
-  // "Running" phase is represented by the SineWave animation instead.
+/**
+ * Activity portion of the project subtitle (without repo count prefix).
+ * Returns empty string when idle.
+ *
+ * Examples:
+ *   ""                       (idle)
+ *   "Building"
+ *   "making a commit"
+ *   "making a commit and a note"
+ *   "pushing changes"
+ */
+export function projectActivity(
+  sessionTypes: SessionType[],
+  runActionPhase?: RunActionPhase
+): string {
   if (sessionTypes.length === 0 && runActionPhase === 'building') {
-    return `${repoLabel} · Building`;
+    return 'Building';
   }
 
   if (sessionTypes.length === 0) {
-    return repoLabel;
+    return '';
   }
 
-  // Count occurrences of each session type
   const counts = new Map<SessionType, number>();
   for (const type of sessionTypes) {
     counts.set(type, (counts.get(type) ?? 0) + 1);
   }
 
-  // Build the activity description from the counted types.
-  // Use a stable display order so the subtitle doesn't jump around.
+  // Special-case "push" to read more naturally: "pushing changes" instead of "making a push"
+  if (counts.size === 1 && counts.has('push')) {
+    return 'pushing changes';
+  }
+
   const displayOrder: SessionType[] = ['commit', 'note', 'review', 'pr', 'push', 'other'];
   const parts: string[] = [];
 
@@ -172,8 +191,6 @@ export function projectSubtitle(
     }
   }
 
-  // Join with commas and "and": "a commit", "a commit and a note",
-  // "commits, notes, and a review"
   let activity: string;
   if (parts.length === 1) {
     activity = parts[0];
@@ -183,10 +200,5 @@ export function projectSubtitle(
     activity = `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`;
   }
 
-  // Special-case "push" to read more naturally: "pushing changes" instead of "making a push"
-  if (counts.size === 1 && counts.has('push')) {
-    return `${repoLabel} · pushing changes`;
-  }
-
-  return `${repoLabel} · making ${activity}`;
+  return `making ${activity}`;
 }

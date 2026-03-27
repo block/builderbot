@@ -41,6 +41,7 @@
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
+  import { darkMode } from './lib/stores/isDark.svelte';
   import type { StoreIncompatibility } from './lib/types';
 
   const updaterEnabled = import.meta.env.VITE_UPDATER_ENABLED === 'true';
@@ -190,6 +191,7 @@
   }
 
   onMount(async () => {
+    darkMode.init();
     document.addEventListener('keydown', handleKonamiKey);
 
     // Listen for the app menu Preferences item.

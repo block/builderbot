@@ -31,7 +31,9 @@
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import RepoBadge from '../../shared/RepoBadge.svelte';
   import { setProjects } from './projectsSidebarState.svelte';
+  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
 
   let projects = $state<Project[]>([]);
   let projectBranches = $state<Map<string, Branch[]>>(new Map());
@@ -128,6 +130,7 @@
     loading = true;
     error = null;
     try {
+      await repoBadgeStore.loadAll();
       const loadedProjects = await commands.listProjects();
       projects = loadedProjects;
       setProjects(loadedProjects);
@@ -170,6 +173,12 @@
     );
     if (generation !== repoLoadGeneration) return;
     reposByProject = new Map(entries);
+
+    // Ensure badges exist for all repos
+    const allRepos = entries.flatMap(([, repos]) =>
+      repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+    );
+    void repoBadgeStore.ensureForRepos(allRepos);
   }
 
   function handleProjectCreated(project: Project) {
@@ -285,6 +294,7 @@
     {error}
     {deletingProjectNames}
     {repoCountsByProject}
+    {reposByProject}
     {projectBranches}
     showAllProjectsRow={true}
   />
@@ -391,12 +401,23 @@
                 {/if}
                 <div class="repo">
                   {#if repos.length > 0}
-                    {#each repos as r, i}
-                      {#if i > 0}<span class="repo-separator">, </span>{/if}
-                      <RepoLabel githubRepo={r.githubRepo} subpath={r.subpath} />
+                    {#each repos as r}
+                      {@const badge = repoBadgeStore.lookup(r.githubRepo, r.subpath)}
+                      <span class="repo-line">
+                        {#if badge}
+                          <RepoBadge shortName={badge.shortName} hue={badge.hue} />
+                        {/if}
+                        <RepoLabel githubRepo={r.githubRepo} subpath={r.subpath} />
+                      </span>
                     {/each}
                   {:else if project.githubRepo}
-                    <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
+                    {@const badge = repoBadgeStore.lookup(project.githubRepo, project.subpath)}
+                    <span class="repo-line">
+                      {#if badge}
+                        <RepoBadge shortName={badge.shortName} hue={badge.hue} />
+                      {/if}
+                      <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
+                    </span>
                   {:else}
                     No repo attached
                   {/if}
@@ -599,15 +620,19 @@
   .repo {
     margin-top: auto;
     font-size: var(--size-sm);
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
     overflow: hidden;
   }
 
-  .repo-separator {
-    color: var(--text-faint);
+  .repo-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .deleting-pill {

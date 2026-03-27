@@ -160,6 +160,14 @@ export interface BranchRef {
   remote: string | null;
 }
 
+export interface RepoBadge {
+  githubRepo: string;
+  subpath: string;
+  shortName: string;
+  hue: number;
+  createdAt: number;
+}
+
 // =============================================================================
 // GitHub types (for PR/Issue picker)
 // =============================================================================

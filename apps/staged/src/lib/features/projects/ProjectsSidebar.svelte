@@ -11,13 +11,16 @@
     GitPullRequestDraft,
     GitBranch,
   } from 'lucide-svelte';
-  import type { Project, Branch, WorkspaceStatus } from '../../types';
+  import type { Project, ProjectRepo, Branch, WorkspaceStatus } from '../../types';
   import { goHome, navigation, selectProject } from '../layout/navigation.svelte';
   import {
     projectDisplayName,
     aggregateProjectPrStatus,
     projectSubtitle,
+    projectActivity,
   } from '../../shared/utils';
+  import RepoBadge from '../../shared/RepoBadge.svelte';
+  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
@@ -40,6 +43,7 @@
     error?: string | null;
     deletingProjectNames?: Map<string, string>;
     repoCountsByProject?: Map<string, number>;
+    reposByProject?: Map<string, ProjectRepo[]>;
     showAllProjectsRow?: boolean;
     projectBranches?: Map<string, Branch[]>;
   }
@@ -50,6 +54,7 @@
     error = null,
     deletingProjectNames = new Map(),
     repoCountsByProject = new Map(),
+    reposByProject = new Map(),
     showAllProjectsRow = true,
     projectBranches = new Map(),
   }: Props = $props();
@@ -244,6 +249,11 @@
               {@const workspaceStatus =
                 project.location === 'remote' ? getProjectWorkspaceStatus(project.id) : null}
               {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
+              {@const repos = reposByProject.get(project.id) ?? []}
+              {@const badges = repos
+                .map((r) => repoBadgeStore.lookup(r.githubRepo, r.subpath))
+                .filter((b): b is NonNullable<typeof b> => Boolean(b))}
+              {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
               <button
                 class="project-row"
                 use:scrollIfActive={navigation.selectedProjectId === project.id}
@@ -272,9 +282,21 @@
                   <div class="row-text">
                     <span class="project-name">{projectDisplayName(project)}</span>
                     <div class="row-meta">
-                      <span class="repo-count"
-                        >{projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}</span
-                      >
+                      {#if badges.length > 0}
+                        <span class="badge-row">
+                          {#each badges as badge}
+                            <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
+                          {/each}
+                        </span>
+                        {#if activity}
+                          <span class="activity-separator">&middot;</span>
+                          <span class="activity-text">{activity}</span>
+                        {/if}
+                      {:else}
+                        <span class="repo-count"
+                          >{projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}</span
+                        >
+                      {/if}
                     </div>
                   </div>
                 </div>
@@ -549,7 +571,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
   }
 
   .project-name {
@@ -574,6 +596,24 @@
 
   .repo-count {
     color: var(--text-faint);
+  }
+
+  .badge-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+  }
+
+  .activity-separator {
+    color: var(--text-faint);
+    margin: 0 1px;
+  }
+
+  .activity-text {
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .row-status {

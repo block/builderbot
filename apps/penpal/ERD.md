@@ -195,8 +195,8 @@ see-also:
 - <a id="E-PENPAL-AGENT-STREAM"></a>**E-PENPAL-AGENT-STREAM**: Agent stdout is parsed as NDJSON. `type: "assistant"` messages provide `contextUsed` (sum of input + cache tokens) and `numTurns`. `type: "result"` provides `totalCostUSD`, `numTurns`, and `contextWindow`.
   ← [P-PENPAL-AGENT-STATUS](PRODUCT.md#P-PENPAL-AGENT-STATUS)
 
-- <a id="E-PENPAL-AGENT-PROMPT"></a>**E-PENPAL-AGENT-PROMPT**: The agent prompt instructs it to: call `penpal_files_in_review` first, reply to the `oldestPending` thread, then enter a long-poll loop via `penpal_wait_for_changes`. Exit condition: 10 consecutive timeouts with no files in review (~5 minutes idle).
-  ← [P-PENPAL-AGENT-LAUNCH](PRODUCT.md#P-PENPAL-AGENT-LAUNCH)
+- <a id="E-PENPAL-AGENT-PROMPT"></a>**E-PENPAL-AGENT-PROMPT**: The agent prompt instructs it to: call `penpal_files_in_review` first, reply to the `oldestPending` thread, then enter a long-poll loop via `penpal_wait_for_changes`. Exit condition: 10 consecutive timeouts with no files in review (~5 minutes idle). When a reviewer answers an open question, the agent incorporates the answer into the relevant document section and removes the question from the open questions list — no strikethroughs or inline answers in the list.
+  ← [P-PENPAL-AGENT-LAUNCH](PRODUCT.md#P-PENPAL-AGENT-LAUNCH), [P-PENPAL-INCORPORATE-ANSWERS](PRODUCT.md#P-PENPAL-INCORPORATE-ANSWERS)
 
 - <a id="E-PENPAL-AGENT-DETECT"></a>**E-PENPAL-AGENT-DETECT**: Background polling every 5 seconds runs `ps -eo pid,args` to find processes ending with `/claude`, then `lsof -a -p {pid} -d cwd -Fn` to determine CWD. CWD is mapped to a project via `FindProjectByPath()`.
   ← [P-PENPAL-AGENT-PRESENCE](PRODUCT.md#P-PENPAL-AGENT-PRESENCE)

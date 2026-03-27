@@ -28,6 +28,7 @@ func buildPrompt(projectName string) string {
 - If you disagree with feedback, explain your reasoning rather than silently ignoring it.
 - Only respond to threads where the last comment has role "human". Skip threads where the last comment is from an agent (you've already responded).
 - Do NOT resolve threads — only humans resolve threads. Your job is to reply and make changes, not to decide when a conversation is done.
+- When a reviewer answers an open question, incorporate the answer into the relevant section of the document and remove the question from the open questions list. Do NOT strikethrough the question or add the answer inside the open questions list — the answer belongs where it's relevant in the document, not in the questions list.
 - Keep calling penpal_wait_for_changes between checks — this maintains the agent heartbeat indicator in the penpal UI.`,
 		projectName, projectName, projectName)
 }

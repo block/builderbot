@@ -146,15 +146,19 @@ fmt-check:
 lint:
     cd src-tauri && cargo clippy -- -D warnings
 
+# Run Rust unit tests
+test:
+    cd src-tauri && cargo test
+
 # Type-check frontend (Svelte + TypeScript)
 typecheck:
     pnpm run check
 
 # Format, then verify everything passes — run before pushing
-check-all: fmt lint typecheck
+check-all: fmt lint typecheck test
 
 # Verify everything without modifying files — for CI
-ci: fmt-check lint typecheck
+ci: fmt-check lint typecheck test
 
 # ============================================================================
 # Maintenance

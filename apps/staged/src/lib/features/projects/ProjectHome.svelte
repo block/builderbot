@@ -23,6 +23,7 @@
   import { setProjects } from './projectsSidebarState.svelte';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
+  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -211,6 +212,7 @@
       loading = true;
     }
     error = null;
+    await repoBadgeStore.loadAll();
     try {
       const projectList = await commands.listProjects();
       if (generation !== loadGeneration) return;
@@ -264,6 +266,13 @@
 
       projectRunActionsStore.hydrateFromProjectBranches(branchesByProject).catch(console.error);
 
+      // Ensure badges exist for all loaded repos
+      const allRepos = [...reposById.values()].map((r) => ({
+        githubRepo: r.githubRepo,
+        subpath: r.subpath,
+      }));
+      void repoBadgeStore.ensureForRepos(allRepos);
+
       try {
         const contexts = await commands.listActionContexts();
         if (generation !== loadGeneration) return;
@@ -308,6 +317,18 @@
         }
         const fallbackCount = project.githubRepo ? 1 : 0;
         return [project.id, knownCount > 0 ? knownCount : fallbackCount] as const;
+      })
+    )
+  );
+
+  let reposByProject = $derived(
+    new Map(
+      projects.map((project) => {
+        const repos: ProjectRepo[] = [];
+        for (const repo of reposById.values()) {
+          if (repo.projectId === project.id) repos.push(repo);
+        }
+        return [project.id, repos] as const;
       })
     )
   );
@@ -622,6 +643,7 @@
     {error}
     {deletingProjectNames}
     {repoCountsByProject}
+    {reposByProject}
     projectBranches={branchesByProject}
     showAllProjectsRow={true}
   />

@@ -879,6 +879,259 @@ async fn delete_project(
     store.delete_project(&id).map_err(|e| e.to_string())
 }
 
+// =============================================================================
+// Repo badge commands
+// =============================================================================
+
+#[tauri::command]
+fn get_all_repo_badges(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+) -> Result<Vec<store::RepoBadge>, String> {
+    get_store(&store)?
+        .list_repo_badges()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn delete_repo_badge(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+) -> Result<(), String> {
+    get_store(&store)?
+        .delete_repo_badge(&github_repo, &subpath)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn update_repo_badge(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+    short_name: String,
+    hue: f64,
+) -> Result<store::RepoBadge, String> {
+    let short_name = short_name.trim().to_string();
+    if short_name.is_empty() || short_name.len() > 6 {
+        return Err("Short name must be 1-6 characters".into());
+    }
+    if !short_name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.')
+    {
+        return Err("Short name must be lowercase alphanumeric (dots allowed)".into());
+    }
+    if short_name.chars().filter(|&c| c == '.').count() > 1
+        || short_name.starts_with('.')
+        || short_name.ends_with('.')
+    {
+        return Err("Short name may contain at most one dot, not at start or end".into());
+    }
+    if !(0.0..=360.0).contains(&hue) {
+        return Err("Hue must be between 0 and 360".into());
+    }
+    let store = get_store(&store)?;
+    store
+        .update_repo_badge(&github_repo, &subpath, &short_name, hue)
+        .map_err(|e| e.to_string())?;
+    store
+        .get_repo_badge(&github_repo, &subpath)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "Badge not found after update for {}/{}",
+                github_repo, subpath
+            )
+        })
+}
+
+/// Build the prompt for AI short name generation.
+fn build_badge_prompt(
+    existing_badges: &[store::RepoBadge],
+    new_repos: &[(String, String)],
+) -> String {
+    let mut prompt = String::from(
+        "Generate short badge names for GitHub repositories. Each name must be:\n\
+         - Max 6 characters\n\
+         - Lowercase alphanumeric, may contain a single dot when combining components to make separation clear\n\
+         - Unique across all existing and new names\n\
+         - A recognizable abbreviation of the most distinguishing part\n\n\
+         Examples of good shortenings:\n\
+         block/goose → goose\n\
+         block/builderbot → bbot\n\
+         square/square → sq\n\
+         block/mark → mark\n\
+         cashapp/redwood → rdwd\n\
+         block/bitkey → btky\n\
+         block/wallet (apps/server) → wlt.sv\n\
+         block/wallet (apps/mobile) → wlt.mb\n\
+         block/goose (ui) → gse.ui\n\
+         block/builderbot (apps/staged) → staged\n",
+    );
+
+    if !existing_badges.is_empty() {
+        prompt.push_str("\nAlready assigned (do NOT reuse these names):\n");
+        for b in existing_badges {
+            if b.subpath.is_empty() {
+                prompt.push_str(&format!("{} → {}\n", b.github_repo, b.short_name));
+            } else {
+                prompt.push_str(&format!(
+                    "{} ({}) → {}\n",
+                    b.github_repo, b.subpath, b.short_name
+                ));
+            }
+        }
+    }
+
+    prompt.push_str("\nGenerate names for:\n");
+    for (repo, subpath) in new_repos {
+        if subpath.is_empty() {
+            prompt.push_str(&format!("{}\n", repo));
+        } else {
+            prompt.push_str(&format!("{} ({})\n", repo, subpath));
+        }
+    }
+
+    prompt.push_str(
+        "\nRespond with ONLY a JSON object mapping each input to its short name. \
+         Use the exact input strings as keys. Example:\n\
+         {\"block/builderbot\": \"bbot\", \"block/wallet (apps/server)\": \"wlt.sv\"}\n",
+    );
+
+    prompt
+}
+
+/// Try to generate short names via ACP. Returns a map from "repo" or "repo (subpath)" to short name.
+async fn ai_generate_short_names(
+    existing_badges: &[store::RepoBadge],
+    new_repos: &[(String, String)],
+) -> Option<std::collections::HashMap<String, String>> {
+    let agent = acp_client::find_acp_agent()?;
+    let prompt = build_badge_prompt(existing_badges, new_repos);
+    let working_dir = std::env::temp_dir();
+
+    let response = acp_client::run_acp_prompt(&agent, &working_dir, &prompt)
+        .await
+        .ok()?;
+
+    // Extract JSON from response (may be wrapped in markdown code fences)
+    let json_str = response
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| response.trim().strip_prefix("```"))
+        .and_then(|s| s.strip_suffix("```"))
+        .unwrap_or(response.trim());
+
+    let parsed: std::collections::HashMap<String, String> = serde_json::from_str(json_str).ok()?;
+
+    // Validate all values: max 6 chars, lowercase alphanumeric + at most one dot
+    let valid = parsed
+        .into_iter()
+        .filter(|(_, name)| {
+            !name.is_empty()
+                && name.len() <= 6
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.')
+                && name.chars().filter(|&c| c == '.').count() <= 1
+                && !name.starts_with('.')
+                && !name.ends_with('.')
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    if valid.is_empty() {
+        None
+    } else {
+        Some(valid)
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn ensure_repo_badges(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    repos: Vec<(String, String)>,
+) -> Result<Vec<store::RepoBadge>, String> {
+    let store = get_store(&store)?;
+    let mut result = Vec::new();
+    let all_badges = store.list_repo_badges().map_err(|e| e.to_string())?;
+    let taken: Vec<String> = all_badges.iter().map(|b| b.short_name.clone()).collect();
+    let existing_hues = store.list_badge_hues().map_err(|e| e.to_string())?;
+    let mut new_hues = existing_hues.clone();
+    let mut new_taken = taken.clone();
+
+    // Separate existing badges from repos that need generation
+    let mut existing = Vec::new();
+    let mut missing = Vec::new();
+    for (github_repo, subpath) in &repos {
+        let subpath_str = subpath.as_str();
+        if let Some(badge) = store
+            .get_repo_badge(github_repo, subpath_str)
+            .map_err(|e| e.to_string())?
+        {
+            existing.push(badge);
+        } else {
+            missing.push((github_repo.clone(), subpath.clone()));
+        }
+    }
+    result.extend(existing);
+
+    if missing.is_empty() {
+        return Ok(result);
+    }
+
+    // Try AI generation for all missing repos at once
+    let ai_names = ai_generate_short_names(&all_badges, &missing).await;
+
+    for (github_repo, subpath) in &missing {
+        let subpath_str = subpath.as_str();
+
+        // Look up AI-generated name by the key format used in the prompt
+        let ai_key = if subpath.is_empty() {
+            github_repo.clone()
+        } else {
+            format!("{} ({})", github_repo, subpath)
+        };
+
+        let short_name = ai_names
+            .as_ref()
+            .and_then(|names| names.get(&ai_key))
+            .filter(|name| !new_taken.contains(name))
+            .cloned()
+            .unwrap_or_else(|| store::fallback_short_name(github_repo, subpath_str, &new_taken));
+
+        let hue = store::next_hue(&new_hues);
+        let badge = store::RepoBadge {
+            github_repo: github_repo.clone(),
+            subpath: subpath.to_string(),
+            short_name: short_name.clone(),
+            hue,
+            created_at: store::now_timestamp(),
+        };
+        match store.create_repo_badge(&badge) {
+            Ok(()) => {
+                new_taken.push(short_name);
+                new_hues.push(hue);
+                result.push(badge);
+            }
+            Err(_) => {
+                // Race: another call created the badge concurrently.
+                // Re-fetch the authoritative row from the database.
+                let existing = store
+                    .get_repo_badge(github_repo, subpath_str)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| {
+                        format!(
+                            "Failed to create or find badge for {}/{}",
+                            github_repo, subpath
+                        )
+                    })?;
+                result.push(existing);
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn cleanup_project_branches_best_effort<F, G>(
     branches: &[store::Branch],
     mut cleanup_branch_resources: F,
@@ -1415,6 +1668,11 @@ pub fn run() {
             remove_project_repo,
             set_primary_project_repo,
             delete_project,
+            // Repo badges
+            get_all_repo_badges,
+            ensure_repo_badges,
+            update_repo_badge,
+            delete_repo_badge,
             // GitHub
             github_commands::list_github_orgs,
             github_commands::list_github_repos,

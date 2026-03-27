@@ -930,3 +930,34 @@ export function createImageFromData(
     pending,
   });
 }
+
+// =============================================================================
+// Repo Badges
+// =============================================================================
+
+/** Fetch all repo badges from the store. */
+export function getAllRepoBadges(): Promise<import('./types').RepoBadge[]> {
+  return invoke('get_all_repo_badges');
+}
+
+/** Ensure badges exist for the given (githubRepo, subpath) pairs.
+ *  Generates missing badges (fallback names + hues) and returns all requested. */
+export function ensureRepoBadges(
+  repos: [string, string][]
+): Promise<import('./types').RepoBadge[]> {
+  return invoke('ensure_repo_badges', { repos });
+}
+
+/** Update the short name and hue of an existing repo badge. */
+export function updateRepoBadge(
+  githubRepo: string,
+  subpath: string,
+  shortName: string,
+  hue: number
+): Promise<import('./types').RepoBadge> {
+  return invoke('update_repo_badge', { githubRepo, subpath, shortName, hue });
+}
+
+export function deleteRepoBadge(githubRepo: string, subpath: string): Promise<void> {
+  return invoke('delete_repo_badge', { githubRepo, subpath });
+}

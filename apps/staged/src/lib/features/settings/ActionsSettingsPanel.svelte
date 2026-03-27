@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import {
     FolderGit2,
     Play,
@@ -16,10 +16,12 @@
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import RepoBadge from '../../shared/RepoBadge.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import type { ActionContext, ProjectAction } from '../../api/commands';
   import * as commands from '../../api/commands';
   import { detectRepoActions, type ActionType } from '../actions/actions';
+  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
 
   type RepoAttachment = {
     projectId: string;
@@ -48,15 +50,58 @@
     actionType: 'run' as ActionType,
     autoCommit: false,
   });
+  let badgeEditName = $state('');
+  let badgeEditHue = $state(0);
 
   let selectedContext = $derived(contexts.find((c) => c.id === selectedContextId) ?? null);
   let selectedContextAttachments = $derived(
     selectedContext ? (repoAttachmentsByContext[selectedContext.id] ?? []) : []
   );
+  let selectedBadge = $derived(
+    selectedContext
+      ? repoBadgeStore.lookup(selectedContext.githubRepo, selectedContext.subpath)
+      : undefined
+  );
 
   onMount(async () => {
+    await repoBadgeStore.loadAll();
     await loadContexts();
+    await ensureBadgesForContexts(contexts);
   });
+
+  async function ensureBadgesForContexts(ctxs: ActionContext[]) {
+    if (ctxs.length === 0) return;
+    await repoBadgeStore.ensureForRepos(
+      ctxs.map((c) => ({ githubRepo: c.githubRepo, subpath: c.subpath }))
+    );
+  }
+
+  $effect(() => {
+    // Only re-run when the selected context changes, not when badge values
+    // update in the store (which would clobber in-progress edits after save).
+    void selectedContextId;
+    untrack(() => {
+      const badge = selectedBadge;
+      if (badge) {
+        badgeEditName = badge.shortName;
+        badgeEditHue = badge.hue;
+      }
+    });
+  });
+
+  async function saveBadge() {
+    if (!selectedContext || !badgeEditName.trim()) return;
+    try {
+      await repoBadgeStore.update(
+        selectedContext.githubRepo,
+        selectedContext.subpath,
+        badgeEditName.trim(),
+        badgeEditHue
+      );
+    } catch (e) {
+      console.error('Failed to update badge:', e);
+    }
+  }
 
   function contextKey(githubRepo: string, subpath: string | null | undefined): string {
     return `${githubRepo}::${subpath ?? ''}`;
@@ -338,6 +383,8 @@
       }
 
       await commands.deleteActionContext(contextId);
+      await commands.deleteRepoBadge(selectedContext.githubRepo, selectedContext.subpath ?? '');
+      repoBadgeStore.remove(selectedContext.githubRepo, selectedContext.subpath);
       if (selectedContextId === contextId) {
         actions = [];
       }
@@ -417,18 +464,24 @@
       {:else}
         <div class="context-list">
           {#each sortedContexts as context (context.id)}
+            {@const badge = repoBadgeStore.lookup(context.githubRepo, context.subpath)}
             <button
               class="context-item"
               class:selected={context.id === selectedContextId}
               onclick={() => (selectedContextId = context.id)}
             >
               <div class="context-item-main">
-                <RepoLabel githubRepo={context.githubRepo} subpath={context.subpath} />
+                <div class="context-item-header">
+                  <RepoLabel githubRepo={context.githubRepo} subpath={context.subpath} />
+                </div>
                 <span class="context-meta">
                   {#if loadingRepoAttachments}
                     Loading usage...
+                  {:else if badge}
+                    {@const count = (repoAttachmentsByContext[context.id] ?? []).length}
+                    <RepoBadge shortName={formatProjectCount(count)} hue={badge.hue} small />
                   {:else}
-                    {formatProjectCount((repoAttachmentsByContext[context.id] ?? []).length)} attached
+                    {formatProjectCount((repoAttachmentsByContext[context.id] ?? []).length)}
                   {/if}
                 </span>
               </div>
@@ -449,10 +502,50 @@
               {#if loadingRepoAttachments}
                 Loading usage...
               {:else}
-                {formatProjectCount(selectedContextAttachments.length)} attached
+                {formatProjectCount(selectedContextAttachments.length)}
               {/if}
             </span>
           </div>
+
+          {#if selectedBadge}
+            <div class="badge-editor">
+              <div class="badge-editor-preview">
+                <RepoBadge
+                  shortName={badgeEditName || selectedBadge.shortName}
+                  hue={badgeEditHue}
+                />
+              </div>
+              <div class="badge-editor-fields">
+                <label class="badge-field">
+                  <span class="badge-field-label">Short name</span>
+                  <input
+                    class="badge-input"
+                    type="text"
+                    maxlength="6"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    bind:value={badgeEditName}
+                    onblur={saveBadge}
+                    onkeydown={(e) => {
+                      if (e.key === 'Enter') saveBadge();
+                    }}
+                  />
+                </label>
+                <label class="badge-field">
+                  <span class="badge-field-label">Hue</span>
+                  <input
+                    class="badge-hue-slider"
+                    type="range"
+                    min="0"
+                    max="359"
+                    step="1"
+                    bind:value={badgeEditHue}
+                    onchange={saveBadge}
+                  />
+                </label>
+              </div>
+            </div>
+          {/if}
 
           {#if selectedContextAttachments.length > 0}
             <div class="repo-attachments">
@@ -722,6 +815,13 @@
     gap: 3px;
   }
 
+  .context-item-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
   .context-meta {
     font-size: calc(var(--size-xs) - 1px);
     color: var(--text-faint);
@@ -767,6 +867,99 @@
     font-size: var(--size-xs);
     color: var(--text-muted);
     white-space: nowrap;
+  }
+
+  .badge-editor {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-primary);
+  }
+
+  .badge-editor-preview {
+    flex-shrink: 0;
+  }
+
+  .badge-editor-fields {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .badge-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+  }
+
+  .badge-field-label {
+    white-space: nowrap;
+  }
+
+  .badge-input {
+    width: 60px;
+    padding: 3px 6px;
+    border-radius: 6px;
+    border: 1px solid var(--border-muted);
+    background: var(--bg-chrome);
+    color: var(--text-primary);
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: var(--size-xs);
+  }
+
+  .badge-hue-slider {
+    width: 200px;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 16px;
+    border-radius: 8px;
+    background: linear-gradient(
+      to right,
+      hsl(0, 80%, 55%),
+      hsl(30, 80%, 55%),
+      hsl(60, 80%, 55%),
+      hsl(90, 80%, 55%),
+      hsl(120, 80%, 55%),
+      hsl(150, 80%, 55%),
+      hsl(180, 80%, 55%),
+      hsl(210, 80%, 55%),
+      hsl(240, 80%, 55%),
+      hsl(270, 80%, 55%),
+      hsl(300, 80%, 55%),
+      hsl(330, 80%, 55%),
+      hsl(359, 80%, 55%)
+    );
+    outline: none;
+  }
+
+  .badge-hue-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: white;
+    border: 2px solid rgba(0, 0, 0, 0.3);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    cursor: pointer;
+  }
+
+  .badge-hue-slider::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: white;
+    border: 2px solid rgba(0, 0, 0, 0.3);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    cursor: pointer;
   }
 
   .repo-attachments {

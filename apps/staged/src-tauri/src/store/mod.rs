@@ -24,6 +24,7 @@ mod project_notes;
 mod project_repos;
 mod projects;
 mod recent_repos;
+pub mod repo_badges;
 mod reviews;
 mod sessions;
 mod workdirs;
@@ -35,6 +36,7 @@ mod tests;
 
 // Re-export all model types for backwards compatibility.
 pub use models::*;
+pub use repo_badges::{fallback_short_name, next_hue};
 
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};

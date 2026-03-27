@@ -708,12 +708,7 @@ fn walk_downstack(state_json: &serde_json::Value, start_ref: &str) -> Vec<StackB
     let mut result = Vec::new();
     let mut current = start_ref.to_string();
 
-    loop {
-        let branch_info = match state_json.get(&current) {
-            Some(b) => b,
-            None => break,
-        };
-
+    while let Some(branch_info) = state_json.get(&current) {
         // Stop if this is trunk
         if branch_info
             .get("trunk")

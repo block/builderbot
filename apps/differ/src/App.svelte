@@ -58,7 +58,14 @@
   import type { FileDiff, FileDiffSummary, Comment, Span } from '@builderbot/diff-viewer/types';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import * as commands from './lib/commands';
-  import type { DiffSpec, RepoInfo, CommitInfo, RecentRepo, StackInfo, StackBranchInfo } from './lib/commands';
+  import type {
+    DiffSpec,
+    RepoInfo,
+    CommitInfo,
+    RecentRepo,
+    StackInfo,
+    StackBranchInfo,
+  } from './lib/commands';
   import FolderPickerModal from './lib/FolderPickerModal.svelte';
   import ThemePicker from './lib/ThemePicker.svelte';
   import SettingsPanel from './lib/SettingsPanel.svelte';
@@ -670,7 +677,9 @@
                   <div class="stack-section-label">THIS BRANCH</div>
                   <button
                     class="stack-row"
-                    class:active={diffMode === 'stack' && !stackViewTarget && diffSpec.head.type === 'WorkingTree'}
+                    class:active={diffMode === 'stack' &&
+                      !stackViewTarget &&
+                      diffSpec.head.type === 'WorkingTree'}
                     onclick={() => setMode('stack')}
                   >
                     <span class="stack-star">★</span>
@@ -678,7 +687,9 @@
                   </button>
                   <button
                     class="stack-row"
-                    class:active={diffMode === 'stack' && !stackViewTarget && diffSpec.head.type === 'Rev'}
+                    class:active={diffMode === 'stack' &&
+                      !stackViewTarget &&
+                      diffSpec.head.type === 'Rev'}
                     onclick={selectStackCommittedOnly}
                   >
                     <span class="stack-star-spacer"></span>

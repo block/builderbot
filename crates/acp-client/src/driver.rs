@@ -286,12 +286,15 @@ impl AgentDriver for AcpDriver {
             // the actions executor does) and logging it to aid debugging.
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        // Put the child in its own process group so we can send SIGINT to
-        // the entire group for graceful shutdown. For remote proxies this
-        // ensures both `sq` and its child (the blox acp proxy) receive the
-        // signal. For local agents this lets the shell and any commands it
-        // spawned clean up before we escalate to SIGKILL.
-        cmd.process_group(0);
+        // Put remote proxies in their own process group so we can send
+        // SIGINT to the entire group (sq + its child processes) for graceful
+        // shutdown. We must NOT do this for local interactive shells because
+        // process_group(0) detaches the child from the controlling terminal,
+        // which breaks zsh's job-control / precmd hooks — the shell either
+        // hangs or exits immediately without running `exec`.
+        if self.is_remote {
+            cmd.process_group(0);
+        }
         // For local shells extra_env is set on the clean environment; for
         // remote spawns it augments the inherited environment.
         for (k, v) in &self.extra_env {
@@ -406,7 +409,7 @@ impl AgentDriver for AcpDriver {
             _ = cancel_token.cancelled() => {
                 log::info!("Session {session_id} cancelled");
                 writer.finalize().await;
-                graceful_stop(&mut child).await;
+                graceful_stop(&mut child, self.is_remote).await;
                 return Ok(());
             }
             result = run_acp_protocol(
@@ -416,7 +419,7 @@ impl AgentDriver for AcpDriver {
         };
 
         writer.finalize().await;
-        graceful_stop(&mut child).await;
+        graceful_stop(&mut child, self.is_remote).await;
 
         protocol_result
     }
@@ -424,23 +427,28 @@ impl AgentDriver for AcpDriver {
 
 /// Gracefully stop the ACP child process.
 ///
-/// Sends SIGINT to the process group so the child (and any processes it
-/// spawned) can run cleanup. Falls back to SIGKILL after a 5-second timeout.
-async fn graceful_stop(child: &mut tokio::process::Child) {
-    let Some(pid) = child.id() else {
-        // Process already exited on its own — no cleanup needed.
-        return;
-    };
-    let Ok(pid) = i32::try_from(pid) else {
-        let _ = child.kill().await;
-        return;
-    };
-    // Send SIGINT to the process group (negative PID) so the child and all
-    // its descendants receive the signal. The process was spawned with
-    // process_group(0) so its PGID == PID.
-    if signal::kill(Pid::from_raw(-pid), Signal::SIGINT).is_ok() {
-        if let Ok(Ok(_status)) = tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+/// For remote proxies (spawned with `process_group(0)`), sends SIGINT to the
+/// process group so the proxy and its children can run cleanup. Falls back to
+/// SIGKILL after a 5-second timeout.
+///
+/// For local agents (no separate process group), kills immediately.
+async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
+    if is_remote {
+        let Some(pid) = child.id() else {
             return;
+        };
+        let Ok(pid) = i32::try_from(pid) else {
+            let _ = child.kill().await;
+            return;
+        };
+        // Send SIGINT to the process group (negative PID) so both `sq`
+        // and its child processes (the blox acp proxy) receive the signal.
+        if signal::kill(Pid::from_raw(-pid), Signal::SIGINT).is_ok() {
+            if let Ok(Ok(_status)) =
+                tokio::time::timeout(Duration::from_secs(5), child.wait()).await
+            {
+                return;
+            }
         }
     }
     let _ = child.kill().await;

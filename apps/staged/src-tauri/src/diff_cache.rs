@@ -593,6 +593,78 @@ pub fn collect_branch_diff(
     Ok((index, file_diffs, commit_results))
 }
 
+/// Collect and cache diffs for a remote branch synchronously.
+///
+/// Executes the collection script, saves branch and commit caches to disk,
+/// cleans up stale entries, and returns the results so the caller can serve
+/// them immediately.
+pub fn collect_and_cache(
+    location: ProjectLocation,
+    project_id: &str,
+    branch_id: &str,
+    workspace_name: &str,
+    repo_subpath: Option<&str>,
+    base_branch: &str,
+    head_sha: &str,
+    commit_shas: &[String],
+) -> Result<(
+    CachedBranchIndex,
+    HashMap<String, git_diff::FileDiff>,
+    Vec<(CachedCommitIndex, HashMap<String, git_diff::FileDiff>)>,
+)> {
+    // Filter to commits not already cached.
+    let uncached_shas: Vec<String> = commit_shas
+        .iter()
+        .filter(|sha| !has_commit_cache(location, project_id, branch_id, sha))
+        .cloned()
+        .collect();
+
+    let (index, file_diffs, commit_results) = collect_branch_diff(
+        workspace_name,
+        repo_subpath,
+        base_branch,
+        branch_id,
+        head_sha,
+        &uncached_shas,
+    )?;
+
+    let sha = index.head_sha.clone();
+    let num_diffs = file_diffs.len();
+    save_cache(location, project_id, &index, &file_diffs)?;
+
+    if let Err(e) = cleanup_old_caches(location, project_id, branch_id, &sha) {
+        log::warn!("Diff cache: cleanup failed: {e}");
+    }
+
+    // Save commit-level caches.
+    let num_commits = commit_results.len();
+    for (commit_index, commit_diffs) in &commit_results {
+        if let Err(e) =
+            save_commit_cache(location, project_id, branch_id, commit_index, commit_diffs)
+        {
+            log::warn!(
+                "Diff cache: failed to save commit cache for {}: {e}",
+                &commit_index.sha[..7.min(commit_index.sha.len())]
+            );
+        }
+    }
+
+    // Clean up commit caches not in the current set.
+    if let Err(e) = cleanup_old_commit_caches(location, project_id, branch_id, commit_shas) {
+        log::warn!("Diff cache: commit cache cleanup failed: {e}");
+    }
+
+    log::info!(
+        "Diff cache: cached {} file diffs + {} commits for branch {} at {}",
+        num_diffs,
+        num_commits,
+        branch_id,
+        &sha[..7.min(sha.len())]
+    );
+
+    Ok((index, file_diffs, commit_results))
+}
+
 /// Spawn a background thread that collects and caches the full branch diff.
 ///
 /// Looks up the branch and project from the store, collects the diff via
@@ -641,60 +713,16 @@ fn cache_branch_diff_background(
         }
     };
 
-    // Filter to commits not already cached.
-    let uncached_shas: Vec<String> = commit_shas
-        .iter()
-        .filter(|sha| !has_commit_cache(project.location, &project.id, branch_id, sha))
-        .cloned()
-        .collect();
-
-    let (index, file_diffs, commit_results) = collect_branch_diff(
+    collect_and_cache(
+        project.location,
+        &project.id,
+        branch_id,
         workspace_name,
         repo_subpath.as_deref(),
         &branch.base_branch,
-        branch_id,
         head_sha,
-        &uncached_shas,
+        commit_shas,
     )?;
-
-    let sha = index.head_sha.clone();
-    let num_diffs = file_diffs.len();
-    save_cache(project.location, &project.id, &index, &file_diffs)?;
-
-    if let Err(e) = cleanup_old_caches(project.location, &project.id, branch_id, &sha) {
-        log::warn!("Diff cache: cleanup failed: {e}");
-    }
-
-    // Save commit-level caches.
-    let num_commits = commit_results.len();
-    for (commit_index, commit_diffs) in &commit_results {
-        if let Err(e) = save_commit_cache(
-            project.location,
-            &project.id,
-            branch_id,
-            commit_index,
-            commit_diffs,
-        ) {
-            log::warn!(
-                "Diff cache: failed to save commit cache for {}: {e}",
-                &commit_index.sha[..7.min(commit_index.sha.len())]
-            );
-        }
-    }
-
-    // Clean up commit caches not in the current set.
-    if let Err(e) = cleanup_old_commit_caches(project.location, &project.id, branch_id, commit_shas)
-    {
-        log::warn!("Diff cache: commit cache cleanup failed: {e}");
-    }
-
-    log::info!(
-        "Diff cache: cached {} file diffs + {} commits for branch {} at {}",
-        num_diffs,
-        num_commits,
-        branch_id,
-        &sha[..7.min(sha.len())]
-    );
 
     Ok(())
 }

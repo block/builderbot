@@ -26,6 +26,14 @@ func TestBuildPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "10 consecutive timeouts") {
 		t.Error("expected prompt to mention 10 consecutive timeouts exit condition")
 	}
+
+	// E-PENPAL-INCORPORATE-ANSWERS: verify open questions handling guideline
+	if !strings.Contains(prompt, "incorporate the answer into the relevant section") {
+		t.Error("expected prompt to include open questions incorporation guideline")
+	}
+	if !strings.Contains(prompt, "Do NOT strikethrough") {
+		t.Error("expected prompt to prohibit strikethroughs on open questions")
+	}
 }
 
 // E-PENPAL-AGENT-PROMPT: verifies buildPrompt uses project name in multiple places.

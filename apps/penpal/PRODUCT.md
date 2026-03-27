@@ -200,6 +200,8 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-WAIT-CHANGES"></a>**P-PENPAL-WAIT-CHANGES**: Agents respond to new comments and thread changes in near real-time, waiting idle until a human posts a comment.
 
+- <a id="P-PENPAL-INCORPORATE-ANSWERS"></a>**P-PENPAL-INCORPORATE-ANSWERS**: When a reviewer answers an open question, the agent incorporates the answer into the relevant section of the document and removes the question from the open questions list. The agent does not strikethrough the question or add the answer inside the open questions list.
+
 ---
 
 ## Review Workflow

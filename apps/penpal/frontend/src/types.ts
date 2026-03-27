@@ -87,6 +87,7 @@ export interface Comment {
   createdAt: string;
   suggestedReplies?: string[];
   inReplyTo?: string;
+  workingStartedAt?: string;
 }
 
 export interface Thread {
@@ -101,6 +102,7 @@ export interface Thread {
 
 export interface ThreadResponse extends Thread {
   agentWorking?: boolean;
+  workingAfterCommentId?: string;
 }
 
 export interface ThreadWithFile extends Thread {

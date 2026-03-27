@@ -20,7 +20,9 @@ export function orderComments(comments: Comment[]): Comment[] {
     }
   });
 
-  const byTime = (a: Comment, b: Comment) => (a.createdAt < b.createdAt ? -1 : 1);
+  // E-PENPAL-COMMENT-ORDER: use workingStartedAt as effective time when present.
+  const effectiveTime = (c: Comment) => c.workingStartedAt || c.createdAt;
+  const byTime = (a: Comment, b: Comment) => (effectiveTime(a) < effectiveTime(b) ? -1 : 1);
   roots.sort(byTime);
   Object.keys(children).forEach((k) => children[k].sort(byTime));
 

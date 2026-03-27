@@ -22,8 +22,8 @@ type Store struct {
 	changedMu  sync.Mutex
 	changeSeq  uint64 // monotonic counter incremented on each change
 	workingMu  sync.RWMutex
-	working    map[string]time.Time // key: "project:path:threadId" -> when agent started working
-	onWorking  func(project string) // called when working state changes
+	working    map[string]workingEntry // key: "project:path:threadId" -> working state
+	onWorking  func(project string)    // called when working state changes
 }
 
 // FileComments holds all comment threads for a single file.
@@ -64,15 +64,26 @@ type SvgRect struct {
 }
 
 // Comment is a single message within a thread.
-// E-PENPAL-THREAD-MODEL: Comment has ID/Author/Role/Body/CreatedAt/SuggestedReplies/InReplyTo.
+// E-PENPAL-THREAD-MODEL: Comment has ID/Author/Role/Body/CreatedAt/SuggestedReplies/InReplyTo/WorkingStartedAt.
 type Comment struct {
-	ID               string    `json:"id"`
-	Author           string    `json:"author"`
-	Role             string    `json:"role"` // "human" | "agent"
-	Body             string    `json:"body"`
-	CreatedAt        time.Time `json:"createdAt"`
-	SuggestedReplies []string  `json:"suggestedReplies,omitempty"`
-	InReplyTo        string    `json:"inReplyTo,omitempty"`
+	ID               string     `json:"id"`
+	Author           string     `json:"author"`
+	Role             string     `json:"role"` // "human" | "agent"
+	Body             string     `json:"body"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	SuggestedReplies []string   `json:"suggestedReplies,omitempty"`
+	InReplyTo        string     `json:"inReplyTo,omitempty"`
+	WorkingStartedAt *time.Time `json:"workingStartedAt,omitempty"`
+}
+
+// workingEntry tracks the state of an agent actively working on a thread.
+// startedAt is immutable (set once, used for WorkingStartedAt ordering).
+// lastRefreshed is updated by RefreshWorkingTimestamp to extend the 60s expiry.
+// E-PENPAL-WORKING: stores when work started and which comment the agent is responding to.
+type workingEntry struct {
+	startedAt      time.Time // when the agent first started working (used for ordering)
+	lastRefreshed  time.Time // when the entry was last refreshed (used for 60s expiry)
+	afterCommentID string
 }
 
 // ThreadWithFile pairs a thread with the file path it belongs to.
@@ -94,7 +105,7 @@ func NewStore(c *cache.Cache, act *activity.Tracker) *Store {
 		activity:   act,
 		heartbeats: make(map[string]time.Time),
 		changed:    make(chan struct{}),
-		working:    make(map[string]time.Time),
+		working:    make(map[string]workingEntry),
 	}
 }
 
@@ -206,16 +217,34 @@ func (s *Store) SetOnWorking(fn func(project string)) {
 }
 
 // SetWorking marks a thread as having an agent actively working on it.
+// afterCommentID is the ID of the last comment the agent saw when it started working.
+// Always updates both startedAt and afterCommentID — use RefreshWorkingTimestamp
+// when only the expiry timer should be extended without changing the anchor position.
 // E-PENPAL-WORKING: updates in-memory working map and triggers SSE event.
-func (s *Store) SetWorking(project, path, threadID string) {
+func (s *Store) SetWorking(project, path, threadID, afterCommentID string) {
 	key := project + ":" + path + ":" + threadID
 	s.workingMu.Lock()
-	s.working[key] = time.Now()
+	now := time.Now()
+	s.working[key] = workingEntry{startedAt: now, lastRefreshed: now, afterCommentID: afterCommentID}
 	fn := s.onWorking
 	s.workingMu.Unlock()
 	if fn != nil {
 		fn(project)
 	}
+}
+
+// RefreshWorkingTimestamp extends the expiry timer for a working entry without
+// changing startedAt or afterCommentID. Use this in long-poll refresh paths
+// where the agent hasn't actually re-read the thread.
+// E-PENPAL-WORKING: refreshes lastRefreshed while preserving startedAt and afterCommentID.
+func (s *Store) RefreshWorkingTimestamp(project, path, threadID string) {
+	key := project + ":" + path + ":" + threadID
+	s.workingMu.Lock()
+	if existing, ok := s.working[key]; ok {
+		existing.lastRefreshed = time.Now()
+		s.working[key] = existing
+	}
+	s.workingMu.Unlock()
 }
 
 // ClearWorking removes the working indicator for a specific thread.
@@ -260,8 +289,8 @@ func (s *Store) WorkingCount(project, path string) int {
 	s.workingMu.RLock()
 	defer s.workingMu.RUnlock()
 	count := 0
-	for key, t := range s.working {
-		if strings.HasPrefix(key, prefix) && time.Since(t) < 60*time.Second {
+	for key, entry := range s.working {
+		if strings.HasPrefix(key, prefix) && time.Since(entry.lastRefreshed) < 60*time.Second {
 			count++
 		}
 	}
@@ -275,11 +304,11 @@ func (s *Store) IsWorking(project, path, threadID string) bool {
 	key := project + ":" + path + ":" + threadID
 	s.workingMu.RLock()
 	defer s.workingMu.RUnlock()
-	t, ok := s.working[key]
+	entry, ok := s.working[key]
 	if !ok {
 		return false
 	}
-	return time.Since(t) < 60*time.Second
+	return time.Since(entry.lastRefreshed) < 60*time.Second
 }
 
 // HasWorkingEntry returns true if a working entry exists for the given thread,
@@ -292,6 +321,34 @@ func (s *Store) HasWorkingEntry(project, path, threadID string) bool {
 	defer s.workingMu.RUnlock()
 	_, ok := s.working[key]
 	return ok
+}
+
+// WorkingAfterCommentID returns the afterCommentID for a working thread,
+// or empty string if no working entry exists.
+// E-PENPAL-WORKING: retrieves the afterCommentID from the working entry.
+func (s *Store) WorkingAfterCommentID(project, path, threadID string) string {
+	key := project + ":" + path + ":" + threadID
+	s.workingMu.RLock()
+	defer s.workingMu.RUnlock()
+	entry, ok := s.working[key]
+	if !ok {
+		return ""
+	}
+	return entry.afterCommentID
+}
+
+// WorkingStartedAt returns the startedAt time for a working thread,
+// or zero time if no working entry exists.
+// E-PENPAL-WORKING: retrieves the startedAt time from the working entry.
+func (s *Store) WorkingStartedAt(project, path, threadID string) time.Time {
+	key := project + ":" + path + ":" + threadID
+	s.workingMu.RLock()
+	defer s.workingMu.RUnlock()
+	entry, ok := s.working[key]
+	if !ok {
+		return time.Time{}
+	}
+	return entry.startedAt
 }
 
 // WorkingCountNoExpiry returns the number of threads with working indicators

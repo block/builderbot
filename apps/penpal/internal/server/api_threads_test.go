@@ -277,7 +277,7 @@ func TestAPIThreads_AgentWorkingField(t *testing.T) {
 	}
 
 	// Mark the thread as working
-	cs.SetWorking("test-proj", "thoughts/plan.md", thread.ID)
+	cs.SetWorking("test-proj", "thoughts/plan.md", thread.ID, "")
 
 	// List threads and check agentWorking
 	req = httptest.NewRequest(http.MethodGet, "/api/threads?project=test-proj&path=thoughts/plan.md", nil)
@@ -297,6 +297,55 @@ func TestAPIThreads_AgentWorkingField(t *testing.T) {
 	}
 	if !threads[0].AgentWorking {
 		t.Errorf("expected agentWorking=true")
+	}
+}
+
+// E-PENPAL-WORKING: verifies workingAfterCommentId is returned in thread response.
+func TestAPIThreads_WorkingAfterCommentId(t *testing.T) {
+	s, c, cs := testServer(t)
+	dir := t.TempDir()
+	seedProject(c, "test-proj", dir, nil)
+
+	// Create a thread
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"project": "test-proj",
+		"path":    "thoughts/plan.md",
+		"anchor":  map[string]string{"selectedText": "some text"},
+		"author":  "user",
+		"role":    "human",
+		"body":    "Hello",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/threads", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	var thread comments.Thread
+	if err := json.Unmarshal(rec.Body.Bytes(), &thread); err != nil {
+		t.Fatalf("parse thread: %v", err)
+	}
+	commentID := thread.Comments[0].ID
+
+	// Mark the thread as working with the comment ID
+	cs.SetWorking("test-proj", "thoughts/plan.md", thread.ID, commentID)
+
+	// List threads and check workingAfterCommentId
+	req = httptest.NewRequest(http.MethodGet, "/api/threads?project=test-proj&path=thoughts/plan.md", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	var threads []threadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &threads); err != nil {
+		t.Fatalf("parse threads: %v", err)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("expected 1 thread, got %d", len(threads))
+	}
+	if !threads[0].AgentWorking {
+		t.Error("expected agentWorking=true")
+	}
+	if threads[0].WorkingAfterCommentID != commentID {
+		t.Errorf("workingAfterCommentId = %q, want %q", threads[0].WorkingAfterCommentID, commentID)
 	}
 }
 
@@ -405,7 +454,7 @@ func TestAPIReviews_AgentActiveAndWorkingFields(t *testing.T) {
 	// Set up a running agent and working indicator
 	s.agents = agents.New(c, cs, 0)
 	s.agents.SimulateRunning("test-proj", 1000, 200000, 0.5, 1)
-	cs.SetWorking("test-proj", "thoughts/plan.md", thread.ID)
+	cs.SetWorking("test-proj", "thoughts/plan.md", thread.ID, "")
 
 	// List reviews
 	req = httptest.NewRequest(http.MethodGet, "/api/reviews?project=test-proj", nil)

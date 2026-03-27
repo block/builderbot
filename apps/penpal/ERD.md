@@ -147,7 +147,7 @@ see-also:
 
 ## Comment Thread Operations
 
-- <a id="E-PENPAL-THREAD-MODEL"></a>**E-PENPAL-THREAD-MODEL**: A `Thread` has ID, Status (`"open"`/`"resolved"`), Anchor, Comments, CreatedAt, ResolvedAt, ResolvedBy. A `Comment` has ID, Author, Role (`"human"`/`"agent"`), Body, CreatedAt, SuggestedReplies, InReplyTo.
+- <a id="E-PENPAL-THREAD-MODEL"></a>**E-PENPAL-THREAD-MODEL**: A `Thread` has ID, Status (`"open"`/`"resolved"`), Anchor, Comments, CreatedAt, ResolvedAt, ResolvedBy. A `Comment` has ID, Author, Role (`"human"`/`"agent"`), Body, CreatedAt, SuggestedReplies, InReplyTo, WorkingStartedAt (optional, set on agent replies to record when the agent began working — used for ordering).
   ← [P-PENPAL-THREAD-STATES](PRODUCT.md#P-PENPAL-THREAD-STATES), [P-PENPAL-REPLY](PRODUCT.md#P-PENPAL-REPLY)
 
 - <a id="E-PENPAL-THREAD-MUTEX"></a>**E-PENPAL-THREAD-MUTEX**: All comment mutations are serialized per-project via `sync.Mutex` to prevent concurrent write corruption.
@@ -156,8 +156,8 @@ see-also:
 - <a id="E-PENPAL-INREPLYTO"></a>**E-PENPAL-INREPLYTO**: `AddComment()` sets `InReplyTo` to the previous comment's ID. `migrateInReplyTo()` backfills missing `InReplyTo` fields in legacy data on save.
   ← [P-PENPAL-REPLY](PRODUCT.md#P-PENPAL-REPLY)
 
-- <a id="E-PENPAL-COMMENT-ORDER"></a>**E-PENPAL-COMMENT-ORDER**: `OrderComments()` arranges comments in tree order: root comments sorted by time, replies grouped under their parents, siblings sorted by time. Missing parents fall back to root level.
-  ← [P-PENPAL-THREAD-PANEL](PRODUCT.md#P-PENPAL-THREAD-PANEL)
+- <a id="E-PENPAL-COMMENT-ORDER"></a>**E-PENPAL-COMMENT-ORDER**: `OrderComments()` arranges comments in tree order: root comments sorted by time, replies grouped under their parents, siblings sorted by effective time. A comment's effective time is `WorkingStartedAt` when present, otherwise `CreatedAt`. This ensures agent replies are ordered by when the agent started working, not when the reply was posted. Missing parents fall back to root level.
+  ← [P-PENPAL-THREAD-PANEL](PRODUCT.md#P-PENPAL-THREAD-PANEL), [P-PENPAL-WORKING](PRODUCT.md#P-PENPAL-WORKING)
 
 - <a id="E-PENPAL-CHANGE-SEQ"></a>**E-PENPAL-CHANGE-SEQ**: A global monotonic sequence number increments on every comment change. `WaitForChangeSince(ctx, sinceSeq)` blocks on a channel until `changeSeq` advances or context cancels.
   ← [P-PENPAL-WAIT-CHANGES](PRODUCT.md#P-PENPAL-WAIT-CHANGES)
@@ -166,7 +166,7 @@ see-also:
 
 ## Working & Heartbeat Indicators
 
-- <a id="E-PENPAL-WORKING"></a>**E-PENPAL-WORKING**: An in-memory `working` map (keyed by `"project:path:threadID"`) tracks which threads an agent is actively processing. Entries expire after 60s. `SetWorking()`/`ClearWorking()` trigger SSE `comments` events.
+- <a id="E-PENPAL-WORKING"></a>**E-PENPAL-WORKING**: An in-memory `working` map (keyed by `"project:path:threadID"`) tracks which threads an agent is actively processing. Each entry stores `startedAt` (time) and `afterCommentID` (the last comment ID when the agent started working). Entries expire after 60s. `SetWorking()`/`ClearWorking()` trigger SSE `comments` events. The API thread response includes `workingAfterCommentId` so the frontend renders the indicator after the correct comment.
   ← [P-PENPAL-WORKING](PRODUCT.md#P-PENPAL-WORKING)
 
 - <a id="E-PENPAL-HEARTBEAT"></a>**E-PENPAL-HEARTBEAT**: An in-memory `heartbeats` map (keyed by `"project:filePath"`) records agent activity. `IsAgentActive()` returns true if heartbeat is <60s old. MCP tool calls record heartbeats.
@@ -182,7 +182,7 @@ see-also:
 - <a id="E-PENPAL-MCP-TOOLS"></a>**E-PENPAL-MCP-TOOLS**: Registered tools: `penpal_find_project` (maps CWD to project), `penpal_list_threads` (by file or project-wide), `penpal_read_thread`, `penpal_reply` (agent role, clears working), `penpal_create_thread` (computes Before/After/StartLine from disk), `penpal_files_in_review` (enriched with threads and oldest pending), `penpal_wait_for_changes` (30s long-poll).
   ← [P-PENPAL-MCP](PRODUCT.md#P-PENPAL-MCP), [P-PENPAL-WAIT-CHANGES](PRODUCT.md#P-PENPAL-WAIT-CHANGES)
 
-- <a id="E-PENPAL-MCP-WORKING"></a>**E-PENPAL-MCP-WORKING**: `penpal_list_threads`, `penpal_read_thread`, and `penpal_files_in_review` automatically set the `working` indicator for threads where the last comment is from a human. `penpal_reply` clears the indicator. `penpal_wait_for_changes` refreshes working timestamps during its 30s cycle to prevent expiry.
+- <a id="E-PENPAL-MCP-WORKING"></a>**E-PENPAL-MCP-WORKING**: `penpal_list_threads`, `penpal_read_thread`, and `penpal_files_in_review` automatically set the `working` indicator (with `afterCommentID` = last comment ID) for threads where the last comment is from a human. `penpal_reply` sets the reply's `InReplyTo` and `WorkingStartedAt` from the stored working entry before clearing the indicator. `penpal_wait_for_changes` refreshes working timestamps during its 30s cycle to prevent expiry.
   ← [P-PENPAL-WORKING](PRODUCT.md#P-PENPAL-WORKING)
 
 ---

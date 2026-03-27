@@ -61,8 +61,8 @@ func TestAgentCleanupOnExit(t *testing.T) {
 	// Pre-populate heartbeats and working indicators
 	cs.RecordHeartbeat("testproj", "file1.md")
 	cs.RecordHeartbeat("testproj", "file2.md")
-	cs.SetWorking("testproj", "file1.md", "thread-1")
-	cs.SetWorking("testproj", "file2.md", "thread-2")
+	cs.SetWorking("testproj", "file1.md", "thread-1", "")
+	cs.SetWorking("testproj", "file2.md", "thread-2", "")
 
 	// Verify they are active before cleanup
 	if !cs.IsAgentActive("testproj", "file1.md") {

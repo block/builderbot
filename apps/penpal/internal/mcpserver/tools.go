@@ -109,7 +109,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 					seen[t.FilePath] = true
 				}
 				if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-					store.SetWorking(input.Project, t.FilePath, t.ID)
+					store.SetWorking(input.Project, t.FilePath, t.ID, t.Comments[len(t.Comments)-1].ID)
 				}
 			}
 			res, err := textResult(threads)
@@ -129,7 +129,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				filtered = append(filtered, t)
 			}
 			if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-				store.SetWorking(input.Project, input.Path, t.ID)
+				store.SetWorking(input.Project, input.Path, t.ID, t.Comments[len(t.Comments)-1].ID)
 			}
 		}
 		res, err := textResult(filtered)
@@ -159,7 +159,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			if t.ID == input.ThreadID {
 				// Set working indicator if last comment is from a human
 				if len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-					store.SetWorking(input.Project, input.Path, input.ThreadID)
+					store.SetWorking(input.Project, input.Path, input.ThreadID, t.Comments[len(t.Comments)-1].ID)
 				}
 				res, err := textResult(t)
 				return res, nil, err
@@ -179,11 +179,19 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project, path, threadId, and body are all required")
 		}
 
+		// E-PENPAL-MCP-WORKING: set InReplyTo and WorkingStartedAt from stored working entry.
+		afterID := store.WorkingAfterCommentID(input.Project, input.Path, input.ThreadID)
+		startedAt := store.WorkingStartedAt(input.Project, input.Path, input.ThreadID)
+
 		comment := comments.Comment{
 			Author:           "claude",
 			Role:             "agent",
 			Body:             input.Body,
 			SuggestedReplies: input.SuggestedReplies,
+			InReplyTo:        afterID,
+		}
+		if !startedAt.IsZero() {
+			comment.WorkingStartedAt = &startedAt
 		}
 		thread, err := store.AddCommentForWorktree(input.Project, input.Path, input.Worktree, input.ThreadID, comment)
 		if err != nil {
@@ -331,7 +339,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 
 				if oldestPending != nil {
 					ef.OldestPending = oldestPending
-					store.SetWorking(input.Project, f.FilePath, oldestPending.ID)
+					store.SetWorking(input.Project, f.FilePath, oldestPending.ID, oldestPending.Comments[len(oldestPending.Comments)-1].ID)
 				}
 			}
 
@@ -397,7 +405,12 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 				if loadErr == nil {
 					for _, t := range fc.Threads {
 						if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-							store.SetWorking(input.Project, f.FilePath, t.ID)
+							lastCommentID := t.Comments[len(t.Comments)-1].ID
+							if store.WorkingAfterCommentID(input.Project, f.FilePath, t.ID) == lastCommentID {
+								store.RefreshWorkingTimestamp(input.Project, f.FilePath, t.ID)
+							} else {
+								store.SetWorking(input.Project, f.FilePath, t.ID, lastCommentID)
+							}
 							pending = append(pending, pendingThread{filePath: f.FilePath, thread: t})
 						}
 					}
@@ -429,13 +442,14 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		}
 
 		// Refresh working timestamps for threads still awaiting a response
-		// so they survive across 30s wait cycles.
+		// so they survive across 30s wait cycles. Use RefreshWorkingTimestamp
+		// to preserve the afterCommentID — the agent hasn't re-read these threads.
 		for _, f := range files {
 			fc, loadErr := store.LoadForWorktree(input.Project, f.FilePath, input.Worktree)
 			if loadErr == nil {
 				for _, t := range fc.Threads {
 					if t.Status == "open" && len(t.Comments) > 0 && t.Comments[len(t.Comments)-1].Role == "human" {
-						store.SetWorking(input.Project, f.FilePath, t.ID)
+						store.RefreshWorkingTimestamp(input.Project, f.FilePath, t.ID)
 					}
 				}
 			}

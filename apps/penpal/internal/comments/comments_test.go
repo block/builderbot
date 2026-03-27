@@ -657,6 +657,56 @@ func TestAddCommentSetsInReplyTo(t *testing.T) {
 }
 
 // E-PENPAL-INREPLYTO: verifies legacy JSON without InReplyTo loads without error.
+// E-PENPAL-WORKING: verifies SetWorking stores and updates afterCommentID.
+func TestSetWorkingStoresAfterCommentID(t *testing.T) {
+	store := newTestStore(t)
+
+	store.SetWorking("proj", "file.md", "t1", "comment-42")
+
+	if !store.IsWorking("proj", "file.md", "t1") {
+		t.Fatal("expected IsWorking to be true")
+	}
+	if got := store.WorkingAfterCommentID("proj", "file.md", "t1"); got != "comment-42" {
+		t.Errorf("WorkingAfterCommentID = %q, want %q", got, "comment-42")
+	}
+
+	// SetWorking with a new afterCommentID should update it (agent re-read the thread)
+	store.SetWorking("proj", "file.md", "t1", "comment-99")
+
+	if got := store.WorkingAfterCommentID("proj", "file.md", "t1"); got != "comment-99" {
+		t.Errorf("after re-read, WorkingAfterCommentID = %q, want %q (should update)", got, "comment-99")
+	}
+}
+
+// E-PENPAL-WORKING: verifies RefreshWorkingTimestamp preserves afterCommentID.
+func TestRefreshWorkingTimestampPreservesAfterCommentID(t *testing.T) {
+	store := newTestStore(t)
+
+	store.SetWorking("proj", "file.md", "t1", "comment-42")
+
+	// RefreshWorkingTimestamp should keep the original afterCommentID
+	store.RefreshWorkingTimestamp("proj", "file.md", "t1")
+
+	if got := store.WorkingAfterCommentID("proj", "file.md", "t1"); got != "comment-42" {
+		t.Errorf("after refresh, WorkingAfterCommentID = %q, want %q (should be preserved)", got, "comment-42")
+	}
+	if !store.IsWorking("proj", "file.md", "t1") {
+		t.Error("expected IsWorking to still be true after refresh")
+	}
+}
+
+// E-PENPAL-WORKING: verifies ClearWorking removes working entry and WorkingAfterCommentID returns empty.
+func TestClearWorkingRemovesAfterCommentID(t *testing.T) {
+	store := newTestStore(t)
+
+	store.SetWorking("proj", "file.md", "t1", "comment-42")
+	store.ClearWorking("proj", "file.md", "t1")
+
+	if got := store.WorkingAfterCommentID("proj", "file.md", "t1"); got != "" {
+		t.Errorf("after clear, WorkingAfterCommentID = %q, want empty", got)
+	}
+}
+
 func TestLegacyJSONWithoutInReplyToLoads(t *testing.T) {
 	store := newTestStore(t)
 

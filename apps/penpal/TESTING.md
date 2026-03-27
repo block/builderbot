@@ -96,6 +96,7 @@ see-also:
 | SPA Serving (E-PENPAL-SPA-SERVE) | — | — | spa_test.go | react-app.spec.ts |
 | Path Traversal (E-PENPAL-PATH-TRAVERSAL) | — | — | pathutil_test.go, spa_test.go | — |
 | View Tracking (E-PENPAL-ACTIVITY) | — | — | — | view-tracking.spec.ts |
+| File Handler (P-PENPAL-FILE-HANDLER) | — | — | api_manage_test.go | — |
 
 ## Known Coverage Gaps
 

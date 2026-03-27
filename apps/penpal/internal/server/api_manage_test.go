@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/loganj/penpal/internal/cache"
@@ -171,6 +172,65 @@ func TestAPIOpen_NewDirectory(t *testing.T) {
 	}
 	if resp["url"] == "" {
 		t.Error("expected non-empty url")
+	}
+}
+
+// E-PENPAL-FILE-HANDLER-EVENT: verifies POST /api/open auto-adds a standalone .md file not in any project.
+func TestAPIOpen_StandaloneMarkdownFile(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	// Create a .md file in a directory that is not registered as a project
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(filePath, []byte("# Notes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(map[string]string{"path": filePath})
+	req := httptest.NewRequest(http.MethodPost, "/api/open", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse JSON: %v", err)
+	}
+	// Should return a file URL containing the filename
+	if resp["url"] == "" {
+		t.Fatal("expected non-empty url")
+	}
+	if !filepath.IsAbs(filePath) {
+		t.Fatal("test setup: filePath should be absolute")
+	}
+	// The URL should reference the file, not just a project
+	if !strings.Contains(resp["url"], "notes.md") {
+		t.Errorf("expected url to contain 'notes.md', got %q", resp["url"])
+	}
+}
+
+// E-PENPAL-FILE-HANDLER-EVENT: verifies POST /api/open rejects non-.md files.
+func TestAPIOpen_RejectsNonMarkdown(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "readme.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(map[string]string{"path": filePath})
+	req := httptest.NewRequest(http.MethodPost, "/api/open", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-.md file, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

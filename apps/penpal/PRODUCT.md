@@ -286,6 +286,8 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-EXTERNAL-LINKS"></a>**P-PENPAL-EXTERNAL-LINKS**: In the desktop app, external HTTP links open in the system browser.
 
+- <a id="P-PENPAL-FILE-HANDLER"></a>**P-PENPAL-FILE-HANDLER**: The macOS app registers as an alternate handler for markdown files (`.md`, `.markdown`). Penpal appears in Finder's "Open With" menu and can be selected via `open -a Penpal file.md`. Opening a markdown file this way behaves identically to `penpal open <path>` — the file is shown in the app, auto-added to its project if applicable, or opened as a standalone file.
+
 ---
 
 ## Open Questions

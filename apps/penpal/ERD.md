@@ -383,6 +383,12 @@ see-also:
 - <a id="E-PENPAL-EXTERNAL-LINKS"></a>**E-PENPAL-EXTERNAL-LINKS**: `handleAppClick()` in `Layout` intercepts clicks on `<a>` elements. For links starting with `http://`, `https://`, or `//`: if `isDesktopApp` (detected via `'__TAURI__' in window`), prevents default, stops propagation, dynamically imports `@tauri-apps/plugin-shell`, and calls `open(href)` to open in the system browser. In browser mode, falls through to default behavior.
   ← [P-PENPAL-EXTERNAL-LINKS](PRODUCT.md#P-PENPAL-EXTERNAL-LINKS)
 
+- <a id="E-PENPAL-FILE-HANDLER-PLIST"></a>**E-PENPAL-FILE-HANDLER-PLIST**: `Info.plist` declares `CFBundleDocumentTypes` with `LSItemContentTypes: [net.daringfireball.markdown]`, `CFBundleTypeExtensions: [md, markdown]`, `CFBundleTypeRole: Editor`, and `LSHandlerRank: Alternate`. This registers Penpal in Finder's "Open With" menu without overriding the user's current default markdown handler.
+  ← [P-PENPAL-FILE-HANDLER](PRODUCT.md#P-PENPAL-FILE-HANDLER)
+
+- <a id="E-PENPAL-FILE-HANDLER-EVENT"></a>**E-PENPAL-FILE-HANDLER-EVENT**: In the Tauri `.run()` callback, handle `tauri::RunEvent::Opened { urls }`. For each URL with `file://` scheme, extract the path and POST it to `http://127.0.0.1:{port}/api/open` (same as the CLI `openPaths` flow). Ensure a window exists before dispatching (create one if all windows are closed). The Go server's existing `handleAPIOpen` resolves the file to its project and triggers SSE navigation.
+  ← [P-PENPAL-FILE-HANDLER](PRODUCT.md#P-PENPAL-FILE-HANDLER)
+
 ---
 
 ## Open Questions

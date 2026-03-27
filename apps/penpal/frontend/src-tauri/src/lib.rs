@@ -9,6 +9,9 @@ use tauri_plugin_shell::ShellExt;
 /// Holds the sidecar child process so we can kill it on quit.
 struct Sidecar(Mutex<Option<CommandChild>>);
 
+/// Holds the server port so the run callback can reach the Go server.
+struct ServerPort(Mutex<String>);
+
 /// Tracks whether a window was just destroyed, so we can distinguish
 /// "last window closed" from "user quit" in ExitRequested.
 #[cfg(target_os = "macos")]
@@ -24,6 +27,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_decorum::init())
         .manage(Sidecar(Mutex::new(None)))
+        .manage(ServerPort(Mutex::new(String::new())))
         .setup(|app| {
             // macOS traffic light positioning
             #[cfg(target_os = "macos")]
@@ -49,6 +53,9 @@ pub fn run() {
 
             // Store the child so we can kill it on quit
             *app.state::<Sidecar>().0.lock().unwrap() = Some(child);
+
+            // Store the port for the run callback (file open events)
+            *app.state::<ServerPort>().0.lock().unwrap() = port.clone();
 
             // Wait for server to be fully ready (projects discovered and files scanned).
             // The /api/ready endpoint blocks until initialization is complete.
@@ -176,6 +183,39 @@ pub fn run() {
                     .title("Penpal")
                     .inner_size(1200.0, 800.0)
                     .build();
+                }
+            }
+            // E-PENPAL-FILE-HANDLER-EVENT: handle macOS file open events (Finder "Open With", `open -a`).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                // Ensure a window exists to display the file
+                if app_handle.webview_windows().is_empty() {
+                    let _ = tauri::WebviewWindowBuilder::new(
+                        app_handle,
+                        "main",
+                        tauri::WebviewUrl::App("/".into()),
+                    )
+                    .title("Penpal")
+                    .inner_size(1200.0, 800.0)
+                    .build();
+                }
+
+                let port = app_handle.state::<ServerPort>().0.lock().unwrap().clone();
+                if !port.is_empty() {
+                    let addr = format!("127.0.0.1:{}", port);
+                    for url in urls {
+                        if let Ok(path) = url.to_file_path() {
+                            let body = serde_json::json!({"path": path.to_string_lossy()}).to_string();
+                            if let Ok(mut stream) = std::net::TcpStream::connect(&addr) {
+                                use std::io::Write;
+                                let req = format!(
+                                    "POST /api/open HTTP/1.0\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                    addr, body.len(), body
+                                );
+                                let _ = stream.write_all(req.as_bytes());
+                            }
+                        }
+                    }
                 }
             }
             if let tauri::RunEvent::Exit = event {

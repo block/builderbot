@@ -286,6 +286,24 @@ func (m *Manager) SimulateFinished(projectName string) {
 	}
 }
 
+// SimulateRunning inserts a synthetic agent entry that appears to be
+// actively running. This is intended for testing the "agent running" status
+// path without requiring an external binary.
+func (m *Manager) SimulateRunning(projectName string, contextUsed, contextWindow int, totalCostUSD float64, numTurns int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.agents[projectName] = &Agent{
+		Project:       projectName,
+		StartedAt:     time.Now(),
+		PID:           99999,
+		done:          make(chan struct{}), // not closed = still running
+		contextWindow: contextWindow,
+		contextUsed:   contextUsed,
+		totalCostUSD:  totalCostUSD,
+		numTurns:      numTurns,
+	}
+}
+
 // StopAll terminates all running agents (for server shutdown).
 func (m *Manager) StopAll() {
 	m.mu.Lock()

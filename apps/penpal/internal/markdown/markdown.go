@@ -44,6 +44,7 @@ var md = goldmark.New(
 const HeadingIDPrefix = "penpal-md-"
 
 // Render converts markdown source to an HTML fragment string.
+// E-PENPAL-PUBLISH-RENDER: goldmark rendering pipeline with prefixed heading IDs.
 func Render(src []byte) (string, error) {
 	var buf bytes.Buffer
 	ctx := parser.NewContext(parser.WithIDs(&prefixedIDs{
@@ -112,6 +113,7 @@ var headingRegex = regexp.MustCompile(`<h([1-3]) id="([^"]+)"[^>]*>(.*?)</h[1-3]
 var htmlTagRegex = regexp.MustCompile(`<[^>]+>`)
 
 // ExtractHeadings parses rendered HTML to find h1-h3 elements with IDs.
+// E-PENPAL-PUBLISH-RENDER: extracts headings for TOC generation.
 func ExtractHeadings(htmlStr string) []Heading {
 	matches := headingRegex.FindAllStringSubmatch(htmlStr, -1)
 	var headings []Heading
@@ -133,6 +135,7 @@ func ExtractHeadings(htmlStr string) []Heading {
 }
 
 // StripFrontmatter removes YAML frontmatter delimited by --- from the beginning of content.
+// E-PENPAL-PUBLISH-RENDER: strips YAML frontmatter before rendering.
 func StripFrontmatter(content []byte) []byte {
 	s := string(content)
 	if !strings.HasPrefix(s, "---") {

@@ -11,6 +11,7 @@ import (
 	"github.com/loganj/penpal/internal/discovery"
 )
 
+// E-PENPAL-API-ROUTES: verifies GET /api/project/{name} returns grouped files with source metadata.
 func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -62,6 +63,7 @@ func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies GET /api/recent returns recent files with names and paths.
 func TestAPIRecent_ReturnsFiles(t *testing.T) {
 	s, c, _ := testServer(t)
 

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import TableOfContents from './TableOfContents';
 
+// E-PENPAL-TOC: verifies heading link rendering, anchor hrefs, and level classes.
 describe('TableOfContents', () => {
   it('returns null for empty headings', () => {
     const { container } = render(<TableOfContents headings={[]} />);

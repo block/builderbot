@@ -14,6 +14,8 @@ import (
 //	{project.Path}/.penpal/comments/{filePath}.json
 //
 // filePath is relative to the project root (e.g., "thoughts/shared/plans/foo.md").
+//
+// E-PENPAL-COMMENT-STORAGE: JSON sidecar files at {project}/.penpal/comments/{path}.json.
 func (s *Store) commentsPath(projectName, filePath string) (string, error) {
 	return s.commentsPathForWorktree(projectName, filePath, "")
 }
@@ -21,6 +23,8 @@ func (s *Store) commentsPath(projectName, filePath string) (string, error) {
 // commentsPathForWorktree returns the absolute path to the sidecar JSON file,
 // scoped to a specific worktree. When worktree is empty, uses the main project path.
 // When worktree is specified, uses the worktree's filesystem path.
+//
+// E-PENPAL-COMMENT-WORKTREE: stores comments within the worktree's filesystem path.
 func (s *Store) commentsPathForWorktree(projectName, filePath, worktree string) (string, error) {
 	project := s.cache.FindProject(projectName)
 	if project == nil {
@@ -55,6 +59,7 @@ func (s *Store) commentsPathForWorktree(projectName, filePath, worktree string) 
 
 // Load reads and parses the sidecar JSON for the given project and file.
 // If the file does not exist, it returns an empty FileComments (not an error).
+// E-PENPAL-COMMENT-STORAGE: reads JSON sidecar file for a project file.
 func (s *Store) Load(projectName, filePath string) (*FileComments, error) {
 	return s.LoadForWorktree(projectName, filePath, "")
 }
@@ -84,6 +89,8 @@ func (s *Store) LoadForWorktree(projectName, filePath, worktree string) (*FileCo
 // migrateInReplyTo backfills missing InReplyTo fields by walking each
 // thread's comments in array order. comment[0] stays root; comment[N]
 // gets InReplyTo = comment[N-1].ID if not already set.
+//
+// E-PENPAL-INREPLYTO: backfills legacy data missing InReplyTo fields.
 func migrateInReplyTo(fc *FileComments) {
 	for i, t := range fc.Threads {
 		for j := 1; j < len(t.Comments); j++ {
@@ -97,11 +104,13 @@ func migrateInReplyTo(fc *FileComments) {
 // Save writes the FileComments to the sidecar JSON file atomically.
 // It writes to a temporary file first, then renames it into place.
 // Directories are created as needed.
+// E-PENPAL-COMMENT-STORAGE: atomic writes via temp file + rename.
 func (s *Store) Save(projectName, filePath string, fc *FileComments) error {
 	return s.SaveForWorktree(projectName, filePath, "", fc)
 }
 
 // SaveForWorktree writes comments scoped to a worktree.
+// E-PENPAL-COMMENT-WORKTREE: atomic write to worktree-scoped sidecar path.
 func (s *Store) SaveForWorktree(projectName, filePath, worktree string, fc *FileComments) error {
 	migrateInReplyTo(fc)
 	p, err := s.commentsPathForWorktree(projectName, filePath, worktree)

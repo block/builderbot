@@ -9,6 +9,8 @@ import (
 	"github.com/loganj/penpal/internal/markdown"
 )
 
+// E-PENPAL-FRONTMATTER-STRIP: markdown.StripFrontmatter() applied in handleRawFile.
+// E-PENPAL-PATH-TRAVERSAL: isSubpath() prevents path traversal on raw files.
 func (s *Server) handleRawFile(w http.ResponseWriter, r *http.Request) {
 	qualifiedName := r.URL.Query().Get("project")
 	filePath := r.URL.Query().Get("path")
@@ -57,6 +59,7 @@ func (s *Server) handleRawFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRecordView records a file-viewed activity event.
+// E-PENPAL-ACTIVITY: records file-viewed events.
 func (s *Server) handleRecordView(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

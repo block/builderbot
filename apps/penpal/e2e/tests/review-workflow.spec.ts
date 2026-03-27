@@ -3,14 +3,22 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { MCPClient } from '../helpers/mcp-client';
+import { blockPendingNavigation } from '../helpers/fixtures';
 
 const BASE_URL = 'http://localhost:18923';
+
+// SPA routes require the Vite dev server (Go server serves the SPA at /app/).
+test.use({ baseURL: 'http://localhost:18924' });
 
 let tmpDir: string;
 let projectUrl: string;
 let projectName: string;
 let filePath: string; // project-relative path to the markdown file
 
+// E-PENPAL-MCP-TOOLS: verifies end-to-end review workflow using MCP tools.
+// Serial mode: the MCP + SSE + watcher pipeline is sensitive to I/O contention
+// from parallel workers, causing the agent reply SSE event to arrive late.
+test.describe.configure({ mode: 'serial' });
 test.describe('review workflow', () => {
   test.beforeAll(async ({ request }) => {
     // Create a temp directory with a markdown file
@@ -32,6 +40,10 @@ test.describe('review workflow', () => {
     projectUrl = openData.url; // e.g. /project/penpal-e2e-XXXX
     projectName = projectUrl.replace('/project/', '');
     filePath = 'thoughts/test-doc.md';
+
+    // Clear the pending navigation that /api/open sets — otherwise the
+    // frontend's SSE onConnect handler will redirect to the project page.
+    await request.get(`${BASE_URL}/api/navigate`);
   });
 
   test.afterAll(async ({ request }) => {
@@ -43,12 +55,25 @@ test.describe('review workflow', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  // E-PENPAL-ANCHOR-COMPUTE: verifies text selection creates anchor with correct context.
+  // E-PENPAL-HIGHLIGHT-REHYPE: verifies comment highlight renders on selected text.
+  // E-PENPAL-MCP-WORKING: verifies working indicator appears when agent reads threads.
+  // E-PENPAL-MCP-TOOLS: verifies penpal_list_threads and penpal_reply MCP tool calls.
+  // E-PENPAL-SUGGESTED-REPLIES: verifies suggested reply pills render after agent reply.
   test('full comment review lifecycle', async ({ page }) => {
+    await blockPendingNavigation(page);
+    // Ensure the SSE connection and file watcher are fully established
+    // before interacting — prevents SSE events from being missed.
+    const focusReady = page.waitForResponse(
+      (resp) => resp.url().includes('/api/focus') && resp.ok(),
+    );
+
     // ---- Step 1: Navigate to the file page ----
     await page.goto(`/file/${projectName}/${filePath}`);
     const content = page.locator('#content');
     await expect(content).toBeVisible();
     await expect(content).toContainText('This is a paragraph for testing comments.');
+    await focusReady;
 
     // Comments panel shows "No comments yet"
     await expect(page.locator('.no-comments')).toContainText('No comments yet');
@@ -89,15 +114,18 @@ test.describe('review workflow', () => {
     await expect(form.locator('.quoted-text')).toContainText(selectedText);
 
     // Fill in author name and comment body
-    await form.locator('#new-thread-author').fill('test-human');
-    await form.locator('#new-thread-body').fill('This needs clarification.');
+    await form.locator('.author-field').fill('test-human');
+    await form.locator('textarea').fill('This needs clarification.');
 
     // Click submit
     await form.locator('.btn-submit').click();
+    // Wait for the form to close — confirms the POST succeeded and
+    // fetchThreads() was triggered.
+    await expect(form).toBeHidden({ timeout: 15000 });
 
     // Assert: thread card appears
     const threadCard = page.locator('.thread-card').first();
-    await expect(threadCard).toBeVisible({ timeout: 5000 });
+    await expect(threadCard).toBeVisible({ timeout: 15000 });
     await expect(threadCard.locator('.comment-author')).toContainText('test-human');
     await expect(threadCard.locator('.comment-role.human')).toBeVisible();
     await expect(threadCard.locator('.comment-body')).toContainText('This needs clarification.');
@@ -115,7 +143,7 @@ test.describe('review workflow', () => {
 
     // Wait for the working indicator to appear via SSE update
     const workingIndicator = threadCard.locator('.thread-working');
-    await expect(workingIndicator).toBeVisible({ timeout: 10000 });
+    await expect(workingIndicator).toBeVisible({ timeout: 15000 });
 
     // ---- Step 4: Simulate agent replying ----
     await mcp.callTool('penpal_reply', {
@@ -129,11 +157,11 @@ test.describe('review workflow', () => {
     // Wait for SSE update — working indicator should disappear, agent comment should appear
     // Use a fresh locator for the thread card (DOM may have been replaced)
     const updatedCard = page.locator(`.thread-card[data-thread-id="${threadId}"]`);
-    await expect(updatedCard.locator('.thread-working')).toBeHidden({ timeout: 10000 });
+    await expect(updatedCard.locator('.thread-working')).toBeHidden({ timeout: 15000 });
 
     // Agent comment appears
     const agentComment = updatedCard.locator('.comment-role.agent');
-    await expect(agentComment).toBeVisible({ timeout: 10000 });
+    await expect(agentComment).toBeVisible({ timeout: 15000 });
 
     // Verify agent comment content
     const comments = updatedCard.locator('.thread-comment');

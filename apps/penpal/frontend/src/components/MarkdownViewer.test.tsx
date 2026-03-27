@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import MarkdownViewer from './MarkdownViewer';
 
+// E-PENPAL-MD-RENDER: verifies data-source-line, heading IDs, mermaid containers, GFM tables.
+// E-PENPAL-HIGHLIGHT-REHYPE: verifies comment highlights and pending highlights via rehype plugin.
 describe('MarkdownViewer', () => {
   it('renders markdown content', () => {
     const md = '# Hello World\n\nThis is a paragraph.';

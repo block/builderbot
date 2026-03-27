@@ -41,6 +41,7 @@ function updateHighlights(ranges: Range[], activeIdx: number) {
   if (ranges[activeIdx]) activeHighlight.add(ranges[activeIdx]);
 }
 
+// E-PENPAL-FIND-BAR: CSS Custom Highlight API with TreeWalker matching for in-page search.
 export default function FindBar({ onClose }: FindBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
@@ -87,7 +88,12 @@ export default function FindBar({ onClose }: FindBarProps) {
   }, [query]);
 
   function scrollToRange(range: Range) {
-    const container = document.querySelector('.main-content');
+    // On file pages .main-content has overflow:hidden; the real scroll
+    // container is .file-main-scroll.  Fall back to .main-content for
+    // non-file pages (project list, workspace, etc.).
+    const container =
+      document.querySelector('.file-main-scroll') ||
+      document.querySelector('.main-content');
     if (!container) return;
     const rangeRect = range.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();

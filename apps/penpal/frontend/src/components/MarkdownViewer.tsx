@@ -45,6 +45,8 @@ interface MarkdownViewerProps {
   highlights?: ThreadHighlight[];
 }
 
+// E-PENPAL-MD-RENDER: data-source-line on blocks, heading ID slugification, mermaid containers.
+// E-PENPAL-TOC: extracts h1/h2/h3 headings and passes to onHeadingsExtracted.
 const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
   function MarkdownViewer({ content, rawMarkdown: _rawMarkdown, onHeadingsExtracted, className, highlights }, ref) {
     const innerRef = useRef<HTMLDivElement>(null);

@@ -1,5 +1,6 @@
 import type { Comment } from '../types';
 
+// E-PENPAL-COMMENT-ORDER: tree-order sorting with parent grouping and time-based sibling sort.
 export function orderComments(comments: Comment[]): Comment[] {
   if (!comments || comments.length <= 1) return comments;
 

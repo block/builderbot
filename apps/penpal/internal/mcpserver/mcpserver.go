@@ -11,6 +11,7 @@ import (
 // NewHandler creates an HTTP handler implementing the MCP Streamable HTTP
 // protocol. It exposes comment and review tools so AI agents can interact
 // with penpal programmatically.
+// E-PENPAL-MCP-TRANSPORT: Streamable HTTP transport via mcp.NewStreamableHTTPHandler.
 func NewHandler(store *comments.Store, c *cache.Cache) http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "penpal",

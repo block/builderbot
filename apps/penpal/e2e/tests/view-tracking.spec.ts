@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 
+// E-PENPAL-ACTIVITY: verifies view tracking API records views and validates required parameters.
 test.describe('POST /api/view', () => {
   test('records a view and returns 204', async ({ request }) => {
     const response = await request.post('/api/view?project=test-proj&path=thoughts/test.md');

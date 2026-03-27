@@ -25,6 +25,34 @@ export default defineConfig({
     },
   ],
   projects: [
-    { name: 'chromium', use: { browserName: 'chromium' } },
+    {
+      name: 'default',
+      use: { browserName: 'chromium' },
+      testIgnore: /(?:sse-refresh|review-workflow|cli-open|mermaid-comments|find-in-page)\.spec\.ts$/,
+    },
+    {
+      // Tests that call POST /api/open broadcast "navigate" SSE events to
+      // all connected browsers, redirecting other tests' pages.  Running
+      // them after the parallel phase avoids cross-test interference.
+      name: 'has-projects',
+      use: { browserName: 'chromium' },
+      testMatch: /(?:cli-open|mermaid-comments|find-in-page)\.spec\.ts$/,
+      dependencies: ['default'],
+    },
+    {
+      // MCP + SSE review pipeline: runs alone so the Go server is idle.
+      name: 'review',
+      use: { browserName: 'chromium' },
+      testMatch: /review-workflow\.spec\.ts$/,
+      dependencies: ['has-projects'],
+    },
+    {
+      // SSE timing tests assert sub-500ms watcher→browser delivery.
+      // Runs last and alone so I/O contention is zero.
+      name: 'sse',
+      use: { browserName: 'chromium' },
+      testMatch: /sse-refresh\.spec\.ts$/,
+      dependencies: ['review'],
+    },
   ],
 });

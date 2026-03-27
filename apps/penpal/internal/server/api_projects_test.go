@@ -13,6 +13,7 @@ import (
 	"github.com/loganj/penpal/internal/cache"
 )
 
+// E-PENPAL-API-ROUTES: verifies GET /api/projects lists discovered projects.
 func TestAPIProjects_ListsProjects(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -44,6 +45,7 @@ func TestAPIProjects_ListsProjects(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CLOSE-PROJECT: verifies POST then DELETE /api/projects round-trip.
 func TestAPIProjects_AddAndCloseStandalone(t *testing.T) {
 	s, _, _ := testServer(t)
 	dir := t.TempDir()
@@ -69,6 +71,7 @@ func TestAPIProjects_AddAndCloseStandalone(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies GET /api/project/{name} returns empty array for unknown project.
 func TestAPIProjectFiles_NotFound(t *testing.T) {
 	s, _, _ := testServer(t)
 
@@ -89,6 +92,7 @@ func TestAPIProjectFiles_NotFound(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies project with no files returns [] not null.
 func TestAPIProjectFiles_NoFilesReturnsEmptyArray(t *testing.T) {
 	// Regression: Go nil slices encode as JSON null. When a project has no
 	// files, the response must be [] not null, or the frontend crashes.
@@ -114,6 +118,7 @@ func TestAPIProjectFiles_NoFilesReturnsEmptyArray(t *testing.T) {
 	}
 }
 
+// E-PENPAL-DELETE-PROJECT: verifies GET /api/project-info returns fileCount.
 func TestAPIProjectInfo_ReturnsInfo(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -139,6 +144,7 @@ func TestAPIProjectInfo_ReturnsInfo(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies GET /api/agents with nonexistent project returns running=false.
 func TestAPIAgents_StatusNoAgent(t *testing.T) {
 	s, _, _ := testServer(t)
 
@@ -171,6 +177,7 @@ func TestAPIAgents_MissingProject(t *testing.T) {
 	}
 }
 
+// E-PENPAL-FRONTMATTER-STRIP: verifies GET /api/raw returns file content.
 func TestAPIRawFile_ReturnsContent(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -192,6 +199,7 @@ func TestAPIRawFile_ReturnsContent(t *testing.T) {
 	}
 }
 
+// E-PENPAL-IN-REVIEW-PAGE: verifies GET /api/in-review returns review groups.
 func TestAPIInReview_ReturnsGroups(t *testing.T) {
 	s, c, _ := testServer(t)
 

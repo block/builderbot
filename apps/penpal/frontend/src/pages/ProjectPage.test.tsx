@@ -52,6 +52,7 @@ function renderPage() {
   );
 }
 
+// E-PENPAL-IN-REVIEW-SECTION, E-PENPAL-SOURCE-ACTIONS, E-PENPAL-BATCH-OPS: verifies source sections, file rows, and SSE reconnect.
 describe('ProjectPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();

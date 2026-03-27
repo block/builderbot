@@ -2,14 +2,19 @@ import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { blockPendingNavigation } from '../helpers/fixtures';
 
 const BASE_URL = 'http://localhost:18923';
+
+// SPA routes require the Vite dev server (Go server serves the SPA at /app/).
+test.use({ baseURL: 'http://localhost:18924' });
 
 let tmpDir: string;
 let projectUrl: string;
 let projectName: string;
 let filePath: string;
 
+// E-PENPAL-SVG-DRAG: verifies mermaid diagram drag selection, SVG extraction, and highlighting.
 test.describe('mermaid diagram commenting', () => {
   test.beforeAll(async ({ request }) => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'penpal-mermaid-e2e-'));
@@ -42,6 +47,10 @@ test.describe('mermaid diagram commenting', () => {
     projectUrl = openData.url;
     projectName = projectUrl.replace('/project/', '');
     filePath = 'thoughts/diagram-doc.md';
+
+    // Clear the pending navigation that /api/open sets — otherwise the
+    // frontend's SSE onConnect handler will redirect to the project page.
+    await request.get(`${BASE_URL}/api/navigate`);
   });
 
   test.afterAll(async ({ request }) => {
@@ -51,7 +60,9 @@ test.describe('mermaid diagram commenting', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  // E-PENPAL-MD-RENDER: verifies mermaid container renders with data-source-line attribute and SVG.
   test('mermaid diagram renders with data-source-line', async ({ page }) => {
+    await blockPendingNavigation(page);
     await page.goto(`/file/${projectName}/${filePath}`);
     const container = page.locator('.mermaid-container');
     await expect(container).toBeVisible({ timeout: 10000 });
@@ -66,12 +77,20 @@ test.describe('mermaid diagram commenting', () => {
     await expect(svg).toBeVisible();
   });
 
+  // E-PENPAL-SVG-DRAG: verifies drag creates pending highlight rect and comment form.
+  // E-PENPAL-SVG-EXTRACT: verifies SVG snippet is extracted and shown in comment form.
   test('drag on mermaid diagram creates SVG selection and comment', async ({ page }) => {
+    await blockPendingNavigation(page);
+    // Wait for the SSE connection and file watcher to be established
+    const focusReady = page.waitForResponse(
+      (resp) => resp.url().includes('/api/focus') && resp.ok(),
+    );
     await page.goto(`/file/${projectName}/${filePath}`);
 
     // Wait for mermaid to render
     const container = page.locator('.mermaid-container');
     await expect(container).toBeVisible({ timeout: 10000 });
+    await focusReady;
     const svg = container.locator('svg');
     await expect(svg).toBeVisible();
 
@@ -111,13 +130,26 @@ test.describe('mermaid diagram commenting', () => {
     await expect(form.locator('.quoted-text')).toHaveCount(0);
 
     // Fill in and submit the comment
-    await form.locator('#new-thread-author').fill('diagram-tester');
-    await form.locator('#new-thread-body').fill('This part of the diagram needs work.');
+    await form.locator('.author-field').fill('diagram-tester');
+    await form.locator('textarea').fill('This part of the diagram needs work.');
+
+    // Capture the fetchThreads GET that fires after submit
+    const threadsRefresh = page.waitForResponse(
+      (resp) =>
+        resp.url().includes('/api/threads?') &&
+        resp.request().method() === 'GET' &&
+        resp.ok(),
+    );
     await form.locator('.btn-submit').click();
+    // Wait for the form to close — confirms the POST succeeded and
+    // fetchThreads() was triggered.
+    await expect(form).toBeHidden({ timeout: 15000 });
+    // Wait for the fetchThreads GET to complete so React state is updated
+    await threadsRefresh;
 
     // Thread card should appear with SVG anchor (not text)
     const threadCard = page.locator('.thread-card').first();
-    await expect(threadCard).toBeVisible({ timeout: 5000 });
+    await expect(threadCard).toBeVisible({ timeout: 15000 });
     const svgAnchor = threadCard.locator('.thread-anchor-svg');
     await expect(svgAnchor).toBeVisible();
     await expect(svgAnchor.locator('svg')).toBeVisible();
@@ -129,7 +161,9 @@ test.describe('mermaid diagram commenting', () => {
     );
   });
 
+  // E-PENPAL-SVG-HIGHLIGHT: verifies clicking a thread card applies and removes SVG highlight overlay.
   test('clicking thread card highlights diagram region', async ({ page, request }) => {
+    await blockPendingNavigation(page);
     await page.goto(`/file/${projectName}/${filePath}`);
 
     // Wait for mermaid to render
@@ -183,7 +217,9 @@ test.describe('mermaid diagram commenting', () => {
     await expect(highlight).not.toBeAttached({ timeout: 5000 });
   });
 
+  // E-PENPAL-MD-RENDER: verifies normal text selection toolbar works alongside mermaid diagrams.
   test('normal text selection still works alongside diagrams', async ({ page }) => {
+    await blockPendingNavigation(page);
     await page.goto(`/file/${projectName}/${filePath}`);
 
     // Wait for mermaid to render

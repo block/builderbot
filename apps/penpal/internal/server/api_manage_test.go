@@ -12,8 +12,10 @@ import (
 	"github.com/loganj/penpal/internal/cache"
 	"github.com/loganj/penpal/internal/comments"
 	"github.com/loganj/penpal/internal/config"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
+// E-PENPAL-REMOVE-WORKSPACE: verifies add and remove workspace round-trip.
 func TestAPIWorkspaces_AddAndRemove(t *testing.T) {
 	s, _, _ := testServer(t)
 	dir := t.TempDir()
@@ -39,6 +41,7 @@ func TestAPIWorkspaces_AddAndRemove(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ADD-SOURCE: verifies POST /api/sources adds a directory tree source.
 func TestAPISources_AddTreeSource(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -63,6 +66,7 @@ func TestAPISources_AddTreeSource(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies POST /api/open resolves existing project.
 func TestAPIOpen_ExistingProject(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -88,6 +92,7 @@ func TestAPIOpen_ExistingProject(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SSE: verifies /api/navigate returns empty when no pending navigation.
 func TestAPINavigate_EmptyByDefault(t *testing.T) {
 	s, _, _ := testServer(t)
 
@@ -105,6 +110,7 @@ func TestAPINavigate_EmptyByDefault(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SSE: verifies /api/open sets pendingNav consumed by /api/navigate.
 func TestAPINavigate_SetByOpen(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -144,6 +150,7 @@ func TestAPINavigate_SetByOpen(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies POST /api/open adds new standalone project.
 func TestAPIOpen_NewDirectory(t *testing.T) {
 	s, _, _ := testServer(t)
 	dir := t.TempDir()
@@ -167,6 +174,7 @@ func TestAPIOpen_NewDirectory(t *testing.T) {
 	}
 }
 
+// E-PENPAL-DELETE-FILE: verifies POST /api/delete-file removes file from disk.
 func TestAPIDeleteFile_Success(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -190,6 +198,7 @@ func TestAPIDeleteFile_Success(t *testing.T) {
 	}
 }
 
+// E-PENPAL-DELETE-PROJECT: verifies POST /api/delete-project removes directory via os.RemoveAll.
 func TestAPIDeleteProject_Success(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -214,6 +223,7 @@ func TestAPIDeleteProject_Success(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies /api/open uses longest-prefix matching for sub-project.
 func TestAPIOpen_PrefersSubProjectOverRoot(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -256,6 +266,7 @@ func TestAPIOpen_PrefersSubProjectOverRoot(t *testing.T) {
 	}
 }
 
+// E-PENPAL-DELETE-FILE: verifies sidecar cleanup and removeEmptyParents after file deletion.
 func TestAPIDeleteFile_CleansUpCommentSidecar(t *testing.T) {
 	s, c, cs := testServer(t)
 
@@ -310,5 +321,207 @@ func TestAPIDeleteFile_CleansUpCommentSidecar(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Errorf("expected 0 files in review, got %d", len(files))
+	}
+}
+
+// E-PENPAL-REMOVE-SOURCE: verifies adding a tree source then removing it via DELETE /api/sources.
+func TestAPISources_RemoveTreeSource(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Register as a standalone project in config so it survives refreshAfterConfigChange
+	s.cfg.Projects = append(s.cfg.Projects, config.ProjectConfig{Path: dir})
+	s.refreshAfterConfigChange()
+
+	projName := filepath.Base(dir)
+
+	// Add a tree source
+	body, _ := json.Marshal(map[string]string{
+		"project": projName,
+		"path":    "docs",
+		"name":    "docs",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("add tree: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Remove the tree source by name
+	body, _ = json.Marshal(map[string]string{
+		"project": projName,
+		"name":    "docs",
+	})
+	req = httptest.NewRequest(http.MethodDelete, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("remove tree: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Removing again should 404
+	body, _ = json.Marshal(map[string]string{
+		"project": projName,
+		"name":    "docs",
+	})
+	req = httptest.NewRequest(http.MethodDelete, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("remove again: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// E-PENPAL-REMOVE-SOURCE: verifies adding file sources then removing individual files.
+func TestAPISources_RemoveFileSource(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	dir := t.TempDir()
+	// Create markdown files
+	for _, name := range []string{"a.md", "b.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("# "+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Register as a standalone project in config so it survives refreshAfterConfigChange
+	s.cfg.Projects = append(s.cfg.Projects, config.ProjectConfig{Path: dir})
+	s.refreshAfterConfigChange()
+
+	projName := filepath.Base(dir)
+
+	// Add first file
+	body, _ := json.Marshal(map[string]string{
+		"project": projName,
+		"path":    "a.md",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("add a.md: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Add second file
+	body, _ = json.Marshal(map[string]string{
+		"project": projName,
+		"path":    "b.md",
+	})
+	req = httptest.NewRequest(http.MethodPost, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("add b.md: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Remove just a.md
+	body, _ = json.Marshal(map[string]string{
+		"project": projName,
+		"file":    "a.md",
+	})
+	req = httptest.NewRequest(http.MethodDelete, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("remove a.md: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Remove a.md again should 404
+	body, _ = json.Marshal(map[string]string{
+		"project": projName,
+		"file":    "a.md",
+	})
+	req = httptest.NewRequest(http.MethodDelete, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("remove a.md again: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Remove b.md should still succeed
+	body, _ = json.Marshal(map[string]string{
+		"project": projName,
+		"file":    "b.md",
+	})
+	req = httptest.NewRequest(http.MethodDelete, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("remove b.md: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// E-PENPAL-REMOVE-SOURCE: verifies auto-detected sources cannot be removed.
+func TestAPISources_CannotRemoveAutoDetected(t *testing.T) {
+	s, c, _ := testServer(t)
+
+	dir := t.TempDir()
+	// Seed a project with an auto-detected source
+	project := seedProject(c, "test-proj", dir, nil)
+	project.Sources = []discovery.FileSource{{
+		Name: "thoughts",
+		Type: "thoughts",
+		Auto: true,
+	}}
+	// Re-set the project in cache with the source
+	c.SetProjects([]discovery.Project{project})
+
+	// Attempt to remove the auto-detected source
+	body, _ := json.Marshal(map[string]string{
+		"project": "test-proj",
+		"name":    "thoughts",
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for auto-detected source removal, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// E-PENPAL-REMOVE-SOURCE: verifies DELETE /api/sources requires project field.
+func TestAPISources_RemoveRequiresProject(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	body, _ := json.Marshal(map[string]string{
+		"name": "docs",
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// E-PENPAL-REMOVE-SOURCE: verifies DELETE /api/sources requires name or file.
+func TestAPISources_RemoveRequiresNameOrFile(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	body, _ := json.Marshal(map[string]string{
+		"project": "test-proj",
+	})
+	req := httptest.NewRequest(http.MethodDelete, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

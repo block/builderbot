@@ -13,6 +13,7 @@ import (
 )
 
 // handleAPISearch returns search results as JSON for the React frontend.
+// E-PENPAL-SEARCH: matches project names, filenames, content; capped at 100.
 func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 

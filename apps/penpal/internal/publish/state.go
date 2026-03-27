@@ -18,6 +18,7 @@ type PublishState struct {
 var stateMu sync.Mutex
 
 // LoadState reads the publish state for a project. Returns map of filePath -> state.
+// E-PENPAL-PUBLISH-STATE: reads publish.json state map with Mutex.
 func LoadState(projectPath string) (map[string]*PublishState, error) {
 	stateMu.Lock()
 	defer stateMu.Unlock()
@@ -41,6 +42,7 @@ func LoadState(projectPath string) (map[string]*PublishState, error) {
 }
 
 // SaveState writes a single file's publish state.
+// E-PENPAL-PUBLISH-STATE: writes publish.json state map with Mutex.
 func SaveState(projectPath, filePath string, state *PublishState) error {
 	stateMu.Lock()
 	defer stateMu.Unlock()

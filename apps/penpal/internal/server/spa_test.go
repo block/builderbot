@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// E-PENPAL-SPA-SERVE: verifies 404 when dist dir is empty.
 func TestSPAHandler_NoDistDir(t *testing.T) {
 	h := newSPAHandler("", "/app")
 	rec := httptest.NewRecorder()
@@ -18,6 +19,7 @@ func TestSPAHandler_NoDistDir(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SPA-SERVE: verifies 404 when dist dir does not exist on disk.
 func TestSPAHandler_MissingDistDir(t *testing.T) {
 	h := newSPAHandler("/nonexistent/path/frontend/dist", "/app")
 	rec := httptest.NewRecorder()
@@ -28,6 +30,7 @@ func TestSPAHandler_MissingDistDir(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SPA-SERVE: verifies /app/ serves index.html.
 func TestSPAHandler_ServesIndexHTML(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0644)
@@ -44,6 +47,7 @@ func TestSPAHandler_ServesIndexHTML(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SPA-SERVE: verifies static files are served from dist directory.
 func TestSPAHandler_ServesStaticFile(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0644)
@@ -62,6 +66,7 @@ func TestSPAHandler_ServesStaticFile(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SPA-SERVE: verifies SPA fallback to index.html for client-side routing.
 func TestSPAHandler_FallbackToIndex(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0644)
@@ -91,6 +96,7 @@ func TestSPAHandler_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SPA-SERVE: verifies path traversal is blocked in SPA handler.
 func TestSPAHandler_PathTraversal(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>SPA</html>"), 0644)
@@ -110,6 +116,7 @@ func TestSPAHandler_PathTraversal(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SPA-SERVE: verifies /app/ returns 404 when frontend/dist is missing.
 func TestSPAHandler_IntegrationWithServer(t *testing.T) {
 	s, _, _ := testServer(t)
 
@@ -122,6 +129,7 @@ func TestSPAHandler_IntegrationWithServer(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SPA-SERVE: verifies /app redirects to /app/ (301).
 func TestSPAHandler_RedirectAppToAppSlash(t *testing.T) {
 	s, _, _ := testServer(t)
 

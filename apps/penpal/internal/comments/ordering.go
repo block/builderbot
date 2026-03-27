@@ -6,6 +6,8 @@ import "sort"
 // and timestamp. Comments are grouped under their parent (InReplyTo),
 // with siblings sorted by CreatedAt. Comments without InReplyTo are
 // treated as root-level, sorted by timestamp.
+//
+// E-PENPAL-COMMENT-ORDER: tree-order sorting with parent grouping.
 func OrderComments(comments []Comment) []Comment {
 	if len(comments) <= 1 {
 		return comments

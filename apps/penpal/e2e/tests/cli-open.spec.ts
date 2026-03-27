@@ -8,6 +8,7 @@ const BASE_URL = `http://localhost:${SERVER_PORT}`;
 
 let tmpDir: string;
 
+// E-PENPAL-CLI: verifies open command registers file, sets pending navigation, and consumes it.
 test.describe('open command navigation', () => {
   test.beforeAll(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'penpal-e2e-cli-open-'));

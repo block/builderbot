@@ -86,6 +86,7 @@ func (c *Cache) FindProject(qualifiedName string) *discovery.Project {
 
 // FindProjectByPath returns a project whose root is a prefix of the given
 // absolute path, or nil if no project matches.
+// E-PENPAL-PATH-MATCH: longest-prefix matching across all project root paths.
 func (c *Cache) FindProjectByPath(absPath string) *discovery.Project {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -107,6 +108,7 @@ func (c *Cache) FindProjectByPath(absPath string) *discovery.Project {
 // given absolute path. If the path is inside a worktree of a known project,
 // it returns the parent project and the worktree name. If the path is inside
 // the main project, worktree is empty.
+// E-PENPAL-PATH-MATCH: extends FindProjectByPath to check non-main worktree paths.
 func (c *Cache) FindProjectByPathWithWorktree(absPath string) (project *discovery.Project, worktree string) {
 	absPath = filepath.Clean(absPath)
 
@@ -222,6 +224,7 @@ func (c *Cache) FindFile(projectName, filePath string) *FileInfo {
 
 // RefreshProject rescans a single project's files across all its sources.
 // projectName should be the qualified name (e.g., "Development/penpal").
+// E-PENPAL-CACHE: walks filesystem and updates per-project file list and metadata.
 func (c *Cache) RefreshProject(projectName string) {
 	project := c.FindProject(projectName)
 	if project == nil {
@@ -246,6 +249,7 @@ func (c *Cache) RefreshProject(projectName string) {
 }
 
 // RefreshAllProjects rescans all projects' files and updates metadata
+// E-PENPAL-CACHE: parallel refresh with no concurrency limit.
 func (c *Cache) RefreshAllProjects() {
 	projects := c.Projects()
 	var wg sync.WaitGroup
@@ -307,6 +311,7 @@ func (c *Cache) RefreshProjectGitInfo(name string) {
 
 // RescanWith replaces the project list with the given projects,
 // preserving existing git info for known projects.
+// E-PENPAL-CACHE: replaces the project list while preserving git enrichment.
 func (c *Cache) RescanWith(projects []discovery.Project) {
 	// Preserve enrichment data (git info) for projects we already know about
 	c.mu.RLock()
@@ -329,6 +334,7 @@ func (c *Cache) RescanWith(projects []discovery.Project) {
 // EnrichTitles fills in missing Title fields for files in the given project.
 // This is called on demand when a user views a project, so titles appear
 // immediately without waiting for a full background rescan.
+// E-PENPAL-TITLE-EXTRACT: reads first 20 lines for H1 headings.
 func (c *Cache) EnrichTitles(projectName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -355,6 +361,7 @@ func (c *Cache) EnrichTitles(projectName string) {
 
 // extractTitle reads the first few lines of a markdown file and returns the
 // text of the first H1 heading (line starting with "# "), or empty string.
+// E-PENPAL-TITLE-EXTRACT: scans first 20 lines for an H1 heading.
 func extractTitle(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -375,6 +382,7 @@ func extractTitle(path string) string {
 // ScanProjectSourcesForWorktree scans a project's sources remapped to a worktree path.
 // Each source's RootPath under the project is remapped to the equivalent path under
 // the worktree. Sources whose directory doesn't exist in the worktree are skipped.
+// E-PENPAL-SCAN: remaps source paths to a worktree and delegates to scanProjectSources.
 func ScanProjectSourcesForWorktree(project *discovery.Project, worktreePath string) []FileInfo {
 	// Build a temporary project with remapped sources
 	wtProject := *project
@@ -421,6 +429,7 @@ func ScanProjectSourcesForWorktree(project *discovery.Project, worktreePath stri
 // Files are de-duplicated by project-relative path: if multiple sources cover
 // the same file, only the first source's entry is kept. This means auto-detected
 // sources (which come first) take priority over manual ones.
+// E-PENPAL-SCAN: walks filesystem, skips dirs, classifies files, deduplicates, sorts by ModTime.
 func scanProjectSources(project *discovery.Project) []FileInfo {
 	var files []FileInfo
 	seen := make(map[string]bool) // project-relative paths already claimed

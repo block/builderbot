@@ -11,6 +11,7 @@ import (
 
 // EnsureGlobalGitignore adds .penpal to the user's global gitignore file
 // so that project-level .penpal/ directories are not committed.
+// E-PENPAL-GITIGNORE: ensures .penpal/ is listed in global gitignore.
 func EnsureGlobalGitignore() {
 	path := globalGitignorePath()
 	if path == "" {

@@ -21,6 +21,7 @@ function findSourceLine(node: Node, contentEl: HTMLElement): number {
   return -1;
 }
 
+// E-PENPAL-ANCHOR-COMPUTE: walks DOM for data-source-line, occurrenceIndex, Before/After context.
 /**
  * Computes an anchor from the current text selection, matching the Go template logic.
  */
@@ -187,6 +188,7 @@ function showSvgHighlight(threadId: string, anchor: Anchor, contentEl: HTMLEleme
   svg.appendChild(rect);
 }
 
+// E-PENPAL-SVG-HIGHLIGHT: creates rect elements on mermaid diagrams for thread anchors.
 /**
  * Applies SVG overlay highlights for mermaid diagram threads.
  * Text highlights are now handled by the rehype plugin (rehypeCommentHighlights).
@@ -307,10 +309,11 @@ export default function SelectionToolbar({
   );
 }
 
+// E-PENPAL-COPY-MD: extracts source lines from data-source-line for clipboard copy.
 /**
  * Extracts the raw markdown corresponding to the current text selection.
  */
-function getSelectionMarkdown(rawMarkdown: string, contentEl: HTMLElement): string | null {
+export function getSelectionMarkdown(rawMarkdown: string, contentEl: HTMLElement): string | null {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || !sel.toString().trim()) return null;
   if (!contentEl.contains(sel.anchorNode) || !contentEl.contains(sel.focusNode)) return null;

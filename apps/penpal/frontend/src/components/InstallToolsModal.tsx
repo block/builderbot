@@ -8,6 +8,7 @@ interface Props {
   onClose: (installed: boolean) => void;
 }
 
+// E-PENPAL-INSTALL-DISMISS: install modal with dismiss keyed to BUILD_ID.
 export default function InstallToolsModal({ open, isUpdate, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<InstallToolsStatus | null>(null);

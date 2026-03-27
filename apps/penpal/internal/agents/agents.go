@@ -23,6 +23,7 @@ var (
 )
 
 // StartPolling begins background polling for active agents every 5 seconds.
+// E-PENPAL-AGENT-DETECT: background ps/lsof polling to find claude processes.
 func StartPolling() {
 	pollMu.Lock()
 	defer pollMu.Unlock()
@@ -68,12 +69,14 @@ func StopPolling() {
 
 // FindActive returns the latest snapshot of active Claude agents.
 // Never blocks on process inspection; returns cached data from background poll.
+// E-PENPAL-AGENT-DETECT: returns cached agent snapshot from background poll.
 func FindActive() map[string][]Info {
 	mu.RLock()
 	defer mu.RUnlock()
 	return cached
 }
 
+// E-PENPAL-AGENT-DETECT: polls ps for claude processes, resolves cwd via lsof.
 func poll() map[string][]Info {
 	out, err := exec.Command("ps", "-eo", "pid,args").Output()
 	if err != nil {

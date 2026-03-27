@@ -10,6 +10,7 @@ import (
 )
 
 // handleAPIThreads dispatches GET (list threads) and POST (create thread).
+// E-PENPAL-API-ROUTES: GET/POST /api/threads endpoint.
 func (s *Server) handleAPIThreads(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -66,6 +67,7 @@ type APIFileInReview struct {
 }
 
 // handleAPIListReviews handles GET /api/reviews?project=X[&agent=true][&worktree=Z].
+// E-PENPAL-REVIEW-COUNT: returns files with open threads for review count.
 func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -194,6 +196,7 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCreateThread handles POST /api/threads.
+// E-PENPAL-AGENT-AUTOSTART: calls maybeStartAgent after thread creation.
 func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Project          string          `json:"project"`
@@ -236,6 +239,7 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAddComment handles POST /api/threads/{id}/comments.
+// E-PENPAL-AGENT-AUTOSTART: calls maybeStartAgent after adding a comment.
 func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request, threadID string) {
 	var req struct {
 		Project          string   `json:"project"`

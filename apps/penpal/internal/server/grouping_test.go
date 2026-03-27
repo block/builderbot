@@ -8,6 +8,7 @@ import (
 	"github.com/loganj/penpal/internal/discovery"
 )
 
+// E-PENPAL-API-ROUTES: verifies RP1 source produces grouped file sections.
 func TestBuildFileGroups_RP1Grouped(t *testing.T) {
 	project := &discovery.Project{
 		Name: "test-project",
@@ -60,6 +61,7 @@ func TestBuildFileGroups_RP1Grouped(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES, E-PENPAL-SRC-THOUGHTS: verifies thoughts source produces a single flat group.
 func TestBuildFileGroups_ThoughtsFlat(t *testing.T) {
 	project := &discovery.Project{
 		Name: "test-project",
@@ -91,6 +93,7 @@ func TestBuildFileGroups_ThoughtsFlat(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies multiple sources produce separate groups.
 func TestBuildFileGroups_MultipleSources(t *testing.T) {
 	project := &discovery.Project{
 		Name: "test-project",
@@ -121,6 +124,7 @@ func TestBuildFileGroups_MultipleSources(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies empty sources are omitted from groups.
 func TestBuildFileGroups_EmptySourceSkipped(t *testing.T) {
 	project := &discovery.Project{
 		Name: "test-project",
@@ -146,6 +150,7 @@ func TestBuildFileGroups_EmptySourceSkipped(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ADD-SOURCE, E-PENPAL-SRC-MANUAL: verifies manual source produces directory headings.
 func TestBuildFileGroups_ManualSourceDirHeadings(t *testing.T) {
 	project := &discovery.Project{
 		Name: "test-project",
@@ -188,6 +193,7 @@ func TestBuildFileGroups_ManualSourceDirHeadings(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies file titles flow through to group view.
 func TestBuildFileGroups_TitleFlowsThrough(t *testing.T) {
 	project := &discovery.Project{
 		Name: "test-project",
@@ -216,6 +222,7 @@ func TestBuildFileGroups_TitleFlowsThrough(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES, E-PENPAL-SRC-THOUGHTS: verifies thoughts source does not produce directory headings.
 func TestBuildFileGroups_ThoughtsNoDirHeadings(t *testing.T) {
 	project := &discovery.Project{
 		Name: "test-project",

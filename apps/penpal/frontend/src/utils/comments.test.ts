@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { orderComments, formatTime, truncateText } from './comments';
 import type { Comment } from '../types';
 
+// E-PENPAL-COMMENT-ORDER: verifies tree-order sorting with parent grouping.
 describe('orderComments', () => {
   it('returns empty array for no comments', () => {
     expect(orderComments([])).toEqual([]);

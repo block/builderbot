@@ -21,6 +21,7 @@ type BlockcellResult struct {
 }
 
 // Publish renders the markdown file to HTML and uploads it to Blockcell.
+// E-PENPAL-PUBLISH-UPLOAD: zips and multipart POSTs rendered HTML to blockcell.
 func Publish(markdownSrc []byte, title, siteName, blockcellURL string) (*BlockcellResult, error) {
 	if blockcellURL == "" {
 		blockcellURL = defaultBlockcellURL
@@ -87,6 +88,7 @@ func Publish(markdownSrc []byte, title, siteName, blockcellURL string) (*Blockce
 var nonAlphanumeric = regexp.MustCompile(`[^a-z0-9]+`)
 
 // GenerateSiteName produces a deterministic, URL-safe slug from project name and file path.
+// E-PENPAL-PUBLISH-UPLOAD: generates deterministic site name for blockcell upload.
 func GenerateSiteName(project, filePath string) string {
 	// Combine project and file path, strip extension
 	raw := project + "-" + strings.TrimSuffix(filePath, ".md")

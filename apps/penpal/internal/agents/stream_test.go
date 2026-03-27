@@ -13,6 +13,7 @@ func newTestAgent() *Agent {
 	}
 }
 
+// E-PENPAL-AGENT-STREAM: verifies contextUsed and numTurns from assistant message.
 func TestProcessLine_AssistantMessage(t *testing.T) {
 	a := newTestAgent()
 	line := []byte(`{"type":"assistant","message":{"usage":{"input_tokens":3,"cache_read_input_tokens":32568,"cache_creation_input_tokens":256,"output_tokens":1}}}`)
@@ -29,6 +30,7 @@ func TestProcessLine_AssistantMessage(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-STREAM: verifies numTurns increments and contextUsed reflects latest turn.
 func TestProcessLine_MultipleTurns(t *testing.T) {
 	a := newTestAgent()
 
@@ -47,6 +49,7 @@ func TestProcessLine_MultipleTurns(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-STREAM: verifies totalCostUSD, numTurns, contextWindow from result message.
 func TestProcessLine_ResultMessage(t *testing.T) {
 	a := newTestAgent()
 	line := []byte(`{"type":"result","total_cost_usd":0.53,"num_turns":7,"modelUsage":{"claude-opus-4-6":{"contextWindow":200000,"maxOutputTokens":32000,"inputTokens":49,"outputTokens":2586,"cacheReadInputTokens":502157,"cacheCreationInputTokens":34709,"costUSD":0.53}}}`)
@@ -66,6 +69,7 @@ func TestProcessLine_ResultMessage(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-STREAM: verifies malformed JSON lines are silently ignored.
 func TestProcessLine_MalformedJSON(t *testing.T) {
 	a := newTestAgent()
 	a.processLine([]byte(`not json at all`))
@@ -83,6 +87,7 @@ func TestProcessLine_MalformedJSON(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-STREAM: verifies irrelevant message types do not update state.
 func TestProcessLine_IrrelevantTypes(t *testing.T) {
 	a := newTestAgent()
 	a.processLine([]byte(`{"type":"user","message":{"role":"user"}}`))
@@ -96,6 +101,7 @@ func TestProcessLine_IrrelevantTypes(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-STREAM: verifies full parseStream processes multiple NDJSON lines and writes log.
 func TestParseStream(t *testing.T) {
 	input := strings.Join([]string{
 		`{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":50,"output_tokens":5}}}`,
@@ -136,6 +142,7 @@ func TestParseStream(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-STREAM: verifies ContextPercent calculation from contextUsed/contextWindow.
 func TestStatusContextPercent(t *testing.T) {
 	a := newTestAgent()
 	a.mu.Lock()
@@ -155,6 +162,7 @@ func TestStatusContextPercent(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-STREAM: verifies ContextPercent is 0 when contextWindow is 0.
 func TestStatusContextPercentZeroWindow(t *testing.T) {
 	a := newTestAgent()
 	a.contextWindow = 0 // edge case: no context window info yet

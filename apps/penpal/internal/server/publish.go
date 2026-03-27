@@ -12,6 +12,7 @@ import (
 	"github.com/loganj/penpal/internal/publish"
 )
 
+// E-PENPAL-PATH-TRAVERSAL: isSubpath() prevents path traversal on publish paths.
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

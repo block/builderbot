@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// E-PENPAL-PUBLISH-RENDER: verifies RenderHTML produces valid HTML with TOC and content.
 func TestRenderHTML_BasicStructure(t *testing.T) {
 	md := []byte("# Hello World\n\nSome paragraph text.\n\n## Section Two\n\nMore text here.\n")
 
@@ -39,6 +40,7 @@ func TestRenderHTML_BasicStructure(t *testing.T) {
 	}
 }
 
+// E-PENPAL-PUBLISH-RENDER: verifies raw markdown is embedded in the HTML page.
 func TestRenderHTML_RawMarkdownEmbedded(t *testing.T) {
 	md := []byte("# Title\n\nSome **bold** text.\n")
 
@@ -54,6 +56,7 @@ func TestRenderHTML_RawMarkdownEmbedded(t *testing.T) {
 	}
 }
 
+// E-PENPAL-PUBLISH-RENDER: verifies frontmatter is stripped before rendering.
 func TestRenderHTML_StripsFrontmatter(t *testing.T) {
 	md := []byte("---\ntitle: My Doc\ntags: [foo]\n---\n\n# Actual Content\n\nBody text.\n")
 
@@ -71,6 +74,7 @@ func TestRenderHTML_StripsFrontmatter(t *testing.T) {
 	}
 }
 
+// E-PENPAL-PUBLISH-RENDER: verifies syntax highlighting is applied to code blocks.
 func TestRenderHTML_SyntaxHighlighting(t *testing.T) {
 	md := []byte("# Code\n\n```go\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n```\n")
 
@@ -86,6 +90,7 @@ func TestRenderHTML_SyntaxHighlighting(t *testing.T) {
 	}
 }
 
+// E-PENPAL-PUBLISH-RENDER: verifies markdown tables are rendered to HTML.
 func TestRenderHTML_Table(t *testing.T) {
 	md := []byte("# Tables\n\n| Name | Value |\n|------|-------|\n| foo  | bar   |\n")
 

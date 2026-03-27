@@ -17,6 +17,7 @@ export function removePendingSvgHighlight() {
   document.querySelectorAll('.penpal-pending-svg-highlight').forEach(el => el.remove());
 }
 
+// E-PENPAL-SVG-EXTRACT: SVG snippet extraction with cropped viewBox and re-IDing.
 /**
  * Extracts a viewBox-cropped SVG snippet from an SVG element.
  * Re-IDs all elements to avoid DOM collisions when the snippet is rendered
@@ -112,15 +113,12 @@ function computeHeadingPath(el: HTMLElement, contentEl: HTMLElement): string {
   return headings.join(' > ');
 }
 
-/**
- * Adds drag-to-select behavior on mermaid SVGs within the content area.
- * On successful selection, calls onComment with an anchor containing the SVG snippet.
- */
+// E-PENPAL-SVG-STARTLINE: startLine computed by counting ```mermaid fences.
 /**
  * Finds the source line number of the nth mermaid fence in the raw markdown.
  * Returns 1-indexed line number, or 0 if not found.
  */
-function findMermaidFenceLine(rawMarkdown: string, containerIndex: number): number {
+export function findMermaidFenceLine(rawMarkdown: string, containerIndex: number): number {
   const lines = rawMarkdown.split('\n');
   let mermaidIdx = 0;
   let inFence = false;
@@ -141,6 +139,7 @@ function findMermaidFenceLine(rawMarkdown: string, containerIndex: number): numb
   return 0;
 }
 
+// E-PENPAL-SVG-DRAG: handles drag on .mermaid-container with 5px threshold for diagram selection.
 export default function MermaidSelection({
   contentRef,
   rawMarkdown,

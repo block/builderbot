@@ -8,6 +8,7 @@ import (
 	"github.com/loganj/penpal/internal/discovery"
 )
 
+// E-PENPAL-PATH-MATCH: verifies FindProjectByPathWithWorktree resolves worktree paths.
 func TestFindProjectByPathWithWorktree(t *testing.T) {
 	c := New()
 
@@ -92,6 +93,7 @@ func TestFindProjectByPathWithWorktree(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SCAN: verifies worktree source remapping and file presence checks.
 func TestScanProjectSourcesForWorktree(t *testing.T) {
 	// Set up a main project with a "thoughts" tree source and a "manual" files source
 	mainDir := t.TempDir()
@@ -164,6 +166,7 @@ func TestScanProjectSourcesForWorktree(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CACHE: verifies WorktreePath returns correct filesystem paths for worktrees.
 func TestWorktreePath(t *testing.T) {
 	c := New()
 

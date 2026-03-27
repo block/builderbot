@@ -67,6 +67,7 @@ function renderPanel(threads: ThreadResponse[] = [mockThread], anchorLines: Reco
   );
 }
 
+// E-PENPAL-COMMENT-RENDER, E-PENPAL-COMMENT-FORM, E-PENPAL-SUGGESTED-REPLIES: verifies comment rendering, form behavior, and suggested reply pills.
 describe('CommentsPanel', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -155,5 +156,64 @@ describe('CommentsPanel', () => {
     );
     expect(screen.getByText('Agent')).toBeDefined();
     expect(screen.getByText('45%')).toBeDefined();
+  });
+
+  // E-PENPAL-WORKING: verifies warning color class at 60%+ context usage.
+  it('shows warning class at 60% context', () => {
+    const { container } = render(
+      <MemoryRouter>
+        <CommentsPanel
+          threads={[mockThread]}
+          anchorLines={{ 'thread-1': 5 }}
+          project="test/project"
+          filePath="thoughts/test.md"
+          onRefresh={vi.fn()}
+          agentStatus={{ running: true, contextPercent: 65 }}
+        />
+      </MemoryRouter>,
+    );
+    const label = container.querySelector('.agent-context-label');
+    expect(label).toBeDefined();
+    expect(label?.classList.contains('warning')).toBe(true);
+    expect(label?.classList.contains('critical')).toBe(false);
+  });
+
+  // E-PENPAL-WORKING: verifies critical color class at 85%+ context usage.
+  it('shows critical class at 85% context', () => {
+    const { container } = render(
+      <MemoryRouter>
+        <CommentsPanel
+          threads={[mockThread]}
+          anchorLines={{ 'thread-1': 5 }}
+          project="test/project"
+          filePath="thoughts/test.md"
+          onRefresh={vi.fn()}
+          agentStatus={{ running: true, contextPercent: 90 }}
+        />
+      </MemoryRouter>,
+    );
+    const label = container.querySelector('.agent-context-label');
+    expect(label).toBeDefined();
+    expect(label?.classList.contains('critical')).toBe(true);
+  });
+
+  // E-PENPAL-WORKING: verifies no color class below 60% context usage.
+  it('no color class below 60% context', () => {
+    const { container } = render(
+      <MemoryRouter>
+        <CommentsPanel
+          threads={[mockThread]}
+          anchorLines={{ 'thread-1': 5 }}
+          project="test/project"
+          filePath="thoughts/test.md"
+          onRefresh={vi.fn()}
+          agentStatus={{ running: true, contextPercent: 30 }}
+        />
+      </MemoryRouter>,
+    );
+    const label = container.querySelector('.agent-context-label');
+    expect(label).toBeDefined();
+    expect(label?.classList.contains('warning')).toBe(false);
+    expect(label?.classList.contains('critical')).toBe(false);
   });
 });

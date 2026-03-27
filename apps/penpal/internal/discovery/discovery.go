@@ -42,6 +42,7 @@ var sourceTypes = map[string]*SourceType{}
 var sourceTypeOrder []string
 
 // RegisterSourceType adds a source type to the registry.
+// E-PENPAL-SOURCE-REGISTRY: pluggable source type registration.
 func RegisterSourceType(st *SourceType) {
 	if _, exists := sourceTypes[st.Name]; !exists {
 		sourceTypeOrder = append(sourceTypeOrder, st.Name)
@@ -50,11 +51,13 @@ func RegisterSourceType(st *SourceType) {
 }
 
 // GetSourceType returns a registered source type by name, or nil.
+// E-PENPAL-SOURCE-REGISTRY: lookup by name in the source type registry.
 func GetSourceType(name string) *SourceType {
 	return sourceTypes[name]
 }
 
 // AllSourceTypes returns all registered source types in registration order.
+// E-PENPAL-SOURCE-REGISTRY: ordered iteration over registered source types.
 func AllSourceTypes() []*SourceType {
 	result := make([]*SourceType, 0, len(sourceTypeOrder))
 	for _, name := range sourceTypeOrder {
@@ -63,6 +66,7 @@ func AllSourceTypes() []*SourceType {
 	return result
 }
 
+// E-PENPAL-SOURCE-REGISTRY: registers all built-in source types (thoughts, rp1, anchors, manual, claude-plans).
 func init() {
 	RegisterSourceType(&SourceType{
 		Name:             "thoughts",
@@ -159,6 +163,7 @@ func init() {
 }
 
 // classifyRP1Feature classifies a file under work/features/{id}/ by its filename.
+// E-PENPAL-SRC-RP1: maps feature path filenames to classification types.
 func classifyRP1Feature(path string) string {
 	base := filepath.Base(path)
 	switch base {
@@ -184,6 +189,7 @@ func classifyRP1Feature(path string) string {
 }
 
 // classifyRP1Issue classifies a file under work/issues/{id}/ by its filename.
+// E-PENPAL-SRC-RP1: maps issue path filenames to classification types.
 func classifyRP1Issue(path string) string {
 	base := filepath.Base(path)
 	switch base {
@@ -202,6 +208,7 @@ func classifyRP1Issue(path string) string {
 }
 
 // isRP1TopLevelReport returns true for known report files directly under work/.
+// E-PENPAL-SRC-RP1: identifies top-level report files for classification.
 func isRP1TopLevelReport(path string) bool {
 	switch path {
 	case "work/audit-report.md",
@@ -217,6 +224,7 @@ func isRP1TopLevelReport(path string) bool {
 
 // classifyAnchorsFile classifies a file by its name within an ANCHORS module.
 // Only known ANCHORS document filenames are kept; everything else is skipped.
+// E-PENPAL-SRC-ANCHORS: recognizes the five ANCHORS filenames, skips all others.
 func classifyAnchorsFile(path string) string {
 	base := filepath.Base(path)
 	switch base {
@@ -246,6 +254,7 @@ var anchorsFileOrder = map[string]int{
 
 // groupAnchorsPaths groups ANCHORS source-relative paths by module directory.
 // Only files in directories that contain an ANCHORS.md marker are included.
+// E-PENPAL-SRC-ANCHORS: groups by module directory with canonical file ordering.
 func groupAnchorsPaths(paths []string) []FileGroup {
 	// First pass: find directories that contain an ANCHORS.md marker
 	modules := make(map[string]bool)
@@ -386,6 +395,7 @@ func (p *Project) QualifiedName() string {
 
 // DetectSources finds auto-detectable file sources in a project directory
 // by checking for all registered source types with an AutoDetectDir or AutoDetectFile.
+// E-PENPAL-SOURCE-REGISTRY: iterates registered types and checks for AutoDetectDir/AutoDetectFile triggers.
 func DetectSources(projectPath string) []FileSource {
 	var sources []FileSource
 	for _, st := range AllSourceTypes() {
@@ -419,6 +429,7 @@ func DetectSources(projectPath string) []FileSource {
 // DiscoverWorkspace scans a workspace directory for projects.
 // ALL immediate subdirectories are treated as projects, regardless of whether
 // they have thoughts/ or other known files.
+// E-PENPAL-DISCOVERY: reads subdirs, calls DetectSources, DiscoverWorktrees, and deduplicates.
 func DiscoverWorkspace(workspacePath, workspaceName string) ([]Project, error) {
 	entries, err := os.ReadDir(workspacePath)
 	if err != nil {
@@ -504,6 +515,7 @@ func DiscoverWorkspace(workspacePath, workspaceName string) ([]Project, error) {
 // worktree of the other), the main worktree is kept and the other is removed.
 // If neither project is the main worktree (both are worktrees of a repo outside
 // the workspace), the first alphabetically is kept.
+// E-PENPAL-DISCOVERY: worktree deduplication keeps main worktree, removes duplicates.
 func deduplicateWorktreeProjects(projects []Project) []Project {
 	// Build path → index map for quick lookup
 	pathIndex := make(map[string]int, len(projects))
@@ -596,6 +608,7 @@ func LoadStandaloneProject(projectPath string, cfg config.ProjectConfig) (Projec
 }
 
 // SourceConfigsToFileSources converts config source entries to runtime FileSources.
+// E-PENPAL-SRC-MANUAL: converts persisted manual source configs to runtime FileSources.
 func SourceConfigsToFileSources(projectPath string, configs []config.SourceConfig) []FileSource {
 	var sources []FileSource
 	for _, src := range configs {
@@ -625,6 +638,7 @@ func SourceConfigsToFileSources(projectPath string, configs []config.SourceConfi
 }
 
 // groupRP1Paths groups RP1 source-relative paths into ordered display groups.
+// E-PENPAL-SRC-RP1: organizes files into fixed-order sections with dynamic Feature/Issue groups.
 func groupRP1Paths(paths []string) []FileGroup {
 	categories := map[string][]string{}
 	features := map[string][]string{}
@@ -705,6 +719,7 @@ func groupRP1Paths(paths []string) []FileGroup {
 // DiscoverClaudePlans checks for markdown files in ~/.claude/plans/ and
 // returns a synthetic Project if any are found. This lets the app surface
 // plan files that Claude Code writes there without any manual configuration.
+// E-PENPAL-CLAUDE-PLANS-DETECT: checks ~/.claude/plans/ and injects a synthetic standalone project.
 func DiscoverClaudePlans() (Project, bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {

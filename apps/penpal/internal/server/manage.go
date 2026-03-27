@@ -93,6 +93,7 @@ func (s *Server) handleAddWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRemoveWorkspace handles DELETE /api/workspaces.
+// E-PENPAL-REMOVE-WORKSPACE: removes workspace, cleans up ProjectSources, refreshes.
 func (s *Server) handleRemoveWorkspace(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -188,6 +189,7 @@ func (s *Server) handleAddStandaloneProject(w http.ResponseWriter, r *http.Reque
 
 // handleCloseStandaloneProject handles DELETE /api/projects.
 // Removes the project from view without deleting any data.
+// E-PENPAL-CLOSE-PROJECT: DELETE /api/projects removes standalone entry.
 func (s *Server) handleCloseStandaloneProject(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
@@ -240,6 +242,7 @@ func (s *Server) handleAPISources(w http.ResponseWriter, r *http.Request) {
 // Adds a file source (tree or individual file) to a project.
 // The type is auto-detected: directories become "tree" sources,
 // markdown files are added to a "files" source.
+// E-PENPAL-ADD-SOURCE: POST /api/sources adds directory or file sources.
 func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Project string `json:"project"` // qualified name
@@ -406,6 +409,7 @@ func (s *Server) addFileToConfig(project *discovery.Project, relPath string) boo
 // Removes a user-added source or individual file from a project.
 // Send {project, name} to remove a whole source (tree).
 // Send {project, file} to remove an individual file from a "files" source.
+// E-PENPAL-REMOVE-SOURCE: DELETE /api/sources removes user-added sources.
 func (s *Server) handleRemoveSource(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Project string `json:"project"` // qualified name

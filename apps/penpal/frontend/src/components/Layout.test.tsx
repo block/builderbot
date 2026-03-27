@@ -51,6 +51,8 @@ beforeEach(() => {
   vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: false } as MediaQueryList);
 });
 
+// E-PENPAL-SIDEBAR-LAYOUT: verifies sidebar rendering, tab bar, SSE reconnect, and internal link navigation.
+// E-PENPAL-REVIEW-COUNT: verifies review count refresh on SSE events.
 describe('Layout', () => {
   it('renders topbar with logo and search', async () => {
     render(

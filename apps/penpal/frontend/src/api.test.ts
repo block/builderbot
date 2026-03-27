@@ -23,6 +23,7 @@ beforeEach(() => {
   window.sessionStorage.clear();
 });
 
+// E-PENPAL-WINDOW-ID: verifies sessionStorage UUID and fallback for per-window focus ID.
 describe('api', () => {
   it('listProjects calls GET /api/projects', async () => {
     const projects = [{ name: 'test', qualifiedName: 'ws/test' }];

@@ -9,6 +9,7 @@ function getInitialTheme(): Theme {
   return 'light';
 }
 
+// E-PENPAL-THEME: reads localStorage, checks matchMedia, toggles data-theme attribute.
 export function useTheme() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
 

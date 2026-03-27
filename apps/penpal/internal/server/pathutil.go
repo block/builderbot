@@ -9,6 +9,7 @@ import (
 // cleaning both paths. It prevents path-traversal attacks by ensuring
 // the resolved child starts with the parent directory prefix.
 // Returns false when child equals parent (e.g. path=".").
+// E-PENPAL-PATH-TRAVERSAL: isSubpath() prevents path traversal on comments, raw files, source-add.
 func isSubpath(parent, child string) bool {
 	parent = filepath.Clean(parent)
 	child = filepath.Clean(child)

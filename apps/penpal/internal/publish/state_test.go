@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// E-PENPAL-PUBLISH-STATE: verifies LoadState/SaveState round-trip and multi-entry accumulation.
 func TestLoadSaveState(t *testing.T) {
 	dir := t.TempDir()
 

@@ -49,6 +49,7 @@ function nextTabId(): string {
   return `tab-${++tabCounter}`;
 }
 
+// E-PENPAL-TABS: per-tab history management with PUSH/REPLACE/POP navigation.
 export function useTabs(): TabsState {
   const navigate = useNavigate();
   const location = useLocation();

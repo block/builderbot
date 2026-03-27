@@ -11,6 +11,7 @@ import (
 	"github.com/loganj/penpal/internal/comments"
 )
 
+// E-PENPAL-API-ROUTES: verifies GET /api/agents returns running=false with no pending comments.
 func TestAPIAgentStatus_NoAgent_NoPendingComments(t *testing.T) {
 	s, c, _ := testServer(t)
 	dir := t.TempDir()
@@ -37,6 +38,7 @@ func TestAPIAgentStatus_NoAgent_NoPendingComments(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-AUTOSTART: verifies needsAgent=true when human comment is pending.
 func TestAPIAgentStatus_NeedsAgent_WithPendingHumanComments(t *testing.T) {
 	s, c, cs := testServer(t)
 	dir := t.TempDir()
@@ -72,6 +74,7 @@ func TestAPIAgentStatus_NeedsAgent_WithPendingHumanComments(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-AUTOSTART: verifies needsAgent absent after agent replies.
 func TestAPIAgentStatus_NoNeedsAgent_WhenAgentReplied(t *testing.T) {
 	s, c, cs := testServer(t)
 	dir := t.TempDir()
@@ -115,6 +118,7 @@ func TestAPIAgentStatus_NoNeedsAgent_WhenAgentReplied(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-AUTOSTART: verifies needsAgent=true after agent finishes with pending comments.
 func TestAPIAgentStatus_NeedsAgent_AfterAgentFinished(t *testing.T) {
 	s, c, cs := testServer(t)
 	s.agents = agents.New(c, cs, 0)
@@ -149,5 +153,123 @@ func TestAPIAgentStatus_NeedsAgent_AfterAgentFinished(t *testing.T) {
 	}
 	if resp["needsAgent"] != true {
 		t.Errorf("expected needsAgent=true for finished agent with pending comments, got %v", resp["needsAgent"])
+	}
+}
+
+// E-PENPAL-API-ROUTES: verifies full response shape when an agent is actively running.
+func TestAPIAgentStatus_RunningAgent_FullResponseShape(t *testing.T) {
+	s, c, cs := testServer(t)
+	s.agents = agents.New(c, cs, 0)
+	dir := t.TempDir()
+	seedProject(c, "test-proj", dir, nil)
+
+	s.agents.SimulateRunning("test-proj", 50000, 200000, 1.23, 5)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents?project=test-proj", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp agentStatusResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if resp.Project != "test-proj" {
+		t.Errorf("expected project=%q, got %q", "test-proj", resp.Project)
+	}
+	if !resp.Running {
+		t.Errorf("expected running=true")
+	}
+	if resp.PID != 99999 {
+		t.Errorf("expected pid=99999, got %d", resp.PID)
+	}
+	if resp.ContextWindow != 200000 {
+		t.Errorf("expected contextWindow=200000, got %d", resp.ContextWindow)
+	}
+	if resp.ContextUsed != 50000 {
+		t.Errorf("expected contextUsed=50000, got %d", resp.ContextUsed)
+	}
+	if resp.ContextPercent != 25.0 {
+		t.Errorf("expected contextPercent=25.0, got %f", resp.ContextPercent)
+	}
+	if resp.TotalCostUSD != 1.23 {
+		t.Errorf("expected totalCostUSD=1.23, got %f", resp.TotalCostUSD)
+	}
+	if resp.NumTurns != 5 {
+		t.Errorf("expected numTurns=5, got %d", resp.NumTurns)
+	}
+	if resp.NeedsAgent {
+		t.Errorf("expected needsAgent=false when agent is running")
+	}
+}
+
+// E-PENPAL-API-ROUTES: verifies POST /api/agents/start returns 503 when manager is nil.
+func TestAPIAgentStart_NoManager(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/start?project=test-proj", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+}
+
+// E-PENPAL-API-ROUTES: verifies POST /api/agents/start returns 400 when project is missing.
+func TestAPIAgentStart_MissingProject(t *testing.T) {
+	s, c, cs := testServer(t)
+	s.agents = agents.New(c, cs, 0)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/start", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+// E-PENPAL-API-ROUTES: verifies POST /api/agents/stop returns 503 when manager is nil.
+func TestAPIAgentStop_NoManager(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/stop?project=test-proj", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rec.Code)
+	}
+}
+
+// E-PENPAL-API-ROUTES: verifies POST /api/agents/stop returns 400 when project is missing.
+func TestAPIAgentStop_MissingProject(t *testing.T) {
+	s, c, cs := testServer(t)
+	s.agents = agents.New(c, cs, 0)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/stop", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+// E-PENPAL-API-ROUTES: verifies GET /api/agents returns 400 when project is missing.
+func TestAPIAgentStatus_MissingProject(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
 	}
 }

@@ -42,6 +42,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// E-PENPAL-SSE-RECONNECT: verifies SSE connection, reconnect on error, and onReconnect callback.
 describe('useSSE', () => {
   it('connects to /events and calls handler on change events', () => {
     const handler = vi.fn();
@@ -131,5 +132,85 @@ describe('useSSE', () => {
     act(() => {
       MockEventSource.instances[0].simulateOpen();
     });
+  });
+
+  // E-PENPAL-SSE-RECONNECT: verifies connection is closed when tab becomes hidden.
+  it('closes connection when tab becomes hidden', () => {
+    const handler = vi.fn();
+    renderHook(() => useSSE(handler));
+
+    const es = MockEventSource.instances[0];
+    expect(es.closed).toBe(false);
+
+    // Simulate tab going hidden
+    Object.defineProperty(document, 'hidden', { value: true, writable: true, configurable: true });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    expect(es.closed).toBe(true);
+
+    // Restore
+    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+  });
+
+  // E-PENPAL-SSE-RECONNECT: verifies reconnect when tab becomes visible after being hidden.
+  it('reconnects when tab becomes visible again', () => {
+    const handler = vi.fn();
+    const onReconnect = vi.fn();
+    renderHook(() => useSSE(handler, onReconnect));
+
+    expect(MockEventSource.instances).toHaveLength(1);
+
+    // Tab goes hidden → closes connection
+    Object.defineProperty(document, 'hidden', { value: true, writable: true, configurable: true });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    expect(MockEventSource.instances[0].closed).toBe(true);
+
+    // Tab becomes visible again → reconnects
+    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    // A new EventSource should have been created
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[1].closed).toBe(false);
+
+    // Restore
+    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+  });
+
+  // E-PENPAL-SSE-RECONNECT: verifies pending reconnect timer is cancelled when tab goes hidden.
+  it('cancels pending reconnect timer when tab becomes hidden', () => {
+    vi.useFakeTimers();
+    const handler = vi.fn();
+    renderHook(() => useSSE(handler));
+
+    // Trigger error to start reconnect timer
+    act(() => {
+      MockEventSource.instances[0].onerror?.();
+    });
+
+    // Before timer fires, tab goes hidden
+    Object.defineProperty(document, 'hidden', { value: true, writable: true, configurable: true });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    // Advance past reconnect delay — should NOT create new connection
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+
+    // Only the original instance should exist (no reconnect fired)
+    expect(MockEventSource.instances).toHaveLength(1);
+
+    // Restore
+    Object.defineProperty(document, 'hidden', { value: false, writable: true, configurable: true });
+    vi.useRealTimers();
   });
 });

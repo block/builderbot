@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// E-PENPAL-CLAUDE-PATH: verifies Resolve returns a valid remembered path.
 func TestResolve_RememberedPath(t *testing.T) {
 	// Create a fake executable
 	dir := t.TempDir()
@@ -18,6 +19,7 @@ func TestResolve_RememberedPath(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CLAUDE-PATH: verifies Resolve skips a nonexistent remembered path.
 func TestResolve_RememberedPathGone(t *testing.T) {
 	// A remembered path that no longer exists should not be returned
 	got := Resolve("/nonexistent/path/to/claude")
@@ -28,6 +30,7 @@ func TestResolve_RememberedPathGone(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CLAUDE-PATH: verifies Resolve finds claude from candidate paths.
 func TestResolve_FindsInCandidates(t *testing.T) {
 	// Create a fake executable in ~/.local/bin/claude location
 	dir := t.TempDir()
@@ -42,6 +45,7 @@ func TestResolve_FindsInCandidates(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CLAUDE-PATH: verifies IsExecutable for files, dirs, and nonexistent paths.
 func TestIsExecutable(t *testing.T) {
 	dir := t.TempDir()
 

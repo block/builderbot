@@ -9,6 +9,8 @@ import "strings"
 // 1. Exact match of SelectedText -> use first occurrence
 // 2. Multiple matches -> use Before/After context to disambiguate
 // 3. No match -> return -1 (thread is orphaned)
+//
+// E-PENPAL-ANCHOR-RESOLVE: text matching with Before/After disambiguation.
 func ResolveAnchor(markdown string, anchor Anchor) int {
 	if anchor.SelectedText == "" {
 		return -1
@@ -74,6 +76,8 @@ func ResolveAnchor(markdown string, anchor Anchor) int {
 // StartLine is the primary mechanism — it records which rendered element the
 // comment was attached to. Text matching against raw markdown is only used
 // as backward compat for old anchors that lack StartLine.
+//
+// E-PENPAL-ANCHOR-RESOLVE: maps threads to line numbers via StartLine or text fallback.
 func ResolveAnchorsToLines(threads []Thread, markdown string) map[string]int {
 	result := make(map[string]int, len(threads))
 	for _, t := range threads {

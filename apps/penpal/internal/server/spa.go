@@ -11,6 +11,7 @@ import (
 // It serves static files when they exist and falls back to index.html for
 // any path that doesn't match a real file (enabling client-side routing).
 // If the directory doesn't exist, all requests return 404.
+// E-PENPAL-SPA-SERVE: SPA from frontend/dist/ at /app/, fallback to index.html, path traversal blocked.
 type spaHandler struct {
 	dir    string
 	prefix string // URL prefix to strip (e.g. "/app" when mounted at /app/)

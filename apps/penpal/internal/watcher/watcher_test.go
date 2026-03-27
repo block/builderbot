@@ -10,6 +10,7 @@ import (
 	"github.com/loganj/penpal/internal/discovery"
 )
 
+// E-PENPAL-WATCHER: verifies FocusProject watches worktree manual sources and auto-detect dirs.
 func TestFocusProjectRemappedManualSources(t *testing.T) {
 	// Create a temporary project directory with a manual source
 	projectDir := t.TempDir()
@@ -94,6 +95,7 @@ func TestFocusProjectRemappedManualSources(t *testing.T) {
 	}
 }
 
+// E-PENPAL-WATCHER: verifies switching FocusProject cleans up previous watches.
 func TestFocusProjectCleansUpOnSwitch(t *testing.T) {
 	projDir1 := t.TempDir()
 	thoughtsDir1 := filepath.Join(projDir1, "thoughts")
@@ -137,6 +139,7 @@ func TestFocusProjectCleansUpOnSwitch(t *testing.T) {
 	assertWatched(t, w, thoughtsDir2, true, "after focusing proj2")
 }
 
+// E-PENPAL-FOCUS: verifies FocusFile watches only the file's parent directory.
 func TestFocusFileWatchesOnlyFileDir(t *testing.T) {
 	projDir := t.TempDir()
 	thoughtsDir := filepath.Join(projDir, "thoughts")
@@ -169,6 +172,7 @@ func TestFocusFileWatchesOnlyFileDir(t *testing.T) {
 	assertWatched(t, w, thoughtsDir, false, "thoughts root (should not be watched)")
 }
 
+// E-PENPAL-FOCUS: verifies switching from file focus to project focus expands watches.
 func TestFocusFileSwitchToProject(t *testing.T) {
 	projDir := t.TempDir()
 	thoughtsDir := filepath.Join(projDir, "thoughts")
@@ -202,6 +206,7 @@ func TestFocusFileSwitchToProject(t *testing.T) {
 	assertWatched(t, w, plansDir, true, "project focus includes subdirs")
 }
 
+// E-PENPAL-FOCUS: verifies ClearFocus removes all dynamic watches.
 func TestClearFocusRemovesAllWatches(t *testing.T) {
 	projDir := t.TempDir()
 	thoughtsDir := filepath.Join(projDir, "thoughts")
@@ -231,6 +236,7 @@ func TestClearFocusRemovesAllWatches(t *testing.T) {
 	assertWatched(t, w, thoughtsDir, false, "after clear")
 }
 
+// E-PENPAL-FOCUS: verifies windowFocuses map unions watches across multiple windows.
 func TestWindowFocusUnionAcrossWindows(t *testing.T) {
 	projDir1 := t.TempDir()
 	thoughtsDir1 := filepath.Join(projDir1, "thoughts")

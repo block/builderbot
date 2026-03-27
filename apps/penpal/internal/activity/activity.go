@@ -46,6 +46,7 @@ func New() *Tracker {
 // RecordAt records activity with a specific timestamp. It does NOT overwrite
 // existing entries — this is used to seed historical data from filesystem
 // ModTimes so that runtime-observed events always take priority.
+// E-PENPAL-ACTIVITY: seed-only recording that preserves existing events.
 func (t *Tracker) RecordAt(activityType EventType, project, filePath string, timestamp time.Time) {
 	key := fileKey{Project: project, FilePath: filePath}
 	t.mu.Lock()
@@ -65,6 +66,7 @@ func (t *Tracker) RecordAt(activityType EventType, project, filePath string, tim
 
 // Record updates the latest activity for a file. Always overwrites
 // the previous activity — we only track the most recent one.
+// E-PENPAL-ACTIVITY: one event per file with overwrite semantics.
 func (t *Tracker) Record(activityType EventType, project, filePath string) {
 	key := fileKey{Project: project, FilePath: filePath}
 	t.mu.Lock()
@@ -80,6 +82,7 @@ func (t *Tracker) Record(activityType EventType, project, filePath string) {
 }
 
 // RecentFiles returns up to `limit` files sorted by most recent activity.
+// E-PENPAL-ACTIVITY: returns recent activity sorted by timestamp.
 func (t *Tracker) RecentFiles(limit int) []FileActivity {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -98,6 +101,7 @@ func (t *Tracker) RecentFiles(limit int) []FileActivity {
 }
 
 // Lookup returns the latest activity for a specific file, or nil if none tracked.
+// E-PENPAL-ACTIVITY: returns a copy of the latest activity for a file.
 func (t *Tracker) Lookup(project, filePath string) *FileActivity {
 	t.mu.RLock()
 	defer t.mu.RUnlock()

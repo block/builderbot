@@ -9,6 +9,7 @@ import (
 	"github.com/loganj/penpal/internal/discovery"
 )
 
+// E-PENPAL-SCAN: verifies scan classifies files by source type.
 func TestScanProjectSources_ClassifiesFiles(t *testing.T) {
 	// Create temporary project structure
 	tmpDir := t.TempDir()
@@ -115,6 +116,7 @@ func TestScanProjectSources_ClassifiesFiles(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SCAN: verifies deduplication when multiple sources overlap the same files.
 func TestScanProjectSources_DedupsOverlappingSources(t *testing.T) {
 	tmpDir := t.TempDir()
 	projectPath := tmpDir
@@ -188,6 +190,7 @@ func TestScanProjectSources_DedupsOverlappingSources(t *testing.T) {
 	}
 }
 
+// E-PENPAL-TITLE-EXTRACT: verifies H1 heading extraction from markdown files.
 func TestExtractTitle(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -216,6 +219,7 @@ func TestExtractTitle(t *testing.T) {
 	}
 }
 
+// E-PENPAL-TITLE-EXTRACT: verifies graceful handling of nonexistent files.
 func TestExtractTitle_NonexistentFile(t *testing.T) {
 	got := extractTitle("/nonexistent/path/file.md")
 	if got != "" {
@@ -223,6 +227,7 @@ func TestExtractTitle_NonexistentFile(t *testing.T) {
 	}
 }
 
+// E-PENPAL-TITLE-EXTRACT: verifies titles are extracted during scan for all file types.
 func TestScanProjectSources_ExtractsTitleForAllFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -272,6 +277,7 @@ func TestScanProjectSources_ExtractsTitleForAllFiles(t *testing.T) {
 	}
 }
 
+// E-PENPAL-TITLE-EXTRACT: verifies EnrichTitles fills in missing titles from disk.
 func TestCache_EnrichTitles(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -311,6 +317,7 @@ func TestCache_EnrichTitles(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SCAN: verifies nested git worktree directories are skipped during scan.
 func TestScanProjectSources_SkipsNestedWorktrees(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -371,6 +378,7 @@ func TestScanProjectSources_SkipsNestedWorktrees(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CACHE: verifies FindFile returns files by project and path.
 func TestCache_FindFile(t *testing.T) {
 	c := New()
 	projectName := "test/project"

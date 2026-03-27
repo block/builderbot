@@ -1122,7 +1122,9 @@
     const comment = findCommentById(currentFileComments, request.id);
     if (!comment) return;
     lastHandledJumpToken = request.token;
-    focusCommentInViewer(comment);
+    requestAnimationFrame(() => {
+      focusCommentInViewer(comment);
+    });
   });
 
   // Jump to a line requested by search results.
@@ -1131,7 +1133,9 @@
     if (!request || !afterPane) return;
     if (lastHandledJumpLineToken === request.token) return;
     lastHandledJumpLineToken = request.token;
-    scrollController.scrollToRow(request.lineIndex, 'after');
+    requestAnimationFrame(() => {
+      scrollController.scrollToRow(request.lineIndex, 'after');
+    });
   });
 
   // ==========================================================================

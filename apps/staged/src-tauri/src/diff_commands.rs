@@ -500,6 +500,26 @@ pub async fn get_diff_files(
         (parse_name_status_z(&output), resolved_sha)
     };
 
+    // On cache miss for remote branches, trigger background collection so
+    // subsequent requests (including per-file diffs) are served from cache.
+    if ctx.worktree_path.is_none() {
+        if let Some(workspace_name) = ctx.workspace_name.as_ref() {
+            let commit_shas: Vec<String> = store
+                .list_commits_for_branch(&branch_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|c| c.sha)
+                .collect();
+            crate::diff_cache::spawn_cache_branch_diff(
+                store.clone(),
+                branch_id.clone(),
+                workspace_name.clone(),
+                resolved_sha.clone(),
+                commit_shas,
+            );
+        }
+    }
+
     Ok(DiffFilesResponse {
         commit_sha: resolved_sha,
         files,

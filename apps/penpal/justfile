@@ -32,8 +32,12 @@ build: ensure-deps build-go
     cd frontend && pnpm install && VITE_BASE=/ VITE_API_URL=http://localhost:8080 pnpm run build && pnpm run tauri:build
 
 # Development mode: full desktop app with Vite HMR
+# Set VITE_PORT to override the default Vite dev server port (5173)
 dev: ensure-deps build-go
-    cd frontend && VITE_BASE=/ PENPAL_PORT=8082 pnpm run tauri:dev
+    #!/usr/bin/env bash
+    port="${VITE_PORT:-5173}"
+    cd frontend && VITE_BASE=/ PENPAL_PORT=8082 VITE_PORT="$port" \
+        pnpm exec tauri dev --config "{\"build\":{\"devUrl\":\"http://localhost:${port}\"}}"
 
 # Build Go binaries (server sidecar + CLI) for desktop app
 build-go: ensure-deps

@@ -209,14 +209,12 @@ export function createScrollController() {
       // Only reset scroll when switching to a different file
       const fileChanged = filePath !== undefined && filePath !== currentFilePath;
       if (fileChanged) {
-        console.info('[jump-comment] scrollController.setAlignments: FILE CHANGED from=%s to=%s — resetting scroll to 0', currentFilePath, filePath);
         currentFilePath = filePath ?? null;
         beforeScrollY = 0;
         afterScrollY = 0;
         beforeScrollX = 0;
         afterScrollX = 0;
       } else {
-        console.info('[jump-comment] scrollController.setAlignments: same file=%s — clamping scroll (beforeY=%d afterY=%d)', filePath, beforeScrollY, afterScrollY);
         // Content refresh - clamp scroll to new bounds but preserve position
         beforeScrollY = clampScroll(beforeScrollY, beforeDims);
         afterScrollY = clampScroll(afterScrollY, afterDims);
@@ -279,12 +277,10 @@ export function createScrollController() {
         const newBefore = clampScroll(scrollY, beforeDims);
         beforeScrollY = newBefore;
         afterScrollY = transferScroll(newBefore, 'before', beforeDims, afterDims);
-        console.info('[jump-comment] scrollController.scrollTo(before): requested=%d clamped=%d afterTransfer=%d', scrollY, newBefore, afterScrollY);
       } else {
         const newAfter = clampScroll(scrollY, afterDims);
         afterScrollY = newAfter;
         beforeScrollY = transferScroll(newAfter, 'after', afterDims, beforeDims);
-        console.info('[jump-comment] scrollController.scrollTo(after): requested=%d clamped=%d beforeTransfer=%d', scrollY, newAfter, beforeScrollY);
       }
     },
 
@@ -297,7 +293,6 @@ export function createScrollController() {
 
       // Position row at 1/3 from top
       const targetY = row * lineHeight - dims.viewportHeight * SCROLL_ANCHOR_FRACTION;
-      console.info('[jump-comment] scrollController.scrollToRow: row=%d side=%s lineH=%d viewportH=%d contentH=%d targetY=%d', row, side, lineHeight, dims.viewportHeight, dims.contentHeight, targetY);
       this.scrollTo(side, targetY);
     },
 

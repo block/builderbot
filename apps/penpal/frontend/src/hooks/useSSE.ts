@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { API_BASE } from '../api';
 import type { SSEEvent } from '../types';
 
+// E-PENPAL-SSE-RECONNECT: reconnects on error/visibility change, calls onReconnect on open.
 export function useSSE(onEvent: (event: SSEEvent) => void, onReconnect?: () => void) {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;

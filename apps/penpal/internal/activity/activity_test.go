@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// E-PENPAL-ACTIVITY: verifies Record stores activity with correct fields.
 func TestRecordStoresActivity(t *testing.T) {
 	tr := New()
 	tr.Record(FileViewed, "myproject", "thoughts/plan.md")
@@ -28,6 +29,7 @@ func TestRecordStoresActivity(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ACTIVITY: verifies Record overwrites previous events for same file.
 func TestRecordOverwritesPrevious(t *testing.T) {
 	tr := New()
 	tr.Record(FileViewed, "myproject", "thoughts/plan.md")
@@ -43,6 +45,7 @@ func TestRecordOverwritesPrevious(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ACTIVITY: verifies RecentFiles returns most-recent-first order.
 func TestRecentFilesOrder(t *testing.T) {
 	tr := New()
 	tr.Record(FileViewed, "p1", "a.md")
@@ -66,6 +69,7 @@ func TestRecentFilesOrder(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ACTIVITY: verifies RecentFiles respects the limit parameter.
 func TestRecentFilesLimit(t *testing.T) {
 	tr := New()
 	tr.Record(FileViewed, "p1", "a.md")
@@ -80,6 +84,7 @@ func TestRecentFilesLimit(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ACTIVITY: verifies Lookup returns nil for untracked files.
 func TestLookupReturnsNilForUntracked(t *testing.T) {
 	tr := New()
 	fa := tr.Lookup("noproject", "nofile.md")
@@ -88,6 +93,7 @@ func TestLookupReturnsNilForUntracked(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ACTIVITY: verifies Lookup returns a copy, not the original pointer.
 func TestLookupReturnsCopy(t *testing.T) {
 	tr := New()
 	tr.Record(FileViewed, "p1", "a.md")
@@ -99,6 +105,7 @@ func TestLookupReturnsCopy(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ACTIVITY: verifies RecordAt stores activity with explicit timestamp.
 func TestRecordAtSetsTimestamp(t *testing.T) {
 	tr := New()
 	ts := time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)
@@ -119,6 +126,7 @@ func TestRecordAtSetsTimestamp(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ACTIVITY: verifies RecordAt does not overwrite existing events.
 func TestRecordAtDoesNotOverwrite(t *testing.T) {
 	tr := New()
 	// Record a real event first
@@ -137,6 +145,7 @@ func TestRecordAtDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ACTIVITY: verifies concurrent Record/Lookup/RecentFiles are safe.
 func TestConcurrentAccess(t *testing.T) {
 	tr := New()
 	var wg sync.WaitGroup

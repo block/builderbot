@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// E-PENPAL-CONFIG: verifies Load returns empty config for missing file.
 func TestLoadNonexistent(t *testing.T) {
 	cfg, err := Load("/nonexistent/path/config.json")
 	if err != nil {
@@ -19,6 +20,7 @@ func TestLoadNonexistent(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CONFIG: verifies round-trip Save then Load preserves config data.
 func TestSaveAndLoad(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "subdir", "config.json")
@@ -108,6 +110,7 @@ func TestEnsureDefaults_AlreadyConfigured(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CONFIG: verifies atomic write leaves no .tmp file behind.
 func TestSaveAtomic(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

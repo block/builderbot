@@ -40,12 +40,14 @@ type ReviewGroup struct {
 	Files          []ReviewFileEntry `json:"files"`
 }
 
+// E-PENPAL-IN-REVIEW-PAGE: GET /api/in-review groups files with open threads.
 func (s *Server) handleAPIInReview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.listAllReviewGroups())
 }
 
 // listAllReviewGroups returns files in review grouped by project+source.
+// E-PENPAL-IN-REVIEW-PAGE: groups files with open threads by project and source.
 func (s *Server) listAllReviewGroups() []ReviewGroup {
 	projects := s.cache.Projects()
 

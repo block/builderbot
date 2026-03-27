@@ -40,6 +40,7 @@ func candidatePaths() []string {
 //  3. Well-known candidate paths (works when launched as GUI app with minimal PATH)
 //
 // Returns the absolute path to the claude binary, or empty string if not found.
+// E-PENPAL-CLAUDE-PATH: multi-strategy resolution for claude binary location.
 func Resolve(remembered string) string {
 	// Check remembered path first
 	if remembered != "" && IsExecutable(remembered) {
@@ -62,6 +63,7 @@ func Resolve(remembered string) string {
 }
 
 // IsExecutable returns true if path exists, is a file, and has an execute bit set.
+// E-PENPAL-CLAUDE-PATH: checks file existence and execute permission.
 func IsExecutable(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {

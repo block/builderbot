@@ -11,6 +11,7 @@ async function navigateViaSidebar(page: Page, href: string) {
   await expect(page).toHaveURL(new RegExp(href.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 }
 
+// E-PENPAL-TABS: verifies per-tab back/forward history navigation, keyboard shortcuts, and tab independence.
 test.describe('Per-tab back/forward navigation', () => {
   test('back and forward buttons render disabled on fresh tab', async ({ page }) => {
     await page.goto('/recent');

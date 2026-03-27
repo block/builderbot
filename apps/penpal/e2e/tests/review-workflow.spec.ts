@@ -11,6 +11,7 @@ let projectUrl: string;
 let projectName: string;
 let filePath: string; // project-relative path to the markdown file
 
+// E-PENPAL-MCP-TOOLS: verifies end-to-end review workflow using MCP tools.
 test.describe('review workflow', () => {
   test.beforeAll(async ({ request }) => {
     // Create a temp directory with a markdown file
@@ -43,6 +44,11 @@ test.describe('review workflow', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  // E-PENPAL-ANCHOR-COMPUTE: verifies text selection creates anchor with correct context.
+  // E-PENPAL-HIGHLIGHT-REHYPE: verifies comment highlight renders on selected text.
+  // E-PENPAL-MCP-WORKING: verifies working indicator appears when agent reads threads.
+  // E-PENPAL-MCP-TOOLS: verifies penpal_list_threads and penpal_reply MCP tool calls.
+  // E-PENPAL-SUGGESTED-REPLIES: verifies suggested reply pills render after agent reply.
   test('full comment review lifecycle', async ({ page }) => {
     // ---- Step 1: Navigate to the file page ----
     await page.goto(`/file/${projectName}/${filePath}`);

@@ -32,6 +32,7 @@ type FileComments struct {
 }
 
 // Thread represents a comment thread anchored to a specific piece of text.
+// E-PENPAL-THREAD-MODEL: Thread has ID/Status/Anchor/Comments/CreatedAt/ResolvedAt/ResolvedBy.
 type Thread struct {
 	ID         string    `json:"id"`
 	Status     string    `json:"status"` // "open" | "resolved"
@@ -43,6 +44,7 @@ type Thread struct {
 }
 
 // Anchor describes the text selection a thread is attached to.
+// E-PENPAL-ANCHOR-STRUCT: Anchor with SelectedText, Before, After, HeadingPath, StartLine, OccurrenceIndex, SvgSnippet/SvgRect.
 type Anchor struct {
 	SelectedText string   `json:"selectedText"`
 	Before       string   `json:"before,omitempty"`
@@ -62,6 +64,7 @@ type SvgRect struct {
 }
 
 // Comment is a single message within a thread.
+// E-PENPAL-THREAD-MODEL: Comment has ID/Author/Role/Body/CreatedAt/SuggestedReplies/InReplyTo.
 type Comment struct {
 	ID               string    `json:"id"`
 	Author           string    `json:"author"`
@@ -96,6 +99,7 @@ func NewStore(c *cache.Cache, act *activity.Tracker) *Store {
 }
 
 // NotifyChange wakes all goroutines blocked in WaitForChange.
+// E-PENPAL-CHANGE-SEQ: increments global monotonic sequence number and broadcasts.
 func (s *Store) NotifyChange() {
 	s.changedMu.Lock()
 	defer s.changedMu.Unlock()
@@ -114,6 +118,8 @@ func (s *Store) ChangeSeq() uint64 {
 // WaitForChangeSince blocks until the change sequence advances past sinceSeq,
 // or until the context is cancelled. Returns the current sequence number.
 // If changes already occurred since sinceSeq, returns immediately.
+//
+// E-PENPAL-CHANGE-SEQ: WaitForChangeSince blocks until changeSeq advances or context cancels.
 func (s *Store) WaitForChangeSince(ctx context.Context, sinceSeq uint64) (uint64, error) {
 	s.changedMu.Lock()
 	if s.changeSeq > sinceSeq {
@@ -140,6 +146,7 @@ func (s *Store) WaitForChangeSince(ctx context.Context, sinceSeq uint64) (uint64
 
 // RecordHeartbeat records the current time as the last agent poll for the
 // given project and file path.
+// E-PENPAL-HEARTBEAT: records agent activity in in-memory heartbeats map.
 func (s *Store) RecordHeartbeat(projectName, filePath string) {
 	s.heartMu.Lock()
 	defer s.heartMu.Unlock()
@@ -151,6 +158,7 @@ func (s *Store) RecordHeartbeat(projectName, filePath string) {
 
 // IsAgentActive returns true if an agent has polled for the given file
 // within the last 60 seconds.
+// E-PENPAL-HEARTBEAT: returns true if heartbeat is <60s old.
 func (s *Store) IsAgentActive(projectName, filePath string) bool {
 	s.heartMu.RLock()
 	defer s.heartMu.RUnlock()
@@ -198,6 +206,7 @@ func (s *Store) SetOnWorking(fn func(project string)) {
 }
 
 // SetWorking marks a thread as having an agent actively working on it.
+// E-PENPAL-WORKING: updates in-memory working map and triggers SSE event.
 func (s *Store) SetWorking(project, path, threadID string) {
 	key := project + ":" + path + ":" + threadID
 	s.workingMu.Lock()
@@ -211,6 +220,7 @@ func (s *Store) SetWorking(project, path, threadID string) {
 
 // ClearWorking removes the working indicator for a specific thread.
 // Broadcasts a change event if the indicator was actually cleared.
+// E-PENPAL-WORKING: clears working entry and triggers SSE event.
 func (s *Store) ClearWorking(project, path, threadID string) {
 	key := project + ":" + path + ":" + threadID
 	s.workingMu.Lock()
@@ -244,6 +254,7 @@ func (s *Store) ClearProjectWorking(project string) {
 
 // WorkingCount returns the number of threads with active working indicators
 // for the given project and file path. Indicators auto-expire after 60 seconds.
+// E-PENPAL-WORKING: counts non-expired working entries with 60s expiry.
 func (s *Store) WorkingCount(project, path string) int {
 	prefix := project + ":" + path + ":"
 	s.workingMu.RLock()
@@ -259,6 +270,7 @@ func (s *Store) WorkingCount(project, path string) int {
 
 // IsWorking returns true if an agent is actively working on the given thread.
 // Working state auto-expires after 60 seconds.
+// E-PENPAL-WORKING: checks working entry with 60s expiry.
 func (s *Store) IsWorking(project, path, threadID string) bool {
 	key := project + ":" + path + ":" + threadID
 	s.workingMu.RLock()

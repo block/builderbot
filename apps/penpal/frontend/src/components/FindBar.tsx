@@ -41,6 +41,7 @@ function updateHighlights(ranges: Range[], activeIdx: number) {
   if (ranges[activeIdx]) activeHighlight.add(ranges[activeIdx]);
 }
 
+// E-PENPAL-FIND-BAR: CSS Custom Highlight API with TreeWalker matching for in-page search.
 export default function FindBar({ onClose }: FindBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const barRef = useRef<HTMLDivElement>(null);

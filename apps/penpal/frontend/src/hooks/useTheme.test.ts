@@ -7,6 +7,7 @@ beforeEach(() => {
   document.documentElement.removeAttribute('data-theme');
 });
 
+// E-PENPAL-THEME: verifies localStorage, system preference, and toggle behavior.
 describe('useTheme', () => {
   it('defaults to light when no preference', () => {
     vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: false } as MediaQueryList);

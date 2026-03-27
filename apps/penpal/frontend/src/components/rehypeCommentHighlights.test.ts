@@ -30,6 +30,7 @@ function findMarks(node: Root | Element): Element[] {
   return marks;
 }
 
+// E-PENPAL-HIGHLIGHT-REHYPE: verifies <mark> injection, pending class, line matching, and text splitting.
 describe('rehypeCommentHighlights', () => {
   it('wraps matching text in a <mark> with comment-highlight class', () => {
     const tree = makeTree(1, 'Hello world');

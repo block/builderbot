@@ -4,6 +4,7 @@ import (
 	"testing"
 )
 
+// E-PENPAL-WORKTREE-DISCOVERY: verifies porcelain output parsing, IsMain flag, and bare repo skipping.
 func TestParseWorktreeList(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -85,6 +86,7 @@ func TestParseWorktreeList(t *testing.T) {
 	}
 }
 
+// E-PENPAL-WORKTREE-DISCOVERY: verifies refs/heads/ prefix is stripped from branch names.
 func TestParseWorktreeList_BranchStripping(t *testing.T) {
 	output := "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /tmp/wt\nHEAD def\nbranch refs/heads/feature/nested\n\n"
 	got := parseWorktreeList("/repo", output)

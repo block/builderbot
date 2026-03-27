@@ -41,6 +41,7 @@ beforeEach(() => {
   vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: false } as MediaQueryList);
 });
 
+// E-PENPAL-INSTALL-DISMISS: verifies install modal dismiss keyed to BUILD_ID on startup.
 describe('Install startup behavior', () => {
   it('shows install modal on first launch when no tools installed', async () => {
     vi.mocked(api.checkInstallStatus).mockResolvedValue({

@@ -17,6 +17,7 @@ type Worktree struct {
 // DiscoverWorktrees returns all git worktrees for the project at projectPath.
 // The main worktree is always first. Returns nil if the project is not a git repo
 // or has no additional worktrees.
+// E-PENPAL-WORKTREE-DISCOVERY: runs git worktree list --porcelain and parses the output.
 func DiscoverWorktrees(projectPath string) []Worktree {
 	cmd := exec.Command("git", "-C", projectPath, "worktree", "list", "--porcelain")
 	out, err := cmd.Output()
@@ -27,6 +28,7 @@ func DiscoverWorktrees(projectPath string) []Worktree {
 }
 
 // parseWorktreeList parses `git worktree list --porcelain` output into Worktree structs.
+// E-PENPAL-WORKTREE-DISCOVERY: parses porcelain output, strips refs/heads/ prefix, sets IsMain flag.
 func parseWorktreeList(projectPath string, output string) []Worktree {
 	if output == "" {
 		return nil

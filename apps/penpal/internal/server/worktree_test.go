@@ -14,6 +14,7 @@ import (
 	"github.com/loganj/penpal/internal/discovery"
 )
 
+// E-PENPAL-API-ROUTES: verifies GET /api/projects includes worktree data.
 func TestAPIProjects_IncludesWorktrees(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -64,6 +65,7 @@ func TestAPIProjects_IncludesWorktrees(t *testing.T) {
 	}
 }
 
+// E-PENPAL-FRONTMATTER-STRIP: verifies raw file serves worktree-specific content.
 func TestRawFile_Worktree(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -120,6 +122,7 @@ func TestRawFile_Worktree(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies thread isolation between main and worktree.
 func TestThreads_WorktreeIsolation(t *testing.T) {
 	s, c, cs := testServer(t)
 
@@ -184,6 +187,7 @@ func TestThreads_WorktreeIsolation(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies thread creation via API stores sidecar in worktree directory.
 func TestCreateThread_ViaAPI_Worktree(t *testing.T) {
 	s, c, _ := testServer(t)
 

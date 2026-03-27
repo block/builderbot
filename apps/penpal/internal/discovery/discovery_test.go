@@ -5,6 +5,7 @@ import (
 	"testing"
 )
 
+// E-PENPAL-SRC-RP1: verifies GroupFiles organizes paths into ordered display groups.
 func TestGroupRP1Paths(t *testing.T) {
 	st := GetSourceType("rp1")
 	if st == nil || st.GroupFiles == nil {
@@ -148,6 +149,7 @@ func TestGroupRP1Paths(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SRC-RP1: verifies ClassifyFile maps rp1 paths to correct types.
 func TestClassifyRP1File(t *testing.T) {
 	st := GetSourceType("rp1")
 	if st == nil || st.ClassifyFile == nil {
@@ -210,6 +212,7 @@ func TestClassifyRP1File(t *testing.T) {
 	}
 }
 
+// E-PENPAL-DISCOVERY: verifies worktree deduplication keeps the main worktree.
 func TestDeduplicateWorktreeProjects(t *testing.T) {
 	mkWT := func(path, branch string, isMain bool) Worktree {
 		return Worktree{Name: filepath.Base(path), Path: path, Branch: branch, IsMain: isMain}
@@ -311,6 +314,7 @@ func TestDeduplicateWorktreeProjects(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SRC-ANCHORS: verifies ClassifyFile recognizes the five ANCHORS filenames.
 func TestClassifyAnchorsFile(t *testing.T) {
 	st := GetSourceType("anchors")
 	if st == nil || st.ClassifyFile == nil {
@@ -348,6 +352,7 @@ func TestClassifyAnchorsFile(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SRC-ANCHORS: verifies GroupFiles groups by module directory with canonical ordering.
 func TestGroupAnchorsPaths(t *testing.T) {
 	st := GetSourceType("anchors")
 	if st == nil || st.GroupFiles == nil {

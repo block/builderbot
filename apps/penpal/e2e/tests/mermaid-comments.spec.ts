@@ -10,6 +10,7 @@ let projectUrl: string;
 let projectName: string;
 let filePath: string;
 
+// E-PENPAL-SVG-DRAG: verifies mermaid diagram drag selection, SVG extraction, and highlighting.
 test.describe('mermaid diagram commenting', () => {
   test.beforeAll(async ({ request }) => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'penpal-mermaid-e2e-'));
@@ -51,6 +52,7 @@ test.describe('mermaid diagram commenting', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  // E-PENPAL-MD-RENDER: verifies mermaid container renders with data-source-line attribute and SVG.
   test('mermaid diagram renders with data-source-line', async ({ page }) => {
     await page.goto(`/file/${projectName}/${filePath}`);
     const container = page.locator('.mermaid-container');
@@ -66,6 +68,8 @@ test.describe('mermaid diagram commenting', () => {
     await expect(svg).toBeVisible();
   });
 
+  // E-PENPAL-SVG-DRAG: verifies drag creates pending highlight rect and comment form.
+  // E-PENPAL-SVG-EXTRACT: verifies SVG snippet is extracted and shown in comment form.
   test('drag on mermaid diagram creates SVG selection and comment', async ({ page }) => {
     await page.goto(`/file/${projectName}/${filePath}`);
 
@@ -129,6 +133,7 @@ test.describe('mermaid diagram commenting', () => {
     );
   });
 
+  // E-PENPAL-SVG-HIGHLIGHT: verifies clicking a thread card applies and removes SVG highlight overlay.
   test('clicking thread card highlights diagram region', async ({ page, request }) => {
     await page.goto(`/file/${projectName}/${filePath}`);
 
@@ -183,6 +188,7 @@ test.describe('mermaid diagram commenting', () => {
     await expect(highlight).not.toBeAttached({ timeout: 5000 });
   });
 
+  // E-PENPAL-MD-RENDER: verifies normal text selection toolbar works alongside mermaid diagrams.
   test('normal text selection still works alongside diagrams', async ({ page }) => {
     await page.goto(`/file/${projectName}/${filePath}`);
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// E-PENPAL-FOCUS: verifies POST /api/focus sets project-level watch.
 func TestAPIFocus_Project(t *testing.T) {
 	s, _, _ := testServer(t)
 	seedProject(s.cache, "ws/proj", t.TempDir(), nil)
@@ -19,6 +20,7 @@ func TestAPIFocus_Project(t *testing.T) {
 	}
 }
 
+// E-PENPAL-FOCUS: verifies POST /api/focus with path sets file-level watch.
 func TestAPIFocus_File(t *testing.T) {
 	s, _, _ := testServer(t)
 	seedProject(s.cache, "ws/proj", t.TempDir(), nil)
@@ -32,6 +34,7 @@ func TestAPIFocus_File(t *testing.T) {
 	}
 }
 
+// E-PENPAL-FOCUS: verifies per-window focus with window ID parameter.
 func TestAPIFocus_WindowScoped(t *testing.T) {
 	s, _, _ := testServer(t)
 	seedProject(s.cache, "ws/proj", t.TempDir(), nil)
@@ -53,6 +56,7 @@ func TestAPIFocus_WindowScoped(t *testing.T) {
 	}
 }
 
+// E-PENPAL-FOCUS: verifies DELETE /api/focus clears all watches.
 func TestAPIFocus_Clear(t *testing.T) {
 	s, _, _ := testServer(t)
 

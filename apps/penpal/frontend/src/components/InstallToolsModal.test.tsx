@@ -19,6 +19,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+// E-PENPAL-INSTALL-DISMISS: verifies install/update modal behavior, claude path prompt, and retry logic.
 describe('InstallToolsModal', () => {
   it('renders with Install button for fresh install', () => {
     render(<InstallToolsModal open={true} isUpdate={false} onClose={() => {}} />);

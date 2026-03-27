@@ -81,6 +81,8 @@ function renderPage() {
   );
 }
 
+// E-PENPAL-PROJECT-CARD: verifies project card rendering with badges, branch, review count, worktrees.
+// E-PENPAL-SORT: verifies sort toggle and alphabetical/recent ordering.
 describe('WorkspacePage', () => {
   beforeEach(() => {
     vi.clearAllMocks();

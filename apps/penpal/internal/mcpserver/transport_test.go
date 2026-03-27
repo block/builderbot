@@ -10,6 +10,7 @@ import (
 )
 
 // TestMCPOverHTTP_FindProject verifies the full HTTP roundtrip for find_project.
+// E-PENPAL-MCP-TRANSPORT: verifies Streamable HTTP transport roundtrip for penpal_find_project.
 func TestMCPOverHTTP_FindProject(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -32,6 +33,8 @@ func TestMCPOverHTTP_FindProject(t *testing.T) {
 
 // TestMCPOverHTTP_ThreadLifecycle exercises create -> list -> reply -> resolve
 // through the HTTP transport as a single integration flow.
+// E-PENPAL-MCP-TRANSPORT: verifies full thread lifecycle over Streamable HTTP transport.
+// E-PENPAL-MCP-TOOLS: exercises create_thread, list_threads, reply, and read_thread in sequence.
 func TestMCPOverHTTP_ThreadLifecycle(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -104,6 +107,8 @@ func TestMCPOverHTTP_ThreadLifecycle(t *testing.T) {
 }
 
 // TestMCPOverHTTP_FilesInReview verifies files_in_review through HTTP.
+// E-PENPAL-MCP-TRANSPORT: verifies penpal_files_in_review over Streamable HTTP transport.
+// E-PENPAL-MCP-TOOLS: verifies files_in_review returns correct file count via HTTP.
 func TestMCPOverHTTP_FilesInReview(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()

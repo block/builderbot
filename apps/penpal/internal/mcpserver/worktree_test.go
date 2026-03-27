@@ -43,6 +43,7 @@ func setupWithWorktree(t *testing.T) (*testEnv, string, func()) {
 	return env, wtDir, cleanup
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_find_project returns worktree name for non-main worktree path.
 func TestFindProject_WithWorktree(t *testing.T) {
 	env, wtDir, cleanup := setupWithWorktree(t)
 	defer cleanup()
@@ -63,6 +64,7 @@ func TestFindProject_WithWorktree(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_find_project omits worktree for main worktree path.
 func TestFindProject_MainWorktree(t *testing.T) {
 	env, _, cleanup := setupWithWorktree(t)
 	defer cleanup()
@@ -83,6 +85,7 @@ func TestFindProject_MainWorktree(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_create_thread stores sidecar in worktree directory.
 func TestCreateThread_InWorktree(t *testing.T) {
 	env, wtDir, cleanup := setupWithWorktree(t)
 	defer cleanup()
@@ -119,6 +122,7 @@ func TestCreateThread_InWorktree(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_list_threads scopes threads to the specified worktree.
 func TestListThreads_WorktreeScoped(t *testing.T) {
 	env, wtDir, cleanup := setupWithWorktree(t)
 	defer cleanup()
@@ -174,6 +178,7 @@ func TestListThreads_WorktreeScoped(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_reply works within worktree-scoped threads.
 func TestReply_InWorktree(t *testing.T) {
 	env, wtDir, cleanup := setupWithWorktree(t)
 	defer cleanup()
@@ -207,6 +212,7 @@ func TestReply_InWorktree(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_files_in_review scopes results to the specified worktree.
 func TestFilesInReview_WorktreeScoped(t *testing.T) {
 	env, wtDir, cleanup := setupWithWorktree(t)
 	defer cleanup()

@@ -27,6 +27,9 @@ function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
   }) as T;
 }
 
+// E-PENPAL-SIDEBAR-LAYOUT: sidebar with workspace links, project mode, and review count.
+// E-PENPAL-REVIEW-COUNT: refreshReviewCount on SSE events, displayed as "In Review (count)".
+// E-PENPAL-EXTERNAL-LINKS: handleAppClick intercepts external links for Tauri shell.
 export default function Layout() {
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();

@@ -14,6 +14,8 @@ function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
   }) as T;
 }
 
+// E-PENPAL-PROJECT-CARD: renderProjectCard with badges, agent dot, review count.
+// E-PENPAL-SORT: sorts projects via useProjectSort with empty projects last.
 export default function WorkspacePage() {
   const { name } = useParams<{ name: string }>();
   const { setSidebarExtra } = useOutletContext<LayoutContext>();

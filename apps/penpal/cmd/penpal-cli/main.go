@@ -36,6 +36,7 @@ func main() {
 }
 
 // runOpen opens paths in the Penpal desktop app, launching it if needed.
+// E-PENPAL-CLI: reads port file, checks health, calls POST /api/open.
 func runOpen(paths []string) {
 	port := config.ReadPortFile()
 
@@ -61,6 +62,7 @@ func runOpen(paths []string) {
 }
 
 // openPaths sends each path to the /api/open endpoint, then opens the desktop app.
+// E-PENPAL-CLI: sends POST /api/open for each path.
 func openPaths(port int, paths []string) {
 	for _, arg := range paths {
 		absPath, err := filepath.Abs(arg)
@@ -97,6 +99,7 @@ func openPaths(port int, paths []string) {
 }
 
 // isServerRunning checks if a penpal server is responding at the given port.
+// E-PENPAL-CLI: health check against running penpal server.
 func isServerRunning(port int) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/api/projects", port))

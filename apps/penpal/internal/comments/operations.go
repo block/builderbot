@@ -14,11 +14,13 @@ import (
 // CreateThread creates a new comment thread on the given file, anchored to
 // the specified text selection. The first comment is added to the thread.
 // IDs and timestamps are generated automatically.
+// E-PENPAL-THREAD-MODEL: creates a Thread with open status, anchor, and initial comment.
 func (s *Store) CreateThread(projectName, filePath string, anchor Anchor, comment Comment) (*Thread, error) {
 	return s.CreateThreadForWorktree(projectName, filePath, "", anchor, comment)
 }
 
 // CreateThreadForWorktree creates a thread scoped to a specific worktree.
+// E-PENPAL-THREAD-MUTEX: serializes thread creation via per-project sync.Mutex.
 func (s *Store) CreateThreadForWorktree(projectName, filePath, worktree string, anchor Anchor, comment Comment) (*Thread, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -54,11 +56,13 @@ func (s *Store) CreateThreadForWorktree(projectName, filePath, worktree string, 
 
 // AddComment appends a comment to an existing thread. The comment ID and
 // timestamp are generated automatically.
+// E-PENPAL-INREPLYTO: sets InReplyTo to previous comment's ID.
 func (s *Store) AddComment(projectName, filePath, threadID string, comment Comment) (*Thread, error) {
 	return s.AddCommentForWorktree(projectName, filePath, "", threadID, comment)
 }
 
 // AddCommentForWorktree appends a comment scoped to a specific worktree.
+// E-PENPAL-THREAD-MUTEX: serializes comment addition via per-project sync.Mutex.
 func (s *Store) AddCommentForWorktree(projectName, filePath, worktree, threadID string, comment Comment) (*Thread, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -92,6 +96,7 @@ func (s *Store) AddCommentForWorktree(projectName, filePath, worktree, threadID 
 }
 
 // ResolveThread marks a thread as resolved.
+// E-PENPAL-THREAD-MODEL: transitions thread status to "resolved" with ResolvedAt/ResolvedBy.
 func (s *Store) ResolveThread(projectName, filePath, threadID, resolvedBy string) error {
 	return s.ResolveThreadForWorktree(projectName, filePath, "", threadID, resolvedBy)
 }
@@ -125,6 +130,7 @@ func (s *Store) ResolveThreadForWorktree(projectName, filePath, worktree, thread
 }
 
 // ReopenThread sets a resolved thread back to open.
+// E-PENPAL-THREAD-MODEL: transitions thread status back to "open", clears ResolvedAt/ResolvedBy.
 func (s *Store) ReopenThread(projectName, filePath, threadID string) error {
 	return s.ReopenThreadForWorktree(projectName, filePath, "", threadID)
 }
@@ -154,6 +160,7 @@ func (s *Store) ReopenThreadForWorktree(projectName, filePath, worktree, threadI
 // ListOpenThreads walks the .penpal/comments/ directory for the given
 // project and returns all threads with status "open" across all files.
 // Returned file paths are relative to the project root (e.g., "thoughts/shared/plans/foo.md").
+// E-PENPAL-COMMENT-STORAGE: reads JSON sidecar files from {project}/.penpal/comments/.
 func (s *Store) ListOpenThreads(projectName string) ([]ThreadWithFile, error) {
 	return s.ListThreadsByStatus(projectName, "open")
 }
@@ -166,6 +173,7 @@ func (s *Store) ListThreadsByStatus(projectName, status string) ([]ThreadWithFil
 }
 
 // ListThreadsByStatusForWorktree walks the comments directory scoped to a worktree.
+// E-PENPAL-COMMENT-WORKTREE: reads threads from worktree-scoped comment storage.
 func (s *Store) ListThreadsByStatusForWorktree(projectName, status, worktree string) ([]ThreadWithFile, error) {
 	project := s.cache.FindProject(projectName)
 	if project == nil {
@@ -248,11 +256,13 @@ func (s *Store) HasPendingHumanComments(projectName string) bool {
 // ListFilesInReview walks the .penpal/comments/ directory for the given
 // project and returns all files that have at least one open comment thread.
 // Returned file paths are relative to the project root (e.g., "thoughts/shared/plans/foo.md").
+// E-PENPAL-COMMENT-STORAGE: scans JSON sidecar files for open threads.
 func (s *Store) ListFilesInReview(projectName string) ([]FileInReview, error) {
 	return s.ListFilesInReviewForWorktree(projectName, "")
 }
 
 // ListFilesInReviewForWorktree lists files in review scoped to a worktree.
+// E-PENPAL-COMMENT-WORKTREE: scans worktree-scoped sidecar files for open threads.
 func (s *Store) ListFilesInReviewForWorktree(projectName, worktree string) ([]FileInReview, error) {
 	project := s.cache.FindProject(projectName)
 	if project == nil {

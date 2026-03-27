@@ -33,6 +33,7 @@ type installConfig struct {
 	claudeBin string // resolved path to claude binary
 }
 
+// E-PENPAL-INSTALL-CLI: CLI symlink creation; E-PENPAL-INSTALL-PLUGIN: plugin marketplace install.
 func (s *Server) handleInstallTools(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -102,6 +103,7 @@ func (s *Server) rememberClaudePath(path string) {
 	}
 }
 
+// E-PENPAL-CLAUDE-PATH: GET/PUT /api/claude-path with validation.
 func (s *Server) handleClaudePath(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -153,6 +155,7 @@ func resolveAppRoot() (string, error) {
 }
 
 // resolveBinDir returns the best directory for placing the CLI symlink.
+// E-PENPAL-INSTALL-CLI: falls back to /usr/local/bin if Homebrew is not found.
 func resolveBinDir() string {
 	// Try Homebrew prefix first
 	if out, err := exec.Command("brew", "--prefix").Output(); err == nil {
@@ -190,6 +193,7 @@ func checkInstallStatus(cfg installConfig) installToolsResponse {
 	return resp
 }
 
+// E-PENPAL-INSTALL-CLI: creates CLI symlink; E-PENPAL-INSTALL-PLUGIN: runs claude plugin install.
 func performInstall(cfg installConfig) installToolsResponse {
 	resp := installToolsResponse{}
 

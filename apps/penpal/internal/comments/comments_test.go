@@ -44,6 +44,7 @@ func newTestStore(t *testing.T) *Store {
 	return NewStore(c, nil)
 }
 
+// E-PENPAL-THREAD-MODEL, E-PENPAL-ANCHOR-STRUCT: verifies thread creation with ID, status, timestamps, and anchor.
 func TestCreateThread(t *testing.T) {
 	store := newTestStore(t)
 
@@ -91,6 +92,7 @@ func TestCreateThread(t *testing.T) {
 	}
 }
 
+// E-PENPAL-INREPLYTO: verifies AddComment appends with unique IDs.
 func TestAddComment(t *testing.T) {
 	store := newTestStore(t)
 
@@ -121,6 +123,7 @@ func TestAddComment(t *testing.T) {
 	}
 }
 
+// E-PENPAL-THREAD-MODEL: verifies error on nonexistent thread.
 func TestAddCommentThreadNotFound(t *testing.T) {
 	store := newTestStore(t)
 
@@ -132,6 +135,7 @@ func TestAddCommentThreadNotFound(t *testing.T) {
 	}
 }
 
+// E-PENPAL-THREAD-MODEL: verifies resolve/reopen status transitions with ResolvedAt/ResolvedBy.
 func TestResolveAndReopenThread(t *testing.T) {
 	store := newTestStore(t)
 
@@ -184,6 +188,7 @@ func TestResolveAndReopenThread(t *testing.T) {
 	}
 }
 
+// E-PENPAL-COMMENT-STORAGE, E-PENPAL-ANCHOR-STRUCT: verifies JSON sidecar round-trip persistence with nested paths.
 func TestLoadSaveRoundTrip(t *testing.T) {
 	store := newTestStore(t)
 
@@ -237,6 +242,7 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	}
 }
 
+// E-PENPAL-COMMENT-STORAGE: verifies Load returns empty FileComments for nonexistent sidecar.
 func TestLoadNonexistentReturnsEmpty(t *testing.T) {
 	store := newTestStore(t)
 
@@ -252,6 +258,7 @@ func TestLoadNonexistentReturnsEmpty(t *testing.T) {
 	}
 }
 
+// E-PENPAL-COMMENT-STORAGE: verifies error on nonexistent project.
 func TestLoadProjectNotFound(t *testing.T) {
 	store := newTestStore(t)
 
@@ -261,6 +268,7 @@ func TestLoadProjectNotFound(t *testing.T) {
 	}
 }
 
+// E-PENPAL-COMMENT-STORAGE: verifies listing open threads across multiple sidecar files.
 func TestListOpenThreadsAcrossFiles(t *testing.T) {
 	store := newTestStore(t)
 
@@ -326,6 +334,7 @@ func TestListOpenThreadsAcrossFiles(t *testing.T) {
 	}
 }
 
+// E-PENPAL-COMMENT-STORAGE: verifies empty result for project with no sidecars.
 func TestListOpenThreadsEmptyProject(t *testing.T) {
 	store := newTestStore(t)
 
@@ -338,6 +347,7 @@ func TestListOpenThreadsEmptyProject(t *testing.T) {
 	}
 }
 
+// E-PENPAL-COMMENT-STORAGE: verifies files-in-review derived from open threads in sidecars.
 func TestListFilesInReview(t *testing.T) {
 	store := newTestStore(t)
 
@@ -413,6 +423,7 @@ func TestListFilesInReview(t *testing.T) {
 	}
 }
 
+// E-PENPAL-COMMENT-STORAGE: verifies review list updates on resolve and reopen.
 func TestFilesInReviewDerivedFromOpenThreads(t *testing.T) {
 	store := newTestStore(t)
 
@@ -481,6 +492,7 @@ func TestFilesInReviewDerivedFromOpenThreads(t *testing.T) {
 	}
 }
 
+// E-PENPAL-COMMENT-STORAGE: verifies orphaned sidecars are excluded when source file is deleted.
 func TestListFilesInReview_SkipsDeletedFiles(t *testing.T) {
 	store := newTestStore(t)
 
@@ -538,6 +550,7 @@ func TestListFilesInReview_SkipsDeletedFiles(t *testing.T) {
 	}
 }
 
+// E-PENPAL-INREPLYTO: verifies migrateInReplyTo backfills legacy data on save.
 func TestMigrateInReplyToOnSave(t *testing.T) {
 	store := newTestStore(t)
 
@@ -584,6 +597,7 @@ func TestMigrateInReplyToOnSave(t *testing.T) {
 	}
 }
 
+// E-PENPAL-INREPLYTO: verifies migration preserves existing InReplyTo values.
 func TestMigratePreservesExistingInReplyTo(t *testing.T) {
 	store := newTestStore(t)
 
@@ -619,6 +633,7 @@ func TestMigratePreservesExistingInReplyTo(t *testing.T) {
 	}
 }
 
+// E-PENPAL-INREPLYTO: verifies AddComment sets InReplyTo to previous comment's ID.
 func TestAddCommentSetsInReplyTo(t *testing.T) {
 	store := newTestStore(t)
 
@@ -641,6 +656,7 @@ func TestAddCommentSetsInReplyTo(t *testing.T) {
 	}
 }
 
+// E-PENPAL-INREPLYTO: verifies legacy JSON without InReplyTo loads without error.
 func TestLegacyJSONWithoutInReplyToLoads(t *testing.T) {
 	store := newTestStore(t)
 

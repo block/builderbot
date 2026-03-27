@@ -11,6 +11,7 @@ import (
 	"github.com/loganj/penpal/internal/comments"
 )
 
+// E-PENPAL-API-ROUTES: verifies GET /api/agents returns running=false with no pending comments.
 func TestAPIAgentStatus_NoAgent_NoPendingComments(t *testing.T) {
 	s, c, _ := testServer(t)
 	dir := t.TempDir()
@@ -37,6 +38,7 @@ func TestAPIAgentStatus_NoAgent_NoPendingComments(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-AUTOSTART: verifies needsAgent=true when human comment is pending.
 func TestAPIAgentStatus_NeedsAgent_WithPendingHumanComments(t *testing.T) {
 	s, c, cs := testServer(t)
 	dir := t.TempDir()
@@ -72,6 +74,7 @@ func TestAPIAgentStatus_NeedsAgent_WithPendingHumanComments(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-AUTOSTART: verifies needsAgent absent after agent replies.
 func TestAPIAgentStatus_NoNeedsAgent_WhenAgentReplied(t *testing.T) {
 	s, c, cs := testServer(t)
 	dir := t.TempDir()
@@ -115,6 +118,7 @@ func TestAPIAgentStatus_NoNeedsAgent_WhenAgentReplied(t *testing.T) {
 	}
 }
 
+// E-PENPAL-AGENT-AUTOSTART: verifies needsAgent=true after agent finishes with pending comments.
 func TestAPIAgentStatus_NeedsAgent_AfterAgentFinished(t *testing.T) {
 	s, c, cs := testServer(t)
 	s.agents = agents.New(c, cs, 0)

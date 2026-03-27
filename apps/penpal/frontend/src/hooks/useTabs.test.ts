@@ -42,6 +42,7 @@ describe('deriveTitleFromPath', () => {
   });
 });
 
+// E-PENPAL-TABS: verifies tab lifecycle, history stacks, back/forward, and tab switching.
 describe('useTabs', () => {
   it('initializes with one tab from current URL', () => {
     const { result } = renderHook(() => useTabs(), { wrapper });

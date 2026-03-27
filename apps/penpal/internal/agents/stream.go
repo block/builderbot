@@ -31,6 +31,7 @@ type modelInfo struct {
 
 // parseStream reads NDJSON from the agent's stdout, extracts usage data,
 // and writes all output through to the log file.
+// E-PENPAL-AGENT-STREAM: NDJSON parsing of agent stdout.
 func (a *Agent) parseStream(r io.Reader, logFile *os.File) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large messages
@@ -43,6 +44,7 @@ func (a *Agent) parseStream(r io.Reader, logFile *os.File) {
 }
 
 // processLine parses a single NDJSON line and updates usage fields on the Agent.
+// E-PENPAL-AGENT-STREAM: extracts contextUsed, numTurns, totalCostUSD from NDJSON.
 func (a *Agent) processLine(line []byte) {
 	var msg streamMessage
 	if err := json.Unmarshal(line, &msg); err != nil {

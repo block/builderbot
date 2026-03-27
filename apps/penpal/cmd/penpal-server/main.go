@@ -30,6 +30,7 @@ func main() {
 	runServe(*port, *root)
 }
 
+// E-PENPAL-MCP-JSON: writes .mcp.json to CWD on startup for MCP client discovery.
 func runServe(port int, rootOverride string) {
 	config.MigrateFromBirdseye()
 	config.EnsureGlobalGitignore()

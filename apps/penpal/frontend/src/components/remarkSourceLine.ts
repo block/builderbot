@@ -18,6 +18,7 @@ const BLOCK_TYPES = new Set([
  * Uses node.data.hProperties which remark-rehype carries through to the
  * resulting hast elements automatically.
  */
+// E-PENPAL-MD-RENDER: sets data-source-line on block-level elements from AST positions.
 export default function remarkSourceLine() {
   return (tree: Root) => {
     visit(tree, (node) => {

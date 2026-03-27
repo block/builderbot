@@ -15,6 +15,7 @@ type agentStatusResponse struct {
 }
 
 // handleAgentStatus handles GET /api/agents?project=X.
+// E-PENPAL-API-ROUTES: GET /api/agents endpoint.
 func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 	projectName := r.URL.Query().Get("project")
 	if projectName == "" {
@@ -43,6 +44,7 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAgentStart handles POST /api/agents/start?project=X.
+// E-PENPAL-API-ROUTES: POST /api/agents/start endpoint.
 func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -78,6 +80,7 @@ func (s *Server) handleAgentStart(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAgentStop handles POST /api/agents/stop?project=X.
+// E-PENPAL-API-ROUTES: POST /api/agents/stop endpoint.
 func (s *Server) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -107,6 +110,8 @@ func (s *Server) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 // maybeStartAgent launches an agent for the project if:
 // 1. The comment is from a human
 // 2. No agent is already running for this project
+//
+// E-PENPAL-AGENT-AUTOSTART: maybeStartAgent after handleCreateThread/handleAddComment.
 func (s *Server) maybeStartAgent(projectName, role string) {
 	if role != "human" || s.agents == nil {
 		return

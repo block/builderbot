@@ -2,6 +2,7 @@ package server
 
 import "testing"
 
+// E-PENPAL-PATH-TRAVERSAL: verifies isSubpath prevents path traversal attacks.
 func TestIsSubpath(t *testing.T) {
 	tests := []struct {
 		parent string

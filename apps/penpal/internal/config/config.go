@@ -48,6 +48,7 @@ type SourceConfig struct {
 
 // DefaultConfigPath returns the default config file location.
 // Set PENPAL_CONFIG to override (used by e2e tests for isolation).
+// E-PENPAL-CONFIG: resolves ~/.config/penpal/config.json path.
 func DefaultConfigPath() string {
 	if p := os.Getenv("PENPAL_CONFIG"); p != "" {
 		return p
@@ -61,6 +62,7 @@ func DefaultConfigPath() string {
 
 // Load reads the config from the given path.
 // Returns an empty config if the file doesn't exist.
+// E-PENPAL-CONFIG: loads config from ~/.config/penpal/config.json.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -78,6 +80,7 @@ func Load(path string) (*Config, error) {
 }
 
 // Save writes the config to the given path atomically.
+// E-PENPAL-CONFIG: atomic write via .tmp + rename.
 func Save(path string, cfg *Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
@@ -98,6 +101,7 @@ func Save(path string, cfg *Config) error {
 }
 
 // PortFilePath returns the path to the server port file.
+// E-PENPAL-PORT-FILE: resolves ~/.config/penpal/server.port path.
 func PortFilePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -107,6 +111,7 @@ func PortFilePath() string {
 }
 
 // WritePortFile writes the server port to the port file.
+// E-PENPAL-PORT-FILE: writes server.port on startup.
 func WritePortFile(port int) error {
 	path := PortFilePath()
 	if path == "" {
@@ -120,6 +125,7 @@ func WritePortFile(port int) error {
 
 // ReadPortFile reads the server port from the port file.
 // Returns 0 if the file does not exist or cannot be read.
+// E-PENPAL-PORT-FILE: reads server.port for CLI discovery.
 func ReadPortFile() int {
 	path := PortFilePath()
 	if path == "" {
@@ -137,6 +143,7 @@ func ReadPortFile() int {
 }
 
 // RemovePortFile removes the server port file.
+// E-PENPAL-PORT-FILE: removes server.port on shutdown.
 func RemovePortFile() {
 	path := PortFilePath()
 	if path != "" {

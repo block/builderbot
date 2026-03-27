@@ -24,6 +24,9 @@ function WorkingIndicator() {
   );
 }
 
+// E-PENPAL-IN-REVIEW-SECTION: "In Review" section before source groups with WorkingIndicator.
+// E-PENPAL-SOURCE-ACTIONS: source group header three-dot menu with copy/publish/remove/delete.
+// E-PENPAL-BATCH-OPS: selection state with batch actions (copy markdown, copy paths, publish, delete).
 export default function ProjectPage() {
   const location = useLocation();
   const { setSidebarExtra } = useOutletContext<LayoutContext>();

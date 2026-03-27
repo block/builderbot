@@ -67,6 +67,7 @@ function renderPanel(threads: ThreadResponse[] = [mockThread], anchorLines: Reco
   );
 }
 
+// E-PENPAL-COMMENT-RENDER, E-PENPAL-COMMENT-FORM, E-PENPAL-SUGGESTED-REPLIES: verifies comment rendering, form behavior, and suggested reply pills.
 describe('CommentsPanel', () => {
   beforeEach(() => {
     localStorage.clear();

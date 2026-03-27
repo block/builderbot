@@ -21,6 +21,7 @@ export const API_BASE = import.meta.env.VITE_API_URL || '';
 
 export const isDesktopApp = typeof window !== 'undefined' && '__TAURI__' in window;
 
+// E-PENPAL-WINDOW-ID: sessionStorage UUID or Tauri window label for focus tracking.
 const WINDOW_FOCUS_KEY = 'penpal-window-focus-id';
 let inMemoryWindowFocusID: string | null = null;
 let resolvedWindowFocusID: string | null = null;

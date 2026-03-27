@@ -82,6 +82,7 @@ func New(c *cache.Cache, w *watcher.Watcher, cs *comments.Store, mcpHandler http
 	return s
 }
 
+// E-PENPAL-CORS: CORS allows only specific origins; E-PENPAL-LAZY-INIT: first request triggers discovery.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.ensureLoaded()
 	// Allow cross-origin requests from Tauri desktop app (tauri://localhost)
@@ -100,6 +101,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // isLocalOrigin returns true for origins that should be allowed CORS access.
+// E-PENPAL-CORS: allows tauri://, https://tauri.*, http://localhost*, http://127.0.0.1*.
 func isLocalOrigin(origin string) bool {
 	return strings.HasPrefix(origin, "tauri://") ||
 		strings.HasPrefix(origin, "https://tauri.") ||
@@ -177,6 +179,7 @@ func (s *Server) workspacePaths() []string {
 }
 
 // ensureLoaded does fast project discovery on first request, then populates in background.
+// E-PENPAL-LAZY-INIT: first HTTP request triggers sync.Once discovery.
 func (s *Server) ensureLoaded() {
 	s.loadOnce.Do(func() {
 		projects := s.discoverAllProjects()
@@ -201,6 +204,7 @@ func (s *Server) ensureLoaded() {
 
 // handleReady blocks until the server's initial population is complete.
 // Tauri polls this endpoint before showing the webview.
+// E-PENPAL-LAZY-INIT: GET /api/ready blocks until populateProjects completes.
 func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	<-s.readyCh
 	w.Header().Set("Content-Type", "application/json")
@@ -208,6 +212,7 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 }
 
 // populateProjects scans file lists and fills in git info in the background.
+// E-PENPAL-GIT-ENRICH: background git enrichment with SSE push.
 func (s *Server) populateProjects() {
 	s.cache.RefreshAllProjects()
 	s.seedRecentActivity()
@@ -251,6 +256,7 @@ func (s *Server) populateProjects() {
 // seedRecentActivity populates the activity tracker with ModTimes from the
 // most recently modified files in the cache. This ensures /recent has data
 // immediately on startup, even for files modified before the server started.
+// E-PENPAL-ACTIVITY: seeds file modification events at startup.
 func (s *Server) seedRecentActivity() {
 	files := s.cache.AllFiles(50)
 	for _, f := range files {
@@ -258,6 +264,7 @@ func (s *Server) seedRecentActivity() {
 	}
 }
 
+// E-PENPAL-API-ROUTES: registers all REST endpoints, SPA, SSE, and MCP.
 func (s *Server) routes() {
 	// Main mux (:8080) — API, SSE, MCP, and React SPA
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -322,6 +329,8 @@ func (s *Server) routes() {
 //	POST /api/focus?window=W&project=X&path=Y     — watch file directory only (FilePage)
 //	DELETE /api/focus?window=W                     — clear deep watches for one window
 //	DELETE /api/focus                              — clear all deep watches (legacy)
+//
+// E-PENPAL-FOCUS: windowFocuses map drives dynamic watches.
 func (s *Server) handleFocus(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
@@ -620,7 +629,8 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 	return groups
 }
 
-// handleEvents is the SSE endpoint for live updates
+// handleEvents is the SSE endpoint for live updates.
+// E-PENPAL-SSE: GET /events long-lived SSE stream with event types.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	// Set headers for SSE
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -707,6 +717,7 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: GET /api/projects endpoint.
 func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -785,6 +796,7 @@ type APIFileGroupView struct {
 	Files      []APIFile `json:"files"`
 }
 
+// E-PENPAL-API-ROUTES: GET /api/project/{qualifiedName} returns grouped file list.
 func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -849,6 +861,7 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+// E-PENPAL-API-ROUTES: GET /api/recent returns recent files.
 func (s *Server) handleAPIRecent(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -912,6 +925,7 @@ type ProjectInfo struct {
 	UnpushedCommits int  `json:"unpushedCommits"`
 }
 
+// E-PENPAL-DELETE-PROJECT: GET /api/project-info returns fileCount, dirty, unpushedCommits.
 func (s *Server) handleProjectInfo(w http.ResponseWriter, r *http.Request) {
 	qualifiedName := r.URL.Query().Get("name")
 	if qualifiedName == "" {
@@ -946,6 +960,7 @@ func (s *Server) handleProjectInfo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(info)
 }
 
+// E-PENPAL-DELETE-PROJECT: POST /api/delete-project with os.RemoveAll.
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -998,6 +1013,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// E-PENPAL-DELETE-FILE: POST /api/delete-file with os.Remove, sidecar cleanup, removeEmptyParents.
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

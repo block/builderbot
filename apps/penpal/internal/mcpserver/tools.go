@@ -76,8 +76,12 @@ func textResult(v any) (*mcp.CallToolResult, error) {
 }
 
 // registerTools adds all penpal MCP tools to the server.
+// E-PENPAL-MCP-TOOLS: registers penpal_find_project, penpal_list_threads, penpal_read_thread, penpal_reply, penpal_create_thread, penpal_files_in_review, penpal_wait_for_changes.
 func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	// penpal_list_threads
+	// E-PENPAL-MCP-TOOLS: penpal_list_threads lists threads by file or project-wide.
+	// E-PENPAL-MCP-WORKING: auto-sets working indicator for threads where last comment is from human.
+	// E-PENPAL-HEARTBEAT: records heartbeat on each tool call.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_list_threads",
 		Description: "List comment threads on documentation files. Paths are relative to the project root (e.g., thoughts/plans/foo.md). When path is omitted, returns all open threads across the project. Optionally filter by status (open/resolved).",
@@ -133,6 +137,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	})
 
 	// penpal_read_thread
+	// E-PENPAL-MCP-TOOLS: penpal_read_thread returns full thread with all comments.
+	// E-PENPAL-MCP-WORKING: auto-sets working indicator when last comment is from human.
+	// E-PENPAL-HEARTBEAT: records heartbeat on each tool call.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_read_thread",
 		Description: "Read a full comment thread on a document. Path is relative to project root (e.g., thoughts/plans/foo.md). Returns the complete thread JSON with all comments.",
@@ -162,6 +169,8 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	})
 
 	// penpal_reply
+	// E-PENPAL-MCP-TOOLS: penpal_reply adds agent reply and clears working indicator.
+	// E-PENPAL-MCP-WORKING: clears working indicator on reply.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_reply",
 		Description: "Reply to an existing comment thread. The reply is attributed to the agent. Include suggestedReplies when asking for confirmation or presenting options, but only for meaningful responses the human would type — not generic ones like \"yes\"/\"no\"/\"looks good\" that duplicate the reply/resolve buttons.",
@@ -187,6 +196,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	})
 
 	// penpal_create_thread
+	// E-PENPAL-MCP-TOOLS: penpal_create_thread computes Before/After/StartLine from disk and creates thread.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_create_thread",
 		Description: "Create a new comment thread anchored to specific text in a markdown document. Path is relative to project root (e.g., thoughts/plans/foo.md). The before/after context is computed automatically by finding the selectedText in the file.",
@@ -267,6 +277,9 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	})
 
 	// penpal_files_in_review
+	// E-PENPAL-MCP-TOOLS: penpal_files_in_review lists files with open threads, enriched with oldest pending.
+	// E-PENPAL-MCP-WORKING: auto-sets working indicator for oldest pending thread.
+	// E-PENPAL-HEARTBEAT: records heartbeat for each file in review.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_files_in_review",
 		Description: "List all documentation files currently in review for a project. File paths are relative to the project root (e.g., thoughts/plans/foo.md). Records a heartbeat for each file to signal agent presence in the penpal UI. For each file, includes all open threads and the full content of the oldest pending thread (where the last comment is from a human). The working indicator is set for the oldest pending thread so the UI shows the agent is working on it.",
@@ -328,6 +341,10 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	})
 
 	// penpal_wait_for_changes
+	// E-PENPAL-MCP-TOOLS: penpal_wait_for_changes blocks via 30s long-poll for comment changes.
+	// E-PENPAL-CHANGE-SEQ: uses WaitForChangeSince to block until changeSeq advances.
+	// E-PENPAL-MCP-WORKING: refreshes working timestamps during 30s cycle to prevent expiry.
+	// E-PENPAL-HEARTBEAT: records heartbeat at start and after waking.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_wait_for_changes",
 		Description: "Block until comment threads change for a project (new thread, reply, resolve, or reopen), or until timeout (30s). Returns the current files in review. Use this in a loop instead of polling penpal_files_in_review. Also records agent heartbeat. Pass the `seq` value from the previous response as `sinceSeq` to avoid missing changes between calls.",
@@ -432,6 +449,7 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 	})
 
 	// penpal_find_project
+	// E-PENPAL-MCP-TOOLS: penpal_find_project maps CWD to project name and optional worktree.
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "penpal_find_project",
 		Description: "Find the penpal project for a given directory. Returns the project name and optional worktree to use with other penpal tools. Call this first if you don't already know your project name.",

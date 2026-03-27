@@ -14,6 +14,7 @@ var mermaidJS string
 
 // RenderHTML converts markdown to a complete, self-contained HTML page
 // with TOC sidebar and mermaid support.
+// E-PENPAL-PUBLISH-RENDER: strips frontmatter, renders via goldmark, extracts headings.
 func RenderHTML(src []byte, title string) ([]byte, error) {
 	src = markdown.StripFrontmatter(src)
 	htmlContent, err := markdown.Render(src)

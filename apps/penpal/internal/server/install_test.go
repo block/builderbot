@@ -12,6 +12,7 @@ import (
 	"github.com/loganj/penpal/internal/config"
 )
 
+// E-PENPAL-INSTALL-CLI: verifies GET /api/install-tools returns status JSON.
 func TestInstallToolsStatus_ReturnsJSON(t *testing.T) {
 	s, _, _ := testServer(t)
 	s.installCfg = &installConfig{binDir: t.TempDir()}
@@ -36,6 +37,7 @@ func TestInstallToolsStatus_ReturnsJSON(t *testing.T) {
 	// Plugin status depends on host machine — just verify the field exists
 }
 
+// E-PENPAL-INSTALL-CLI: verifies existing CLI symlink is detected.
 func TestInstallToolsStatus_DetectsExistingSymlink(t *testing.T) {
 	s, _, _ := testServer(t)
 	binDir := t.TempDir()
@@ -63,6 +65,7 @@ func TestInstallToolsStatus_DetectsExistingSymlink(t *testing.T) {
 	}
 }
 
+// E-PENPAL-INSTALL-CLI: verifies POST /api/install-tools creates CLI symlink.
 func TestInstallToolsInstall_CreatesSymlink(t *testing.T) {
 	s, _, _ := testServer(t)
 	binDir := t.TempDir()
@@ -105,6 +108,7 @@ func TestInstallToolsInstall_CreatesSymlink(t *testing.T) {
 	}
 }
 
+// E-PENPAL-INSTALL-CLI: verifies install is idempotent (second call succeeds).
 func TestInstallToolsInstall_Idempotent(t *testing.T) {
 	s, _, _ := testServer(t)
 	binDir := t.TempDir()
@@ -150,6 +154,7 @@ func TestInstallToolsInstall_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CLAUDE-PATH: verifies install status includes claudeBin field.
 func TestInstallToolsStatus_IncludesClaudeBin(t *testing.T) {
 	s, _, _ := testServer(t)
 	// Create a fake claude binary and inject it via installCfg
@@ -187,6 +192,7 @@ func TestInstallToolsStatus_ClaudeBinEmpty(t *testing.T) {
 	}
 }
 
+// E-PENPAL-INSTALL-PLUGIN: verifies plugin install fails when claude binary is missing.
 func TestPerformInstall_NoClaudeBin_ReportsError(t *testing.T) {
 	appRoot := t.TempDir()
 	macosDir := filepath.Join(appRoot, "Contents", "MacOS")
@@ -207,6 +213,7 @@ func TestPerformInstall_NoClaudeBin_ReportsError(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CLAUDE-PATH: verifies PUT /api/claude-path saves and persists valid path.
 func TestClaudePath_PUT_Valid(t *testing.T) {
 	s, _, _ := testServer(t)
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
@@ -242,6 +249,7 @@ func TestClaudePath_PUT_Valid(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CLAUDE-PATH: verifies PUT /api/claude-path rejects invalid path.
 func TestClaudePath_PUT_InvalidPath(t *testing.T) {
 	s, _, _ := testServer(t)
 
@@ -255,6 +263,7 @@ func TestClaudePath_PUT_InvalidPath(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CLAUDE-PATH: verifies PUT /api/claude-path rejects empty path.
 func TestClaudePath_PUT_EmptyPath(t *testing.T) {
 	s, _, _ := testServer(t)
 
@@ -268,6 +277,7 @@ func TestClaudePath_PUT_EmptyPath(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CLAUDE-PATH: verifies GET /api/claude-path returns remembered path.
 func TestClaudePath_GET(t *testing.T) {
 	s, _, _ := testServer(t)
 	// Pre-set a remembered path

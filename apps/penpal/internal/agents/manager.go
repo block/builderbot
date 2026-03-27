@@ -66,6 +66,7 @@ func (m *Manager) SetOnChange(fn func(projectName string)) {
 
 // Start launches a Claude agent for the given project.
 // Returns nil if an agent is already running for this project.
+// E-PENPAL-AGENT-SPAWN: writes temp MCP config, builds prompt, runs claude.
 func (m *Manager) Start(projectName string) (*Agent, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -187,6 +188,7 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 }
 
 // Stop terminates the agent for the given project.
+// E-PENPAL-AGENT-CLEANUP: graceful shutdown with SIGTERM, falls back to kill.
 func (m *Manager) Stop(projectName string) error {
 	m.mu.Lock()
 	agent, ok := m.agents[projectName]

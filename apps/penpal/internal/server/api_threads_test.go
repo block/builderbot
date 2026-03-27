@@ -12,6 +12,7 @@ import (
 	"github.com/loganj/penpal/internal/comments"
 )
 
+// E-PENPAL-API-ROUTES: verifies POST /api/threads creates thread and GET lists it.
 func TestAPIThreads_CreateAndList(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -65,6 +66,7 @@ func TestAPIThreads_CreateAndList(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies POST /api/threads/{id}/comments adds a reply.
 func TestAPIThreads_AddComment(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -114,6 +116,7 @@ func TestAPIThreads_AddComment(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies PATCH /api/threads/{id} resolves and reopens.
 func TestAPIThreads_ResolveAndReopen(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -169,6 +172,7 @@ func TestAPIThreads_ResolveAndReopen(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies GET /api/threads?project=X returns project-wide open threads.
 func TestAPIThreads_ListOpenAcrossProject(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -192,6 +196,7 @@ func TestAPIThreads_ListOpenAcrossProject(t *testing.T) {
 	}
 }
 
+// E-PENPAL-REVIEW-COUNT: verifies GET /api/reviews returns files with open threads.
 func TestAPIReviews_ListFilesInReview(t *testing.T) {
 	s, c, _ := testServer(t)
 

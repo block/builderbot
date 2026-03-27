@@ -27,6 +27,7 @@ function saveAuthor(name: string) {
   if (name) localStorage.setItem('penpal-author', name);
 }
 
+// E-PENPAL-COMMENT-RENDER: renders comment body via ReactMarkdown with remarkGfm.
 function CommentBody({ text }: { text: string }) {
   if (!text) return null;
   return (
@@ -227,6 +228,7 @@ export default function CommentsPanel({
 }
 
 // ── NewThreadForm ──
+// E-PENPAL-COMMENT-FORM: NewThreadForm with Escape/Cmd+Enter keys, author localStorage persistence.
 
 interface NewThreadFormProps {
   anchor: Anchor;
@@ -386,7 +388,7 @@ function ThreadCard({
       .catch((err) => console.error('Failed to submit suggested reply:', err));
   };
 
-  // Get last comment for suggested replies
+  // E-PENPAL-SUGGESTED-REPLIES: show pills when lastComment.role === 'agent' with suggestedReplies.
   const lastComment = ordered.length > 0 ? ordered[ordered.length - 1] : null;
   const showSuggestions =
     lastComment?.suggestedReplies?.length &&
@@ -511,6 +513,7 @@ function ThreadCard({
 }
 
 // ── ReplyForm ──
+// E-PENPAL-COMMENT-FORM: ReplyForm with Escape/Cmd+Enter keys, author localStorage persistence.
 
 interface ReplyFormProps {
   threadId: string;

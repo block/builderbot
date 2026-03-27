@@ -9,6 +9,7 @@ import RecentPage from './pages/RecentPage';
 import InReviewPage from './pages/InReviewPage';
 import { api } from './api';
 
+// E-PENPAL-HOME-REDIRECT: navigates to first workspace, standalone project, or /recent.
 function IndexRedirect() {
   const navigate = useNavigate();
 

@@ -3,6 +3,7 @@ import { render, screen, act } from '@testing-library/react';
 import React from 'react';
 import SelectionToolbar from './SelectionToolbar';
 
+// E-PENPAL-ANCHOR-COMPUTE: verifies computeAnchor uses document-order start line for backwards selections.
 describe('SelectionToolbar', () => {
   afterEach(() => {
     vi.restoreAllMocks();

@@ -34,6 +34,7 @@ vi.mock('../hooks/useSSE', () => ({
   useSSE: vi.fn(),
 }));
 
+// E-PENPAL-IN-REVIEW-PAGE: verifies review group rendering with breadcrumbs and file rows.
 describe('InReviewPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();

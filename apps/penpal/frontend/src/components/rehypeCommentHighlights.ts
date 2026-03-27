@@ -13,6 +13,7 @@ interface Options {
   highlights: ThreadHighlight[];
 }
 
+// E-PENPAL-HIGHLIGHT-REHYPE: rehype plugin injecting <mark> elements for comment highlights.
 /**
  * Rehype plugin that inserts <mark> elements into the hast AST for comment highlights.
  * Replaces the previous DOM mutation approach (addCommentHighlights) so that React

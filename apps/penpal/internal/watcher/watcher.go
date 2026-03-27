@@ -73,6 +73,7 @@ type Watcher struct {
 }
 
 // New creates a new watcher
+// E-PENPAL-WATCHER: initializes fsnotify bridge with two-tier watch sets and debounce map.
 func New(c *cache.Cache, act *activity.Tracker) (*Watcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -97,6 +98,7 @@ func New(c *cache.Cache, act *activity.Tracker) (*Watcher, error) {
 // Start begins watching for changes across all workspaces.
 // Only workspace directories are watched initially; individual projects
 // are deep-watched on demand via FocusProject.
+// E-PENPAL-WATCHER: starts two-tier watch (base + dynamic) and event loop.
 func (w *Watcher) Start(workspacePaths []string, discoverFn func() ([]discovery.Project, error)) error {
 	w.workspacePaths = workspacePaths
 	w.discoverFn = discoverFn
@@ -128,6 +130,7 @@ func (w *Watcher) FocusProject(name string) {
 
 // SetWindowFocusProject watches a project's sources and comments directories
 // for a specific window.
+// E-PENPAL-FOCUS: sets project-level focus for a specific window.
 func (w *Watcher) SetWindowFocusProject(windowID, name string) {
 	w.setWindowFocus(normalizeWindowID(windowID), focusTarget{
 		Kind:    focusKindProject,
@@ -143,6 +146,7 @@ func (w *Watcher) FocusFile(projectName, filePath, worktree string) {
 
 // SetWindowFocusFile watches only the directory containing a specific file for
 // a specific window.
+// E-PENPAL-FOCUS: sets file-level focus for a specific window.
 func (w *Watcher) SetWindowFocusFile(windowID, projectName, filePath, worktree string) {
 	w.setWindowFocus(normalizeWindowID(windowID), focusTarget{
 		Kind:     focusKindFile,
@@ -158,6 +162,7 @@ func (w *Watcher) ClearFocus() {
 }
 
 // ClearWindowFocus removes deep watches for a specific window.
+// E-PENPAL-FOCUS: removes focus for a specific window, recomputes union.
 func (w *Watcher) ClearWindowFocus(windowID string) {
 	windowID = normalizeWindowID(windowID)
 	w.focusMu.Lock()
@@ -470,6 +475,7 @@ func (w *Watcher) loop() {
 	}
 }
 
+// E-PENPAL-WATCHER: routes fsnotify events to project/workspace refresh or SSE broadcast.
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := filepath.Clean(event.Name)
 
@@ -632,6 +638,7 @@ func (w *Watcher) findProjectForPath(path string) string {
 }
 
 // debounceRefresh debounces rapid changes to the same project
+// E-PENPAL-WATCHER: 100ms debounce coalescing rapid filesystem events.
 func (w *Watcher) debounceRefresh(key string, fn func()) {
 	w.debounceMu.Lock()
 	defer w.debounceMu.Unlock()

@@ -8,6 +8,7 @@ interface TableOfContentsProps {
   headings: Heading[];
 }
 
+// E-PENPAL-TOC: renders sidebar card with "On this page" heading and anchor links.
 export default function TableOfContents({ headings }: TableOfContentsProps) {
   if (headings.length === 0) return null;
 

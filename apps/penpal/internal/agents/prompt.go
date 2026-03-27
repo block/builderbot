@@ -2,6 +2,7 @@ package agents
 
 import "fmt"
 
+// E-PENPAL-AGENT-PROMPT: builds agent prompt with penpal_files_in_review first, long-poll loop.
 func buildPrompt(projectName string) string {
 	return fmt.Sprintf(`You are a document review agent for project %q in penpal.
 

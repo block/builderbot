@@ -42,6 +42,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// E-PENPAL-SSE-RECONNECT: verifies SSE connection, reconnect on error, and onReconnect callback.
 describe('useSSE', () => {
   it('connects to /events and calls handler on change events', () => {
     const handler = vi.fn();

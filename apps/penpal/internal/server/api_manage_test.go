@@ -14,6 +14,7 @@ import (
 	"github.com/loganj/penpal/internal/config"
 )
 
+// E-PENPAL-REMOVE-WORKSPACE: verifies add and remove workspace round-trip.
 func TestAPIWorkspaces_AddAndRemove(t *testing.T) {
 	s, _, _ := testServer(t)
 	dir := t.TempDir()
@@ -39,6 +40,7 @@ func TestAPIWorkspaces_AddAndRemove(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ADD-SOURCE: verifies POST /api/sources adds a directory tree source.
 func TestAPISources_AddTreeSource(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -63,6 +65,7 @@ func TestAPISources_AddTreeSource(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies POST /api/open resolves existing project.
 func TestAPIOpen_ExistingProject(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -88,6 +91,7 @@ func TestAPIOpen_ExistingProject(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SSE: verifies /api/navigate returns empty when no pending navigation.
 func TestAPINavigate_EmptyByDefault(t *testing.T) {
 	s, _, _ := testServer(t)
 
@@ -105,6 +109,7 @@ func TestAPINavigate_EmptyByDefault(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SSE: verifies /api/open sets pendingNav consumed by /api/navigate.
 func TestAPINavigate_SetByOpen(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -144,6 +149,7 @@ func TestAPINavigate_SetByOpen(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies POST /api/open adds new standalone project.
 func TestAPIOpen_NewDirectory(t *testing.T) {
 	s, _, _ := testServer(t)
 	dir := t.TempDir()
@@ -167,6 +173,7 @@ func TestAPIOpen_NewDirectory(t *testing.T) {
 	}
 }
 
+// E-PENPAL-DELETE-FILE: verifies POST /api/delete-file removes file from disk.
 func TestAPIDeleteFile_Success(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -190,6 +197,7 @@ func TestAPIDeleteFile_Success(t *testing.T) {
 	}
 }
 
+// E-PENPAL-DELETE-PROJECT: verifies POST /api/delete-project removes directory via os.RemoveAll.
 func TestAPIDeleteProject_Success(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -214,6 +222,7 @@ func TestAPIDeleteProject_Success(t *testing.T) {
 	}
 }
 
+// E-PENPAL-API-ROUTES: verifies /api/open uses longest-prefix matching for sub-project.
 func TestAPIOpen_PrefersSubProjectOverRoot(t *testing.T) {
 	s, c, _ := testServer(t)
 
@@ -256,6 +265,7 @@ func TestAPIOpen_PrefersSubProjectOverRoot(t *testing.T) {
 	}
 }
 
+// E-PENPAL-DELETE-FILE: verifies sidecar cleanup and removeEmptyParents after file deletion.
 func TestAPIDeleteFile_CleansUpCommentSidecar(t *testing.T) {
 	s, c, cs := testServer(t)
 

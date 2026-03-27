@@ -11,6 +11,7 @@ import (
 	"testing"
 )
 
+// E-PENPAL-PUBLISH-UPLOAD: verifies Publish sends a valid zip with index.html via multipart POST.
 func TestPublish_UploadsValidZip(t *testing.T) {
 	var receivedBody []byte
 	var receivedContentType string
@@ -91,6 +92,7 @@ func TestPublish_UploadsValidZip(t *testing.T) {
 	}
 }
 
+// E-PENPAL-PUBLISH-UPLOAD: verifies Publish returns error on non-200 response.
 func TestPublish_ErrorResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
@@ -107,6 +109,7 @@ func TestPublish_ErrorResponse(t *testing.T) {
 	}
 }
 
+// E-PENPAL-PUBLISH-UPLOAD: verifies GenerateSiteName produces correct URL-safe slugs.
 func TestGenerateSiteName(t *testing.T) {
 	tests := []struct {
 		project  string

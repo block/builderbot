@@ -138,6 +138,7 @@ func createTestThread(t *testing.T, env *testEnv, filePath, body string) *commen
 	return thread
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_find_project returns correct project for a directory.
 func TestFindProject(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -155,6 +156,7 @@ func TestFindProject(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_find_project returns error for unknown directory.
 func TestFindProject_NotFound(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -167,6 +169,7 @@ func TestFindProject_NotFound(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_create_thread computes anchor context from disk.
 func TestCreateThread(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -195,6 +198,7 @@ func TestCreateThread(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_list_threads returns threads for a specific file.
 func TestListThreads_ByFile(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -218,6 +222,7 @@ func TestListThreads_ByFile(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_list_threads returns threads across all project files.
 func TestListThreads_AcrossProject(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -238,6 +243,7 @@ func TestListThreads_AcrossProject(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_read_thread returns full thread with comments.
 func TestReadThread(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -259,6 +265,7 @@ func TestReadThread(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_read_thread returns error for nonexistent thread.
 func TestReadThread_NotFound(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -275,6 +282,7 @@ func TestReadThread_NotFound(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_reply adds agent comment to thread.
 func TestReply(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -308,6 +316,7 @@ type fileWithThreadsResponse struct {
 	OldestPending *comments.Thread  `json:"oldestPending,omitempty"`
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_files_in_review returns files with open threads.
 func TestFilesInReview(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -339,6 +348,7 @@ func TestFilesInReview(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_files_in_review includes open thread data in response.
 func TestFilesInReview_IncludesThreads(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -364,6 +374,7 @@ func TestFilesInReview_IncludesThreads(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-TOOLS: verifies penpal_files_in_review identifies oldest pending human thread.
 func TestFilesInReview_OldestPending(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -392,6 +403,7 @@ func TestFilesInReview_OldestPending(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-WORKING, E-PENPAL-WORKING: verifies files_in_review sets working indicator for pending threads.
 func TestFilesInReview_SetsWorkingIndicator(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -413,6 +425,7 @@ func TestFilesInReview_SetsWorkingIndicator(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-WORKING, E-PENPAL-WORKING: verifies reply clears working indicator for the thread.
 func TestReply_ClearsWorkingIndicator(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -440,6 +453,7 @@ func TestReply_ClearsWorkingIndicator(t *testing.T) {
 	}
 }
 
+// E-PENPAL-MCP-WORKING: verifies no oldest pending when agent already replied.
 func TestFilesInReview_NoOldestPendingWhenAgentReplied(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()
@@ -465,6 +479,7 @@ func TestFilesInReview_NoOldestPendingWhenAgentReplied(t *testing.T) {
 	}
 }
 
+// E-PENPAL-CHANGE-SEQ: verifies penpal_wait_for_changes wakes on NotifyChange.
 func TestWaitForChanges_Triggered(t *testing.T) {
 	env, cleanup := setup(t)
 	defer cleanup()

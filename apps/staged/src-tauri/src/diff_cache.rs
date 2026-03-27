@@ -444,16 +444,16 @@ while IFS= read -r -d '' sf; do
     '{{status:$s,before_path:$bp,after_path:$ap,before_content_b64:(if($bb|length)==0 then null else $bb end),after_content_b64:(if($ab|length)==0 then null else $ab end),patch:$p}}'
 done < <(g diff --name-status -z "$MB" "$HD")
 }}
-BF=$(cf | jq -s '.')
+cf | jq -s '.' > "$TD/bf.json"
 CS=({commit_shas_bash})
-CA_PARTS=()
+: > "$TD/ca_parts.json"
 for cs in "${{CS[@]}}"; do
   pp=$(g rev-parse "$cs^" 2>/dev/null) || continue
-  CF=$(MB="$pp" HD="$cs" cf | jq -s '.')
-  CA_PARTS+=("$(jq -nc --arg s "$cs" --arg p "$pp" --argjson f "$CF" '{{sha:$s,parent:$p,files:$f}}')")
+  MB="$pp" HD="$cs" cf | jq -s '.' > "$TD/cf.json"
+  jq -nc --arg s "$cs" --arg p "$pp" --slurpfile f "$TD/cf.json" '{{sha:$s,parent:$p,files:$f[0]}}' >> "$TD/ca_parts.json"
 done
-CA=$(printf '%s\n' "${{CA_PARTS[@]}}" | jq -s '.')
-jq -nc --arg head "$HD" --arg base "$MB" --argjson files "$BF" --argjson commits "$CA" '{{head:$head,base:$base,files:$files,commits:$commits}}'
+jq -s '.' "$TD/ca_parts.json" > "$TD/ca.json"
+jq -nc --arg head "$HD" --arg base "$MB" --slurpfile files "$TD/bf.json" --slurpfile commits "$TD/ca.json" '{{head:$head,base:$base,files:$files[0],commits:$commits[0]}}'
 "##
     )
 }

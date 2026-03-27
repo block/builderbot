@@ -179,8 +179,6 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 			return nil, nil, fmt.Errorf("project, path, threadId, and body are all required")
 		}
 
-		store.ClearWorking(input.Project, input.Path, input.ThreadID)
-
 		comment := comments.Comment{
 			Author:           "claude",
 			Role:             "agent",
@@ -191,6 +189,10 @@ func registerTools(server *mcp.Server, store *comments.Store, c *cache.Cache) {
 		if err != nil {
 			return nil, nil, err
 		}
+
+		// Clear working AFTER writing the comment so the SSE broadcast
+		// triggers a fetchThreads that reads the updated file.
+		store.ClearWorking(input.Project, input.Path, input.ThreadID)
 		res, err := textResult(thread)
 		return res, nil, err
 	})

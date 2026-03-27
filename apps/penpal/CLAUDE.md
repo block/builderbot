@@ -20,3 +20,7 @@ Loading rules:
    - Feature work: modules.md, patterns.md
    - Strategic or system-wide analysis: all files
 <!-- rp1:end -->
+
+## ANCHORS
+
+This repo uses ANCHORS for requirements-driven development. Always load the anchors skill (`/anchors`) before making changes.

@@ -230,4 +230,89 @@ describe('FindBar', () => {
     expect(screen.getByLabelText('Previous match')).toBeDisabled();
     expect(screen.getByLabelText('Next match')).toBeDisabled();
   });
+
+  // E-PENPAL-FIND-BAR: verifies scrollTo is called when matches are found.
+  it('calls scrollTo on initial match', async () => {
+    const onClose = vi.fn();
+    render(<FindBar onClose={onClose} />);
+
+    const input = screen.getByPlaceholderText('Find in page...');
+
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'fox' } });
+      // Allow requestAnimationFrame to fire
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    });
+
+    expect(mainContent.scrollTo).toHaveBeenCalled();
+    // scrollTo should be called with an object containing 'top' and 'behavior: smooth'
+    const call = (mainContent.scrollTo as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call).toHaveProperty('behavior', 'smooth');
+    expect(call).toHaveProperty('top');
+  });
+
+  // E-PENPAL-FIND-BAR: verifies scrollTo is called when navigating between matches.
+  it('calls scrollTo when navigating between matches', async () => {
+    const onClose = vi.fn();
+    render(<FindBar onClose={onClose} />);
+
+    const input = screen.getByPlaceholderText('Find in page...');
+
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'fox' } });
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    });
+
+    (mainContent.scrollTo as ReturnType<typeof vi.fn>).mockClear();
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Next match'));
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    });
+
+    expect(mainContent.scrollTo).toHaveBeenCalled();
+  });
+
+  // E-PENPAL-FIND-BAR: verifies scrollTo targets .file-main-scroll on file pages.
+  it('scrolls .file-main-scroll instead of .main-content on file pages', async () => {
+    // Simulate file page layout: .main-content has overflow:hidden,
+    // scrollable container is .file-main-scroll inside it.
+    const scrollContainer = document.createElement('div');
+    scrollContainer.className = 'file-main-scroll';
+    scrollContainer.scrollTo = vi.fn();
+    // Move the text content into the scroll container
+    while (mainContent.firstChild) {
+      scrollContainer.appendChild(mainContent.firstChild);
+    }
+    mainContent.appendChild(scrollContainer);
+
+    const onClose = vi.fn();
+    render(<FindBar onClose={onClose} />);
+
+    const input = screen.getByPlaceholderText('Find in page...');
+
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'fox' } });
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    });
+
+    // scrollTo should be called on .file-main-scroll, not .main-content
+    expect(scrollContainer.scrollTo).toHaveBeenCalled();
+    expect(mainContent.scrollTo).not.toHaveBeenCalled();
+  });
+
+  // E-PENPAL-FIND-BAR: verifies scrollTo is NOT called when no matches are found.
+  it('does not call scrollTo when no matches found', async () => {
+    const onClose = vi.fn();
+    render(<FindBar onClose={onClose} />);
+
+    const input = screen.getByPlaceholderText('Find in page...');
+
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'xyznonexistent' } });
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    });
+
+    expect(mainContent.scrollTo).not.toHaveBeenCalled();
+  });
 });

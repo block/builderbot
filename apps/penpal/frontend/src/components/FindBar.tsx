@@ -88,7 +88,12 @@ export default function FindBar({ onClose }: FindBarProps) {
   }, [query]);
 
   function scrollToRange(range: Range) {
-    const container = document.querySelector('.main-content');
+    // On file pages .main-content has overflow:hidden; the real scroll
+    // container is .file-main-scroll.  Fall back to .main-content for
+    // non-file pages (project list, workspace, etc.).
+    const container =
+      document.querySelector('.file-main-scroll') ||
+      document.querySelector('.main-content');
     if (!container) return;
     const rangeRect = range.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();

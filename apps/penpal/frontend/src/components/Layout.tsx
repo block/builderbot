@@ -46,10 +46,9 @@ export default function Layout() {
   const [headings, setHeadings] = useState<Heading[]>([]);
   const isFilePage = location.pathname.startsWith('/file/');
 
-  // Detect project-mode view: /project/:qn[@worktree] or /file/:qn[@worktree]/*
-  // QN may contain slashes (e.g. "Development/birdseye"), so match against known projects
+  // E-PENPAL-PROJECT-RESOLVE: detect active project from URL path.
   const pathAfterPrefix = location.pathname.match(/^\/(project|file)\/(.+)/)?.[2] || '';
-  const { activeProject, activeWorktree } = (() => {
+  const { activeProject, activeWorktree } = useMemo(() => {
     if (!pathAfterPrefix) return { activeProject: null, activeWorktree: '' };
     const sorted = [...projects].sort((a, b) => b.qualifiedName.length - a.qualifiedName.length);
     for (const p of sorted) {
@@ -66,7 +65,7 @@ export default function Layout() {
     const parsed = parseProjectWorktree(pathAfterPrefix.split('/').slice(0, 2).join('/'));
     const fallbackProject = projects.find((p) => p.qualifiedName === parsed.project) || null;
     return { activeProject: fallbackProject, activeWorktree: parsed.worktree };
-  })();
+  }, [pathAfterPrefix, projects]);
   const isProjectMode = !!pathAfterPrefix;
 
   // Add modal state
@@ -755,6 +754,19 @@ export default function Layout() {
     return compact(root);
   }
 
+  // Flatten a file tree into visual (depth-first) order for shift-click ranges.
+  function flattenTree(node: ReturnType<typeof buildFileTree>): string[] {
+    const paths: string[] = [];
+    for (const child of node.children) {
+      if (child.isDir) {
+        paths.push(...flattenTree(child));
+      } else {
+        paths.push(child.path);
+      }
+    }
+    return paths;
+  }
+
   const outletContext: LayoutContext = { setHeadings, projects };
 
   return (
@@ -872,7 +884,7 @@ export default function Layout() {
                 {projectFiles.map((group) => {
                   const isExpanded = expandedSources.has(group.name);
                   const tree = isExpanded ? buildFileTree(group.files) : null;
-                  const allFilePaths = (group.files || []).map(f => f.path);
+                  const allFilePaths = tree ? flattenTree(tree) : [];
 
                   function renderTreeNode(node: ReturnType<typeof buildFileTree>, sourceKey: string): ReactNode {
                     return node.children.map(child => {

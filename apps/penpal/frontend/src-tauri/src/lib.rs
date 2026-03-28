@@ -42,7 +42,7 @@ pub fn run() {
             let menu = build_menu(app_handle)?;
             app.set_menu(menu)?;
 
-            // Spawn Go server sidecar
+            // E-PENPAL-TAURI: spawn Go server sidecar, poll /api/ready, manage lifecycle.
             let port = std::env::var("PENPAL_PORT").unwrap_or_else(|_| "8080".to_string());
             let sidecar = app.shell().sidecar("penpal-server")
                 .expect("failed to locate penpal-server sidecar");
@@ -86,7 +86,7 @@ pub fn run() {
                     return;
                 }
 
-                // Handle new_window — doesn't need an existing window
+                // E-PENPAL-NEW-WINDOW: Cmd+N creates a new window.
                 if event.id().as_ref() == "new_window" {
                     let label = format!("win-{}", std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

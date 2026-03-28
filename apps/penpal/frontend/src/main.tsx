@@ -1,3 +1,4 @@
+// E-PENPAL-FRONTEND-STACK: React 19 + TypeScript + Vite SPA entry point.
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';

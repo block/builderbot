@@ -905,6 +905,7 @@ export default function Layout() {
                         >
                           <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
                           <span className="label" title={child.file?.title || child.name}>{child.file?.title || child.name}</span>
+                          {child.file?.fileType && child.file.fileType !== 'other' && <span className={`badge-file-type badge-file-type-${child.file.fileType}`}>{child.file.fileType}</span>}
                           {inReview && <span className="badge-review">in review</span>}
                         </Link>
                       );

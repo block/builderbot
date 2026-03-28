@@ -475,6 +475,35 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
   color: var(--text-disabled);
 }
+.tree-item .badge-file-type {
+  font-size: 0.7em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 500;
+  margin-left: 4px;
+  flex-shrink: 0;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+.tree-item .badge-file-type-research { background: var(--file-type-research-bg); color: var(--file-type-research-color, currentColor); }
+.tree-item .badge-file-type-plan { background: var(--file-type-plan-bg); color: var(--file-type-plan-color, currentColor); }
+.tree-item .badge-file-type-knowledge { background: var(--file-type-knowledge-bg); color: var(--file-type-knowledge-color, currentColor); }
+.tree-item .badge-file-type-requirement { background: var(--file-type-requirement-bg); color: var(--file-type-requirement-color, currentColor); }
+.tree-item .badge-file-type-design { background: var(--file-type-design-bg); color: var(--file-type-design-color, currentColor); }
+.tree-item .badge-file-type-task { background: var(--file-type-task-bg); color: var(--file-type-task-color, currentColor); }
+.tree-item .badge-file-type-prd { background: var(--file-type-prd-bg); color: var(--file-type-prd-color, currentColor); }
+.tree-item .badge-file-type-charter { background: var(--file-type-charter-bg); color: var(--file-type-charter-color, currentColor); }
+.tree-item .badge-file-type-quick { background: var(--file-type-quick-bg); color: var(--file-type-quick-color, currentColor); }
+.tree-item .badge-file-type-hypothesis { background: var(--file-type-hypothesis-bg); color: var(--file-type-hypothesis-color, currentColor); }
+.tree-item .badge-file-type-test-report { background: var(--file-type-test-report-bg); color: var(--file-type-test-report-color, currentColor); }
+.tree-item .badge-file-type-verification { background: var(--file-type-verification-bg); color: var(--file-type-verification-color, currentColor); }
+.tree-item .badge-file-type-review { background: var(--file-type-review-bg); color: var(--file-type-review-color, currentColor); }
+.tree-item .badge-file-type-content { background: var(--file-type-content-bg); color: var(--file-type-content-color, currentColor); }
+.tree-item .badge-file-type-investigation { background: var(--file-type-investigation-bg); color: var(--file-type-investigation-color, currentColor); }
+.tree-item .badge-file-type-analysis { background: var(--file-type-analysis-bg); color: var(--file-type-analysis-color, currentColor); }
+.tree-item .badge-file-type-evidence { background: var(--file-type-evidence-bg); color: var(--file-type-evidence-color, currentColor); }
+.tree-item .badge-file-type-report { background: var(--file-type-report-bg); color: var(--file-type-report-color, currentColor); }
+.tree-item .badge-file-type-field-notes { background: var(--file-type-field-notes-bg); color: var(--file-type-field-notes-color, currentColor); }
 .tree-item .badge-review {
   font-size: 0.7em;
   padding: 1px 5px;

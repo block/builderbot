@@ -3,11 +3,10 @@ import { test, expect } from '@playwright/test';
 // SPA routes require the Vite dev server (Go server serves the SPA at /app/).
 test.use({ baseURL: 'http://localhost:18924' });
 
-// E-PENPAL-HOME-REDIRECT: verifies index route redirects to /recent or /workspace.
-test('index redirects to recent or workspace', async ({ page }) => {
+// E-PENPAL-HOME-DEFAULT: verifies index route renders the home welcome screen.
+test('index renders home view', async ({ page }) => {
   await page.goto('/');
-  await page.waitForURL(/\/(recent|workspace)/);
-  expect(page.url()).toMatch(/\/(recent|workspace)/);
+  await expect(page.getByText('Select a project from the sidebar')).toBeVisible();
 });
 
 // E-PENPAL-SPA-SERVE: verifies SPA serves the recent page at /recent.

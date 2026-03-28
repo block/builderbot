@@ -19,14 +19,7 @@ vi.mock('./hooks/useSSE', () => ({
 }));
 
 describe('App', () => {
-  it('renders the layout', async () => {
-    render(<App />);
-    // With no projects, IndexRedirect falls back to /recent
-    expect(await screen.findByTestId('app-layout')).toBeInTheDocument();
-  });
-
-  it('renders workspace page on /workspace route', async () => {
-    // createBrowserRouter uses the current URL; for testing just verify layout loads
+  it('renders the layout with home view', async () => {
     render(<App />);
     expect(await screen.findByTestId('app-layout')).toBeInTheDocument();
   });

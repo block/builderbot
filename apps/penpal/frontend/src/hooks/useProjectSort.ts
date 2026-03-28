@@ -29,7 +29,7 @@ function getSnapshot(): ProjectSortOrder {
   return 'alpha';
 }
 
-// E-PENPAL-SORT: useSyncExternalStore backed by localStorage with cross-tab sync.
+// E-PENPAL-HOME-SIDEBAR: useSyncExternalStore backed by localStorage with cross-tab sync for project ordering.
 export function useProjectSort() {
   const sortOrder = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 

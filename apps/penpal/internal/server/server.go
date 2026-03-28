@@ -626,6 +626,33 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 		groups = append(groups, gv)
 	}
 
+	// E-PENPAL-SRC-ALL-MD: virtual "All Markdown" group with every file, organized by directory.
+	// Always present, no dedup against typed sources.
+	if len(cachedFiles) > 0 {
+		allMd := FileGroupView{
+			Name:       "All Markdown",
+			Source:     "__all_markdown__",
+			SourceType: "tree",
+			Auto:       false,
+		}
+		for _, f := range cachedFiles {
+			allMd.Files = append(allMd.Files, ProjectFile{
+				Name:       f.Name,
+				Title:      f.Title,
+				Path:       f.FullPath,
+				Source:     f.Source,
+				SourceType: f.SourceType,
+				ModTime:    f.ModTime,
+				Age:        formatAge(f.ModTime),
+				FileType:   f.FileType,
+			})
+		}
+		sort.Slice(allMd.Files, func(i, j int) bool {
+			return allMd.Files[i].Path < allMd.Files[j].Path
+		})
+		groups = append(groups, allMd)
+	}
+
 	return groups
 }
 

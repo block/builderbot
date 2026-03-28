@@ -26,15 +26,15 @@ Penpal is a desktop application and local web server for collaborative review of
 
 - <a id="P-PENPAL-DEDUP"></a>**P-PENPAL-DEDUP**: When multiple directories in a workspace share the same git repository (one is a worktree of the other), only the main worktree is shown as a project to avoid duplicates.
 
-- <a id="P-PENPAL-GIT-INFO"></a>**P-PENPAL-GIT-INFO**: In the home view, each project tree item shows the current git branch name and dirty status indicator. In the project view, the worktree dropdown shows the branch name and dirty indicator.
+- <a id="P-PENPAL-GIT-INFO"></a>**P-PENPAL-GIT-INFO**: In the home view, each project or worktree tree item shows its git branch as a tooltip prefixed with "branch: " (e.g. `branch: main`), not inline. In the project view, the worktree dropdown shows the current worktree name; the dropdown menu lists each worktree by name with a worktree icon (non-main only), matching the home tree format.
 
 - <a id="P-PENPAL-WS-ROOT"></a>**P-PENPAL-WS-ROOT**: If the workspace directory itself has a `thoughts/` directory at its root, a synthetic "(root)" project is created.
 
 - <a id="P-PENPAL-CLAUDE-PLANS"></a>**P-PENPAL-CLAUDE-PLANS**: If `~/.claude/plans/` exists and contains markdown files, it automatically appears as a standalone project called ".claude/plans".
 
-- <a id="P-PENPAL-REMOVE-WORKSPACE"></a>**P-PENPAL-REMOVE-WORKSPACE**: Users can remove a workspace via a context menu on the workspace tree item. Removing a workspace takes it out of Penpal's view without deleting any files.
+- <a id="P-PENPAL-REMOVE-WORKSPACE"></a>**P-PENPAL-REMOVE-WORKSPACE**: Users can remove a workspace via a right-click context menu on the workspace tree item. Removing a workspace takes it out of Penpal's view without deleting any files.
 
-- <a id="P-PENPAL-CLOSE-PROJECT"></a>**P-PENPAL-CLOSE-PROJECT**: Users can close a standalone project via a context menu. Closing removes it from Penpal's view without deleting files.
+- <a id="P-PENPAL-CLOSE-PROJECT"></a>**P-PENPAL-CLOSE-PROJECT**: Users can close a standalone project via a right-click context menu. Closing removes it from Penpal's view without deleting files.
 
 - <a id="P-PENPAL-DELETE-PROJECT"></a>**P-PENPAL-DELETE-PROJECT**: Users can delete a project from disk via a context menu. A confirmation modal shows the file count, git dirty status, and unpushed commit count before deletion.
 
@@ -100,17 +100,25 @@ Source types are the pluggable system that determines how projects discover, cla
 
 ---
 
+## General UX
+
+- <a id="P-PENPAL-NO-SELECT-CHROME"></a>**P-PENPAL-NO-SELECT-CHROME**: Text in application chrome (sidebar, tab bar, topbar, breadcrumbs, menus) is not user-selectable. Only document content in the main viewer area is selectable.
+
+---
+
 ## Navigation — Home View
 
 The home view is the top-level navigation state. It shows all workspaces and standalone projects in the sidebar.
 
 - <a id="P-PENPAL-HOME"></a>**P-PENPAL-HOME**: The home view sidebar shows a flat list of workspaces, standalone projects, and global navigation links (In Review, Recent). A ⌂ icon header identifies the view. A "+" button allows adding new workspaces or standalone projects.
 
-- <a id="P-PENPAL-HOME-TREE"></a>**P-PENPAL-HOME-TREE**: Workspaces are expandable tree items. Expanding a workspace reveals its child projects. Standalone projects appear as top-level peers of workspaces, not nested under any workspace. Global In Review and Recent links appear as top-level peers alongside workspaces and standalone projects.
+- <a id="P-PENPAL-HOME-TREE"></a>**P-PENPAL-HOME-TREE**: Workspaces are expandable tree items. Expanding a workspace reveals its child projects. Standalone projects appear as top-level peers of workspaces, not nested under any workspace. Visual dividers separate the workspaces section, standalone projects section, and global navigation section. Sections with no items are not shown (and their dividers are omitted). Global In Review and Recent links appear in the global navigation section. The In Review link shows a right-aligned count (matching the project view's source header count style) of all files currently in review across all projects; the link is dimmed when the count is zero.
 
-- <a id="P-PENPAL-HOME-PROJECT-ITEM"></a>**P-PENPAL-HOME-PROJECT-ITEM**: Each project in the home tree shows: project name, git branch name, dirty status indicator, agent dot (when an agent is active), and review count badge (when files are in review). Multi-worktree projects are expandable, showing each worktree as a child item with its own branch name.
+- <a id="P-PENPAL-HOME-PROJECT-ITEM"></a>**P-PENPAL-HOME-PROJECT-ITEM**: Each project in the home tree shows: project name and agent dot (when an agent is active). No file counts or review counts are shown on individual project items. Git branch is available as a tooltip. Multi-worktree projects are expandable, showing each worktree as a child item. Non-main worktrees display a worktree icon; the main worktree does not. Git branch is shown as a tooltip on each worktree. The tree does not use vertical guide lines or dirty status indicators.
 
 - <a id="P-PENPAL-HOME-NAVIGATE"></a>**P-PENPAL-HOME-NAVIGATE**: Clicking a project in the home tree navigates the current tab to the project view for that project. The sidebar switches to show the project's sources.
+
+- <a id="P-PENPAL-SORT"></a>**P-PENPAL-SORT**: The home sidebar header includes a sort toggle that switches between alphabetical and recent-modification order for workspaces and standalone projects. The selected order persists in localStorage and syncs across tabs/windows. Projects with zero recognized files always sort last and are visually dimmed.
 
 - <a id="P-PENPAL-HOME-DEFAULT"></a>**P-PENPAL-HOME-DEFAULT**: Opening a new tab (via + button or Cmd+T) or a new window with no target lands on the home view. The main content area shows a welcome message with the app name and a hint to select a project.
 
@@ -122,23 +130,23 @@ The project view shows the contents of a single project in the sidebar, organize
 
 - <a id="P-PENPAL-PROJECT-BREADCRUMB"></a>**P-PENPAL-PROJECT-BREADCRUMB**: A breadcrumb bar at the top of the sidebar shows the navigation path: ⌂ / workspace name / project name. Only the ⌂ icon is clickable (navigates back to home). For standalone projects without a workspace, the breadcrumb is ⌂ / project name. An agent dot appears in the breadcrumb when an agent is active for this project.
 
-- <a id="P-PENPAL-PROJECT-WORKTREE-DROPDOWN"></a>**P-PENPAL-PROJECT-WORKTREE-DROPDOWN**: When a project has worktrees, a dropdown in the breadcrumb bar shows the current branch name with dirty status indicator. Clicking the dropdown shows all available worktrees; selecting one switches to that worktree's view.
+- <a id="P-PENPAL-PROJECT-WORKTREE-DROPDOWN"></a>**P-PENPAL-PROJECT-WORKTREE-DROPDOWN**: When a project has multiple worktrees, a dropdown in the breadcrumb bar shows the current worktree: "main repo" when viewing the main worktree, or the worktree icon and worktree name when viewing a non-main worktree. Clicking the dropdown shows all available worktrees; each item shows its name with a worktree icon (non-main only), matching the home tree format. Selecting a worktree switches to that worktree's view. For single-worktree projects (no additional worktrees), the breadcrumb shows dimmed static text "no worktrees" (no dropdown).
 
-- <a id="P-PENPAL-PROJECT-SOURCES"></a>**P-PENPAL-PROJECT-SOURCES**: The project sidebar shows each detected source type as a collapsible top-level section with its badge and file count. Sources appear in this order: typed sources (RPI, RP1, ANCHORS), then All Markdown, then In Review, then Recent. Each source expands to show its files in a tree view.
+- <a id="P-PENPAL-PROJECT-SOURCES"></a>**P-PENPAL-PROJECT-SOURCES**: The project sidebar shows each detected source type as a collapsible top-level section with its badge and file count. Sources appear in this order: typed sources (RPI, RP1, ANCHORS), then All Markdown, then In Review, then Recent. Each source expands to show its files in a tree view. Virtual sources with no files are shown with an alternate label and dimmed styling: "All Markdown" becomes "No Markdown Found", "In Review" becomes "Nothing in Review", "Recent" becomes "Nothing Recent". These empty virtual sources are not expandable.
 
-- <a id="P-PENPAL-PROJECT-FILE-TREE"></a>**P-PENPAL-PROJECT-FILE-TREE**: Within each source section, files are organized in a tree view that mirrors the directory structure. Directories are collapsible. Files show their name (or H1 heading when available), type badge, and an "in review" badge when they have open threads.
+- <a id="P-PENPAL-PROJECT-FILE-TREE"></a>**P-PENPAL-PROJECT-FILE-TREE**: Within each source section, files are organized in a tree view that mirrors the directory structure. Directories are collapsible. Single-child directory chains are compacted into one tree item with a combined path (e.g., `a/b/c/` instead of three nested levels), similar to IntelliJ's "compact middle packages" behavior. Files show their name (or H1 heading when available), type badge, and an "in review" badge when they have open threads.
 
 - <a id="P-PENPAL-PROJECT-IN-REVIEW"></a>**P-PENPAL-PROJECT-IN-REVIEW**: Each project view includes a collapsible "In Review" section in the sidebar showing files with open comment threads in this project, with a count.
 
 - <a id="P-PENPAL-PROJECT-RECENT"></a>**P-PENPAL-PROJECT-RECENT**: Each project view includes a collapsible "Recent" section in the sidebar showing recently accessed files in this project, with a count.
 
-- <a id="P-PENPAL-PROJECT-BROWSE"></a>**P-PENPAL-PROJECT-BROWSE**: When viewing a project with no file open, the main content area shows a welcome message with the project name and a hint to expand a source in the sidebar. The tab bar shows "No open files".
+- <a id="P-PENPAL-PROJECT-BROWSE"></a>**P-PENPAL-PROJECT-BROWSE**: When viewing a project with no file open, the main content area shows a welcome message with the project name and a hint to expand a source in the sidebar.
 
 ---
 
 ## Navigation — Tabs & Windows
 
-- <a id="P-PENPAL-TABS"></a>**P-PENPAL-TABS**: The tab bar shows open files only — not projects or home. Each tab represents a file with its own document view and comment panel. The sidebar follows the active tab's project context: switching tabs updates the sidebar to show the sources of the project that contains the active file.
+- <a id="P-PENPAL-TABS"></a>**P-PENPAL-TABS**: Each tab is a navigation context with its own back/forward history. The tab bar shows all open tabs, labeled by their current page (file name, project name, "Home", etc.). The close button (×) appears on each tab only when more than one tab is open. The sidebar follows the active tab's context: on the home view it shows the home tree; on a project view it shows the project's source tree; on a file view it shows the breadcrumb bar, worktree picker, and the file's table of contents (not the source tree).
 
 - <a id="P-PENPAL-TAB-NAVIGATE"></a>**P-PENPAL-TAB-NAVIGATE**: Clicking a file in the sidebar navigates the current tab to that file. If no tabs are open, a new tab is created. Navigating within a tab builds per-tab back/forward history (including project-to-project and home-to-project transitions).
 
@@ -158,7 +166,7 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 - <a id="P-PENPAL-GLOBAL-IN-REVIEW"></a>**P-PENPAL-GLOBAL-IN-REVIEW**: The global In Review view shows all files with open comment threads across all projects. The sidebar shows a breadcrumb (⌂ / In Review) and a flat list of two-line file rows. Each row shows the filename on the first line and workspace / project / source path context on the second line.
 
-- <a id="P-PENPAL-GLOBAL-RECENT"></a>**P-PENPAL-GLOBAL-RECENT**: The global Recent view shows up to 50 recently active files across all projects, sorted by most recent activity first. The sidebar shows a breadcrumb (⌂ / Recent) and two-line file rows with filename, context path, and relative timestamp.
+- <a id="P-PENPAL-GLOBAL-RECENT"></a>**P-PENPAL-GLOBAL-RECENT**: The global Recent view shows up to 50 recently active files across all projects, sorted by most recent activity first. The sidebar shows a breadcrumb (⌂ / Recent) and two-line file rows with filename, context path, and relative timestamp. Each entry shows an activity type label (viewed, modified, created, comment, published).
 
 - <a id="P-PENPAL-GLOBAL-ROW-NAVIGATE"></a>**P-PENPAL-GLOBAL-ROW-NAVIGATE**: Clicking a file in a global view navigates the current tab to that file and switches the sidebar to the file's project context. Cmd+Click opens in a new tab.
 
@@ -168,9 +176,11 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 - <a id="P-PENPAL-FILE-TYPES"></a>**P-PENPAL-FILE-TYPES**: Files are classified by type (research, plan, knowledge, prd, design, task, etc.) based on their path within a source. Type badges appear next to the filename in the sidebar tree and file viewer.
 
-- <a id="P-PENPAL-FILE-ACTIONS"></a>**P-PENPAL-FILE-ACTIONS**: Each file has an action menu (via context menu in the sidebar or toolbar in the file viewer) with: copy markdown, copy relative path (with `@` prefix), copy absolute path, publish to Blockcell, remove from Penpal, and delete from disk. In the file viewer toolbar, "copy file" places the file on the clipboard as a file reference, so pasting in Finder or other apps inserts the file itself (macOS only).
+- <a id="P-PENPAL-FILE-ACTIONS"></a>**P-PENPAL-FILE-ACTIONS**: Each file has a right-click context menu (in the sidebar tree or file viewer toolbar) with: copy markdown, copy relative path (with `@` prefix), copy absolute path, publish to Blockcell, remove from Penpal, and delete from disk. In the file viewer toolbar, "copy file" places the file on the clipboard as a file reference, so pasting in Finder or other apps inserts the file itself (macOS only).
 
-- <a id="P-PENPAL-SOURCE-ACTIONS"></a>**P-PENPAL-SOURCE-ACTIONS**: Each source section header in the sidebar has a context menu with: copy relative paths, copy absolute paths, and publish all files. Auto-detected sources show an "(auto)" label in the header.
+- <a id="P-PENPAL-SOURCE-ACTIONS"></a>**P-PENPAL-SOURCE-ACTIONS**: Each source section header in the sidebar has a right-click context menu with: copy relative paths, copy absolute paths, publish all files, remove source from Penpal (non-auto sources only), and delete from disk.
+
+- <a id="P-PENPAL-BATCH-OPS"></a>**P-PENPAL-BATCH-OPS**: Users can select multiple files in the sidebar via shift-click (extends selection from last-clicked file to shift-clicked file within the same source). A floating selection bar appears at the bottom of the sidebar showing the count and batch actions: copy markdown (concatenated), copy paths, publish, and delete. A "Clear" button dismisses the selection.
 
 - <a id="P-PENPAL-DELETE-FILE"></a>**P-PENPAL-DELETE-FILE**: Files and source groups can be deleted from disk via the action menu. A confirmation modal prevents accidental deletion. When a file is deleted, its associated comments are also deleted, and empty parent directories are cleaned up.
 

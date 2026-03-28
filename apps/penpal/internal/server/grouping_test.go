@@ -28,9 +28,9 @@ func TestBuildFileGroups_RP1Grouped(t *testing.T) {
 
 	groups := buildFileGroups(project, files)
 
-	// Should have 4 flat groups: Context, PRDs, auth, data-layer
-	if len(groups) != 4 {
-		t.Fatalf("expected 4 groups, got %d", len(groups))
+	// Should have 4 typed groups + 1 "All Markdown" virtual group
+	if len(groups) != 5 {
+		t.Fatalf("expected 5 groups, got %d", len(groups))
 	}
 
 	expectedGroups := []struct {
@@ -78,9 +78,9 @@ func TestBuildFileGroups_ThoughtsFlat(t *testing.T) {
 
 	groups := buildFileGroups(project, files)
 
-	// Thoughts has no GroupFiles, so single flat group named "thoughts"
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group, got %d", len(groups))
+	// Thoughts has no GroupFiles, so single flat group + All Markdown
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
 	if groups[0].Name != "thoughts" {
 		t.Errorf("expected group name 'thoughts', got %q", groups[0].Name)
@@ -111,9 +111,9 @@ func TestBuildFileGroups_MultipleSources(t *testing.T) {
 
 	groups := buildFileGroups(project, files)
 
-	// thoughts → 1 flat group; rp1 → 1 group (Context only)
-	if len(groups) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(groups))
+	// thoughts → 1 flat group; rp1 → 1 group (Context only); + All Markdown
+	if len(groups) != 3 {
+		t.Fatalf("expected 3 groups, got %d", len(groups))
 	}
 
 	if groups[0].Name != "thoughts" {
@@ -142,8 +142,9 @@ func TestBuildFileGroups_EmptySourceSkipped(t *testing.T) {
 
 	groups := buildFileGroups(project, files)
 
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group (empty rp1 skipped), got %d", len(groups))
+	// 1 typed group (empty rp1 skipped) + All Markdown
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups (empty rp1 skipped), got %d", len(groups))
 	}
 	if groups[0].Name != "thoughts" {
 		t.Errorf("expected group 'thoughts', got %q", groups[0].Name)
@@ -169,8 +170,9 @@ func TestBuildFileGroups_ManualSourceDirHeadings(t *testing.T) {
 
 	groups := buildFileGroups(project, files)
 
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group, got %d", len(groups))
+	// 1 typed group + All Markdown
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
 
 	g := groups[0]
@@ -210,8 +212,9 @@ func TestBuildFileGroups_TitleFlowsThrough(t *testing.T) {
 
 	groups := buildFileGroups(project, files)
 
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group, got %d", len(groups))
+	// 1 typed group + All Markdown
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
 
 	if groups[0].Files[0].Title != "Per-Tab Navigation" {
@@ -239,12 +242,49 @@ func TestBuildFileGroups_ThoughtsNoDirHeadings(t *testing.T) {
 
 	groups := buildFileGroups(project, files)
 
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group, got %d", len(groups))
+	// 1 typed group + All Markdown
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
 	for i, f := range groups[0].Files {
 		if f.Dir != "" || f.ShowDir {
 			t.Errorf("file %d: thoughts should have no Dir/ShowDir, got Dir=%q ShowDir=%v", i, f.Dir, f.ShowDir)
 		}
+	}
+}
+
+// E-PENPAL-SRC-ALL-MD: verifies "All Markdown" virtual group is always appended.
+func TestBuildFileGroups_AllMarkdownVirtual(t *testing.T) {
+	project := &discovery.Project{
+		Name: "test-project",
+		Path: "/tmp/test",
+		Sources: []discovery.FileSource{
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
+		},
+	}
+
+	files := []cache.FileInfo{
+		{Source: "thoughts", Path: "plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: time.Now()},
+		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: time.Now()},
+	}
+
+	groups := buildFileGroups(project, files)
+
+	last := groups[len(groups)-1]
+	if last.Name != "All Markdown" {
+		t.Fatalf("last group should be 'All Markdown', got %q", last.Name)
+	}
+	if last.Source != "__all_markdown__" {
+		t.Errorf("expected source '__all_markdown__', got %q", last.Source)
+	}
+	if last.Auto {
+		t.Errorf("All Markdown should be auto=false (virtual source, not auto-detected)")
+	}
+	if len(last.Files) != 2 {
+		t.Errorf("expected 2 files in All Markdown, got %d", len(last.Files))
+	}
+	// Files should be sorted by path
+	if last.Files[0].Path > last.Files[1].Path {
+		t.Errorf("All Markdown files should be sorted by path: %q > %q", last.Files[0].Path, last.Files[1].Path)
 	}
 }

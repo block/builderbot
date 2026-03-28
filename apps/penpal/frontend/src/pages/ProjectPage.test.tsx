@@ -1,150 +1,32 @@
-import { render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, Outlet } from 'react-router-dom';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { describe, it, expect } from 'vitest';
 import ProjectPage from './ProjectPage';
-import { api } from '../api';
-import { useSSE } from '../hooks/useSSE';
 
-vi.mock('../api', () => ({
-  api: {
-    getProjectFiles: vi.fn().mockResolvedValue([
-      {
-        name: 'thoughts',
-        source: 'thoughts',
-        sourceType: 'tree',
-        auto: true,
-        badgeText: 'thoughts',
-        badgeColor: '#333',
-        badgeBg: '#eee',
-        files: [
-          { name: 'plan.md', path: 'thoughts/plan.md', age: '1h ago', fileType: 'plan', source: 'thoughts', sourceType: 'tree' },
-          { name: 'research.md', path: 'thoughts/research.md', age: '2h ago', fileType: 'research', source: 'thoughts', sourceType: 'tree' },
-        ],
-      },
-    ]),
-    getReviews: vi.fn().mockResolvedValue([]),
-    getAgentStatus: vi.fn().mockResolvedValue({ running: false }),
-    listProjects: vi.fn().mockResolvedValue([{ qualifiedName: 'ws/proj' }]),
-    getInReview: vi.fn().mockResolvedValue([]),
-    focusProject: vi.fn().mockResolvedValue(undefined),
-  },
-  API_BASE: 'http://localhost:8080',
-  isDesktopApp: false,
-}));
-
-vi.mock('../hooks/useSSE', () => ({
-  useSSE: vi.fn(),
-}));
-
-function ContextProvider() {
-  return <Outlet context={{ setHeadings: vi.fn(), setSidebarExtra: vi.fn(), projects: [] }} />;
-}
-
-function renderPage() {
+function renderPage(path = '/project/ws/proj') {
   return render(
-    <MemoryRouter initialEntries={['/project/ws/proj']}>
+    <MemoryRouter initialEntries={[path]}>
       <Routes>
-        <Route element={<ContextProvider />}>
-          <Route path="/project/*" element={<ProjectPage />} />
-        </Route>
+        <Route path="/project/*" element={<ProjectPage />} />
       </Routes>
     </MemoryRouter>,
   );
 }
 
-// E-PENPAL-IN-REVIEW-SECTION, E-PENPAL-SOURCE-ACTIONS, E-PENPAL-BATCH-OPS: verifies source sections, file rows, and SSE reconnect.
+// E-PENPAL-PROJECT-WELCOME: verifies project welcome screen.
 describe('ProjectPage', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it('renders source sections', async () => {
-    renderPage();
-    await waitFor(() => {
-      expect(screen.getAllByText('thoughts').length).toBeGreaterThan(0);
-    });
-  });
-
-  it('renders file rows within sources', async () => {
-    renderPage();
-    await waitFor(() => {
-      expect(screen.getByText('plan.md')).toBeTruthy();
-      expect(screen.getByText('research.md')).toBeTruthy();
-    });
-  });
-
-  it('shows file type badges', async () => {
-    renderPage();
-    await waitFor(() => {
-      expect(screen.getByText('plan')).toBeTruthy();
-      expect(screen.getByText('research')).toBeTruthy();
-    });
-  });
-
-  it('shows file ages', async () => {
-    renderPage();
-    await waitFor(() => {
-      expect(screen.getByText('1h ago')).toBeTruthy();
-    });
-  });
-
-  it('shows add source button', async () => {
-    renderPage();
-    await waitFor(() => {
-      expect(screen.getByText('+ Add to project')).toBeTruthy();
-    });
-  });
-
   it('has project-page testid', () => {
     renderPage();
     expect(screen.getByTestId('project-page')).toBeTruthy();
   });
 
-  it('shows title as primary and name as subtitle when title is set', async () => {
-    const { api } = await import('../api');
-    (api.getProjectFiles as ReturnType<typeof vi.fn>).mockResolvedValueOnce([{
-      name: 'thoughts',
-      source: 'thoughts',
-      sourceType: 'tree',
-      auto: true,
-      files: [
-        { name: 'plan.md', title: 'My Plan', path: 'thoughts/plan.md', age: '1h ago', fileType: 'plan', source: 'thoughts', sourceType: 'tree' },
-      ],
-    }]);
+  it('shows project name extracted from URL', () => {
     renderPage();
-    await waitFor(() => {
-      expect(screen.getByText('My Plan')).toBeTruthy();
-      expect(screen.getByText('plan.md')).toBeTruthy();
-    });
+    expect(screen.getByText('proj')).toBeTruthy();
   });
 
-  it('reasserts focus and refreshes on SSE reconnect', async () => {
+  it('shows sidebar guidance text', () => {
     renderPage();
-
-    await waitFor(() => {
-      expect(api.getProjectFiles).toHaveBeenCalledTimes(1);
-      expect(api.getReviews).toHaveBeenCalledTimes(1);
-      expect(api.getAgentStatus).toHaveBeenCalledTimes(1);
-    });
-
-    const useSSEMock = vi.mocked(useSSE);
-    const onReconnect = useSSEMock.mock.calls[0]?.[1];
-    expect(onReconnect).toBeDefined();
-
-    vi.mocked(api.focusProject).mockClear();
-    vi.mocked(api.getProjectFiles).mockClear();
-    vi.mocked(api.getReviews).mockClear();
-    vi.mocked(api.getAgentStatus).mockClear();
-    vi.mocked(api.listProjects).mockClear();
-
-    onReconnect?.();
-
-    await waitFor(() => {
-      expect(api.focusProject).toHaveBeenCalledWith('ws/proj');
-      expect(api.getProjectFiles).toHaveBeenCalledTimes(1);
-      expect(api.getReviews).toHaveBeenCalledTimes(1);
-      expect(api.getAgentStatus).toHaveBeenCalledTimes(1);
-      expect(api.listProjects).toHaveBeenCalledTimes(1);
-    });
+    expect(screen.getByText('Expand a source in the sidebar to browse files.')).toBeTruthy();
   });
 });

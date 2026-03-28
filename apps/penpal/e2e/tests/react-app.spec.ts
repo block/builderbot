@@ -17,7 +17,7 @@ test.describe('React app', () => {
     await expect(page.getByPlaceholder('Search all thoughts...')).toBeVisible();
   });
 
-  // E-PENPAL-SIDEBAR-LAYOUT: verifies sidebar renders Recent and In Review navigation links.
+  // E-PENPAL-HOME-SIDEBAR: verifies sidebar renders Recent and In Review navigation links.
   test('renders sidebar with navigation links', async ({ page }) => {
     await page.goto('/');
     const sidebar = page.getByTestId('sidebar');

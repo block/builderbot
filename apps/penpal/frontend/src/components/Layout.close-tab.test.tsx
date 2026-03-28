@@ -24,17 +24,20 @@ vi.mock('@tauri-apps/plugin-shell', () => ({
 // __TAURI_INTERNALS__ directly and spy on invoke calls.
 const mockInvoke = vi.fn().mockResolvedValue(undefined);
 beforeEach(() => {
-  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
-    metadata: {
-      currentWindow: { label: 'main' },
-      currentWebview: { label: 'main' },
+  Object.assign(window, {
+    __TAURI_INTERNALS__: {
+      metadata: {
+        currentWindow: { label: 'main' },
+        currentWebview: { label: 'main' },
+      },
+      invoke: mockInvoke,
+      convertFileSrc: vi.fn(),
     },
-    invoke: mockInvoke,
-    convertFileSrc: vi.fn(),
-  };
+  });
 });
 afterEach(() => {
-  delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  // @ts-expect-error — cleaning up test-only property
+  delete window.__TAURI_INTERNALS__;
 });
 
 // Mock API with isDesktopApp = true

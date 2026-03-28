@@ -806,9 +806,9 @@ export default function Layout() {
             <div className="breadcrumb-bar">
               <Link to="/" className="breadcrumb-home" title="Home">⌂</Link>
               <span className="sep">/</span>
-              <span className="current">
+              <Link to={`/project/${activeProject.qualifiedName}${activeWorktree ? `@${activeWorktree}` : ''}`} className="current">
                 {activeProject.workspace ? `${activeProject.workspace} / ` : ''}{activeProject.name}
-              </span>
+              </Link>
               {activeProject.agentConnected && <span className="agent-dot" />}
               {activeProject.worktrees && activeProject.worktrees.length > 1 ? (
                 <div className="worktree-dropdown" ref={worktreeDropdownRef} onClick={() => setShowWorktreeDropdown(!showWorktreeDropdown)}>

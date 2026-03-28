@@ -130,7 +130,7 @@ The home view is the top-level navigation state. It shows all workspaces and sta
 
 The project view shows the contents of a single project in the sidebar, organized by source.
 
-- <a id="P-PENPAL-PROJECT-BREADCRUMB"></a>**P-PENPAL-PROJECT-BREADCRUMB**: A breadcrumb bar at the top of the sidebar shows the navigation path: ⌂ / workspace name / project name. Only the ⌂ icon is clickable (navigates back to home). For standalone projects without a workspace, the breadcrumb is ⌂ / project name. An agent dot appears in the breadcrumb when an agent is active for this project.
+- <a id="P-PENPAL-PROJECT-BREADCRUMB"></a>**P-PENPAL-PROJECT-BREADCRUMB**: A breadcrumb bar at the top of the sidebar shows the navigation path: ⌂ / workspace name / project name. The ⌂ icon navigates back to home. The project name is a single clickable segment (including workspace prefix when present) that navigates to the project view. For standalone projects without a workspace, the breadcrumb is ⌂ / project name. An agent dot appears in the breadcrumb when an agent is active for this project.
 
 - <a id="P-PENPAL-PROJECT-WORKTREE-DROPDOWN"></a>**P-PENPAL-PROJECT-WORKTREE-DROPDOWN**: When a project has multiple worktrees, a dropdown in the breadcrumb bar shows the current worktree: "main repo" when viewing the main worktree, or the worktree icon and worktree name when viewing a non-main worktree. Clicking the dropdown shows all available worktrees; each item shows its name with a worktree icon (non-main only), matching the home tree format. Selecting a worktree switches to that worktree's view. For single-worktree projects (no additional worktrees), the breadcrumb shows dimmed static text "no worktrees" (no dropdown).
 

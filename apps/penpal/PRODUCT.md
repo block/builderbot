@@ -56,6 +56,8 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-SRC-SKIP"></a>**P-PENPAL-SRC-SKIP**: Source types can define directories to skip during scanning. Skipped directories and their contents are completely ignored.
 
+- <a id="P-PENPAL-SRC-GITIGNORE"></a>**P-PENPAL-SRC-GITIGNORE**: Scanning respects `.gitignore` rules. Directories that are gitignored are skipped during the walk, preventing build output, dependency caches, and other ignored content from appearing in the file tree. A registered source's own root path is always scanned even if it falls within a gitignored directory — explicit source configuration overrides gitignore.
+
 - <a id="P-PENPAL-SRC-DEDUP"></a>**P-PENPAL-SRC-DEDUP**: When multiple sources in a project cover overlapping paths, files are de-duplicated by project-relative path. The first source (in the order sources appear in the sidebar) wins — a file that appears in an earlier source is not shown again in a later source.
 
 ### thoughts Source Type

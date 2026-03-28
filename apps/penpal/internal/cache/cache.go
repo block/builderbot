@@ -3,6 +3,7 @@ package cache
 import (
 	"bufio"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -11,6 +12,32 @@ import (
 
 	"github.com/loganj/penpal/internal/discovery"
 )
+
+// gitIgnoreChecker uses `git check-ignore` to test whether paths are
+// gitignored. It detects whether the project is a git repo on construction;
+// non-git projects always return false.
+// E-PENPAL-SCAN: gitignore-aware directory skipping.
+type gitIgnoreChecker struct {
+	projectPath string
+	isGitRepo   bool
+}
+
+func newGitIgnoreChecker(projectPath string) *gitIgnoreChecker {
+	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--git-dir")
+	err := cmd.Run()
+	return &gitIgnoreChecker{
+		projectPath: projectPath,
+		isGitRepo:   err == nil,
+	}
+}
+
+func (g *gitIgnoreChecker) IsIgnored(path string) bool {
+	if !g.isGitRepo {
+		return false
+	}
+	cmd := exec.Command("git", "-C", g.projectPath, "check-ignore", "-q", path)
+	return cmd.Run() == nil
+}
 
 // FileInfo represents a cached file
 type FileInfo struct {
@@ -433,6 +460,7 @@ func ScanProjectSourcesForWorktree(project *discovery.Project, worktreePath stri
 func scanProjectSources(project *discovery.Project) []FileInfo {
 	var files []FileInfo
 	seen := make(map[string]bool) // project-relative paths already claimed
+	gitChecker := newGitIgnoreChecker(project.Path)
 
 	for _, source := range project.Sources {
 		if source.Type == "thoughts" || source.Type == "tree" {
@@ -461,6 +489,16 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 						if fi, err := os.Lstat(gitEntry); err == nil && !fi.IsDir() {
 							return filepath.SkipDir
 						}
+					}
+					// Never walk into .git (git doesn't report it as ignored).
+					if info.Name() == ".git" {
+						return filepath.SkipDir
+					}
+					// Skip gitignored directories (build output, deps, etc.).
+					// P-PENPAL-SRC-GITIGNORE: registered source roots are
+					// always scanned even if gitignored.
+					if path != rootPath && gitChecker.IsIgnored(path) {
+						return filepath.SkipDir
 					}
 					if st != nil && st.SkipDirs[info.Name()] {
 						return filepath.SkipDir

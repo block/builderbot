@@ -2,6 +2,7 @@ package cache
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -375,6 +376,121 @@ func TestScanProjectSources_SkipsNestedWorktrees(t *testing.T) {
 		for _, f := range files {
 			t.Logf("  %s", f.FullPath)
 		}
+	}
+}
+
+// E-PENPAL-SCAN, P-PENPAL-SRC-GITIGNORE: verifies gitignored directories are skipped.
+func TestScanProjectSources_SkipsGitignored(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Initialise a git repo so git check-ignore works.
+	runGit(t, tmpDir, "init")
+	runGit(t, tmpDir, "config", "user.email", "test@test.com")
+	runGit(t, tmpDir, "config", "user.name", "test")
+
+	// Create .gitignore that ignores "build/" and "vendor/".
+	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\nvendor/\n"), 0644)
+
+	// Create visible files.
+	os.MkdirAll(filepath.Join(tmpDir, "docs"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "docs", "readme.md"), []byte("# Readme"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "notes.md"), []byte("# Notes"), 0644)
+
+	// Create files inside gitignored directories.
+	os.MkdirAll(filepath.Join(tmpDir, "build", "out"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "build", "out", "generated.md"), []byte("# Gen"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "vendor", "lib"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "vendor", "lib", "dep.md"), []byte("# Dep"), 0644)
+
+	project := &discovery.Project{
+		Name: "test",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{
+				Name:     "all",
+				Type:     "tree",
+				RootPath: tmpDir,
+			},
+		},
+	}
+
+	files := scanProjectSources(project)
+
+	paths := map[string]bool{}
+	for _, f := range files {
+		paths[f.FullPath] = true
+	}
+
+	if !paths["docs/readme.md"] {
+		t.Error("expected docs/readme.md (not gitignored)")
+	}
+	if !paths["notes.md"] {
+		t.Error("expected notes.md (not gitignored)")
+	}
+	if paths["build/out/generated.md"] {
+		t.Error("build/out/generated.md should be skipped (gitignored)")
+	}
+	if paths["vendor/lib/dep.md"] {
+		t.Error("vendor/lib/dep.md should be skipped (gitignored)")
+	}
+}
+
+// E-PENPAL-SCAN, P-PENPAL-SRC-GITIGNORE: registered source root overrides gitignore.
+func TestScanProjectSources_GitignoreDoesNotSkipSourceRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	runGit(t, tmpDir, "init")
+	runGit(t, tmpDir, "config", "user.email", "test@test.com")
+	runGit(t, tmpDir, "config", "user.name", "test")
+
+	// Gitignore the "build/" directory.
+	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n"), 0644)
+
+	// But we have a registered source explicitly pointing into build/docs.
+	os.MkdirAll(filepath.Join(tmpDir, "build", "docs"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "build", "docs", "api.md"), []byte("# API"), 0644)
+
+	project := &discovery.Project{
+		Name: "test",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{
+				Name:     "build-docs",
+				Type:     "tree",
+				RootPath: filepath.Join(tmpDir, "build", "docs"),
+			},
+		},
+	}
+
+	files := scanProjectSources(project)
+
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].FullPath != "build/docs/api.md" {
+		t.Errorf("expected build/docs/api.md, got %s", files[0].FullPath)
+	}
+}
+
+// E-PENPAL-SCAN: non-git directories work without errors.
+func TestGitIgnoreChecker_NonGitDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	checker := newGitIgnoreChecker(tmpDir)
+	if checker.isGitRepo {
+		t.Fatal("expected non-git dir to be detected")
+	}
+	if checker.IsIgnored(filepath.Join(tmpDir, "anything")) {
+		t.Error("non-git dir should never report paths as ignored")
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 }
 

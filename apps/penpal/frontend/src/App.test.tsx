@@ -18,6 +18,7 @@ vi.mock('./hooks/useSSE', () => ({
   useSSE: vi.fn(),
 }));
 
+// E-PENPAL-HOME-DEFAULT: verifies app renders the home layout.
 describe('App', () => {
   it('renders the layout with home view', async () => {
     render(<App />);

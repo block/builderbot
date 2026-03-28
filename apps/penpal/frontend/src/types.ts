@@ -87,7 +87,7 @@ export interface Comment {
   createdAt: string;
   suggestedReplies?: string[];
   inReplyTo?: string;
-  workingStartedAt?: string;
+  workingStartedAt?: string; // E-PENPAL-WORKING
 }
 
 export interface Thread {
@@ -102,7 +102,7 @@ export interface Thread {
 
 export interface ThreadResponse extends Thread {
   agentWorking?: boolean;
-  workingAfterCommentId?: string;
+  workingAfterCommentId?: string; // E-PENPAL-WORKING
 }
 
 export interface ThreadWithFile extends Thread {

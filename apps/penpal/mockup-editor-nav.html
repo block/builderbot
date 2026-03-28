@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Penpal Editor-like Navigation Mockup v8</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #1a1a1a; color: #e0e0e0; height: 100vh; overflow: hidden;
+}
+:root {
+  --bg-body: #1a1a1a; --bg-surface: #242424; --bg-surface-hover: #333;
+  --bg-surface-active: #1e3a5f; --bg-surface-secondary: #2a2a2a; --bg-input: #1a1a1a;
+  --text-primary: #e0e0e0; --text-secondary: #c0c0c0; --text-muted: #a0a0a0;
+  --text-subtle: #888; --text-faint: #777; --text-disabled: #666;
+  --border-default: #444; --border-subtle: #3a3a3a; --border-card: #3a3a3a;
+  --accent-primary: #58a6ff; --accent-success: #3fb950; --accent-danger: #f85149;
+}
+.app {
+  display: grid; grid-template-columns: 260px 1fr;
+  grid-template-rows: auto auto 1fr; height: 100vh;
+}
+
+/* ── Topbar ── */
+.topbar {
+  grid-column: 1 / -1; display: flex; align-items: center;
+  padding: 10px 16px; gap: 16px; background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+}
+.topbar-nav {
+  background: none; border: none; color: var(--text-secondary);
+  font-size: 1.3em; padding: 2px 6px; cursor: pointer; border-radius: 4px;
+}
+.topbar-logo { font-weight: 600; font-size: 1.1em; color: var(--text-primary); text-decoration: none; }
+.topbar-search { flex: 1; max-width: 400px; }
+.topbar-search input {
+  width: 100%; padding: 7px 12px; border: 1px solid var(--border-subtle);
+  border-radius: 6px; background: var(--bg-input); color: var(--text-primary); font-size: 0.9em;
+}
+.theme-toggle {
+  background: none; border: 1px solid var(--border-subtle); border-radius: 6px;
+  padding: 6px 10px; cursor: pointer; color: var(--text-muted); font-size: 1em;
+}
+
+/* ── Tab bar (files only) ── */
+.tab-bar {
+  grid-column: 1 / -1; display: flex; align-items: stretch; min-height: 32px;
+  background: color-mix(in srgb, var(--bg-body) 90%, black);
+  box-shadow: inset 0 -1px 0 var(--border-default);
+}
+.tab-bar-tab {
+  display: flex; align-items: center; gap: 6px; padding: 0 12px;
+  border: none; background: color-mix(in srgb, var(--bg-body) 90%, black);
+  color: var(--text-muted); font-size: 0.8em; cursor: pointer; white-space: nowrap;
+  max-width: 200px; border-right: 1px solid var(--border-subtle); flex-shrink: 0;
+}
+.tab-bar-tab.active { background: var(--bg-surface); color: var(--text-primary); font-weight: 500; }
+.tab-bar-tab .tab-close { opacity: 0; font-size: 1.1em; padding: 2px; border-radius: 3px; }
+.tab-bar-tab:hover .tab-close { opacity: 0.5; }
+.tab-bar-new {
+  padding: 0 10px; background: none; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 1em;
+}
+/* Empty tab bar state */
+.tab-bar-empty {
+  flex: 1; display: flex; align-items: center; padding: 0 12px;
+  font-size: 0.78em; color: var(--text-disabled);
+}
+
+/* ── Sidebar ── */
+.sidebar {
+  grid-row: 3; background: var(--bg-surface); border-right: 1px solid var(--border-default);
+  overflow-y: auto; padding: 0; display: flex; flex-direction: column;
+}
+
+/* ── Breadcrumb bar (replaces project-bar) ── */
+.breadcrumb-bar {
+  display: flex; align-items: center; gap: 2px; padding: 6px 12px;
+  border-bottom: 1px solid var(--border-default); background: var(--bg-surface-secondary);
+  font-size: 0.78em; flex-wrap: wrap;
+}
+.breadcrumb-bar a {
+  color: var(--text-muted); text-decoration: none; padding: 2px 4px; border-radius: 3px;
+}
+.breadcrumb-bar a:hover { color: var(--accent-primary); background: var(--bg-surface-hover); text-decoration: none; }
+.breadcrumb-bar .sep { color: var(--text-disabled); padding: 0 1px; }
+.breadcrumb-bar .current { color: var(--text-primary); font-weight: 600; padding: 2px 4px; }
+.breadcrumb-bar .agent-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent-success); flex-shrink: 0; animation: pulse 2s infinite;
+  margin-left: 4px;
+}
+.worktree-dropdown {
+  margin-left: auto; display: flex; align-items: center; gap: 4px;
+  background: var(--bg-surface); border: 1px solid var(--border-subtle);
+  border-radius: 4px; padding: 2px 8px 2px 6px; cursor: pointer;
+  font-size: 0.95em; color: var(--accent-success);
+}
+.worktree-dropdown .dirty { color: var(--accent-danger); }
+.worktree-dropdown::after {
+  content: '▾'; font-size: 0.7em; color: var(--text-disabled); margin-left: 2px;
+}
+
+.breadcrumb-home {
+  font-size: 1.3em; line-height: 1; color: var(--text-muted); text-decoration: none;
+}
+.breadcrumb-home:hover { color: var(--accent-primary); text-decoration: none; }
+
+/* ── Source headers ── */
+.source-header {
+  display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+  font-size: 0.8em; font-weight: 600; color: var(--text-secondary);
+  cursor: pointer; user-select: none; border-bottom: 1px solid var(--border-card);
+}
+.source-header:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
+.source-header .chevron {
+  width: 14px; text-align: center; font-size: 0.7em; color: var(--text-disabled);
+  transition: transform 0.15s;
+}
+.source-header .chevron.open { transform: rotate(90deg); }
+.source-header .badge-source {
+  font-size: 0.7em; padding: 1px 5px; border-radius: 3px; font-weight: 600; flex-shrink: 0;
+}
+.source-header .source-count {
+  margin-left: auto; font-size: 0.75em; color: var(--text-disabled); font-weight: 400;
+}
+.source-body { padding: 2px 0 4px 0; border-bottom: 1px solid var(--border-card); }
+
+/* ── Tree items ── */
+.tree-item {
+  display: flex; align-items: center; gap: 4px; padding: 3px 12px;
+  font-size: 0.82em; color: var(--text-secondary); cursor: pointer;
+  user-select: none; text-decoration: none; position: relative;
+}
+.tree-item:hover { background: var(--bg-surface-hover); color: var(--text-primary); text-decoration: none; }
+.tree-item.active { background: var(--bg-surface-active); color: var(--accent-primary); font-weight: 500; }
+.tree-item .icon { width: 16px; text-align: center; flex-shrink: 0; font-size: 0.9em; opacity: 0.7; }
+.tree-item .chevron {
+  width: 14px; text-align: center; flex-shrink: 0; font-size: 0.7em;
+  color: var(--text-disabled); transition: transform 0.1s;
+}
+.tree-item .chevron.open { transform: rotate(90deg); }
+.tree-item .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.tree-item .badge {
+  font-size: 0.7em; padding: 1px 5px; border-radius: 3px; font-weight: 500;
+  margin-left: 4px; flex-shrink: 0;
+}
+.tree-item .badge-review { background: rgba(88, 166, 255, 0.15); color: #58a6ff; }
+.tree-item .agent-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent-success); flex-shrink: 0; animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.4); }
+  70% { box-shadow: 0 0 0 4px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.tree-item .branch {
+  font-size: 0.85em; color: var(--accent-success); opacity: 0.7;
+  margin-left: auto; flex-shrink: 0;
+}
+.tree-item .branch .dirty { color: var(--accent-danger); }
+.tree-item .meta {
+  font-size: 0.85em; color: var(--text-disabled); margin-left: auto; flex-shrink: 0;
+}
+.tree-children { position: relative; }
+.tree-children .tree-item { padding-left: 24px; }
+.tree-children .tree-children .tree-item { padding-left: 40px; }
+.tree-children::before {
+  content: ''; position: absolute; left: 18px; top: 0; bottom: 0;
+  width: 1px; background: var(--border-card);
+}
+.tree-children .tree-children::before { left: 34px; }
+
+/* ── Two-line file rows (for global lists) ── */
+.file-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  cursor: pointer; text-decoration: none;
+}
+.file-row:hover { background: var(--bg-surface-hover); text-decoration: none; }
+.file-row.active { background: var(--bg-surface-active); }
+.file-row .file-icon { width: 16px; text-align: center; font-size: 0.9em; opacity: 0.6; flex-shrink: 0; }
+.file-row .file-info { flex: 1; min-width: 0; }
+.file-row .file-name {
+  font-size: 0.82em; color: var(--text-primary); font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-row.active .file-name { color: var(--accent-primary); }
+.file-row .file-context {
+  font-size: 0.7em; color: var(--text-disabled);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px;
+}
+.file-row .file-meta {
+  font-size: 0.72em; color: var(--text-disabled); flex-shrink: 0; white-space: nowrap;
+}
+
+/* ── Sidebar sections ── */
+.sidebar-section { padding: 4px 0; border-bottom: 1px solid var(--border-card); }
+.sidebar-section:last-of-type { border-bottom: none; }
+.sidebar-section-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 12px; font-size: 0.7em; font-weight: 600;
+  color: var(--text-subtle); text-transform: uppercase; letter-spacing: 0.5px; user-select: none;
+}
+.sidebar-section-header button {
+  background: none; border: none; color: var(--text-disabled); cursor: pointer;
+  font-size: 1.2em; padding: 0 2px; line-height: 1;
+}
+.sidebar-section-header button:hover { color: var(--text-primary); }
+
+/* ── Main content ── */
+.main-content { grid-row: 3; overflow-y: auto; padding: 32px 48px; background: var(--bg-body); }
+.file-content { max-width: 720px; margin: 0 auto; }
+.file-content h1 { font-size: 1.8em; margin-bottom: 16px; font-weight: 600; }
+.file-content h2 { font-size: 1.3em; margin-top: 24px; margin-bottom: 12px; font-weight: 600; color: var(--text-secondary); }
+.file-content p { line-height: 1.7; margin-bottom: 12px; color: var(--text-secondary); }
+.file-content code { background: #333; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+.file-content .comment-thread {
+  margin: 16px 0; border-left: 3px solid var(--accent-primary);
+  padding: 12px 16px; background: rgba(88, 166, 255, 0.05); border-radius: 0 6px 6px 0;
+}
+.file-content .comment-thread .author { font-weight: 600; font-size: 0.85em; color: var(--accent-primary); margin-bottom: 4px; }
+.file-content .comment-thread .body { font-size: 0.9em; color: var(--text-secondary); }
+.welcome { max-width: 600px; margin: 80px auto; text-align: center; }
+.welcome h2 { font-size: 1.4em; margin-bottom: 8px; color: var(--text-secondary); }
+.welcome p { color: var(--text-muted); font-size: 0.95em; margin-bottom: 6px; }
+.welcome kbd {
+  background: var(--bg-surface); border: 1px solid var(--border-default);
+  border-radius: 4px; padding: 2px 6px; font-size: 0.85em; color: var(--text-muted);
+}
+
+/* ── View switcher ── */
+.view-switcher {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 4px; background: var(--bg-surface);
+  border: 1px solid var(--border-default); border-radius: 8px; padding: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4); z-index: 100; flex-wrap: wrap;
+  justify-content: center; max-width: 90vw;
+}
+.view-switcher button {
+  padding: 7px 12px; border: none; background: none; color: var(--text-muted);
+  font-size: 0.78em; cursor: pointer; border-radius: 6px; font-weight: 500;
+}
+.view-switcher button:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
+.view-switcher button.active { background: var(--bg-surface-active); color: var(--accent-primary); }
+
+.annotation {
+  position: fixed; background: #2d2a1a; border: 1px solid #665; color: #ddc;
+  padding: 10px 14px; border-radius: 6px; font-size: 0.78em; max-width: 280px;
+  line-height: 1.5; z-index: 50; pointer-events: none;
+}
+.annotation strong { color: #ffd; }
+.annotation em { color: #cc9; }
+.annotation-label {
+  display: inline-block; background: #554; color: #ffd; font-size: 0.7em;
+  padding: 1px 6px; border-radius: 3px; margin-bottom: 4px; font-weight: 600; text-transform: uppercase;
+}
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════════
+     VIEW 1: WORKSPACE (no files open)
+     ══════════════════════════════════════════════════════════════════ -->
+<div id="view-workspace" class="app">
+  <div class="topbar">
+    <button class="topbar-nav">&#8249;</button>
+    <button class="topbar-nav">&#8250;</button>
+    <a href="#" class="topbar-logo">Penpal</a>
+    <form class="topbar-search"><input type="search" placeholder="Search all thoughts..."></form>
+    <button class="theme-toggle">&#9790;</button>
+  </div>
+  <div class="tab-bar">
+    <div class="tab-bar-empty">No open files</div>
+  </div>
+  <nav class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-section-header">
+        <span class="breadcrumb-home" style="font-size: 1.6em; cursor: default;">&#8962;</span>
+        <button title="Add workspace or project">+</button>
+      </div>
+      <div class="tree-item" style="font-weight: 500;">
+        <span class="chevron open">&#9654;</span>
+        <span class="icon">&#127968;</span>
+        <span class="label">Development</span>
+        <span class="agent-dot"></span>
+      </div>
+      <div class="tree-children">
+        <a class="tree-item" href="#">
+          <span class="chevron" style="visibility:hidden">&#9654;</span>
+          <span class="icon">&#128230;</span>
+          <span class="label">builderbot</span>
+          <span class="agent-dot"></span>
+          <span class="branch">main</span>
+        </a>
+        <div class="tree-item">
+          <span class="chevron open">&#9654;</span>
+          <span class="icon">&#128230;</span>
+          <span class="label">birdseye</span>
+        </div>
+        <div class="tree-children">
+          <a class="tree-item" href="#">
+            <span class="chevron" style="visibility:hidden">&#9654;</span>
+            <span class="icon" style="font-size: 0.75em; opacity: 0.5;">&#9671;</span>
+            <span class="label">birdseye</span>
+            <span class="branch">main</span>
+          </a>
+          <a class="tree-item" href="#">
+            <span class="chevron" style="visibility:hidden">&#9654;</span>
+            <span class="icon" style="font-size: 0.75em; opacity: 0.5;">&#9671;</span>
+            <span class="label">dashboard-redesign</span>
+            <span class="branch">feat/dash<span class="dirty">*</span></span>
+          </a>
+        </div>
+        <a class="tree-item" href="#">
+          <span class="chevron" style="visibility:hidden">&#9654;</span>
+          <span class="icon">&#128230;</span>
+          <span class="label">penpal</span>
+          <span class="agent-dot"></span>
+          <span class="branch">main</span>
+        </a>
+      </div>
+      <div class="tree-item" style="font-weight: 500;">
+        <span class="chevron">&#9654;</span>
+        <span class="icon">&#127968;</span>
+        <span class="label">Personal</span>
+      </div>
+      <a class="tree-item" href="#">
+        <span class="chevron" style="visibility:hidden">&#9654;</span>
+        <span class="icon">&#128230;</span>
+        <span class="label">personal-notes</span>
+        <span class="branch">main</span>
+      </a>
+      <a class="tree-item" href="#">
+        <span class="chevron" style="visibility:hidden">&#9654;</span>
+        <span class="icon">&#128230;</span>
+        <span class="label" style="color: var(--text-muted);">.claude/plans</span>
+      </a>
+    </div>
+  </nav>
+  <div class="main-content">
+    <div class="welcome">
+      <h2>Penpal</h2>
+      <p>Select a project from the sidebar to browse its files.</p>
+      <p><kbd>&#8984;P</kbd> to search all thoughts</p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════════
+     VIEW 2: PROJECT (file open, breadcrumb nav)
+     ══════════════════════════════════════════════════════════════════ -->
+<div id="view-project" class="app hidden">
+  <div class="topbar">
+    <button class="topbar-nav">&#8249;</button>
+    <button class="topbar-nav">&#8250;</button>
+    <a href="#" class="topbar-logo">Penpal</a>
+    <form class="topbar-search"><input type="search" placeholder="Search all thoughts..."></form>
+    <button class="theme-toggle">&#9790;</button>
+  </div>
+  <div class="tab-bar">
+    <button class="tab-bar-tab active"><span>architecture.md</span><span class="tab-close">&times;</span></button>
+    <button class="tab-bar-tab"><span>RFC: new auth flow</span><span class="tab-close">&times;</span></button>
+    <button class="tab-bar-new">+</button>
+  </div>
+  <nav class="sidebar">
+    <!-- Breadcrumb: workspace > project, with worktree dropdown -->
+    <div class="breadcrumb-bar">
+      <a href="#" class="breadcrumb-home" title="Home">&#8962;</a>
+      <span class="sep">/</span>
+      <span class="current">Development / builderbot</span>
+      <span class="agent-dot"></span>
+      <div class="worktree-dropdown">main</div>
+    </div>
+
+    <!-- Source: RPI (expanded) -->
+    <div class="source-header">
+      <span class="chevron open">&#9654;</span>
+      <span class="badge-source" style="background: rgba(136,136,136,0.12); color: #888;">RPI</span>
+      <span class="source-count">7</span>
+    </div>
+    <div class="source-body">
+      <div class="tree-item">
+        <span class="chevron open">&#9654;</span>
+        <span class="icon">&#128193;</span>
+        <span class="label">plans/</span>
+      </div>
+      <div class="tree-children">
+        <a class="tree-item active" href="#">
+          <span class="chevron" style="visibility:hidden">&#9654;</span>
+          <span class="icon" style="color: var(--accent-primary);">&#128196;</span>
+          <span class="label">architecture.md</span>
+          <span class="badge badge-review">in review</span>
+        </a>
+        <a class="tree-item" href="#">
+          <span class="chevron" style="visibility:hidden">&#9654;</span>
+          <span class="icon" style="color: #58a6ff;">&#128196;</span>
+          <span class="label">roadmap.md</span>
+        </a>
+        <a class="tree-item" href="#">
+          <span class="chevron" style="visibility:hidden">&#9654;</span>
+          <span class="icon" style="color: #58a6ff;">&#128196;</span>
+          <span class="label">RFC: new auth flow.md</span>
+          <span class="badge badge-review">in review</span>
+        </a>
+      </div>
+      <div class="tree-item">
+        <span class="chevron">&#9654;</span>
+        <span class="icon">&#128193;</span>
+        <span class="label">decisions/</span>
+      </div>
+      <div class="tree-item">
+        <span class="chevron open">&#9654;</span>
+        <span class="icon">&#128193;</span>
+        <span class="label">research/</span>
+      </div>
+      <div class="tree-children">
+        <a class="tree-item" href="#">
+          <span class="chevron" style="visibility:hidden">&#9654;</span>
+          <span class="icon" style="color: #58a6ff;">&#128196;</span>
+          <span class="label">llm-context-windows.md</span>
+        </a>
+        <a class="tree-item" href="#">
+          <span class="chevron" style="visibility:hidden">&#9654;</span>
+          <span class="icon" style="color: #58a6ff;">&#128196;</span>
+          <span class="label">tree-view-prior-art.md</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- RP1 (collapsed) -->
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span class="badge-source" style="background: rgba(139,92,246,0.12); color: #8b5cf6;">RP1</span>
+      <span class="source-count">6</span>
+    </div>
+
+    <!-- ANCHORS (collapsed) -->
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span class="badge-source" style="background: rgba(13,148,136,0.12); color: #0d9488;">ANCHORS</span>
+      <span class="source-count">5</span>
+    </div>
+
+    <!-- All Markdown (collapsed) -->
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span>All Markdown</span>
+      <span class="source-count">23</span>
+    </div>
+
+    <!-- In Review (collapsed) -->
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span>In Review</span>
+      <span class="source-count">2</span>
+    </div>
+
+    <!-- Recent (collapsed) -->
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span>Recent</span>
+      <span class="source-count">8</span>
+    </div>
+  </nav>
+  <div class="main-content">
+    <div class="file-content">
+      <h1>Architecture</h1>
+      <p>This document describes the high-level architecture of the builderbot system.</p>
+      <h2>Overview</h2>
+      <p>The system is composed of three main layers: the <code>core</code> runtime, the <code>plugin</code> interface, and the <code>agent</code> orchestrator.</p>
+      <div class="comment-thread">
+        <div class="author">logan</div>
+        <div class="body">Should we call out the penpal integration here as a fourth layer?</div>
+      </div>
+      <h2>Core Runtime</h2>
+      <p>The core runtime manages process lifecycle, configuration loading, and the event bus.</p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════════
+     VIEW 3: PROJECT (no files open — just browsing)
+     ══════════════════════════════════════════════════════════════════ -->
+<div id="view-project-empty" class="app hidden">
+  <div class="topbar">
+    <button class="topbar-nav">&#8249;</button>
+    <button class="topbar-nav">&#8250;</button>
+    <a href="#" class="topbar-logo">Penpal</a>
+    <form class="topbar-search"><input type="search" placeholder="Search all thoughts..."></form>
+    <button class="theme-toggle">&#9790;</button>
+  </div>
+  <div class="tab-bar">
+    <div class="tab-bar-empty">No open files</div>
+  </div>
+  <nav class="sidebar">
+    <div class="breadcrumb-bar">
+      <a href="#" class="breadcrumb-home" title="Home">&#8962;</a>
+      <span class="sep">/</span>
+      <span class="current">Development / builderbot</span>
+      <span class="agent-dot"></span>
+      <div class="worktree-dropdown">main</div>
+    </div>
+
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span class="badge-source" style="background: rgba(136,136,136,0.12); color: #888;">RPI</span>
+      <span class="source-count">7</span>
+    </div>
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span class="badge-source" style="background: rgba(139,92,246,0.12); color: #8b5cf6;">RP1</span>
+      <span class="source-count">6</span>
+    </div>
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span class="badge-source" style="background: rgba(13,148,136,0.12); color: #0d9488;">ANCHORS</span>
+      <span class="source-count">5</span>
+    </div>
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span>All Markdown</span>
+      <span class="source-count">23</span>
+    </div>
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span>In Review</span>
+      <span class="source-count">2</span>
+    </div>
+    <div class="source-header">
+      <span class="chevron">&#9654;</span>
+      <span>Recent</span>
+      <span class="source-count">8</span>
+    </div>
+  </nav>
+  <div class="main-content">
+    <div class="welcome">
+      <h2>builderbot</h2>
+      <p>Expand a source in the sidebar to browse files.</p>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════════
+     VIEW 4: GLOBAL IN REVIEW (sidebar replaces workspace tree)
+     ══════════════════════════════════════════════════════════════════ -->
+<div id="view-global-review" class="app hidden">
+  <div class="topbar">
+    <button class="topbar-nav">&#8249;</button>
+    <button class="topbar-nav">&#8250;</button>
+    <a href="#" class="topbar-logo">Penpal</a>
+    <form class="topbar-search"><input type="search" placeholder="Search all thoughts..."></form>
+    <button class="theme-toggle">&#9790;</button>
+  </div>
+  <div class="tab-bar">
+    <button class="tab-bar-tab active"><span>architecture.md</span><span class="tab-close">&times;</span></button>
+    <button class="tab-bar-new">+</button>
+  </div>
+  <nav class="sidebar">
+    <div class="breadcrumb-bar">
+      <a href="#" class="breadcrumb-home" title="Home">&#8962;</a>
+      <span class="sep">/</span>
+      <span class="current">In Review</span>
+    </div>
+    <div class="sidebar-section" style="border-bottom: none;">
+      <a class="file-row active" href="#">
+        <span class="file-icon" style="color: var(--accent-primary);">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">architecture.md</div>
+          <div class="file-context">Development / builderbot &middot; thoughts/plans/</div>
+        </div>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">RFC: new auth flow.md</div>
+          <div class="file-context">Development / builderbot &middot; thoughts/plans/</div>
+        </div>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">dashboard-layout.md</div>
+          <div class="file-context">Development / birdseye @ feat/dash &middot; thoughts/</div>
+        </div>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">nav-redesign.md</div>
+          <div class="file-context">Development / penpal &middot; thoughts/</div>
+        </div>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">plugin-api.md</div>
+          <div class="file-context">Development / penpal &middot; thoughts/</div>
+        </div>
+      </a>
+    </div>
+  </nav>
+  <div class="main-content">
+    <div class="file-content">
+      <h1>Architecture</h1>
+      <p>This document describes the high-level architecture of the builderbot system.</p>
+      <div class="comment-thread">
+        <div class="author">logan</div>
+        <div class="body">Should we call out the penpal integration here as a fourth layer?</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════════
+     VIEW 5: GLOBAL RECENT
+     ══════════════════════════════════════════════════════════════════ -->
+<div id="view-global-recent" class="app hidden">
+  <div class="topbar">
+    <button class="topbar-nav">&#8249;</button>
+    <button class="topbar-nav">&#8250;</button>
+    <a href="#" class="topbar-logo">Penpal</a>
+    <form class="topbar-search"><input type="search" placeholder="Search all thoughts..."></form>
+    <button class="theme-toggle">&#9790;</button>
+  </div>
+  <div class="tab-bar">
+    <div class="tab-bar-empty">No open files</div>
+  </div>
+  <nav class="sidebar">
+    <div class="breadcrumb-bar">
+      <a href="#" class="breadcrumb-home" title="Home">&#8962;</a>
+      <span class="sep">/</span>
+      <span class="current">Recent</span>
+    </div>
+    <div class="sidebar-section" style="border-bottom: none;">
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">architecture.md</div>
+          <div class="file-context">Development / builderbot &middot; thoughts/plans/</div>
+        </div>
+        <span class="file-meta">2m ago</span>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">RFC: new auth flow.md</div>
+          <div class="file-context">Development / builderbot &middot; thoughts/plans/</div>
+        </div>
+        <span class="file-meta">15m ago</span>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">nav-redesign.md</div>
+          <div class="file-context">Development / penpal &middot; thoughts/</div>
+        </div>
+        <span class="file-meta">1h ago</span>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">dashboard-layout.md</div>
+          <div class="file-context">Development / birdseye @ feat/dash &middot; thoughts/</div>
+        </div>
+        <span class="file-meta">2h ago</span>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">roadmap.md</div>
+          <div class="file-context">Development / builderbot &middot; thoughts/plans/</div>
+        </div>
+        <span class="file-meta">3h ago</span>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">charter.md</div>
+          <div class="file-context">Development / builderbot &middot; .rp1/work/</div>
+        </div>
+        <span class="file-meta">5h ago</span>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">plugin-api.md</div>
+          <div class="file-context">Development / penpal &middot; thoughts/</div>
+        </div>
+        <span class="file-meta">yesterday</span>
+      </a>
+      <a class="file-row" href="#">
+        <span class="file-icon" style="color: #58a6ff;">&#128196;</span>
+        <div class="file-info">
+          <div class="file-name">modules.md</div>
+          <div class="file-context">Development / builderbot &middot; .rp1/context/</div>
+        </div>
+        <span class="file-meta">yesterday</span>
+      </a>
+    </div>
+  </nav>
+  <div class="main-content">
+    <div class="welcome">
+      <h2>Recent</h2>
+      <p>Select a file to open it.</p>
+    </div>
+  </div>
+</div>
+
+
+<!-- View switcher -->
+<div class="view-switcher">
+  <button class="active" onclick="switchView('workspace')">Home</button>
+  <button onclick="switchView('project')">Project (file open)</button>
+  <button onclick="switchView('project-empty')">Project (browsing)</button>
+  <button onclick="switchView('global-review')">Global In Review</button>
+  <button onclick="switchView('global-recent')">Global Recent</button>
+</div>
+
+<!-- Annotations -->
+<div id="ann-workspace" class="annotation" style="top: 100px; right: 20px;">
+  <div class="annotation-label">Home</div>
+  <strong>Tabs are only for files.</strong> Tab bar shows "No open files" when empty.<br><br>
+  Home icon at top matches the breadcrumb icon in other views. Opening a new tab lands here. Clicking a project navigates to its source view.
+</div>
+<div id="ann-project" class="annotation hidden" style="top: 100px; right: 20px;">
+  <div class="annotation-label">Project with file</div>
+  <strong>Breadcrumb</strong> at top: <em>&#8962; / Development / builderbot</em>. Home icon goes back to workspace view. Only the icon is clickable.<br><br>
+  Sidebar shows sources + per-project In Review &amp; Recent. Tabs are open files. No footer links.
+</div>
+<div id="ann-project-empty" class="annotation hidden" style="top: 100px; right: 20px;">
+  <div class="annotation-label">Project browsing</div>
+  Clicked a project from workspace view. Breadcrumb: <em>&#8962; / Development / builderbot</em>. Only the home icon is clickable.<br><br>
+  All sources collapsed &mdash; clean stack. Expand to browse, click a file to open it.
+</div>
+<div id="ann-global-review" class="annotation hidden" style="top: 100px; right: 20px;">
+  <div class="annotation-label">Global In Review</div>
+  Breadcrumb: <em>&#8962; / In Review</em>. Two-line rows with workspace / project / path context.<br><br>
+  <strong>Question:</strong> How do you get here? Could be a keyboard shortcut, the Penpal logo menu, or a command palette action.
+</div>
+<div id="ann-global-recent" class="annotation hidden" style="top: 100px; right: 20px;">
+  <div class="annotation-label">Global Recent</div>
+  Same two-line rows + timestamp. Breadcrumb: <em>&#8962; / Recent</em>.<br><br>
+  Could also work as a <strong>floating popup</strong> (like IntelliJ Cmd+E) instead of a sidebar view.
+</div>
+
+<script>
+function switchView(name) {
+  document.querySelectorAll('.app').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('.annotation').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('.view-switcher button').forEach(btn => btn.classList.remove('active'));
+  document.getElementById('view-' + name).classList.remove('hidden');
+  document.getElementById('ann-' + name).classList.remove('hidden');
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

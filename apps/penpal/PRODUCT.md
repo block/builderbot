@@ -16,33 +16,27 @@ Penpal is a desktop application and local web server for collaborative review of
 
 ## Project Discovery & Workspace Management
 
-- <a id="P-PENPAL-WORKSPACE"></a>**P-PENPAL-WORKSPACE**: Users can register workspace directories. Every immediate non-hidden subdirectory of a workspace is shown as a project in the sidebar, with no manual configuration needed.
+- <a id="P-PENPAL-WORKSPACE"></a>**P-PENPAL-WORKSPACE**: Users can register workspace directories. Every immediate non-hidden subdirectory of a workspace is shown as a project, with no manual configuration needed.
 
 - <a id="P-PENPAL-AUTO-DETECT"></a>**P-PENPAL-AUTO-DETECT**: Projects are automatically scanned for recognized source types. Each detected source type gets a colored badge and determines which files are shown, how they are classified, and how they are grouped. See [Source Types](#source-types) for the full list.
 
-- <a id="P-PENPAL-STANDALONE"></a>**P-PENPAL-STANDALONE**: Users can add standalone projects (directories or individual files) outside of any workspace, via the sidebar "Add" button or the `penpal open` CLI command.
+- <a id="P-PENPAL-STANDALONE"></a>**P-PENPAL-STANDALONE**: Users can add standalone projects (directories or individual files) outside of any workspace, via the home view "+" button or the `penpal open` CLI command.
 
-- <a id="P-PENPAL-WORKTREE"></a>**P-PENPAL-WORKTREE**: Git worktrees for a project are discovered and shown as navigable sub-items in the sidebar. Each worktree has its own branch name and independent comment storage.
+- <a id="P-PENPAL-WORKTREE"></a>**P-PENPAL-WORKTREE**: Git worktrees for a project are discovered automatically. In the home view, multi-worktree projects expand to show each worktree as a child item with its branch name. In the project view, a worktree dropdown in the breadcrumb bar lets the user switch between worktrees. Each worktree has its own branch name and independent comment storage.
 
 - <a id="P-PENPAL-DEDUP"></a>**P-PENPAL-DEDUP**: When multiple directories in a workspace share the same git repository (one is a worktree of the other), only the main worktree is shown as a project to avoid duplicates.
 
-- <a id="P-PENPAL-GIT-INFO"></a>**P-PENPAL-GIT-INFO**: Project cards show the current git branch name and whether there are uncommitted changes (dirty status).
+- <a id="P-PENPAL-GIT-INFO"></a>**P-PENPAL-GIT-INFO**: In the home view, each project tree item shows the current git branch name and dirty status indicator. In the project view, the worktree dropdown shows the branch name and dirty indicator.
 
 - <a id="P-PENPAL-WS-ROOT"></a>**P-PENPAL-WS-ROOT**: If the workspace directory itself has a `thoughts/` directory at its root, a synthetic "(root)" project is created.
 
 - <a id="P-PENPAL-CLAUDE-PLANS"></a>**P-PENPAL-CLAUDE-PLANS**: If `~/.claude/plans/` exists and contains markdown files, it automatically appears as a standalone project called ".claude/plans".
 
-- <a id="P-PENPAL-REMOVE-WORKSPACE"></a>**P-PENPAL-REMOVE-WORKSPACE**: Users can remove a workspace via a three-dot menu on the workspace sidebar entry. Removing a workspace takes it out of Penpal's view without deleting any files.
+- <a id="P-PENPAL-REMOVE-WORKSPACE"></a>**P-PENPAL-REMOVE-WORKSPACE**: Users can remove a workspace via a context menu on the workspace tree item. Removing a workspace takes it out of Penpal's view without deleting any files.
 
-- <a id="P-PENPAL-CLOSE-PROJECT"></a>**P-PENPAL-CLOSE-PROJECT**: Users can close a standalone project via the sidebar or workspace page three-dot menu. Closing removes it from Penpal's view without deleting files.
+- <a id="P-PENPAL-CLOSE-PROJECT"></a>**P-PENPAL-CLOSE-PROJECT**: Users can close a standalone project via a context menu. Closing removes it from Penpal's view without deleting files.
 
-- <a id="P-PENPAL-DELETE-PROJECT"></a>**P-PENPAL-DELETE-PROJECT**: Users can delete a workspace project from disk via the workspace page. A confirmation modal shows the file count, git dirty status, and unpushed commit count before deletion.
-
-- <a id="P-PENPAL-PROJECT-CARD"></a>**P-PENPAL-PROJECT-CARD**: Project cards on the workspace page show: name, source type badges, branch name, relative age, review count badge (when files are in review), agent dot (when an agent is active), and worktree count (when additional worktrees exist). Cards also have a three-dot menu with copy-path and delete/close actions.
-
-- <a id="P-PENPAL-STANDALONE-SECTION"></a>**P-PENPAL-STANDALONE-SECTION**: The workspace page shows a "Standalone Projects" section listing any standalone projects, regardless of which workspace is being viewed.
-
-- <a id="P-PENPAL-HOME-REDIRECT"></a>**P-PENPAL-HOME-REDIRECT**: When navigating to the root URL, the app redirects to the most recently modified workspace project, or the most recently modified standalone project, or the Recent page if nothing is configured.
+- <a id="P-PENPAL-DELETE-PROJECT"></a>**P-PENPAL-DELETE-PROJECT**: Users can delete a project from disk via a context menu. A confirmation modal shows the file count, git dirty status, and unpushed commit count before deletion.
 
 ---
 
@@ -54,19 +48,19 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-SRC-DETECT"></a>**P-PENPAL-SRC-DETECT**: Each source type specifies how it is auto-detected — either by a directory name (e.g., `thoughts/`) or a file name (e.g., `ANCHORS.md`) at the project root. When the trigger is found, the source is activated automatically.
 
-- <a id="P-PENPAL-SRC-CLASSIFY"></a>**P-PENPAL-SRC-CLASSIFY**: Each source type defines file classification rules that assign a type label (e.g., research, plan, prd, knowledge) to files based on their path within the source. The type label determines the badge shown next to the filename. Files that the source type does not recognize are hidden (not shown in the file list).
+- <a id="P-PENPAL-SRC-CLASSIFY"></a>**P-PENPAL-SRC-CLASSIFY**: Each source type defines file classification rules that assign a type label (e.g., research, plan, prd, knowledge) to files based on their path within the source. The type label determines the badge shown next to the filename. Files that the source type does not recognize are hidden (not shown in the source's file tree).
 
-- <a id="P-PENPAL-SRC-GROUP"></a>**P-PENPAL-SRC-GROUP**: Each source type can define grouping logic to organize files into named sections with headers on the project page. Source types without custom grouping show files in a single flat list under the source name.
+- <a id="P-PENPAL-SRC-GROUP"></a>**P-PENPAL-SRC-GROUP**: Each source type can define grouping logic to organize files into named sections within the sidebar tree. Source types without custom grouping show files in a directory tree under the source header.
 
-- <a id="P-PENPAL-SRC-BADGE"></a>**P-PENPAL-SRC-BADGE**: Each source type has a display name and badge color shown in the project page source header and on project cards (e.g., "RPI" grey, "RP1" purple, "ANCHORS" teal).
+- <a id="P-PENPAL-SRC-BADGE"></a>**P-PENPAL-SRC-BADGE**: Each source type has a display name and badge color shown in the sidebar source header (e.g., "RPI" grey, "RP1" purple, "ANCHORS" teal).
 
 - <a id="P-PENPAL-SRC-SKIP"></a>**P-PENPAL-SRC-SKIP**: Source types can define directories to skip during scanning. Skipped directories and their contents are completely ignored.
 
-- <a id="P-PENPAL-SRC-DEDUP"></a>**P-PENPAL-SRC-DEDUP**: When multiple sources in a project cover overlapping paths, files are de-duplicated by project-relative path. The first source (in the order sources appear on the project page) wins — a file that appears in an earlier source is not shown again in a later source.
+- <a id="P-PENPAL-SRC-DEDUP"></a>**P-PENPAL-SRC-DEDUP**: When multiple sources in a project cover overlapping paths, files are de-duplicated by project-relative path. The first source (in the order sources appear in the sidebar) wins — a file that appears in an earlier source is not shown again in a later source.
 
 ### thoughts Source Type
 
-- <a id="P-PENPAL-SRC-THOUGHTS"></a>**P-PENPAL-SRC-THOUGHTS**: Auto-detected by a `thoughts/` directory at the project root. Shows a grey "RPI" badge. Files are shown in a single flat list under the source name. Files whose path contains "research" are classified as `research`; files whose path contains "plan" are classified as `plan`; all others are classified as `other`. The first matching rule wins.
+- <a id="P-PENPAL-SRC-THOUGHTS"></a>**P-PENPAL-SRC-THOUGHTS**: Auto-detected by a `thoughts/` directory at the project root. Shows a grey "RPI" badge. Files are shown in a directory tree under the source header. Files whose path contains "research" are classified as `research`; files whose path contains "plan" are classified as `plan`; all others are classified as `other`. The first matching rule wins.
 
 - <a id="P-PENPAL-SRC-THOUGHTS-WSROOT"></a>**P-PENPAL-SRC-THOUGHTS-WSROOT**: The thoughts source type can also be detected at the workspace root level. If the workspace directory itself contains a `thoughts/` directory, a synthetic "(root)" project is created for it.
 
@@ -100,29 +94,85 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-SRC-CLAUDE-PLANS"></a>**P-PENPAL-SRC-CLAUDE-PLANS**: Auto-detected by the presence of `~/.claude/plans/` containing at least one `.md` file. All files are classified as type `plan`. Files are shown in a single flat list. This source type is injected into a synthetic standalone project rather than being detected within an existing project.
 
-### manual Source Type
+### All Markdown Virtual Source
 
-- <a id="P-PENPAL-SRC-MANUAL"></a>**P-PENPAL-SRC-MANUAL**: Represents user-added sources (directories or individual files). Not auto-detected — created when a user adds a source via the "Add to project" UI or `penpal open`. Shows directory headings for subdirectory boundaries within the source, so files are visually organized by their parent directory.
+- <a id="P-PENPAL-SRC-ALL-MD"></a>**P-PENPAL-SRC-ALL-MD**: Every project includes an "All Markdown" section in the sidebar that shows all `.md` files in the project directory tree, organized by directory structure. This is a virtual source — not auto-detected, always present. Files that also appear in a typed source (RPI, RP1, ANCHORS) are shown in both places. The All Markdown section has no badge and no file count deduplication against other sources.
 
 ---
 
-## File Browsing
+## Navigation — Home View
 
-- <a id="P-PENPAL-FILE-LIST"></a>**P-PENPAL-FILE-LIST**: Navigating into a project shows a grouped list of markdown files organized by source. Each file shows its type badge, modification age, and an action menu. When a file has an H1 heading, it is shown as the primary label with the filename as a subtitle.
+The home view is the top-level navigation state. It shows all workspaces and standalone projects in the sidebar.
 
-- <a id="P-PENPAL-FILE-TYPES"></a>**P-PENPAL-FILE-TYPES**: Files are classified by type (research, plan, knowledge, prd, design, task, etc.) based on their path within a source. Type badges appear next to the filename.
+- <a id="P-PENPAL-HOME"></a>**P-PENPAL-HOME**: The home view sidebar shows a flat list of workspaces, standalone projects, and global navigation links (In Review, Recent). A ⌂ icon header identifies the view. A "+" button allows adding new workspaces or standalone projects.
 
-- <a id="P-PENPAL-IN-REVIEW-SECTION"></a>**P-PENPAL-IN-REVIEW-SECTION**: Files with open comment threads appear in an "In Review" section at the top of the project page, with an indicator when an agent is actively working.
+- <a id="P-PENPAL-HOME-TREE"></a>**P-PENPAL-HOME-TREE**: Workspaces are expandable tree items. Expanding a workspace reveals its child projects. Standalone projects appear as top-level peers of workspaces, not nested under any workspace. Global In Review and Recent links appear as top-level peers alongside workspaces and standalone projects.
 
-- <a id="P-PENPAL-FILE-ACTIONS"></a>**P-PENPAL-FILE-ACTIONS**: Each file has an action menu with: copy markdown, copy relative path (with `@` prefix), copy absolute path, publish to Blockcell, remove from Penpal, and delete from disk. In the file viewer toolbar, "copy file" places the file on the clipboard as a file reference, so pasting in Finder or other apps inserts the file itself (macOS only).
+- <a id="P-PENPAL-HOME-PROJECT-ITEM"></a>**P-PENPAL-HOME-PROJECT-ITEM**: Each project in the home tree shows: project name, git branch name, dirty status indicator, agent dot (when an agent is active), and review count badge (when files are in review). Multi-worktree projects are expandable, showing each worktree as a child item with its own branch name.
 
-- <a id="P-PENPAL-SOURCE-ACTIONS"></a>**P-PENPAL-SOURCE-ACTIONS**: Each source group header on the project page has a three-dot menu with: copy relative paths, copy absolute paths, publish all files, remove from Penpal (non-auto sources only), and delete from disk. Auto-detected sources show an "(auto)" label in the header.
+- <a id="P-PENPAL-HOME-NAVIGATE"></a>**P-PENPAL-HOME-NAVIGATE**: Clicking a project in the home tree navigates the current tab to the project view for that project. The sidebar switches to show the project's sources.
+
+- <a id="P-PENPAL-HOME-DEFAULT"></a>**P-PENPAL-HOME-DEFAULT**: Opening a new tab (via + button or Cmd+T) or a new window with no target lands on the home view. The main content area shows a welcome message with the app name and a hint to select a project.
+
+---
+
+## Navigation — Project View
+
+The project view shows the contents of a single project in the sidebar, organized by source.
+
+- <a id="P-PENPAL-PROJECT-BREADCRUMB"></a>**P-PENPAL-PROJECT-BREADCRUMB**: A breadcrumb bar at the top of the sidebar shows the navigation path: ⌂ / workspace name / project name. Only the ⌂ icon is clickable (navigates back to home). For standalone projects without a workspace, the breadcrumb is ⌂ / project name. An agent dot appears in the breadcrumb when an agent is active for this project.
+
+- <a id="P-PENPAL-PROJECT-WORKTREE-DROPDOWN"></a>**P-PENPAL-PROJECT-WORKTREE-DROPDOWN**: When a project has worktrees, a dropdown in the breadcrumb bar shows the current branch name with dirty status indicator. Clicking the dropdown shows all available worktrees; selecting one switches to that worktree's view.
+
+- <a id="P-PENPAL-PROJECT-SOURCES"></a>**P-PENPAL-PROJECT-SOURCES**: The project sidebar shows each detected source type as a collapsible top-level section with its badge and file count. Sources appear in this order: typed sources (RPI, RP1, ANCHORS), then All Markdown, then In Review, then Recent. Each source expands to show its files in a tree view.
+
+- <a id="P-PENPAL-PROJECT-FILE-TREE"></a>**P-PENPAL-PROJECT-FILE-TREE**: Within each source section, files are organized in a tree view that mirrors the directory structure. Directories are collapsible. Files show their name (or H1 heading when available), type badge, and an "in review" badge when they have open threads.
+
+- <a id="P-PENPAL-PROJECT-IN-REVIEW"></a>**P-PENPAL-PROJECT-IN-REVIEW**: Each project view includes a collapsible "In Review" section in the sidebar showing files with open comment threads in this project, with a count.
+
+- <a id="P-PENPAL-PROJECT-RECENT"></a>**P-PENPAL-PROJECT-RECENT**: Each project view includes a collapsible "Recent" section in the sidebar showing recently accessed files in this project, with a count.
+
+- <a id="P-PENPAL-PROJECT-BROWSE"></a>**P-PENPAL-PROJECT-BROWSE**: When viewing a project with no file open, the main content area shows a welcome message with the project name and a hint to expand a source in the sidebar. The tab bar shows "No open files".
+
+---
+
+## Navigation — Tabs & Windows
+
+- <a id="P-PENPAL-TABS"></a>**P-PENPAL-TABS**: The tab bar shows open files only — not projects or home. Each tab represents a file with its own document view and comment panel. The sidebar follows the active tab's project context: switching tabs updates the sidebar to show the sources of the project that contains the active file.
+
+- <a id="P-PENPAL-TAB-NAVIGATE"></a>**P-PENPAL-TAB-NAVIGATE**: Clicking a file in the sidebar navigates the current tab to that file. If no tabs are open, a new tab is created. Navigating within a tab builds per-tab back/forward history (including project-to-project and home-to-project transitions).
+
+- <a id="P-PENPAL-TAB-NEW"></a>**P-PENPAL-TAB-NEW**: New tabs are created explicitly: via the + button in the tab bar, Cmd+T, or Cmd+Click on a navigable item. A new tab with no target opens on the home view. Cmd+Click opens the target in a new background tab (current tab stays active).
+
+- <a id="P-PENPAL-TAB-KEYS"></a>**P-PENPAL-TAB-KEYS**: Keyboard shortcuts for tab management: Cmd+T (new tab on home), Cmd+W (close tab), Ctrl+Tab / Ctrl+Shift+Tab (next/previous tab). Back (Cmd+[) and forward (Cmd+]) navigate per-tab history. Middle-click on a tab closes it.
+
+- <a id="P-PENPAL-WINDOW-LIFECYCLE"></a>**P-PENPAL-WINDOW-LIFECYCLE**: Closing the last tab in a window closes the window. Opening a new window (Cmd+N) creates a window with a single tab on the home view. The app stays running when all windows are closed (macOS dock behavior); clicking the dock icon reopens a window on home.
+
+- <a id="P-PENPAL-CMD-CLICK"></a>**P-PENPAL-CMD-CLICK**: Cmd+Click on any navigable item (file, project) opens it in a new background tab. Cmd+Shift+Click opens in a new window.
+
+---
+
+## Navigation — Global Views
+
+Global views aggregate content across all projects. They appear as top-level items in the home view sidebar, alongside workspaces and standalone projects.
+
+- <a id="P-PENPAL-GLOBAL-IN-REVIEW"></a>**P-PENPAL-GLOBAL-IN-REVIEW**: The global In Review view shows all files with open comment threads across all projects. The sidebar shows a breadcrumb (⌂ / In Review) and a flat list of two-line file rows. Each row shows the filename on the first line and workspace / project / source path context on the second line.
+
+- <a id="P-PENPAL-GLOBAL-RECENT"></a>**P-PENPAL-GLOBAL-RECENT**: The global Recent view shows up to 50 recently active files across all projects, sorted by most recent activity first. The sidebar shows a breadcrumb (⌂ / Recent) and two-line file rows with filename, context path, and relative timestamp.
+
+- <a id="P-PENPAL-GLOBAL-ROW-NAVIGATE"></a>**P-PENPAL-GLOBAL-ROW-NAVIGATE**: Clicking a file in a global view navigates the current tab to that file and switches the sidebar to the file's project context. Cmd+Click opens in a new tab.
+
+---
+
+## File Actions
+
+- <a id="P-PENPAL-FILE-TYPES"></a>**P-PENPAL-FILE-TYPES**: Files are classified by type (research, plan, knowledge, prd, design, task, etc.) based on their path within a source. Type badges appear next to the filename in the sidebar tree and file viewer.
+
+- <a id="P-PENPAL-FILE-ACTIONS"></a>**P-PENPAL-FILE-ACTIONS**: Each file has an action menu (via context menu in the sidebar or toolbar in the file viewer) with: copy markdown, copy relative path (with `@` prefix), copy absolute path, publish to Blockcell, remove from Penpal, and delete from disk. In the file viewer toolbar, "copy file" places the file on the clipboard as a file reference, so pasting in Finder or other apps inserts the file itself (macOS only).
+
+- <a id="P-PENPAL-SOURCE-ACTIONS"></a>**P-PENPAL-SOURCE-ACTIONS**: Each source section header in the sidebar has a context menu with: copy relative paths, copy absolute paths, and publish all files. Auto-detected sources show an "(auto)" label in the header.
 
 - <a id="P-PENPAL-DELETE-FILE"></a>**P-PENPAL-DELETE-FILE**: Files and source groups can be deleted from disk via the action menu. A confirmation modal prevents accidental deletion. When a file is deleted, its associated comments are also deleted, and empty parent directories are cleaned up.
-
-- <a id="P-PENPAL-BATCH-OPS"></a>**P-PENPAL-BATCH-OPS**: Users can select multiple files via checkboxes and perform batch operations: copy markdown (concatenated), copy paths, publish, or delete.
-
-- <a id="P-PENPAL-SORT"></a>**P-PENPAL-SORT**: The workspace page supports toggling between alphabetical and recent-modification sort order. Projects with zero recognized files always sort last.
 
 ---
 
@@ -196,19 +246,11 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-AGENT-STATUS"></a>**P-PENPAL-AGENT-STATUS**: When an agent is running, the UI shows a colored progress bar indicating how much of the agent's capacity has been used, cost in USD, and a stop button.
 
-- <a id="P-PENPAL-AGENT-PRESENCE"></a>**P-PENPAL-AGENT-PRESENCE**: Running agents are automatically detected and mapped to their projects. Visual indicators (dots) appear on project cards and in the sidebar.
+- <a id="P-PENPAL-AGENT-PRESENCE"></a>**P-PENPAL-AGENT-PRESENCE**: Running agents are automatically detected and mapped to their projects. Visual indicators (dots) appear on project tree items in the home view and in the project breadcrumb bar.
 
 - <a id="P-PENPAL-WAIT-CHANGES"></a>**P-PENPAL-WAIT-CHANGES**: Agents respond to new comments and thread changes in near real-time, waiting idle until a human posts a comment.
 
 - <a id="P-PENPAL-INCORPORATE-ANSWERS"></a>**P-PENPAL-INCORPORATE-ANSWERS**: When a reviewer answers an open question, the agent incorporates the answer into the relevant section of the document and removes the question from the open questions list. The agent does not strikethrough the question or add the answer inside the open questions list.
-
----
-
-## Review Workflow
-
-- <a id="P-PENPAL-IN-REVIEW"></a>**P-PENPAL-IN-REVIEW**: The "In Review" page aggregates all files with open threads across all projects, grouped by workspace, project, and source. Each group shows a clickable breadcrumb path (workspace → project → source) for navigation.
-
-- <a id="P-PENPAL-REVIEW-COUNT"></a>**P-PENPAL-REVIEW-COUNT**: The sidebar shows a count of all files currently in review across all projects.
 
 ---
 
@@ -220,47 +262,15 @@ Source types are the pluggable system that determines how projects discover, cla
 
 ---
 
-## Tab Navigation
-
-- <a id="P-PENPAL-TABS"></a>**P-PENPAL-TABS**: The app has a browser-style tab bar. Multiple pages can be open simultaneously, each with independent back/forward history. Closing the last tab closes the window.
-
-- <a id="P-PENPAL-TAB-KEYS"></a>**P-PENPAL-TAB-KEYS**: Keyboard shortcuts for tab management: Cmd+T (new tab), Cmd+W (close tab), Ctrl+Tab / Ctrl+Shift+Tab (next/previous tab). Back (Cmd+[) and forward (Cmd+]) navigate per-tab history. Middle-click on a tab closes it.
-
-- <a id="P-PENPAL-CMD-CLICK"></a>**P-PENPAL-CMD-CLICK**: Cmd+Click on links opens in a new background tab (current tab stays active). Cmd+Shift+Click opens in a new window.
-
----
-
 ## Search
 
 - <a id="P-PENPAL-SEARCH"></a>**P-PENPAL-SEARCH**: A search bar searches across all projects' markdown files as the user types, matching project names, filenames, and file content (case-insensitive). Results are capped at 100 files; when more matches exist, a message indicates results are truncated. Matching projects appear in a separate "Projects" section. Files that matched by name show a "name" badge distinct from content matches.
 
 ---
 
-## Recent Files
-
-- <a id="P-PENPAL-RECENT"></a>**P-PENPAL-RECENT**: The "Recent" page shows up to 50 recently active files across all projects, sorted by most recent activity first. Each entry shows an activity type label (viewed, modified, created, comment, published) and a relative timestamp.
-
----
-
 ## CLI
 
 - <a id="P-PENPAL-CLI-OPEN"></a>**P-PENPAL-CLI-OPEN**: The `penpal open <path>...` command opens one or more files or directories in the Penpal app, launching the app if it's not running. Directories are resolved to their project; `.md` files are auto-added to their containing project if not already tracked (or a new standalone project is created). Non-`.md` files are rejected.
-
----
-
-## Source Management
-
-- <a id="P-PENPAL-ADD-SOURCE"></a>**P-PENPAL-ADD-SOURCE**: Users can add arbitrary directories or individual markdown files as sources to any project. Directories are scanned for all `.md` files; individual files are tracked directly.
-
-- <a id="P-PENPAL-REMOVE-SOURCE"></a>**P-PENPAL-REMOVE-SOURCE**: User-added sources can be removed. Auto-detected sources (thoughts, rp1, anchors) cannot be removed.
-
----
-
-## Sidebar Navigation
-
-- <a id="P-PENPAL-SIDEBAR"></a>**P-PENPAL-SIDEBAR**: The sidebar shows workspaces, standalone projects, and global navigation links (In Review with count, Recent, Search). A "+ Add workspace or project" button opens a modal to register new paths.
-
-- <a id="P-PENPAL-SIDEBAR-PROJECT"></a>**P-PENPAL-SIDEBAR-PROJECT**: When viewing a project or file, the sidebar switches to project mode showing a "← Home" back link, the workspace name (if applicable), worktree sub-items, and a "Sources" card listing each source as an in-page anchor link.
 
 ---
 
@@ -278,7 +288,7 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-CLAUDE-PATH"></a>**P-PENPAL-CLAUDE-PATH**: If the `claude` binary cannot be found during install, the modal shows a text input for the user to manually provide the path. The path is validated and persisted for future use.
 
-- <a id="P-PENPAL-NEW-WINDOW"></a>**P-PENPAL-NEW-WINDOW**: In the desktop app, Cmd+N opens a new window at the default route. The app stays running when all windows are closed (macOS dock behavior); clicking the dock icon reopens a window.
+- <a id="P-PENPAL-NEW-WINDOW"></a>**P-PENPAL-NEW-WINDOW**: In the desktop app, Cmd+N opens a new window with a single tab on the home view. The app stays running when all windows are closed (macOS dock behavior); clicking the dock icon reopens a window on home.
 
 - <a id="P-PENPAL-FIND"></a>**P-PENPAL-FIND**: In the desktop app, Cmd+F opens a Find bar for in-page text search with match highlighting and navigation.
 

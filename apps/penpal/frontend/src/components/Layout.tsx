@@ -28,7 +28,9 @@ function debounce<T extends (...args: never[]) => void>(fn: T, ms: number): T {
 }
 
 // E-PENPAL-HOME-SIDEBAR: home view sidebar tree with workspaces, standalone projects, global nav links.
-// E-PENPAL-PROJECT-SIDEBAR: project view sidebar with breadcrumb, worktree dropdown, source file trees.
+// E-PENPAL-PROJECT-RESOLVE, E-PENPAL-BREADCRUMB, E-PENPAL-WORKTREE-DROPDOWN,
+// E-PENPAL-SOURCE-SECTIONS, E-PENPAL-FILE-TREE, E-PENPAL-FILE-TREE-ITEM:
+// project view sidebar with breadcrumb, worktree dropdown, source file trees.
 // E-PENPAL-REVIEW-COUNT: refreshReviewCount on SSE events, displayed as "In Review (count)".
 // E-PENPAL-EXTERNAL-LINKS: handleAppClick intercepts external links for Tauri shell.
 export default function Layout() {

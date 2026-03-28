@@ -53,7 +53,8 @@ beforeEach(() => {
   vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: false } as MediaQueryList);
 });
 
-// E-PENPAL-HOME-SIDEBAR, E-PENPAL-PROJECT-SIDEBAR: verifies sidebar rendering, tab bar, SSE reconnect, and internal link navigation.
+// E-PENPAL-HOME-SIDEBAR, E-PENPAL-PROJECT-RESOLVE, E-PENPAL-BREADCRUMB, E-PENPAL-SOURCE-SECTIONS:
+// verifies sidebar rendering, tab bar, SSE reconnect, and internal link navigation.
 // E-PENPAL-REVIEW-COUNT: verifies review count refresh on SSE events.
 describe('Layout', () => {
   it('renders topbar with logo and search', async () => {

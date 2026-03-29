@@ -315,7 +315,24 @@ export default function Layout() {
     useCallback(() => {}, []),
   );
 
-  const { sortOrder, toggle: toggleSort } = useProjectSort();
+  const { sortOrder, setSortOrder, showEmpty, setShowEmpty } = useProjectSort();
+
+  // E-PENPAL-VIEW-OPTIONS: view options panel state
+  const [showViewOptions, setShowViewOptions] = useState(false);
+  const viewOptionsPanelRef = useRef<HTMLDivElement>(null);
+
+  // Close view options panel on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (viewOptionsPanelRef.current && !viewOptionsPanelRef.current.contains(e.target as Node)) {
+        setShowViewOptions(false);
+      }
+    }
+    if (showViewOptions) {
+      document.addEventListener('mousedown', handleClick);
+      return () => document.removeEventListener('mousedown', handleClick);
+    }
+  }, [showViewOptions]);
 
   // Group projects by workspace
   const workspaceProjects = useMemo(
@@ -329,9 +346,12 @@ export default function Layout() {
     return 0;
   }, [sortOrder]);
 
+  // E-PENPAL-VIEW-OPTIONS: filter empty projects when showEmpty is false
+  const filterEmpty = useCallback((p: APIProject) => showEmpty || p.fileCount > 0, [showEmpty]);
+
   const standaloneProjects = useMemo(() => {
-    return projects.filter((p) => p.origin === 'standalone').sort(projectSort);
-  }, [projects, sortOrder, projectSort]);
+    return projects.filter((p) => p.origin === 'standalone').filter(filterEmpty).sort(projectSort);
+  }, [projects, sortOrder, projectSort, filterEmpty]);
   const workspaces = useMemo(() => {
     const ws = [...new Set(workspaceProjects.map((p) => p.workspace))];
     ws.sort((a, b) => a.localeCompare(b));
@@ -340,10 +360,15 @@ export default function Layout() {
   const sortedWorkspaceProjects = useMemo(() => {
     const map = new Map<string, APIProject[]>();
     for (const ws of workspaces) {
-      map.set(ws, workspaceProjects.filter(p => p.workspace === ws).sort(projectSort));
+      map.set(ws, workspaceProjects.filter(p => p.workspace === ws).filter(filterEmpty).sort(projectSort));
     }
     return map;
-  }, [workspaces, workspaceProjects, projectSort]);
+  }, [workspaces, workspaceProjects, projectSort, filterEmpty]);
+
+  // E-PENPAL-VIEW-OPTIONS: hide workspaces with no visible projects when showEmpty is false
+  const visibleWorkspaces = useMemo(() => {
+    return workspaces.filter(ws => (sortedWorkspaceProjects.get(ws) || []).length > 0);
+  }, [workspaces, sortedWorkspaceProjects]);
 
   // Listen for native menu events (tab/window shortcuts)
   useEffect(() => {
@@ -384,7 +409,7 @@ export default function Layout() {
       window.removeEventListener('menu-go-back', goBack);
       window.removeEventListener('menu-go-forward', goForward);
     };
-  }, [activeTabId, clearWindowFocusOnClose, closeTab, openTab, activateTab, tabs, workspaces, standaloneProjects, goBack, goForward]);
+  }, [activeTabId, clearWindowFocusOnClose, closeTab, openTab, activateTab, tabs, visibleWorkspaces, standaloneProjects, goBack, goForward]);
 
   // Listen for find bar toggle (Tauri menu event only — in browser, native Cmd+F works)
   useEffect(() => {
@@ -1088,13 +1113,51 @@ export default function Layout() {
           <>
             {/* Home view sidebar */}
             {/* E-PENPAL-FE-HOME-LABEL: show "Home" label next to house icon on home screen */}
+            {/* E-PENPAL-VIEW-OPTIONS: view options popover with sort order and show-empty toggle */}
             <div className="sidebar-home-header">
               <span className="home-icon">⌂</span>
               <span className="home-label">Home</span>
-              <button
-                title={`Sort: ${sortOrder === 'alpha' ? 'A→Z' : 'Recent'}`}
-                onClick={toggleSort}
-              >{sortOrder === 'alpha' ? 'A→Z' : '⏱'}</button>
+              <div className="view-options-wrap" ref={viewOptionsPanelRef}>
+                <button
+                  className="view-options-btn"
+                  title="View options"
+                  aria-label="View options"
+                  aria-haspopup="true"
+                  aria-expanded={showViewOptions}
+                  onClick={() => setShowViewOptions((prev) => !prev)}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
+                    <line x1="4" y1="6" x2="20" y2="6" />
+                    <circle cx="9" cy="6" r="2" />
+                    <line x1="4" y1="12" x2="20" y2="12" />
+                    <circle cx="15" cy="12" r="2" />
+                    <line x1="4" y1="18" x2="20" y2="18" />
+                    <circle cx="12" cy="18" r="2" />
+                  </svg>
+                </button>
+                {showViewOptions && (
+                  <div className="view-options-panel">
+                    <label className="view-options-label">
+                      Project order
+                      <select
+                        value={sortOrder}
+                        onChange={(e) => setSortOrder(e.target.value as 'alpha' | 'recent')}
+                      >
+                        <option value="alpha">A→Z</option>
+                        <option value="recent">Most Recent</option>
+                      </select>
+                    </label>
+                    <label className="view-options-label view-options-toggle">
+                      <input
+                        type="checkbox"
+                        checked={showEmpty}
+                        onChange={(e) => setShowEmpty(e.target.checked)}
+                      />
+                      Show empty projects
+                    </label>
+                  </div>
+                )}
+              </div>
               <button
                 title="Add workspace or project"
                 onClick={() => { setShowAddModal(true); setAddPath(''); setAddError(''); }}
@@ -1102,7 +1165,7 @@ export default function Layout() {
             </div>
 
             {/* Workspaces */}
-            {workspaces.map(ws => {
+            {visibleWorkspaces.map(ws => {
               const isExpanded = expandedWorkspaces.has(ws);
               const wsProjects = sortedWorkspaceProjects.get(ws) || [];
               const hasAgent = wsProjects.some(p => p.agentConnected);
@@ -1176,7 +1239,7 @@ export default function Layout() {
             })}
 
             {/* Divider between workspaces and standalone projects */}
-            {workspaces.length > 0 && standaloneProjects.length > 0 && (
+            {visibleWorkspaces.length > 0 && standaloneProjects.length > 0 && (
               <div className="home-section-divider" />
             )}
 
@@ -1197,7 +1260,7 @@ export default function Layout() {
             ))}
 
             {/* Divider before global nav */}
-            {(workspaces.length > 0 || standaloneProjects.length > 0) && (
+            {(visibleWorkspaces.length > 0 || standaloneProjects.length > 0) && (
               <div className="home-section-divider" />
             )}
 

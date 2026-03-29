@@ -121,6 +121,9 @@
         branchesByProject = new Map(branchesByProject).set(projectId, branches);
         workspaceLifecycle.enqueueInitialSetup(projectId, branches);
         replaceProjectRepos(projectId, repos);
+        void repoBadgeStore.ensureForRepos(
+          repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+        );
       } catch (e) {
         console.error('[ProjectHome] Failed to refresh project after setup progress:', e);
       }
@@ -533,6 +536,9 @@
       branchesByProject = new Map(branchesByProject).set(projectId, branches);
       workspaceLifecycle.enqueueInitialSetup(projectId, branches);
       replaceProjectRepos(projectId, repos);
+      void repoBadgeStore.ensureForRepos(
+        repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+      );
     } catch (e) {
       console.error('Failed to add repo:', e);
       const message = e instanceof Error ? e.message : String(e);

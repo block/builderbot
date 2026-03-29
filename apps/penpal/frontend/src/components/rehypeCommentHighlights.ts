@@ -56,7 +56,7 @@ export default function rehypeCommentHighlights(options: Options) {
         const matched = applyContinuation(node, state.highlight, state.remaining);
         if (matched > 0) {
           const newRemaining = state.remaining.slice(matched).trim();
-          if (newRemaining.length < 3) {
+          if (newRemaining.length === 0) {
             continuing.delete(threadId);
           } else {
             state.remaining = newRemaining;
@@ -268,6 +268,22 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
     }
   }
 
+  // Positionally-constrained match for very short prefixes (1-2 chars):
+  // only accept if the element text ENDS with the prefix, to avoid false
+  // positives from arbitrary-position matches within the element.
+  if (matchIndex === -1 && normSelected.length > 1) {
+    const shortLen = Math.min(2, normSelected.length);
+    for (let tryLen = shortLen; tryLen >= 1; tryLen--) {
+      const prefix = normSelected.slice(0, tryLen);
+      if (normalizedText.endsWith(prefix)) {
+        matchIndex = normalizedText.length - tryLen;
+        matchLength = tryLen;
+        isCrossElement = true;
+        break;
+      }
+    }
+  }
+
   if (matchIndex === -1) return { remaining: null, matched: false };
 
   const normToOrig = buildNormToOrigMap(text, normalizedText);
@@ -278,7 +294,7 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
 
   if (isCrossElement) {
     const remaining = normSelected.slice(matchLength).trim();
-    return { remaining: remaining.length >= 3 ? remaining : null, matched: true };
+    return { remaining: remaining.length >= 1 ? remaining : null, matched: true };
   }
   return { remaining: null, matched: true };
 }
@@ -331,6 +347,15 @@ function applyContinuation(element: Element, highlight: ThreadHighlight, remaini
     if (hi >= 3) {
       matchLength = hi;
       matchIndex = normalizedText.indexOf(remaining.slice(0, matchLength));
+    }
+  }
+
+  // Strategy 2b: Positionally-constrained match for very short remaining (1-2 chars).
+  // Only accept if the element text STARTS with the remaining text.
+  if (matchIndex === -1 && remaining.length < 3 && remaining.length >= 1) {
+    if (normalizedText.startsWith(remaining)) {
+      matchIndex = 0;
+      matchLength = remaining.length;
     }
   }
 

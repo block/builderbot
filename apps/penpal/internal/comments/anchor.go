@@ -73,23 +73,18 @@ func ResolveAnchor(markdown string, anchor Anchor) int {
 // of threadID -> line number (1-indexed). Threads that can't be anchored
 // are mapped to -1.
 //
-// StartLine is the primary mechanism — it records which rendered element the
-// comment was attached to. Text matching against raw markdown is only used
-// as backward compat for old anchors that lack StartLine.
+// Always re-resolves anchors against the current markdown using text matching
+// (selectedText + before/after context). The stored StartLine is used as a
+// fallback only when text matching fails, preserving highlights even when the
+// selected text has been edited.
 //
-// E-PENPAL-ANCHOR-RESOLVE: maps threads to line numbers via StartLine or text fallback.
+// E-PENPAL-ANCHOR-RESOLVE: maps threads to line numbers via text matching with StartLine fallback.
 func ResolveAnchorsToLines(threads []Thread, markdown string) map[string]int {
 	result := make(map[string]int, len(threads))
 	for _, t := range threads {
-		if t.Anchor.StartLine > 0 {
-			result[t.ID] = t.Anchor.StartLine
-			continue
-		}
-		// Backward compat: text matching for anchors without StartLine
+		// Always try text matching first so line numbers track document edits
 		offset := ResolveAnchor(markdown, t.Anchor)
-		if offset < 0 {
-			result[t.ID] = -1
-		} else {
+		if offset >= 0 {
 			line := 1
 			for i := 0; i < offset && i < len(markdown); i++ {
 				if markdown[i] == '\n' {
@@ -97,7 +92,14 @@ func ResolveAnchorsToLines(threads []Thread, markdown string) map[string]int {
 				}
 			}
 			result[t.ID] = line
+			continue
 		}
+		// Text not found — fall back to stored StartLine (text may have been edited)
+		if t.Anchor.StartLine > 0 {
+			result[t.ID] = t.Anchor.StartLine
+			continue
+		}
+		result[t.ID] = -1
 	}
 	return result
 }

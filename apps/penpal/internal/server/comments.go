@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/loganj/penpal/internal/comments"
@@ -174,6 +176,27 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		threads = filtered
+	}
+
+	// Re-resolve anchor lines against current file content so highlights
+	// track document edits (PENPAL-23). Read the file and update each
+	// thread's StartLine before returning.
+	if project := s.cache.FindProject(projectName); project != nil {
+		basePath := project.Path
+		if worktree != "" {
+			if wtPath := s.cache.WorktreePath(projectName, worktree); wtPath != "" {
+				basePath = wtPath
+			}
+		}
+		fullPath := filepath.Join(basePath, filePath)
+		if raw, readErr := os.ReadFile(fullPath); readErr == nil {
+			resolvedLines := comments.ResolveAnchorsToLines(threads, string(raw))
+			for i := range threads {
+				if line, ok := resolvedLines[threads[i].ID]; ok && line > 0 {
+					threads[i].Anchor.StartLine = line
+				}
+			}
+		}
 	}
 
 	agentRunning := s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running

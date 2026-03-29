@@ -237,7 +237,7 @@ async function verifyHighlightText(
     const t = await marks.nth(i).textContent().catch(() => '');
     if (t) parts.push(t);
   }
-  const normMark = normalizeForComparison(parts.join(' '));
+  const normMark = normalizeForComparison(parts.join(''));
   const normSelected = normalizeForComparison(selectedText);
 
   if (normMark.includes(normSelected)) {

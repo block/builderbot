@@ -99,6 +99,7 @@ see-also:
 | View Tracking (E-PENPAL-ACTIVITY) | — | — | — | view-tracking.spec.ts |
 | File Handler (P-PENPAL-FILE-HANDLER) | — | — | api_manage_test.go | — |
 | Source Disambiguation (P-PENPAL-SRC-DISAMBIG) | — | Layout.test.tsx | — | — |
+| Home Label (P-PENPAL-HOME-LABEL) | — | Layout.test.tsx | — | — |
 
 ## Known Coverage Gaps
 

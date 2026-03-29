@@ -112,6 +112,20 @@ describe('Layout', () => {
     expect(screen.getByText('In Review')).toBeInTheDocument();
   });
 
+  // E-PENPAL-FE-HOME-LABEL: "Home" label appears on home screen sidebar
+  it('shows "Home" label next to house icon on home screen', async () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    const sidebar = screen.getByTestId('sidebar');
+    const homeLabel = sidebar.querySelector('.home-label');
+    expect(homeLabel).toBeInTheDocument();
+    expect(homeLabel).toHaveTextContent('Home');
+  });
+
   it('renders theme toggle', () => {
     render(
       <MemoryRouter>

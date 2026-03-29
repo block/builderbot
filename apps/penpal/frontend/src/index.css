@@ -448,6 +448,13 @@ a:hover { text-decoration: underline; }
   font-weight: normal;
   letter-spacing: normal;
 }
+/* E-PENPAL-FE-HOME-LABEL */
+.sidebar-home-header .home-label {
+  margin-right: auto;
+  font-size: 1.15em;
+  text-transform: none;
+  letter-spacing: normal;
+}
 .sidebar-home-header button {
   background: none;
   border: none;

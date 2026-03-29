@@ -120,6 +120,8 @@ The home view is the top-level navigation state. It shows all workspaces and sta
 
 - <a id="P-PENPAL-HOME"></a>**P-PENPAL-HOME**: The home view sidebar shows a flat list of workspaces, standalone projects, and global navigation links (In Review, Recent). A ⌂ icon header identifies the view. A "+" button allows adding new workspaces or standalone projects.
 
+- <a id="P-PENPAL-HOME-LABEL"></a>**P-PENPAL-HOME-LABEL**: When on the home screen, the word "Home" appears next to the ⌂ icon at the top of the sidebar.
+
 - <a id="P-PENPAL-HOME-TREE"></a>**P-PENPAL-HOME-TREE**: Workspaces are expandable tree items. Expanding a workspace reveals its child projects. Standalone projects appear as top-level peers of workspaces, not nested under any workspace. Visual dividers separate the workspaces section, standalone projects section, and global navigation section. Sections with no items are not shown (and their dividers are omitted). Global In Review and Recent links appear in the global navigation section. The In Review link shows a right-aligned count (matching the project view's source header count style) of all files currently in review across all projects; the link is dimmed when the count is zero.
 
 - <a id="P-PENPAL-HOME-PROJECT-ITEM"></a>**P-PENPAL-HOME-PROJECT-ITEM**: Each project in the home tree shows: project name and agent dot (when an agent is active). No file counts or review counts are shown on individual project items. Git branch is available as a tooltip. Multi-worktree projects are expandable, showing each worktree as a child item. Non-main worktrees display a worktree icon; the main worktree does not. Git branch is shown as a tooltip on each worktree. The tree does not use vertical guide lines or dirty status indicators.

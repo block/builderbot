@@ -64,16 +64,27 @@ export default function rehypeCommentHighlights(options: Options) {
         }
       }
 
-      // Start new highlights at this line
-      const lineHighlights = byLine.get(sourceLine);
-      if (!lineHighlights) return;
+      // Start new highlights at or near this line.
+      // Check nearby lines (0-3 offset) because startLine may point to an empty
+      // line or thematic break preceding the actual content element when the
+      // selectedText starts with whitespace/newlines.
+      for (let lineOffset = 0; lineOffset <= 3; lineOffset++) {
+        const lineHighlights = byLine.get(sourceLine - lineOffset);
+        if (!lineHighlights) continue;
 
-      for (const highlight of lineHighlights) {
-        if (applied.has(highlight.threadId)) continue;
-        const result = applyHighlight(node, highlight);
-        applied.add(highlight.threadId);
-        if (result.remaining) {
-          continuing.set(highlight.threadId, { highlight, remaining: result.remaining });
+        for (const highlight of lineHighlights) {
+          if (applied.has(highlight.threadId)) continue;
+          const result = applyHighlight(node, highlight);
+          applied.add(highlight.threadId);
+          if (result.remaining) {
+            continuing.set(highlight.threadId, { highlight, remaining: result.remaining });
+          } else if (!result.matched) {
+            // Start element had no text (e.g. <hr>) — schedule full text for continuation
+            const normSelected = normalizeSelected(highlight.selectedText);
+            if (normSelected.length >= 5) {
+              continuing.set(highlight.threadId, { highlight, remaining: normSelected });
+            }
+          }
         }
       }
     });
@@ -208,12 +219,15 @@ function insertMarks(
  * in the element's accumulated text content and wrapping matching portions
  * in <mark> elements.
  *
- * Returns { remaining } — for cross-element selections, the normalized text
- * that was NOT matched in this element and needs continuation in subsequent elements.
+ * Returns { remaining, matched } — `matched` is true if any text was highlighted.
+ * For cross-element selections, `remaining` is the normalized text that was NOT
+ * matched in this element and needs continuation in subsequent elements.
+ * When `matched` is false (e.g. element has no text like <hr>), the caller
+ * should schedule the full normalizedSelected for continuation.
  */
-function applyHighlight(element: Element, highlight: ThreadHighlight): { remaining: string | null } {
+function applyHighlight(element: Element, highlight: ThreadHighlight): { remaining: string | null; matched: boolean } {
   const { nodes, text } = collectTextNodes(element);
-  if (nodes.length === 0) return { remaining: null };
+  if (nodes.length === 0) return { remaining: null, matched: false };
 
   const normalizedText = normalizeHast(text);
   const normSelected = normalizeSelected(highlight.selectedText);
@@ -254,7 +268,7 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
     }
   }
 
-  if (matchIndex === -1) return { remaining: null };
+  if (matchIndex === -1) return { remaining: null, matched: false };
 
   const normToOrig = buildNormToOrigMap(text, normalizedText);
   const origMatchStart = normToOrig[matchIndex];
@@ -264,9 +278,9 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
 
   if (isCrossElement) {
     const remaining = normSelected.slice(matchLength).trim();
-    return { remaining: remaining.length >= 5 ? remaining : null };
+    return { remaining: remaining.length >= 5 ? remaining : null, matched: true };
   }
-  return { remaining: null };
+  return { remaining: null, matched: true };
 }
 
 /**

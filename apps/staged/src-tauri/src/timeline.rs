@@ -42,41 +42,41 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             format!("{}..HEAD", &branch.base_branch)
         };
         let format_arg = "--format=%H|%h|%s|%an|%ct";
-        if let Ok(output) = branches::run_workspace_git(
+        let output = branches::run_workspace_git(
             ws_name,
             repo_subpath.as_deref(),
             &["log", format_arg, &range],
-        ) {
-            // git log returns newest-first; parse then assign order so 0 = oldest.
-            for line in output.lines() {
-                if line.is_empty() {
-                    continue;
-                }
-                let parts: Vec<&str> = line.splitn(5, '|').collect();
-                if parts.len() >= 5 {
-                    let sha = parts[0].to_string();
-                    let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
-                    let (session_id, session_status) = store.resolve_session_status(
-                        our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
-                    );
+        )
+        .map_err(|e| format!("Failed to load commits from workspace: {e}"))?;
+        // git log returns newest-first; parse then assign order so 0 = oldest.
+        for line in output.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(5, '|').collect();
+            if parts.len() >= 5 {
+                let sha = parts[0].to_string();
+                let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
+                let (session_id, session_status) = store.resolve_session_status(
+                    our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
+                );
 
-                    commits.push(CommitTimelineItem {
-                        id: our_commit.as_ref().map(|c| c.id.clone()),
-                        sha,
-                        short_sha: parts[1].to_string(),
-                        subject: parts[2].to_string(),
-                        author: parts[3].to_string(),
-                        timestamp: parts[4].parse().unwrap_or(0),
-                        order: 0, // placeholder, assigned below
-                        session_id,
-                        session_status,
-                    });
-                }
+                commits.push(CommitTimelineItem {
+                    id: our_commit.as_ref().map(|c| c.id.clone()),
+                    sha,
+                    short_sha: parts[1].to_string(),
+                    subject: parts[2].to_string(),
+                    author: parts[3].to_string(),
+                    timestamp: parts[4].parse().unwrap_or(0),
+                    order: 0, // placeholder, assigned below
+                    session_id,
+                    session_status,
+                });
             }
-            let len = commits.len() as i64;
-            for (i, commit) in commits.iter_mut().enumerate() {
-                commit.order = len - 1 - i as i64;
-            }
+        }
+        let len = commits.len() as i64;
+        for (i, commit) in commits.iter_mut().enumerate() {
+            commit.order = len - 1 - i as i64;
         }
     } else if let Some(ref wd) = workdir {
         // Local branch: fetch commits from the local worktree

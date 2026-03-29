@@ -100,6 +100,10 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-SRC-ALL-MD"></a>**P-PENPAL-SRC-ALL-MD**: Every project includes an "All Markdown" section in the sidebar that shows all `.md` files in the project directory tree, organized by directory structure. This is a virtual source — not auto-detected, always present. Files that also appear in a typed source (RPI, RP1, ANCHORS) are shown in both places. The All Markdown section has no badge and no file count deduplication against other sources.
 
+### Source Disambiguation
+
+- <a id="P-PENPAL-SRC-DISAMBIG"></a>**P-PENPAL-SRC-DISAMBIG**: When multiple sources share the same type badge in the sidebar (e.g., multiple Anchors modules), the source path is shown to the right of the badge label to disambiguate them. The path text is deemphasized and ellipsized if too long.
+
 ---
 
 ## General UX

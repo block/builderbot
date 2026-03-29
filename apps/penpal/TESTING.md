@@ -97,6 +97,7 @@ see-also:
 | Path Traversal (E-PENPAL-PATH-TRAVERSAL) | — | — | pathutil_test.go, spa_test.go | — |
 | View Tracking (E-PENPAL-ACTIVITY) | — | — | — | view-tracking.spec.ts |
 | File Handler (P-PENPAL-FILE-HANDLER) | — | — | api_manage_test.go | — |
+| Source Disambiguation (P-PENPAL-SRC-DISAMBIG) | — | Layout.test.tsx | — | — |
 
 ## Known Coverage Gaps
 

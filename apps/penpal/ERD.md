@@ -279,6 +279,9 @@ see-also:
 - <a id="E-PENPAL-SOURCE-SECTIONS"></a>**E-PENPAL-SOURCE-SECTIONS**: The project sidebar shows collapsible source sections populated from `projectFiles` state (via `api.getProjectFiles()`), a collapsible "In Review" section (from `projectReviews` via `api.getReviews()`), and a collapsible "Recent" section. Each source header shows its badge and file count. Virtual sources with zero files show alternate labels ("No Markdown Found", "Nothing in Review", "Nothing Recent") with `deemphasized` class and are not expandable. State: `expandedSources` `Set<string>`. SSE `files` and `comments` events refresh the data.
   ← [P-PENPAL-PROJECT-SOURCES](PRODUCT.md#P-PENPAL-PROJECT-SOURCES), [P-PENPAL-PROJECT-IN-REVIEW](PRODUCT.md#P-PENPAL-PROJECT-IN-REVIEW), [P-PENPAL-PROJECT-RECENT](PRODUCT.md#P-PENPAL-PROJECT-RECENT)
 
+- <a id="E-PENPAL-FE-SRC-DISAMBIG"></a>**E-PENPAL-FE-SRC-DISAMBIG**: When rendering source sections in the sidebar, the frontend computes which `badgeText` values appear on more than one group. For groups with duplicated badges, the group `name` (module path) is rendered as a `<span class="source-disambig">` to the right of the badge with `text-overflow: ellipsis`, deemphasized color (`var(--text-disabled)`), and a `title` attribute showing the full path. Groups with unique badges show no disambiguation text.
+  ← [P-PENPAL-SRC-DISAMBIG](PRODUCT.md#P-PENPAL-SRC-DISAMBIG)
+
 - <a id="E-PENPAL-FILE-TREE"></a>**E-PENPAL-FILE-TREE**: `buildFileTree()` constructs a recursive directory tree from the flat file list in each source section. Single-child directory chains are compacted into one node with a combined path label (e.g., `a/b/c/`). State: `expandedDirs` `Set<string>`.
   ← [P-PENPAL-PROJECT-FILE-TREE](PRODUCT.md#P-PENPAL-PROJECT-FILE-TREE)
 

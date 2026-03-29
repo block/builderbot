@@ -879,56 +879,57 @@ export default function Layout() {
                 {activeProject.workspace ? `${activeProject.workspace} / ` : ''}{activeProject.name}
               </Link>
               {activeProject.agentConnected && <span className="agent-dot" />}
-              {activeProject.worktrees && activeProject.worktrees.length > 1 ? (
-                <div className="worktree-dropdown" ref={worktreeDropdownRef} onClick={() => setShowWorktreeDropdown(!showWorktreeDropdown)}>
-                  {(() => {
-                    const wt = activeProject.worktrees!.find(wt => activeWorktree ? wt.name === activeWorktree : wt.isMain);
-                    const isMain = !wt || wt.isMain;
-                    return isMain ? 'main repo' : (
-                      <>
-                        <svg className="worktree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                          <circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="18" cy="19" r="2" />
-                          <path d="M8 5h8" /><path d="M8 5v8a6 6 0 0 0 6 6h2" />
-                        </svg>
-                        {wt!.name}
-                      </>
-                    );
-                  })()}
-                  {showWorktreeDropdown && (
-                    <div className="worktree-dropdown-menu">
-                      {activeProject.worktrees.map(wt => {
-                        const isActive = wt.isMain ? !activeWorktree : activeWorktree === wt.name;
-                        const url = wt.isMain
-                          ? `/project/${activeProject.qualifiedName}`
-                          : `/project/${activeProject.qualifiedName}@${wt.name}`;
-                        return (
-                          <button
-                            key={wt.name}
-                            className={isActive ? 'active' : ''}
-                            title={wt.branch ? `branch: ${wt.branch}` : undefined}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setShowWorktreeDropdown(false);
-                              navigate(url);
-                            }}
-                          >
-                            {!wt.isMain && (
-                              <svg className="worktree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                                <circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="18" cy="19" r="2" />
-                                <path d="M8 5h8" /><path d="M8 5v8a6 6 0 0 0 6 6h2" />
-                              </svg>
-                            )}
-                            {wt.isMain ? 'main repo' : wt.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="worktree-label deemphasized">no worktrees</div>
-              )}
             </div>
+            {/* E-PENPAL-WORKTREE-DROPDOWN: full-width worktree selector row below breadcrumb */}
+            {activeProject.worktrees && activeProject.worktrees.length > 1 ? (
+              <div className="worktree-selector-row" ref={worktreeDropdownRef} onClick={() => setShowWorktreeDropdown(!showWorktreeDropdown)}>
+                {(() => {
+                  const wt = activeProject.worktrees!.find(wt => activeWorktree ? wt.name === activeWorktree : wt.isMain);
+                  const isMain = !wt || wt.isMain;
+                  return isMain ? 'main repo' : (
+                    <>
+                      <svg className="worktree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                        <circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="18" cy="19" r="2" />
+                        <path d="M8 5h8" /><path d="M8 5v8a6 6 0 0 0 6 6h2" />
+                      </svg>
+                      {wt!.name}
+                    </>
+                  );
+                })()}
+                {showWorktreeDropdown && (
+                  <div className="worktree-dropdown-menu">
+                    {activeProject.worktrees.map(wt => {
+                      const isActive = wt.isMain ? !activeWorktree : activeWorktree === wt.name;
+                      const url = wt.isMain
+                        ? `/project/${activeProject.qualifiedName}`
+                        : `/project/${activeProject.qualifiedName}@${wt.name}`;
+                      return (
+                        <button
+                          key={wt.name}
+                          className={isActive ? 'active' : ''}
+                          title={wt.branch ? `branch: ${wt.branch}` : undefined}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowWorktreeDropdown(false);
+                            navigate(url);
+                          }}
+                        >
+                          {!wt.isMain && (
+                            <svg className="worktree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                              <circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="18" cy="19" r="2" />
+                              <path d="M8 5h8" /><path d="M8 5v8a6 6 0 0 0 6 6h2" />
+                            </svg>
+                          )}
+                          {wt.isMain ? 'main repo' : wt.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="worktree-selector-row deemphasized">no worktrees</div>
+            )}
 
             {isFilePage ? (
               /* File view: only show table of contents below breadcrumb */

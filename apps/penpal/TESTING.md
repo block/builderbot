@@ -65,7 +65,8 @@ see-also:
 | Source Types — claude-plans (P-PENPAL-SRC-CLAUDE-PLANS) | — | — | — | — |
 | Source Types — manual (P-PENPAL-SRC-MANUAL) | — | — | grouping_test.go (TestBuildFileGroups_ManualSourceDirHeadings) | — |
 | Cache & File Scanning (E-PENPAL-CACHE, SCAN) | cache_test.go | — | — | — |
-| Worktree Support (P-PENPAL-WORKTREE) | discovery/worktree_test.go, cache/worktree_test.go | — | worktree_test.go (API + MCP) | — |
+| Worktree Support (P-PENPAL-WORKTREE) | discovery/worktree_test.go, cache/worktree_test.go | Layout.test.tsx | worktree_test.go (API + MCP) | — |
+| Worktree Dropdown (P-PENPAL-PROJECT-WORKTREE-DROPDOWN) | — | Layout.test.tsx | — | — |
 | Git Integration (P-PENPAL-GIT-INFO) | — | — | — | — |
 | File List & Grouping (P-PENPAL-FILE-LIST) | — | ProjectPage.test.tsx | grouping_test.go, integration_test.go | — |
 | Markdown Rendering (P-PENPAL-GFM, MERMAID) | — | MarkdownViewer.test.tsx | — | mermaid-comments.spec.ts |

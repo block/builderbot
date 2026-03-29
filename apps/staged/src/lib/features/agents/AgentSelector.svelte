@@ -143,9 +143,9 @@
 
   .selector-dropdown {
     position: absolute;
-    bottom: 100%;
+    top: 100%;
     left: 0;
-    margin-bottom: 4px;
+    margin-top: 4px;
     background: var(--bg-primary);
     border: 1px solid var(--border-muted);
     border-radius: 6px;

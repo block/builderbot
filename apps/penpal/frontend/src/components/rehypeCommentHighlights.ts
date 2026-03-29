@@ -116,6 +116,7 @@ function normalizeSelected(selectedText: string): string {
   return selectedText
     .replace(/[*_`]/g, '')
     .replace(/^(?:#{1,6} |- |\* |\d+\. |> |- \[[ x]\] )/gm, '')
+    .replace(/^-{3,}$/gm, '')  // thematic breaks (rendered as <hr> with no text)
     .replace(/\s+/g, ' ')
     .trim();
 }

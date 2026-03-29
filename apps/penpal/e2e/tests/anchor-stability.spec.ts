@@ -121,16 +121,19 @@ function editBefore(
   return lines.join('\n');
 }
 
-/** Insert 1-3 new paragraph lines at a random position below anchorLine. */
+/** Insert a new paragraph below the selection's end line. */
 function editAfter(
   markdown: string,
   anchorLine: number,
+  selectedText: string,
   testIdx: number,
 ): string {
   const lines = markdown.split('\n');
+  const selectionLineCount = selectedText.split('\n').length;
+  const endLine = anchorLine + selectionLineCount - 1;
   const insertAt = Math.min(
     lines.length,
-    anchorLine + 2 + Math.floor(Math.random() * 5),
+    endLine + 1 + Math.floor(Math.random() * 5),
   );
   const newLines = [
     '',
@@ -141,7 +144,7 @@ function editAfter(
   return lines.join('\n');
 }
 
-/** Modify the line containing the anchored text. */
+/** Modify a line within the selection's range. */
 function editWithin(
   markdown: string,
   anchorLine: number,
@@ -149,9 +152,12 @@ function editWithin(
   testIdx: number,
 ): string {
   const lines = markdown.split('\n');
-  const lineIdx = anchorLine - 1;
+  const selectionLineCount = selectedText.split('\n').length;
+  const endLine = anchorLine + selectionLineCount - 1;
+  // Pick a random line within the selection range
+  const targetLine = anchorLine + Math.floor(Math.random() * (endLine - anchorLine + 1));
+  const lineIdx = targetLine - 1;
   if (lineIdx >= 0 && lineIdx < lines.length) {
-    // Append text to the line (don't replace the selectedText entirely)
     lines[lineIdx] = lines[lineIdx] + ` [edit-${testIdx}]`;
   }
   return lines.join('\n');
@@ -511,7 +517,7 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
       fs.writeFileSync(absFilePath, baselineMarkdown);
       await page.waitForTimeout(300);
 
-      const afterEditAfter = editAfter(baselineMarkdown, anchorLine, testIdx);
+      const afterEditAfter = editAfter(baselineMarkdown, anchorLine, selectedText, testIdx);
       fs.writeFileSync(absFilePath, afterEditAfter);
       await page.waitForTimeout(300);
 

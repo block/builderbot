@@ -28,7 +28,7 @@ export default defineConfig({
     {
       name: 'default',
       use: { browserName: 'chromium' },
-      testIgnore: /(?:sse-refresh|review-workflow|cli-open|mermaid-comments|find-in-page)\.spec\.ts$/,
+      testIgnore: /(?:sse-refresh|review-workflow|cli-open|mermaid-comments|find-in-page|anchor-stability)\.spec\.ts$/,
     },
     {
       // Tests that call POST /api/open broadcast "navigate" SSE events to
@@ -53,6 +53,13 @@ export default defineConfig({
       use: { browserName: 'chromium' },
       testMatch: /sse-refresh\.spec\.ts$/,
       dependencies: ['review'],
+    },
+    {
+      // Anchor stability stress test — run independently via orchestrator.
+      name: 'anchor-stability',
+      use: { browserName: 'chromium' },
+      testMatch: /anchor-stability\.spec\.ts$/,
+      timeout: 120000,
     },
   ],
 });

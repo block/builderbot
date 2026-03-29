@@ -295,6 +295,7 @@ export default function FilePage() {
         if (event.type === 'files') {
           fetchContent();
           fetchFileMetadata();
+          fetchThreads(); // Re-fetch threads so anchor lines are re-resolved against new content
         }
         if (event.type === 'agents') fetchAgentStatus();
       },

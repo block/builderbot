@@ -65,6 +65,10 @@
     newSessionDisabled?: boolean;
     /** Whether the timeline is being revalidated in the background. */
     revalidating?: boolean;
+    /** Error message from a failed load/revalidation. */
+    error?: string | null;
+    /** Callback to retry loading the timeline. */
+    onRetry?: () => void;
     /** When set, a provisioning row is shown at the start of the timeline. */
     provisioningLabel?: string;
     /** Optional detail text for the provisioning row (e.g. git progress). */
@@ -95,6 +99,8 @@
     onNewReview,
     newSessionDisabled = false,
     revalidating = false,
+    error,
+    onRetry,
     provisioningLabel,
     provisioningDetail,
     footerActions,
@@ -488,7 +494,8 @@
             !onNewCommit &&
             pendingDropNotes.length === 0 &&
             pendingItems.length === 0 &&
-            !revalidating}
+            !revalidating &&
+            !error}
           sessionId={item.sessionId}
           deleteDisabledReason={item.deleteDisabledReason}
           {onSessionClick}
@@ -506,6 +513,7 @@
           isLast={index === pendingDropNotes.length - 1 &&
             pendingItems.length === 0 &&
             !revalidating &&
+            !error &&
             !onNewNote &&
             !onNewCommit}
         />
@@ -521,13 +529,32 @@
               item.secondaryMeta ??
               fallbackHintForPendingType(item.type))
             : item.secondaryMeta}
-          isLast={index === pendingItems.length - 1 && !revalidating && !onNewNote && !onNewCommit}
+          isLast={index === pendingItems.length - 1 &&
+            !revalidating &&
+            !error &&
+            !onNewNote &&
+            !onNewCommit}
         />
       </div>
     {/each}
     {#if revalidating}
       <div transition:slide={{ duration: 200 }}>
-        <TimelineRow type="revalidating" title="Looking for changes..." isLast={true} />
+        <TimelineRow
+          type="revalidating"
+          title="Looking for changes..."
+          isLast={!error && !onNewNote && !onNewCommit}
+        />
+      </div>
+    {/if}
+    {#if error && !revalidating}
+      <div transition:slide={{ duration: 200 }}>
+        <TimelineRow
+          type="load-error"
+          title="Failed to load commits"
+          secondaryMeta={error}
+          isLast={true}
+          onRetryClick={onRetry}
+        />
       </div>
     {/if}
     {#if onNewNote || onNewCommit || onNewReview || footerActions}

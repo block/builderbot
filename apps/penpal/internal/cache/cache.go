@@ -575,6 +575,13 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				if !strings.HasSuffix(path, ".md") {
 					return nil
 				}
+				// E-PENPAL-SOURCE-REGISTRY: RequireSibling pre-filter.
+				if st != nil && st.RequireSibling != "" {
+					siblingPath := filepath.Join(filepath.Dir(path), st.RequireSibling)
+					if _, err := os.Stat(siblingPath); err != nil {
+						return nil
+					}
+				}
 				relToSource, _ := filepath.Rel(rootPath, path)
 				relToProject, _ := filepath.Rel(project.Path, path)
 

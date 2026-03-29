@@ -250,8 +250,8 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
   // Cross-element fallback: find the longest prefix of selectedText
   // that matches within this element. The remainder will be highlighted
   // in subsequent elements via the continuation mechanism.
-  if (matchIndex === -1 && normSelected.length > 10) {
-    let lo = 10, hi = normSelected.length - 1;
+  if (matchIndex === -1 && normSelected.length > 3) {
+    let lo = 3, hi = normSelected.length - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >>> 1;
       if (normalizedText.indexOf(normSelected.slice(0, mid)) !== -1) {
@@ -261,7 +261,7 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
       }
     }
     const prefixLen = hi;
-    if (prefixLen >= 10) {
+    if (prefixLen >= 3) {
       matchIndex = normalizedText.indexOf(normSelected.slice(0, prefixLen));
       matchLength = prefixLen;
       isCrossElement = true;
@@ -290,7 +290,21 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
  *
  * Returns the number of normalized characters matched (0 if no match).
  */
+// Block-level tags whose children should be matched individually rather than
+// as concatenated text (prevents wrong-position matches in container elements).
+const BLOCK_TAGS = new Set([
+  'li', 'p', 'div', 'blockquote', 'pre', 'ul', 'ol', 'table',
+  'tr', 'td', 'th', 'section', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+]);
+
 function applyContinuation(element: Element, highlight: ThreadHighlight, remaining: string): number {
+  // Skip container elements with block children — let individual children handle
+  // the continuation to avoid matching the wrong child's text when collectTextNodes
+  // concatenates all descendants without separators.
+  if (element.children.some(c => c.type === 'element' && BLOCK_TAGS.has((c as Element).tagName))) {
+    return 0;
+  }
+
   const { nodes, text } = collectTextNodes(element);
   if (nodes.length === 0) return 0;
 

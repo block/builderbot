@@ -102,7 +102,7 @@ Implementation (must satisfy all of the above)
 1. **PRODUCT.md is authoritative.** If there is a conflict between documents, PRODUCT.md wins.
 2. **ERD.md must fully satisfy PRODUCT.md.** Every product requirement should have corresponding engineering requirements that cover it.
 3. **All implementation must meet both PRD and ERD requirements.** Do not implement against only one document.
-4. **Keep documents consistent.** When changing a requirement, update PRODUCT.md first, then ERD.md to reflect it (and link back).
+4. **Keep documents consistent.** When changing a requirement or adding a new feature, update PRODUCT.md first, then ERD.md to reflect it (and link back), then update TESTING.md's coverage mapping table so every new or changed requirement has a test-layer assignment. Always verify the TESTING.md table reflects the current scope — even when a row already exists for the feature area, it may need updating to cover new requirements.
 5. **Do not add requirements to ERD.md that contradict or extend PRODUCT.md without updating PRODUCT.md first.** The PRD drives the ERD, not the other way around.
 6. **Tests are truthier than implementation, but documents are truthier than tests.** If the implementation diverges from the tests, the implementation is assumed buggy. If the tests diverge from the PRD or ERD, the tests are wrong. Fix the code to match the tests; fix the tests to match the documents; update the documents first if the requirement has genuinely changed.
 7. **Every P-\* and E-\* requirement must have test coverage.** See TESTING.md for coverage invariants and the requirement-to-test-layer mapping. A requirement without a corresponding test is a coverage gap that must be addressed.
@@ -171,6 +171,7 @@ Rules:
 - Keep existing descriptive comments — the tag is an addition
 - Natural prose is fine: `// Per E-AUTH-SESSION, tokens expire after 24 hours`
 - Skip self-explanatory code, boilerplate, and standard library calls
+- **Tag test functions too** — every test file that verifies a requirement must carry the relevant E-*/P-* ID
 
 ### Monorepo Support
 

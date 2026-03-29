@@ -128,7 +128,13 @@ The home view is the top-level navigation state. It shows all workspaces and sta
 
 - <a id="P-PENPAL-HOME-NAVIGATE"></a>**P-PENPAL-HOME-NAVIGATE**: Clicking a project in the home tree navigates the current tab to the project view for that project. The sidebar switches to show the project's sources.
 
-- <a id="P-PENPAL-SORT"></a>**P-PENPAL-SORT**: The home sidebar header includes a sort toggle that switches between alphabetical and recent-modification order for workspaces and standalone projects. The selected order persists in localStorage and syncs across tabs/windows. Projects with zero recognized files always sort last and are visually dimmed.
+- <a id="P-PENPAL-VIEW-OPTIONS"></a>**P-PENPAL-VIEW-OPTIONS**: The home sidebar header includes a view options button (filter icon) just to the left of the "+" button. Clicking it opens a floating panel. The panel stays open while the user changes settings and dismisses only when clicking outside it (including clicking the view options button again).
+
+- <a id="P-PENPAL-VIEW-OPTIONS-SORT"></a>**P-PENPAL-VIEW-OPTIONS-SORT**: The view options panel contains a "Project order" dropdown with two options: A->Z (default) and Most Recent. Selecting an option reorders the project list immediately.
+
+- <a id="P-PENPAL-VIEW-OPTIONS-EMPTY"></a>**P-PENPAL-VIEW-OPTIONS-EMPTY**: The view options panel contains a "Show empty projects" toggle that defaults to on. When off, projects with zero recognized files are hidden entirely. When on, they appear sorted last and visually dimmed.
+
+- <a id="P-PENPAL-SORT"></a>**P-PENPAL-SORT**: The selected sort order and show-empty preference persist in localStorage and sync across tabs/windows via storage events.
 
 - <a id="P-PENPAL-HOME-DEFAULT"></a>**P-PENPAL-HOME-DEFAULT**: Opening a new tab (via + button or Cmd+T) or a new window with no target lands on the home view. The main content area shows a welcome message with the app name and a hint to select a project.
 

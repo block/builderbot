@@ -466,6 +466,67 @@ a:hover { text-decoration: underline; }
 }
 .sidebar-home-header button:hover { color: var(--text-primary); }
 
+/* E-PENPAL-VIEW-OPTIONS: view options floating panel */
+.view-options-wrap { position: relative; display: inline-flex; }
+.view-options-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.view-options-btn svg { display: block; }
+.view-options-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 180px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow-float);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.view-options-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.75em;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.view-options-label select {
+  font-size: 1.15em;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  padding: 3px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-surface-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.view-options-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8em;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.view-options-toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
 /* ── Sidebar tree items ── */
 .tree-item {
   display: flex;

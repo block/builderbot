@@ -419,6 +419,7 @@ describe('Layout', () => {
     link.remove();
   });
 
+
   // E-PENPAL-SIDEBAR-RESIZE: sidebar resize tests
   describe('sidebar resize', () => {
     it('renders the sidebar resize handle', () => {
@@ -604,5 +605,137 @@ describe('Layout', () => {
     expect(worktreeRow!.classList.contains('deemphasized')).toBe(true);
     const breadcrumbBar = worktreeRow!.closest('.breadcrumb-bar');
     expect(breadcrumbBar).toBeNull();
+  });
+
+  // E-PENPAL-VIEW-OPTIONS: view options button renders and opens panel
+  it('renders view options button in home sidebar', async () => {
+    render(
+      <MemoryRouter>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByLabelText('View options')).toBeInTheDocument();
+  });
+
+  it('opens view options panel on click', async () => {
+    render(
+      <MemoryRouter>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    const btn = screen.getByLabelText('View options');
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+
+    expect(screen.getByText('Project order')).toBeInTheDocument();
+    expect(screen.getByText('Show empty projects')).toBeInTheDocument();
+  });
+
+  it('changes sort order via view options panel', async () => {
+    vi.mocked(api.listProjects).mockResolvedValue([
+      {
+        name: 'bravo',
+        qualifiedName: 'bravo',
+        workspace: '',
+        projectPath: '/tmp/bravo',
+        origin: 'standalone' as const,
+        badges: [],
+        fileCount: 3,
+        lastModified: '2026-01-02T00:00:00Z',
+      },
+      {
+        name: 'alpha',
+        qualifiedName: 'alpha',
+        workspace: '',
+        projectPath: '/tmp/alpha',
+        origin: 'standalone' as const,
+        badges: [],
+        fileCount: 5,
+        lastModified: '2026-01-01T00:00:00Z',
+      },
+    ]);
+
+    render(
+      <MemoryRouter>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    // Wait for projects to load
+    await screen.findByText('alpha');
+
+    // Default A→Z: alpha should appear before bravo
+    const sidebar = screen.getByTestId('sidebar');
+    const items = sidebar.querySelectorAll('.tree-item .label');
+    const labels = Array.from(items).map((el) => el.textContent);
+    const alphaIdx = labels.indexOf('alpha');
+    const bravoIdx = labels.indexOf('bravo');
+    expect(alphaIdx).toBeLessThan(bravoIdx);
+
+    // Open view options and switch to "Most Recent"
+    const btn = screen.getByLabelText('View options');
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    const select = screen.getByDisplayValue('A→Z');
+    await act(async () => {
+      fireEvent.change(select, { target: { value: 'recent' } });
+    });
+
+    expect(localStorage.getItem('penpal-project-sort')).toBe('recent');
+  });
+
+  it('hides empty projects when toggle is off', async () => {
+    vi.mocked(api.listProjects).mockResolvedValue([
+      {
+        name: 'has-files',
+        qualifiedName: 'has-files',
+        workspace: '',
+        projectPath: '/tmp/has-files',
+        origin: 'standalone' as const,
+        badges: [],
+        fileCount: 5,
+        lastModified: '2026-01-01T00:00:00Z',
+      },
+      {
+        name: 'empty-project',
+        qualifiedName: 'empty-project',
+        workspace: '',
+        projectPath: '/tmp/empty-project',
+        origin: 'standalone' as const,
+        badges: [],
+        fileCount: 0,
+        lastModified: '2026-01-01T00:00:00Z',
+      },
+    ]);
+
+    render(
+      <MemoryRouter>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    // Wait for projects to load — both should be visible initially
+    await screen.findByText('has-files');
+    expect(screen.getByText('empty-project')).toBeInTheDocument();
+
+    // Open view options and uncheck "Show empty projects"
+    const btn = screen.getByLabelText('View options');
+    await act(async () => {
+      fireEvent.click(btn);
+    });
+    const checkbox = screen.getByRole('checkbox');
+    expect(checkbox).toBeChecked();
+    await act(async () => {
+      fireEvent.click(checkbox);
+    });
+
+    // Empty project should be hidden
+    expect(screen.queryByText('empty-project')).not.toBeInTheDocument();
+    // Non-empty project should still be visible
+    expect(screen.getByText('has-files')).toBeInTheDocument();
   });
 });

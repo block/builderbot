@@ -6,7 +6,7 @@ beforeEach(() => {
   localStorage.clear();
 });
 
-// E-PENPAL-HOME-SIDEBAR: verifies default, toggle, persistence, and cross-instance sync.
+// E-PENPAL-SORT, E-PENPAL-VIEW-OPTIONS: verifies default, toggle, persistence, showEmpty, and cross-instance sync.
 describe('useProjectSort', () => {
   it('defaults to alpha', () => {
     const { result } = renderHook(() => useProjectSort());
@@ -54,5 +54,37 @@ describe('useProjectSort', () => {
 
     act(() => b.current.toggle());
     expect(a.current.sortOrder).toBe('alpha');
+  });
+
+  // E-PENPAL-VIEW-OPTIONS: showEmpty tests
+  it('defaults showEmpty to true', () => {
+    const { result } = renderHook(() => useProjectSort());
+    expect(result.current.showEmpty).toBe(true);
+  });
+
+  it('reads stored showEmpty preference', () => {
+    localStorage.setItem('penpal-show-empty', 'false');
+    const { result } = renderHook(() => useProjectSort());
+    expect(result.current.showEmpty).toBe(false);
+  });
+
+  it('setShowEmpty persists to localStorage', () => {
+    const { result } = renderHook(() => useProjectSort());
+
+    act(() => result.current.setShowEmpty(false));
+    expect(result.current.showEmpty).toBe(false);
+    expect(localStorage.getItem('penpal-show-empty')).toBe('false');
+
+    act(() => result.current.setShowEmpty(true));
+    expect(result.current.showEmpty).toBe(true);
+    expect(localStorage.getItem('penpal-show-empty')).toBe('true');
+  });
+
+  it('showEmpty syncs across instances', () => {
+    const { result: a } = renderHook(() => useProjectSort());
+    const { result: b } = renderHook(() => useProjectSort());
+
+    act(() => a.current.setShowEmpty(false));
+    expect(b.current.showEmpty).toBe(false);
   });
 });

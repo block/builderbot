@@ -32,6 +32,13 @@ export default function rehypeCommentHighlights(options: Options) {
   }
 
   return (tree: Root) => {
+    // Track which highlights have been applied by threadId to avoid
+    // double-applying when parent and child share a start line
+    // (e.g. <li> and its child <p> both start on the same line),
+    // while still allowing children with different start lines to be visited
+    // (e.g. <ol> containing <li> elements on different lines).
+    const applied = new Set<string>();
+
     visit(tree, 'element', (node: Element, index, parent) => {
       if (index === undefined || !parent) return;
 
@@ -41,13 +48,13 @@ export default function rehypeCommentHighlights(options: Options) {
       const lineHighlights = byLine.get(sourceLine);
       if (!lineHighlights) return;
 
-      // Process each highlight for this block, then skip children
-      // to avoid double-applying when parent and child share a start line
-      // (e.g. <li> and its child <p> both start on the same line).
       for (const highlight of lineHighlights) {
-        applyHighlight(node, highlight);
+        if (!applied.has(highlight.threadId)) {
+          applyHighlight(node, highlight);
+          applied.add(highlight.threadId);
+        }
       }
-      return SKIP;
+      // Continue visiting children — they may contain highlights on different lines
     });
   };
 }
@@ -87,13 +94,21 @@ function applyHighlight(element: Element, highlight: ThreadHighlight) {
   const { nodes, text } = collectTextNodes(element);
   if (nodes.length === 0) return;
 
-  // Normalize whitespace for matching (mirrors DOM-based approach)
-  const normalizedText = text.replace(/\s+/g, ' ');
-  const normalizedSelected = highlight.selectedText.replace(/\s+/g, ' ');
+  // Normalize both sides identically: strip inline formatting characters
+  // (*, _, `) and collapse whitespace. Stripping must be applied to BOTH
+  // the HAST text and the selectedText so that literal underscores inside
+  // code identifiers (e.g. correlation_id) are handled consistently.
+  const normalizedText = text.replace(/[*_`]/g, '').replace(/\s+/g, ' ');
+  const normalizedSelected = highlight.selectedText
+    .replace(/[*_`]/g, '')
+    .replace(/^(?:#{1,6} |- |\* |\d+\. |> |- \[[ x]\] )/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 
   // Use occurrenceIndex to find the Nth match within the block,
   // falling back to the first occurrence if the index is not set or not found.
   let matchIndex = -1;
+  let matchLength = normalizedSelected.length;
   const targetOccurrence = highlight.occurrenceIndex ?? 0;
   let pos = 0;
   for (let i = 0; i <= targetOccurrence; i++) {
@@ -106,17 +121,45 @@ function applyHighlight(element: Element, highlight: ThreadHighlight) {
   }
   // Fall back to first occurrence if Nth not found
   if (matchIndex === -1) matchIndex = normalizedText.indexOf(normalizedSelected);
+
+  // Cross-element fallback: if selectedText spans multiple elements (e.g.
+  // contains newlines), the full text won't be found in a single block.
+  // Find the longest prefix of selectedText that matches within this element.
+  if (matchIndex === -1 && normalizedSelected.length > 10) {
+    // Binary search for the longest matching prefix
+    let lo = 10, hi = normalizedSelected.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (normalizedText.indexOf(normalizedSelected.slice(0, mid)) !== -1) {
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    const prefixLen = hi;
+    if (prefixLen >= 10) {
+      matchIndex = normalizedText.indexOf(normalizedSelected.slice(0, prefixLen));
+      matchLength = prefixLen;
+    }
+  }
+
   if (matchIndex === -1) return;
 
   const matchStart = matchIndex;
-  const matchEnd = matchIndex + normalizedSelected.length;
+  const matchEnd = matchIndex + matchLength;
 
   // Map normalized positions back to original text positions.
   // Build a mapping from normalized index -> original index.
+  // Accounts for both stripped formatting chars (*_`) and collapsed whitespace.
   const normToOrig: number[] = [];
   let ni = 0;
   for (let oi = 0; oi < text.length; oi++) {
-    if (/\s/.test(text[oi])) {
+    const ch = text[oi];
+    if (ch === '*' || ch === '_' || ch === '`') {
+      // Character was stripped — no corresponding position in normalized text
+      continue;
+    }
+    if (/\s/.test(ch)) {
       // In normalized form, consecutive whitespace maps to a single space
       if (ni < normalizedText.length && normalizedText[ni] === ' ') {
         normToOrig.push(oi);

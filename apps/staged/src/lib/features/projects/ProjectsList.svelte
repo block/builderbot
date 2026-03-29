@@ -346,7 +346,7 @@
                     <span class="number">{index + 1}</span>
                   </div>
                 {/if}
-                {#if status.runActionPhase === 'running' && status.kind === 'running'}
+                {#if status.runActionPhase !== 'building' && status.kind === 'running'}
                   <div
                     class="status-indicator wave-spinner"
                     in:fade={{ duration: 300, delay: 150 }}

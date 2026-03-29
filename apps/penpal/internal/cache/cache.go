@@ -62,12 +62,16 @@ func (g *gitIgnoreChecker) IsIgnored(path string) bool {
 	}
 	// Write path + NUL to the persistent process.
 	if _, err := g.stdin.Write(append([]byte(path), 0)); err != nil {
+		// E-PENPAL-SCAN: disable checker on write failure to prevent desync.
+		g.isGitRepo = false
 		return false
 	}
 	// Read 4 NUL-terminated fields: source, linenum, pattern, pathname.
 	var source string
 	for i := 0; i < 4; i++ {
 		if !g.scanner.Scan() {
+			// E-PENPAL-SCAN: partial read leaves stream out of sync; disable.
+			g.isGitRepo = false
 			return false
 		}
 		if i == 0 {

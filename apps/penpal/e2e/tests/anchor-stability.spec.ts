@@ -160,7 +160,9 @@ function editWithin(
 
 /** Pick a random span of the document for anchoring (PENPAL-46).
  *  Size classes: "small" (30-100 chars) and "large" (20-30% of document).
- *  Start and end positions are random, ignoring markdown element boundaries.
+ *  Start and end positions are fully random with zero restrictions —
+ *  selections can begin or end anywhere: inside fenced code blocks,
+ *  mid-line, on block markers, inside inline code spans, etc.
  *  Returns { text, isCrossElement, sizeClass, anchorType, startLine }. */
 function pickRandomSelection(
   rawMarkdown: string,
@@ -178,27 +180,10 @@ function pickRandomSelection(
     targetLength = 30 + Math.floor(rng() * 70);
   }
 
-  // Pick random start position, ensuring at least 15 chars remain on the
-  // starting line so the rehype prefix fallback has enough text to match.
-  const margin = Math.min(30, Math.floor(docLength * 0.02));
-  const maxStart = Math.max(margin, docLength - targetLength - margin);
-  let startPos = margin + Math.floor(rng() * Math.max(1, maxStart - margin));
-
-  // Snap start forward if too close to end of line (avoids tiny prefix in cross-element)
-  const nextNewline = rawMarkdown.indexOf('\n', startPos);
-  if (nextNewline !== -1 && nextNewline - startPos < 15) {
-    // Skip past the newline and any blank lines / block markers to the next content
-    let scan = nextNewline + 1;
-    while (scan < docLength && /[\n\s]/.test(rawMarkdown[scan])) scan++;
-    // Also skip past block markers on the new line
-    const lineStart = rawMarkdown.lastIndexOf('\n', scan - 1) + 1;
-    const lineContent = rawMarkdown.slice(lineStart, lineStart + 20);
-    const markerMatch = lineContent.match(/^(?:#{1,6} |- |\* |\d+\. |> |- \[[ x]\] |```)/);
-    if (markerMatch) scan = lineStart + markerMatch[0].length;
-    if (scan < docLength - targetLength) startPos = scan;
-  }
-
-  const endPos = Math.min(startPos + targetLength, docLength - 1);
+  // Fully random start position — no margins, no snapping, no skipping
+  const maxStart = Math.max(0, docLength - targetLength);
+  const startPos = Math.floor(rng() * Math.max(1, maxStart));
+  const endPos = Math.min(startPos + targetLength, docLength);
 
   const text = rawMarkdown.slice(startPos, endPos);
 
@@ -230,24 +215,52 @@ function normalizeForComparison(s: string): string {
   return s.replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim();
 }
 
-/** Check that the highlight's visible text overlaps with the expected selectedText.
- *  Returns true if the mark text is a substring of the normalized selectedText
- *  or vice versa (cross-element selections may only highlight a prefix). */
+/** Verify that the highlight marks cover the expected selectedText.
+ *
+ *  Gathers textContent from ALL mark elements for this thread (cross-element
+ *  selections should produce marks in multiple elements), concatenates them,
+ *  and checks that the combined text covers the full normalized selectedText.
+ *
+ *  Returns { pass, reason } where reason explains the outcome:
+ *  - PASS: marks cover the full selectedText
+ *  - FAIL with explanation of the mismatch */
 async function verifyHighlightText(
   page: import('@playwright/test').Page,
   highlightSelector: string,
   selectedText: string,
-): Promise<{ correct: boolean; markText: string }> {
-  const markText = await page.locator(highlightSelector).first()
-    .textContent()
-    .catch(() => null);
-  if (!markText) return { correct: false, markText: '' };
-  const normMark = normalizeForComparison(markText);
+): Promise<{ pass: boolean; reason: string }> {
+  const marks = page.locator(highlightSelector);
+  const count = await marks.count();
+  if (count === 0) return { pass: false, reason: 'no mark elements found for this thread' };
+  const parts: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const t = await marks.nth(i).textContent().catch(() => '');
+    if (t) parts.push(t);
+  }
+  const normMark = normalizeForComparison(parts.join(' '));
   const normSelected = normalizeForComparison(selectedText);
-  // The mark text should be a meaningful substring of the selectedText (or contain it).
-  // For cross-element fallback, the mark covers only a prefix, so check both directions.
-  const correct = normSelected.includes(normMark) || normMark.includes(normSelected);
-  return { correct, markText: normMark.slice(0, 80) };
+
+  if (normMark.includes(normSelected)) {
+    return { pass: true, reason: 'marks cover full selectedText' };
+  }
+
+  // Mismatch — diagnose why
+  if (normSelected.includes(normMark)) {
+    // Marks cover only a subset of the selection
+    const coverage = normMark.length / normSelected.length;
+    return {
+      pass: false,
+      reason: `marks cover only ${(coverage * 100).toFixed(0)}% of selectedText (${normMark.length}/${normSelected.length} chars). ` +
+        `mark="${normMark.slice(0, 60)}" expected to contain="${normSelected.slice(0, 60)}"`,
+    };
+  }
+
+  // Mark text doesn't overlap with selectedText at all
+  return {
+    pass: false,
+    reason: `mark text does not match selectedText. ` +
+      `mark="${normMark.slice(0, 60)}" vs selected="${normSelected.slice(0, 60)}"`,
+  };
 }
 
 // ── Test suite ────────────────────────────────────────────────────────
@@ -401,12 +414,12 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
         .catch(() => false);
 
       if (initialVisible) {
-        const { correct, markText } = await verifyHighlightText(page, highlightSelector, selectedText);
-        if (correct) {
+        const { pass, reason } = await verifyHighlightText(page, highlightSelector, selectedText);
+        if (pass) {
           scores.initial = 2;
-          details.push('Initial highlight: PASS');
+          details.push(`Initial highlight: PASS — ${reason}`);
         } else {
-          details.push(`Initial highlight: FAIL — visible but wrong text. mark="${markText}"`);
+          details.push(`Initial highlight: FAIL — ${reason}`);
         }
       } else {
         // Enhanced diagnostics for initial highlight failures
@@ -442,12 +455,12 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
         .catch(() => false);
 
       if (editBeforeVisible) {
-        const { correct, markText } = await verifyHighlightText(page, highlightSelector, selectedText);
-        if (correct) {
+        const { pass, reason } = await verifyHighlightText(page, highlightSelector, selectedText);
+        if (pass) {
           scores.editBefore = 2;
-          details.push('Edit before: PASS');
+          details.push(`Edit before: PASS — ${reason}`);
         } else {
-          details.push(`Edit before: FAIL — visible but wrong text. mark="${markText}"`);
+          details.push(`Edit before: FAIL — ${reason}`);
         }
       } else {
         details.push('Edit before: FAIL — highlight disappeared after inserting lines above');
@@ -474,12 +487,12 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
         .catch(() => false);
 
       if (editAfterVisible) {
-        const { correct, markText } = await verifyHighlightText(page, highlightSelector, selectedText);
-        if (correct) {
+        const { pass, reason } = await verifyHighlightText(page, highlightSelector, selectedText);
+        if (pass) {
           scores.editAfter = 2;
-          details.push('Edit after: PASS');
+          details.push(`Edit after: PASS — ${reason}`);
         } else {
-          details.push(`Edit after: FAIL — visible but wrong text. mark="${markText}"`);
+          details.push(`Edit after: FAIL — ${reason}`);
         }
       } else {
         details.push('Edit after: FAIL — highlight disappeared after inserting lines below');
@@ -500,17 +513,20 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
       fs.writeFileSync(absFilePath, afterEditWithin);
       await page.waitForTimeout(300);
 
+      // editWithin appends a short tag to the anchor line — this is an insertion,
+      // not a deletion or substantial rewrite. Per P-PENPAL-ANCHOR the highlight
+      // MUST remain visible. We don't verify exact text match because the content
+      // within the highlight was intentionally modified.
       const editWithinVisible = await expect(highlightLocator)
         .toBeVisible({ timeout: 3000 })
         .then(() => true)
         .catch(() => false);
 
       if (editWithinVisible) {
-        // Skip text verification — the edit intentionally modified the anchor line content
         scores.editWithin = 1;
-        details.push('Edit within: PASS');
+        details.push('Edit within: PASS — highlight survived minor insertion (P-PENPAL-ANCHOR: not substantially rewritten)');
       } else {
-        details.push('Edit within: FAIL — highlight disappeared after modifying anchored text');
+        details.push('Edit within: FAIL — highlight disappeared after minor insertion (P-PENPAL-ANCHOR violation: appending text is not a substantial rewrite)');
       }
       phaseDurations.editWithin = Date.now() - phaseStart;
 

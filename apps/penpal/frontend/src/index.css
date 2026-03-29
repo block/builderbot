@@ -888,7 +888,8 @@ a:hover { text-decoration: underline; }
   opacity: 1;
 }
 .file-main { display: flex; flex-direction: column; overflow: hidden; }
-.file-main-scroll { padding: 0 40px 24px 40px; max-width: 900px; overflow-y: auto; flex: 1; }
+/* E-PENPAL-VIEW-MARGINS: symmetric padding, no max-width cap — content expands to fill column */
+.file-main-scroll { padding: 0 40px 24px 40px; overflow-y: auto; flex: 1; }
 
 /* Sidebar floating card (TOC) */
 .sidebar-card {

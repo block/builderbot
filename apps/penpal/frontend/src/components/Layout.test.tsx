@@ -298,4 +298,117 @@ describe('Layout', () => {
 
     link.remove();
   });
+
+  // E-PENPAL-SIDEBAR-RESIZE: sidebar resize tests
+  describe('sidebar resize', () => {
+    it('renders the sidebar resize handle', () => {
+      render(
+        <MemoryRouter>
+          <Layout />
+        </MemoryRouter>,
+      );
+
+      expect(screen.getByTestId('sidebar-resize-handle')).toBeInTheDocument();
+    });
+
+    it('applies default sidebar width to grid template', () => {
+      render(
+        <MemoryRouter>
+          <Layout />
+        </MemoryRouter>,
+      );
+
+      const app = screen.getByTestId('app-layout');
+      expect(app.style.gridTemplateColumns).toBe('240px 4px 1fr');
+    });
+
+    it('restores sidebar width from localStorage', () => {
+      localStorage.setItem('sidebarWidth', '300');
+
+      render(
+        <MemoryRouter>
+          <Layout />
+        </MemoryRouter>,
+      );
+
+      const app = screen.getByTestId('app-layout');
+      expect(app.style.gridTemplateColumns).toBe('300px 4px 1fr');
+    });
+
+    it('updates sidebar width on drag and persists to localStorage', () => {
+      render(
+        <MemoryRouter>
+          <Layout />
+        </MemoryRouter>,
+      );
+
+      const handle = screen.getByTestId('sidebar-resize-handle');
+      const app = screen.getByTestId('app-layout');
+
+      // Start drag at x=240
+      fireEvent.mouseDown(handle, { clientX: 240 });
+
+      // Move to x=340 (delta = +100, new width = 240 + 100 = 340)
+      act(() => {
+        document.dispatchEvent(new MouseEvent('mousemove', { clientX: 340, buttons: 1 }));
+      });
+
+      expect(app.style.gridTemplateColumns).toBe('340px 4px 1fr');
+
+      // Release
+      act(() => {
+        document.dispatchEvent(new MouseEvent('mouseup'));
+      });
+
+      expect(localStorage.getItem('sidebarWidth')).toBe('340');
+    });
+
+    it('clamps sidebar width to minimum of 200px', () => {
+      render(
+        <MemoryRouter>
+          <Layout />
+        </MemoryRouter>,
+      );
+
+      const handle = screen.getByTestId('sidebar-resize-handle');
+      const app = screen.getByTestId('app-layout');
+
+      fireEvent.mouseDown(handle, { clientX: 240 });
+
+      // Drag far left (delta = -200, would give 40px, clamped to 200)
+      act(() => {
+        document.dispatchEvent(new MouseEvent('mousemove', { clientX: 40, buttons: 1 }));
+      });
+
+      expect(app.style.gridTemplateColumns).toBe('200px 4px 1fr');
+
+      act(() => {
+        document.dispatchEvent(new MouseEvent('mouseup'));
+      });
+    });
+
+    it('clamps sidebar width to maximum of 700px', () => {
+      render(
+        <MemoryRouter>
+          <Layout />
+        </MemoryRouter>,
+      );
+
+      const handle = screen.getByTestId('sidebar-resize-handle');
+      const app = screen.getByTestId('app-layout');
+
+      fireEvent.mouseDown(handle, { clientX: 240 });
+
+      // Drag far right (delta = +700, would give 940px, clamped to 700)
+      act(() => {
+        document.dispatchEvent(new MouseEvent('mousemove', { clientX: 940, buttons: 1 }));
+      });
+
+      expect(app.style.gridTemplateColumns).toBe('700px 4px 1fr');
+
+      act(() => {
+        document.dispatchEvent(new MouseEvent('mouseup'));
+      });
+    });
+  });
 });

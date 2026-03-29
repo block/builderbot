@@ -123,9 +123,10 @@ a { color: var(--link-color); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 /* ── App shell grid ── */
+/* E-PENPAL-SIDEBAR-RESIZE: grid-template-columns overridden inline by Layout.tsx for resizable sidebar */
 .app {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 240px 4px 1fr;
   grid-template-rows: auto auto 1fr;
   height: 100vh;
 }
@@ -260,11 +261,35 @@ a:hover { text-decoration: underline; }
 /* ── Sidebar ── */
 .sidebar {
   grid-row: 3;
+  grid-column: 1;
   background: var(--bg-surface);
   border-right: 1px solid var(--border-default);
   overflow-y: auto;
   padding: 12px 0;
   user-select: none;
+}
+/* E-PENPAL-SIDEBAR-RESIZE: drag handle for left sidebar resizing */
+.sidebar-resize-handle {
+  grid-row: 3;
+  grid-column: 2;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  transition: background 0.15s;
+}
+.sidebar-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 1px;
+  width: 2px;
+  background: var(--border-default);
+  opacity: 0.3;
+  transition: opacity 0.15s, background 0.15s;
+}
+.sidebar-resize-handle:hover::after {
+  background: var(--accent-primary);
+  opacity: 1;
 }
 .sidebar-item {
   display: flex;
@@ -732,6 +757,7 @@ a:hover { text-decoration: underline; }
 .main-content {
   position: relative;
   grid-row: 3;
+  grid-column: 3;
   overflow-y: auto;
   padding: 24px;
 }

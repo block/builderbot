@@ -61,7 +61,7 @@ see-also:
 | Source Types — General (P-PENPAL-SRC-DETECT, SRC-CLASSIFY, SRC-GROUP) | discovery_test.go | — | integration_test.go (buildFileGroups) | — |
 | Source Types — thoughts (P-PENPAL-SRC-THOUGHTS) | discovery_test.go (classify) | — | grouping_test.go (TestBuildFileGroups_ThoughtsFlat) | — |
 | Source Types — rp1 (P-PENPAL-SRC-RP1, SRC-RP1-CLASSIFY, SRC-RP1-GROUP) | discovery_test.go (TestClassifyRP1File, TestGroupRP1Paths) | — | grouping_test.go (TestBuildFileGroups_RP1Grouped) | — |
-| Source Types — anchors (P-PENPAL-SRC-ANCHORS, SRC-ANCHORS-GROUP) | discovery_test.go (TestClassifyAnchorsFile, TestGroupAnchorsPaths) | — | — | — |
+| Source Types — anchors (P-PENPAL-SRC-ANCHORS, SRC-ANCHORS-GROUP, SRC-ANCHORS-NESTED) | discovery_test.go (TestClassifyAnchorsFile, TestGroupAnchorsPaths, TestGroupAnchorsPaths_MarkerOnlyModule, TestAnchorsFileOrder, TestAnchorsRequireSibling) | — | — | — |
 | Source Types — claude-plans (P-PENPAL-SRC-CLAUDE-PLANS) | — | — | — | — |
 | Source Types — manual (P-PENPAL-SRC-MANUAL) | — | — | grouping_test.go (TestBuildFileGroups_ManualSourceDirHeadings) | — |
 | Cache & File Scanning (E-PENPAL-CACHE, SCAN) | cache_test.go | — | — | — |

@@ -315,7 +315,7 @@ func TestDeduplicateWorktreeProjects(t *testing.T) {
 	}
 }
 
-// E-PENPAL-SRC-ANCHORS: verifies ClassifyFile recognizes the five ANCHORS filenames.
+// E-PENPAL-SRC-ANCHORS: verifies ClassifyFile recognizes four content filenames and skips all others.
 func TestClassifyAnchorsFile(t *testing.T) {
 	st := GetSourceType("anchors")
 	if st == nil || st.ClassifyFile == nil {
@@ -326,13 +326,15 @@ func TestClassifyAnchorsFile(t *testing.T) {
 		path     string
 		expected string
 	}{
-		{"ANCHORS.md", "anchors"},
+		// ANCHORS.md is skipped (module membership enforced by RequireSibling)
+		{"ANCHORS.md", ""},
+		{"auth/ANCHORS.md", ""},
+		// content files
 		{"PRODUCT.md", "product"},
 		{"ERD.md", "engineering"},
 		{"TESTING.md", "testing"},
 		{"DEPENDENCIES.md", "dependencies"},
-		// nested module
-		{"auth/ANCHORS.md", "anchors"},
+		// nested module content files
 		{"auth/PRODUCT.md", "product"},
 		{"auth/ERD.md", "engineering"},
 		{"services/payments/TESTING.md", "testing"},
@@ -354,6 +356,9 @@ func TestClassifyAnchorsFile(t *testing.T) {
 }
 
 // E-PENPAL-SRC-ANCHORS: verifies GroupFiles groups by module directory with canonical ordering.
+// Note: ANCHORS.md never reaches GroupFiles — it's filtered by ClassifyFile (returns "")
+// at scan time. Module membership is enforced by RequireSibling at scan time, so
+// GroupFiles receives only pre-validated content files.
 func TestGroupAnchorsPaths(t *testing.T) {
 	st := GetSourceType("anchors")
 	if st == nil || st.GroupFiles == nil {
@@ -366,19 +371,18 @@ func TestGroupAnchorsPaths(t *testing.T) {
 		expected []FileGroup
 	}{
 		{
-			name:     "empty input",
+			name:     "empty input produces no groups",
 			paths:    nil,
 			expected: nil,
 		},
 		{
 			name: "single root module",
 			paths: []string{
-				"ANCHORS.md",
 				"PRODUCT.md",
 				"ERD.md",
 			},
 			expected: []FileGroup{
-				{Name: "(root)", Paths: []string{"ANCHORS.md", "PRODUCT.md", "ERD.md"}},
+				{Name: "(root)", Paths: []string{"PRODUCT.md", "ERD.md"}},
 			},
 		},
 		{
@@ -386,52 +390,36 @@ func TestGroupAnchorsPaths(t *testing.T) {
 			paths: []string{
 				"DEPENDENCIES.md",
 				"PRODUCT.md",
-				"ANCHORS.md",
 				"TESTING.md",
 				"ERD.md",
 			},
 			expected: []FileGroup{
 				{Name: "(root)", Paths: []string{
-					"ANCHORS.md", "PRODUCT.md", "ERD.md", "TESTING.md", "DEPENDENCIES.md",
+					"PRODUCT.md", "ERD.md", "TESTING.md", "DEPENDENCIES.md",
 				}},
 			},
 		},
 		{
 			name: "nested modules sorted alphabetically",
 			paths: []string{
-				"payments/ANCHORS.md",
 				"payments/PRODUCT.md",
-				"auth/ANCHORS.md",
 				"auth/PRODUCT.md",
 				"auth/ERD.md",
 			},
 			expected: []FileGroup{
-				{Name: "auth", Paths: []string{"auth/ANCHORS.md", "auth/PRODUCT.md", "auth/ERD.md"}},
-				{Name: "payments", Paths: []string{"payments/ANCHORS.md", "payments/PRODUCT.md"}},
+				{Name: "auth", Paths: []string{"auth/PRODUCT.md", "auth/ERD.md"}},
+				{Name: "payments", Paths: []string{"payments/PRODUCT.md"}},
 			},
 		},
 		{
 			name: "root and nested modules together",
 			paths: []string{
-				"ANCHORS.md",
 				"PRODUCT.md",
-				"services/auth/ANCHORS.md",
 				"services/auth/ERD.md",
 			},
 			expected: []FileGroup{
-				{Name: "(root)", Paths: []string{"ANCHORS.md", "PRODUCT.md"}},
-				{Name: "services/auth", Paths: []string{"services/auth/ANCHORS.md", "services/auth/ERD.md"}},
-			},
-		},
-		{
-			name: "files without sibling ANCHORS.md are dropped",
-			paths: []string{
-				"ANCHORS.md",
-				"PRODUCT.md",
-				"stray/PRODUCT.md",
-			},
-			expected: []FileGroup{
-				{Name: "(root)", Paths: []string{"ANCHORS.md", "PRODUCT.md"}},
+				{Name: "(root)", Paths: []string{"PRODUCT.md"}},
+				{Name: "services/auth", Paths: []string{"services/auth/ERD.md"}},
 			},
 		},
 	}
@@ -459,6 +447,61 @@ func TestGroupAnchorsPaths(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// E-PENPAL-SRC-ANCHORS: verifies that a marker-only module (directory with ANCHORS.md
+// but no content files) produces no groups. This documents the intended behavior:
+// RequireSibling admits the directory, ClassifyFile skips ANCHORS.md, and
+// GroupFiles receives an empty slice.
+func TestGroupAnchorsPaths_MarkerOnlyModule(t *testing.T) {
+	st := GetSourceType("anchors")
+	if st == nil || st.GroupFiles == nil {
+		t.Fatal("anchors source type not registered or has no GroupFiles")
+	}
+
+	// Simulate what the scanner produces for a directory containing only ANCHORS.md:
+	// ClassifyFile returns "" for ANCHORS.md, so it never reaches GroupFiles.
+	got := st.GroupFiles(nil)
+	if len(got) != 0 {
+		t.Errorf("expected 0 groups for marker-only module, got %d: %+v", len(got), got)
+	}
+}
+
+// E-PENPAL-SRC-ANCHORS: verifies canonical file ordering is stable for all recognized
+// content filenames. An unrecognized filename would get Go's zero-value (0) from the
+// map lookup, colliding with PRODUCT.md's position — RequireSibling and ClassifyFile
+// prevent this, but this test documents the sort contract.
+func TestAnchorsFileOrder(t *testing.T) {
+	// Every content filename must have a unique position in the order map.
+	contentFiles := []string{"PRODUCT.md", "ERD.md", "TESTING.md", "DEPENDENCIES.md"}
+	seen := map[int]string{}
+	for _, f := range contentFiles {
+		pos, ok := anchorsFileOrder[f]
+		if !ok {
+			t.Errorf("anchorsFileOrder missing entry for %q", f)
+			continue
+		}
+		if prev, dup := seen[pos]; dup {
+			t.Errorf("anchorsFileOrder position %d shared by %q and %q", pos, prev, f)
+		}
+		seen[pos] = f
+	}
+
+	// ANCHORS.md must NOT be in the order map (it never reaches GroupFiles).
+	if _, ok := anchorsFileOrder["ANCHORS.md"]; ok {
+		t.Error("anchorsFileOrder should not contain ANCHORS.md")
+	}
+}
+
+// E-PENPAL-SRC-ANCHORS: verifies RequireSibling is set on the anchors source type.
+func TestAnchorsRequireSibling(t *testing.T) {
+	st := GetSourceType("anchors")
+	if st == nil {
+		t.Fatal("anchors source type not registered")
+	}
+	if st.RequireSibling != "ANCHORS.md" {
+		t.Errorf("RequireSibling = %q, want %q", st.RequireSibling, "ANCHORS.md")
 	}
 }
 

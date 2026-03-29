@@ -86,11 +86,11 @@ Source types are the pluggable system that determines how projects discover, cla
 
 ### anchors Source Type
 
-- <a id="P-PENPAL-SRC-ANCHORS"></a>**P-PENPAL-SRC-ANCHORS**: Auto-detected by an `ANCHORS.md` file at the project root. Shows a teal "ANCHORS" badge. Scans the full project tree but only shows the five recognized ANCHORS filenames: `ANCHORS.md`, `PRODUCT.md`, `ERD.md`, `TESTING.md`, `DEPENDENCIES.md`. All other files are hidden.
+- <a id="P-PENPAL-SRC-ANCHORS"></a>**P-PENPAL-SRC-ANCHORS**: Auto-detected by an `ANCHORS.md` file at the project root. Shows a teal "ANCHORS" badge. Scans the full project tree but only includes files from directories that contain an `ANCHORS.md` sibling. Only four content filenames are shown: `PRODUCT.md`, `ERD.md`, `TESTING.md`, `DEPENDENCIES.md`. `ANCHORS.md` itself and all other files are hidden. A directory with only `ANCHORS.md` and no content files produces no visible output.
 
-- <a id="P-PENPAL-SRC-ANCHORS-GROUP"></a>**P-PENPAL-SRC-ANCHORS-GROUP**: Files are grouped by module directory — a subdirectory that contains its own `ANCHORS.md`. The root module is shown as "(root)". Modules are sorted alphabetically. Within each module, files are sorted in canonical order: ANCHORS → PRODUCT → ERD → TESTING → DEPENDENCIES.
+- <a id="P-PENPAL-SRC-ANCHORS-GROUP"></a>**P-PENPAL-SRC-ANCHORS-GROUP**: Files are grouped by module directory. The root module is shown as "(root)". Modules are sorted alphabetically. Within each module, files are sorted in canonical order: PRODUCT → ERD → TESTING → DEPENDENCIES.
 
-- <a id="P-PENPAL-SRC-ANCHORS-NESTED"></a>**P-PENPAL-SRC-ANCHORS-NESTED**: Supports nested modules in monorepos. Stray ANCHORS document files (e.g., a `PRODUCT.md` in a directory without a sibling `ANCHORS.md`) are excluded from the file list.
+- <a id="P-PENPAL-SRC-ANCHORS-NESTED"></a>**P-PENPAL-SRC-ANCHORS-NESTED**: Supports nested modules in monorepos. Stray ANCHORS document files (e.g., a `PRODUCT.md` in a directory without a sibling `ANCHORS.md`) are excluded by the sibling requirement at scan time.
 
 ### claude-plans Source Type
 

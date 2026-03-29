@@ -531,4 +531,78 @@ describe('Layout', () => {
       });
     });
   });
+
+  // E-PENPAL-WORKTREE-DROPDOWN: worktree selector renders as full-width row outside breadcrumb bar
+  it('renders worktree selector as a full-width row outside the breadcrumb bar', async () => {
+    vi.mocked(api.listProjects).mockResolvedValue([
+      {
+        name: 'project-a',
+        qualifiedName: 'ws1/project-a',
+        workspace: 'ws1',
+        origin: 'workspace',
+        badges: [],
+        fileCount: 5,
+        lastModified: '2026-01-01T00:00:00Z',
+        worktrees: [
+          { name: 'main', path: '/tmp/main', branch: 'main', isMain: true },
+          { name: 'feature-x', path: '/tmp/feature-x', branch: 'feature-x', isMain: false },
+        ],
+      },
+    ] as never);
+
+    render(
+      <MemoryRouter initialEntries={['/project/ws1/project-a']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    // Wait for project to load and render
+    await waitFor(() => {
+      expect(screen.getByText('main repo')).toBeInTheDocument();
+    });
+
+    // The worktree selector should be a sibling of the breadcrumb bar, not a child
+    const worktreeRow = screen.getByText('main repo').closest('.worktree-selector-row');
+    expect(worktreeRow).toBeInTheDocument();
+    const breadcrumbBar = worktreeRow!.closest('.breadcrumb-bar');
+    expect(breadcrumbBar).toBeNull();
+
+    // The worktree selector row should be a direct child of the sidebar nav
+    const sidebar = screen.getByTestId('sidebar');
+    expect(sidebar.contains(worktreeRow)).toBe(true);
+  });
+
+  // E-PENPAL-WORKTREE-DROPDOWN: single-worktree projects show deemphasized row
+  it('renders deemphasized worktree row for single-worktree projects', async () => {
+    vi.mocked(api.listProjects).mockResolvedValue([
+      {
+        name: 'project-a',
+        qualifiedName: 'ws1/project-a',
+        workspace: 'ws1',
+        origin: 'workspace',
+        badges: [],
+        fileCount: 5,
+        lastModified: '2026-01-01T00:00:00Z',
+        worktrees: [
+          { name: 'main', path: '/tmp/main', branch: 'main', isMain: true },
+        ],
+      },
+    ] as never);
+
+    render(
+      <MemoryRouter initialEntries={['/project/ws1/project-a']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('no worktrees')).toBeInTheDocument();
+    });
+
+    const worktreeRow = screen.getByText('no worktrees').closest('.worktree-selector-row');
+    expect(worktreeRow).toBeInTheDocument();
+    expect(worktreeRow!.classList.contains('deemphasized')).toBe(true);
+    const breadcrumbBar = worktreeRow!.closest('.breadcrumb-bar');
+    expect(breadcrumbBar).toBeNull();
+  });
 });

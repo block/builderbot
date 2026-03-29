@@ -210,34 +210,62 @@ function pickRandomSelection(
   };
 }
 
-/** Normalize text the same way the rehype plugin does: strip formatting chars and collapse whitespace. */
+/** Normalize text for comparison — must match the rehype plugin's normalization:
+ *  strip inline formatting chars, block-level markers, thematic breaks, and collapse whitespace. */
 function normalizeForComparison(s: string): string {
-  return s.replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim();
+  return s
+    .replace(/[*_`]/g, '')
+    .replace(/^(?:#{1,6} |- |\* |\d+\. |> |- \[[ x]\] )/gm, '')
+    .replace(/^-{3,}$/gm, '')  // thematic breaks (rendered as <hr> with no text)
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /** Verify that the highlight marks cover the expected selectedText.
  *
- *  Gathers textContent from ALL mark elements for this thread (cross-element
- *  selections should produce marks in multiple elements), concatenates them,
- *  and checks that the combined text covers the full normalized selectedText.
+ *  Uses DOM evaluation to concatenate mark text with proper inter-element
+ *  spacing: marks within the same block element are joined directly (preserving
+ *  words split across inline elements), marks in different block elements are
+ *  joined with a space (representing visual block separation).
  *
- *  Returns { pass, reason } where reason explains the outcome:
- *  - PASS: marks cover the full selectedText
- *  - FAIL with explanation of the mismatch */
+ *  Returns { pass, reason } where reason explains the outcome. */
 async function verifyHighlightText(
   page: import('@playwright/test').Page,
   highlightSelector: string,
   selectedText: string,
 ): Promise<{ pass: boolean; reason: string }> {
-  const marks = page.locator(highlightSelector);
-  const count = await marks.count();
-  if (count === 0) return { pass: false, reason: 'no mark elements found for this thread' };
-  const parts: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const t = await marks.nth(i).textContent().catch(() => '');
-    if (t) parts.push(t);
-  }
-  const normMark = normalizeForComparison(parts.join(''));
+  const markInfo = await page.evaluate((selector) => {
+    const marks = document.querySelectorAll(selector);
+    if (marks.length === 0) return { count: 0, text: '' };
+
+    function getBlockAncestor(el: Element): Element | null {
+      let current = el.parentElement;
+      while (current) {
+        const display = window.getComputedStyle(current).display;
+        if (display !== 'inline' && display !== 'inline-block') return current;
+        current = current.parentElement;
+      }
+      return null;
+    }
+
+    let combinedText = '';
+    let lastBlock: Element | null = null;
+    for (const mark of marks) {
+      const block = getBlockAncestor(mark);
+      const text = mark.textContent || '';
+      if (!text) continue;
+      if (lastBlock !== null && block !== lastBlock) {
+        combinedText += ' '; // space between different block ancestors
+      }
+      combinedText += text;
+      lastBlock = block;
+    }
+    return { count: marks.length, text: combinedText };
+  }, highlightSelector);
+
+  if (markInfo.count === 0) return { pass: false, reason: 'no mark elements found for this thread' };
+
+  const normMark = normalizeForComparison(markInfo.text);
   const normSelected = normalizeForComparison(selectedText);
 
   if (normMark.includes(normSelected)) {
@@ -246,20 +274,18 @@ async function verifyHighlightText(
 
   // Mismatch — diagnose why
   if (normSelected.includes(normMark)) {
-    // Marks cover only a subset of the selection
     const coverage = normMark.length / normSelected.length;
     return {
       pass: false,
       reason: `marks cover only ${(coverage * 100).toFixed(0)}% of selectedText (${normMark.length}/${normSelected.length} chars). ` +
-        `mark="${normMark.slice(0, 60)}" expected to contain="${normSelected.slice(0, 60)}"`,
+        `mark="${normMark.slice(0, 80)}" expected to contain="${normSelected.slice(0, 80)}"`,
     };
   }
 
-  // Mark text doesn't overlap with selectedText at all
   return {
     pass: false,
     reason: `mark text does not match selectedText. ` +
-      `mark="${normMark.slice(0, 60)}" vs selected="${normSelected.slice(0, 60)}"`,
+      `mark="${normMark.slice(0, 80)}" vs selected="${normSelected.slice(0, 80)}"`,
   };
 }
 

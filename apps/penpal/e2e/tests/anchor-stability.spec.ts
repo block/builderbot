@@ -44,7 +44,6 @@ interface TestResult {
   screenshots: Record<string, string>;
   timestamp: string;
   details: string;
-  analysis?: string;
   durationMs: number;
   phaseDurations: Record<string, number>;
 }
@@ -376,8 +375,11 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
       const phaseDurations: Record<string, number> = {};
       await blockPendingNavigation(page);
 
-      // Reset file to original content at the start of each test to avoid
-      // accumulated [edit-N] modifications from previous tests.
+      // Use a per-test file path to avoid leaking highlights/threads across tests
+      // within an iteration (PENPAL-50). Each test gets its own file so threads
+      // from previous tests don't appear.
+      filePath = `thoughts/stability-test-${testIdx}.md`;
+      absFilePath = path.join(tmpDir, filePath);
       fs.writeFileSync(absFilePath, doc.markdown);
 
       // ── Pick a random document span (PENPAL-46) ──────────────────
@@ -416,7 +418,7 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
 
       if (!threadId) {
         details.push('No thread ID — skipping all validations');
-        const testResult = buildResult(testIdx, selection.anchorType, selectedText, selectionType, sizeClass, scores, screenshots, details, Date.now() - testStart, phaseDurations, doc.markdown);
+        const testResult = buildResult(testIdx, selection.anchorType, selectedText, selectionType, sizeClass, scores, screenshots, details, Date.now() - testStart, phaseDurations);
         saveTestResult(testResult);
         return;
       }
@@ -568,7 +570,7 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
       screenshots.editWithin = ssWithin;
 
       // ── Save results ───────────────────────────────────────────
-      const testResult = buildResult(testIdx, selection.anchorType, selectedText, selectionType, sizeClass, scores, screenshots, details, Date.now() - testStart, phaseDurations, doc.markdown);
+      const testResult = buildResult(testIdx, selection.anchorType, selectedText, selectionType, sizeClass, scores, screenshots, details, Date.now() - testStart, phaseDurations);
       saveTestResult(testResult);
     });
   }
@@ -587,7 +589,6 @@ function buildResult(
   details: string[],
   durationMs: number,
   phaseDurations: Record<string, number>,
-  rawMarkdown: string,
 ): TestResult {
   const total =
     scores.initial + scores.editBefore + scores.editAfter + scores.editWithin;
@@ -606,59 +607,7 @@ function buildResult(
     durationMs,
     phaseDurations,
   };
-  // Analyze imperfect tests (PENPAL-35)
-  if (total < 7) {
-    result.analysis = analyzeFailure(scores, selectedText, anchorType, rawMarkdown);
-  }
   return result;
-}
-
-/** Produce a brief analysis of why a test scored less than perfect (PENPAL-35). */
-function analyzeFailure(
-  scores: TestScores,
-  selectedText: string,
-  anchorType: string,
-  rawMarkdown: string,
-): string {
-  const reasons: string[] = [];
-
-  const isCrossElement = selectedText.includes('\n');
-  const hasMarkdownFormatting = /[*_`]/.test(selectedText);
-  const foundInMarkdown = rawMarkdown.includes(selectedText);
-
-  if (!foundInMarkdown) {
-    reasons.push('selectedText not found in raw markdown — server-side ResolveAnchor will fail.');
-    if (isCrossElement) {
-      reasons.push('This is a cross-element selection (contains newlines). The text between elements may not match exactly.');
-    }
-    if (hasMarkdownFormatting) {
-      reasons.push('selectedText contains inline formatting (*, _, `). If extracted from rendered text, the raw markdown won\'t match.');
-    }
-  }
-
-  if (scores.initial === 0) {
-    if (foundInMarkdown) {
-      reasons.push('Initial highlight failed despite text being in markdown. Possible causes: rehype plugin didn\'t find the text in rendered elements, timing issue, or startLine mismatch.');
-      if (isCrossElement) {
-        reasons.push('Cross-element selection — rehype plugin may not highlight text spanning multiple block elements.');
-      }
-      if (hasMarkdownFormatting) {
-        reasons.push('Inline formatting in selectedText may not match stripped text in rendered HAST nodes.');
-      }
-    }
-  } else {
-    if (scores.editBefore === 0) {
-      reasons.push('Edit-before failed — lines inserted above anchor may have caused startLine drift or text matching failure.');
-    }
-    if (scores.editAfter === 0) {
-      reasons.push('Edit-after failed — unusual, as edits below should not affect the anchor.');
-    }
-    if (scores.editWithin === 0) {
-      reasons.push('Edit-within failed — expected, as modifying the anchored line changes the text that selectedText must match.');
-    }
-  }
-
-  return reasons.join(' ') || 'Unknown failure cause.';
 }
 
 function saveTestResult(testResult: TestResult) {

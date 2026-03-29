@@ -61,7 +61,7 @@ export default function InReviewPage() {
               <span className="source-breadcrumb">
                 {group.workspace && (
                   <>
-                    <Link to={group.workspaceURL || `/workspace/${encodeURIComponent(group.workspace)}`}>
+                    <Link to={group.workspaceURL || '/'}>
                       {group.workspace}
                     </Link>
                     <span className="breadcrumb-sep">/</span>

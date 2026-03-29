@@ -42,7 +42,7 @@ pub fn run() {
             let menu = build_menu(app_handle)?;
             app.set_menu(menu)?;
 
-            // Spawn Go server sidecar
+            // E-PENPAL-TAURI: spawn Go server sidecar, poll /api/ready, manage lifecycle.
             let port = std::env::var("PENPAL_PORT").unwrap_or_else(|_| "8080".to_string());
             let sidecar = app.shell().sidecar("penpal-server")
                 .expect("failed to locate penpal-server sidecar");
@@ -86,7 +86,7 @@ pub fn run() {
                     return;
                 }
 
-                // Handle new_window — doesn't need an existing window
+                // E-PENPAL-NEW-WINDOW: Cmd+N creates a new window.
                 if event.id().as_ref() == "new_window" {
                     let label = format!("win-{}", std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -200,12 +200,17 @@ pub fn run() {
                     .build();
                 }
 
+                // E-PENPAL-FILE-HANDLER-EVENT: dispatch HTTP on a background thread to avoid blocking the main thread.
                 let port = app_handle.state::<ServerPort>().0.lock().unwrap().clone();
                 if !port.is_empty() {
                     let addr = format!("127.0.0.1:{}", port);
-                    for url in urls {
-                        if let Ok(path) = url.to_file_path() {
-                            let body = serde_json::json!({"path": path.to_string_lossy()}).to_string();
+                    let paths: Vec<String> = urls.iter()
+                        .filter_map(|url| url.to_file_path().ok())
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect();
+                    std::thread::spawn(move || {
+                        for path_str in paths {
+                            let body = serde_json::json!({"path": path_str}).to_string();
                             if let Ok(mut stream) = std::net::TcpStream::connect(&addr) {
                                 use std::io::Write;
                                 let req = format!(
@@ -215,7 +220,7 @@ pub fn run() {
                                 let _ = stream.write_all(req.as_bytes());
                             }
                         }
-                    }
+                    });
                 }
             }
             if let tauri::RunEvent::Exit = event {

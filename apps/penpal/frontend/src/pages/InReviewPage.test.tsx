@@ -8,7 +8,7 @@ vi.mock('../api', () => ({
     getInReview: vi.fn().mockResolvedValue([
       {
         workspace: 'ws',
-        workspaceURL: '/workspace/ws',
+        workspaceURL: '',
         projectName: 'my-proj',
         projectQN: 'ws/my-proj',
         sourceName: 'thoughts',

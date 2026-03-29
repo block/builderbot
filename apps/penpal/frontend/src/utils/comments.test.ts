@@ -43,6 +43,30 @@ describe('orderComments', () => {
     const result = orderComments(comments);
     expect(result.length).toBe(2);
   });
+
+  // E-PENPAL-COMMENT-ORDER: workingStartedAt used as effective time for ordering
+  it('uses workingStartedAt as effective time when present', () => {
+    // Agent reply was posted at T+3 but started working at T+1, so it should
+    // sort before a human comment created at T+2
+    const comments: Comment[] = [
+      { id: '1', author: 'Alice', role: 'human', body: 'Root', createdAt: '2026-01-01T00:00:00Z' },
+      { id: '2', author: 'Bob', role: 'human', body: 'Second question', createdAt: '2026-01-01T02:00:00Z', inReplyTo: '1' },
+      { id: '3', author: 'Claude', role: 'agent', body: 'Agent reply', createdAt: '2026-01-01T03:00:00Z', inReplyTo: '1', workingStartedAt: '2026-01-01T01:00:00Z' },
+    ];
+    const result = orderComments(comments);
+    // Agent reply (workingStartedAt=T+1) should come before human comment (createdAt=T+2)
+    expect(result.map(c => c.id)).toEqual(['1', '3', '2']);
+  });
+
+  it('falls back to createdAt when workingStartedAt is absent', () => {
+    const comments: Comment[] = [
+      { id: '1', author: 'Alice', role: 'human', body: 'Root', createdAt: '2026-01-01T00:00:00Z' },
+      { id: '2', author: 'Claude', role: 'agent', body: 'First reply', createdAt: '2026-01-01T01:00:00Z', inReplyTo: '1' },
+      { id: '3', author: 'Bob', role: 'human', body: 'Second reply', createdAt: '2026-01-01T02:00:00Z', inReplyTo: '1' },
+    ];
+    const result = orderComments(comments);
+    expect(result.map(c => c.id)).toEqual(['1', '2', '3']);
+  });
 });
 
 describe('formatTime', () => {

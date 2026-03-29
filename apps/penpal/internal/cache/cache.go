@@ -2,7 +2,10 @@ package cache
 
 import (
 	"bufio"
+	"bytes"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -11,6 +14,96 @@ import (
 
 	"github.com/loganj/penpal/internal/discovery"
 )
+
+// gitIgnoreChecker uses a persistent `git check-ignore --stdin` process to
+// test whether paths are gitignored. A single subprocess handles all queries,
+// avoiding per-directory process spawn overhead.
+// E-PENPAL-SCAN: gitignore-aware directory skipping.
+type gitIgnoreChecker struct {
+	isGitRepo bool
+	stdin     io.WriteCloser
+	scanner   *bufio.Scanner
+	cmd       *exec.Cmd
+}
+
+func newGitIgnoreChecker(projectPath string) *gitIgnoreChecker {
+	g := &gitIgnoreChecker{}
+	if exec.Command("git", "-C", projectPath, "rev-parse", "--git-dir").Run() != nil {
+		return g
+	}
+	g.isGitRepo = true
+	// Start a persistent check-ignore process. With -v -n -z, every input
+	// path produces exactly 4 NUL-delimited fields: source, linenum, pattern,
+	// pathname. For non-ignored paths, source is empty.
+	g.cmd = exec.Command("git", "-C", projectPath, "check-ignore", "--stdin", "-z", "-v", "-n")
+	stdin, err := g.cmd.StdinPipe()
+	if err != nil {
+		g.isGitRepo = false
+		return g
+	}
+	stdout, err := g.cmd.StdoutPipe()
+	if err != nil {
+		g.isGitRepo = false
+		return g
+	}
+	if err := g.cmd.Start(); err != nil {
+		g.isGitRepo = false
+		return g
+	}
+	g.stdin = stdin
+	g.scanner = bufio.NewScanner(stdout)
+	g.scanner.Split(scanNul)
+	return g
+}
+
+func (g *gitIgnoreChecker) IsIgnored(path string) bool {
+	if !g.isGitRepo {
+		return false
+	}
+	// Write path + NUL to the persistent process.
+	if _, err := g.stdin.Write(append([]byte(path), 0)); err != nil {
+		// E-PENPAL-SCAN: disable checker on write failure to prevent desync.
+		g.isGitRepo = false
+		return false
+	}
+	// Read 4 NUL-terminated fields: source, linenum, pattern, pathname.
+	var source string
+	for i := 0; i < 4; i++ {
+		if !g.scanner.Scan() {
+			// E-PENPAL-SCAN: partial read leaves stream out of sync; disable.
+			g.isGitRepo = false
+			return false
+		}
+		if i == 0 {
+			source = g.scanner.Text()
+		}
+	}
+	// Non-empty source means a gitignore rule matched.
+	return source != ""
+}
+
+func (g *gitIgnoreChecker) Close() {
+	if g.stdin != nil {
+		g.stdin.Close()
+	}
+	if g.cmd != nil {
+		g.cmd.Wait()
+	}
+}
+
+// scanNul is a bufio.SplitFunc that splits on NUL bytes.
+func scanNul(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	if i := bytes.IndexByte(data, 0); i >= 0 {
+		return i + 1, data[:i], nil
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
 
 // FileInfo represents a cached file
 type FileInfo struct {
@@ -433,6 +526,8 @@ func ScanProjectSourcesForWorktree(project *discovery.Project, worktreePath stri
 func scanProjectSources(project *discovery.Project) []FileInfo {
 	var files []FileInfo
 	seen := make(map[string]bool) // project-relative paths already claimed
+	gitChecker := newGitIgnoreChecker(project.Path)
+	defer gitChecker.Close()
 
 	for _, source := range project.Sources {
 		if source.Type == "thoughts" || source.Type == "tree" {
@@ -461,6 +556,16 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 						if fi, err := os.Lstat(gitEntry); err == nil && !fi.IsDir() {
 							return filepath.SkipDir
 						}
+					}
+					// Never walk into .git (git doesn't report it as ignored).
+					if info.Name() == ".git" {
+						return filepath.SkipDir
+					}
+					// Skip gitignored directories (build output, deps, etc.).
+					// P-PENPAL-SRC-GITIGNORE: registered source roots are
+					// always scanned even if gitignored.
+					if path != rootPath && gitChecker.IsIgnored(path) {
+						return filepath.SkipDir
 					}
 					if st != nil && st.SkipDirs[info.Name()] {
 						return filepath.SkipDir

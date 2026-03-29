@@ -4,6 +4,7 @@
 <dict>
 	<key>CFBundleIconName</key>
 	<string>icon</string>
+	<!-- E-PENPAL-FILE-HANDLER-PLIST: register .md files for "Open With" -->
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

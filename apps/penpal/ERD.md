@@ -82,8 +82,11 @@ see-also:
 - <a id="E-PENPAL-SRC-CLAUDE-PLANS"></a>**E-PENPAL-SRC-CLAUDE-PLANS**: The `claude-plans` source type classifies all files as `plan`. No custom grouping. Injected via `DiscoverClaudePlans()` which creates a synthetic standalone project or injects a tree source into an existing manually-added project.
   ← [P-PENPAL-SRC-CLAUDE-PLANS](PRODUCT.md#P-PENPAL-SRC-CLAUDE-PLANS), [P-PENPAL-CLAUDE-PLANS](PRODUCT.md#P-PENPAL-CLAUDE-PLANS)
 
-- <a id="E-PENPAL-SRC-MANUAL"></a>**E-PENPAL-SRC-MANUAL**: The `manual` source type is used for user-added sources. Directory sources create "tree" type entries; individual file sources create "files" type entries. `GroupFiles()` generates directory headings (`Dir`, `ShowDir` fields on `FileInfo`) for subdirectory boundaries. Configuration is persisted in `config.json` under `ProjectSources` (workspace projects) or inline with the `ProjectConfig` entry (standalone projects).
-  ← [P-PENPAL-SRC-MANUAL](PRODUCT.md#P-PENPAL-SRC-MANUAL), [P-PENPAL-ADD-SOURCE](PRODUCT.md#P-PENPAL-ADD-SOURCE)
+- <a id="E-PENPAL-SRC-MANUAL"></a>**E-PENPAL-SRC-MANUAL**: The `manual` source type is used for user-added sources (via `penpal open` CLI or the add-workspace/project modal). Directory sources create "tree" type entries; individual file sources create "files" type entries. `GroupFiles()` generates directory headings (`Dir`, `ShowDir` fields on `FileInfo`) for subdirectory boundaries. Configuration is persisted in `config.json` under `ProjectSources` (workspace projects) or inline with the `ProjectConfig` entry (standalone projects).
+  ← [P-PENPAL-CLI-OPEN](PRODUCT.md#P-PENPAL-CLI-OPEN), [P-PENPAL-STANDALONE](PRODUCT.md#P-PENPAL-STANDALONE)
+
+- <a id="E-PENPAL-SRC-ALL-MD"></a>**E-PENPAL-SRC-ALL-MD**: An "All Markdown" virtual source is always present in every project's sidebar. It shows all `.md` files in the project directory tree, organized by directory structure, regardless of whether they also appear in a typed source. No badge, no deduplication against other sources. The `Auto` field is `true` — the frontend uses this field to control whether the "Remove from Penpal" context menu item appears, and virtual sources cannot be removed. Implemented as a synthetic source group appended after the typed source groups in the project files response.
+  ← [P-PENPAL-SRC-ALL-MD](PRODUCT.md#P-PENPAL-SRC-ALL-MD)
 
 - <a id="E-PENPAL-WORKTREE-DISCOVERY"></a>**E-PENPAL-WORKTREE-DISCOVERY**: Worktrees are discovered by parsing `git worktree list --porcelain` output. Each worktree gets a name, path, branch, and `IsMain` flag. The `refs/heads/` prefix is stripped from branch names.
   ← [P-PENPAL-WORKTREE](PRODUCT.md#P-PENPAL-WORKTREE)
@@ -96,13 +99,13 @@ see-also:
 ## Cache
 
 - <a id="E-PENPAL-CACHE"></a>**E-PENPAL-CACHE**: An in-memory cache (`sync.RWMutex`-protected) holds the full project list and per-project file lists. `RefreshProject()` walks the filesystem; `RefreshAllProjects()` runs in parallel with no concurrency limit. `RescanWith()` replaces the project list while preserving git enrichment.
-  ← [P-PENPAL-FILE-LIST](PRODUCT.md#P-PENPAL-FILE-LIST)
+  ← [P-PENPAL-PROJECT-FILE-TREE](PRODUCT.md#P-PENPAL-PROJECT-FILE-TREE)
 
-- <a id="E-PENPAL-SCAN"></a>**E-PENPAL-SCAN**: `scanProjectSources()` walks `RootPath` recursively for tree sources, skipping `.git`-file directories (nested worktrees), source-type `SkipDirs`, and non-`.md` files. Files returning `""` from `ClassifyFile()` are hidden. Files are de-duplicated by project-relative path (first source wins) and sorted by `ModTime` descending.
-  ← [P-PENPAL-FILE-LIST](PRODUCT.md#P-PENPAL-FILE-LIST), [P-PENPAL-FILE-TYPES](PRODUCT.md#P-PENPAL-FILE-TYPES), [P-PENPAL-SRC-DEDUP](PRODUCT.md#P-PENPAL-SRC-DEDUP)
+- <a id="E-PENPAL-SCAN"></a>**E-PENPAL-SCAN**: `scanProjectSources()` walks `RootPath` recursively for tree sources, skipping `.git`-file directories (nested worktrees), gitignored directories (via `git check-ignore`), source-type `SkipDirs`, and non-`.md` files. Gitignore checking is initialized once per scan via `newGitIgnoreChecker(projectPath)`, which detects whether the project is a git repo; non-git projects skip the gitignore check gracefully. On write or read failure (partial 4-field response), the checker disables itself (`isGitRepo=false`) to prevent permanent stream desync. The source's own `rootPath` is never checked against gitignore (the `path != rootPath` guard ensures registered sources always scan). Files returning `""` from `ClassifyFile()` are hidden. Files are de-duplicated by project-relative path (first source wins) and sorted by `ModTime` descending.
+  ← [P-PENPAL-PROJECT-FILE-TREE](PRODUCT.md#P-PENPAL-PROJECT-FILE-TREE), [P-PENPAL-FILE-TYPES](PRODUCT.md#P-PENPAL-FILE-TYPES), [P-PENPAL-SRC-DEDUP](PRODUCT.md#P-PENPAL-SRC-DEDUP), [P-PENPAL-SRC-GITIGNORE](PRODUCT.md#P-PENPAL-SRC-GITIGNORE)
 
 - <a id="E-PENPAL-TITLE-EXTRACT"></a>**E-PENPAL-TITLE-EXTRACT**: `EnrichTitles()` reads the first 20 lines of each file to extract H1 headings. Titles are cached and shown as the primary display name when present.
-  ← [P-PENPAL-FILE-LIST](PRODUCT.md#P-PENPAL-FILE-LIST)
+  ← [P-PENPAL-PROJECT-FILE-TREE](PRODUCT.md#P-PENPAL-PROJECT-FILE-TREE)
 
 - <a id="E-PENPAL-PATH-MATCH"></a>**E-PENPAL-PATH-MATCH**: `FindProjectByPath()` uses longest-prefix matching across all project root paths. `FindProjectByPathWithWorktree()` extends this to check non-main worktree paths and return the worktree name.
   ← [P-PENPAL-CLI-OPEN](PRODUCT.md#P-PENPAL-CLI-OPEN), [P-PENPAL-MCP](PRODUCT.md#P-PENPAL-MCP)
@@ -246,8 +249,8 @@ see-also:
 - <a id="E-PENPAL-FRONTEND-STACK"></a>**E-PENPAL-FRONTEND-STACK**: React 19 + TypeScript + Vite + Tailwind v4. Router: react-router-dom v7 (browser router with `/app/` basename in production). Markdown: react-markdown v10 with remark-gfm, rehype-raw. Diagrams: mermaid v11. Desktop: Tauri v2.
   ← [P-PENPAL-RENDER](PRODUCT.md#P-PENPAL-RENDER)
 
-- <a id="E-PENPAL-TABS"></a>**E-PENPAL-TABS**: `useTabs` hook maintains per-tab history stacks. `PUSH` navigation truncates forward history. `REPLACE` replaces current entry. `POP` events (browser back/forward) are matched against tab history. Each tab derives its title from the current URL path. Tauri native menu items dispatch `CustomEvent`s (`menu-new-tab`, `menu-close-tab`, `menu-prev-tab`, `menu-next-tab`, `menu-go-back`, `menu-go-forward`) which the frontend handles via `window.addEventListener`. The `menu-close-tab` handler checks `tabs.length`: when `<= 1`, it calls `getCurrentWindow().close()` to close the window (clearing server focus state first); otherwise it calls `closeTab(activeTabId)`. The tab bar hides the `×` close button when only one tab remains. Cmd+Click on internal links calls `openTab(path, title, { background: true })`. Cmd+Shift+Click calls `openInNewWindow()` via Tauri `WebviewWindow`. Middle-click on a tab fires `onAuxClick` with `button === 1` to close. In browser mode, Cmd+[/] keydown handlers provide back/forward.
-  ← [P-PENPAL-TABS](PRODUCT.md#P-PENPAL-TABS), [P-PENPAL-TAB-KEYS](PRODUCT.md#P-PENPAL-TAB-KEYS), [P-PENPAL-CMD-CLICK](PRODUCT.md#P-PENPAL-CMD-CLICK)
+- <a id="E-PENPAL-TABS"></a>**E-PENPAL-TABS**: `useTabs` hook maintains per-tab history stacks. `PUSH` navigation truncates forward history. `REPLACE` replaces current entry. `POP` events (browser back/forward) are matched against tab history. Each tab derives its title from the current URL path. The tab bar renders all tabs, labeled by their current page. The close button (×) appears on each tab when more than one tab is open. New tab (+ button, Cmd+T) calls `openTab('/', 'Home')`. Clicking a file in the sidebar navigates the current tab; if no tabs exist, a new tab is created. The `menu-close-tab` handler checks `tabs.length`: when `<= 1`, it calls `getCurrentWindow().close()` to close the window (clearing server focus state first); otherwise it calls `closeTab(activeTabId)`. Tauri native menu items dispatch `CustomEvent`s (`menu-new-tab`, `menu-close-tab`, `menu-prev-tab`, `menu-next-tab`, `menu-go-back`, `menu-go-forward`) handled via `window.addEventListener`. Cmd+Click on internal links calls `openTab(path, title, { background: true })`. Cmd+Shift+Click calls `openInNewWindow()`. Middle-click on tab fires `onAuxClick` with `button === 1` to close. In browser mode, Cmd+[/] keydown handlers provide back/forward.
+  ← [P-PENPAL-TABS](PRODUCT.md#P-PENPAL-TABS), [P-PENPAL-TAB-NAVIGATE](PRODUCT.md#P-PENPAL-TAB-NAVIGATE), [P-PENPAL-TAB-NEW](PRODUCT.md#P-PENPAL-TAB-NEW), [P-PENPAL-TAB-KEYS](PRODUCT.md#P-PENPAL-TAB-KEYS), [P-PENPAL-WINDOW-LIFECYCLE](PRODUCT.md#P-PENPAL-WINDOW-LIFECYCLE), [P-PENPAL-CMD-CLICK](PRODUCT.md#P-PENPAL-CMD-CLICK)
 
 - <a id="E-PENPAL-WINDOW-ID"></a>**E-PENPAL-WINDOW-ID**: Each browser window gets a unique ID: in browser mode via `sessionStorage` (UUID), in desktop mode via Tauri window label. Sent as `?window=` param on all `/api/focus` calls.
   ← [P-PENPAL-FOCUS](PRODUCT.md#P-PENPAL-FOCUS)
@@ -255,26 +258,47 @@ see-also:
 - <a id="E-PENPAL-MD-RENDER"></a>**E-PENPAL-MD-RENDER**: Each rendered block is tagged with `data-source-line` (1-indexed). Heading IDs use the same slugification algorithm as Go's goldmark renderer. Mermaid blocks produce `.mermaid-container` divs with `data-mermaid-source`.
   ← [P-PENPAL-GFM](PRODUCT.md#P-PENPAL-GFM), [P-PENPAL-MERMAID](PRODUCT.md#P-PENPAL-MERMAID)
 
-- <a id="E-PENPAL-PROJECT-CARD"></a>**E-PENPAL-PROJECT-CARD**: `WorkspacePage.tsx` `renderProjectCard()` composes: project name as `<Link>`, `APIBadge` spans (text, color, bg from source type registry), agent dot (when `agentConnected || agentRunning`), review count badge (when `reviewCount > 0`, populated server-side from `ListFilesInReview()`), age string, branch with `*` dirty suffix, worktree count (non-main worktrees from `worktrees` array), and a three-dot menu (copy-path, close/delete). Standalone projects section rendered unconditionally when `standaloneProjects.length > 0` under a "Standalone Projects" heading.
-  ← [P-PENPAL-PROJECT-CARD](PRODUCT.md#P-PENPAL-PROJECT-CARD), [P-PENPAL-STANDALONE-SECTION](PRODUCT.md#P-PENPAL-STANDALONE-SECTION)
+- <a id="E-PENPAL-HOME-SIDEBAR"></a>**E-PENPAL-HOME-SIDEBAR**: In home mode (no active project), `Layout.tsx` renders a sidebar tree with: ⌂ header with "+" add button and sort toggle, expandable workspace items (with child projects), standalone project items as top-level peers, and global "In Review" / "Recent" `NavLink`s in a global nav section. Visual dividers (`.home-section-divider`) separate the workspaces section, standalone projects section, and global navigation section; sections with no items are omitted along with their dividers. Workspace items show agent dots when any child project has `agentConnected`. Projects show: name (with branch as tooltip), agent dot, and expandable worktree children (when multiple worktrees exist). Non-main worktrees display a worktree icon; the main worktree does not. State: `expandedWorkspaces` and `expandedWorktreeProjects` `Set<string>`. Clicking a project navigates to `/project/{qn}`. `useProjectSort` hook controls ordering; projects with zero files sort last and are visually dimmed (`.deemphasized` class).
+  ← [P-PENPAL-HOME](PRODUCT.md#P-PENPAL-HOME), [P-PENPAL-HOME-TREE](PRODUCT.md#P-PENPAL-HOME-TREE), [P-PENPAL-HOME-PROJECT-ITEM](PRODUCT.md#P-PENPAL-HOME-PROJECT-ITEM), [P-PENPAL-HOME-NAVIGATE](PRODUCT.md#P-PENPAL-HOME-NAVIGATE)
 
-- <a id="E-PENPAL-HOME-REDIRECT"></a>**E-PENPAL-HOME-REDIRECT**: `IndexRedirect` component at route `/` calls `api.listProjects()` on mount and navigates with `{ replace: true }`: first workspace-origin project → `/workspace/{workspace}`, else first standalone-origin project → `/project/{qn}`, else `/recent`.
-  ← [P-PENPAL-HOME-REDIRECT](PRODUCT.md#P-PENPAL-HOME-REDIRECT)
+- <a id="E-PENPAL-SORT"></a>**E-PENPAL-SORT**: `useProjectSort` hook uses `useSyncExternalStore` backed by localStorage key `penpal-project-sort` (default `'alpha'`). Subscribes to `storage` events for cross-tab sync. Home sidebar sorts by `localeCompare` for alpha or uses server order (sorted by `cache.ProjectsSortedByModTime()`) for recent. Projects with `fileCount === 0` always sort last and get `.deemphasized` styling. The sort toggle in the home sidebar header switches between the two modes.
+  ← [P-PENPAL-SORT](PRODUCT.md#P-PENPAL-SORT)
 
-- <a id="E-PENPAL-SIDEBAR-LAYOUT"></a>**E-PENPAL-SIDEBAR-LAYOUT**: Non-project mode: renders workspace `NavLink`s with agent dots and three-dot menu ("Remove workspace"), standalone project `NavLink`s with badges and three-dot menu ("Close project"), divider, "In Review" link with `(count)` suffix (computed from `api.getInReview()` sum of `g.files.length`), "Recent" link, and "+ Add workspace or project" button. Project mode: "← Home" link (to workspace page or `/`), workspace name link, worktree sub-items (with branch names, linking to `/project/{qn}` or `/project/{qn}@{name}`), and a "Sources" card injected by `ProjectPage` listing sources as `<a href="#source-{name}">` anchor links.
-  ← [P-PENPAL-SIDEBAR](PRODUCT.md#P-PENPAL-SIDEBAR), [P-PENPAL-SIDEBAR-PROJECT](PRODUCT.md#P-PENPAL-SIDEBAR-PROJECT)
+- <a id="E-PENPAL-HOME-DEFAULT"></a>**E-PENPAL-HOME-DEFAULT**: `HomePage` component at route `/` renders a welcome screen with the app name and `⌘P` search hint. Opening a new tab (+ button or Cmd+T) calls `openTab('/', 'Home')`. New windows open on `/`.
+  ← [P-PENPAL-HOME-DEFAULT](PRODUCT.md#P-PENPAL-HOME-DEFAULT)
 
-- <a id="E-PENPAL-IN-REVIEW-SECTION"></a>**E-PENPAL-IN-REVIEW-SECTION**: `ProjectPage` fetches `GET /api/reviews?project=<qn>` on mount and on `comments` SSE events. When `reviewPaths.length > 0`, renders an "In Review" section before source groups. Files are matched back to cached groups to display name, title, age, and type. Shows `WorkingIndicator` (pulsing dot) when `review.workingThreads > 0`.
-  ← [P-PENPAL-IN-REVIEW-SECTION](PRODUCT.md#P-PENPAL-IN-REVIEW-SECTION)
+- <a id="E-PENPAL-PROJECT-RESOLVE"></a>**E-PENPAL-PROJECT-RESOLVE**: In project mode, `Layout.tsx` detects the active project from the URL path using longest-prefix match against known `qualifiedName`s, with `@worktree` suffix parsing via `parseProjectWorktree()`. Applied on both `/project/` and `/file/` routes.
+  ← [P-PENPAL-HOME-NAVIGATE](PRODUCT.md#P-PENPAL-HOME-NAVIGATE)
 
-- <a id="E-PENPAL-SOURCE-ACTIONS"></a>**E-PENPAL-SOURCE-ACTIONS**: Source group header three-dot menu in `ProjectPage` offers: "Copy relative paths" (joins `@` + path with newlines), "Copy absolute paths", "Publish" (parallel `api.publish()` calls), "Remove from Penpal" (only for non-auto sources; calls `api.removeSource()` per file for "files" sources, or once for tree sources), "Delete from disk" (triggers delete confirmation modal). Auto-detected sources show `(auto)` badge and hide the remove option.
-  ← [P-PENPAL-SOURCE-ACTIONS](PRODUCT.md#P-PENPAL-SOURCE-ACTIONS)
+- <a id="E-PENPAL-BREADCRUMB"></a>**E-PENPAL-BREADCRUMB**: Breadcrumb bar at the top of the sidebar renders: ⌂ `<Link>` to home, separator, workspace/project name as a single `<Link>` to the project view (including `@worktree` suffix when active), and an agent-dot `<span>` when `activeProject.agentConnected` is true.
+  ← [P-PENPAL-PROJECT-BREADCRUMB](PRODUCT.md#P-PENPAL-PROJECT-BREADCRUMB), [P-PENPAL-AGENT-PRESENCE](PRODUCT.md#P-PENPAL-AGENT-PRESENCE)
 
-- <a id="E-PENPAL-BATCH-OPS"></a>**E-PENPAL-BATCH-OPS**: `ProjectPage` maintains a `Set<string>` selection state. File row checkboxes toggle individual paths; source header checkboxes toggle all files in a source (with indeterminate state for partial selection). Selection bar appears when `selected.size > 0` with actions: "Copy markdown" (`Promise.all` of `api.getRawFile()` joined with `\n\n---\n\n`), "Copy paths" (joins `@` + path), "Publish" (parallel), "Delete" (triggers modal), and "Clear".
+- <a id="E-PENPAL-WORKTREE-DROPDOWN"></a>**E-PENPAL-WORKTREE-DROPDOWN**: When the active project has multiple worktrees, a dropdown in the breadcrumb bar shows "main repo" for the main worktree or a worktree icon + name for non-main worktrees. Clicking opens a menu listing all worktrees; selecting one navigates to that worktree's view. Single-worktree projects show dimmed static text "no worktrees". State: `showWorktreeDropdown`.
+  ← [P-PENPAL-PROJECT-WORKTREE-DROPDOWN](PRODUCT.md#P-PENPAL-PROJECT-WORKTREE-DROPDOWN)
+
+- <a id="E-PENPAL-SOURCE-SECTIONS"></a>**E-PENPAL-SOURCE-SECTIONS**: The project sidebar shows collapsible source sections populated from `projectFiles` state (via `api.getProjectFiles()`), a collapsible "In Review" section (from `projectReviews` via `api.getReviews()`), and a collapsible "Recent" section. Each source header shows its badge and file count. Virtual sources with zero files show alternate labels ("No Markdown Found", "Nothing in Review", "Nothing Recent") with `deemphasized` class and are not expandable. State: `expandedSources` `Set<string>`. SSE `files` and `comments` events refresh the data.
+  ← [P-PENPAL-PROJECT-SOURCES](PRODUCT.md#P-PENPAL-PROJECT-SOURCES), [P-PENPAL-PROJECT-IN-REVIEW](PRODUCT.md#P-PENPAL-PROJECT-IN-REVIEW), [P-PENPAL-PROJECT-RECENT](PRODUCT.md#P-PENPAL-PROJECT-RECENT)
+
+- <a id="E-PENPAL-FILE-TREE"></a>**E-PENPAL-FILE-TREE**: `buildFileTree()` constructs a recursive directory tree from the flat file list in each source section. Single-child directory chains are compacted into one node with a combined path label (e.g., `a/b/c/`). State: `expandedDirs` `Set<string>`.
+  ← [P-PENPAL-PROJECT-FILE-TREE](PRODUCT.md#P-PENPAL-PROJECT-FILE-TREE)
+
+- <a id="E-PENPAL-FILE-TREE-ITEM"></a>**E-PENPAL-FILE-TREE-ITEM**: Each file in the tree shows its name (or H1 title when available), a file type badge (from `fileType` field, styled with `--file-type-{type}-bg/color` CSS variables, hidden for `other`), an "in review" badge when the file has open threads, and active highlighting for the current file.
+  ← [P-PENPAL-PROJECT-FILE-TREE](PRODUCT.md#P-PENPAL-PROJECT-FILE-TREE), [P-PENPAL-FILE-TYPES](PRODUCT.md#P-PENPAL-FILE-TYPES)
+
+- <a id="E-PENPAL-PROJECT-WELCOME"></a>**E-PENPAL-PROJECT-WELCOME**: `ProjectPage.tsx` is a simple welcome screen. Extracts the project name from the URL path via `parseProjectWorktree()` and shows the project name with a hint to expand a source in the sidebar. Data-testid `project-page`.
+  ← [P-PENPAL-PROJECT-BROWSE](PRODUCT.md#P-PENPAL-PROJECT-BROWSE)
+
+- <a id="E-PENPAL-SOURCE-ACTIONS"></a>**E-PENPAL-SOURCE-ACTIONS**: Source section headers in the sidebar support right-click context menus with: "Copy relative paths" (joins `@` + path with newlines), "Copy absolute paths", "Publish" (parallel `api.publish()` calls), "Remove from Penpal" (only for non-auto sources; `group.auto` controls visibility), "Delete from disk". No "(auto)" badge is displayed. File tree items support right-click with: "Copy markdown", "Copy relative path", "Copy absolute path", "Publish", "Remove from Penpal" (files source only), "Delete from disk".
+  ← [P-PENPAL-SOURCE-ACTIONS](PRODUCT.md#P-PENPAL-SOURCE-ACTIONS), [P-PENPAL-FILE-ACTIONS](PRODUCT.md#P-PENPAL-FILE-ACTIONS)
+
+- <a id="E-PENPAL-BATCH-OPS"></a>**E-PENPAL-BATCH-OPS**: `Layout.tsx` maintains a `Set<string>` selection state for the project sidebar. Shift-click on a file extends the selection from the last-clicked file to the shift-clicked file within the same source group. A floating selection bar at the bottom of the sidebar appears when `selected.size > 0` with actions: "Copy markdown" (`Promise.all` of `api.getRawFile()` joined with `\n\n---\n\n`), "Copy paths" (joins `@` + path), "Publish" (parallel), "Delete" (triggers delete confirmation modal), and "Clear".
   ← [P-PENPAL-BATCH-OPS](PRODUCT.md#P-PENPAL-BATCH-OPS)
 
-- <a id="E-PENPAL-SORT"></a>**E-PENPAL-SORT**: `useProjectSort` hook uses `useSyncExternalStore` backed by localStorage key `penpal-project-sort` (default `'alpha'`). Subscribes to `storage` events for cross-tab sync. `WorkspacePage` sorts by `localeCompare` for alpha or uses server order (sorted by `cache.ProjectsSortedByModTime()`) for recent. Projects with `fileCount === 0` always sort last. Sidebar also uses the same hook for consistent ordering.
-  ← [P-PENPAL-SORT](PRODUCT.md#P-PENPAL-SORT)
+- <a id="E-PENPAL-CONTEXT-MENU"></a>**E-PENPAL-CONTEXT-MENU**: A shared `ContextMenu` component renders an absolutely-positioned menu at mouse coordinates on `contextmenu` events. Items are `{ label, className?, onClick }`. The menu auto-dismisses on click-outside or item selection. Used for workspace items (remove), standalone projects (close), source headers (copy/publish/remove/delete), and file items (copy/publish/remove/delete).
+  ← [P-PENPAL-REMOVE-WORKSPACE](PRODUCT.md#P-PENPAL-REMOVE-WORKSPACE), [P-PENPAL-CLOSE-PROJECT](PRODUCT.md#P-PENPAL-CLOSE-PROJECT), [P-PENPAL-FILE-ACTIONS](PRODUCT.md#P-PENPAL-FILE-ACTIONS), [P-PENPAL-SOURCE-ACTIONS](PRODUCT.md#P-PENPAL-SOURCE-ACTIONS)
+
+- <a id="E-PENPAL-NO-SELECT-CHROME"></a>**E-PENPAL-NO-SELECT-CHROME**: CSS `user-select: none` is applied to all application chrome: `.sidebar`, `.tab-bar`, `.topbar`, `.breadcrumb-bar`, and context menus. Only `.main-content` (the markdown viewer area) allows text selection.
+  ← [P-PENPAL-NO-SELECT-CHROME](PRODUCT.md#P-PENPAL-NO-SELECT-CHROME)
 
 - <a id="E-PENPAL-FRONTMATTER-STRIP"></a>**E-PENPAL-FRONTMATTER-STRIP**: `markdown.StripFrontmatter()` checks for `---` prefix, finds the next `\n---` occurrence, and returns content after it with leading newlines trimmed. Applied in `handleRawFile` before serving content and in `publish/render.go` during publishing. The frontend renders the already-stripped content.
   ← [P-PENPAL-FRONTMATTER](PRODUCT.md#P-PENPAL-FRONTMATTER)
@@ -311,18 +335,21 @@ see-also:
 
 ## Review Workflow
 
-- <a id="E-PENPAL-IN-REVIEW-PAGE"></a>**E-PENPAL-IN-REVIEW-PAGE**: `GET /api/in-review` calls `listAllReviewGroups()` which groups files with open threads by `{project QN, source name}`. Each group includes workspace, project name, source badge data (from registered `SourceType`), agent active status (from `agents.Status(qn).Running`), working thread count, and per-file metadata from cache. Frontend `InReviewPage` renders each group with source badge, breadcrumb links (workspace → project → source anchor), `WorkingIndicator`, and file row links.
-  ← [P-PENPAL-IN-REVIEW](PRODUCT.md#P-PENPAL-IN-REVIEW)
+- <a id="E-PENPAL-IN-REVIEW-PAGE"></a>**E-PENPAL-IN-REVIEW-PAGE**: `GET /api/in-review` calls `listAllReviewGroups()` which groups files with open threads by `{project QN, source name}`. Each group includes workspace, project name, source badge data (from registered `SourceType`), agent active status (from `agents.Status(qn).Running`), working thread count, and per-file metadata from cache. Frontend `InReviewPage` renders two-line file rows with filename, context path (workspace / project / source), and working indicator.
+  ← [P-PENPAL-GLOBAL-IN-REVIEW](PRODUCT.md#P-PENPAL-GLOBAL-IN-REVIEW), [P-PENPAL-GLOBAL-ROW-NAVIGATE](PRODUCT.md#P-PENPAL-GLOBAL-ROW-NAVIGATE)
 
-- <a id="E-PENPAL-REVIEW-COUNT"></a>**E-PENPAL-REVIEW-COUNT**: Sidebar `refreshReviewCount()` calls `api.getInReview()` and sums `g.files.length` across all groups. Updated on `comments` SSE events (debounced 200ms). Displayed as `In Review (count)` in the sidebar nav link; link gets class `no-reviews` when count is zero.
-  ← [P-PENPAL-REVIEW-COUNT](PRODUCT.md#P-PENPAL-REVIEW-COUNT)
+- <a id="E-PENPAL-REVIEW-COUNT"></a>**E-PENPAL-REVIEW-COUNT**: Sidebar `refreshReviewCount()` calls `api.getInReview()` and sums `g.files.length` across all groups. Updated on `comments` SSE events (debounced 200ms). Displayed as `In Review (count)` in the home sidebar; link is dimmed when count is zero.
+  ← [P-PENPAL-HOME-TREE](PRODUCT.md#P-PENPAL-HOME-TREE), [P-PENPAL-GLOBAL-IN-REVIEW](PRODUCT.md#P-PENPAL-GLOBAL-IN-REVIEW)
 
 ---
 
 ## Activity Tracking
 
 - <a id="E-PENPAL-ACTIVITY"></a>**E-PENPAL-ACTIVITY**: In-memory `activity.Tracker` stores one event per file (keyed by project + path). Event types: `viewed`, `modified`, `created`, `comment`, `published`. `Record()` always overwrites; `RecordAt()` (for seeding from mtime) does not overwrite.
-  ← [P-PENPAL-RECENT](PRODUCT.md#P-PENPAL-RECENT)
+  ← [P-PENPAL-GLOBAL-RECENT](PRODUCT.md#P-PENPAL-GLOBAL-RECENT), [P-PENPAL-PROJECT-RECENT](PRODUCT.md#P-PENPAL-PROJECT-RECENT)
+
+- <a id="E-PENPAL-RECENT-PAGE"></a>**E-PENPAL-RECENT-PAGE**: `GET /api/recent` returns up to 50 recently active files across all projects, sorted by most recent activity. Frontend `RecentPage` renders two-line file rows with filename, workspace / project context, and relative timestamp. Clicking navigates the current tab to the file.
+  ← [P-PENPAL-GLOBAL-RECENT](PRODUCT.md#P-PENPAL-GLOBAL-RECENT), [P-PENPAL-GLOBAL-ROW-NAVIGATE](PRODUCT.md#P-PENPAL-GLOBAL-ROW-NAVIGATE)
 
 ---
 
@@ -348,11 +375,11 @@ see-also:
 
 ## Source Management
 
-- <a id="E-PENPAL-ADD-SOURCE"></a>**E-PENPAL-ADD-SOURCE**: `POST /api/sources` accepts a relative path. Directories create "tree" sources; `.md` files are added to a "files" source. Duplicate detection refuses paths already covered by an existing source. Only `.md` files accepted for individual file sources.
-  ← [P-PENPAL-ADD-SOURCE](PRODUCT.md#P-PENPAL-ADD-SOURCE)
+- <a id="E-PENPAL-ADD-SOURCE"></a>**E-PENPAL-ADD-SOURCE**: `POST /api/sources` accepts a relative path. Directories create "tree" sources; `.md` files are added to a "files" source. Duplicate detection refuses paths already covered by an existing source. Only `.md` files accepted for individual file sources. Used internally by `penpal open` CLI to auto-add files to their containing project.
+  ← [P-PENPAL-CLI-OPEN](PRODUCT.md#P-PENPAL-CLI-OPEN)
 
 - <a id="E-PENPAL-REMOVE-SOURCE"></a>**E-PENPAL-REMOVE-SOURCE**: `DELETE /api/sources` removes user-added sources. Auto-detected sources cannot be removed. For "files" sources, individual files can be removed; the source entry is deleted when empty.
-  ← [P-PENPAL-REMOVE-SOURCE](PRODUCT.md#P-PENPAL-REMOVE-SOURCE)
+  ← [P-PENPAL-FILE-ACTIONS](PRODUCT.md#P-PENPAL-FILE-ACTIONS)
 
 ---
 
@@ -386,7 +413,7 @@ see-also:
 - <a id="E-PENPAL-FILE-HANDLER-PLIST"></a>**E-PENPAL-FILE-HANDLER-PLIST**: `Info.plist` declares `CFBundleDocumentTypes` with `LSItemContentTypes: [net.daringfireball.markdown]`, `CFBundleTypeExtensions: [md, markdown]`, `CFBundleTypeRole: Editor`, and `LSHandlerRank: Alternate`. This registers Penpal in Finder's "Open With" menu without overriding the user's current default markdown handler.
   ← [P-PENPAL-FILE-HANDLER](PRODUCT.md#P-PENPAL-FILE-HANDLER)
 
-- <a id="E-PENPAL-FILE-HANDLER-EVENT"></a>**E-PENPAL-FILE-HANDLER-EVENT**: In the Tauri `.run()` callback, handle `tauri::RunEvent::Opened { urls }`. For each URL with `file://` scheme, extract the path and POST it to `http://127.0.0.1:{port}/api/open` (same as the CLI `openPaths` flow). Ensure a window exists before dispatching (create one if all windows are closed). The Go server's existing `handleAPIOpen` resolves the file to its project and triggers SSE navigation.
+- <a id="E-PENPAL-FILE-HANDLER-EVENT"></a>**E-PENPAL-FILE-HANDLER-EVENT**: In the Tauri `.run()` callback, handle `tauri::RunEvent::Opened { urls }`. For each URL with `file://` scheme, extract the path and POST it to `http://127.0.0.1:{port}/api/open` (same as the CLI `openPaths` flow). HTTP requests are dispatched on `tauri::async_runtime::spawn` to avoid blocking the main thread. Ensure a window exists before dispatching (create one if all windows are closed). The Go server's existing `handleAPIOpen` resolves the file to its project and triggers SSE navigation.
   ← [P-PENPAL-FILE-HANDLER](PRODUCT.md#P-PENPAL-FILE-HANDLER)
 
 ---

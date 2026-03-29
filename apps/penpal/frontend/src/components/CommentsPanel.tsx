@@ -37,6 +37,7 @@ function CommentBody({ text }: { text: string }) {
   );
 }
 
+// E-PENPAL-AGENT-STATUS: color-coded agent context usage in the status bar.
 function agentContextColorClass(pct: number): string {
   if (pct >= 85) return 'critical';
   if (pct >= 60) return 'warning';
@@ -342,6 +343,20 @@ interface ThreadCardProps {
   onEnsureAgent: () => void;
 }
 
+// E-PENPAL-WORKING: pulsing dot animation for agent working state.
+function WorkingIndicator() {
+  return (
+    <div className="thread-working">
+      <span className="agent-dot" />
+      <span className="working-dots">
+        <span>.</span>
+        <span>.</span>
+        <span>.</span>
+      </span>
+    </div>
+  );
+}
+
 function ThreadCard({
   thread,
   line,
@@ -440,29 +455,11 @@ function ThreadCard({
             </div>
           </div>
           {/* E-PENPAL-WORKING: render indicator after the specific comment the agent is responding to */}
-          {thread.agentWorking && thread.workingAfterCommentId === c.id && (
-            <div className="thread-working">
-              <span className="agent-dot" />
-              <span className="working-dots">
-                <span>.</span>
-                <span>.</span>
-                <span>.</span>
-              </span>
-            </div>
-          )}
+          {thread.agentWorking && thread.workingAfterCommentId === c.id && <WorkingIndicator />}
         </div>
       ))}
       {/* Fallback: show at end if workingAfterCommentId is unset or not found */}
-      {thread.agentWorking && (!thread.workingAfterCommentId || !ordered.some(c => c.id === thread.workingAfterCommentId)) && (
-        <div className="thread-working">
-          <span className="agent-dot" />
-          <span className="working-dots">
-            <span>.</span>
-            <span>.</span>
-            <span>.</span>
-          </span>
-        </div>
-      )}
+      {thread.agentWorking && (!thread.workingAfterCommentId || !ordered.some(c => c.id === thread.workingAfterCommentId)) && <WorkingIndicator />}
 
       {/* Suggested replies */}
       {showSuggestions && (

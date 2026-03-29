@@ -135,10 +135,25 @@ describe('CommentsPanel', () => {
     expect(screen.getByText('Anchor text not found in document')).toBeDefined();
   });
 
-  it('renders agent working indicator', () => {
+  it('renders agent working indicator at end when workingAfterCommentId is unset', () => {
     const workingThread: ThreadResponse = { ...mockThread, agentWorking: true };
     const { container } = renderPanel([workingThread]);
     expect(container.querySelector('.thread-working')).toBeDefined();
+  });
+
+  it('renders working indicator inline after the specific comment, not at end', () => {
+    // E-PENPAL-WORKING: inline positioning — indicator after comment-1, not after comment-2
+    const workingThread: ThreadResponse = {
+      ...mockThread,
+      agentWorking: true,
+      workingAfterCommentId: 'comment-1',
+    };
+    const { container } = renderPanel([workingThread]);
+    const indicators = container.querySelectorAll('.thread-working');
+    expect(indicators.length).toBe(1);
+    // The indicator should be inside the same wrapper as comment-1
+    const comment1 = container.querySelector('#comment-comment-1')!;
+    expect(comment1.parentElement!.querySelector('.thread-working')).toBeDefined();
   });
 
   it('renders agent status indicator when running', () => {

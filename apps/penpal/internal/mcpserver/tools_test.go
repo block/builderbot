@@ -578,3 +578,72 @@ func TestWaitForChanges_Triggered(t *testing.T) {
 		t.Errorf("changed = %v, want true", result["changed"])
 	}
 }
+
+// E-PENPAL-MCP-WORKING: verifies wait_for_changes calls SetWorking when no working entry exists.
+func TestWaitForChanges_SetsWorking(t *testing.T) {
+	env, cleanup := setup(t)
+	defer cleanup()
+
+	thread := createTestThread(t, env, "thoughts/test.md", "please review")
+
+	// No pre-existing working entry — the branch should call SetWorking.
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		env.store.NotifyChange()
+	}()
+
+	text := callTool(t, env, "penpal_wait_for_changes", map[string]any{"project": env.projName})
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result["changed"] != true {
+		t.Fatalf("changed = %v, want true", result["changed"])
+	}
+
+	// Verify SetWorking was called: working entry should now exist with correct afterCommentID.
+	lastCommentID := thread.Comments[len(thread.Comments)-1].ID
+	got := env.store.WorkingAfterCommentID(env.projName, "thoughts/test.md", thread.ID)
+	if got != lastCommentID {
+		t.Errorf("WorkingAfterCommentID = %q, want %q", got, lastCommentID)
+	}
+}
+
+// E-PENPAL-MCP-WORKING: verifies wait_for_changes calls RefreshWorkingTimestamp when entry already tracks the correct comment.
+func TestWaitForChanges_RefreshesWorking(t *testing.T) {
+	env, cleanup := setup(t)
+	defer cleanup()
+
+	thread := createTestThread(t, env, "thoughts/test.md", "please review")
+	lastCommentID := thread.Comments[len(thread.Comments)-1].ID
+
+	// Pre-set a working entry with the same afterCommentID — RefreshWorkingTimestamp branch.
+	env.store.SetWorking(env.projName, "thoughts/test.md", thread.ID, lastCommentID)
+
+	// Record IsWorking before the poll to confirm it stays true after.
+	if !env.store.IsWorking(env.projName, "thoughts/test.md", thread.ID) {
+		t.Fatal("expected working before poll")
+	}
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		env.store.NotifyChange()
+	}()
+
+	text := callTool(t, env, "penpal_wait_for_changes", map[string]any{"project": env.projName})
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// afterCommentID should be unchanged (RefreshWorkingTimestamp preserves it).
+	got := env.store.WorkingAfterCommentID(env.projName, "thoughts/test.md", thread.ID)
+	if got != lastCommentID {
+		t.Errorf("WorkingAfterCommentID = %q, want %q (should be unchanged)", got, lastCommentID)
+	}
+	if !env.store.IsWorking(env.projName, "thoughts/test.md", thread.ID) {
+		t.Error("expected working entry to persist after refresh")
+	}
+}

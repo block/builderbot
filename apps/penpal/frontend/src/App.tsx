@@ -1,42 +1,20 @@
-import { useEffect } from 'react';
-import { createBrowserRouter, RouterProvider, useNavigate } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import Layout from './components/Layout';
-import WorkspacePage from './pages/WorkspacePage';
 import ProjectPage from './pages/ProjectPage';
 import FilePage from './pages/FilePage';
 import SearchPage from './pages/SearchPage';
 import RecentPage from './pages/RecentPage';
 import InReviewPage from './pages/InReviewPage';
-import { api } from './api';
 
-// E-PENPAL-HOME-REDIRECT: navigates to first workspace, standalone project, or /recent.
-function IndexRedirect() {
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    api.listProjects().then((projects) => {
-      // First workspace (matches Go handleIndex: s.cfg.Workspaces[0].DisplayName())
-      const workspaceProject = projects.find((p) => p.origin === 'workspace' && p.workspace);
-      if (workspaceProject) {
-        navigate(`/workspace/${encodeURIComponent(workspaceProject.workspace)}`, { replace: true });
-        return;
-      }
-
-      // First standalone project
-      const standalone = projects.find((p) => p.origin === 'standalone');
-      if (standalone) {
-        navigate(`/project/${standalone.qualifiedName}`, { replace: true });
-        return;
-      }
-
-      // Nothing configured
-      navigate('/recent', { replace: true });
-    }).catch(() => {
-      navigate('/recent', { replace: true });
-    });
-  }, [navigate]);
-
-  return null;
+// E-PENPAL-HOME-DEFAULT: home view welcome screen.
+function HomePage() {
+  return (
+    <div className="welcome-screen">
+      <h2>Penpal</h2>
+      <p>Select a project from the sidebar to browse its files.</p>
+      <p><kbd>⌘P</kbd> to search all thoughts</p>
+    </div>
+  );
 }
 
 // Vite sets import.meta.env.BASE_URL from the `base` config (e.g. '/app/' for
@@ -47,8 +25,7 @@ const router = createBrowserRouter([
   {
     element: <Layout />,
     children: [
-      { path: '/', element: <IndexRedirect /> },
-      { path: '/workspace/:name', element: <WorkspacePage /> },
+      { path: '/', element: <HomePage /> },
       { path: '/project/*', element: <ProjectPage /> },
       { path: '/file/*', element: <FilePage /> },
       { path: '/search', element: <SearchPage /> },

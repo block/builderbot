@@ -35,6 +35,8 @@ vi.mock('../api', () => ({
       },
     ]),
     getInReview: vi.fn().mockResolvedValue([]),
+    getProjectFiles: vi.fn().mockResolvedValue([]),
+    getReviews: vi.fn().mockResolvedValue([]),
     clearFocus: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -51,7 +53,8 @@ beforeEach(() => {
   vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: false } as MediaQueryList);
 });
 
-// E-PENPAL-SIDEBAR-LAYOUT: verifies sidebar rendering, tab bar, SSE reconnect, and internal link navigation.
+// E-PENPAL-HOME-SIDEBAR, E-PENPAL-PROJECT-RESOLVE, E-PENPAL-BREADCRUMB, E-PENPAL-SOURCE-SECTIONS:
+// verifies sidebar rendering, tab bar, SSE reconnect, and internal link navigation.
 // E-PENPAL-REVIEW-COUNT: verifies review count refresh on SSE events.
 describe('Layout', () => {
   it('renders topbar with logo and search', async () => {
@@ -75,7 +78,7 @@ describe('Layout', () => {
     expect(screen.getByTestId('topbar-tabs')).toBeInTheDocument();
   });
 
-  it('renders initial tab matching URL', async () => {
+  it('shows initial tab in tab bar', async () => {
     render(
       <MemoryRouter initialEntries={['/recent']}>
         <Layout />
@@ -83,6 +86,8 @@ describe('Layout', () => {
     );
 
     const tabs = screen.getByTestId('topbar-tabs');
+    // All tabs are shown, including non-file tabs
+    expect(tabs.querySelectorAll('.tab-bar-tab')).toHaveLength(1);
     expect(tabs.querySelector('.tab-bar-tab.active .tab-title')?.textContent).toBe('Recent');
   });
 
@@ -202,7 +207,7 @@ describe('Layout', () => {
       expect(api.listProjects).toHaveBeenCalled();
     });
 
-    // Should start with one tab
+    // Should start with one tab (the initial /recent tab)
     const tabBar = screen.getByTestId('topbar-tabs');
     expect(tabBar.querySelectorAll('.tab-bar-tab')).toHaveLength(1);
 
@@ -211,12 +216,12 @@ describe('Layout', () => {
     const onEvent = useSSEMock.mock.calls[0]?.[0];
     expect(onEvent).toBeDefined();
 
-    // Simulate a navigate SSE event for a new path
+    // Simulate a navigate SSE event for a file path
     act(() => {
       onEvent!({ type: 'navigate', path: '/file/project/doc.md' } as SSEEvent);
     });
 
-    // Should now have two tabs
+    // Should now have two tabs (initial + new file tab)
     await waitFor(() => {
       expect(tabBar.querySelectorAll('.tab-bar-tab')).toHaveLength(2);
     });
@@ -234,12 +239,10 @@ describe('Layout', () => {
     });
 
     const tabBar = screen.getByTestId('topbar-tabs');
-
-    // Get the onEvent callback
     const useSSEMock = vi.mocked(useSSE);
-    const onEvent = useSSEMock.mock.calls[0]?.[0];
 
-    // Open a second tab via navigate event
+    // Open a file tab via navigate event
+    const onEvent = useSSEMock.mock.calls[0]?.[0];
     act(() => {
       onEvent!({ type: 'navigate', path: '/file/project/doc.md' } as SSEEvent);
     });
@@ -248,23 +251,16 @@ describe('Layout', () => {
       expect(tabBar.querySelectorAll('.tab-bar-tab')).toHaveLength(2);
     });
 
-    // Switch back to first tab by clicking it
-    act(() => {
-      (tabBar.querySelector('.tab-bar-tab') as HTMLElement)?.click();
-    });
-
-    // Now navigate to the same path again — should NOT create a third tab
-    // We need to get the latest callback since tabs state changed
+    // Navigate to the same path again — should NOT create a third tab
     const latestOnEvent = useSSEMock.mock.calls[useSSEMock.mock.calls.length - 1]?.[0];
     act(() => {
       latestOnEvent!({ type: 'navigate', path: '/file/project/doc.md' } as SSEEvent);
     });
 
-    // Should still have exactly two tabs
+    // Should still have exactly two tabs (reuse existing file tab)
     await waitFor(() => {
       expect(tabBar.querySelectorAll('.tab-bar-tab')).toHaveLength(2);
     });
-    // The second tab should be active
     const activeTab = tabBar.querySelector('.tab-bar-tab.active .tab-title');
     expect(activeTab?.textContent).toBe('doc.md');
   });

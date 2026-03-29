@@ -6,7 +6,7 @@ beforeEach(() => {
   localStorage.clear();
 });
 
-// E-PENPAL-SORT: verifies default, toggle, persistence, and cross-instance sync.
+// E-PENPAL-HOME-SIDEBAR: verifies default, toggle, persistence, and cross-instance sync.
 describe('useProjectSort', () => {
   it('defaults to alpha', () => {
     const { result } = renderHook(() => useProjectSort());

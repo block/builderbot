@@ -79,6 +79,67 @@ describe('SelectionToolbar', () => {
 
     document.body.removeChild(contentDiv);
   });
+
+  it('clears browser selection after comment via requestAnimationFrame', async () => {
+    const contentDiv = document.createElement('div');
+    const para = document.createElement('p');
+    para.setAttribute('data-source-line', '1');
+    const textNode = document.createTextNode('hello world');
+    para.appendChild(textNode);
+    contentDiv.appendChild(para);
+    document.body.appendChild(contentDiv);
+
+    const onComment = vi.fn();
+    const contentRef = { current: contentDiv } as React.RefObject<HTMLDivElement | null>;
+
+    render(
+      <SelectionToolbar
+        contentRef={contentRef}
+        rawMarkdown={'hello world'}
+        onComment={onComment}
+      />,
+    );
+
+    const removeAllRanges = vi.fn();
+    vi.spyOn(window, 'getSelection').mockReturnValue({
+      anchorNode: textNode,
+      focusNode: textNode,
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => 'hello world',
+      getRangeAt: () => ({
+        startContainer: textNode,
+        startOffset: 0,
+        endContainer: textNode,
+        endOffset: textNode.nodeValue!.length,
+        commonAncestorContainer: para,
+        getBoundingClientRect: () =>
+          ({ top: 10, bottom: 20, left: 5, right: 50, width: 45, height: 10 }) as DOMRect,
+        intersectsNode: () => true,
+      }) as unknown as Range,
+      removeAllRanges,
+    } as unknown as Selection);
+
+    // Show toolbar
+    await act(async () => {
+      contentDiv.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    // Click Comment — selection clearing is deferred via requestAnimationFrame
+    // so it runs after React re-renders the pending highlight marks.
+    const commentBtn = screen.getByText('Comment');
+    await act(async () => {
+      commentBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      // Wait for requestAnimationFrame callback
+      await new Promise((r) => requestAnimationFrame(r));
+    });
+
+    expect(onComment).toHaveBeenCalledOnce();
+    expect(removeAllRanges).toHaveBeenCalled();
+
+    document.body.removeChild(contentDiv);
+  });
 });
 
 // E-PENPAL-COPY-MD: verifies getSelectionMarkdown extracts raw markdown from data-source-line attributes.

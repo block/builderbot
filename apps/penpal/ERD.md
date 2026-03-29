@@ -51,7 +51,7 @@ see-also:
 - <a id="E-PENPAL-COMMENT-STORAGE"></a>**E-PENPAL-COMMENT-STORAGE**: Comment threads are stored as JSON sidecar files at `{project}/.penpal/comments/{relative-path}.json`. Writes are atomic (temp file + rename). Path traversal is prevented by verifying the resolved path stays within the comments directory.
   ← [P-PENPAL-SELECT-COMMENT](PRODUCT.md#P-PENPAL-SELECT-COMMENT), [P-PENPAL-REPLY](PRODUCT.md#P-PENPAL-REPLY)
 
-- <a id="E-PENPAL-COMMENT-WORKTREE"></a>**E-PENPAL-COMMENT-WORKTREE**: For named worktrees, comment sidecars are stored within the worktree's filesystem path, not the main worktree. This ensures full comment isolation between worktrees.
+- <a id="E-PENPAL-COMMENT-WORKTREE"></a>**E-PENPAL-COMMENT-WORKTREE**: `commentsPathForWorktree(projectName, filePath, worktree)` resolves the sidecar base path. When `worktree` is empty, uses `project.Path`; when set, calls `s.cache.WorktreePath(projectName, worktree)` to get the worktree's filesystem path as `basePath`. Sidecar is then `{basePath}/.penpal/comments/{filePath}.json`. This isolates comments per-worktree — each worktree has its own `.penpal/comments/` directory tree.
   ← [P-PENPAL-WORKTREE](PRODUCT.md#P-PENPAL-WORKTREE)
 
 - <a id="E-PENPAL-GITIGNORE"></a>**E-PENPAL-GITIGNORE**: On startup, `config.EnsureGlobalGitignore()` ensures `.penpal/` is listed in the global gitignore so sidecar files are never committed.
@@ -273,7 +273,7 @@ see-also:
 - <a id="E-PENPAL-BREADCRUMB"></a>**E-PENPAL-BREADCRUMB**: Breadcrumb bar at the top of the sidebar renders: ⌂ `<Link>` to home, separator, workspace/project name as a single `<Link>` to the project view (including `@worktree` suffix when active), and an agent-dot `<span>` when `activeProject.agentConnected` is true.
   ← [P-PENPAL-PROJECT-BREADCRUMB](PRODUCT.md#P-PENPAL-PROJECT-BREADCRUMB), [P-PENPAL-AGENT-PRESENCE](PRODUCT.md#P-PENPAL-AGENT-PRESENCE)
 
-- <a id="E-PENPAL-WORKTREE-DROPDOWN"></a>**E-PENPAL-WORKTREE-DROPDOWN**: When the active project has multiple worktrees, a dropdown in the breadcrumb bar shows "main repo" for the main worktree or a worktree icon + name for non-main worktrees. Clicking opens a menu listing all worktrees; selecting one navigates to that worktree's view. Single-worktree projects show dimmed static text "no worktrees". State: `showWorktreeDropdown`.
+- <a id="E-PENPAL-WORKTREE-DROPDOWN"></a>**E-PENPAL-WORKTREE-DROPDOWN**: Rendered in `Layout.tsx` breadcrumb bar as a `.worktree-dropdown` div with `worktreeDropdownRef` for click-outside dismiss (via `mousedown` document listener). The `::after` pseudo-element renders a `▾` indicator. The `.worktree-dropdown-menu` is absolutely positioned, right-aligned. Each worktree button shows `active` class for the current selection; selecting a worktree navigates to `/project/{qn}@{worktreeName}`. Single-worktree projects render a static `.worktree-label` span instead (no ref, no click handler). State: `showWorktreeDropdown` boolean, toggled on click.
   ← [P-PENPAL-PROJECT-WORKTREE-DROPDOWN](PRODUCT.md#P-PENPAL-PROJECT-WORKTREE-DROPDOWN)
 
 - <a id="E-PENPAL-SOURCE-SECTIONS"></a>**E-PENPAL-SOURCE-SECTIONS**: The project sidebar shows collapsible source sections populated from `projectFiles` state (via `api.getProjectFiles()`), a collapsible "In Review" section (from `projectReviews` via `api.getReviews()`), and a collapsible "Recent" section. Each source header shows its badge and file count. Virtual sources with zero files show alternate labels ("No Markdown Found", "Nothing in Review", "Nothing Recent") with `deemphasized` class and are not expandable. State: `expandedSources` `Set<string>`. SSE `files` and `comments` events refresh the data.
@@ -334,7 +334,7 @@ see-also:
 
 ## Search
 
-- <a id="E-PENPAL-SEARCH"></a>**E-PENPAL-SEARCH**: Search matches project names (substring), filenames, and file content (case-insensitive line scan). Results capped at 100 files. Name matches sort before content matches within a project. Files not recognized by a source type's classifier are excluded.
+- <a id="E-PENPAL-SEARCH"></a>**E-PENPAL-SEARCH**: `GET /api/search?q=` handled by `handleAPISearch()`. Iterates `s.cache.Projects()`, doing substring match on project names for the "Projects" section (`matchingProjects`). For file matches, walks each source's `RootPath` via `filepath.Walk`, skipping `SkipDirs` and non-`.md` files. Filenames checked via `strings.Contains(ToLower(...), query)` (flagged `nameMatch: true`); content checked via `bufio.Scanner` line-by-line (stops at first match). Files returning `""` from `ClassifyFile()` are excluded. Results per project sorted name-matches-first then alphabetical; capped at 100 total files with early `break` on project iteration. Response struct: `apiSearchResponse{Query, MatchingProjects, ProjectResults, TotalFiles}`. Frontend `SearchPage` component at route `/search` calls `api.search(query)` and renders project cards, grouped file rows with `FileTypeBadge`, and a "name" `<span class="match-type">` badge for name matches.
   ← [P-PENPAL-SEARCH](PRODUCT.md#P-PENPAL-SEARCH)
 
 ---

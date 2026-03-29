@@ -279,21 +279,28 @@ export default function Layout() {
     () => projects.filter((p) => p.origin === 'workspace'),
     [projects],
   );
+  // E-PENPAL-SORT: shared comparator — empty projects last, then alpha or API order.
+  const projectSort = useCallback((a: APIProject, b: APIProject) => {
+    if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
+    if (sortOrder === 'alpha') return a.name.localeCompare(b.name);
+    return 0;
+  }, [sortOrder]);
+
   const standaloneProjects = useMemo(() => {
-    const sp = projects.filter((p) => p.origin === 'standalone');
-    sp.sort((a, b) => {
-      // Empty projects always last
-      if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
-      if (sortOrder === 'alpha') return a.name.localeCompare(b.name);
-      return 0; // recent: keep API order
-    });
-    return sp;
-  }, [projects, sortOrder]);
+    return projects.filter((p) => p.origin === 'standalone').sort(projectSort);
+  }, [projects, sortOrder, projectSort]);
   const workspaces = useMemo(() => {
     const ws = [...new Set(workspaceProjects.map((p) => p.workspace))];
     ws.sort((a, b) => a.localeCompare(b));
     return ws;
   }, [workspaceProjects]);
+  const sortedWorkspaceProjects = useMemo(() => {
+    const map = new Map<string, APIProject[]>();
+    for (const ws of workspaces) {
+      map.set(ws, workspaceProjects.filter(p => p.workspace === ws).sort(projectSort));
+    }
+    return map;
+  }, [workspaces, workspaceProjects, projectSort]);
 
   // Listen for native menu events (tab/window shortcuts)
   useEffect(() => {
@@ -1034,13 +1041,7 @@ export default function Layout() {
             {/* Workspaces */}
             {workspaces.map(ws => {
               const isExpanded = expandedWorkspaces.has(ws);
-              const wsProjects = workspaceProjects.filter(p => p.workspace === ws)
-                .sort((a, b) => {
-                  // Empty projects always last
-                  if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
-                  if (sortOrder === 'alpha') return a.name.localeCompare(b.name);
-                  return 0; // recent: keep API order
-                });
+              const wsProjects = sortedWorkspaceProjects.get(ws) || [];
               const hasAgent = wsProjects.some(p => p.agentConnected);
               return (
                 <div key={ws}>

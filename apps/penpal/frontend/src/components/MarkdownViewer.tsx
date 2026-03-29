@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useMemo, forwardRef, useImperativeHandle } fr
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { Prism as SyntaxHighlighter, type SyntaxHighlighterProps } from 'react-syntax-highlighter';
 import { dracula as prismDracula } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Components } from 'react-markdown';
 import type { Heading } from './TableOfContents';
@@ -259,7 +259,7 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
                   language={match[1]}
                   PreTag="div"
                   customStyle={{ margin: 0, padding: '16px', borderRadius: '6px', fontSize: '0.85em' }}
-                  renderer={rendererProp}
+                  renderer={rendererProp as SyntaxHighlighterProps['renderer']}
                 >
                   {codeText}
                 </SyntaxHighlighter>

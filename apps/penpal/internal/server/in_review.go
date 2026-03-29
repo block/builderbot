@@ -122,10 +122,6 @@ func (s *Server) listAllReviewGroups() []ReviewGroup {
 					AgentActive:  agentActive,
 					Files:        make([]ReviewFileEntry, 0),
 				}
-				if p.WorkspaceName != "" {
-					g.WorkspaceURL = "/workspace/" + p.WorkspaceName
-				}
-
 				groupMap[key] = g
 				groupOrder = append(groupOrder, key)
 			}

@@ -427,10 +427,9 @@ export default function Layout() {
     api.addWorkspace(addPath.trim())
       .then(() => {
         refreshProjects();
-        const name = addPath.trim().split('/').pop() || addPath.trim();
         setShowAddModal(false);
         setAddPath('');
-        navigate(`/workspace/${encodeURIComponent(name)}`);
+        navigate('/');
       })
       .catch((err) => setAddError(err.message))
       .finally(() => setAddLoading(false));
@@ -459,10 +458,12 @@ export default function Layout() {
     const wsProject = workspaceProjects.find((p) => p.workspace === ws);
     const wsPath = wsProject?.workspacePath;
     if (!wsPath) return;
+    const wsProjectNames = workspaceProjects.filter(p => p.workspace === ws).map(p => p.qualifiedName);
     api.removeWorkspace(wsPath)
       .then(() => {
         refreshProjects();
-        if (location.pathname === `/workspace/${encodeURIComponent(ws)}`) {
+        // Navigate home if viewing a project that belonged to the removed workspace
+        if (wsProjectNames.some(qn => location.pathname.startsWith(`/project/${qn}`) || location.pathname.startsWith(`/file/${qn}`))) {
           navigate('/');
         }
       })

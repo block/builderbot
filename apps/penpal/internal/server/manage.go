@@ -325,6 +325,11 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 
 		// Check if this file is already covered by an existing source
 		for _, src := range project.Sources {
+			// Skip the virtual __all_markdown__ source — it covers the whole
+			// project tree but should not block manual file additions.
+			if src.Name == "__all_markdown__" {
+				continue
+			}
 			if src.Type == "thoughts" || src.Type == "tree" {
 				if src.RootPath != "" && strings.HasPrefix(absPath, src.RootPath+"/") {
 					http.Error(w, fmt.Sprintf("file is already included via source %q", src.Name), http.StatusConflict)

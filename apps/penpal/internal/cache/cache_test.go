@@ -484,6 +484,143 @@ func TestGitIgnoreChecker_NonGitDir(t *testing.T) {
 	}
 }
 
+// E-PENPAL-SCAN: verifies CheckAllProjectsHasFiles sets HasFiles correctly.
+func TestCheckAllProjectsHasFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Project with markdown files
+	withMD := filepath.Join(tmpDir, "with-md")
+	os.MkdirAll(filepath.Join(withMD, "docs"), 0755)
+	os.WriteFile(filepath.Join(withMD, "docs", "readme.md"), []byte("# Hello"), 0644)
+
+	// Project with no markdown files
+	withoutMD := filepath.Join(tmpDir, "without-md")
+	os.MkdirAll(withoutMD, 0755)
+	os.WriteFile(filepath.Join(withoutMD, "main.go"), []byte("package main"), 0644)
+
+	c := New()
+	c.SetProjects([]discovery.Project{
+		{Name: "has-files", Path: withMD},
+		{Name: "no-files", Path: withoutMD},
+	})
+
+	c.CheckAllProjectsHasFiles()
+
+	projects := c.Projects()
+	for _, p := range projects {
+		switch p.Name {
+		case "has-files":
+			if !p.HasFiles {
+				t.Error("project with .md files should have HasFiles=true")
+			}
+		case "no-files":
+			if p.HasFiles {
+				t.Error("project without .md files should have HasFiles=false")
+			}
+		}
+	}
+}
+
+// E-PENPAL-SCAN: verifies projectHasAnyMarkdown skips gitignored dirs.
+func TestProjectHasAnyMarkdown_SkipsGitignored(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	runGit(t, tmpDir, "init")
+	runGit(t, tmpDir, "config", "user.email", "test@test.com")
+	runGit(t, tmpDir, "config", "user.name", "test")
+
+	// All .md files are in a gitignored directory
+	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "build"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "build", "output.md"), []byte("# Gen"), 0644)
+
+	if projectHasAnyMarkdown(tmpDir) {
+		t.Error("expected false: only .md files are in gitignored dir")
+	}
+
+	// Add a non-gitignored .md file and re-check
+	os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# README"), 0644)
+	if !projectHasAnyMarkdown(tmpDir) {
+		t.Error("expected true: README.md is not gitignored")
+	}
+}
+
+// E-PENPAL-SCAN: verifies projectHasAnyMarkdown skips .hg and .svn dirs.
+func TestProjectHasAnyMarkdown_SkipsVCSDirs(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// .md files only in .hg and .svn dirs
+	os.MkdirAll(filepath.Join(tmpDir, ".hg"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, ".hg", "notes.md"), []byte("# HG"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, ".svn"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, ".svn", "notes.md"), []byte("# SVN"), 0644)
+
+	if projectHasAnyMarkdown(tmpDir) {
+		t.Error("expected false: only .md files are in .hg/.svn dirs")
+	}
+}
+
+// E-PENPAL-SRC-ALL-MD: verifies AllFiles deduplicates __all_markdown__ entries.
+func TestAllFiles_DeduplicatesAllMarkdown(t *testing.T) {
+	c := New()
+	now := time.Now()
+
+	c.SetProjectFiles("proj", []FileInfo{
+		{Project: "proj", Source: "thoughts", FullPath: "thoughts/plan.md", Name: "plan.md", ModTime: now},
+		{Project: "proj", Source: "__all_markdown__", FullPath: "thoughts/plan.md", Name: "plan.md", ModTime: now},
+		{Project: "proj", Source: "__all_markdown__", FullPath: "README.md", Name: "README.md", ModTime: now},
+	})
+
+	files := c.AllFiles(0)
+	if len(files) != 2 {
+		t.Fatalf("expected 2 unique files, got %d", len(files))
+	}
+
+	// The thoughts/plan.md entry should prefer the typed source
+	for _, f := range files {
+		if f.FullPath == "thoughts/plan.md" && f.Source != "thoughts" {
+			t.Errorf("expected source 'thoughts' for thoughts/plan.md, got %q", f.Source)
+		}
+		// README.md only exists in __all_markdown__, so that's fine
+		if f.FullPath == "README.md" && f.Source != "__all_markdown__" {
+			t.Errorf("expected source '__all_markdown__' for README.md, got %q", f.Source)
+		}
+	}
+}
+
+// E-PENPAL-SCAN: verifies EnsureProjectScanned prevents concurrent duplicate scans.
+func TestEnsureProjectScanned_NoDuplicateScans(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "notes.md"), []byte("# Notes"), 0644)
+
+	c := New()
+	c.SetProjects([]discovery.Project{
+		{
+			Name: "test",
+			Path: tmpDir,
+			Sources: []discovery.FileSource{
+				{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: tmpDir, Auto: true},
+			},
+		},
+	})
+
+	// First call should scan
+	if !c.EnsureProjectScanned("test") {
+		t.Error("first call should return true (scan performed)")
+	}
+
+	// Second call should be a no-op
+	if c.EnsureProjectScanned("test") {
+		t.Error("second call should return false (already scanned)")
+	}
+
+	// Files should be populated from the first scan
+	files := c.ProjectFiles("test")
+	if len(files) == 0 {
+		t.Error("expected files after scan")
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

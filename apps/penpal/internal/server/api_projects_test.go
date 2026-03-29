@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/loganj/penpal/internal/cache"
+	"github.com/loganj/penpal/internal/discovery"
 )
 
 // E-PENPAL-API-ROUTES: verifies GET /api/projects lists discovered projects.
@@ -123,9 +124,11 @@ func TestAPIProjectInfo_ReturnsInfo(t *testing.T) {
 	s, c, _ := testServer(t)
 
 	dir := t.TempDir()
-	seedProject(c, "test-proj", dir, []cache.FileInfo{
+	project := seedProject(c, "test-proj", dir, []cache.FileInfo{
 		{Project: "test-proj", Name: "plan.md", FullPath: "thoughts/plan.md", Source: "thoughts", ModTime: time.Now()},
 	})
+	project.HasFiles = true
+	c.SetProjects([]discovery.Project{project})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/project-info?name=test-proj", nil)
 	rec := httptest.NewRecorder()
@@ -139,8 +142,8 @@ func TestAPIProjectInfo_ReturnsInfo(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
 		t.Fatalf("parse JSON: %v", err)
 	}
-	if info.FileCount != 1 {
-		t.Errorf("expected fileCount=1, got %d", info.FileCount)
+	if !info.HasFiles {
+		t.Errorf("expected hasFiles=true, got false")
 	}
 }
 

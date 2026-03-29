@@ -79,7 +79,18 @@ func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 					return nil
 				}
 				if info.IsDir() {
-					if st != nil && st.SkipDirs[info.Name()] {
+					name := info.Name()
+					// E-PENPAL-SEARCH: skip .git dirs and nested worktrees/submodules.
+					if name == ".git" {
+						return filepath.SkipDir
+					}
+					if path != source.RootPath {
+						gitEntry := filepath.Join(path, ".git")
+						if fi, gErr := os.Lstat(gitEntry); gErr == nil && !fi.IsDir() {
+							return filepath.SkipDir
+						}
+					}
+					if st != nil && st.SkipDirs[name] {
 						return filepath.SkipDir
 					}
 					return nil

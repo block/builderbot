@@ -384,6 +384,51 @@ func TestAPIDeleteFile_CleansUpCommentSidecar(t *testing.T) {
 	}
 }
 
+// E-PENPAL-ADD-SOURCE: verifies __all_markdown__ source doesn't block manual file additions.
+// The conflict check must skip __all_markdown__ since it covers the entire project tree.
+func TestAPISources_AddFileNotBlockedByAllMarkdown(t *testing.T) {
+	s, _, _ := testServer(t)
+
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# Notes"), 0o644)
+
+	// Register as standalone with __all_markdown__ source (always present in real projects)
+	s.cfg.Projects = append(s.cfg.Projects, config.ProjectConfig{Path: dir})
+	s.refreshAfterConfigChange()
+
+	projName := filepath.Base(dir)
+
+	// Verify the project has __all_markdown__ source
+	project := s.cache.FindProject(projName)
+	if project == nil {
+		t.Fatal("project not found after refresh")
+	}
+	hasAllMD := false
+	for _, src := range project.Sources {
+		if src.Name == "__all_markdown__" {
+			hasAllMD = true
+			break
+		}
+	}
+	if !hasAllMD {
+		t.Fatal("project should have __all_markdown__ source")
+	}
+
+	// Adding a file should succeed (not 409) even though __all_markdown__ covers it
+	body, _ := json.Marshal(map[string]string{
+		"project": projName,
+		"path":    "notes.md",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/sources", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s — __all_markdown__ should not block file additions", rec.Code, rec.Body.String())
+	}
+}
+
 // E-PENPAL-REMOVE-SOURCE: verifies adding a tree source then removing it via DELETE /api/sources.
 func TestAPISources_RemoveTreeSource(t *testing.T) {
 	s, _, _ := testServer(t)

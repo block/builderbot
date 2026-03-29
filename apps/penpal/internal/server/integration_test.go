@@ -19,6 +19,7 @@ func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 	project := seedProject(c, projectName, "/tmp/test", nil)
 	project.Sources = []discovery.FileSource{
 		{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
+		{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/test", Auto: true},
 	}
 	// Re-set projects to include the sources we just added
 	c.SetProjects([]discovery.Project{project})
@@ -27,6 +28,9 @@ func TestAPIProjectFiles_ReturnsGroups(t *testing.T) {
 	files := []cache.FileInfo{
 		{Project: projectName, Source: "rp1", Path: "context/index.md", FullPath: ".rp1/context/index.md", Name: "index.md", FileType: "knowledge", ModTime: now},
 		{Project: projectName, Source: "rp1", Path: "work/features/auth/requirements.md", FullPath: ".rp1/work/features/auth/requirements.md", Name: "requirements.md", FileType: "requirement", ModTime: now},
+		// __all_markdown__ source claims all files (duplicates typed sources)
+		{Project: projectName, Source: "__all_markdown__", Path: ".rp1/context/index.md", FullPath: ".rp1/context/index.md", Name: "index.md", FileType: "knowledge", ModTime: now},
+		{Project: projectName, Source: "__all_markdown__", Path: ".rp1/work/features/auth/requirements.md", FullPath: ".rp1/work/features/auth/requirements.md", Name: "requirements.md", FileType: "requirement", ModTime: now},
 	}
 	c.SetProjectFiles(projectName, files)
 

@@ -282,10 +282,16 @@ async function verifyHighlightText(
     };
   }
 
+  // Find divergence point for diagnostics
+  let divergeIdx = 0;
+  const minLen = Math.min(normMark.length, normSelected.length);
+  while (divergeIdx < minLen && normMark[divergeIdx] === normSelected[divergeIdx]) divergeIdx++;
+  const context = `diverge@${divergeIdx}: mark="...${normMark.slice(Math.max(0, divergeIdx - 10), divergeIdx + 20)}" ` +
+    `vs selected="...${normSelected.slice(Math.max(0, divergeIdx - 10), divergeIdx + 20)}"`;
+
   return {
     pass: false,
-    reason: `mark text does not match selectedText. ` +
-      `mark="${normMark.slice(0, 80)}" vs selected="${normSelected.slice(0, 80)}"`,
+    reason: `mark text does not match selectedText (markLen=${normMark.length}, selLen=${normSelected.length}). ${context}`,
   };
 }
 

@@ -295,13 +295,16 @@ function applyContinuation(element: Element, highlight: ThreadHighlight, remaini
   if (nodes.length === 0) return 0;
 
   const normalizedText = normalizeHast(text);
+  let matchIndex = -1;
+  let matchLength = 0;
+  let skippedChars = 0; // chars consumed from remaining before the match
 
-  // Try full remaining first
-  let matchIndex = normalizedText.indexOf(remaining);
-  let matchLength = remaining.length;
+  // Strategy 1: Try full remaining
+  matchIndex = normalizedText.indexOf(remaining);
+  matchLength = remaining.length;
 
+  // Strategy 2: Binary search for longest prefix of remaining
   if (matchIndex === -1) {
-    // Binary search for the longest prefix of remaining in this element
     let lo = 1, hi = Math.min(remaining.length, normalizedText.length);
     while (lo <= hi) {
       const mid = (lo + hi) >>> 1;
@@ -311,9 +314,24 @@ function applyContinuation(element: Element, highlight: ThreadHighlight, remaini
         hi = mid - 1;
       }
     }
-    matchLength = hi;
-    if (matchLength < 3) return 0;
-    matchIndex = normalizedText.indexOf(remaining.slice(0, matchLength));
+    if (hi >= 3) {
+      matchLength = hi;
+      matchIndex = normalizedText.indexOf(remaining.slice(0, matchLength));
+    }
+  }
+
+  // Strategy 3: Overlap detection — the remaining may start with a short
+  // fragment from the previous element. Check if the element's text starts
+  // with a suffix of remaining (e.g. remaining="s Observability..." and
+  // element text starts with "Observability...").
+  if (matchIndex === -1 && normalizedText.length >= 10) {
+    const probe = normalizedText.slice(0, Math.min(30, normalizedText.length));
+    const overlapIdx = remaining.indexOf(probe);
+    if (overlapIdx > 0 && overlapIdx < 30) {
+      matchIndex = 0;
+      matchLength = Math.min(normalizedText.length, remaining.length - overlapIdx);
+      skippedChars = overlapIdx;
+    }
   }
 
   if (matchIndex === -1) return 0;
@@ -324,5 +342,5 @@ function applyContinuation(element: Element, highlight: ThreadHighlight, remaini
 
   insertMarks(nodes, origMatchStart, origMatchEnd, highlight);
 
-  return matchLength;
+  return skippedChars + matchLength;
 }

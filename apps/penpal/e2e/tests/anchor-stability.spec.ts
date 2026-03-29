@@ -214,7 +214,7 @@ function pickRandomSelection(
 function normalizeForComparison(s: string): string {
   return s
     .replace(/[*_`]/g, '')
-    .replace(/^(?:#{1,6} |- |\* |\d+\. |> |- \[[ x]\] )/gm, '')
+    .replace(/^(?:#{1,6} |- |\* |\d*\. |> |- \[[ x]\] )/gm, '')
     .replace(/^-+$/gm, '')  // thematic breaks and partial fragments (rendered as <hr> with no text)
     .replace(/\s+/g, ' ')
     .trim();

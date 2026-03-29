@@ -93,6 +93,23 @@ describe('MarkdownViewer', () => {
     expect(mark?.getAttribute('data-thread-id')).toBe('t1');
   });
 
+  it('renders highlights inside fenced code blocks via custom renderer', () => {
+    // ``` fence is line 1, code content starts at line 2
+    const md = '```go\nfunc main() {}\n```';
+    const highlights = [
+      { threadId: 't-code', selectedText: 'func main', startLine: 2 },
+    ];
+    const { container } = render(
+      <MarkdownViewer content={md} rawMarkdown={md} highlights={highlights} />,
+    );
+    // SyntaxHighlighter tokenizes "func" and "main" separately, so there may
+    // be multiple <mark> elements covering the full match.
+    const marks = container.querySelectorAll('mark.comment-highlight[data-thread-id="t-code"]');
+    expect(marks.length).toBeGreaterThan(0);
+    const combinedText = Array.from(marks).map(m => m.textContent).join('');
+    expect(combinedText).toBe('func main');
+  });
+
   it('renders pending highlights with pending-highlight class', () => {
     const md = 'Hello world';
     const highlights = [

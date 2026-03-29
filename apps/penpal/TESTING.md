@@ -93,6 +93,7 @@ see-also:
 | Config & Migration (E-PENPAL-CONFIG) | config_test.go, migrate_test.go | — | — | — |
 | Install Tools (P-PENPAL-INSTALL) | — | InstallStartup.test.tsx, InstallToolsModal.test.tsx | install_test.go | — |
 | Theme (P-PENPAL-THEME) | — | useTheme.test.ts | — | — |
+| Sidebar Resize (P-PENPAL-SIDEBAR-RESIZE) | — | Layout.test.tsx | — | — |
 | SPA Serving (E-PENPAL-SPA-SERVE) | — | — | spa_test.go | react-app.spec.ts |
 | Path Traversal (E-PENPAL-PATH-TRAVERSAL) | — | — | pathutil_test.go, spa_test.go | — |
 | View Tracking (E-PENPAL-ACTIVITY) | — | — | — | view-tracking.spec.ts |

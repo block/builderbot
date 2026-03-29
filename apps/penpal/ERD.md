@@ -300,6 +300,9 @@ see-also:
 - <a id="E-PENPAL-NO-SELECT-CHROME"></a>**E-PENPAL-NO-SELECT-CHROME**: CSS `user-select: none` is applied to all application chrome: `.sidebar`, `.tab-bar`, `.topbar`, `.breadcrumb-bar`, and context menus. Only `.main-content` (the markdown viewer area) allows text selection.
   ← [P-PENPAL-NO-SELECT-CHROME](PRODUCT.md#P-PENPAL-NO-SELECT-CHROME)
 
+- <a id="E-PENPAL-SIDEBAR-RESIZE"></a>**E-PENPAL-SIDEBAR-RESIZE**: The left sidebar width is managed in `Layout.tsx` React state (`sidebarWidth`), initialized from `localStorage.getItem('sidebarWidth')` (default 240px). A 4px drag handle (`.sidebar-resize-handle`) on the right edge of the sidebar initiates mouse-tracking: `mousedown` captures `startX` and `startWidth`, `mousemove` computes `newWidth = startWidth + (clientX - startX)` clamped to [200, 700], `mouseup` persists to `localStorage`. The `.app` grid template uses an inline style `gridTemplateColumns: \`${sidebarWidth}px 1fr\`` to override the CSS default. The drag handle uses the same visual styling as the existing `.chat-resize-handle` (2px accent-colored indicator on hover).
+  ← [P-PENPAL-SIDEBAR-RESIZE](PRODUCT.md#P-PENPAL-SIDEBAR-RESIZE)
+
 - <a id="E-PENPAL-FRONTMATTER-STRIP"></a>**E-PENPAL-FRONTMATTER-STRIP**: `markdown.StripFrontmatter()` checks for `---` prefix, finds the next `\n---` occurrence, and returns content after it with leading newlines trimmed. Applied in `handleRawFile` before serving content and in `publish/render.go` during publishing. The frontend renders the already-stripped content.
   ← [P-PENPAL-FRONTMATTER](PRODUCT.md#P-PENPAL-FRONTMATTER)
 

@@ -106,6 +106,8 @@ Source types are the pluggable system that determines how projects discover, cla
 
 - <a id="P-PENPAL-NO-SELECT-CHROME"></a>**P-PENPAL-NO-SELECT-CHROME**: Text in application chrome (sidebar, tab bar, topbar, breadcrumbs, menus) is not user-selectable. Only document content in the main viewer area is selectable.
 
+- <a id="P-PENPAL-SIDEBAR-RESIZE"></a>**P-PENPAL-SIDEBAR-RESIZE**: The left sidebar is resizable via a drag handle on its right edge. The width range matches the right comments panel (200-700px). The user's preferred width is persisted across sessions. Works on all pages/views.
+
 ---
 
 ## Navigation — Home View

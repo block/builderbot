@@ -93,6 +93,49 @@ export default function Layout() {
   const [deleteFiles, setDeleteFiles] = useState<{ project: string; path: string }[]>([]);
   const [deleting, setDeleting] = useState(false);
 
+  // E-PENPAL-SIDEBAR-RESIZE: resizable left sidebar state
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const saved = localStorage.getItem('sidebarWidth');
+    return saved ? parseInt(saved, 10) : 240;
+  });
+  const sidebarResizing = useRef(false);
+  const sidebarResizeStartX = useRef(0);
+  const sidebarResizeStartWidth = useRef(0);
+  const sidebarWidthRef = useRef(sidebarWidth);
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth;
+  }, [sidebarWidth]);
+
+  const handleSidebarResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    sidebarResizing.current = true;
+    sidebarResizeStartX.current = e.clientX;
+    sidebarResizeStartWidth.current = sidebarWidthRef.current;
+    e.preventDefault();
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (ev.buttons === 0) {
+        cleanup();
+        return;
+      }
+      const delta = ev.clientX - sidebarResizeStartX.current;
+      const newWidth = Math.min(Math.max(sidebarResizeStartWidth.current + delta, 200), 700);
+      setSidebarWidth(newWidth);
+      sidebarWidthRef.current = newWidth;
+    };
+    const onMouseUp = () => {
+      cleanup();
+    };
+    const cleanup = () => {
+      sidebarResizing.current = false;
+      localStorage.setItem('sidebarWidth', String(sidebarWidthRef.current));
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, []);
+
   // Home tree expansion state
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(new Set());
   const [expandedWorktreeProjects, setExpandedWorktreeProjects] = useState<Set<string>>(new Set());
@@ -782,7 +825,7 @@ export default function Layout() {
   const outletContext: LayoutContext = { setHeadings, projects };
 
   return (
-    <div className="app" data-testid="app-layout" onClick={handleAppClick}>
+    <div className="app" data-testid="app-layout" onClick={handleAppClick} style={{ gridTemplateColumns: `${sidebarWidth}px 4px 1fr` }}>
       <div
         className="topbar"
         {...(isDesktopApp ? { 'data-tauri-drag-region': '' } : {})}
@@ -1161,6 +1204,9 @@ export default function Layout() {
           </>
         )}
       </nav>
+
+      {/* E-PENPAL-SIDEBAR-RESIZE: drag handle for left sidebar resizing */}
+      <div className="sidebar-resize-handle" data-testid="sidebar-resize-handle" onMouseDown={handleSidebarResizeMouseDown} />
 
       <div className="main-content" style={isFilePage ? { padding: 0, overflow: 'hidden' } : undefined}>
         {isDesktopApp && showFindBar && <FindBar onClose={() => setShowFindBar(false)} />}

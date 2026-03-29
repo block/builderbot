@@ -139,6 +139,17 @@ describe('rehypeCommentHighlights', () => {
     expect((code.children[0] as Text).value).toBe('func main() {}');
   });
 
+  it('does not false-positive short prefix match on long elements', () => {
+    // A long element ending with "H" should NOT trigger a cross-element match
+    // for a highlight starting with "Hello"
+    const tree = makeTree(1, 'Something that ends with H');
+    const transform = rehypeCommentHighlights({
+      highlights: [{ threadId: 't1', selectedText: 'Hello World', startLine: 1 }],
+    });
+    transform(tree);
+    expect(findMarks(tree)).toHaveLength(0);
+  });
+
   it('handles multiple highlights on different lines', () => {
     const tree: Root = {
       type: 'root',

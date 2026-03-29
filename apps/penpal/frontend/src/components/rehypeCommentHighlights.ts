@@ -275,9 +275,10 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
   }
 
   // Positionally-constrained match for very short prefixes (1-2 chars):
-  // only accept if the element text ENDS with the prefix, to avoid false
-  // positives from arbitrary-position matches within the element.
-  if (matchIndex === -1 && normSelected.length > 1) {
+  // only accept if the element text ENDS with the prefix AND the element
+  // is short (≤ 3 chars). This targets inline elements like <em>H</em>ello
+  // while rejecting long elements that happen to end with the same char.
+  if (matchIndex === -1 && normSelected.length > 1 && normalizedText.length <= 3) {
     const shortLen = Math.min(2, normSelected.length);
     for (let tryLen = shortLen; tryLen >= 1; tryLen--) {
       const prefix = normSelected.slice(0, tryLen);
@@ -369,10 +370,14 @@ function applyContinuation(element: Element, highlight: ThreadHighlight, remaini
   // fragment from the previous element. Check if the element's text starts
   // with a suffix of remaining (e.g. remaining="s Observability..." and
   // element text starts with "Observability...").
-  if (matchIndex === -1 && normalizedText.length >= 10) {
-    const probe = normalizedText.slice(0, Math.min(30, normalizedText.length));
+  // Thresholds are proportional to content length to avoid edge cases with
+  // very short or very long text.
+  const minOverlapElement = Math.max(3, Math.min(10, Math.floor(remaining.length / 3)));
+  const probeWindow = Math.max(5, Math.floor(remaining.length / 2));
+  if (matchIndex === -1 && normalizedText.length >= minOverlapElement) {
+    const probe = normalizedText.slice(0, Math.min(probeWindow, normalizedText.length));
     const overlapIdx = remaining.indexOf(probe);
-    if (overlapIdx > 0 && overlapIdx < 30) {
+    if (overlapIdx > 0 && overlapIdx < probeWindow) {
       matchIndex = 0;
       matchLength = Math.min(normalizedText.length, remaining.length - overlapIdx);
       skippedChars = overlapIdx;

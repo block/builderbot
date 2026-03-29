@@ -2,15 +2,13 @@ package server
 
 import (
 	"net/http"
-	"os"
-	"path/filepath"
 
 	"github.com/loganj/penpal/internal/activity"
 	"github.com/loganj/penpal/internal/markdown"
 )
 
 // E-PENPAL-FRONTMATTER-STRIP: markdown.StripFrontmatter() applied in handleRawFile.
-// E-PENPAL-PATH-TRAVERSAL: isSubpath() prevents path traversal on raw files.
+// E-PENPAL-PATH-TRAVERSAL: resolveProjectFile() prevents path traversal on raw files.
 func (s *Server) handleRawFile(w http.ResponseWriter, r *http.Request) {
 	qualifiedName := r.URL.Query().Get("project")
 	filePath := r.URL.Query().Get("path")
@@ -20,34 +18,8 @@ func (s *Server) handleRawFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project := s.cache.FindProject(qualifiedName)
-	if project == nil {
-		http.Error(w, "project not found", http.StatusNotFound)
-		return
-	}
-
-	// Use worktree path if specified
-	basePath := project.Path
-	if worktree != "" {
-		wtPath := s.cache.WorktreePath(qualifiedName, worktree)
-		if wtPath == "" {
-			http.Error(w, "worktree not found", http.StatusNotFound)
-			return
-		}
-		basePath = wtPath
-	}
-
-	fullPath := filepath.Join(basePath, filePath)
-
-	// Prevent path traversal: resolved path must stay within the base path.
-	resolved, err := filepath.Abs(fullPath)
-	if err != nil || !isSubpath(basePath, resolved) {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-
-	content, err := os.ReadFile(resolved)
-	if err != nil {
+	content, ok := s.resolveProjectFile(qualifiedName, filePath, worktree)
+	if !ok {
 		http.Error(w, "file not found", http.StatusNotFound)
 		return
 	}

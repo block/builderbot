@@ -245,7 +245,8 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
             const codeHighlights = (highlights ?? []).filter(hl => {
               if (!sourceLine) return false;
               // Code block spans from sourceLine (``` fence) to sourceLine + codeLineCount + 1 (closing ```)
-              return hl.startLine > sourceLine && hl.startLine <= sourceLine + codeLineCount;
+              // Include fence line (>=) so anchors resolved to the opening ``` aren't silently dropped
+              return hl.startLine >= sourceLine && hl.startLine <= sourceLine + codeLineCount;
             });
 
             const rendererProp = codeHighlights.length > 0

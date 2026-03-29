@@ -110,6 +110,21 @@ describe('MarkdownViewer', () => {
     expect(combinedText).toBe('func main');
   });
 
+  it('renders highlights when startLine equals the fence line', () => {
+    // Backend may resolve anchor to the opening ``` fence (line 1)
+    const md = '```go\nfunc main() {}\n```';
+    const highlights = [
+      { threadId: 't-fence', selectedText: 'func main', startLine: 1 },
+    ];
+    const { container } = render(
+      <MarkdownViewer content={md} rawMarkdown={md} highlights={highlights} />,
+    );
+    const marks = container.querySelectorAll('mark.comment-highlight[data-thread-id="t-fence"]');
+    expect(marks.length).toBeGreaterThan(0);
+    const combinedText = Array.from(marks).map(m => m.textContent).join('');
+    expect(combinedText).toBe('func main');
+  });
+
   it('renders pending highlights with pending-highlight class', () => {
     const md = 'Hello world';
     const highlights = [

@@ -1086,8 +1086,10 @@ export default function Layout() {
         ) : (
           <>
             {/* Home view sidebar */}
+            {/* E-PENPAL-FE-HOME-LABEL: show "Home" label next to house icon on home screen */}
             <div className="sidebar-home-header">
               <span className="home-icon">⌂</span>
+              <span className="home-label">Home</span>
               <button
                 title={`Sort: ${sortOrder === 'alpha' ? 'A→Z' : 'Recent'}`}
                 onClick={toggleSort}

@@ -432,6 +432,7 @@ a:hover { text-decoration: underline; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
   padding: 4px 16px;
   font-size: 0.7em;
   font-weight: 600;

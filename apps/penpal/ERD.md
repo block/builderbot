@@ -413,7 +413,7 @@ see-also:
 - <a id="E-PENPAL-FILE-HANDLER-PLIST"></a>**E-PENPAL-FILE-HANDLER-PLIST**: `Info.plist` declares `CFBundleDocumentTypes` with `LSItemContentTypes: [net.daringfireball.markdown]`, `CFBundleTypeExtensions: [md, markdown]`, `CFBundleTypeRole: Editor`, and `LSHandlerRank: Alternate`. This registers Penpal in Finder's "Open With" menu without overriding the user's current default markdown handler.
   ← [P-PENPAL-FILE-HANDLER](PRODUCT.md#P-PENPAL-FILE-HANDLER)
 
-- <a id="E-PENPAL-FILE-HANDLER-EVENT"></a>**E-PENPAL-FILE-HANDLER-EVENT**: In the Tauri `.run()` callback, handle `tauri::RunEvent::Opened { urls }`. For each URL with `file://` scheme, extract the path and POST it to `http://127.0.0.1:{port}/api/open` (same as the CLI `openPaths` flow). Ensure a window exists before dispatching (create one if all windows are closed). The Go server's existing `handleAPIOpen` resolves the file to its project and triggers SSE navigation.
+- <a id="E-PENPAL-FILE-HANDLER-EVENT"></a>**E-PENPAL-FILE-HANDLER-EVENT**: In the Tauri `.run()` callback, handle `tauri::RunEvent::Opened { urls }`. For each URL with `file://` scheme, extract the path and POST it to `http://127.0.0.1:{port}/api/open` (same as the CLI `openPaths` flow). HTTP requests are dispatched on `tauri::async_runtime::spawn` to avoid blocking the main thread. Ensure a window exists before dispatching (create one if all windows are closed). The Go server's existing `handleAPIOpen` resolves the file to its project and triggers SSE navigation.
   ← [P-PENPAL-FILE-HANDLER](PRODUCT.md#P-PENPAL-FILE-HANDLER)
 
 ---

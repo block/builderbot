@@ -633,7 +633,7 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 			Name:       "All Markdown",
 			Source:     "__all_markdown__",
 			SourceType: "tree",
-			Auto:       false,
+			Auto:       true,
 		}
 		for _, f := range cachedFiles {
 			allMd.Files = append(allMd.Files, ProjectFile{

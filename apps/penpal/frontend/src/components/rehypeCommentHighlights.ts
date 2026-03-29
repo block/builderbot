@@ -56,7 +56,7 @@ export default function rehypeCommentHighlights(options: Options) {
         const matched = applyContinuation(node, state.highlight, state.remaining);
         if (matched > 0) {
           const newRemaining = state.remaining.slice(matched).trim();
-          if (newRemaining.length < 5) {
+          if (newRemaining.length < 3) {
             continuing.delete(threadId);
           } else {
             state.remaining = newRemaining;
@@ -81,7 +81,7 @@ export default function rehypeCommentHighlights(options: Options) {
           } else if (!result.matched) {
             // Start element had no text (e.g. <hr>) — schedule full text for continuation
             const normSelected = normalizeSelected(highlight.selectedText);
-            if (normSelected.length >= 5) {
+            if (normSelected.length >= 3) {
               continuing.set(highlight.threadId, { highlight, remaining: normSelected });
             }
           }
@@ -278,7 +278,7 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
 
   if (isCrossElement) {
     const remaining = normSelected.slice(matchLength).trim();
-    return { remaining: remaining.length >= 5 ? remaining : null, matched: true };
+    return { remaining: remaining.length >= 3 ? remaining : null, matched: true };
   }
   return { remaining: null, matched: true };
 }

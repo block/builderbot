@@ -444,6 +444,8 @@ a:hover { text-decoration: underline; }
 .sidebar-home-header .home-icon {
   font-size: 1.6em;
   line-height: 1;
+  position: relative;
+  top: -1px;
   cursor: default;
   text-transform: none;
   font-weight: normal;

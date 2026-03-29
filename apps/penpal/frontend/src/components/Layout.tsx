@@ -484,9 +484,13 @@ export default function Layout() {
   // E-PENPAL-SOURCE-ACTIONS, E-PENPAL-BATCH-OPS: file and source action helpers
   const qn = activeProject?.qualifiedName || '';
 
+  const refreshFilesTimer = useRef<ReturnType<typeof setTimeout>>();
   function debouncedRefreshFiles() {
     if (!qn) return;
-    api.getProjectFiles(qn, activeWorktree || undefined).then(setProjectFiles).catch(() => {});
+    clearTimeout(refreshFilesTimer.current);
+    refreshFilesTimer.current = setTimeout(() => {
+      api.getProjectFiles(qn, activeWorktree || undefined).then(setProjectFiles).catch(() => {});
+    }, 200);
   }
 
   function showContextMenu(e: React.MouseEvent, items: ContextMenuItem[]) {

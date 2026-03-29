@@ -56,15 +56,7 @@ If any test scored < 7, examine failure diagnostics in the test details (analysi
 - `allHighlights` — total mark elements on page
 - `threadHighlight` — marks for the specific thread (0 = highlight never created)
 
-### 4. Check Linear for sub-issues
-
-```bash
-~/.claude/skills/linear/linear list-issues --team PENPAL --parent PENPAL-21
-```
-
-Address any new sub-issues. File `[claude]`-prefixed sub-issues for self-found improvements.
-
-### 5. Make improvements if needed
+### 4. Make improvements if needed
 
 Improvements should be in **production code**, not by avoiding test cases that expose real issues. Key files:
 
@@ -87,7 +79,6 @@ d.setdefault('improvements', []).append({
     'afterIteration': <LAST_COMPLETED_ITERATION>,
     'type': '<production|test|dashboard>',
     'description': 'Description of the improvement',
-    'linearIssue': 'PENPAL-XX',  # optional
 })
 with open(path, 'w') as f:
     json.dump(d, f, indent=2)
@@ -96,16 +87,8 @@ with open(path, 'w') as f:
 ```
 
 3. Commit the fix
-4. File a Linear sub-issue under PENPAL-21:
 
-```bash
-~/.claude/skills/linear/linear create-issue --team PENPAL \
-  --title "[claude] description" \
-  --description "Details" \
-  --parent PENPAL-21 --status Done
-```
-
-### 6. Repeat from step 1
+### 5. Repeat from step 1
 
 ## Critical Rules
 
@@ -114,7 +97,7 @@ with open(path, 'w') as f:
 - **NEVER make flaky tests.** Tests must pass reliably every time.
 - Improvements go in production code (`frontend/src/`, `internal/`), not by constraining test inputs.
 - Always record improvements in results.json notes so the dashboard shows them.
-- Always check Linear between iterations for new sub-issues from the user.
+- Always check between iterations for new issues from the user.
 
 ## Starting the Dashboard
 

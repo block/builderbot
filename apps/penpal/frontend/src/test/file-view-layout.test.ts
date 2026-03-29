@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // E-PENPAL-VIEW-MARGINS: verify file view layout CSS enforces symmetric margins
 // and no max-width cap on the scroll container.
 describe('file view layout margins', () => {
-  const css = readFileSync(resolve(__dirname, '../../src/index.css'), 'utf-8');
+  const here = dirname(fileURLToPath(import.meta.url));
+  const css = readFileSync(resolve(here, '../index.css'), 'utf-8');
 
   it('file-main-scroll has symmetric left and right padding', () => {
     // Extract the .file-main-scroll rule

@@ -102,7 +102,10 @@ see-also:
 | Source Disambiguation (P-PENPAL-SRC-DISAMBIG) | — | Layout.test.tsx | — | — |
 | Home Label (P-PENPAL-HOME-LABEL) | — | Layout.test.tsx | — | — |
 | File View Margins (P-PENPAL-VIEW-MARGINS) | — | file-view-layout.test.ts | — | — |
-| View Options (P-PENPAL-VIEW-OPTIONS, P-PENPAL-SORT) | — | useProjectSort.test.ts, Layout.test.tsx | — | — |
+| View Options Panel (P-PENPAL-VIEW-OPTIONS) | — | Layout.test.tsx | — | — |
+| View Options — Sort (P-PENPAL-VIEW-OPTIONS-SORT) | — | useProjectSort.test.ts, Layout.test.tsx | — | — |
+| View Options — Empty Projects (P-PENPAL-VIEW-OPTIONS-EMPTY) | — | useProjectSort.test.ts, Layout.test.tsx | — | — |
+| Sort Persistence (P-PENPAL-SORT) | — | useProjectSort.test.ts | — | — |
 
 ## Known Coverage Gaps
 

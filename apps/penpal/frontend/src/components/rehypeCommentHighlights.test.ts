@@ -107,6 +107,38 @@ describe('rehypeCommentHighlights', () => {
     expect(JSON.stringify(tree)).toBe(original);
   });
 
+  it('does not insert marks inside fenced code blocks', () => {
+    // Fenced code: <pre><code>...</code></pre>
+    const tree: Root = {
+      type: 'root',
+      children: [
+        {
+          type: 'element',
+          tagName: 'pre',
+          properties: {},
+          children: [
+            {
+              type: 'element',
+              tagName: 'code',
+              properties: { className: ['language-go'] },
+              children: [{ type: 'text', value: 'func main() {}' } as Text],
+              position: { start: { line: 2, column: 1, offset: 4 }, end: { line: 2, column: 16, offset: 19 } },
+            } as Element,
+          ],
+          position: { start: { line: 1, column: 1, offset: 0 }, end: { line: 3, column: 4, offset: 23 } },
+        } as Element,
+      ],
+    };
+    const transform = rehypeCommentHighlights({
+      highlights: [{ threadId: 't1', selectedText: 'func main', startLine: 1 }],
+    });
+    transform(tree);
+    expect(findMarks(tree)).toHaveLength(0);
+    // Text content should be unchanged
+    const code = (tree.children[0] as Element).children[0] as Element;
+    expect((code.children[0] as Text).value).toBe('func main() {}');
+  });
+
   it('handles multiple highlights on different lines', () => {
     const tree: Root = {
       type: 'root',

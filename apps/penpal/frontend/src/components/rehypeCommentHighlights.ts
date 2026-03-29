@@ -1,4 +1,4 @@
-import { visit } from 'unist-util-visit';
+import { visit, SKIP } from 'unist-util-visit';
 import type { Root, Element, Text, ElementContent } from 'hast';
 
 export interface ThreadHighlight {
@@ -43,6 +43,12 @@ export default function rehypeCommentHighlights(options: Options) {
 
     visit(tree, 'element', (node: Element, index, parent) => {
       if (index === undefined || !parent) return;
+
+      // Skip fenced code blocks — SyntaxHighlighter re-parses children as
+      // a plain string, so inserting <mark> elements into the HAST tree
+      // corrupts the output (children become [string, object, string] which
+      // stringifies as ",[object Object],").
+      if (node.tagName === 'pre' || node.tagName === 'code') return SKIP;
 
       const sourceLine = node.position?.start?.line;
       if (!sourceLine) return;

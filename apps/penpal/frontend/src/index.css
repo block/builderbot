@@ -432,6 +432,7 @@ a:hover { text-decoration: underline; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
   padding: 4px 16px;
   font-size: 0.7em;
   font-weight: 600;
@@ -443,6 +444,8 @@ a:hover { text-decoration: underline; }
 .sidebar-home-header .home-icon {
   font-size: 1.6em;
   line-height: 1;
+  position: relative;
+  top: -1px;
   cursor: default;
   text-transform: none;
   font-weight: normal;

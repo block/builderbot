@@ -659,6 +659,16 @@ a:hover { text-decoration: underline; }
   font-weight: 600;
   flex-shrink: 0;
 }
+/* E-PENPAL-FE-SRC-DISAMBIG: deemphasized path label for duplicate source badges */
+.source-header .source-disambig {
+  font-size: 0.75em;
+  color: var(--text-disabled);
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 .source-header .source-count,
 .tree-item .source-count {
   margin-left: auto;

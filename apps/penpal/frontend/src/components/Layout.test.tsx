@@ -265,6 +265,112 @@ describe('Layout', () => {
     expect(activeTab?.textContent).toBe('doc.md');
   });
 
+  // E-PENPAL-FE-SRC-DISAMBIG: verifies disambiguation text appears for duplicate badge types.
+  it('shows disambiguation path when multiple sources share the same badge', async () => {
+    // Mock getProjectFiles to return two ANCHORS groups with same badgeText
+    vi.mocked(api.getProjectFiles).mockResolvedValue([
+      {
+        name: 'apps/auth',
+        source: 'anchors',
+        sourceType: 'tree',
+        auto: true,
+        badgeText: 'ANCHORS',
+        badgeColor: '#0d9488',
+        badgeBg: '#f0fdfa',
+        files: [{ name: 'PRODUCT.md', path: 'apps/auth/PRODUCT.md', age: '1h' }],
+      },
+      {
+        name: 'apps/payments',
+        source: 'anchors',
+        sourceType: 'tree',
+        auto: true,
+        badgeText: 'ANCHORS',
+        badgeColor: '#0d9488',
+        badgeBg: '#f0fdfa',
+        files: [{ name: 'ERD.md', path: 'apps/payments/ERD.md', age: '2h' }],
+      },
+      {
+        name: 'All Markdown',
+        source: '__all_markdown__',
+        sourceType: 'tree',
+        auto: true,
+        files: [],
+      },
+    ]);
+
+    render(
+      <MemoryRouter initialEntries={['/project/ws1/project-a']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    // Wait for project files to load and render
+    await waitFor(() => {
+      expect(api.getProjectFiles).toHaveBeenCalled();
+    });
+
+    // Both disambiguation labels should appear
+    const disambigLabels = await screen.findAllByText(/apps\/(auth|payments)/);
+    expect(disambigLabels).toHaveLength(2);
+
+    // Verify they have the correct CSS class
+    for (const label of disambigLabels) {
+      expect(label.className).toBe('source-disambig');
+    }
+  });
+
+  // E-PENPAL-FE-SRC-DISAMBIG: verifies no disambiguation text when badges are unique.
+  it('does not show disambiguation path when source badges are unique', async () => {
+    vi.mocked(api.getProjectFiles).mockResolvedValue([
+      {
+        name: 'thoughts',
+        source: 'thoughts',
+        sourceType: 'tree',
+        auto: true,
+        badgeText: 'RPI',
+        badgeColor: '#888',
+        badgeBg: '#f0f0f0',
+        files: [{ name: 'plan.md', path: 'thoughts/plan.md', age: '1h' }],
+      },
+      {
+        name: 'Context',
+        source: 'rp1',
+        sourceType: 'tree',
+        auto: true,
+        badgeText: 'RP1',
+        badgeColor: '#8b5cf6',
+        badgeBg: '#f5f0ff',
+        files: [{ name: 'index.md', path: '.rp1/context/index.md', age: '2h' }],
+      },
+      {
+        name: 'All Markdown',
+        source: '__all_markdown__',
+        sourceType: 'tree',
+        auto: true,
+        files: [],
+      },
+    ]);
+
+    render(
+      <MemoryRouter initialEntries={['/project/ws1/project-a']}>
+        <Layout />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(api.getProjectFiles).toHaveBeenCalled();
+    });
+
+    // Wait a tick for the state update to propagate
+    await waitFor(() => {
+      expect(screen.getAllByText('RPI')).toHaveLength(1);
+    });
+
+    // No disambiguation labels should exist
+    const disambigLabels = document.querySelectorAll('.source-disambig');
+    expect(disambigLabels).toHaveLength(0);
+  });
+
   it('uses client-side navigation for internal link clicks (preserves back button)', async () => {
     render(
       <MemoryRouter initialEntries={['/recent']}>

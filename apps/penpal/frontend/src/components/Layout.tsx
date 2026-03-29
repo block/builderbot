@@ -936,7 +936,19 @@ export default function Layout() {
             ) : (
               /* Project view: show source file trees */
               <>
-                {projectFiles.map((group) => {
+                {/* E-PENPAL-FE-SRC-DISAMBIG: compute badge texts that appear on multiple groups */}
+                {(() => {
+                  const badgeCounts = new Map<string, number>();
+                  for (const g of projectFiles) {
+                    if (g.badgeText) {
+                      badgeCounts.set(g.badgeText, (badgeCounts.get(g.badgeText) || 0) + 1);
+                    }
+                  }
+                  const duplicatedBadges = new Set<string>();
+                  for (const [badge, count] of badgeCounts) {
+                    if (count > 1) duplicatedBadges.add(badge);
+                  }
+                  return projectFiles.map((group) => {
                   const isExpanded = expandedSources.has(group.name);
                   const tree = isExpanded ? buildFileTree(group.files) : null;
                   const allFilePaths = tree ? flattenTree(tree) : [];
@@ -1007,6 +1019,10 @@ export default function Layout() {
                         ) : (
                           <span>{displayName}</span>
                         )}
+                        {/* E-PENPAL-FE-SRC-DISAMBIG: show source path when badge is shared by multiple groups */}
+                        {group.badgeText && duplicatedBadges.has(group.badgeText) && (
+                          <span className="source-disambig" title={group.name}>{group.name}</span>
+                        )}
                         {!isEmpty && <span className="source-count">{group.files.length}</span>}
                       </div>
                       {isExpanded && tree && (
@@ -1016,7 +1032,8 @@ export default function Layout() {
                       )}
                     </div>
                   );
-                })}
+                });
+                })()}
 
                 {/* Per-project In Review section */}
                 {(() => {

@@ -277,7 +277,7 @@ function thematicBreak(): Block {
 
 export interface GeneratorOptions {
   /** When true, generates a document with repeated/duplicate content blocks
-   *  to test anchor stability with ambiguous text (PENPAL-41). */
+   *  to test anchor stability with ambiguous text. */
   repetitive?: boolean;
 }
 
@@ -295,7 +295,7 @@ export function generateMarkdownDocument(seed = 42, options?: GeneratorOptions):
   // Build diverse content blocks
   const contentBlocks: Block[] = [];
   if (repetitive) {
-    // PENPAL-41: Generate repeated content — same blockId reused so text duplicates
+    // Generate repeated content — same blockId reused so text duplicates
     for (let i = 0; i < 3; i++) contentBlocks.push(headingBlock(2, blockId++));
     // Use the SAME id for multiple paragraphs to create duplicate text
     const sharedParaId = blockId++;

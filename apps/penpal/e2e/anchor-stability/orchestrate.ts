@@ -41,7 +41,6 @@ interface AllResults {
     afterIteration: number;
     type: 'production' | 'test' | 'dashboard';
     description: string;
-    linearIssue?: string;
   }>;
   currentIteration: number;
   currentTest: number;

@@ -174,7 +174,7 @@
     border-radius: 4px;
   }
 
-  /* Improvement sections between iterations (PENPAL-34, PENPAL-43) */
+  /* Improvement sections between iterations */
   .improvements-section {
     background: #f0f4ff;
     border: 1px solid #c7d2fe;
@@ -205,7 +205,7 @@
     white-space: pre-wrap;
   }
 
-  /* Analysis text for imperfect tests (PENPAL-35) */
+  /* Analysis text for imperfect tests */
   .analysis-text {
     white-space: pre-wrap;
     font-size: 0.8rem;
@@ -248,8 +248,7 @@
 // ── State ─────────────────────────────────────────────────────────────
 let lastJson = '';
 let expandedSections = new Set();
-let barHitRegions = []; // { x, y, w, h, iterIndex } — for clickable bars (PENPAL-45)
-const POLL_INTERVAL = 1000;
+let barHitRegions = []; // { x, y, w, h, iterIndex } — for clickable barsconst POLL_INTERVAL = 1000;
 const TEST_COLORS = [
   '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981',
   '#06b6d4', '#6366f1', '#f97316', '#84cc16', '#14b8a6',
@@ -330,8 +329,7 @@ function drawChart(data) {
   const chartW = W - pad.left - pad.right;
   const chartH = H - pad.top - pad.bottom;
   const maxScore = 70;
-  // Dynamic slot count — show all iterations (PENPAL-30)
-  const numSlots = Math.max(1, data.iterations.length);
+  // Dynamic slot count — show all iterations  const numSlots = Math.max(1, data.iterations.length);
   const barWidth = Math.min(80, chartW / (numSlots * 1.5));
 
   // Y axis
@@ -363,11 +361,9 @@ function drawChart(data) {
   ctx.textAlign = 'left';
   ctx.fillText('pass: 69', pad.left + chartW + 4, threshY + 4);
 
-  // Track bar hit regions for click handling (PENPAL-45)
-  barHitRegions = [];
+  // Track bar hit regions for click handling  barHitRegions = [];
 
-  // Bars — updates in real time as results roll in (PENPAL-29, PENPAL-45)
-  for (let i = 0; i < numSlots; i++) {
+  // Bars — updates in real time as results roll in  for (let i = 0; i < numSlots; i++) {
     const x = pad.left + (i + 0.5) * (chartW / numSlots) - barWidth / 2;
     const iter = data.iterations[i];
 
@@ -376,8 +372,7 @@ function drawChart(data) {
     const isDone = iter.status === 'done';
 
     if (isDone) {
-      // Completed iteration: single solid bar, no score inside (PENPAL-45)
-      const totalH = (iter.totalScore / maxScore) * chartH;
+      // Completed iteration: single solid bar, no score inside      const totalH = (iter.totalScore / maxScore) * chartH;
       const barColor = iter.totalScore >= 69 ? '#22c55e' : iter.totalScore >= 50 ? '#eab308' : '#ef4444';
       ctx.fillStyle = barColor;
       ctx.fillRect(x, pad.top + chartH - totalH, barWidth, totalH);
@@ -402,8 +397,7 @@ function drawChart(data) {
       barHitRegions.push({ x, y, w: barWidth, h: pad.top + chartH - y, iterIndex: i });
     }
 
-    // Total label above bar — only show if below 70 (PENPAL-45)
-    const totalH = (iter.totalScore / maxScore) * chartH;
+    // Total label above bar — only show if below 70    const totalH = (iter.totalScore / maxScore) * chartH;
     const barTopY = pad.top + chartH - totalH;
     if (iter.totalScore < 70) {
       const label = isDone ? String(iter.totalScore) : iter.totalScore + '/' + (iter.tests.length * 7);
@@ -413,8 +407,7 @@ function drawChart(data) {
       ctx.fillText(label, x + barWidth / 2, barTopY - 6);
     }
 
-    // Improvement indicator line before this iteration (PENPAL-47)
-    const iterImprovements = (data.improvements || []).filter(imp => imp.afterIteration === i - 1);
+    // Improvement indicator line before this iteration    const iterImprovements = (data.improvements || []).filter(imp => imp.afterIteration === i - 1);
     if (iterImprovements.length > 0) {
       const hasProduction = iterImprovements.some(imp => imp.type === 'production');
       const lineColor = hasProduction ? '#3b82f6' : '#9ca3af';
@@ -434,11 +427,9 @@ function drawChart(data) {
 function updateIterations(data) {
   const el = document.getElementById('iterations');
   let html = '';
-  // Show iterations in descending order (most recent first) — PENPAL-26
-  for (let i = data.iterations.length - 1; i >= 0; i--) {
+  // Show iterations in descending order (most recent first)  for (let i = data.iterations.length - 1; i >= 0; i--) {
     const iter = data.iterations[i];
-    // Show running max possible score (PENPAL-28)
-    const maxPossible = iter.status === 'done' ? 70 : iter.tests.length * 7;
+    // Show running max possible score    const maxPossible = iter.status === 'done' ? 70 : iter.tests.length * 7;
     const badgeClass = iter.status === 'done'
       ? (iter.totalScore >= 69 ? 'badge-green' : iter.totalScore >= 50 ? 'badge-yellow' : 'badge-red')
       : 'badge-yellow';
@@ -455,8 +446,7 @@ function updateIterations(data) {
         <div class="body">${renderTests(iter, i)}</div>
       </details>`;
 
-    // Show improvements BETWEEN iterations as a separate collapsible section (PENPAL-34)
-    const iterImprovements = (data.improvements || []).filter(imp => imp.afterIteration === i - 1);
+    // Show improvements BETWEEN iterations as a separate collapsible section    const iterImprovements = (data.improvements || []).filter(imp => imp.afterIteration === i - 1);
     if (iterImprovements.length > 0) {
       const hasProduction = iterImprovements.some(imp => imp.type === 'production');
       const counts = { production: 0, test: 0, dashboard: 0 };
@@ -467,7 +457,7 @@ function updateIterations(data) {
         counts.dashboard > 0 ? `${counts.dashboard} dashboard` : '',
       ].filter(Boolean).join(', ');
       const body = iterImprovements.map(imp => {
-        const prefix = imp.linearIssue ? `${imp.linearIssue}: ` : '';
+        const prefix = '';
         const tag = `<span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:0.75rem;font-weight:600;${
           imp.type === 'production' ? 'background:#dbeafe;color:#1d4ed8' :
           imp.type === 'test' ? 'background:#e5e7eb;color:#374151' :
@@ -548,8 +538,7 @@ function escHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-// Clickable bars — expand and scroll to iteration section (PENPAL-45)
-document.getElementById('chart').addEventListener('click', (e) => {
+// Clickable bars — expand and scroll to iteration sectiondocument.getElementById('chart').addEventListener('click', (e) => {
   const canvas = e.target;
   const rect = canvas.getBoundingClientRect();
   const cx = e.clientX - rect.left;

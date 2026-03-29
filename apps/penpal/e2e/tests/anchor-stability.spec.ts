@@ -18,7 +18,7 @@ const SEED = parseInt(
   process.env.STABILITY_SEED ?? String(42 + ITERATION * 1000),
   10,
 );
-const REPETITIVE = process.env.STABILITY_REPETITIVE !== '0'; // Default to repetitive (PENPAL-46)
+const REPETITIVE = process.env.STABILITY_REPETITIVE !== '0'; // Default to repetitive
 const RESULTS_FILE = path.join(RESULTS_DIR, 'results.json');
 const SCREENSHOTS_DIR = path.join(RESULTS_DIR, 'screenshots');
 const NUM_TESTS = 10;
@@ -36,8 +36,8 @@ interface TestResult {
   testIndex: number;
   iteration: number;
   anchorType: string;
-  selectionType: 'single-element' | 'cross-element'; // PENPAL-38
-  sizeClass: 'small' | 'large'; // PENPAL-46
+  selectionType: 'single-element' | 'cross-element';
+  sizeClass: 'small' | 'large';
   selectedText: string;
   scores: TestScores;
   total: number;
@@ -62,7 +62,6 @@ interface Improvement {
   afterIteration: number;
   type: 'production' | 'test' | 'dashboard';
   description: string;
-  linearIssue?: string;
 }
 
 interface AllResults {
@@ -163,7 +162,7 @@ function editWithin(
   return lines.join('\n');
 }
 
-/** Pick a random span of the document for anchoring (PENPAL-46).
+/** Pick a random span of the document for anchoring.
  *  Size classes: "small" (30-100 chars) and "large" (20-30% of document).
  *  Start and end positions are fully random with zero restrictions —
  *  selections can begin or end anywhere: inside fenced code blocks,
@@ -324,7 +323,7 @@ function createTestRng(seed: number) {
 test.describe.configure({ mode: 'serial' });
 test.describe(`anchor stability - iteration ${ITERATION}`, () => {
   test.beforeAll(async ({ request }) => {
-    // Generate the document (PENPAL-41: repetitive mode for duplicate content testing)
+    // Generate the document (repetitive mode for duplicate content testing)
     doc = generateMarkdownDocument(SEED, { repetitive: REPETITIVE });
     testRng = createTestRng(SEED + 999);
 
@@ -382,13 +381,13 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
       await blockPendingNavigation(page);
 
       // Use a per-test file path to avoid leaking highlights/threads across tests
-      // within an iteration (PENPAL-50). Each test gets its own file so threads
+      // within an iteration. Each test gets its own file so threads
       // from previous tests don't appear.
       filePath = `thoughts/stability-test-${testIdx}.md`;
       absFilePath = path.join(tmpDir, filePath);
       fs.writeFileSync(absFilePath, doc.markdown);
 
-      // ── Pick a random document span (PENPAL-46) ──────────────────
+      // ── Pick a random document span ──────────────────────────────
       const selection = pickRandomSelection(doc.markdown, testRng);
       const selectedText = selection.text;
       const selectionType = selection.isCrossElement ? 'cross-element' as const : 'single-element' as const;
@@ -473,7 +472,7 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
       }
       phaseDurations.initial = Date.now() - phaseStart;
 
-      // Scroll to highlight before screenshot (PENPAL-24)
+      // Scroll to highlight before screenshot
       await scrollToHighlight(page, threadId);
       const ssInitial = `iter${ITERATION}_test${testIdx}_initial.png`;
       await page.screenshot({ path: path.join(SCREENSHOTS_DIR, ssInitial) });
@@ -481,7 +480,7 @@ test.describe(`anchor stability - iteration ${ITERATION}`, () => {
 
       // ── Step 3: Edit BEFORE anchor ─────────────────────────────
       phaseStart = Date.now();
-      // Snapshot the baseline — each phase resets to this (PENPAL-22)
+      // Snapshot the baseline — each phase resets to this
       const baselineMarkdown = fs.readFileSync(absFilePath, 'utf-8');
       const anchorLine = await getAnchorLine(page, threadId);
 
@@ -626,7 +625,7 @@ function saveTestResult(testResult: TestResult) {
   writeResults(results);
 }
 
-/** Scroll the page so the highlight is visible before taking a screenshot (PENPAL-24). */
+/** Scroll the page so the highlight is visible before taking a screenshot. */
 async function scrollToHighlight(page: import('@playwright/test').Page, threadId: string) {
   await page.evaluate((tid) => {
     const mark = document.querySelector(`.comment-highlight[data-thread-id="${tid}"]`);

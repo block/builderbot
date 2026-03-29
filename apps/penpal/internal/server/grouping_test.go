@@ -277,8 +277,8 @@ func TestBuildFileGroups_AllMarkdownVirtual(t *testing.T) {
 	if last.Source != "__all_markdown__" {
 		t.Errorf("expected source '__all_markdown__', got %q", last.Source)
 	}
-	if last.Auto {
-		t.Errorf("All Markdown should be auto=false (virtual source, not auto-detected)")
+	if !last.Auto {
+		t.Errorf("All Markdown should be auto=true (virtual source, not removable)")
 	}
 	if len(last.Files) != 2 {
 		t.Errorf("expected 2 files in All Markdown, got %d", len(last.Files))

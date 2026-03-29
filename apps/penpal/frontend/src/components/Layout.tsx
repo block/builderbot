@@ -491,7 +491,7 @@ export default function Layout() {
   // E-PENPAL-SOURCE-ACTIONS, E-PENPAL-BATCH-OPS: file and source action helpers
   const qn = activeProject?.qualifiedName || '';
 
-  const refreshFilesTimer = useRef<ReturnType<typeof setTimeout>>();
+  const refreshFilesTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   function debouncedRefreshFiles() {
     if (!qn) return;
     clearTimeout(refreshFilesTimer.current);

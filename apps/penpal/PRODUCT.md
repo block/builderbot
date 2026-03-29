@@ -200,6 +200,8 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 - <a id="P-PENPAL-RENDER"></a>**P-PENPAL-RENDER**: Clicking a file opens a two-pane view: rendered markdown on the left, comments panel on the right, with a draggable divider.
 
+- <a id="P-PENPAL-VIEW-MARGINS"></a>**P-PENPAL-VIEW-MARGINS**: The file view maintains equal margins between the content and each side boundary (left sidebar and right comments panel). Content expands to fill available space between the margins.
+
 - <a id="P-PENPAL-GFM"></a>**P-PENPAL-GFM**: Markdown rendering supports GitHub Flavored Markdown: tables, task lists, strikethrough, autolinks, and syntax-highlighted code blocks with a dark color scheme (for fenced blocks with a language specifier).
 
 - <a id="P-PENPAL-FRONTMATTER"></a>**P-PENPAL-FRONTMATTER**: YAML/TOML frontmatter is stripped from the rendered output so users see only the document content.

@@ -18,6 +18,10 @@ interface Options {
  * Rehype plugin that inserts <mark> elements into the hast AST for comment highlights.
  * Replaces the previous DOM mutation approach (addCommentHighlights) so that React
  * owns the marks and reconciliation works correctly on re-render.
+ *
+ * Supports cross-element selections: when selectedText spans multiple block elements,
+ * the plugin highlights the matching prefix in the start element and continues
+ * highlighting in subsequent sibling elements until the full text is covered.
  */
 export default function rehypeCommentHighlights(options: Options) {
   const { highlights } = options;
@@ -32,22 +36,63 @@ export default function rehypeCommentHighlights(options: Options) {
   }
 
   return (tree: Root) => {
+    // Track which highlights have been started to avoid double-applying
+    const applied = new Set<string>();
+    // Cross-element highlights needing continuation: threadId → remaining normalized text
+    const continuing = new Map<string, { highlight: ThreadHighlight; remaining: string }>();
+
     visit(tree, 'element', (node: Element, index, parent) => {
       if (index === undefined || !parent) return;
+
+      // Skip fenced code blocks — SyntaxHighlighter re-parses children as
+      // a plain string, so inserting <mark> elements into the HAST tree
+      // corrupts the output (children become [string, object, string] which
+      // stringifies as ",[object Object],").
+      if (node.tagName === 'pre' || node.tagName === 'code') return SKIP;
 
       const sourceLine = node.position?.start?.line;
       if (!sourceLine) return;
 
-      const lineHighlights = byLine.get(sourceLine);
-      if (!lineHighlights) return;
-
-      // Process each highlight for this block, then skip children
-      // to avoid double-applying when parent and child share a start line
-      // (e.g. <li> and its child <p> both start on the same line).
-      for (const highlight of lineHighlights) {
-        applyHighlight(node, highlight);
+      // Continue cross-element highlights into subsequent elements.
+      // Only try elements on lines AFTER the highlight's startLine to avoid
+      // double-matching in child elements of the start element (whose text
+      // was already covered by collectTextNodes on the parent).
+      for (const [threadId, state] of continuing) {
+        if (sourceLine <= state.highlight.startLine) continue;
+        const matched = applyContinuation(node, state.highlight, state.remaining);
+        if (matched > 0) {
+          const newRemaining = state.remaining.slice(matched).trim();
+          if (newRemaining.length === 0) {
+            continuing.delete(threadId);
+          } else {
+            state.remaining = newRemaining;
+          }
+        }
       }
-      return SKIP;
+
+      // Start new highlights at or near this line.
+      // Check nearby lines (0-3 offset) because startLine may point to an empty
+      // line or thematic break preceding the actual content element when the
+      // selectedText starts with whitespace/newlines.
+      for (let lineOffset = 0; lineOffset <= 3; lineOffset++) {
+        const lineHighlights = byLine.get(sourceLine - lineOffset);
+        if (!lineHighlights) continue;
+
+        for (const highlight of lineHighlights) {
+          if (applied.has(highlight.threadId)) continue;
+          const result = applyHighlight(node, highlight);
+          applied.add(highlight.threadId);
+          if (result.remaining) {
+            continuing.set(highlight.threadId, { highlight, remaining: result.remaining });
+          } else if (!result.matched) {
+            // Start element had no text (e.g. <hr>) — schedule full text for continuation
+            const normSelected = normalizeSelected(highlight.selectedText);
+            if (normSelected.length >= 3) {
+              continuing.set(highlight.threadId, { highlight, remaining: normSelected });
+            }
+          }
+        }
+      }
     });
   };
 }
@@ -78,68 +123,59 @@ function collectTextNodes(node: Element): { nodes: { node: Text; parent: Element
   return { nodes: result, text };
 }
 
+// ── Shared normalization and mark-insertion helpers ───────────────────
+
+function normalizeHast(text: string): string {
+  return text.replace(/[*_`]/g, '').replace(/\s+/g, ' ');
+}
+
+function normalizeSelected(selectedText: string): string {
+  return selectedText
+    .replace(/[*_`]/g, '')
+    .replace(/^(?:#{1,6} |- |\* |\d*\. |> |- \[[ x]\] )/gm, '')
+    .replace(/^-+$/gm, '')  // thematic breaks and partial fragments (rendered as <hr> with no text)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /**
- * Applies a single highlight to a hast element by finding the selectedText
- * in the element's accumulated text content and wrapping matching portions
- * in <mark> elements.
+ * Build a mapping from normalized-text index → original-text index.
+ * Accounts for stripped formatting chars (*_`) and collapsed whitespace.
  */
-function applyHighlight(element: Element, highlight: ThreadHighlight) {
-  const { nodes, text } = collectTextNodes(element);
-  if (nodes.length === 0) return;
-
-  // Normalize whitespace for matching (mirrors DOM-based approach)
-  const normalizedText = text.replace(/\s+/g, ' ');
-  const normalizedSelected = highlight.selectedText.replace(/\s+/g, ' ');
-
-  // Use occurrenceIndex to find the Nth match within the block,
-  // falling back to the first occurrence if the index is not set or not found.
-  let matchIndex = -1;
-  const targetOccurrence = highlight.occurrenceIndex ?? 0;
-  let pos = 0;
-  for (let i = 0; i <= targetOccurrence; i++) {
-    const found = normalizedText.indexOf(normalizedSelected, pos);
-    if (found === -1) break;
-    if (i === targetOccurrence) {
-      matchIndex = found;
-    }
-    pos = found + 1;
-  }
-  // Fall back to first occurrence if Nth not found
-  if (matchIndex === -1) matchIndex = normalizedText.indexOf(normalizedSelected);
-  if (matchIndex === -1) return;
-
-  const matchStart = matchIndex;
-  const matchEnd = matchIndex + normalizedSelected.length;
-
-  // Map normalized positions back to original text positions.
-  // Build a mapping from normalized index -> original index.
+function buildNormToOrigMap(text: string, normalizedText: string): number[] {
   const normToOrig: number[] = [];
   let ni = 0;
   for (let oi = 0; oi < text.length; oi++) {
-    if (/\s/.test(text[oi])) {
-      // In normalized form, consecutive whitespace maps to a single space
+    const ch = text[oi];
+    if (ch === '*' || ch === '_' || ch === '`') continue;
+    if (/\s/.test(ch)) {
       if (ni < normalizedText.length && normalizedText[ni] === ' ') {
         normToOrig.push(oi);
         ni++;
       }
-      // Skip additional whitespace chars in original
     } else {
       normToOrig.push(oi);
       ni++;
     }
   }
-  // Sentinel for end mapping
-  normToOrig.push(text.length);
+  normToOrig.push(text.length); // sentinel for end mapping
+  return normToOrig;
+}
 
-  const origMatchStart = normToOrig[matchStart];
-  const origMatchEnd = normToOrig[matchEnd];
-
-  // Process text nodes in reverse order to preserve indices
+/**
+ * Insert <mark> elements into the text nodes for the given match range
+ * (specified in original/unnormalized text coordinates).
+ */
+function insertMarks(
+  nodes: { node: Text; parent: Element | Root; index: number; start: number }[],
+  origMatchStart: number,
+  origMatchEnd: number,
+  highlight: ThreadHighlight,
+): void {
   for (let i = nodes.length - 1; i >= 0; i--) {
     const entry = nodes[i];
     const nodeStart = entry.start;
 
-    // Check overlap with match region
     const overlapStart = Math.max(origMatchStart - nodeStart, 0);
     const overlapEnd = Math.min(origMatchEnd - nodeStart, entry.node.value.length);
     if (overlapStart >= overlapEnd) continue;
@@ -147,12 +183,10 @@ function applyHighlight(element: Element, highlight: ThreadHighlight) {
     const nodeValue = entry.node.value;
     const newNodes: ElementContent[] = [];
 
-    // Text before the highlight
     if (overlapStart > 0) {
       newNodes.push({ type: 'text', value: nodeValue.slice(0, overlapStart) } as Text);
     }
 
-    // The highlighted portion wrapped in <mark>
     const markElement: Element = {
       type: 'element',
       tagName: 'mark',
@@ -166,18 +200,14 @@ function applyHighlight(element: Element, highlight: ThreadHighlight) {
     };
     newNodes.push(markElement);
 
-    // Text after the highlight
     if (overlapEnd < nodeValue.length) {
       newNodes.push({ type: 'text', value: nodeValue.slice(overlapEnd) } as Text);
     }
 
-    // Replace the original text node in its parent
     const parentChildren = (entry.parent as Element).children;
     parentChildren.splice(entry.index, 1, ...newNodes);
 
-    // Adjust indices for any earlier entries that share the same parent
-    // (only needed if multiple text nodes in the same parent, which is rare)
-    const inserted = newNodes.length - 1; // net new nodes
+    const inserted = newNodes.length - 1;
     if (inserted !== 0) {
       for (let j = i - 1; j >= 0; j--) {
         if (nodes[j].parent === entry.parent && nodes[j].index > entry.index) {
@@ -186,4 +216,176 @@ function applyHighlight(element: Element, highlight: ThreadHighlight) {
       }
     }
   }
+}
+
+// ── Highlight application ────────────────────────────────────────────
+
+/**
+ * Applies a single highlight to a hast element by finding the selectedText
+ * in the element's accumulated text content and wrapping matching portions
+ * in <mark> elements.
+ *
+ * Returns { remaining, matched } — `matched` is true if any text was highlighted.
+ * For cross-element selections, `remaining` is the normalized text that was NOT
+ * matched in this element and needs continuation in subsequent elements.
+ * When `matched` is false (e.g. element has no text like <hr>), the caller
+ * should schedule the full normalizedSelected for continuation.
+ */
+function applyHighlight(element: Element, highlight: ThreadHighlight): { remaining: string | null; matched: boolean } {
+  const { nodes, text } = collectTextNodes(element);
+  if (nodes.length === 0) return { remaining: null, matched: false };
+
+  const normalizedText = normalizeHast(text);
+  const normSelected = normalizeSelected(highlight.selectedText);
+
+  // Use occurrenceIndex to find the Nth match within the block
+  let matchIndex = -1;
+  let matchLength = normSelected.length;
+  const targetOccurrence = highlight.occurrenceIndex ?? 0;
+  let pos = 0;
+  for (let i = 0; i <= targetOccurrence; i++) {
+    const found = normalizedText.indexOf(normSelected, pos);
+    if (found === -1) break;
+    if (i === targetOccurrence) matchIndex = found;
+    pos = found + 1;
+  }
+  if (matchIndex === -1) matchIndex = normalizedText.indexOf(normSelected);
+
+  let isCrossElement = false;
+
+  // Cross-element fallback: find the longest prefix of selectedText
+  // that matches within this element. The remainder will be highlighted
+  // in subsequent elements via the continuation mechanism.
+  if (matchIndex === -1 && normSelected.length > 3) {
+    let lo = 3, hi = normSelected.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (normalizedText.indexOf(normSelected.slice(0, mid)) !== -1) {
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    const prefixLen = hi;
+    if (prefixLen >= 3) {
+      matchIndex = normalizedText.indexOf(normSelected.slice(0, prefixLen));
+      matchLength = prefixLen;
+      isCrossElement = true;
+    }
+  }
+
+  // Positionally-constrained match for very short prefixes (1-2 chars):
+  // only accept if the element text ENDS with the prefix, to avoid false
+  // positives from arbitrary-position matches within the element.
+  if (matchIndex === -1 && normSelected.length > 1) {
+    const shortLen = Math.min(2, normSelected.length);
+    for (let tryLen = shortLen; tryLen >= 1; tryLen--) {
+      const prefix = normSelected.slice(0, tryLen);
+      if (normalizedText.endsWith(prefix)) {
+        matchIndex = normalizedText.length - tryLen;
+        matchLength = tryLen;
+        isCrossElement = true;
+        break;
+      }
+    }
+  }
+
+  if (matchIndex === -1) return { remaining: null, matched: false };
+
+  const normToOrig = buildNormToOrigMap(text, normalizedText);
+  const origMatchStart = normToOrig[matchIndex];
+  const origMatchEnd = normToOrig[matchIndex + matchLength];
+
+  insertMarks(nodes, origMatchStart, origMatchEnd, highlight);
+
+  if (isCrossElement) {
+    const remaining = normSelected.slice(matchLength).trim();
+    return { remaining: remaining.length >= 1 ? remaining : null, matched: true };
+  }
+  return { remaining: null, matched: true };
+}
+
+/**
+ * Continue a cross-element highlight into a subsequent element.
+ * Searches for the remaining normalized text (or a prefix of it) in the
+ * element's text and applies <mark> elements for the matched portion.
+ *
+ * Returns the number of normalized characters matched (0 if no match).
+ */
+// Block-level tags whose children should be matched individually rather than
+// as concatenated text (prevents wrong-position matches in container elements).
+const BLOCK_TAGS = new Set([
+  'li', 'p', 'div', 'blockquote', 'pre', 'ul', 'ol', 'table',
+  'tr', 'td', 'th', 'section', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+]);
+
+function applyContinuation(element: Element, highlight: ThreadHighlight, remaining: string): number {
+  // Skip container elements with block children — let individual children handle
+  // the continuation to avoid matching the wrong child's text when collectTextNodes
+  // concatenates all descendants without separators.
+  if (element.children.some(c => c.type === 'element' && BLOCK_TAGS.has((c as Element).tagName))) {
+    return 0;
+  }
+
+  const { nodes, text } = collectTextNodes(element);
+  if (nodes.length === 0) return 0;
+
+  const normalizedText = normalizeHast(text);
+  let matchIndex = -1;
+  let matchLength = 0;
+  let skippedChars = 0; // chars consumed from remaining before the match
+
+  // Strategy 1: Try full remaining
+  matchIndex = normalizedText.indexOf(remaining);
+  matchLength = remaining.length;
+
+  // Strategy 2: Binary search for longest prefix of remaining
+  if (matchIndex === -1) {
+    let lo = 1, hi = Math.min(remaining.length, normalizedText.length);
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (normalizedText.indexOf(remaining.slice(0, mid)) !== -1) {
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (hi >= 3) {
+      matchLength = hi;
+      matchIndex = normalizedText.indexOf(remaining.slice(0, matchLength));
+    }
+  }
+
+  // Strategy 2b: Positionally-constrained match for very short remaining (1-2 chars).
+  // Only accept if the element text STARTS with the remaining text.
+  if (matchIndex === -1 && remaining.length < 3 && remaining.length >= 1) {
+    if (normalizedText.startsWith(remaining)) {
+      matchIndex = 0;
+      matchLength = remaining.length;
+    }
+  }
+
+  // Strategy 3: Overlap detection — the remaining may start with a short
+  // fragment from the previous element. Check if the element's text starts
+  // with a suffix of remaining (e.g. remaining="s Observability..." and
+  // element text starts with "Observability...").
+  if (matchIndex === -1 && normalizedText.length >= 10) {
+    const probe = normalizedText.slice(0, Math.min(30, normalizedText.length));
+    const overlapIdx = remaining.indexOf(probe);
+    if (overlapIdx > 0 && overlapIdx < 30) {
+      matchIndex = 0;
+      matchLength = Math.min(normalizedText.length, remaining.length - overlapIdx);
+      skippedChars = overlapIdx;
+    }
+  }
+
+  if (matchIndex === -1) return 0;
+
+  const normToOrig = buildNormToOrigMap(text, normalizedText);
+  const origMatchStart = normToOrig[matchIndex];
+  const origMatchEnd = normToOrig[matchIndex + matchLength];
+
+  insertMarks(nodes, origMatchStart, origMatchEnd, highlight);
+
+  return skippedChars + matchLength;
 }

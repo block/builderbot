@@ -220,6 +220,7 @@ export default function SelectionToolbar({
   const [visible, setVisible] = useState(false);
   const [position, setPosition] = useState({ top: 0, left: 0 });
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const clearSelectionRaf = useRef<number>(0);
 
   const handleMouseUp = useCallback(() => {
     setTimeout(() => {
@@ -256,6 +257,7 @@ export default function SelectionToolbar({
     return () => {
       contentEl.removeEventListener('mouseup', handleMouseUp);
       document.removeEventListener('click', handleClick);
+      cancelAnimationFrame(clearSelectionRaf.current);
     };
   }, [contentRef, handleMouseUp]);
 
@@ -278,9 +280,13 @@ export default function SelectionToolbar({
     if (!selectedText) return;
 
     const anchor = computeAnchor(sel, selectedText, rawMarkdown, contentRef.current);
-    sel.removeAllRanges();
     setVisible(false);
     onComment(anchor, selectedText);
+    // Clear browser selection after React re-renders the pending highlight.
+    // Doing it synchronously before onComment doesn't stick because React's
+    // DOM mutations (inserting <mark> elements) cause the browser to partially
+    // restore the selection over the mutated nodes.
+    clearSelectionRaf.current = requestAnimationFrame(() => window.getSelection()?.removeAllRanges());
   };
 
   const handleCopyMarkdown = (e: React.MouseEvent) => {

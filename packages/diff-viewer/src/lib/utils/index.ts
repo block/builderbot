@@ -38,6 +38,8 @@ export {
   measureLineHeight,
   normalizeLineSelection,
   resolveLineSelectionToolbarLeft,
+  getLineClass,
+  getCharHighlights,
 } from './diffViewerHelpers';
 
 export {
@@ -84,3 +86,6 @@ export {
 	createFileSelectionWithSearch,
 	type FileSelectionWithSearchConfig
 } from './fileSelection';
+
+export { computeLineDiff, getLineDiffResult } from './inlineDiff.js';
+export type { BeforeLineClass, AfterLineClass, CharHighlight, ModifiedPair, LineDiffResult } from './inlineDiff.js';

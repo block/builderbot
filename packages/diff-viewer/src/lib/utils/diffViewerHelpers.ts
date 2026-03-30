@@ -1,5 +1,7 @@
 import type { Alignment, Comment, SmartDiffAnnotation } from '../types';
 import type { Token } from './highlighter';
+import { getLineDiffResult } from './inlineDiff.js';
+import type { BeforeLineClass, AfterLineClass, CharHighlight } from './inlineDiff.js';
 
 export type ChangedAlignmentEntry = { alignment: Alignment; index: number };
 export type PaneSide = 'before' | 'after';
@@ -283,4 +285,69 @@ export function buildLineSelectionToolbarLayout(
     top: lineRect.top - viewerRect.top,
     left,
   };
+}
+
+/**
+ * Get the line classification for a specific line within a changed alignment.
+ * Returns null if the line is not in a changed alignment.
+ */
+export function getLineClass(
+  side: PaneSide,
+  lineIndex: number,
+  beforeLineToAlignment: Map<number, number>,
+  afterLineToAlignment: Map<number, number>,
+  alignments: Alignment[],
+  beforeLines: string[],
+  afterLines: string[]
+): BeforeLineClass | AfterLineClass | null {
+  const map = side === 'before' ? beforeLineToAlignment : afterLineToAlignment;
+  const alignIdx = map.get(lineIndex);
+  if (alignIdx === undefined) return null;
+
+  const alignment = alignments[alignIdx];
+  const alignBefore = beforeLines.slice(alignment.before.start, alignment.before.end);
+  const alignAfter = afterLines.slice(alignment.after.start, alignment.after.end);
+  const result = getLineDiffResult(alignBefore, alignAfter);
+
+  if (side === 'before') {
+    const localIdx = lineIndex - alignment.before.start;
+    return result.beforeLines[localIdx];
+  } else {
+    const localIdx = lineIndex - alignment.after.start;
+    return result.afterLines[localIdx];
+  }
+}
+
+/**
+ * Get character highlights for a line if it's a modified line in a changed alignment.
+ * Returns null if the line is not modified.
+ */
+export function getCharHighlights(
+  side: PaneSide,
+  lineIndex: number,
+  beforeLineToAlignment: Map<number, number>,
+  afterLineToAlignment: Map<number, number>,
+  alignments: Alignment[],
+  beforeLines: string[],
+  afterLines: string[]
+): CharHighlight[] | null {
+  const map = side === 'before' ? beforeLineToAlignment : afterLineToAlignment;
+  const alignIdx = map.get(lineIndex);
+  if (alignIdx === undefined) return null;
+
+  const alignment = alignments[alignIdx];
+  const alignBefore = beforeLines.slice(alignment.before.start, alignment.before.end);
+  const alignAfter = afterLines.slice(alignment.after.start, alignment.after.end);
+  const result = getLineDiffResult(alignBefore, alignAfter);
+
+  const localIdx = side === 'before'
+    ? lineIndex - alignment.before.start
+    : lineIndex - alignment.after.start;
+
+  const pair = result.modifiedPairs.find(p =>
+    side === 'before' ? p.beforeLineIndex === localIdx : p.afterLineIndex === localIdx
+  );
+
+  if (!pair) return null;
+  return side === 'before' ? pair.beforeHighlights : pair.afterHighlights;
 }

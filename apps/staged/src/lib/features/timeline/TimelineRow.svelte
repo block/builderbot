@@ -32,7 +32,8 @@
     | 'failed-review'
     | 'image'
     | 'revalidating'
-    | 'provisioning';
+    | 'provisioning'
+    | 'load-error';
 
   export type TimelineBadge = {
     icon: 'comment' | 'warning';
@@ -53,6 +54,7 @@
     onDeleteClick?: () => void;
     /** When set, the delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
+    onRetryClick?: () => void;
   }
 
   let {
@@ -68,6 +70,7 @@
     onSessionClick,
     onDeleteClick,
     deleteDisabledReason,
+    onRetryClick,
   }: Props = $props();
 
   let isNote = $derived(
@@ -96,7 +99,11 @@
       type === 'provisioning'
   );
   let isFailed = $derived(
-    !deleting && (type === 'failed-commit' || type === 'failed-note' || type === 'failed-review')
+    !deleting &&
+      (type === 'failed-commit' ||
+        type === 'failed-note' ||
+        type === 'failed-review' ||
+        type === 'load-error')
   );
   let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
   let hasSession = $derived(!!sessionId && !deleting);
@@ -118,6 +125,11 @@
     e.stopPropagation();
     onDeleteClick?.();
   }
+
+  function handleRetryClick(e: MouseEvent) {
+    e.stopPropagation();
+    onRetryClick?.();
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -127,7 +139,7 @@
   class:pending={isPending}
   class:failed={isFailed}
   class:clickable={isClickable}
-  class:compact={type === 'revalidating'}
+  class:compact={type === 'revalidating' || type === 'load-error'}
   onclick={handleRowClick}
 >
   <div class="timeline-marker">
@@ -189,7 +201,12 @@
         </div>
       {/if}
     </div>
-    <div class="timeline-actions">
+    <div class="timeline-actions" class:always-visible={!!onRetryClick}>
+      {#if onRetryClick}
+        <button class="action-btn retry-btn" onclick={handleRetryClick} title="Retry">
+          Retry
+        </button>
+      {/if}
       {#if hasSession}
         <button class="action-btn session-btn" onclick={handleSessionClick} title="View session">
           <MessageSquare size={12} />
@@ -418,7 +435,8 @@
     transition: opacity 0.1s;
   }
 
-  .timeline-row:hover .timeline-actions {
+  .timeline-row:hover .timeline-actions,
+  .timeline-actions.always-visible {
     opacity: 1;
   }
 
@@ -452,6 +470,18 @@
   .delete-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
+  }
+
+  .retry-btn {
+    width: auto;
+    padding: 0 8px;
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+  }
+
+  .retry-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   @keyframes pulse {

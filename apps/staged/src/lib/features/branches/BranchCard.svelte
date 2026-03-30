@@ -838,6 +838,7 @@
       {:else if error && !timeline}
         <div class="error">
           <span>{error}</span>
+          <button class="retry-btn" onclick={() => loadTimeline()}>Retry</button>
         </div>
       {:else if timeline || isProvisioning}
         <BranchTimeline
@@ -847,6 +848,8 @@
           pendingItems={sessionMgr.pendingSessionItems}
           {prunedSessionIds}
           {revalidating}
+          {error}
+          onRetry={() => loadTimeline()}
           deletingItems={timelineDeletingItems}
           reviewCommentBreakdown={timelineReviewDetailsById}
           onSessionClick={(sid) => sessionMgr.handleTimelineSessionClick(sid)}
@@ -895,11 +898,6 @@
             {/if}
           {/snippet}
         </BranchTimeline>
-        {#if error}
-          <div class="error revalidation-error">
-            <span>{error}</span>
-          </div>
-        {/if}
       {/if}
     </div>
   {/if}
@@ -1153,13 +1151,26 @@
   }
 
   .error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     color: var(--ui-danger);
     font-size: var(--size-sm);
   }
 
-  .revalidation-error {
-    padding: 4px 12px;
-    color: var(--text-faint);
+  .error .retry-btn {
+    padding: 2px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle);
+    background: none;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    cursor: pointer;
+  }
+
+  .error .retry-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   /* Worktree error state */

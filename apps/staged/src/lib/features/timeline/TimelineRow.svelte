@@ -219,7 +219,7 @@
           Retry
         </button>
       {/if}
-      {#if hasSession}
+      {#if hasSession && !onStartClick}
         <button class="action-btn session-btn" onclick={handleSessionClick} title="View session">
           <MessageSquare size={12} />
         </button>
@@ -490,6 +490,11 @@
     padding: 0 8px;
     font-size: var(--size-xs);
     color: var(--text-muted);
+  }
+
+  .start-btn {
+    border: 1px solid var(--border-muted);
+    border-radius: 4px;
   }
 
   .retry-btn:hover,

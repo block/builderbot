@@ -133,6 +133,9 @@ see-also:
 - <a id="E-PENPAL-HIGHLIGHT-REHYPE"></a>**E-PENPAL-HIGHLIGHT-REHYPE**: A rehype plugin (`rehypeCommentHighlights`) injects `<mark>` elements into the rendered AST by matching `SelectedText` at the correct `startLine` and `occurrenceIndex`. Pending (unsaved) anchors get a `.pending` CSS class.
   ← [P-PENPAL-HIGHLIGHT](PRODUCT.md#P-PENPAL-HIGHLIGHT)
 
+- <a id="E-PENPAL-HIGHLIGHT-CROSS"></a>**E-PENPAL-HIGHLIGHT-CROSS**: The rehype plugin splits and wraps `<mark>` elements across inline formatting boundaries (bold, italic, code, links) and across block boundaries between code blocks and prose. Each contiguous segment of highlighted text gets its own `<mark>` wrapper so the highlight renders correctly regardless of intervening HTML structure.
+  ← [P-PENPAL-HIGHLIGHT-CROSS](PRODUCT.md#P-PENPAL-HIGHLIGHT-CROSS)
+
 ---
 
 ## Mermaid Diagram Anchoring

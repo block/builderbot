@@ -73,6 +73,7 @@ see-also:
 | Text Selection & Anchors (P-PENPAL-SELECT-COMMENT, ANCHOR) | — | SelectionToolbar.test.tsx | — | review-workflow.spec.ts |
 | Anchor Resolution (P-PENPAL-ANCHOR-RESOLVE) | comments_test.go (implicit via round-trip) | rehypeCommentHighlights.test.ts | — | — |
 | Comment Highlights (P-PENPAL-HIGHLIGHT) | — | rehypeCommentHighlights.test.ts, MarkdownViewer.test.tsx | — | review-workflow.spec.ts |
+| Cross-Element Highlights (P-PENPAL-HIGHLIGHT-CROSS) | — | rehypeCommentHighlights.test.ts | — | — |
 | Mermaid Diagram Comments (P-PENPAL-DIAGRAM-SELECT) | — | — | — | mermaid-comments.spec.ts |
 | Comment Threads (P-PENPAL-THREAD-PANEL, REPLY, STATES) | comments_test.go | CommentsPanel.test.tsx | api_threads_test.go | review-workflow.spec.ts |
 | Comment Ordering (E-PENPAL-COMMENT-ORDER) | ordering_test.go | utils/comments.test.ts | — | — |

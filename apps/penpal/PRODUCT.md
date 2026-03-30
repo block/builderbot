@@ -234,6 +234,8 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 - <a id="P-PENPAL-HIGHLIGHT"></a>**P-PENPAL-HIGHLIGHT**: Anchored text is highlighted in the rendered document. Clicking a thread card scrolls to and briefly activates the corresponding highlight.
 
+- <a id="P-PENPAL-HIGHLIGHT-CROSS"></a>**P-PENPAL-HIGHLIGHT-CROSS**: A single highlight can span across formatting boundaries — bold, italic, code, links, and other inline markup — as well as cross between code blocks and surrounding prose.
+
 ---
 
 ## Mermaid Diagram Comments

@@ -614,7 +614,6 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 		groups = append(groups, gv)
 	}
 
-
 	return groups
 }
 

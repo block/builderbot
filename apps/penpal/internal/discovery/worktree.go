@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -140,5 +141,31 @@ func FindMainWorktree(path string) string {
 		return filepath.Dir(commonDir)
 	}
 
+	return ""
+}
+
+// GitWorktreesDir returns the path to the .git/worktrees/ directory for the
+// repository that projectPath belongs to, or "" if it doesn't exist.
+// Works for both main worktrees (.git is a directory) and linked worktrees
+// (.git is a file pointing to the main repo's gitdir).
+// E-PENPAL-WORKTREE-WATCH: resolves the worktrees metadata directory for fs watching.
+func GitWorktreesDir(projectPath string) string {
+	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--git-common-dir")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if commonDir == "" || commonDir == "." {
+		return ""
+	}
+	// --git-common-dir output is relative to the -C directory
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(projectPath, commonDir)
+	}
+	wtDir := filepath.Join(filepath.Clean(commonDir), "worktrees")
+	if info, err := os.Stat(wtDir); err == nil && info.IsDir() {
+		return wtDir
+	}
 	return ""
 }

@@ -91,6 +91,9 @@ see-also:
 - <a id="E-PENPAL-WORKTREE-DISCOVERY"></a>**E-PENPAL-WORKTREE-DISCOVERY**: Worktrees are discovered by parsing `git worktree list --porcelain` output. Each worktree gets a name, path, branch, and `IsMain` flag. The `refs/heads/` prefix is stripped from branch names.
   ← [P-PENPAL-WORKTREE](PRODUCT.md#P-PENPAL-WORKTREE)
 
+- <a id="E-PENPAL-WORKTREE-WATCH"></a>**E-PENPAL-WORKTREE-WATCH**: The watcher monitors each project's `.git/worktrees/` directory (for the main worktree) or the equivalent resolved via `git rev-parse --git-common-dir`. When entries are created or removed in that directory, the watcher re-runs `DiscoverWorktrees` for the affected project, updates the cached worktree list, and broadcasts a `projects` SSE event so the frontend reflects the change.
+  ← [P-PENPAL-WORKTREE](PRODUCT.md#P-PENPAL-WORKTREE)
+
 - <a id="E-PENPAL-CLAUDE-PLANS-DETECT"></a>**E-PENPAL-CLAUDE-PLANS-DETECT**: `DiscoverClaudePlans()` checks `~/.claude/plans/` for existence and at least one `.md` file. If found, a synthetic standalone project is injected. If the user already manually added the same path, a tree source is injected into the existing entry instead of duplicating.
   ← [P-PENPAL-CLAUDE-PLANS](PRODUCT.md#P-PENPAL-CLAUDE-PLANS)
 

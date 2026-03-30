@@ -70,6 +70,9 @@ type Watcher struct {
 	windowFocuses  map[string]focusTarget
 	baseWatched    map[string]struct{}
 	dynamicWatched map[string]struct{}
+
+	// E-PENPAL-WORKTREE-WATCH: tracks .git/worktrees/ dirs to detect worktree add/remove.
+	worktreeWatchDirs map[string]struct{}
 }
 
 // New creates a new watcher
@@ -87,9 +90,10 @@ func New(c *cache.Cache, act *activity.Tracker) (*Watcher, error) {
 		done:           make(chan struct{}),
 		subs:           make(map[chan Event]struct{}),
 		debounce:       make(map[string]*time.Timer),
-		windowFocuses:  make(map[string]focusTarget),
-		baseWatched:    make(map[string]struct{}),
-		dynamicWatched: make(map[string]struct{}),
+		windowFocuses:     make(map[string]focusTarget),
+		baseWatched:       make(map[string]struct{}),
+		dynamicWatched:    make(map[string]struct{}),
+		worktreeWatchDirs: make(map[string]struct{}),
 	}
 
 	return w, nil
@@ -330,6 +334,19 @@ func (w *Watcher) syncBaseWatchesLocked(workspacePaths []string, projects []disc
 		desired[filepath.Clean(p.Path)] = struct{}{}
 	}
 
+	// E-PENPAL-WORKTREE-WATCH: watch .git/worktrees/ dirs to detect worktree add/remove.
+	desiredWtDirs := make(map[string]struct{})
+	for _, p := range projects {
+		if len(p.Worktrees) == 0 {
+			continue
+		}
+		if wtDir := discovery.GitWorktreesDir(p.Path); wtDir != "" {
+			clean := filepath.Clean(wtDir)
+			desiredWtDirs[clean] = struct{}{}
+			desired[clean] = struct{}{}
+		}
+	}
+
 	for path := range w.baseWatched {
 		if _, ok := desired[path]; ok {
 			continue
@@ -355,6 +372,8 @@ func (w *Watcher) syncBaseWatchesLocked(workspacePaths []string, projects []disc
 		}
 		w.baseWatched[path] = struct{}{}
 	}
+
+	w.worktreeWatchDirs = desiredWtDirs
 }
 
 func (w *Watcher) syncDynamicWatchesLocked() {
@@ -479,8 +498,26 @@ func (w *Watcher) loop() {
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := filepath.Clean(event.Name)
 
-	// Check if this is a change in a workspace directory (new/removed project)
+	// E-PENPAL-WORKTREE-WATCH: detect worktree add/remove via .git/worktrees/ changes.
 	parentDir := filepath.Clean(filepath.Dir(path))
+	if _, ok := w.worktreeWatchDirs[parentDir]; ok {
+		w.debounceRefresh("worktrees:"+parentDir, func() {
+			if w.discoverFn != nil {
+				projects, err := w.discoverFn()
+				if err == nil {
+					w.cache.RescanWith(projects)
+					w.focusMu.Lock()
+					w.syncBaseWatchesLocked(w.workspacePaths, projects)
+					w.syncDynamicWatchesLocked()
+					w.focusMu.Unlock()
+					w.Broadcast(Event{Type: EventProjectsChanged})
+				}
+			}
+		})
+		return
+	}
+
+	// Check if this is a change in a workspace directory (new/removed project)
 	for _, ws := range w.workspacePaths {
 		if parentDir == filepath.Clean(ws) {
 			w.debounceRefresh("workspace:"+ws, func() {

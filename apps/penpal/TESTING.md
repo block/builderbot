@@ -70,6 +70,7 @@ see-also:
 | Git Integration (P-PENPAL-GIT-INFO) | — | — | — | — |
 | File List & Grouping (P-PENPAL-FILE-LIST) | — | ProjectPage.test.tsx | grouping_test.go, integration_test.go | — |
 | Markdown Rendering (P-PENPAL-GFM, MERMAID) | — | MarkdownViewer.test.tsx | — | mermaid-comments.spec.ts |
+| Stable Components (E-PENPAL-MD-STABLE-COMPONENTS) | — | MarkdownViewer.test.tsx | — | — |
 | Text Selection & Anchors (P-PENPAL-SELECT-COMMENT, ANCHOR) | — | SelectionToolbar.test.tsx | — | review-workflow.spec.ts |
 | Anchor Resolution (P-PENPAL-ANCHOR-RESOLVE) | comments_test.go (implicit via round-trip) | rehypeCommentHighlights.test.ts | — | — |
 | Comment Highlights (P-PENPAL-HIGHLIGHT) | — | rehypeCommentHighlights.test.ts, MarkdownViewer.test.tsx | — | review-workflow.spec.ts |

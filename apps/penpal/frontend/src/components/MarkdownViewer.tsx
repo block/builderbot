@@ -176,6 +176,13 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
   function MarkdownViewer({ content, rawMarkdown: _rawMarkdown, onHeadingsExtracted, className, highlights }, ref) {
     const innerRef = useRef<HTMLDivElement>(null);
 
+    // E-PENPAL-MD-STABLE-COMPONENTS: keep highlights in a ref so the code
+    // component reads the latest value without being recreated on every change.
+    // This prevents ReactMarkdown from unmounting/remounting custom components
+    // (which would destroy externally-rendered mermaid SVGs).
+    const highlightsRef = useRef<ThreadHighlight[]>([]);
+    highlightsRef.current = highlights ?? [];
+
     // Expose the inner ref to the parent
     useImperativeHandle(ref, () => innerRef.current!, []);
 
@@ -244,7 +251,7 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
 
             // Find highlights targeting lines within this code block
             const codeHighlights: { selectedText: string; threadId: string; pending?: boolean; occurrenceIndex?: number }[] =
-              (highlights ?? []).filter(hl => {
+              highlightsRef.current.filter(hl => {
                 if (!sourceLine) return false;
                 // Code block spans from sourceLine (``` fence) to sourceLine + codeLineCount + 1 (closing ```)
                 // Include fence line (>=) so anchors resolved to the opening ``` aren't silently dropped
@@ -301,7 +308,7 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
           return <pre {...domProps}>{children}</pre>;
         },
       }),
-      [highlights],
+      [], // E-PENPAL-MD-STABLE-COMPONENTS: stable references prevent mermaid SVG destruction
     );
 
     return (

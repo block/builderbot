@@ -142,6 +142,28 @@ describe('MarkdownViewer', () => {
     expect(codeMarks.length).toBeGreaterThan(0);
   });
 
+  // E-PENPAL-MD-STABLE-COMPONENTS: mermaid containers survive highlight changes
+  it('preserves mermaid containers when highlights change', () => {
+    const md = '```mermaid\ngraph TD\n  A --> B\n```\n\nSome text here';
+    const { container, rerender } = render(
+      <MarkdownViewer content={md} rawMarkdown={md} />,
+    );
+    const mermaidBefore = container.querySelector('.mermaid-container');
+    expect(mermaidBefore).not.toBeNull();
+
+    // Re-render with highlights — mermaid container must be the same DOM node
+    const highlights = [
+      { threadId: 't1', selectedText: 'Some text', startLine: 6 },
+    ];
+    rerender(
+      <MarkdownViewer content={md} rawMarkdown={md} highlights={highlights} />,
+    );
+    const mermaidAfter = container.querySelector('.mermaid-container');
+    expect(mermaidAfter).not.toBeNull();
+    // Same DOM element reference means React reconciled in place (not unmounted/remounted)
+    expect(mermaidAfter).toBe(mermaidBefore);
+  });
+
   it('renders pending highlights with pending-highlight class', () => {
     const md = 'Hello world';
     const highlights = [

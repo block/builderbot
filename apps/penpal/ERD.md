@@ -261,6 +261,9 @@ see-also:
 - <a id="E-PENPAL-MD-RENDER"></a>**E-PENPAL-MD-RENDER**: Each rendered block is tagged with `data-source-line` (1-indexed). Heading IDs use the same slugification algorithm as Go's goldmark renderer. Mermaid blocks produce `.mermaid-container` divs with `data-mermaid-source`.
   ← [P-PENPAL-GFM](PRODUCT.md#P-PENPAL-GFM), [P-PENPAL-MERMAID](PRODUCT.md#P-PENPAL-MERMAID)
 
+- <a id="E-PENPAL-MD-STABLE-COMPONENTS"></a>**E-PENPAL-MD-STABLE-COMPONENTS**: MarkdownViewer's custom `components` object passed to ReactMarkdown must use stable function references across re-renders. The `code` component reads `highlights` through a ref instead of a closure so that `useMemo` has no dependencies. This prevents ReactMarkdown from unmounting/remounting custom components when highlights change, which would destroy externally-rendered mermaid SVGs and their highlight overlays.
+  ← [P-PENPAL-MERMAID](PRODUCT.md#P-PENPAL-MERMAID), [P-PENPAL-SVG-HIGHLIGHT](PRODUCT.md#P-PENPAL-SVG-HIGHLIGHT)
+
 - <a id="E-PENPAL-HOME-SIDEBAR"></a>**E-PENPAL-HOME-SIDEBAR**: In home mode (no active project), `Layout.tsx` renders a sidebar tree with: ⌂ header with view-options button and "+" add button, expandable workspace items (with child projects), standalone project items as top-level peers, and global "In Review" / "Recent" `NavLink`s in a global nav section. Visual dividers (`.home-section-divider`) separate the workspaces section, standalone projects section, and global navigation section; sections with no items are omitted along with their dividers.
   ← [P-PENPAL-HOME](PRODUCT.md#P-PENPAL-HOME), [P-PENPAL-HOME-TREE](PRODUCT.md#P-PENPAL-HOME-TREE)
 

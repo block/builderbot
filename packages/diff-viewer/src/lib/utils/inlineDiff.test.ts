@@ -381,6 +381,37 @@ describe('computeLineDiff', () => {
       expect(result.modifiedPairs).toHaveLength(0);
     });
 
+    it('classifies replaced JSDoc descriptions as removed/added, not modified', () => {
+      // Real-world case: a JSDoc comment is completely rewritten. The
+      // description lines share structural tokens (` * `, `segments`,
+      // `highlights`) which inflate similarity despite being semantically
+      // unrelated. They should be removed/added, not modified.
+      const before = [
+        '/**',
+        ' * Get highlighted token segments for a line, with search matches applied.',
+        ' */',
+      ];
+      const after = [
+        '/**',
+        ' * Apply character-level diff highlights to segments by splitting them at highlight boundaries.',
+        ' * Works similarly to applySearchHighlights — walks through segments tracking column position.',
+        ' */',
+      ];
+      const result = computeLineDiff(before, after);
+
+      // /** and */ are context
+      expect(result.beforeLines[0]).toBe('unchanged');
+      expect(result.beforeLines[2]).toBe('unchanged');
+      expect(result.afterLines[0]).toBe('unchanged');
+      expect(result.afterLines[3]).toBe('unchanged');
+
+      // The description lines are too different to be "modified"
+      expect(result.beforeLines[1]).toBe('removed');
+      expect(result.afterLines[1]).toBe('added');
+      expect(result.afterLines[2]).toBe('added');
+      expect(result.modifiedPairs).toHaveLength(0);
+    });
+
     it('handles interleaved unchanged and changed lines', () => {
       const before = ['A', 'B', 'C', 'D', 'E'];
       const after = ['A', 'B2', 'C', 'D2', 'E'];

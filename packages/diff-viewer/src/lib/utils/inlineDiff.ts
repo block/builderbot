@@ -90,7 +90,7 @@ function similarity(a: string, b: string): number {
   return (2 * lcsLen) / (a.length + b.length);
 }
 
-const SIMILARITY_THRESHOLD = 0.5;
+const SIMILARITY_THRESHOLD = 0.55;
 
 function splitWords(text: string): string[] {
   return text.split(/(\s+)/);

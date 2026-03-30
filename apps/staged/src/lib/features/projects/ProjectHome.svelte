@@ -478,13 +478,14 @@
       })
     );
 
-    // Navigate away immediately so the user doesn't have to wait for backend deletion
+    // Navigate away immediately so the user doesn't have to wait for backend deletion.
+    // Skip projects that are already being deleted.
     const currentIndex = projects.findIndex((p) => p.id === id);
-    const remainingProjects = projects.filter((p) => p.id !== id);
-    if (remainingProjects.length > 0) {
-      // Prefer next project, fall back to previous
-      const nextProject = remainingProjects[Math.min(currentIndex, remainingProjects.length - 1)];
-      selectProject(nextProject.id);
+    const alive = projects.filter((p) => p.id !== id && !deletingProjectNames.has(p.id));
+    if (alive.length > 0) {
+      // Prefer the next project after the current one; fall back to the closest earlier one
+      const next = alive.find((p) => projects.indexOf(p) > currentIndex) ?? alive[alive.length - 1];
+      selectProject(next.id);
     } else {
       goHome();
     }

@@ -50,6 +50,7 @@
     onDeleteNote?: (noteId: string, sessionId?: string) => void;
     onDeleteReview?: (reviewId: string, sessionId?: string) => void;
     onDeleteImage?: (imageId: string) => void;
+    onStartQueued?: () => void;
     /** Optional per-review breakdown of visible comments vs hold-to-reveal annotations. */
     reviewCommentBreakdown?: Record<
       string,
@@ -93,6 +94,7 @@
     onDeleteNote,
     onDeleteReview,
     onDeleteImage,
+    onStartQueued,
     reviewCommentBreakdown = {},
     onNewNote,
     onNewCommit,
@@ -169,6 +171,23 @@
   }
 
   let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
+
+  /** True when there is at least one non-queued active session (running in timeline or pending-but-not-queued). */
+  let hasActiveSession = $derived.by(() => {
+    for (const commit of timeline.commits) {
+      if (commit.sessionStatus === 'running') return true;
+    }
+    for (const note of timeline.notes) {
+      if (note.sessionStatus === 'running') return true;
+    }
+    for (const review of timeline.reviews) {
+      if (review.sessionStatus === 'running') return true;
+    }
+    for (const item of pendingItems) {
+      if (item.sessionId && !item.type.startsWith('queued-')) return true;
+    }
+    return false;
+  });
 
   $effect(() => {
     liveSessionHintPoller.syncRunningSessionIds(runningSessionIds);
@@ -501,6 +520,9 @@
           {onSessionClick}
           onItemClick={() => handleItemClick(item)}
           onDeleteClick={item.deleteDisabledReason ? undefined : () => handleDeleteClick(item)}
+          onStartClick={item.type.startsWith('queued-') && !hasActiveSession
+            ? onStartQueued
+            : undefined}
         />
       </div>
     {/each}

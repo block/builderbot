@@ -272,6 +272,56 @@ test.describe('mermaid diagram commenting', () => {
     await expect(toolbar.locator('button', { hasText: 'Comment' })).toBeVisible();
   });
 
+  // E-PENPAL-HIGHLIGHT-MEDIA: verifies dragging upward out of a mermaid diagram
+  // creates a text selection anchored at the end of the container.
+  test('dragging upward out of mermaid diagram switches to text selection', async ({ page }) => {
+    await blockPendingNavigation(page);
+    await page.goto(`/file/${projectName}/${filePath}`);
+
+    const container = page.locator('.mermaid-container');
+    await expect(container).toBeVisible({ timeout: 10000 });
+    const svg = container.locator('svg');
+    await expect(svg).toBeVisible();
+
+    const svgBox = await svg.boundingBox();
+    expect(svgBox).toBeTruthy();
+
+    // Find the "intro text" paragraph above the diagram
+    const beforeText = page.locator('p', { hasText: 'intro text before' });
+    await expect(beforeText).toBeVisible();
+    const beforeBox = await beforeText.boundingBox();
+    expect(beforeBox).toBeTruthy();
+
+    // Start drag inside the SVG (center area)
+    const startX = svgBox!.x + svgBox!.width * 0.5;
+    const startY = svgBox!.y + svgBox!.height * 0.5;
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+
+    // Move past 5px threshold to enter SVG rect mode
+    await page.mouse.move(startX - 10, startY - 10, { steps: 2 });
+    const pendingRect = svg.locator('.penpal-pending-svg-highlight');
+    await expect(pendingRect).toBeAttached();
+
+    // Drag upward above the container into the text before
+    const endX = beforeBox!.x + beforeBox!.width * 0.5;
+    const endY = beforeBox!.y + beforeBox!.height * 0.5;
+    await page.mouse.move(endX, endY, { steps: 5 });
+
+    // SVG rect should be cancelled
+    await expect(pendingRect).not.toBeAttached({ timeout: 2000 });
+
+    await page.mouse.up();
+
+    // Text selection should exist
+    const selectionText = await page.evaluate(() => window.getSelection()?.toString().trim() ?? '');
+    expect(selectionText.length).toBeGreaterThan(0);
+
+    // SelectionToolbar should appear
+    const toolbar = page.locator('.selection-toolbar');
+    await expect(toolbar).toBeVisible({ timeout: 5000 });
+  });
+
   // E-PENPAL-MD-RENDER: verifies normal text selection toolbar works alongside mermaid diagrams.
   test('normal text selection still works alongside diagrams', async ({ page }) => {
     await blockPendingNavigation(page);

@@ -178,6 +178,20 @@ describe('MarkdownViewer', () => {
     expect(mermaidContainer?.getAttribute('data-thread-id')).toBe('t-media');
   });
 
+  // E-PENPAL-HIGHLIGHT-MEDIA: pending mermaid container gets pending-highlight class
+  it('applies pending-highlight class to mermaid container for pending highlights', () => {
+    const md = 'Before text\n\n```mermaid\ngraph TD\n  A --> B\n```';
+    const highlights = [
+      { threadId: 'pending', selectedText: 'Before text A B', startLine: 1, pending: true },
+    ];
+    const { container } = render(
+      <MarkdownViewer content={md} rawMarkdown={md} highlights={highlights} />,
+    );
+    const mermaidContainer = container.querySelector('.mermaid-container.pending-highlight');
+    expect(mermaidContainer).not.toBeNull();
+    expect(mermaidContainer?.classList.contains('comment-highlight')).toBe(true);
+  });
+
   it('renders pending highlights with pending-highlight class', () => {
     const md = 'Hello world';
     const highlights = [

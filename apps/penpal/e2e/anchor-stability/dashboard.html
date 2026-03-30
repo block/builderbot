@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Anchor Stability Dashboard</title>
+<style>
+  :root {
+    --bg: #f8f9fa;
+    --surface: #fff;
+    --border: #dee2e6;
+    --text: #212529;
+    --text-muted: #6c757d;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --blue: #3b82f6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--border);
+  }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+  .pulse {
+    width: 8px; height: 8px;
+    background: var(--green);
+    border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+  }
+  .pulse.stopped { background: var(--text-muted); animation: none; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* Chart */
+  .chart-container {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  canvas { width: 100%; height: 300px; }
+
+  /* Iterations */
+  details {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+  }
+  details > summary {
+    padding: 12px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+  }
+  details > summary:hover { background: #f1f3f5; }
+  details > .body { padding: 0 16px 16px; }
+
+  /* Test rows */
+  .test-row {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 6px;
+  }
+  .test-row > summary {
+    padding: 8px 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+  }
+  .test-row > .test-body {
+    padding: 8px 12px 12px;
+    font-size: 0.85rem;
+  }
+
+  /* Score badges */
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #fff;
+  }
+  .badge-green { background: var(--green); }
+  .badge-yellow { background: var(--yellow); color: #000; }
+  .badge-red { background: var(--red); }
+
+  /* Phase results */
+  .phases {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .phase {
+    background: var(--bg);
+    border-radius: 4px;
+    padding: 6px 8px;
+    text-align: center;
+    font-size: 0.8rem;
+  }
+  .phase .phase-label { color: var(--text-muted); margin-bottom: 2px; }
+  .phase .phase-score { font-weight: 600; }
+  .phase.pass { border-left: 3px solid var(--green); }
+  .phase.fail { border-left: 3px solid var(--red); }
+
+  /* Screenshots */
+  .screenshots {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+  .screenshots img {
+    width: 100%;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: transform 0.15s;
+  }
+  .screenshots img:hover { transform: scale(1.02); }
+  .ss-label { font-size: 0.7rem; color: var(--text-muted); text-align: center; }
+
+  /* Lightbox */
+  .lightbox {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.85);
+    z-index: 1000;
+    justify-content: center;
+    align-items: center;
+    cursor: zoom-out;
+  }
+  .lightbox.active { display: flex; }
+  .lightbox img { max-width: 95vw; max-height: 95vh; border-radius: 8px; }
+
+  /* Details text */
+  .details-text {
+    white-space: pre-wrap;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: var(--bg);
+    border-radius: 4px;
+  }
+
+  /* Improvement sections between iterations */
+  .improvements-section {
+    background: #f0f4ff;
+    border: 1px solid #c7d2fe;
+    border-radius: 8px;
+    margin-bottom: 8px;
+  }
+  .improvements-section.test-only {
+    background: #f3f4f6;
+    border-color: #d1d5db;
+  }
+  .improvements-section > summary {
+    padding: 8px 16px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--blue);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+  }
+  .improvements-section.test-only > summary { color: var(--text-muted); }
+  .improvements-section > summary:hover { background: #e0e7ff; border-radius: 8px; }
+  .improvements-section.test-only > summary:hover { background: #e5e7eb; }
+  .improvements-section > .improvements-body {
+    padding: 0 16px 12px;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+  }
+
+  /* Analysis text for imperfect tests */
+  .analysis-text {
+    white-space: pre-wrap;
+    font-size: 0.8rem;
+    color: #7c3aed;
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: #f5f3ff;
+    border-left: 3px solid #7c3aed;
+    border-radius: 4px;
+  }
+
+  .progress-text { font-size: 0.85rem; color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Anchor Stability Dashboard</h1>
+    <div class="progress-text" id="progress">Waiting for results...</div>
+  </div>
+  <div class="header-right">
+    <span id="poll-status">Auto-refresh: ON</span>
+    <div class="pulse" id="pulse-dot"></div>
+  </div>
+</div>
+
+<div class="chart-container">
+  <canvas id="chart" width="800" height="300"></canvas>
+</div>
+
+<div id="iterations"></div>
+
+<!-- Lightbox for screenshot zoom -->
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('active')">
+  <img id="lightbox-img" src="" alt="Screenshot">
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────
+let lastJson = '';
+let expandedSections = new Set();
+let barHitRegions = []; // { x, y, w, h, iterIndex } — for clickable barsconst POLL_INTERVAL = 1000;
+const TEST_COLORS = [
+  '#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981',
+  '#06b6d4', '#6366f1', '#f97316', '#84cc16', '#14b8a6',
+];
+
+// ── Polling ───────────────────────────────────────────────────────────
+async function poll() {
+  try {
+    const res = await fetch('/results.json?t=' + Date.now());
+    if (!res.ok) return;
+    const text = await res.text();
+    if (text === lastJson) return;
+    lastJson = text;
+    const data = JSON.parse(text);
+    update(data);
+  } catch { /* server not ready yet */ }
+}
+
+setInterval(poll, POLL_INTERVAL);
+poll();
+
+// ── Update ────────────────────────────────────────────────────────────
+function update(data) {
+  saveExpandState();
+  updateProgress(data);
+  drawChart(data);
+  updateIterations(data);
+  restoreExpandState();
+}
+
+function saveExpandState() {
+  expandedSections = new Set();
+  document.querySelectorAll('details[data-key]').forEach(el => {
+    if (el.open) expandedSections.add(el.dataset.key);
+  });
+}
+
+function restoreExpandState() {
+  document.querySelectorAll('details[data-key]').forEach(el => {
+    if (expandedSections.has(el.dataset.key)) el.open = true;
+  });
+}
+
+// ── Progress ──────────────────────────────────────────────────────────
+function updateProgress(data) {
+  const el = document.getElementById('progress');
+  const dot = document.getElementById('pulse-dot');
+  const anyRunning = data.iterations.some(i => i.status === 'running');
+
+  if (data.iterations.length === 0) {
+    el.textContent = 'Waiting for results...';
+  } else if (anyRunning) {
+    const iter = data.currentIteration + 1;
+    const test = data.currentTest + 1;
+    el.textContent = `Iteration ${iter} - Test ${test}/10`;
+    dot.classList.remove('stopped');
+  } else {
+    el.textContent = `Complete - ${data.iterations.length} iteration(s)`;
+    dot.classList.add('stopped');
+  }
+}
+
+// ── Chart ─────────────────────────────────────────────────────────────
+function drawChart(data) {
+  const canvas = document.getElementById('chart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width;
+  const H = rect.height;
+
+  ctx.clearRect(0, 0, W, H);
+
+  const pad = { top: 30, right: 20, bottom: 10, left: 50 };
+  const chartW = W - pad.left - pad.right;
+  const chartH = H - pad.top - pad.bottom;
+  const maxScore = 70;
+  // Dynamic slot count — show all iterations  const numSlots = Math.max(1, data.iterations.length);
+  const barWidth = Math.min(80, chartW / (numSlots * 1.5));
+
+  // Y axis
+  ctx.strokeStyle = '#dee2e6';
+  ctx.lineWidth = 1;
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#6c757d';
+  ctx.textAlign = 'right';
+  for (let v = 0; v <= maxScore; v += 10) {
+    const y = pad.top + chartH - (v / maxScore) * chartH;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(pad.left + chartW, y);
+    ctx.stroke();
+    ctx.fillText(String(v), pad.left - 8, y + 4);
+  }
+
+  // Threshold line at 69
+  ctx.strokeStyle = '#ef444480';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  const threshY = pad.top + chartH - (69 / maxScore) * chartH;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, threshY);
+  ctx.lineTo(pad.left + chartW, threshY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#ef4444';
+  ctx.textAlign = 'left';
+  ctx.fillText('pass: 69', pad.left + chartW + 4, threshY + 4);
+
+  // Track bar hit regions for click handling  barHitRegions = [];
+
+  // Bars — updates in real time as results roll in  for (let i = 0; i < numSlots; i++) {
+    const x = pad.left + (i + 0.5) * (chartW / numSlots) - barWidth / 2;
+    const iter = data.iterations[i];
+
+    if (!iter) continue;
+
+    const isDone = iter.status === 'done';
+
+    if (isDone) {
+      // Completed iteration: single solid bar, no score inside      const totalH = (iter.totalScore / maxScore) * chartH;
+      const barColor = iter.totalScore >= 69 ? '#22c55e' : iter.totalScore >= 50 ? '#eab308' : '#ef4444';
+      ctx.fillStyle = barColor;
+      ctx.fillRect(x, pad.top + chartH - totalH, barWidth, totalH);
+      barHitRegions.push({ x, y: pad.top + chartH - totalH, w: barWidth, h: totalH, iterIndex: i });
+    } else {
+      // In-progress: stacked segments
+      let y = pad.top + chartH;
+      for (let t = 0; t < iter.tests.length; t++) {
+        const test = iter.tests[t];
+        const segH = (test.total / maxScore) * chartH;
+        ctx.fillStyle = TEST_COLORS[t % TEST_COLORS.length];
+        ctx.fillRect(x, y - segH, barWidth, segH);
+        y -= segH;
+
+        if (segH > 12) {
+          ctx.fillStyle = '#fff';
+          ctx.font = '10px monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText(String(test.total), x + barWidth / 2, y + segH / 2 + 4);
+        }
+      }
+      barHitRegions.push({ x, y, w: barWidth, h: pad.top + chartH - y, iterIndex: i });
+    }
+
+    // Total label above bar — only show if below 70    const totalH = (iter.totalScore / maxScore) * chartH;
+    const barTopY = pad.top + chartH - totalH;
+    if (iter.totalScore < 70) {
+      const label = isDone ? String(iter.totalScore) : iter.totalScore + '/' + (iter.tests.length * 7);
+      ctx.fillStyle = '#212529';
+      ctx.font = 'bold 13px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, x + barWidth / 2, barTopY - 6);
+    }
+
+    // Improvement indicator line before this iteration    const iterImprovements = (data.improvements || []).filter(imp => imp.afterIteration === i - 1);
+    if (iterImprovements.length > 0) {
+      const hasProduction = iterImprovements.some(imp => imp.type === 'production');
+      const lineColor = hasProduction ? '#3b82f6' : '#9ca3af';
+      const lineX = x - (chartW / numSlots - barWidth) / 2;
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(lineX, pad.top);
+      ctx.lineTo(lineX, pad.top + chartH);
+      ctx.stroke();
+    }
+  }
+}
+
+// ── Iteration details ─────────────────────────────────────────────────
+function updateIterations(data) {
+  const el = document.getElementById('iterations');
+  let html = '';
+  // Show iterations in descending order (most recent first)  for (let i = data.iterations.length - 1; i >= 0; i--) {
+    const iter = data.iterations[i];
+    // Show running max possible score    const maxPossible = iter.status === 'done' ? 70 : iter.tests.length * 7;
+    const badgeClass = iter.status === 'done'
+      ? (iter.totalScore >= 69 ? 'badge-green' : iter.totalScore >= 50 ? 'badge-yellow' : 'badge-red')
+      : 'badge-yellow';
+    const timing = iter.durationMs ? ` — ${(iter.durationMs / 1000).toFixed(1)}s` : '';
+    html += `
+      <details data-key="iter-${i}">
+        <summary>
+          <span class="badge ${badgeClass}">${iter.totalScore}/${maxPossible}</span>
+          Iteration ${i + 1}
+          <span style="color:var(--text-muted);font-weight:normal;font-size:0.85rem">
+            (${iter.tests.length}/10 tests ${iter.status === 'running' ? '- running' : '- done'}${timing})
+          </span>
+        </summary>
+        <div class="body">${renderTests(iter, i)}</div>
+      </details>`;
+
+    // Show improvements BETWEEN iterations as a separate collapsible section    const iterImprovements = (data.improvements || []).filter(imp => imp.afterIteration === i - 1);
+    if (iterImprovements.length > 0) {
+      const hasProduction = iterImprovements.some(imp => imp.type === 'production');
+      const counts = { production: 0, test: 0, dashboard: 0 };
+      iterImprovements.forEach(imp => counts[imp.type]++);
+      const summary = [
+        counts.production > 0 ? `${counts.production} production` : '',
+        counts.test > 0 ? `${counts.test} test` : '',
+        counts.dashboard > 0 ? `${counts.dashboard} dashboard` : '',
+      ].filter(Boolean).join(', ');
+      const body = iterImprovements.map(imp => {
+        const prefix = '';
+        const tag = `<span style="display:inline-block;padding:0 5px;border-radius:3px;font-size:0.75rem;font-weight:600;${
+          imp.type === 'production' ? 'background:#dbeafe;color:#1d4ed8' :
+          imp.type === 'test' ? 'background:#e5e7eb;color:#374151' :
+          'background:#fef3c7;color:#92400e'
+        }">${imp.type}</span>`;
+        return `${tag} ${escHtml(prefix + imp.description)}`;
+      }).join('<br>');
+      html += `
+        <details class="improvements-section${hasProduction ? '' : ' test-only'}" data-key="improvements-before-${i}">
+          <summary>Improvements before iteration ${i + 1}: ${summary}</summary>
+          <div class="improvements-body">${body}</div>
+        </details>`;
+    }
+  }
+  el.innerHTML = html;
+}
+
+function renderTests(iter, iterIdx) {
+  let html = '';
+  for (const test of iter.tests) {
+    const badgeClass = test.total >= 6 ? 'badge-green' : test.total >= 4 ? 'badge-yellow' : 'badge-red';
+    const timing = test.durationMs ? `${(test.durationMs / 1000).toFixed(1)}s` : '';
+    html += `
+      <details class="test-row" data-key="iter-${iterIdx}-test-${test.testIndex}">
+        <summary>
+          <span class="badge ${badgeClass}">${test.total}/7</span>
+          Test ${test.testIndex + 1} &mdash; ${test.anchorType}${test.sizeClass ? ` <span style="color:#0891b2;font-size:0.75rem;font-weight:normal">[${test.sizeClass}]</span>` : ''}${test.selectionType === 'cross-element' ? ' <span style="color:#7c3aed;font-size:0.75rem;font-weight:normal">[cross-element]</span>' : ''}
+          ${timing ? `<span style="color:var(--text-muted);font-size:0.8rem">(${timing})</span>` : ''}
+          <span style="color:var(--text-muted);font-size:0.8rem">"${escHtml(test.selectedText.slice(0, 50))}${test.selectedText.length > 50 ? '...' : ''}"</span>
+        </summary>
+        <div class="test-body">
+          <div class="phases">
+            ${renderPhase('Initial', test.scores.initial, 2, test.phaseDurations?.initial)}
+            ${renderPhase('Edit Before', test.scores.editBefore, 2, test.phaseDurations?.editBefore)}
+            ${renderPhase('Edit After', test.scores.editAfter, 2, test.phaseDurations?.editAfter)}
+            ${renderPhase('Edit Within', test.scores.editWithin, 1, test.phaseDurations?.editWithin)}
+          </div>
+          <div class="screenshots">
+            ${renderScreenshot(test.screenshots.initial, 'Initial')}
+            ${renderScreenshot(test.screenshots.editBefore, 'Edit Before')}
+            ${renderScreenshot(test.screenshots.editAfter, 'Edit After')}
+            ${renderScreenshot(test.screenshots.editWithin, 'Edit Within')}
+          </div>
+          ${test.details ? `<div class="details-text">${escHtml(test.details)}</div>` : ''}
+          ${test.analysis ? `<div class="analysis-text"><strong>Analysis:</strong> ${escHtml(test.analysis)}</div>` : ''}
+        </div>
+      </details>`;
+  }
+  return html;
+}
+
+function renderPhase(label, score, maxScore, durationMs) {
+  const pass = score > 0;
+  const timing = durationMs ? `<div style="font-size:0.7rem;color:var(--text-muted)">${(durationMs / 1000).toFixed(1)}s</div>` : '';
+  return `
+    <div class="phase ${pass ? 'pass' : 'fail'}">
+      <div class="phase-label">${label}</div>
+      <div class="phase-score">${score}/${maxScore}</div>
+      ${timing}
+    </div>`;
+}
+
+function renderScreenshot(filename, label) {
+  if (!filename) return `<div><div class="ss-label">${label}</div><div style="height:60px;background:#e9ecef;border-radius:4px"></div></div>`;
+  return `
+    <div>
+      <div class="ss-label">${label}</div>
+      <img src="/screenshots/${filename}" alt="${label}" loading="lazy" onclick="showLightbox(this.src)">
+    </div>`;
+}
+
+function showLightbox(src) {
+  document.getElementById('lightbox-img').src = src;
+  document.getElementById('lightbox').classList.add('active');
+}
+
+function escHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// Clickable bars — expand and scroll to iteration sectiondocument.getElementById('chart').addEventListener('click', (e) => {
+  const canvas = e.target;
+  const rect = canvas.getBoundingClientRect();
+  const cx = e.clientX - rect.left;
+  const cy = e.clientY - rect.top;
+  for (const region of barHitRegions) {
+    if (cx >= region.x && cx <= region.x + region.w && cy >= region.y && cy <= region.y + region.h) {
+      const details = document.querySelector(`details[data-key="iter-${region.iterIndex}"]`);
+      if (details) {
+        details.open = true;
+        details.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+      break;
+    }
+  }
+});
+document.getElementById('chart').style.cursor = 'pointer';
+
+// Handle window resize for chart
+window.addEventListener('resize', () => {
+  try {
+    const data = JSON.parse(lastJson);
+    drawChart(data);
+  } catch {}
+});
+</script>
+</body>
+</html>

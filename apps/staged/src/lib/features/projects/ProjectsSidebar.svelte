@@ -301,7 +301,7 @@
                   </div>
                 </div>
                 <div class="row-status">
-                  {#if status.runActionPhase === 'running' && status.kind === 'running'}
+                  {#if status.runActionPhase !== 'building' && status.kind === 'running'}
                     <span
                       class="status-running"
                       in:fade={{ duration: 300, delay: 150 }}

@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useState, useCallback, useRef, type ReactNode } from 'react';
-import { Link, NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { api, isDesktopApp, API_BASE } from '../api';
 import { useTheme } from '../hooks/useTheme';
 import { useSSE } from '../hooks/useSSE';
 import { useTabs, deriveTitleFromPath } from '../hooks/useTabs';
 import { openInNewWindow } from '../utils/window';
-import TableOfContents from './TableOfContents';
 import FindBar from './FindBar';
 import InstallToolsModal from './InstallToolsModal';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
+import Topbar from './Topbar';
+import TabBar from './TabBar';
+import HomeSidebar from './HomeSidebar';
+import ProjectSidebar from './ProjectSidebar';
 import type { Heading } from './TableOfContents';
 import type { APIProject, APIFileGroupView, APIFileInReview, SSEEvent } from '../types';
 import { parseProjectWorktree } from '../utils/worktree';
@@ -316,23 +319,6 @@ export default function Layout() {
   );
 
   const { sortOrder, setSortOrder, showEmpty, setShowEmpty } = useProjectSort();
-
-  // E-PENPAL-VIEW-OPTIONS: view options panel state
-  const [showViewOptions, setShowViewOptions] = useState(false);
-  const viewOptionsPanelRef = useRef<HTMLDivElement>(null);
-
-  // Close view options panel on outside click
-  useEffect(() => {
-    function handleClick(e: MouseEvent) {
-      if (viewOptionsPanelRef.current && !viewOptionsPanelRef.current.contains(e.target as Node)) {
-        setShowViewOptions(false);
-      }
-    }
-    if (showViewOptions) {
-      document.addEventListener('mousedown', handleClick);
-      return () => document.removeEventListener('mousedown', handleClick);
-    }
-  }, [showViewOptions]);
 
   // Group projects by workspace
   const workspaceProjects = useMemo(
@@ -777,14 +763,6 @@ export default function Layout() {
     });
   }
 
-  // Build file URL for a project file
-  function fileUrl(file: { path: string }) {
-    if (!activeProject) return '#';
-    const base = `/file/${activeProject.qualifiedName}`;
-    const wt = activeWorktree ? `@${activeWorktree}` : '';
-    return `${base}${wt}/${file.path}`;
-  }
-
   // Get the current file path from the URL (when on a file page)
   const currentFilePath = (() => {
     if (!isFilePage || !activeProject) return '';
@@ -798,493 +776,72 @@ export default function Layout() {
     return rest;
   })();
 
-  // Build a tree structure from flat file list, then compact single-child directory chains
-  function buildFileTree(files: { path: string; name: string; title?: string; fileType?: string; dir?: string }[]) {
-    interface TreeNode {
-      name: string;
-      path: string;
-      isDir: boolean;
-      children: TreeNode[];
-      file?: typeof files[0];
-    }
-    const root: TreeNode = { name: '', path: '', isDir: true, children: [] };
-    for (const file of files) {
-      const parts = file.path.split('/');
-      let node = root;
-      for (let i = 0; i < parts.length - 1; i++) {
-        const dirPath = parts.slice(0, i + 1).join('/');
-        let child = node.children.find(c => c.isDir && c.path === dirPath);
-        if (!child) {
-          child = { name: parts[i], path: dirPath, isDir: true, children: [] };
-          node.children.push(child);
-        }
-        node = child;
-      }
-      node.children.push({ name: file.name, path: file.path, isDir: false, children: [], file });
-    }
-    // Compact single-child directory chains: a/ -> b/ -> c/ becomes a/b/c/
-    function compact(node: TreeNode): TreeNode {
-      node.children = node.children.map(compact);
-      if (node.isDir && node.children.length === 1 && node.children[0].isDir) {
-        const child = node.children[0];
-        return { ...child, name: node.name + '/' + child.name };
-      }
-      return node;
-    }
-    return compact(root);
-  }
-
-  // Flatten a file tree into visual (depth-first) order for shift-click ranges.
-  function flattenTree(node: ReturnType<typeof buildFileTree>): string[] {
-    const paths: string[] = [];
-    for (const child of node.children) {
-      if (child.isDir) {
-        paths.push(...flattenTree(child));
-      } else {
-        paths.push(child.path);
-      }
-    }
-    return paths;
-  }
-
   const outletContext: LayoutContext = { setHeadings, projects };
 
   return (
     <div className="app" data-testid="app-layout" onClick={handleAppClick} style={{ gridTemplateColumns: `${sidebarWidth}px 4px 1fr` }}>
-      <div
-        className="topbar"
-        {...(isDesktopApp ? { 'data-tauri-drag-region': '' } : {})}
-      >
-        <button className="topbar-nav" disabled={!canGoBack} onClick={goBack} aria-label="Go back">‹</button>
-        <button className="topbar-nav" disabled={!canGoForward} onClick={goForward} aria-label="Go forward">›</button>
-        <Link to="/" className="topbar-logo">
-          Penpal
-        </Link>
-        <form className="topbar-search" onSubmit={handleSearch}>
-          <input
-            type="search"
-            name="q"
-            placeholder="Search all thoughts..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </form>
-        <button className="theme-toggle" onClick={toggle} aria-label="Toggle dark mode" title="Toggle dark mode">
-          {theme === 'dark' ? '☾' : '☀'}
-        </button>
-      </div>
+      <Topbar
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        goBack={goBack}
+        goForward={goForward}
+        searchQuery={searchQuery}
+        onSearchQueryChange={setSearchQuery}
+        onSearchSubmit={handleSearch}
+        theme={theme}
+        onToggleTheme={toggle}
+        isDesktopApp={isDesktopApp}
+      />
 
-      <div className="tab-bar" data-testid="topbar-tabs">
-        {tabs.map(tab => (
-          <button
-            key={tab.id}
-            className={`tab-bar-tab${tab.id === activeTabId ? ' active' : ''}`}
-            onClick={() => activateTab(tab.id)}
-            onAuxClick={(e) => { if (e.button === 1) closeTab(tab.id); }}
-          >
-            <span className="tab-title" title={tab.title}>{tab.title}</span>
-            {tabs.length > 1 && (
-              <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}>×</span>
-            )}
-          </button>
-        ))}
-        <button className="tab-bar-new" onClick={() => {
-          openTab('/', 'Home');
-        }} aria-label="New tab">+</button>
-      </div>
+      <TabBar
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onActivateTab={activateTab}
+        onCloseTab={closeTab}
+        onNewTab={() => openTab('/', 'Home')}
+      />
 
       <nav className="sidebar" data-testid="sidebar">
         {isProjectMode && activeProject ? (
-          <>
-            {/* Breadcrumb bar */}
-            <div className="breadcrumb-bar">
-              <Link to="/" className="breadcrumb-home" title="Home">⌂</Link>
-              <span className="sep">/</span>
-              <Link to={`/project/${activeProject.qualifiedName}${activeWorktree ? `@${activeWorktree}` : ''}`} className="current">
-                {activeProject.workspace ? `${activeProject.workspace} / ` : ''}{activeProject.name}
-              </Link>
-              {activeProject.agentConnected && <span className="agent-dot" />}
-            </div>
-            {/* E-PENPAL-WORKTREE-DROPDOWN: full-width worktree selector row below breadcrumb */}
-            {activeProject.worktrees && activeProject.worktrees.length > 1 ? (
-              <div className="worktree-selector-row" ref={worktreeDropdownRef} onClick={() => setShowWorktreeDropdown(!showWorktreeDropdown)}>
-                {(() => {
-                  const wt = activeProject.worktrees!.find(wt => activeWorktree ? wt.name === activeWorktree : wt.isMain);
-                  const isMain = !wt || wt.isMain;
-                  return isMain ? 'main repo' : (
-                    <>
-                      <svg className="worktree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                        <circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="18" cy="19" r="2" />
-                        <path d="M8 5h8" /><path d="M8 5v8a6 6 0 0 0 6 6h2" />
-                      </svg>
-                      {wt!.name}
-                    </>
-                  );
-                })()}
-                {showWorktreeDropdown && (
-                  <div className="worktree-dropdown-menu">
-                    {activeProject.worktrees.map(wt => {
-                      const isActive = wt.isMain ? !activeWorktree : activeWorktree === wt.name;
-                      const url = wt.isMain
-                        ? `/project/${activeProject.qualifiedName}`
-                        : `/project/${activeProject.qualifiedName}@${wt.name}`;
-                      return (
-                        <button
-                          key={wt.name}
-                          className={isActive ? 'active' : ''}
-                          title={wt.branch ? `branch: ${wt.branch}` : undefined}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setShowWorktreeDropdown(false);
-                            navigate(url);
-                          }}
-                        >
-                          {!wt.isMain && (
-                            <svg className="worktree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                              <circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="18" cy="19" r="2" />
-                              <path d="M8 5h8" /><path d="M8 5v8a6 6 0 0 0 6 6h2" />
-                            </svg>
-                          )}
-                          {wt.isMain ? 'main repo' : wt.name}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="worktree-selector-row deemphasized">no worktrees</div>
-            )}
-
-            {isFilePage ? (
-              /* File view: only show table of contents below breadcrumb */
-              headings.length > 0 ? <TableOfContents headings={headings} /> : null
-            ) : (
-              /* Project view: show source file trees */
-              <>
-                {/* E-PENPAL-FE-SRC-DISAMBIG: compute badge texts that appear on multiple groups */}
-                {(() => {
-                  const badgeCounts = new Map<string, number>();
-                  for (const g of projectFiles) {
-                    if (g.badgeText) {
-                      badgeCounts.set(g.badgeText, (badgeCounts.get(g.badgeText) || 0) + 1);
-                    }
-                  }
-                  const duplicatedBadges = new Set<string>();
-                  for (const [badge, count] of badgeCounts) {
-                    if (count > 1) duplicatedBadges.add(badge);
-                  }
-                  return projectFiles.map((group) => {
-                  const isExpanded = expandedSources.has(group.name);
-                  const tree = isExpanded ? buildFileTree(group.files) : null;
-                  const allFilePaths = tree ? flattenTree(tree) : [];
-
-                  function renderTreeNode(node: ReturnType<typeof buildFileTree>, sourceKey: string): ReactNode {
-                    return node.children.map(child => {
-                      if (child.isDir) {
-                        const dirKey = `${sourceKey}:${child.path}`;
-                        const isDirExpanded = expandedDirs.has(dirKey);
-                        return (
-                          <div key={dirKey}>
-                            <div className="tree-item" onClick={() => toggleDir(dirKey)}>
-                              <span className={`chevron${isDirExpanded ? ' open' : ''}`}>▶</span>
-                              <span className="label" title={child.name + '/'}>{child.name}/</span>
-                            </div>
-                            {isDirExpanded && (
-                              <div className="tree-children">
-                                {renderTreeNode(child, sourceKey)}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      }
-                      const url = fileUrl(child);
-                      const isActive = currentFilePath === child.path;
-                      const inReview = !!projectReviews[child.path];
-                      const isSelected = selected.has(child.path);
-                      return (
-                        <Link
-                          key={child.path}
-                          to={url}
-                          className={`tree-item${isActive ? ' active' : ''}${isSelected ? ' selected' : ''}`}
-                          onClick={(e) => handleFileClick(e, child.path, allFilePaths)}
-                          onContextMenu={(e) => fileContextMenu(e, { path: child.path, sourceType: group.sourceType }, group)}
-                        >
-                          <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-                          <span className="label" title={child.file?.title || child.name}>{child.file?.title || child.name}</span>
-                          {child.file?.fileType && child.file.fileType !== 'other' && <span className={`badge-file-type badge-file-type-${child.file.fileType}`}>{child.file.fileType}</span>}
-                          {inReview && <span className="badge-review">in review</span>}
-                        </Link>
-                      );
-                    });
-                  }
-
-                  const isEmpty = !group.files || group.files.length === 0;
-                  const isVirtual = group.source === '__all_markdown__';
-                  const displayName = isEmpty && isVirtual ? 'No Markdown Found' : group.name;
-
-                  return (
-                    <div key={group.name}>
-                      <div
-                        className={`source-header${isEmpty && isVirtual ? ' deemphasized' : ''}`}
-                        onClick={isEmpty ? undefined : () => toggleSource(group.name)}
-                        onContextMenu={isEmpty ? undefined : (e) => sourceContextMenu(e, group)}
-                      >
-                        {isEmpty ? (
-                          <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-                        ) : (
-                          <span className={`chevron${isExpanded ? ' open' : ''}`}>▶</span>
-                        )}
-                        {group.badgeText ? (
-                          <span
-                            className="badge-source"
-                            style={{ background: group.badgeBg, color: group.badgeColor }}
-                          >
-                            {group.badgeText}
-                          </span>
-                        ) : (
-                          <span>{displayName}</span>
-                        )}
-                        {/* E-PENPAL-FE-SRC-DISAMBIG: show source path when badge is shared by multiple groups */}
-                        {group.badgeText && duplicatedBadges.has(group.badgeText) && (
-                          <span className="source-disambig" title={group.name}>{group.name}</span>
-                        )}
-                        {!isEmpty && <span className="source-count">{group.files.length}</span>}
-                      </div>
-                      {isExpanded && tree && (
-                        <div className="source-body">
-                          {renderTreeNode(tree, group.name)}
-                        </div>
-                      )}
-                    </div>
-                  );
-                });
-                })()}
-
-                {/* Per-project In Review section */}
-                {(() => {
-                  const reviewFiles = Object.keys(projectReviews);
-                  const isEmpty = reviewFiles.length === 0;
-                  const isExpanded = expandedSources.has('__in_review__');
-                  return (
-                    <div>
-                      <div
-                        className={`source-header${isEmpty ? ' deemphasized' : ''}`}
-                        onClick={isEmpty ? undefined : () => toggleSource('__in_review__')}
-                      >
-                        {isEmpty ? (
-                          <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-                        ) : (
-                          <span className={`chevron${isExpanded ? ' open' : ''}`}>▶</span>
-                        )}
-                        <span>{isEmpty ? 'Nothing in Review' : 'In Review'}</span>
-                        {!isEmpty && <span className="source-count">{reviewFiles.length}</span>}
-                      </div>
-                      {isExpanded && !isEmpty && (
-                        <div className="source-body">
-                          {reviewFiles.map(filePath => {
-                            const url = fileUrl({ path: filePath });
-                            const name = filePath.split('/').pop() || filePath;
-                            const isActive = currentFilePath === filePath;
-                            return (
-                              <Link key={filePath} to={url} className={`tree-item${isActive ? ' active' : ''}`}>
-                                <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-                                <span className="label" title={name}>{name}</span>
-                              </Link>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-
-                {/* Per-project Recent section — currently always empty (TODO: fetch per-project recent files) */}
-                <div>
-                  <div className="source-header deemphasized">
-                    <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-                    <span>Nothing Recent</span>
-                  </div>
-                </div>
-              </>
-            )}
-          </>
+          <ProjectSidebar
+            activeProject={activeProject}
+            activeWorktree={activeWorktree}
+            isFilePage={isFilePage}
+            headings={headings}
+            projectFiles={projectFiles}
+            projectReviews={projectReviews}
+            expandedSources={expandedSources}
+            expandedDirs={expandedDirs}
+            selected={selected}
+            currentFilePath={currentFilePath}
+            showWorktreeDropdown={showWorktreeDropdown}
+            worktreeDropdownRef={worktreeDropdownRef}
+            onSetShowWorktreeDropdown={setShowWorktreeDropdown}
+            onToggleSource={toggleSource}
+            onToggleDir={toggleDir}
+            onFileClick={handleFileClick}
+            onFileContextMenu={fileContextMenu}
+            onSourceContextMenu={sourceContextMenu}
+          />
         ) : (
-          <>
-            {/* Home view sidebar */}
-            {/* E-PENPAL-FE-HOME-LABEL: show "Home" label next to house icon on home screen */}
-            {/* E-PENPAL-VIEW-OPTIONS: view options popover with sort order and show-empty toggle */}
-            <div className="sidebar-home-header">
-              <span className="home-icon">⌂</span>
-              <span className="home-label">Home</span>
-              <div className="view-options-wrap" ref={viewOptionsPanelRef}>
-                <button
-                  className="view-options-btn"
-                  title="View options"
-                  aria-label="View options"
-                  aria-haspopup="true"
-                  aria-expanded={showViewOptions}
-                  onClick={() => setShowViewOptions((prev) => !prev)}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14" aria-hidden="true">
-                    <line x1="4" y1="6" x2="20" y2="6" />
-                    <circle cx="9" cy="6" r="2" />
-                    <line x1="4" y1="12" x2="20" y2="12" />
-                    <circle cx="15" cy="12" r="2" />
-                    <line x1="4" y1="18" x2="20" y2="18" />
-                    <circle cx="12" cy="18" r="2" />
-                  </svg>
-                </button>
-                {showViewOptions && (
-                  <div className="view-options-panel">
-                    <label className="view-options-label">
-                      Project order
-                      <select
-                        value={sortOrder}
-                        onChange={(e) => setSortOrder(e.target.value as 'alpha' | 'recent')}
-                      >
-                        <option value="alpha">A→Z</option>
-                        <option value="recent">Most Recent</option>
-                      </select>
-                    </label>
-                    <label className="view-options-label view-options-toggle">
-                      <input
-                        type="checkbox"
-                        checked={showEmpty}
-                        onChange={(e) => setShowEmpty(e.target.checked)}
-                      />
-                      Show empty projects
-                    </label>
-                  </div>
-                )}
-              </div>
-              <button
-                title="Add workspace or project"
-                onClick={() => { setShowAddModal(true); setAddPath(''); setAddError(''); }}
-              >+</button>
-            </div>
-
-            {/* Workspaces */}
-            {visibleWorkspaces.map(ws => {
-              const isExpanded = expandedWorkspaces.has(ws);
-              const wsProjects = sortedWorkspaceProjects.get(ws) || [];
-              const hasAgent = wsProjects.some(p => p.agentConnected);
-              return (
-                <div key={ws}>
-                  <div
-                    className="tree-item"
-                    style={{ fontWeight: 500 }}
-                    onClick={() => toggleWorkspace(ws)}
-                    onContextMenu={(e) => showContextMenu(e, [
-                      { label: 'Remove workspace', className: 'menu-danger', onClick: () => handleRemoveWorkspace(ws) },
-                    ])}
-                  >
-                    <span className={`chevron${isExpanded ? ' open' : ''}`}>▶</span>
-                    <span className="label" title={ws}>{ws}</span>
-                    {hasAgent && <span className="agent-dot" />}
-                  </div>
-                  {isExpanded && (
-                    <div className="tree-children">
-                      {wsProjects.map(p => {
-                        const hasWorktrees = p.worktrees && p.worktrees.length > 1;
-                        const isWtExpanded = expandedWorktreeProjects.has(p.qualifiedName);
-                        return (
-                          <div key={p.qualifiedName}>
-                            <div
-                              className={`tree-item${!p.hasFiles ? ' deemphasized' : ''}`}
-                              onClick={() => {
-                                if (hasWorktrees) {
-                                  toggleWorktreeProject(p.qualifiedName);
-                                } else {
-                                  navigate(`/project/${p.qualifiedName}`);
-                                }
-                              }}
-                            >
-                              {hasWorktrees ? (
-                                <span className={`chevron${isWtExpanded ? ' open' : ''}`}>▶</span>
-                              ) : (
-                                <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-                              )}
-                              <span className="label" title={p.branch ? `${p.name}\nbranch: ${p.branch}` : p.name}>{p.name}</span>
-                              {p.agentConnected && <span className="agent-dot" />}
-                            </div>
-                            {hasWorktrees && isWtExpanded && (
-                              <div className="tree-children">
-                                {p.worktrees!.map(wt => {
-                                  const url = wt.isMain
-                                    ? `/project/${p.qualifiedName}`
-                                    : `/project/${p.qualifiedName}@${wt.name}`;
-                                  return (
-                                    <Link key={wt.name} to={url} className="tree-item worktree-item" title={wt.branch ? `branch: ${wt.branch}` : undefined}>
-                                      <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-                                      {!wt.isMain && (
-                                        <svg className="worktree-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                                          <circle cx="6" cy="5" r="2" /><circle cx="18" cy="5" r="2" /><circle cx="18" cy="19" r="2" />
-                                          <path d="M8 5h8" /><path d="M8 5v8a6 6 0 0 0 6 6h2" />
-                                        </svg>
-                                      )}
-                                      <span className="label" title={wt.isMain ? p.name : wt.name}>{wt.isMain ? p.name : wt.name}</span>
-                                    </Link>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-
-            {/* Divider between workspaces and standalone projects */}
-            {visibleWorkspaces.length > 0 && standaloneProjects.length > 0 && (
-              <div className="home-section-divider" />
-            )}
-
-            {/* Standalone projects */}
-            {standaloneProjects.map(p => (
-              <Link
-                key={p.qualifiedName}
-                to={`/project/${p.qualifiedName}`}
-                className={`tree-item${!p.hasFiles ? ' deemphasized' : ''}`}
-                onContextMenu={(e) => showContextMenu(e, [
-                  { label: 'Close project', className: 'menu-muted', onClick: () => handleCloseStandaloneProject(p) },
-                ])}
-              >
-                <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-                <span className="label" title={p.branch ? `${p.name}\nbranch: ${p.branch}` : p.name}>{p.name}</span>
-                {p.agentConnected && <span className="agent-dot" />}
-              </Link>
-            ))}
-
-            {/* Divider before global nav */}
-            {(visibleWorkspaces.length > 0 || standaloneProjects.length > 0) && (
-              <div className="home-section-divider" />
-            )}
-
-            {/* Global In Review */}
-            <NavLink
-              to="/in-review"
-              className={({ isActive }) =>
-                `tree-item${isActive ? ' active' : ''}${reviewCount === 0 ? ' deemphasized' : ''}`
-              }
-            >
-              <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-              <span className="label">In Review</span>
-              {reviewCount > 0 && <span className="source-count">{reviewCount}</span>}
-            </NavLink>
-
-            {/* Global Recent */}
-            <NavLink
-              to="/recent"
-              className={({ isActive }) => `tree-item${isActive ? ' active' : ''}`}
-            >
-              <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
-              <span className="label">Recent</span>
-            </NavLink>
-          </>
+          <HomeSidebar
+            visibleWorkspaces={visibleWorkspaces}
+            sortedWorkspaceProjects={sortedWorkspaceProjects}
+            standaloneProjects={standaloneProjects}
+            reviewCount={reviewCount}
+            expandedWorkspaces={expandedWorkspaces}
+            expandedWorktreeProjects={expandedWorktreeProjects}
+            onToggleWorkspace={toggleWorkspace}
+            onToggleWorktreeProject={toggleWorktreeProject}
+            onShowContextMenu={showContextMenu}
+            onRemoveWorkspace={handleRemoveWorkspace}
+            onCloseStandaloneProject={handleCloseStandaloneProject}
+            onShowAddModal={() => { setShowAddModal(true); setAddPath(''); setAddError(''); }}
+            sortOrder={sortOrder}
+            onSetSortOrder={setSortOrder}
+            showEmpty={showEmpty}
+            onSetShowEmpty={setShowEmpty}
+          />
         )}
       </nav>
 

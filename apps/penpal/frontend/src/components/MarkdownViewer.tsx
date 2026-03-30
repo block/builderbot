@@ -1,8 +1,8 @@
-import { useEffect, useRef, useMemo, forwardRef, useImperativeHandle } from 'react';
+import React, { useEffect, useRef, useMemo, forwardRef, useImperativeHandle } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { Prism as SyntaxHighlighter, type SyntaxHighlighterProps } from 'react-syntax-highlighter';
 import { dracula as prismDracula } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Components } from 'react-markdown';
 import type { Heading } from './TableOfContents';
@@ -35,6 +35,130 @@ function generateHeadingId(text: string): string {
     result += 'heading';
   }
   return result;
+}
+
+// ── Code block highlight renderer ──────────────────────────────────────
+// SyntaxHighlighter's renderer prop receives a tree of token nodes per line.
+// This walks the tokens, finds text matching a highlight's selectedText, and
+// wraps the matching range in <mark> elements while preserving syntax styles.
+
+interface RendererNode {
+  type: 'element' | 'text';
+  value?: string | number;
+  tagName?: string;
+  properties?: { className?: string[]; style?: React.CSSProperties; [key: string]: unknown };
+  children?: RendererNode[];
+}
+
+/** Extract all text from a rendererNode tree. */
+function extractText(node: RendererNode): string {
+  if (node.type === 'text') return String(node.value ?? '');
+  return (node.children ?? []).map(extractText).join('');
+}
+
+/** Render a rendererNode to a React element, applying inline styles from the stylesheet. */
+function renderNode(
+  node: RendererNode,
+  stylesheet: Record<string, React.CSSProperties>,
+  useInlineStyles: boolean,
+  key: string | number,
+): React.ReactNode {
+  if (node.type === 'text') return String(node.value ?? '');
+  const classNames = node.properties?.className ?? [];
+  const style = useInlineStyles
+    ? classNames.reduce<React.CSSProperties>((acc, cls) => ({ ...acc, ...(stylesheet[cls] || {}) }), {})
+    : undefined;
+  const children = (node.children ?? []).map((child, i) => renderNode(child, stylesheet, useInlineStyles, i));
+  const props: Record<string, unknown> = { key, style, className: classNames.join(' ') || undefined };
+  // Pass through data-* attributes (e.g., dataThreadId → data-thread-id for <mark> elements)
+  if (node.properties) {
+    for (const [k, v] of Object.entries(node.properties)) {
+      if (k !== 'className' && k !== 'style') props[k] = v;
+    }
+  }
+  return React.createElement(node.tagName ?? 'span', props, ...children);
+}
+
+/** Collect all leaf text spans from a rendererNode tree with their character offsets. */
+function collectLeaves(node: RendererNode, offset: number, out: { node: RendererNode; start: number; end: number; parent: RendererNode; index: number }[]) {
+  if (node.type === 'text') return;
+  for (let i = 0; i < (node.children ?? []).length; i++) {
+    const child = node.children![i];
+    if (child.type === 'text') {
+      const text = String(child.value ?? '');
+      out.push({ node: child, start: offset, end: offset + text.length, parent: node, index: i });
+      offset += text.length;
+    } else {
+      collectLeaves(child, offset, out);
+      offset += extractText(child).length;
+    }
+  }
+}
+
+function createCodeHighlightRenderer(
+  codeHighlights: { selectedText: string; threadId: string; pending?: boolean }[],
+) {
+  return ({ rows, stylesheet, useInlineStyles }: { rows: RendererNode[]; stylesheet: Record<string, React.CSSProperties>; useInlineStyles: boolean }) => {
+    // Build full code text and collect all text leaves across all rows
+    const allLeaves: { node: RendererNode; start: number; end: number; parent: RendererNode; index: number }[] = [];
+    let globalOffset = 0;
+    for (const row of rows) {
+      collectLeaves(row, globalOffset, allLeaves);
+      globalOffset += extractText(row).length;
+    }
+    const fullText = allLeaves.map(l => String(l.node.value ?? '')).join('');
+
+    // Find match ranges for each highlight
+    const matchRanges: { start: number; end: number; threadId: string; pending?: boolean }[] = [];
+    for (const hl of codeHighlights) {
+      const idx = fullText.indexOf(hl.selectedText);
+      if (idx !== -1) {
+        matchRanges.push({ start: idx, end: idx + hl.selectedText.length, threadId: hl.threadId, pending: hl.pending });
+      }
+    }
+
+    if (matchRanges.length === 0) {
+      // No matches — render normally
+      return rows.map((row, i) => renderNode(row, stylesheet, useInlineStyles, i));
+    }
+
+    // For each text leaf, check if it overlaps any match range and split/wrap
+    for (const range of matchRanges) {
+      for (let li = allLeaves.length - 1; li >= 0; li--) {
+        const leaf = allLeaves[li];
+        const overlapStart = Math.max(range.start, leaf.start);
+        const overlapEnd = Math.min(range.end, leaf.end);
+        if (overlapStart >= overlapEnd) continue;
+
+        const text = String(leaf.node.value ?? '');
+        const localStart = overlapStart - leaf.start;
+        const localEnd = overlapEnd - leaf.start;
+
+        const newChildren: RendererNode[] = [];
+        if (localStart > 0) {
+          newChildren.push({ type: 'text', value: text.slice(0, localStart) });
+        }
+        // Wrap matching portion in a mark element
+        newChildren.push({
+          type: 'element',
+          tagName: 'mark',
+          properties: {
+            className: range.pending ? ['comment-highlight', 'pending-highlight'] : ['comment-highlight'],
+            'data-thread-id': range.threadId,
+          },
+          children: [{ type: 'text', value: text.slice(localStart, localEnd) }],
+        });
+        if (localEnd < text.length) {
+          newChildren.push({ type: 'text', value: text.slice(localEnd) });
+        }
+
+        // Replace the text node in its parent's children array
+        leaf.parent.children!.splice(leaf.index, 1, ...newChildren);
+      }
+    }
+
+    return rows.map((row, i) => renderNode(row, stylesheet, useInlineStyles, i));
+  };
 }
 
 interface MarkdownViewerProps {
@@ -114,6 +238,21 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
           // Fenced code block (has language class) — use SyntaxHighlighter
           if (match) {
             const sourceLine = node?.position?.start?.line;
+            const codeText = String(children).replace(/\n$/, '');
+            const codeLineCount = codeText.split('\n').length;
+
+            // Find highlights targeting lines within this code block
+            const codeHighlights = (highlights ?? []).filter(hl => {
+              if (!sourceLine) return false;
+              // Code block spans from sourceLine (``` fence) to sourceLine + codeLineCount + 1 (closing ```)
+              // Include fence line (>=) so anchors resolved to the opening ``` aren't silently dropped
+              return hl.startLine >= sourceLine && hl.startLine <= sourceLine + codeLineCount;
+            });
+
+            const rendererProp = codeHighlights.length > 0
+              ? createCodeHighlightRenderer(codeHighlights)
+              : undefined;
+
             return (
               <div data-unwrap-pre="" {...(sourceLine ? { 'data-source-line': String(sourceLine) } : {})}>
                 <SyntaxHighlighter
@@ -121,8 +260,9 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
                   language={match[1]}
                   PreTag="div"
                   customStyle={{ margin: 0, padding: '16px', borderRadius: '6px', fontSize: '0.85em' }}
+                  renderer={rendererProp as SyntaxHighlighterProps['renderer']}
                 >
-                  {String(children).replace(/\n$/, '')}
+                  {codeText}
                 </SyntaxHighlighter>
               </div>
             );
@@ -150,7 +290,7 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
           return <pre {...domProps}>{children}</pre>;
         },
       }),
-      [],
+      [highlights],
     );
 
     return (

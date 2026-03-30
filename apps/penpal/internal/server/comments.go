@@ -176,6 +176,18 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		threads = filtered
 	}
 
+	// Re-resolve anchor lines against current file content so highlights
+	// track document edits (PENPAL-23). Uses resolveProjectFile which
+	// shares path resolution and traversal checks with the file endpoint.
+	if raw, ok := s.resolveProjectFile(projectName, filePath, worktree); ok {
+		resolvedLines := comments.ResolveAnchorsToLines(threads, string(raw))
+		for i := range threads {
+			if line, ok := resolvedLines[threads[i].ID]; ok && line > 0 {
+				threads[i].Anchor.StartLine = line
+			}
+		}
+	}
+
 	agentRunning := s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running
 	var result []threadResponse
 	for _, t := range threads {

@@ -27,6 +27,7 @@ type SourceType struct {
 	GroupFiles       func(paths []string) []FileGroup // optional: groups files for display; if nil, single flat list
 	ShowDirHeadings  bool                             // show directory headings above files in each subdirectory
 	SkipDirs         map[string]bool                  // directory names to skip during tree scan (e.g., node_modules)
+	RequireSibling   string                           // if set, only include files from directories containing this file
 }
 
 // FileGroup represents a named group of files within a source for display.
@@ -142,6 +143,7 @@ func init() {
 		BadgeActiveColor: "#0f766e",
 		AutoDetectFile:   "ANCHORS.md",
 		ScanMode:         "tree",
+		RequireSibling:   "ANCHORS.md",
 		ClassifyFile:     classifyAnchorsFile,
 		GroupFiles:       groupAnchorsPaths,
 		SkipDirs: map[string]bool{
@@ -239,13 +241,12 @@ func isRP1TopLevelReport(path string) bool {
 }
 
 // classifyAnchorsFile classifies a file by its name within an ANCHORS module.
-// Only known ANCHORS document filenames are kept; everything else is skipped.
-// E-PENPAL-SRC-ANCHORS: recognizes the five ANCHORS filenames, skips all others.
+// Only the four content filenames are kept; everything else (including ANCHORS.md
+// itself) is skipped. Module membership is enforced by RequireSibling at scan time.
+// E-PENPAL-SRC-ANCHORS: recognizes four content filenames, skips all others.
 func classifyAnchorsFile(path string) string {
 	base := filepath.Base(path)
 	switch base {
-	case "ANCHORS.md":
-		return "anchors"
 	case "PRODUCT.md":
 		return "product"
 	case "ERD.md":
@@ -255,45 +256,30 @@ func classifyAnchorsFile(path string) string {
 	case "DEPENDENCIES.md":
 		return "dependencies"
 	default:
-		return "" // skip non-ANCHORS files
+		return "" // skip ANCHORS.md and non-ANCHORS files
 	}
 }
 
 // anchorsFileOrder defines the display order for files within a module.
 var anchorsFileOrder = map[string]int{
-	"ANCHORS.md":      0,
-	"PRODUCT.md":      1,
-	"ERD.md":          2,
-	"TESTING.md":      3,
-	"DEPENDENCIES.md": 4,
+	"PRODUCT.md":      0,
+	"ERD.md":          1,
+	"TESTING.md":      2,
+	"DEPENDENCIES.md": 3,
 }
 
 // groupAnchorsPaths groups ANCHORS source-relative paths by module directory.
-// Only files in directories that contain an ANCHORS.md marker are included.
+// All incoming files have already passed RequireSibling and ClassifyFile filtering,
+// so every file belongs to a valid module directory.
 // E-PENPAL-SRC-ANCHORS: groups by module directory with canonical file ordering.
 func groupAnchorsPaths(paths []string) []FileGroup {
-	// First pass: find directories that contain an ANCHORS.md marker
-	modules := make(map[string]bool)
-	for _, p := range paths {
-		if filepath.Base(p) == "ANCHORS.md" {
-			dir := filepath.Dir(p)
-			if dir == "." {
-				dir = ""
-			}
-			modules[dir] = true
-		}
-	}
-
-	// Second pass: group files by module directory
 	groups := make(map[string][]string)
 	for _, p := range paths {
 		dir := filepath.Dir(p)
 		if dir == "." {
 			dir = ""
 		}
-		if modules[dir] {
-			groups[dir] = append(groups[dir], p)
-		}
+		groups[dir] = append(groups[dir], p)
 	}
 
 	// Sort module names; root ("") sorts first naturally

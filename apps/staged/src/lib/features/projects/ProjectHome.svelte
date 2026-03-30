@@ -478,6 +478,17 @@
       })
     );
 
+    // Navigate away immediately so the user doesn't have to wait for backend deletion
+    const currentIndex = projects.findIndex((p) => p.id === id);
+    const remainingProjects = projects.filter((p) => p.id !== id);
+    if (remainingProjects.length > 0) {
+      // Prefer next project, fall back to previous
+      const nextProject = remainingProjects[Math.min(currentIndex, remainingProjects.length - 1)];
+      selectProject(nextProject.id);
+    } else {
+      goHome();
+    }
+
     try {
       await commands.deleteProject(id);
       projects = projects.filter((p) => p.id !== id);

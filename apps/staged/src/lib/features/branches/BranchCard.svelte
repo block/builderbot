@@ -862,6 +862,11 @@
           onDeleteReview={handleDeleteReview}
           onImageClick={handleImageClick}
           onDeleteImage={handleDeleteImage}
+          onStartQueued={() => {
+            commands
+              .drainQueuedSessions(branch.id)
+              .catch((e) => console.error('Failed to drain queued sessions:', e));
+          }}
           onNewNote={() => sessionMgr.openNewSession('note')}
           onNewCommit={() => sessionMgr.openNewSession('commit')}
           onNewReview={hasCodeChanges ? (e) => sessionMgr.openNewSession('review', e) : undefined}

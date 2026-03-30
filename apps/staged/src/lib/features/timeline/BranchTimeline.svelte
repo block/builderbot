@@ -50,6 +50,7 @@
     onDeleteNote?: (noteId: string, sessionId?: string) => void;
     onDeleteReview?: (reviewId: string, sessionId?: string) => void;
     onDeleteImage?: (imageId: string) => void;
+    onStartQueued?: () => void;
     /** Optional per-review breakdown of visible comments vs hold-to-reveal annotations. */
     reviewCommentBreakdown?: Record<
       string,
@@ -93,6 +94,7 @@
     onDeleteNote,
     onDeleteReview,
     onDeleteImage,
+    onStartQueued,
     reviewCommentBreakdown = {},
     onNewNote,
     onNewCommit,
@@ -501,6 +503,7 @@
           {onSessionClick}
           onItemClick={() => handleItemClick(item)}
           onDeleteClick={item.deleteDisabledReason ? undefined : () => handleDeleteClick(item)}
+          onStartClick={item.type.startsWith('queued-') ? onStartQueued : undefined}
         />
       </div>
     {/each}

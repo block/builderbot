@@ -55,6 +55,7 @@
     /** When set, the delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
     onRetryClick?: () => void;
+    onStartClick?: () => void;
   }
 
   let {
@@ -71,6 +72,7 @@
     onDeleteClick,
     deleteDisabledReason,
     onRetryClick,
+    onStartClick,
   }: Props = $props();
 
   let isNote = $derived(
@@ -129,6 +131,11 @@
   function handleRetryClick(e: MouseEvent) {
     e.stopPropagation();
     onRetryClick?.();
+  }
+
+  function handleStartClick(e: MouseEvent) {
+    e.stopPropagation();
+    onStartClick?.();
   }
 </script>
 
@@ -201,7 +208,12 @@
         </div>
       {/if}
     </div>
-    <div class="timeline-actions" class:always-visible={!!onRetryClick}>
+    <div class="timeline-actions" class:always-visible={!!onRetryClick || !!onStartClick}>
+      {#if onStartClick}
+        <button class="action-btn start-btn" onclick={handleStartClick} title="Start">
+          Start
+        </button>
+      {/if}
       {#if onRetryClick}
         <button class="action-btn retry-btn" onclick={handleRetryClick} title="Retry">
           Retry
@@ -472,14 +484,16 @@
     cursor: not-allowed;
   }
 
-  .retry-btn {
+  .retry-btn,
+  .start-btn {
     width: auto;
     padding: 0 8px;
     font-size: var(--size-xs);
     color: var(--text-muted);
   }
 
-  .retry-btn:hover {
+  .retry-btn:hover,
+  .start-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
   }

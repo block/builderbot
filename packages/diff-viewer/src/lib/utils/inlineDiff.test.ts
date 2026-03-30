@@ -239,13 +239,66 @@ describe('computeLineDiff', () => {
       expect(result.afterLines).toEqual(['added', 'added', 'added']);
     });
 
+    it('detects re-indented lines as modified within a hunk with context', () => {
+      // Real-world case: code wrapped in an if-else block gains indentation.
+      // The hunk alignment includes context lines (identical on both sides)
+      // plus the changed lines. The re-indented lines should be "modified".
+      const before = [
+        'This is critical - the application parses this to link the PR.',
+        '</action>"#,',
+        '        pr_type = pr_type,',
+        '        base_branch = base_branch,',
+        '        branch_name = branch.branch_name,',
+        '        draft_flag = draft_flag,',
+        '    );',
+        '',
+        '    let mut session = store::Session::new_running(&prompt, &working_dir);',
+        '    if let Some(ref p) = provider {',
+      ];
+      const after = [
+        'This is critical - the application parses this to link the PR.',
+        '</action>"#,',
+        '            pr_type = pr_type,',
+        '            base_branch = base_branch,',
+        '            branch_name = branch.branch_name,',
+        '            draft_flag = draft_flag,',
+        '        )',
+        '    };',
+        '',
+        '    let mut session = store::Session::new_running(&prompt, &working_dir);',
+        '    if let Some(ref p) = provider {',
+      ];
+      const result = computeLineDiff(before, after);
+
+      // Context lines should be unchanged
+      expect(result.beforeLines[0]).toBe('unchanged');
+      expect(result.beforeLines[1]).toBe('unchanged');
+      expect(result.afterLines[0]).toBe('unchanged');
+      expect(result.afterLines[1]).toBe('unchanged');
+
+      // Re-indented lines should be modified, not removed/added
+      expect(result.beforeLines[2]).toBe('modified'); // pr_type
+      expect(result.beforeLines[3]).toBe('modified'); // base_branch
+      expect(result.beforeLines[4]).toBe('modified'); // branch_name
+      expect(result.beforeLines[5]).toBe('modified'); // draft_flag
+      expect(result.beforeLines[6]).toBe('modified'); // ); -> )
+
+      expect(result.afterLines[2]).toBe('modified'); // pr_type
+      expect(result.afterLines[3]).toBe('modified'); // base_branch
+      expect(result.afterLines[4]).toBe('modified'); // branch_name
+      expect(result.afterLines[5]).toBe('modified'); // draft_flag
+      expect(result.afterLines[6]).toBe('modified'); // )
+      expect(result.afterLines[7]).toBe('added');    // };
+
+      // Trailing context should be unchanged
+      expect(result.beforeLines[7]).toBe('unchanged');
+      expect(result.afterLines[8]).toBe('unchanged');
+    });
+
     it('detects re-indented lines as modified when many insertions precede them', () => {
-      // Real-world case: code gets wrapped in an if-else block. The "before"
-      // has a simple format!() call; the "after" has a large new if-branch
-      // followed by an else-branch where the original code is re-indented.
-      // When parsed as a single changed alignment the greedy two-pointer
-      // sees many inserted after-lines before reaching the re-indented lines,
-      // causing them to be classified as removed/added instead of modified.
+      // Edge case: if two hunks were merged into a single alignment, the
+      // greedy matcher would see many inserted after-lines before reaching
+      // the re-indented lines. The scan-ahead handles this.
       const before = [
         '    let prompt = format!(',
         '        r#"<action>',
@@ -281,9 +334,7 @@ describe('computeLineDiff', () => {
       ];
       const result = computeLineDiff(before, after);
 
-      // The re-indented lines in the else branch should be modified, not removed/added.
-      // before[2..5] ("pr_type", "base_branch", "branch_name", "draft_flag")
-      // should pair with the re-indented versions in the after else-branch.
+      // The re-indented lines should be modified, not removed/added
       expect(result.beforeLines[2]).toBe('modified'); // pr_type
       expect(result.beforeLines[3]).toBe('modified'); // base_branch
       expect(result.beforeLines[4]).toBe('modified'); // branch_name

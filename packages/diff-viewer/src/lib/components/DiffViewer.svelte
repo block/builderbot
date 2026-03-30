@@ -65,6 +65,7 @@
     normalizeLineSelection,
     resolveLineSelectionToolbarLeft,
   } from '../utils/diffViewerHelpers';
+  import { createLineDiffCache } from '../utils/inlineDiff.js';
   import type { BeforeLineClass, AfterLineClass, CharHighlight } from '../utils/inlineDiff.js';
   import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
   import { pathsMatch } from '../utils/diffModalHelpers';
@@ -127,6 +128,12 @@
     onUpdateComment,
     onDeleteComment,
   }: Props = $props();
+
+  // ==========================================================================
+  // Inline diff cache (scoped to component instance)
+  // ==========================================================================
+
+  const lineDiffCache = createLineDiffCache();
 
   // ==========================================================================
   // Element refs
@@ -922,7 +929,8 @@
       afterLineToAlignment,
       changedAlignments,
       beforeLines,
-      afterLines
+      afterLines,
+      lineDiffCache
     );
   }
 
@@ -934,7 +942,8 @@
       afterLineToAlignment,
       changedAlignments,
       beforeLines,
-      afterLines
+      afterLines,
+      lineDiffCache
     );
   }
 

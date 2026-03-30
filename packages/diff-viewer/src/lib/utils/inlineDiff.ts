@@ -146,6 +146,8 @@ function mergeHighlights(highlights: CharHighlight[]): CharHighlight[] {
   return merged;
 }
 
+const MAX_SCAN_AHEAD = 10;
+
 export function computeLineDiff(
   beforeLines: string[],
   afterLines: string[],
@@ -205,7 +207,8 @@ export function computeLineDiff(
       // before-line. This handles cases where many insertions precede a
       // modification (e.g. code re-indented after being wrapped in a block).
       let found = false;
-      for (let scan = ai + 1; scan < unmatchedAfter.length; scan++) {
+      const scanLimit = Math.min(ai + 1 + MAX_SCAN_AHEAD, unmatchedAfter.length);
+      for (let scan = ai + 1; scan < scanLimit; scan++) {
         const scanIdx = unmatchedAfter[scan];
         const scanSim = similarity(beforeLines[bIdx].trim(), afterLines[scanIdx].trim());
         if (scanSim > SIMILARITY_THRESHOLD) {
@@ -242,29 +245,47 @@ export function computeLineDiff(
 }
 
 const MAX_CACHE_SIZE = 100;
-const cache = new Map<string, LineDiffResult>();
 
 function makeCacheKey(beforeLines: string[], afterLines: string[]): string {
   return beforeLines.join('\n') + '\0' + afterLines.join('\n');
 }
 
+export interface LineDiffCache {
+  get(beforeLines: string[], afterLines: string[]): LineDiffResult;
+}
+
+export function createLineDiffCache(): LineDiffCache {
+  const cache = new Map<string, LineDiffResult>();
+
+  return {
+    get(beforeLines: string[], afterLines: string[]): LineDiffResult {
+      const key = makeCacheKey(beforeLines, afterLines);
+      const cached = cache.get(key);
+      if (cached) return cached;
+
+      const result = computeLineDiff(beforeLines, afterLines);
+
+      if (cache.size >= MAX_CACHE_SIZE) {
+        const firstKey = cache.keys().next().value;
+        if (firstKey !== undefined) {
+          cache.delete(firstKey);
+        }
+      }
+      cache.set(key, result);
+
+      return result;
+    },
+  };
+}
+
+/**
+ * @deprecated Use createLineDiffCache() for component-scoped caching.
+ * Kept for backward compatibility with tests.
+ */
+const defaultCache = createLineDiffCache();
 export function getLineDiffResult(
   beforeLines: string[],
   afterLines: string[],
 ): LineDiffResult {
-  const key = makeCacheKey(beforeLines, afterLines);
-  const cached = cache.get(key);
-  if (cached) return cached;
-
-  const result = computeLineDiff(beforeLines, afterLines);
-
-  if (cache.size >= MAX_CACHE_SIZE) {
-    const firstKey = cache.keys().next().value;
-    if (firstKey !== undefined) {
-      cache.delete(firstKey);
-    }
-  }
-  cache.set(key, result);
-
-  return result;
+  return defaultCache.get(beforeLines, afterLines);
 }

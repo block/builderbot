@@ -1,7 +1,6 @@
 import type { Alignment, Comment, SmartDiffAnnotation } from '../types';
 import type { Token } from './highlighter';
-import { getLineDiffResult } from './inlineDiff.js';
-import type { BeforeLineClass, AfterLineClass, CharHighlight } from './inlineDiff.js';
+import type { LineDiffCache, BeforeLineClass, AfterLineClass, CharHighlight } from './inlineDiff.js';
 
 export type ChangedAlignmentEntry = { alignment: Alignment; index: number };
 export type PaneSide = 'before' | 'after';
@@ -298,7 +297,8 @@ export function getLineClass(
   afterLineToAlignment: Map<number, number>,
   changedAlignments: ChangedAlignmentEntry[],
   beforeLines: string[],
-  afterLines: string[]
+  afterLines: string[],
+  cache: LineDiffCache
 ): BeforeLineClass | AfterLineClass | null {
   const map = side === 'before' ? beforeLineToAlignment : afterLineToAlignment;
   const alignIdx = map.get(lineIndex);
@@ -307,7 +307,7 @@ export function getLineClass(
   const alignment = changedAlignments[alignIdx].alignment;
   const alignBefore = beforeLines.slice(alignment.before.start, alignment.before.end);
   const alignAfter = afterLines.slice(alignment.after.start, alignment.after.end);
-  const result = getLineDiffResult(alignBefore, alignAfter);
+  const result = cache.get(alignBefore, alignAfter);
 
   if (side === 'before') {
     const localIdx = lineIndex - alignment.before.start;
@@ -329,7 +329,8 @@ export function getCharHighlights(
   afterLineToAlignment: Map<number, number>,
   changedAlignments: ChangedAlignmentEntry[],
   beforeLines: string[],
-  afterLines: string[]
+  afterLines: string[],
+  cache: LineDiffCache
 ): CharHighlight[] | null {
   const map = side === 'before' ? beforeLineToAlignment : afterLineToAlignment;
   const alignIdx = map.get(lineIndex);
@@ -338,7 +339,7 @@ export function getCharHighlights(
   const alignment = changedAlignments[alignIdx].alignment;
   const alignBefore = beforeLines.slice(alignment.before.start, alignment.before.end);
   const alignAfter = afterLines.slice(alignment.after.start, alignment.after.end);
-  const result = getLineDiffResult(alignBefore, alignAfter);
+  const result = cache.get(alignBefore, alignAfter);
 
   const localIdx = side === 'before'
     ? lineIndex - alignment.before.start

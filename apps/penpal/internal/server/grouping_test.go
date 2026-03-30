@@ -10,25 +10,33 @@ import (
 
 // E-PENPAL-API-ROUTES: verifies RP1 source produces grouped file sections.
 func TestBuildFileGroups_RP1Grouped(t *testing.T) {
+	now := time.Now()
 	project := &discovery.Project{
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
 			{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/test", Auto: true},
 		},
 	}
 
 	files := []cache.FileInfo{
-		{Source: "rp1", Path: "context/index.md", FullPath: ".rp1/context/index.md", Name: "index.md", FileType: "knowledge", ModTime: time.Now()},
-		{Source: "rp1", Path: "work/prds/my-prd.md", FullPath: ".rp1/work/prds/my-prd.md", Name: "my-prd.md", FileType: "prd", ModTime: time.Now()},
-		{Source: "rp1", Path: "work/features/auth/requirements.md", FullPath: ".rp1/work/features/auth/requirements.md", Name: "requirements.md", FileType: "requirement", ModTime: time.Now()},
-		{Source: "rp1", Path: "work/features/auth/design.md", FullPath: ".rp1/work/features/auth/design.md", Name: "design.md", FileType: "design", ModTime: time.Now()},
-		{Source: "rp1", Path: "work/features/data-layer/tasks.md", FullPath: ".rp1/work/features/data-layer/tasks.md", Name: "tasks.md", FileType: "task", ModTime: time.Now()},
+		{Source: "rp1", Path: "context/index.md", FullPath: ".rp1/context/index.md", Name: "index.md", FileType: "knowledge", ModTime: now},
+		{Source: "rp1", Path: "work/prds/my-prd.md", FullPath: ".rp1/work/prds/my-prd.md", Name: "my-prd.md", FileType: "prd", ModTime: now},
+		{Source: "rp1", Path: "work/features/auth/requirements.md", FullPath: ".rp1/work/features/auth/requirements.md", Name: "requirements.md", FileType: "requirement", ModTime: now},
+		{Source: "rp1", Path: "work/features/auth/design.md", FullPath: ".rp1/work/features/auth/design.md", Name: "design.md", FileType: "design", ModTime: now},
+		{Source: "rp1", Path: "work/features/data-layer/tasks.md", FullPath: ".rp1/work/features/data-layer/tasks.md", Name: "tasks.md", FileType: "task", ModTime: now},
+		// __all_markdown__ claims all files
+		{Source: "__all_markdown__", Path: ".rp1/context/index.md", FullPath: ".rp1/context/index.md", Name: "index.md", FileType: "knowledge", ModTime: now},
+		{Source: "__all_markdown__", Path: ".rp1/work/prds/my-prd.md", FullPath: ".rp1/work/prds/my-prd.md", Name: "my-prd.md", FileType: "prd", ModTime: now},
+		{Source: "__all_markdown__", Path: ".rp1/work/features/auth/requirements.md", FullPath: ".rp1/work/features/auth/requirements.md", Name: "requirements.md", FileType: "requirement", ModTime: now},
+		{Source: "__all_markdown__", Path: ".rp1/work/features/auth/design.md", FullPath: ".rp1/work/features/auth/design.md", Name: "design.md", FileType: "design", ModTime: now},
+		{Source: "__all_markdown__", Path: ".rp1/work/features/data-layer/tasks.md", FullPath: ".rp1/work/features/data-layer/tasks.md", Name: "tasks.md", FileType: "task", ModTime: now},
 	}
 
 	groups := buildFileGroups(project, files)
 
-	// Should have 4 typed groups + 1 "All Markdown" virtual group
+	// Should have 4 typed groups + 1 "All Markdown" group
 	if len(groups) != 5 {
 		t.Fatalf("expected 5 groups, got %d", len(groups))
 	}
@@ -63,17 +71,21 @@ func TestBuildFileGroups_RP1Grouped(t *testing.T) {
 
 // E-PENPAL-API-ROUTES, E-PENPAL-SRC-THOUGHTS: verifies thoughts source produces a single flat group.
 func TestBuildFileGroups_ThoughtsFlat(t *testing.T) {
+	now := time.Now()
 	project := &discovery.Project{
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
 			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/test", Auto: true},
 		},
 	}
 
 	files := []cache.FileInfo{
-		{Source: "thoughts", Path: "plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: time.Now()},
-		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: time.Now()},
+		{Source: "thoughts", Path: "plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: now},
+		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: now},
+		{Source: "__all_markdown__", Path: "thoughts/plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: now},
+		{Source: "__all_markdown__", Path: "thoughts/research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: now},
 	}
 
 	groups := buildFileGroups(project, files)
@@ -95,18 +107,22 @@ func TestBuildFileGroups_ThoughtsFlat(t *testing.T) {
 
 // E-PENPAL-API-ROUTES: verifies multiple sources produce separate groups.
 func TestBuildFileGroups_MultipleSources(t *testing.T) {
+	now := time.Now()
 	project := &discovery.Project{
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
 			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
 			{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/test", Auto: true},
 		},
 	}
 
 	files := []cache.FileInfo{
-		{Source: "thoughts", Path: "plan.md", FullPath: "thoughts/plan.md", Name: "plan.md", FileType: "plan", ModTime: time.Now()},
-		{Source: "rp1", Path: "context/index.md", FullPath: ".rp1/context/index.md", Name: "index.md", FileType: "knowledge", ModTime: time.Now()},
+		{Source: "thoughts", Path: "plan.md", FullPath: "thoughts/plan.md", Name: "plan.md", FileType: "plan", ModTime: now},
+		{Source: "rp1", Path: "context/index.md", FullPath: ".rp1/context/index.md", Name: "index.md", FileType: "knowledge", ModTime: now},
+		{Source: "__all_markdown__", Path: "thoughts/plan.md", FullPath: "thoughts/plan.md", Name: "plan.md", FileType: "plan", ModTime: now},
+		{Source: "__all_markdown__", Path: ".rp1/context/index.md", FullPath: ".rp1/context/index.md", Name: "index.md", FileType: "knowledge", ModTime: now},
 	}
 
 	groups := buildFileGroups(project, files)
@@ -126,23 +142,26 @@ func TestBuildFileGroups_MultipleSources(t *testing.T) {
 
 // E-PENPAL-API-ROUTES: verifies empty sources are omitted from groups.
 func TestBuildFileGroups_EmptySourceSkipped(t *testing.T) {
+	now := time.Now()
 	project := &discovery.Project{
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
 			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
 			{Name: "rp1", Type: "tree", SourceTypeName: "rp1", RootPath: "/tmp/test/.rp1", Auto: true},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/test", Auto: true},
 		},
 	}
 
 	// Only thoughts has files, rp1 is empty
 	files := []cache.FileInfo{
-		{Source: "thoughts", Path: "plan.md", FullPath: "thoughts/plan.md", Name: "plan.md", FileType: "plan", ModTime: time.Now()},
+		{Source: "thoughts", Path: "plan.md", FullPath: "thoughts/plan.md", Name: "plan.md", FileType: "plan", ModTime: now},
+		{Source: "__all_markdown__", Path: "thoughts/plan.md", FullPath: "thoughts/plan.md", Name: "plan.md", FileType: "plan", ModTime: now},
 	}
 
 	groups := buildFileGroups(project, files)
 
-	// 1 typed group (empty rp1 skipped) + All Markdown
+	// 1 thoughts group (empty rp1 skipped) + All Markdown
 	if len(groups) != 2 {
 		t.Fatalf("expected 2 groups (empty rp1 skipped), got %d", len(groups))
 	}
@@ -153,19 +172,25 @@ func TestBuildFileGroups_EmptySourceSkipped(t *testing.T) {
 
 // E-PENPAL-ADD-SOURCE, E-PENPAL-SRC-MANUAL: verifies manual source produces directory headings.
 func TestBuildFileGroups_ManualSourceDirHeadings(t *testing.T) {
+	now := time.Now()
 	project := &discovery.Project{
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
 			{Name: "docs", Type: "tree", SourceTypeName: "manual", RootPath: "/tmp/test/docs", Auto: false},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/test", Auto: true},
 		},
 	}
 
 	files := []cache.FileInfo{
-		{Source: "docs", Path: "root.md", FullPath: "docs/root.md", Name: "root.md", FileType: "other", ModTime: time.Now()},
-		{Source: "docs", Path: "guides/setup.md", FullPath: "docs/guides/setup.md", Name: "setup.md", FileType: "other", ModTime: time.Now()},
-		{Source: "docs", Path: "guides/deploy.md", FullPath: "docs/guides/deploy.md", Name: "deploy.md", FileType: "other", ModTime: time.Now()},
-		{Source: "docs", Path: "api/endpoints.md", FullPath: "docs/api/endpoints.md", Name: "endpoints.md", FileType: "other", ModTime: time.Now()},
+		{Source: "docs", Path: "root.md", FullPath: "docs/root.md", Name: "root.md", FileType: "other", ModTime: now},
+		{Source: "docs", Path: "guides/setup.md", FullPath: "docs/guides/setup.md", Name: "setup.md", FileType: "other", ModTime: now},
+		{Source: "docs", Path: "guides/deploy.md", FullPath: "docs/guides/deploy.md", Name: "deploy.md", FileType: "other", ModTime: now},
+		{Source: "docs", Path: "api/endpoints.md", FullPath: "docs/api/endpoints.md", Name: "endpoints.md", FileType: "other", ModTime: now},
+		{Source: "__all_markdown__", Path: "docs/root.md", FullPath: "docs/root.md", Name: "root.md", FileType: "other", ModTime: now},
+		{Source: "__all_markdown__", Path: "docs/guides/setup.md", FullPath: "docs/guides/setup.md", Name: "setup.md", FileType: "other", ModTime: now},
+		{Source: "__all_markdown__", Path: "docs/guides/deploy.md", FullPath: "docs/guides/deploy.md", Name: "deploy.md", FileType: "other", ModTime: now},
+		{Source: "__all_markdown__", Path: "docs/api/endpoints.md", FullPath: "docs/api/endpoints.md", Name: "endpoints.md", FileType: "other", ModTime: now},
 	}
 
 	groups := buildFileGroups(project, files)
@@ -197,17 +222,21 @@ func TestBuildFileGroups_ManualSourceDirHeadings(t *testing.T) {
 
 // E-PENPAL-API-ROUTES: verifies file titles flow through to group view.
 func TestBuildFileGroups_TitleFlowsThrough(t *testing.T) {
+	now := time.Now()
 	project := &discovery.Project{
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
 			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/test", Auto: true},
 		},
 	}
 
 	files := []cache.FileInfo{
-		{Source: "thoughts", Path: "plans/my-plan.md", FullPath: "thoughts/plans/my-plan.md", Name: "my-plan.md", Title: "Per-Tab Navigation", FileType: "plan", ModTime: time.Now()},
-		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", Title: "", FileType: "research", ModTime: time.Now()},
+		{Source: "thoughts", Path: "plans/my-plan.md", FullPath: "thoughts/plans/my-plan.md", Name: "my-plan.md", Title: "Per-Tab Navigation", FileType: "plan", ModTime: now},
+		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", Title: "", FileType: "research", ModTime: now},
+		{Source: "__all_markdown__", Path: "thoughts/plans/my-plan.md", FullPath: "thoughts/plans/my-plan.md", Name: "my-plan.md", Title: "Per-Tab Navigation", FileType: "plan", ModTime: now},
+		{Source: "__all_markdown__", Path: "thoughts/research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", Title: "", FileType: "research", ModTime: now},
 	}
 
 	groups := buildFileGroups(project, files)
@@ -227,17 +256,21 @@ func TestBuildFileGroups_TitleFlowsThrough(t *testing.T) {
 
 // E-PENPAL-API-ROUTES, E-PENPAL-SRC-THOUGHTS: verifies thoughts source does not produce directory headings.
 func TestBuildFileGroups_ThoughtsNoDirHeadings(t *testing.T) {
+	now := time.Now()
 	project := &discovery.Project{
 		Name: "test-project",
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
 			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/test", Auto: true},
 		},
 	}
 
 	files := []cache.FileInfo{
-		{Source: "thoughts", Path: "plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: time.Now()},
-		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: time.Now()},
+		{Source: "thoughts", Path: "plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: now},
+		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: now},
+		{Source: "__all_markdown__", Path: "thoughts/plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: now},
+		{Source: "__all_markdown__", Path: "thoughts/research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: now},
 	}
 
 	groups := buildFileGroups(project, files)
@@ -260,12 +293,17 @@ func TestBuildFileGroups_AllMarkdownVirtual(t *testing.T) {
 		Path: "/tmp/test",
 		Sources: []discovery.FileSource{
 			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: "/tmp/test/thoughts", Auto: true},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/test", Auto: true},
 		},
 	}
 
+	// scanProjectSources produces entries for both the typed source and
+	// the __all_markdown__ catch-all (which claims every .md file).
 	files := []cache.FileInfo{
 		{Source: "thoughts", Path: "plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: time.Now()},
 		{Source: "thoughts", Path: "research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: time.Now()},
+		{Source: "__all_markdown__", Path: "thoughts/plans/foo.md", FullPath: "thoughts/plans/foo.md", Name: "foo.md", FileType: "plan", ModTime: time.Now()},
+		{Source: "__all_markdown__", Path: "thoughts/research/bar.md", FullPath: "thoughts/research/bar.md", Name: "bar.md", FileType: "research", ModTime: time.Now()},
 	}
 
 	groups := buildFileGroups(project, files)

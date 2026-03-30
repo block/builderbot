@@ -144,7 +144,7 @@ export default function HomeSidebar({
                   return (
                     <div key={p.qualifiedName}>
                       <div
-                        className={`tree-item${p.fileCount === 0 ? ' deemphasized' : ''}`}
+                        className={`tree-item${!p.hasFiles ? ' deemphasized' : ''}`}
                         onClick={() => {
                           if (hasWorktrees) {
                             onToggleWorktreeProject(p.qualifiedName);
@@ -201,7 +201,7 @@ export default function HomeSidebar({
         <Link
           key={p.qualifiedName}
           to={`/project/${p.qualifiedName}`}
-          className={`tree-item${p.fileCount === 0 ? ' deemphasized' : ''}`}
+          className={`tree-item${!p.hasFiles ? ' deemphasized' : ''}`}
           onContextMenu={(e) => onShowContextMenu(e, [
             { label: 'Close project', className: 'menu-muted', onClick: () => onCloseStandaloneProject(p) },
           ])}

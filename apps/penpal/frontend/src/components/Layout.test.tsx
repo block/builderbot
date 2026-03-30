@@ -29,8 +29,8 @@ vi.mock('../api', () => ({
         qualifiedName: 'ws1/project-a',
         workspace: 'ws1',
         origin: 'workspace',
-        badges: [],
-        fileCount: 5,
+
+        hasFiles: true,
         lastModified: '2026-01-01T00:00:00Z',
       },
     ]),
@@ -541,8 +541,8 @@ describe('Layout', () => {
         qualifiedName: 'ws1/project-a',
         workspace: 'ws1',
         origin: 'workspace',
-        badges: [],
-        fileCount: 5,
+
+        hasFiles: true,
         lastModified: '2026-01-01T00:00:00Z',
         worktrees: [
           { name: 'main', path: '/tmp/main', branch: 'main', isMain: true },
@@ -581,8 +581,8 @@ describe('Layout', () => {
         qualifiedName: 'ws1/project-a',
         workspace: 'ws1',
         origin: 'workspace',
-        badges: [],
-        fileCount: 5,
+
+        hasFiles: true,
         lastModified: '2026-01-01T00:00:00Z',
         worktrees: [
           { name: 'main', path: '/tmp/main', branch: 'main', isMain: true },
@@ -642,8 +642,8 @@ describe('Layout', () => {
         workspace: '',
         projectPath: '/tmp/bravo',
         origin: 'standalone' as const,
-        badges: [],
-        fileCount: 3,
+
+        hasFiles: true,
         lastModified: '2026-01-02T00:00:00Z',
       },
       {
@@ -652,8 +652,8 @@ describe('Layout', () => {
         workspace: '',
         projectPath: '/tmp/alpha',
         origin: 'standalone' as const,
-        badges: [],
-        fileCount: 5,
+
+        hasFiles: true,
         lastModified: '2026-01-01T00:00:00Z',
       },
     ]);
@@ -696,8 +696,8 @@ describe('Layout', () => {
         workspace: '',
         projectPath: '/tmp/has-files',
         origin: 'standalone' as const,
-        badges: [],
-        fileCount: 5,
+
+        hasFiles: true,
         lastModified: '2026-01-01T00:00:00Z',
       },
       {
@@ -706,8 +706,8 @@ describe('Layout', () => {
         workspace: '',
         projectPath: '/tmp/empty-project',
         origin: 'standalone' as const,
-        badges: [],
-        fileCount: 0,
+
+        hasFiles: false,
         lastModified: '2026-01-01T00:00:00Z',
       },
     ]);

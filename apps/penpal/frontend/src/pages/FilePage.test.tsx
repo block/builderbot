@@ -37,7 +37,7 @@ vi.mock('../components/MermaidRenderer', () => ({
 function LayoutWrapper() {
   const ctx: LayoutContext = {
     setHeadings: vi.fn(),
-    projects: [{ name: 'proj', qualifiedName: 'ws/proj', workspace: 'ws', origin: 'workspace' as const, badges: [], fileCount: 1, lastModified: '', projectPath: '/tmp/proj' }],
+    projects: [{ name: 'proj', qualifiedName: 'ws/proj', workspace: 'ws', origin: 'workspace' as const, hasFiles: true, lastModified: '', projectPath: '/tmp/proj' }],
   };
   return <Outlet context={ctx} />;
 }

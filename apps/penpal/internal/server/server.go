@@ -214,9 +214,8 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 // populateProjects scans file lists and fills in git info in the background.
 // E-PENPAL-GIT-ENRICH: background git enrichment with SSE push.
 func (s *Server) populateProjects() {
-	s.cache.RefreshAllProjects()
-	s.seedRecentActivity()
-	log.Printf("Background file scan complete")
+	s.cache.CheckAllProjectsHasFiles()
+	log.Printf("Background hasFiles check complete")
 	s.readyOnce.Do(func() { close(s.readyCh) }) // signal that essential data is ready
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
 
@@ -251,17 +250,6 @@ func (s *Server) populateProjects() {
 	wg.Wait()
 	log.Printf("Background enrichment complete (git info)")
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
-}
-
-// seedRecentActivity populates the activity tracker with ModTimes from the
-// most recently modified files in the cache. This ensures /recent has data
-// immediately on startup, even for files modified before the server started.
-// E-PENPAL-ACTIVITY: seeds file modification events at startup.
-func (s *Server) seedRecentActivity() {
-	files := s.cache.AllFiles(50)
-	for _, f := range files {
-		s.activity.RecordAt(activity.FileModified, f.Project, f.FullPath, f.ModTime)
-	}
 }
 
 // E-PENPAL-API-ROUTES: registers all REST endpoints, SPA, SSE, and MCP.
@@ -626,31 +614,6 @@ func buildFileGroups(project *discovery.Project, cachedFiles []cache.FileInfo) [
 		groups = append(groups, gv)
 	}
 
-	// E-PENPAL-SRC-ALL-MD: virtual "All Markdown" group with every file, organized by directory.
-	// Always present, no dedup against typed sources.
-	allMd := FileGroupView{
-		Name:       "All Markdown",
-		Source:     "__all_markdown__",
-		SourceType: "tree",
-		Auto:       true,
-	}
-	for _, f := range cachedFiles {
-		allMd.Files = append(allMd.Files, ProjectFile{
-			Name:       f.Name,
-			Title:      f.Title,
-			Path:       f.FullPath,
-			Source:     f.Source,
-			SourceType: f.SourceType,
-			ModTime:    f.ModTime,
-			Age:        formatAge(f.ModTime),
-			FileType:   f.FileType,
-		})
-	}
-	sort.Slice(allMd.Files, func(i, j int) bool {
-		return allMd.Files[i].Path < allMd.Files[j].Path
-	})
-	groups = append(groups, allMd)
-
 	return groups
 }
 
@@ -697,12 +660,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 // API handlers for dynamic updates
 
-type APIBadge struct {
-	Text  string `json:"text"`
-	Color string `json:"color"`
-	Bg    string `json:"bg"`
-}
-
 type APIWorktree struct {
 	Name   string `json:"name"`
 	Path   string `json:"path"`
@@ -717,10 +674,9 @@ type APIProject struct {
 	WorkspacePath  string        `json:"workspacePath,omitempty"`
 	ProjectPath    string        `json:"projectPath"`
 	Origin         string        `json:"origin"`
-	Badges         []APIBadge    `json:"badges"`
 	Branch         string        `json:"branch,omitempty"`
 	Dirty          bool          `json:"dirty,omitempty"`
-	FileCount      int           `json:"fileCount"`
+	HasFiles       bool          `json:"hasFiles"`
 	LastModified   string        `json:"lastModified"`
 	AgentConnected bool          `json:"agentConnected,omitempty"`
 	AgentRunning   bool          `json:"agentRunning,omitempty"`
@@ -750,10 +706,6 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 	result := make([]APIProject, len(projects))
 	for i, p := range projects {
 		qn := p.QualifiedName()
-		apiBadges := make([]APIBadge, 0)
-		for _, b := range p.Badges() {
-			apiBadges = append(apiBadges, APIBadge{Text: b.Text, Color: b.Color, Bg: b.Bg})
-		}
 		result[i] = APIProject{
 			Name:           p.Name,
 			QualifiedName:  qn,
@@ -761,8 +713,7 @@ func (s *Server) handleListAPIProjects(w http.ResponseWriter, r *http.Request) {
 			WorkspacePath:  p.WorkspacePath,
 			ProjectPath:    p.Path,
 			Origin:         p.Origin,
-			Badges:         apiBadges,
-			FileCount:      p.FileCount,
+			HasFiles:       p.HasFiles,
 			LastModified:   p.LastModified.Format(time.RFC3339),
 			Age:            computeProjectAge(p),
 			AgentConnected: s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running,
@@ -850,8 +801,16 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		cachedFiles = cache.ScanProjectSourcesForWorktree(project, wtPath)
 	} else {
-		// Ensure file titles are populated before serving
-		s.cache.EnrichTitles(qualifiedName)
+		// Lazy scan: full file scan happens on first access, not at startup.
+		// E-PENPAL-ACTIVITY: seed recent activity on first scan so /api/recent
+		// populates progressively as projects are opened.
+		if s.cache.EnsureProjectScanned(qualifiedName) {
+			for _, f := range s.cache.ProjectFiles(qualifiedName) {
+				if f.Source != "__all_markdown__" {
+					s.activity.RecordAt(activity.FileModified, f.Project, f.FullPath, f.ModTime)
+				}
+			}
+		}
 		cachedFiles = s.cache.ProjectFiles(qualifiedName)
 	}
 	fileGroups := buildFileGroups(project, cachedFiles)
@@ -945,7 +904,7 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, r *http.Request) {
 }
 
 type ProjectInfo struct {
-	FileCount       int  `json:"fileCount"`
+	HasFiles        bool `json:"hasFiles"`
 	Dirty           bool `json:"dirty"`
 	UnpushedCommits int  `json:"unpushedCommits"`
 }
@@ -964,7 +923,7 @@ func (s *Server) handleProjectInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := ProjectInfo{
-		FileCount: len(s.cache.ProjectFiles(qualifiedName)),
+		HasFiles: project.HasFiles,
 	}
 
 	// Fresh git status

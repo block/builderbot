@@ -162,6 +162,22 @@ func init() {
 			return "plan"
 		},
 	})
+
+	// E-PENPAL-SRC-ALL-MD: catch-all source that finds all .md files in the
+	// project tree. Registered last so typed sources claim their files first.
+	// Always present — the scan simply finds nothing if there are no .md files.
+	RegisterSourceType(&SourceType{
+		Name:            "__all_markdown__",
+		ScanMode:        "tree",
+		ShowDirHeadings: true,
+		SkipDirs: map[string]bool{
+			"node_modules": true, ".hg": true, ".svn": true,
+		},
+		GroupFiles: func(paths []string) []FileGroup {
+			sort.Strings(paths)
+			return []FileGroup{{Name: "All Markdown", Paths: paths}}
+		},
+	})
 }
 
 // classifyRP1Feature classifies a file under work/features/{id}/ by its filename.
@@ -291,15 +307,6 @@ func groupAnchorsPaths(paths []string) []FileGroup {
 	return result
 }
 
-// Badge holds rendering metadata for a source type badge.
-type Badge struct {
-	Text        string
-	Color       string
-	Bg          string
-	ActiveBg    string
-	ActiveColor string
-}
-
 // FileSource represents a set of files to display for a project.
 type FileSource struct {
 	Name           string   // display name (e.g., "thoughts", "docs")
@@ -318,7 +325,7 @@ type Project struct {
 	WorkspacePath string // which workspace discovered this (empty for standalone)
 	WorkspaceName string // display name of the workspace (empty for standalone)
 	Git           *GitInfo
-	FileCount     int
+	HasFiles      bool
 	LastModified  time.Time
 	Worktrees     []Worktree // discovered worktrees for this project
 }
@@ -346,27 +353,6 @@ func (p *Project) HasSourceType(name string) bool {
 		}
 	}
 	return false
-}
-
-// Badges returns badge metadata for all auto-detected sources.
-func (p *Project) Badges() []Badge {
-	var badges []Badge
-	for _, s := range p.Sources {
-		if !s.Auto {
-			continue
-		}
-		st := GetSourceType(s.Name)
-		if st != nil {
-			badges = append(badges, Badge{
-				Text:        st.DisplayName,
-				Color:       st.BadgeColor,
-				Bg:          st.BadgeBg,
-				ActiveBg:    st.BadgeActiveBg,
-				ActiveColor: st.BadgeActiveColor,
-			})
-		}
-	}
-	return badges
 }
 
 // QualifiedName returns the workspace-qualified project identifier
@@ -409,6 +395,17 @@ func DetectSources(projectPath string) []FileSource {
 			}
 		}
 	}
+
+	// E-PENPAL-SRC-ALL-MD: always append the catch-all source last so typed
+	// sources claim their files first during scanning.
+	sources = append(sources, FileSource{
+		Name:           "__all_markdown__",
+		Type:           "tree",
+		SourceTypeName: "__all_markdown__",
+		RootPath:       projectPath,
+		Auto:           true,
+	})
+
 	return sources
 }
 

@@ -327,13 +327,13 @@ export default function Layout() {
   );
   // E-PENPAL-SORT: shared comparator — empty projects last, then alpha or API order.
   const projectSort = useCallback((a: APIProject, b: APIProject) => {
-    if ((a.fileCount > 0) !== (b.fileCount > 0)) return b.fileCount > 0 ? 1 : -1;
+    if (a.hasFiles !== b.hasFiles) return b.hasFiles ? 1 : -1;
     if (sortOrder === 'alpha') return a.name.localeCompare(b.name);
     return 0;
   }, [sortOrder]);
 
   // E-PENPAL-VIEW-OPTIONS: filter empty projects when showEmpty is false
-  const filterEmpty = useCallback((p: APIProject) => showEmpty || p.fileCount > 0, [showEmpty]);
+  const filterEmpty = useCallback((p: APIProject) => showEmpty || p.hasFiles, [showEmpty]);
 
   const standaloneProjects = useMemo(() => {
     return projects.filter((p) => p.origin === 'standalone').filter(filterEmpty).sort(projectSort);

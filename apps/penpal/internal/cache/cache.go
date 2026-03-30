@@ -3,7 +3,9 @@ package cache
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,12 +131,15 @@ type Cache struct {
 	projects []discovery.Project
 	// projectFiles maps project name to its file list
 	projectFiles map[string][]FileInfo
+	// projectScanned tracks which projects have had a full file scan
+	projectScanned map[string]bool
 }
 
 // New creates a new cache
 func New() *Cache {
 	return &Cache{
-		projectFiles: make(map[string][]FileInfo),
+		projectFiles:   make(map[string][]FileInfo),
+		projectScanned: make(map[string]bool),
 	}
 }
 
@@ -262,6 +267,7 @@ func (c *Cache) SetProjectFiles(projectName string, files []FileInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.projectFiles[projectName] = files
+	c.projectScanned[projectName] = true
 }
 
 // ProjectFiles returns the cached file list for a project
@@ -276,14 +282,35 @@ func (c *Cache) ProjectFiles(projectName string) []FileInfo {
 	return nil
 }
 
-// AllFiles returns all files across all projects, sorted by modification time
+// AllFiles returns all files across all projects, sorted by modification time.
+// Files are deduplicated by project+path: when a file appears in both a typed
+// source and __all_markdown__, only the typed-source entry is kept.
+// E-PENPAL-SRC-ALL-MD: dedup prevents __all_markdown__ from doubling the list.
 func (c *Cache) AllFiles(limit int) []FileInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	var all []FileInfo
+	type fileKey struct {
+		project, path string
+	}
+	best := make(map[fileKey]FileInfo)
 	for _, files := range c.projectFiles {
-		all = append(all, files...)
+		for _, f := range files {
+			k := fileKey{f.Project, f.FullPath}
+			if existing, ok := best[k]; ok {
+				// Prefer typed-source entry over __all_markdown__
+				if existing.Source == "__all_markdown__" && f.Source != "__all_markdown__" {
+					best[k] = f
+				}
+			} else {
+				best[k] = f
+			}
+		}
+	}
+
+	all := make([]FileInfo, 0, len(best))
+	for _, f := range best {
+		all = append(all, f)
 	}
 
 	sort.Slice(all, func(i, j int) bool {
@@ -315,6 +342,25 @@ func (c *Cache) FindFile(projectName, filePath string) *FileInfo {
 	return nil
 }
 
+// EnsureProjectScanned triggers a full file scan for a project if it hasn't
+// been scanned yet. Returns true if a scan was actually performed (first call
+// for this project). This is the lazy-scan entry point — called when a user
+// first opens a project, rather than eagerly at startup.
+// E-PENPAL-SCAN: lazy scan with write-lock gating to prevent duplicate walks.
+func (c *Cache) EnsureProjectScanned(projectName string) bool {
+	c.mu.Lock()
+	if c.projectScanned[projectName] {
+		c.mu.Unlock()
+		return false
+	}
+	// Mark as in-progress under write lock to prevent concurrent scans.
+	c.projectScanned[projectName] = true
+	c.mu.Unlock()
+
+	c.RefreshProject(projectName)
+	return true
+}
+
 // RefreshProject rescans a single project's files across all its sources.
 // projectName should be the qualified name (e.g., "Development/penpal").
 // E-PENPAL-CACHE: walks filesystem and updates per-project file list and metadata.
@@ -330,9 +376,10 @@ func (c *Cache) RefreshProject(projectName string) {
 	// Update project metadata
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.projectScanned[projectName] = true
 	for i := range c.projects {
 		if c.projects[i].QualifiedName() == projectName {
-			c.projects[i].FileCount = len(files)
+			c.projects[i].HasFiles = len(files) > 0
 			if len(files) > 0 {
 				c.projects[i].LastModified = files[0].ModTime
 			}
@@ -354,6 +401,73 @@ func (c *Cache) RefreshAllProjects() {
 		}(p.QualifiedName())
 	}
 	wg.Wait()
+}
+
+// errFoundMarkdown is a sentinel used to short-circuit filepath.WalkDir
+// once a .md file is found.
+var errFoundMarkdown = errors.New("found markdown")
+
+// CheckAllProjectsHasFiles does a cheap per-project check to set HasFiles
+// without doing a full file scan. For each project, it walks the project
+// root and stops as soon as it finds any .md file.
+// E-PENPAL-SCAN: lightweight startup check — no file list is built.
+func (c *Cache) CheckAllProjectsHasFiles() {
+	projects := c.Projects()
+	var wg sync.WaitGroup
+	for _, p := range projects {
+		wg.Add(1)
+		go func(p discovery.Project) {
+			defer wg.Done()
+			found := projectHasAnyMarkdown(p.Path)
+			c.mu.Lock()
+			for i := range c.projects {
+				if c.projects[i].QualifiedName() == p.QualifiedName() {
+					c.projects[i].HasFiles = found
+					break
+				}
+			}
+			c.mu.Unlock()
+		}(p)
+	}
+	wg.Wait()
+}
+
+// projectHasAnyMarkdown walks the directory tree and returns true as soon as
+// it finds any .md file. Aligns skip behavior with scanProjectSources: skips
+// .git, node_modules, .hg, .svn, nested worktrees/submodules, and gitignored dirs.
+// E-PENPAL-SCAN: lightweight startup check consistent with full scan filtering.
+func projectHasAnyMarkdown(projectPath string) bool {
+	gitChecker := newGitIgnoreChecker(projectPath)
+	defer gitChecker.Close()
+
+	err := filepath.WalkDir(projectPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == "node_modules" || name == ".hg" || name == ".svn" {
+				return filepath.SkipDir
+			}
+			// Skip nested git worktrees and submodules (.git file, not dir).
+			if path != projectPath {
+				gitEntry := filepath.Join(path, ".git")
+				if fi, err := os.Lstat(gitEntry); err == nil && !fi.IsDir() {
+					return filepath.SkipDir
+				}
+			}
+			// E-PENPAL-SRC-GITIGNORE: skip gitignored directories.
+			if path != projectPath && gitChecker.IsIgnored(path) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".md") {
+			return errFoundMarkdown
+		}
+		return nil
+	})
+	return errors.Is(err, errFoundMarkdown)
 }
 
 // EnrichProject updates a project's git info without rescanning files.
@@ -519,10 +633,10 @@ func ScanProjectSourcesForWorktree(project *discovery.Project, worktreePath stri
 }
 
 // scanProjectSources scans all sources of a project for markdown files.
-// Files are de-duplicated by project-relative path: if multiple sources cover
-// the same file, only the first source's entry is kept. This means auto-detected
-// sources (which come first) take priority over manual ones.
-// E-PENPAL-SCAN: walks filesystem, skips dirs, classifies files, deduplicates, sorts by ModTime.
+// Each source does its own walk. Files are de-duplicated by project-relative
+// path: if multiple sources cover the same file, only the first source's entry
+// is kept — except __all_markdown__ which claims every file regardless.
+// E-PENPAL-SCAN: per-source WalkDir, classifies files, deduplicates, sorts by ModTime.
 func scanProjectSources(project *discovery.Project) []FileInfo {
 	var files []FileInfo
 	seen := make(map[string]bool) // project-relative paths already claimed
@@ -541,33 +655,30 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				stName = source.Name
 			}
 			st := discovery.GetSourceType(stName)
+			isAllMarkdown := source.Name == "__all_markdown__"
 
-			filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+			filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return nil
 				}
-				if info.IsDir() {
+				if d.IsDir() {
 					// Skip nested git worktrees and submodules: they contain a
 					// .git file (not directory) pointing at the real gitdir.
-					// Without this, tree sources rooted at "." walk into
-					// .claude/worktrees/<branch>/ and surface duplicate files.
 					if path != rootPath {
 						gitEntry := filepath.Join(path, ".git")
 						if fi, err := os.Lstat(gitEntry); err == nil && !fi.IsDir() {
 							return filepath.SkipDir
 						}
 					}
-					// Never walk into .git (git doesn't report it as ignored).
-					if info.Name() == ".git" {
+					if d.Name() == ".git" {
 						return filepath.SkipDir
 					}
-					// Skip gitignored directories (build output, deps, etc.).
 					// P-PENPAL-SRC-GITIGNORE: registered source roots are
 					// always scanned even if gitignored.
 					if path != rootPath && gitChecker.IsIgnored(path) {
 						return filepath.SkipDir
 					}
-					if st != nil && st.SkipDirs[info.Name()] {
+					if st != nil && st.SkipDirs[d.Name()] {
 						return filepath.SkipDir
 					}
 					return nil
@@ -585,7 +696,7 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 				relToSource, _ := filepath.Rel(rootPath, path)
 				relToProject, _ := filepath.Rel(project.Path, path)
 
-				if seen[relToProject] {
+				if !isAllMarkdown && seen[relToProject] {
 					return nil // already claimed by an earlier source
 				}
 
@@ -603,9 +714,15 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					}
 				}
 
-				title := extractTitle(path)
+				// Only stat .md files (for ModTime), not every entry.
+				info, err := d.Info()
+				if err != nil {
+					return nil
+				}
 
-				seen[relToProject] = true
+				if !isAllMarkdown {
+					seen[relToProject] = true
+				}
 				files = append(files, FileInfo{
 					Project:     project.QualifiedName(),
 					Workspace:   project.WorkspaceName,
@@ -615,8 +732,8 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					SourceAuto:  source.Auto,
 					Path:        relToSource,
 					FullPath:    relToProject,
-					Name:        filepath.Base(path),
-					Title:       title,
+					Name:        d.Name(),
+					Title:       extractTitle(path),
 					ModTime:     info.ModTime(),
 					FileType:    fileType,
 				})

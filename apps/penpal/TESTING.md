@@ -64,7 +64,7 @@ see-also:
 | Source Types — anchors (P-PENPAL-SRC-ANCHORS, SRC-ANCHORS-GROUP, SRC-ANCHORS-NESTED) | discovery_test.go (TestClassifyAnchorsFile, TestGroupAnchorsPaths, TestGroupAnchorsPaths_MarkerOnlyModule, TestAnchorsFileOrder, TestAnchorsRequireSibling) | — | — | — |
 | Source Types — claude-plans (P-PENPAL-SRC-CLAUDE-PLANS) | — | — | — | — |
 | Source Types — manual (P-PENPAL-SRC-MANUAL) | — | — | grouping_test.go (TestBuildFileGroups_ManualSourceDirHeadings) | — |
-| Cache & File Scanning (E-PENPAL-CACHE, SCAN) | cache_test.go | — | — | — |
+| Cache & File Scanning (E-PENPAL-CACHE, SCAN) | cache_test.go (TestCheckAllProjectsHasFiles, TestProjectHasAnyMarkdown_SkipsGitignored, TestProjectHasAnyMarkdown_SkipsVCSDirs, TestAllFiles_DeduplicatesAllMarkdown, TestEnsureProjectScanned_NoDuplicateScans) | — | — | — |
 | Worktree Support (P-PENPAL-WORKTREE) | discovery/worktree_test.go, cache/worktree_test.go | Layout.test.tsx | worktree_test.go (API + MCP) | — |
 | Worktree Dropdown (P-PENPAL-PROJECT-WORKTREE-DROPDOWN) | — | Layout.test.tsx | — | — |
 | Git Integration (P-PENPAL-GIT-INFO) | — | — | — | — |
@@ -89,7 +89,7 @@ see-also:
 | Search (P-PENPAL-SEARCH) | — | SearchPage.test.tsx | — | react-app.spec.ts |
 | Recent Files (P-PENPAL-RECENT) | activity_test.go | RecentPage.test.tsx | integration_test.go | — |
 | CLI Open (P-PENPAL-CLI-OPEN) | — | — | api_manage_test.go | cli-open.spec.ts |
-| Source Management (P-PENPAL-ADD-SOURCE, REMOVE-SOURCE) | — | — | api_manage_test.go | — |
+| Source Management (P-PENPAL-ADD-SOURCE, REMOVE-SOURCE) | — | — | api_manage_test.go (TestAPISources_AddFileNotBlockedByAllMarkdown) | — |
 | Real-Time Updates (P-PENPAL-REALTIME, FOCUS) | watcher_test.go | useSSE.test.ts | api_focus_test.go | — |
 | Config & Migration (E-PENPAL-CONFIG) | config_test.go, migrate_test.go | — | — | — |
 | Install Tools (P-PENPAL-INSTALL) | — | InstallStartup.test.tsx, InstallToolsModal.test.tsx | install_test.go | — |

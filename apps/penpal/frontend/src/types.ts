@@ -1,13 +1,5 @@
 // Types matching Go JSON API responses
 
-export interface APIBadge {
-  text: string;
-  color: string;
-  bg: string;
-  activeBg?: string;
-  activeColor?: string;
-}
-
 export interface APIWorktree {
   name: string;
   path: string;
@@ -22,10 +14,9 @@ export interface APIProject {
   workspacePath?: string;
   projectPath: string;
   origin: 'workspace' | 'standalone';
-  badges: APIBadge[];
   branch?: string;
   dirty?: boolean;
-  fileCount: number;
+  hasFiles: boolean;
   lastModified: string;
   agentConnected?: boolean;
   agentRunning?: boolean;
@@ -147,7 +138,7 @@ export interface ReviewGroup {
 }
 
 export interface ProjectInfo {
-  fileCount: number;
+  hasFiles: boolean;
   dirty: boolean;
   unpushedCommits: number;
 }

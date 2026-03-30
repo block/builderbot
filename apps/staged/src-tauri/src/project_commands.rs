@@ -18,6 +18,7 @@ pub(crate) async fn add_project_repo_impl(
     set_as_primary: Option<bool>,
     reason: Option<String>,
     pr_number: Option<u64>,
+    default_branch: Option<String>,
 ) -> Result<store::ProjectRepo, String> {
     let project = store
         .get_project(&project_id)
@@ -44,12 +45,9 @@ pub(crate) async fn add_project_repo_impl(
         };
         resolved_branch_name = format!("{resolved_branch_name}-{suffix}");
     }
-    // Validate that the subpath exists as a directory in the repo before
-    // creating anything. This prevents repos being added with invalid
-    // subpaths that would fail later during worktree setup.
-    if let Some(sub) = &subpath {
-        git::validate_subpath_in_repo(&github_repo, sub).map_err(|e| e.to_string())?;
-    }
+    // Subpath validation is handled by the frontend before submission
+    // (SubpathInput.waitForValidation). Skipping the redundant backend
+    // re-validation here removes a ~500ms-2s GitHub API round-trip.
 
     let repo_subpath = if project.location == store::ProjectLocation::Remote {
         // For remote repos, store the user's subpath as-is (relative to repo
@@ -129,8 +127,17 @@ pub(crate) async fn add_project_repo_impl(
         repo.is_primary = true;
     }
 
-    let detected_base = git::detect_default_branch_for_repo(&repo.github_repo)
-        .unwrap_or_else(|_| "main".to_string());
+    // Use the frontend-prefetched default branch when available to avoid
+    // a ~500ms-2s GitHub API round-trip.
+    let detected_base = default_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            git::detect_default_branch_for_repo(&repo.github_repo)
+                .unwrap_or_else(|_| "main".to_string())
+        });
     let effective_base = if detected_base.starts_with("origin/") {
         detected_base
     } else {

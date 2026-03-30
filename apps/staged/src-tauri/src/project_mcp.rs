@@ -606,6 +606,7 @@ impl ProjectToolsHandler {
             None,
             p.reason,
             None,
+            None, // MCP has no prefetched default branch
         )
         .await
         {

@@ -689,9 +689,9 @@ pub(crate) fn infer_workspace_name(branch_name: &str) -> String {
         .collect::<Vec<_>>()
         .join("-");
     if safe.is_empty() {
-        return "mrk-feature".to_string();
+        return "stg-feature".to_string();
     }
-    let mut full = format!("mrk-{safe}");
+    let mut full = format!("stg-{safe}");
     if full.len() > WORKSPACE_NAME_MAX_LENGTH {
         full = full[..WORKSPACE_NAME_MAX_LENGTH]
             .trim_end_matches('-')

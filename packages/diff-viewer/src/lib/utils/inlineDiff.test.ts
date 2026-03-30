@@ -239,6 +239,57 @@ describe('computeLineDiff', () => {
       expect(result.afterLines).toEqual(['added', 'added', 'added']);
     });
 
+    it('detects re-indented lines as modified when many insertions precede them', () => {
+      // Real-world case: code gets wrapped in an if-else block. The "before"
+      // has a simple format!() call; the "after" has a large new if-branch
+      // followed by an else-branch where the original code is re-indented.
+      // When parsed as a single changed alignment the greedy two-pointer
+      // sees many inserted after-lines before reaching the re-indented lines,
+      // causing them to be classified as removed/added instead of modified.
+      const before = [
+        '    let prompt = format!(',
+        '        r#"<action>',
+        '        pr_type = pr_type,',
+        '        base_branch = base_branch,',
+        '        branch_name = branch.branch_name,',
+        '        draft_flag = draft_flag,',
+        '    );',
+      ];
+      const after = [
+        '    let prompt = if let Some(ctx) = git_context {',
+        '        format!(',
+        '            r#"<action>',
+        'Steps:',
+        '1. Push the current branch to the remote',
+        '</action>"#,',
+        '            pr_type = pr_type,',
+        '            base_branch = base_branch,',
+        '            branch_name = branch.branch_name,',
+        '            draft_flag = draft_flag,',
+        '            log_output = ctx.log,',
+        '            stat_output = ctx.stat,',
+        '        )',
+        '    } else {',
+        '        format!(',
+        '            r#"<action>',
+        '            pr_type = pr_type,',
+        '            base_branch = base_branch,',
+        '            branch_name = branch.branch_name,',
+        '            draft_flag = draft_flag,',
+        '        )',
+        '    };',
+      ];
+      const result = computeLineDiff(before, after);
+
+      // The re-indented lines in the else branch should be modified, not removed/added.
+      // before[2..5] ("pr_type", "base_branch", "branch_name", "draft_flag")
+      // should pair with the re-indented versions in the after else-branch.
+      expect(result.beforeLines[2]).toBe('modified'); // pr_type
+      expect(result.beforeLines[3]).toBe('modified'); // base_branch
+      expect(result.beforeLines[4]).toBe('modified'); // branch_name
+      expect(result.beforeLines[5]).toBe('modified'); // draft_flag
+    });
+
     it('handles interleaved unchanged and changed lines', () => {
       const before = ['A', 'B', 'C', 'D', 'E'];
       const after = ['A', 'B2', 'C', 'D2', 'E'];

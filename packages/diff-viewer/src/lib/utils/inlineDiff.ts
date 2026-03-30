@@ -201,19 +201,27 @@ export function computeLineDiff(
       bi++;
       ai++;
     } else {
-      // Peek ahead: if the next after-line is a better match for the current
-      // before-line, skip the current after-line as a pure insertion.
-      if (ai + 1 < unmatchedAfter.length) {
-        const nextAIdx = unmatchedAfter[ai + 1];
-        const nextSim = similarity(beforeLines[bIdx], afterLines[nextAIdx]);
-        if (nextSim > SIMILARITY_THRESHOLD) {
-          afterClasses[aIdx] = 'added';
-          ai++;
-          continue;
+      // Scan ahead in unmatchedAfter to find a match for the current
+      // before-line. This handles cases where many insertions precede a
+      // modification (e.g. code re-indented after being wrapped in a block).
+      let found = false;
+      for (let scan = ai + 1; scan < unmatchedAfter.length; scan++) {
+        const scanIdx = unmatchedAfter[scan];
+        const scanSim = similarity(beforeLines[bIdx], afterLines[scanIdx]);
+        if (scanSim > SIMILARITY_THRESHOLD) {
+          // Mark all skipped after-lines as pure additions.
+          for (let skip = ai; skip < scan; skip++) {
+            afterClasses[unmatchedAfter[skip]] = 'added';
+          }
+          ai = scan;
+          found = true;
+          break;
         }
       }
-      beforeClasses[bIdx] = 'removed';
-      bi++;
+      if (!found) {
+        beforeClasses[bIdx] = 'removed';
+        bi++;
+      }
     }
   }
 

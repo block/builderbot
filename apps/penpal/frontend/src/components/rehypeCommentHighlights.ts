@@ -131,25 +131,32 @@ export default function rehypeCommentHighlights(options: Options) {
       const sourceLine = node.position?.start?.line;
       if (!sourceLine) return;
 
-      // E-PENPAL-HIGHLIGHT-MEDIA: wrap block-level images during continuation
+      // E-PENPAL-HIGHLIGHT-MEDIA: wrap block-level images during continuation.
+      // Images have no text content, so wrapping doesn't consume from remaining —
+      // the next text element will continue matching. Only SKIP if we wrapped,
+      // to avoid falling through to text-matching logic on an image-only block.
       if (isMediaOnlyBlock(node) && continuing.size > 0) {
+        let wrapped = false;
         for (const [, state] of continuing) {
           if (sourceLine > state.highlight.startLine) {
             wrapNodeInMark(node, index!, parent! as Element | Root, state.highlight);
+            wrapped = true;
             break;
           }
         }
-        return SKIP;
+        if (wrapped) return SKIP;
       }
 
       // Continue cross-element highlights into subsequent elements.
       // Only try elements on lines AFTER the highlight's startLine to avoid
       // double-matching in child elements of the start element (whose text
       // was already covered by collectTextNodes on the parent).
+      let continuationMatched = false;
       for (const [threadId, state] of continuing) {
         if (sourceLine <= state.highlight.startLine) continue;
         const matched = applyContinuation(node, state.highlight, state.remaining, state.mermaidCrossed);
         if (matched > 0) {
+          continuationMatched = true;
           const newRemaining = state.remaining.slice(matched).trim();
           if (newRemaining.length === 0) {
             continuing.delete(threadId);
@@ -159,7 +166,7 @@ export default function rehypeCommentHighlights(options: Options) {
         }
       }
       // E-PENPAL-HIGHLIGHT-MEDIA: wrap inline images after continuation marks
-      wrapInlineMedia(node);
+      if (continuationMatched) wrapInlineMedia(node);
 
       // Start new highlights at or near this line.
       // Check nearby lines (0-3 offset) because startLine may point to an empty
@@ -599,13 +606,12 @@ function handleCodeBlock(
   );
   if (!codeChild) return false;
 
+  // Mermaid <pre> blocks are handled by the caller (annotated as media)
+  // before handleCodeBlock is reached, so only syntax-highlighted and
+  // language-less code blocks arrive here.
   const classes = Array.isArray(codeChild.properties?.className)
     ? (codeChild.properties.className as string[]) : [];
-  const isMermaid = classes.some(c => c === 'language-mermaid');
   const hasLanguage = classes.some(c => /^language-/.test(String(c)));
-
-  // Mermaid: skip for now (Phase 2 handles wrapping as media)
-  if (isMermaid) return true;
 
   // Language-less code: fall through to normal mark insertion
   // (SyntaxHighlighter is not used, so <mark> elements render fine)

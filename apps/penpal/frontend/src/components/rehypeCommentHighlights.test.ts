@@ -772,6 +772,40 @@ describe('rehypeCommentHighlights', () => {
       expect(lastPMarks.length).toBeGreaterThanOrEqual(1);
     });
 
+    it('highlight starting near mermaid via lineOffset annotates it', () => {
+      // startLine is 1 line before the mermaid fence (e.g. empty line or
+      // thematic break). The 0-3 lineOffset loop should still find the match.
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makePreCode(4, 'mermaid', 'graph TD\n  A[Start]-->B[End]\n'),
+          makeParagraph(8, 'After text'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          selectedText: 'Start End After text',
+          startLine: 3, // 1 line before the mermaid fence at line 4
+        }],
+      });
+      transform(tree);
+
+      // Mermaid should be annotated via lineOffset match
+      const pre = tree.children[0] as Element;
+      const code = pre.children[0] as Element;
+      expect(code.properties?.dataMermaidHighlight).toBeDefined();
+      const parsed = JSON.parse(String(code.properties?.dataMermaidHighlight));
+      expect(parsed.threadId).toBe('t1');
+
+      // Text after should be highlighted via continuation
+      const lastP = tree.children[1];
+      const lastPMarks = lastP.type === 'element' && (lastP as Element).tagName === 'mark'
+        ? [lastP as Element]
+        : findMarks(lastP as Element);
+      expect(lastPMarks.length).toBeGreaterThanOrEqual(1);
+    });
+
     it('highlight starting at mermaid with no text after only annotates diagram', () => {
       // Selection entirely within mermaid — only SVG labels captured
       const tree: Root = {

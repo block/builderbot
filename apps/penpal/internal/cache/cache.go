@@ -388,15 +388,18 @@ func (c *Cache) RefreshProject(projectName string) {
 	}
 }
 
-// RefreshAllProjects rescans all projects' files and updates metadata
-// E-PENPAL-CACHE: parallel refresh with no concurrency limit.
+// RefreshAllProjects rescans all projects' files and updates metadata.
+// E-PENPAL-CACHE: parallel refresh with concurrency limit of 4.
 func (c *Cache) RefreshAllProjects() {
 	projects := c.Projects()
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
 	for _, p := range projects {
 		wg.Add(1)
 		go func(qn string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			c.RefreshProject(qn)
 		}(p.QualifiedName())
 	}
@@ -410,14 +413,17 @@ var errFoundMarkdown = errors.New("found markdown")
 // CheckAllProjectsHasFiles does a cheap per-project check to set HasFiles
 // without doing a full file scan. For each project, it walks the project
 // root and stops as soon as it finds any .md file.
-// E-PENPAL-SCAN: lightweight startup check — no file list is built.
+// E-PENPAL-SCAN: lightweight startup check with concurrency limit of 4.
 func (c *Cache) CheckAllProjectsHasFiles() {
 	projects := c.Projects()
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
 	for _, p := range projects {
 		wg.Add(1)
 		go func(p discovery.Project) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			found := projectHasAnyMarkdown(p.Path)
 			c.mu.Lock()
 			for i := range c.projects {

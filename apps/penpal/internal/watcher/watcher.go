@@ -578,13 +578,14 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// Only care about .md files for file list updates
-	if !strings.HasSuffix(path, ".md") && event.Op&fsnotify.Create == 0 {
+	// E-PENPAL-WATCHER: only .md file events trigger cache updates. Non-.md
+	// Create events (e.g., scanner temp files, backup artifacts) are ignored.
+	if !strings.HasSuffix(path, ".md") {
 		return
 	}
 
 	// Record activity for .md file changes before debouncing
-	if strings.HasSuffix(path, ".md") && w.activity != nil {
+	if w.activity != nil {
 		if project := w.cache.FindProject(projectName); project != nil {
 			if relPath, err := filepath.Rel(project.Path, path); err == nil {
 				evtType := activity.FileModified

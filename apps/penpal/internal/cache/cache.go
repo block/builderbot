@@ -342,6 +342,13 @@ func (c *Cache) FindFile(projectName, filePath string) *FileInfo {
 	return nil
 }
 
+// IsProjectScanned returns whether a project has had a full file scan.
+func (c *Cache) IsProjectScanned(projectName string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.projectScanned[projectName]
+}
+
 // EnsureProjectScanned triggers a full file scan for a project if it hasn't
 // been scanned yet. Returns true if a scan was actually performed (first call
 // for this project). This is the lazy-scan entry point — called when a user

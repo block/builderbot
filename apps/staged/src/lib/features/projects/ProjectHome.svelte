@@ -524,7 +524,8 @@
         selection.branchName,
         selection.subpath,
         undefined,
-        selection.prNumber
+        selection.prNumber,
+        selection.defaultBranch ?? undefined
       );
       const [projectsList, branches, repos] = await Promise.all([
         commands.listProjects(),

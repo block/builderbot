@@ -15,12 +15,7 @@
 
   interface Props {
     excludeRepos?: Set<string>;
-    onAdded: (selection: {
-      nameWithOwner: string;
-      branchName?: string;
-      subpath?: string;
-      prNumber?: number;
-    }) => void;
+    onAdded: (selection: RepoSelection) => void;
     onClose: () => void;
   }
 
@@ -32,6 +27,7 @@
   let branchName = $state('');
   let isNewBranch = $state(false);
   let matchedPr = $state<PullRequest | null>(null);
+  let defaultBranch = $state<string | null>(null);
   let saving = $state(false);
   let error = $state<string | null>(null);
   let repoConfigApi = $state<
@@ -74,6 +70,7 @@
         branchName: normalizedBranch,
         subpath: normalizedSubpath,
         prNumber,
+        defaultBranch,
       });
       onClose();
     } catch (e) {
@@ -134,6 +131,7 @@
           bind:branchName
           bind:isNewBranch
           bind:matchedPr
+          bind:defaultBranch
           bind:api={repoConfigApi}
           {excludeRepos}
           autofocus

@@ -126,9 +126,10 @@
 
   async function prefetchDefaultBranch(repo: string) {
     try {
-      defaultBranch = await commands.detectDefaultBranch(repo);
+      const branch = await commands.detectDefaultBranch(repo);
+      if (selectedRepo === repo) defaultBranch = branch;
     } catch {
-      defaultBranch = null;
+      if (selectedRepo === repo) defaultBranch = null;
     }
   }
 

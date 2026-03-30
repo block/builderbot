@@ -3,6 +3,8 @@ export interface RepoSelection {
   subpath?: string;
   prNumber?: number;
   branchName?: string;
+  /** Pre-fetched default branch to avoid a slow API call during project/repo creation. */
+  defaultBranch?: string | null;
 }
 
 /**

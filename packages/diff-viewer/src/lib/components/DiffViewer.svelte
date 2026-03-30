@@ -920,7 +920,7 @@
       lineIndex,
       beforeLineToAlignment,
       afterLineToAlignment,
-      activeAlignments,
+      changedAlignments,
       beforeLines,
       afterLines
     );
@@ -932,7 +932,7 @@
       lineIndex,
       beforeLineToAlignment,
       afterLineToAlignment,
-      activeAlignments,
+      changedAlignments,
       beforeLines,
       afterLines
     );

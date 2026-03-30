@@ -1,28 +1,33 @@
 import { describe, expect, it } from 'vitest';
 import { getLineClass, getCharHighlights } from './diffViewerHelpers';
+import type { ChangedAlignmentEntry } from './diffViewerHelpers';
 import type { Alignment } from '../types';
 
 /**
- * Helper to build alignment lookup maps from an alignment array,
- * mapping each line index to its alignment index.
+ * Helper to build alignment lookup maps and the changedAlignments array
+ * from a full alignment array. Maps line indices to the index within
+ * the changedAlignments array (matching production code).
  */
 function buildLookups(alignments: Alignment[]) {
   const beforeLineToAlignment = new Map<number, number>();
   const afterLineToAlignment = new Map<number, number>();
+  const changedAlignments: ChangedAlignmentEntry[] = [];
 
   for (let i = 0; i < alignments.length; i++) {
     const a = alignments[i];
     if (a.changed) {
+      const changedIdx = changedAlignments.length;
+      changedAlignments.push({ alignment: a, index: i });
       for (let line = a.before.start; line < a.before.end; line++) {
-        beforeLineToAlignment.set(line, i);
+        beforeLineToAlignment.set(line, changedIdx);
       }
       for (let line = a.after.start; line < a.after.end; line++) {
-        afterLineToAlignment.set(line, i);
+        afterLineToAlignment.set(line, changedIdx);
       }
     }
   }
 
-  return { beforeLineToAlignment, afterLineToAlignment };
+  return { beforeLineToAlignment, afterLineToAlignment, changedAlignments };
 }
 
 describe('getLineClass', () => {
@@ -30,11 +35,11 @@ describe('getLineClass', () => {
     const alignments: Alignment[] = [
       { before: { start: 0, end: 3 }, after: { start: 0, end: 3 }, changed: false },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     const result = getLineClass(
       'before', 1, beforeLineToAlignment, afterLineToAlignment,
-      alignments, ['a', 'b', 'c'], ['a', 'b', 'c'],
+      changedAlignments, ['a', 'b', 'c'], ['a', 'b', 'c'],
     );
     expect(result).toBeNull();
   });
@@ -46,11 +51,11 @@ describe('getLineClass', () => {
       { before: { start: 0, end: 1 }, after: { start: 0, end: 1 }, changed: true },
       { before: { start: 1, end: 2 }, after: { start: 1, end: 2 }, changed: false },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     const result = getLineClass(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     );
     expect(result).toBe('modified');
   });
@@ -61,11 +66,11 @@ describe('getLineClass', () => {
     const alignments: Alignment[] = [
       { before: { start: 0, end: 1 }, after: { start: 0, end: 1 }, changed: true },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     const result = getLineClass(
       'after', 0, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     );
     expect(result).toBe('modified');
   });
@@ -77,11 +82,11 @@ describe('getLineClass', () => {
       { before: { start: 0, end: 1 }, after: { start: 0, end: 0 }, changed: true },
       { before: { start: 1, end: 2 }, after: { start: 0, end: 1 }, changed: false },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     const result = getLineClass(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     );
     expect(result).toBe('removed');
   });
@@ -93,11 +98,11 @@ describe('getLineClass', () => {
       { before: { start: 0, end: 1 }, after: { start: 0, end: 1 }, changed: false },
       { before: { start: 1, end: 1 }, after: { start: 1, end: 2 }, changed: true },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     const result = getLineClass(
       'after', 1, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     );
     expect(result).toBe('added');
   });
@@ -111,18 +116,18 @@ describe('getLineClass', () => {
       { before: { start: 2, end: 4 }, after: { start: 2, end: 5 }, changed: true },
       { before: { start: 4, end: 5 }, after: { start: 5, end: 6 }, changed: false },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     // Line 2 before: "const a = 1;" should be modified (similar to "const a = 2;")
     expect(getLineClass(
       'before', 2, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     )).toBe('modified');
 
     // Line 3 in after: "newLine();" should be added (no similar before-line)
     expect(getLineClass(
       'after', 3, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     )).toBe('added');
   });
 });
@@ -132,11 +137,11 @@ describe('getCharHighlights', () => {
     const alignments: Alignment[] = [
       { before: { start: 0, end: 1 }, after: { start: 0, end: 1 }, changed: false },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     const result = getCharHighlights(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      alignments, ['hello'], ['hello'],
+      changedAlignments, ['hello'], ['hello'],
     );
     expect(result).toBeNull();
   });
@@ -147,12 +152,12 @@ describe('getCharHighlights', () => {
     const alignments: Alignment[] = [
       { before: { start: 0, end: 1 }, after: { start: 0, end: 1 }, changed: true },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     // Lines are too dissimilar to be "modified", so no char highlights
     const result = getCharHighlights(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     );
     expect(result).toBeNull();
   });
@@ -163,11 +168,11 @@ describe('getCharHighlights', () => {
     const alignments: Alignment[] = [
       { before: { start: 0, end: 1 }, after: { start: 0, end: 1 }, changed: true },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     const result = getCharHighlights(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     );
     expect(result).not.toBeNull();
     expect(result!.length).toBeGreaterThan(0);
@@ -185,11 +190,11 @@ describe('getCharHighlights', () => {
     const alignments: Alignment[] = [
       { before: { start: 0, end: 1 }, after: { start: 0, end: 1 }, changed: true },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     const result = getCharHighlights(
       'after', 0, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     );
     expect(result).not.toBeNull();
     // "slow" replaces "quick" -> highlight at position 4-8
@@ -203,11 +208,11 @@ describe('getCharHighlights', () => {
       { before: { start: 0, end: 1 }, after: { start: 0, end: 1 }, changed: false },
       { before: { start: 1, end: 2 }, after: { start: 1, end: 2 }, changed: true },
     ];
-    const { beforeLineToAlignment, afterLineToAlignment } = buildLookups(alignments);
+    const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
     const result = getCharHighlights(
       'after', 1, beforeLineToAlignment, afterLineToAlignment,
-      alignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines,
     );
     expect(result).not.toBeNull();
     expect(result!.length).toBeGreaterThan(0);

@@ -296,7 +296,7 @@ export function getLineClass(
   lineIndex: number,
   beforeLineToAlignment: Map<number, number>,
   afterLineToAlignment: Map<number, number>,
-  alignments: Alignment[],
+  changedAlignments: ChangedAlignmentEntry[],
   beforeLines: string[],
   afterLines: string[]
 ): BeforeLineClass | AfterLineClass | null {
@@ -304,7 +304,7 @@ export function getLineClass(
   const alignIdx = map.get(lineIndex);
   if (alignIdx === undefined) return null;
 
-  const alignment = alignments[alignIdx];
+  const alignment = changedAlignments[alignIdx].alignment;
   const alignBefore = beforeLines.slice(alignment.before.start, alignment.before.end);
   const alignAfter = afterLines.slice(alignment.after.start, alignment.after.end);
   const result = getLineDiffResult(alignBefore, alignAfter);
@@ -327,7 +327,7 @@ export function getCharHighlights(
   lineIndex: number,
   beforeLineToAlignment: Map<number, number>,
   afterLineToAlignment: Map<number, number>,
-  alignments: Alignment[],
+  changedAlignments: ChangedAlignmentEntry[],
   beforeLines: string[],
   afterLines: string[]
 ): CharHighlight[] | null {
@@ -335,7 +335,7 @@ export function getCharHighlights(
   const alignIdx = map.get(lineIndex);
   if (alignIdx === undefined) return null;
 
-  const alignment = alignments[alignIdx];
+  const alignment = changedAlignments[alignIdx].alignment;
   const alignBefore = beforeLines.slice(alignment.before.start, alignment.before.end);
   const alignAfter = afterLines.slice(alignment.after.start, alignment.after.end);
   const result = getLineDiffResult(alignBefore, alignAfter);

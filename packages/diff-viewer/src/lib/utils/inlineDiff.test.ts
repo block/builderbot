@@ -341,6 +341,46 @@ describe('computeLineDiff', () => {
       expect(result.beforeLines[5]).toBe('modified'); // draft_flag
     });
 
+    it('classifies completely replaced code blocks as removed/added, not modified', () => {
+      // Real-world case: a `let prompt = format!(...)` block is replaced by
+      // a `let git_context = pre_compute_git_context(...)` call preceded by
+      // comments. The lines share structural tokens like `let ... = ...(` but
+      // are semantically unrelated and should NOT be paired as modified.
+      const before = [
+        '    let prompt = format!(',
+        '        r#"<action>',
+        'Create a {pr_type} for the current branch.',
+        '',
+        'Steps:',
+        '1. First, look at the diff between the current branch and when it branched off of the base branch `{base_branch}`.',
+        '2. Push the current branch to the remote: `git push -u origin {branch_name}`',
+        '3. Create a PR using the GitHub CLI: `gh pr create --base {base_branch} --fill-first{draft_flag}`',
+      ];
+      const after = [
+        '    // Pre-compute git context in parallel so the agent can skip straight to',
+        '    // pushing and creating the PR instead of running these deterministic',
+        '    // commands itself.',
+        '    let git_context = pre_compute_git_context(',
+        '        is_remote,',
+        '        &working_dir,',
+        '        workspace_name.as_deref(),',
+        '        &store,',
+        '        &branch,',
+        '        base_branch,',
+        '    );',
+      ];
+      const result = computeLineDiff(before, after);
+
+      // Every before-line should be removed, every after-line should be added
+      for (let i = 0; i < before.length; i++) {
+        expect(result.beforeLines[i]).toBe('removed');
+      }
+      for (let i = 0; i < after.length; i++) {
+        expect(result.afterLines[i]).toBe('added');
+      }
+      expect(result.modifiedPairs).toHaveLength(0);
+    });
+
     it('handles interleaved unchanged and changed lines', () => {
       const before = ['A', 'B', 'C', 'D', 'E'];
       const after = ['A', 'B2', 'C', 'D2', 'E'];

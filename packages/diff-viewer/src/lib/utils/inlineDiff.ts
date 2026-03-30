@@ -90,7 +90,7 @@ function similarity(a: string, b: string): number {
   return (2 * lcsLen) / (a.length + b.length);
 }
 
-const SIMILARITY_THRESHOLD = 0.4;
+const SIMILARITY_THRESHOLD = 0.5;
 
 function splitWords(text: string): string[] {
   return text.split(/(\s+)/);
@@ -183,7 +183,7 @@ export function computeLineDiff(
   while (bi < unmatchedBefore.length && ai < unmatchedAfter.length) {
     const bIdx = unmatchedBefore[bi];
     const aIdx = unmatchedAfter[ai];
-    const sim = similarity(beforeLines[bIdx], afterLines[aIdx]);
+    const sim = similarity(beforeLines[bIdx].trim(), afterLines[aIdx].trim());
 
     if (sim > SIMILARITY_THRESHOLD) {
       beforeClasses[bIdx] = 'modified';
@@ -207,7 +207,7 @@ export function computeLineDiff(
       let found = false;
       for (let scan = ai + 1; scan < unmatchedAfter.length; scan++) {
         const scanIdx = unmatchedAfter[scan];
-        const scanSim = similarity(beforeLines[bIdx], afterLines[scanIdx]);
+        const scanSim = similarity(beforeLines[bIdx].trim(), afterLines[scanIdx].trim());
         if (scanSim > SIMILARITY_THRESHOLD) {
           // Mark all skipped after-lines as pure additions.
           for (let skip = ai; skip < scan; skip++) {

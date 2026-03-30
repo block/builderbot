@@ -39,7 +39,7 @@ export default function rehypeCommentHighlights(options: Options) {
     // Track which highlights have been started to avoid double-applying
     const applied = new Set<string>();
     // Cross-element highlights needing continuation: threadId → remaining normalized text
-    const continuing = new Map<string, { highlight: ThreadHighlight; remaining: string }>();
+    const continuing = new Map<string, { highlight: ThreadHighlight; remaining: string; mermaidCrossed?: boolean }>();
 
     visit(tree, 'element', (node: Element, index, parent) => {
       if (index === undefined || !parent) return;
@@ -52,6 +52,77 @@ export default function rehypeCommentHighlights(options: Options) {
       // string), so handleCodeBlock stores match info as data attributes instead.
       // Language-less <pre> falls through to normal mark insertion.
       if (node.tagName === 'pre') {
+        // E-PENPAL-HIGHLIGHT-MEDIA: annotate mermaid blocks during continuation.
+        // We can't wrap <pre> in <mark> because mermaid rendering uses imperative
+        // DOM mutations (innerHTML = svg). Wrapping changes the tree structure,
+        // causing React to recreate DOM nodes and lose the rendered SVG.
+        // Instead, annotate the <code> element so MarkdownViewer can add highlight
+        // classes to the mermaid container div (props-only change, no DOM recreation).
+        const codeChild = node.children.find(
+          (c): c is Element => c.type === 'element' && c.tagName === 'code'
+        );
+        const isMermaid = codeChild && Array.isArray(codeChild.properties?.className) &&
+          (codeChild.properties.className as string[]).some(c => c === 'language-mermaid');
+        if (isMermaid) {
+          const sourceLine = node.position?.start?.line;
+          let annotated = false;
+
+          // Annotate mermaid during cross-element continuation
+          if (continuing.size > 0 && sourceLine) {
+            for (const [, state] of continuing) {
+              if (sourceLine > state.highlight.startLine) {
+                codeChild.properties = codeChild.properties || {};
+                codeChild.properties.dataMermaidHighlight = JSON.stringify({
+                  threadId: state.highlight.threadId,
+                  pending: state.highlight.pending,
+                });
+                // Mark that this continuation crossed a mermaid block, so
+                // post-mermaid matching is lenient (remaining contains SVG
+                // text from sel.toString() that won't match any HAST element).
+                state.mermaidCrossed = true;
+                annotated = true;
+                break;
+              }
+            }
+          }
+
+          // E-PENPAL-HIGHLIGHT-MEDIA: start highlights whose startLine falls on
+          // this mermaid block. The selectedText from sel.toString() contains SVG
+          // labels (not mermaid source), so we can't text-match — just annotate
+          // the mermaid and schedule the full selectedText for continuation so
+          // adjacent prose elements get highlighted.
+          if (sourceLine) {
+            for (let lineOffset = 0; lineOffset <= 3; lineOffset++) {
+              const lineHighlights = byLine.get(sourceLine - lineOffset);
+              if (!lineHighlights) continue;
+              for (const highlight of lineHighlights) {
+                if (applied.has(highlight.threadId)) continue;
+                applied.add(highlight.threadId);
+                if (!annotated) {
+                  codeChild.properties = codeChild.properties || {};
+                  codeChild.properties.dataMermaidHighlight = JSON.stringify({
+                    threadId: highlight.threadId,
+                    pending: highlight.pending,
+                  });
+                  annotated = true;
+                }
+                // Schedule continuation with the full text — mermaidCrossed
+                // ensures lenient matching past the SVG text in remaining.
+                const normSelected = normalizeSelected(highlight.selectedText);
+                if (normSelected.length >= 3) {
+                  continuing.set(highlight.threadId, {
+                    highlight,
+                    remaining: normSelected,
+                    mermaidCrossed: true,
+                  });
+                }
+              }
+            }
+          }
+
+          return SKIP;
+        }
+
         if (handleCodeBlock(node, continuing, byLine, applied)) {
           return SKIP;
         }
@@ -60,14 +131,32 @@ export default function rehypeCommentHighlights(options: Options) {
       const sourceLine = node.position?.start?.line;
       if (!sourceLine) return;
 
+      // E-PENPAL-HIGHLIGHT-MEDIA: wrap block-level images during continuation.
+      // Images have no text content, so wrapping doesn't consume from remaining —
+      // the next text element will continue matching. Only SKIP if we wrapped,
+      // to avoid falling through to text-matching logic on an image-only block.
+      if (isMediaOnlyBlock(node) && continuing.size > 0) {
+        let wrapped = false;
+        for (const [, state] of continuing) {
+          if (sourceLine > state.highlight.startLine) {
+            wrapNodeInMark(node, index!, parent! as Element | Root, state.highlight);
+            wrapped = true;
+            break;
+          }
+        }
+        if (wrapped) return SKIP;
+      }
+
       // Continue cross-element highlights into subsequent elements.
       // Only try elements on lines AFTER the highlight's startLine to avoid
       // double-matching in child elements of the start element (whose text
       // was already covered by collectTextNodes on the parent).
+      let continuationMatched = false;
       for (const [threadId, state] of continuing) {
         if (sourceLine <= state.highlight.startLine) continue;
-        const matched = applyContinuation(node, state.highlight, state.remaining);
+        const matched = applyContinuation(node, state.highlight, state.remaining, state.mermaidCrossed);
         if (matched > 0) {
+          continuationMatched = true;
           const newRemaining = state.remaining.slice(matched).trim();
           if (newRemaining.length === 0) {
             continuing.delete(threadId);
@@ -76,6 +165,8 @@ export default function rehypeCommentHighlights(options: Options) {
           }
         }
       }
+      // E-PENPAL-HIGHLIGHT-MEDIA: wrap inline images after continuation marks
+      if (continuationMatched) wrapInlineMedia(node);
 
       // Start new highlights at or near this line.
       // Check nearby lines (0-3 offset) because startLine may point to an empty
@@ -98,6 +189,8 @@ export default function rehypeCommentHighlights(options: Options) {
               continuing.set(highlight.threadId, { highlight, remaining: normSelected });
             }
           }
+          // E-PENPAL-HIGHLIGHT-MEDIA: wrap inline images after highlight marks
+          if (result.matched) wrapInlineMedia(node);
         }
       }
     });
@@ -332,7 +425,7 @@ const BLOCK_TAGS = new Set([
   'tr', 'td', 'th', 'section', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
 ]);
 
-function applyContinuation(element: Element, highlight: ThreadHighlight, remaining: string): number {
+function applyContinuation(element: Element, highlight: ThreadHighlight, remaining: string, mermaidCrossed?: boolean): number {
   // Skip container elements with block children — let individual children handle
   // the continuation to avoid matching the wrong child's text when collectTextNodes
   // concatenates all descendants without separators.
@@ -383,13 +476,19 @@ function applyContinuation(element: Element, highlight: ThreadHighlight, remaini
   // with a suffix of remaining (e.g. remaining="s Observability..." and
   // element text starts with "Observability...").
   // Thresholds are proportional to content length to avoid edge cases with
-  // very short or very long text.
-  const minOverlapElement = Math.max(3, Math.min(10, Math.floor(remaining.length / 3)));
+  // very short or very long text. When mermaidCrossed, remaining is polluted
+  // with SVG text from sel.toString() that doesn't appear in HAST, so we
+  // lower thresholds to accept shorter matches at any position.
+  const minOverlapElement = mermaidCrossed ? 3 : Math.max(3, Math.min(10, Math.floor(remaining.length / 3)));
   const probeWindow = Math.max(5, Math.floor(remaining.length / 2));
   if (matchIndex === -1 && normalizedText.length >= minOverlapElement) {
     const probe = normalizedText.slice(0, Math.min(probeWindow, normalizedText.length));
     const overlapIdx = remaining.indexOf(probe);
-    if (overlapIdx > 0 && overlapIdx < probeWindow) {
+    // Accept the overlap if it's within the probe window, OR if the probe
+    // is long enough (≥8 chars) to be specific regardless of position.
+    // After crossing a mermaid block, accept any position with ≥3 char probe
+    // since the SVG text may push the real match arbitrarily far into remaining.
+    if (overlapIdx > 0 && (mermaidCrossed ? probe.length >= 3 : (probe.length >= 8 || overlapIdx < probeWindow))) {
       matchIndex = 0;
       matchLength = Math.min(normalizedText.length, remaining.length - overlapIdx);
       skippedChars = overlapIdx;
@@ -405,6 +504,88 @@ function applyContinuation(element: Element, highlight: ThreadHighlight, remaini
   insertMarks(nodes, origMatchStart, origMatchEnd, highlight);
 
   return skippedChars + matchLength;
+}
+
+// ── Media wrapping ──────────────────────────────────────────────────
+
+// E-PENPAL-HIGHLIGHT-MEDIA: helpers for wrapping images and mermaid diagrams in highlights.
+
+/** Returns true if the element is a block containing only <img> elements and whitespace text. */
+function isMediaOnlyBlock(node: Element): boolean {
+  if (!node.children || node.children.length === 0) return false;
+  let hasImg = false;
+  for (const child of node.children) {
+    if (child.type === 'element' && (child as Element).tagName === 'img') {
+      hasImg = true;
+    } else if (child.type === 'text' && !(child as Text).value.trim()) {
+      // whitespace text node — ok
+    } else {
+      return false;
+    }
+  }
+  return hasImg;
+}
+
+/** Wrap a node in a <mark> element by replacing it in the parent's children array. */
+function wrapNodeInMark(
+  node: Element, index: number, parent: Element | Root, highlight: ThreadHighlight
+): void {
+  const mark: Element = {
+    type: 'element',
+    tagName: 'mark',
+    properties: {
+      className: highlight.pending
+        ? ['comment-highlight', 'pending-highlight']
+        : ['comment-highlight'],
+      dataThreadId: highlight.threadId,
+    },
+    children: [node],
+  };
+  (parent as Element).children[index] = mark;
+}
+
+/** Find the nearest <mark> element searching from `fromIndex` in `direction`, skipping whitespace text. */
+function findNearestMark(children: ElementContent[], fromIndex: number, direction: -1 | 1): Element | null {
+  for (let i = fromIndex + direction; i >= 0 && i < children.length; i += direction) {
+    const c = children[i];
+    if (c.type === 'element' && (c as Element).tagName === 'mark') return c as Element;
+    if (c.type === 'text' && !(c as Text).value.trim()) continue;
+    break;
+  }
+  return null;
+}
+
+/**
+ * After mark insertion, scan an element's children for <img> elements
+ * sandwiched between <mark> elements with the same threadId and wrap them.
+ */
+function wrapInlineMedia(element: Element): void {
+  const children = element.children;
+  for (let i = children.length - 1; i >= 0; i--) {
+    const child = children[i];
+    if (child.type !== 'element') continue;
+    const el = child as Element;
+    if (el.tagName !== 'img') continue;
+
+    const markBefore = findNearestMark(children, i, -1);
+    const markAfter = findNearestMark(children, i, 1);
+
+    if (markBefore && markAfter &&
+        markBefore.properties?.dataThreadId === markAfter.properties?.dataThreadId) {
+      const threadId = markBefore.properties?.dataThreadId as string;
+      const pending = (markBefore.properties?.className as string[])?.includes('pending-highlight');
+      const mark: Element = {
+        type: 'element',
+        tagName: 'mark',
+        properties: {
+          className: pending ? ['comment-highlight', 'pending-highlight'] : ['comment-highlight'],
+          dataThreadId: threadId,
+        },
+        children: [el],
+      };
+      children[i] = mark;
+    }
+  }
 }
 
 // ── Code block bridging ─────────────────────────────────────────────
@@ -425,13 +606,12 @@ function handleCodeBlock(
   );
   if (!codeChild) return false;
 
+  // Mermaid <pre> blocks are handled by the caller (annotated as media)
+  // before handleCodeBlock is reached, so only syntax-highlighted and
+  // language-less code blocks arrive here.
   const classes = Array.isArray(codeChild.properties?.className)
     ? (codeChild.properties.className as string[]) : [];
-  const isMermaid = classes.some(c => c === 'language-mermaid');
   const hasLanguage = classes.some(c => /^language-/.test(String(c)));
-
-  // Mermaid: skip for now (Phase 2 handles wrapping as media)
-  if (isMermaid) return true;
 
   // Language-less code: fall through to normal mark insertion
   // (SyntaxHighlighter is not used, so <mark> elements render fine)

@@ -1364,6 +1364,27 @@ a:hover { text-decoration: underline; }
   box-shadow: 0 0 0 2px rgba(163, 134, 0, 0.4);
   color: #e0e0e0;
 }
+/* E-PENPAL-HIGHLIGHT-MEDIA: mermaid containers use a prominent border + shadow
+   instead of background, since the SVG covers the highlight bg. */
+.mermaid-container.comment-highlight {
+  border: 2px solid #f5c518;
+  box-shadow: 0 0 0 2px rgba(245, 197, 24, 0.35);
+  border-bottom: 2px solid #f5c518;
+  background: var(--bg-surface);
+}
+[data-theme="dark"] .mermaid-container.comment-highlight {
+  border-color: #a38600;
+  box-shadow: 0 0 0 2px rgba(163, 134, 0, 0.35);
+  background: var(--bg-surface);
+}
+.mermaid-container.comment-highlight:hover {
+  border-color: #e8b400;
+  box-shadow: 0 0 0 3px rgba(245, 197, 24, 0.45);
+}
+[data-theme="dark"] .mermaid-container.comment-highlight:hover {
+  border-color: #c79f00;
+  box-shadow: 0 0 0 3px rgba(163, 134, 0, 0.45);
+}
 
 /* Review banner */
 .review-banner {

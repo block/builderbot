@@ -60,6 +60,44 @@ function makeParagraph(line: number, text: string): Element {
   } as Element;
 }
 
+/** Build a <p><img src="..."></p> block-level image paragraph */
+function makeImgParagraph(line: number, src: string): Element {
+  return {
+    type: 'element',
+    tagName: 'p',
+    properties: {},
+    children: [
+      {
+        type: 'element',
+        tagName: 'img',
+        properties: { src },
+        children: [],
+      } as Element,
+    ],
+    position: { start: { line, column: 1, offset: 0 }, end: { line, column: 1, offset: 0 } },
+  } as Element;
+}
+
+/** Build a <p>text <img src="..."> text</p> with inline image */
+function makeParagraphWithImg(line: number, textBefore: string, imgSrc: string, textAfter: string): Element {
+  return {
+    type: 'element',
+    tagName: 'p',
+    properties: {},
+    children: [
+      { type: 'text', value: textBefore } as Text,
+      {
+        type: 'element',
+        tagName: 'img',
+        properties: { src: imgSrc },
+        children: [],
+      } as Element,
+      { type: 'text', value: textAfter } as Text,
+    ],
+    position: { start: { line, column: 1, offset: 0 }, end: { line, column: 1 + textBefore.length + textAfter.length, offset: textBefore.length + textAfter.length } },
+  } as Element;
+}
+
 // E-PENPAL-HIGHLIGHT-REHYPE: verifies <mark> injection, pending class, line matching, and text splitting.
 describe('rehypeCommentHighlights', () => {
   it('wraps matching text in a <mark> with comment-highlight class', () => {
@@ -478,6 +516,372 @@ describe('rehypeCommentHighlights', () => {
       const marks = findMarks(tree);
       expect(marks.length).toBeGreaterThanOrEqual(1);
       expect((marks[0].children[0] as Text).value).toContain('The actual matching text');
+    });
+  });
+
+  // E-PENPAL-HIGHLIGHT-MEDIA: media wrapping tests
+  describe('media highlight wrapping', () => {
+    it('inline image wrapped when between marks with same threadId', () => {
+      // <p>Hello <img> world</p> — highlight covers "Hello" and "world"
+      const tree: Root = {
+        type: 'root',
+        children: [makeParagraphWithImg(1, 'Hello ', 'test.png', ' world')],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{ threadId: 't1', selectedText: 'Hello  world', startLine: 1 }],
+      });
+      transform(tree);
+
+      const marks = findMarks(tree);
+      // Should have 3 marks: "Hello ", <img> wrapper, " world"
+      expect(marks).toHaveLength(3);
+      // The middle mark should wrap the img
+      const imgMark = marks.find(m =>
+        m.children.some(c => c.type === 'element' && (c as Element).tagName === 'img')
+      );
+      expect(imgMark).toBeDefined();
+      expect((imgMark!.properties as Record<string, unknown>).dataThreadId).toBe('t1');
+    });
+
+    it('block-level image wrapped during continuation', () => {
+      // <p>First</p> <p><img></p> <p>Last</p>
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makeParagraph(1, 'First paragraph text'),
+          makeImgParagraph(3, 'diagram.png'),
+          makeParagraph(5, 'Last paragraph text'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          selectedText: 'First paragraph text Last paragraph text',
+          startLine: 1,
+        }],
+      });
+      transform(tree);
+
+      // The image paragraph should be wrapped in a <mark>
+      const rootChildren = tree.children;
+      const imgContainer = rootChildren[1];
+      expect(imgContainer.type).toBe('element');
+      expect((imgContainer as Element).tagName).toBe('mark');
+      expect((imgContainer as Element).properties?.dataThreadId).toBe('t1');
+      // The <p><img></p> should be inside the mark
+      const innerP = (imgContainer as Element).children[0] as Element;
+      expect(innerP.tagName).toBe('p');
+      expect((innerP.children[0] as Element).tagName).toBe('img');
+
+      // First and last paragraphs should also have marks
+      const marks = findMarks(tree);
+      expect(marks.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('mermaid block annotated (not wrapped) during continuation', () => {
+      // <p>Before</p> <pre><code class="language-mermaid">...</code></pre> <p>After</p>
+      // Mermaid blocks can't be wrapped in <mark> because it changes tree structure,
+      // causing React to recreate DOM nodes and lose imperatively-rendered SVG.
+      // Instead, the <code> element gets a dataMermaidHighlight annotation.
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makeParagraph(1, 'Before mermaid text'),
+          makePreCode(3, 'mermaid', 'graph TD\n  A-->B\n'),
+          makeParagraph(7, 'After mermaid text'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          selectedText: 'Before mermaid text After mermaid text',
+          startLine: 1,
+        }],
+      });
+      transform(tree);
+
+      // The mermaid <pre> should NOT be wrapped — tree structure unchanged
+      const pre = tree.children[1] as Element;
+      expect(pre.tagName).toBe('pre');
+
+      // The <code> element should have dataMermaidHighlight annotation
+      const code = pre.children[0] as Element;
+      const raw = code.properties?.dataMermaidHighlight;
+      expect(raw).toBeDefined();
+      const parsed = JSON.parse(String(raw)) as { threadId: string; pending?: boolean };
+      expect(parsed.threadId).toBe('t1');
+
+      // Before and after paragraphs should also have marks
+      const proseMarks = findMarks(tree).filter(m =>
+        m.children.some(c => c.type === 'text')
+      );
+      expect(proseMarks.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('image NOT wrapped when highlight is only on one side', () => {
+      // <p>Hello <img> world</p> — highlight covers only "Hello"
+      const tree: Root = {
+        type: 'root',
+        children: [makeParagraphWithImg(1, 'Hello ', 'test.png', ' world')],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{ threadId: 't1', selectedText: 'Hello', startLine: 1 }],
+      });
+      transform(tree);
+
+      const marks = findMarks(tree);
+      // Should have 1 mark for "Hello" only — img should NOT be wrapped
+      expect(marks).toHaveLength(1);
+      expect((marks[0].children[0] as Text).value).toBe('Hello');
+
+      // The img should still be a direct child of the <p>, not wrapped in <mark>
+      const p = tree.children[0] as Element;
+      const hasDirectImg = p.children.some(
+        c => c.type === 'element' && (c as Element).tagName === 'img'
+      );
+      expect(hasDirectImg).toBe(true);
+    });
+
+    it('mermaid annotation carries pending flag', () => {
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makeParagraph(1, 'Before text'),
+          makePreCode(3, 'mermaid', 'graph TD\n  A-->B\n'),
+          makeParagraph(7, 'After text'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          selectedText: 'Before text After text',
+          startLine: 1,
+          pending: true,
+        }],
+      });
+      transform(tree);
+
+      const pre = tree.children[1] as Element;
+      const code = pre.children[0] as Element;
+      const parsed = JSON.parse(String(code.properties?.dataMermaidHighlight)) as { threadId: string; pending?: boolean };
+      expect(parsed.pending).toBe(true);
+    });
+
+    it('continuation works past mermaid when selectedText has SVG text', () => {
+      // Real scenario: user selects from prose through a mermaid diagram to prose
+      // after. Selection captures SVG node labels (not mermaid source), so the
+      // remaining after matching the first paragraph contains junk SVG text
+      // before the post-mermaid paragraph text.
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makeParagraph(1, 'Before mermaid text'),
+          makePreCode(3, 'mermaid', 'graph TD\n  A[Start]-->B[End]\n'),
+          makeParagraph(7, 'After mermaid text here'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          // Simulates sel.toString(): prose + SVG labels + post-prose
+          selectedText: 'Before mermaid text Start End After mermaid text here',
+          startLine: 1,
+        }],
+      });
+      transform(tree);
+
+      // First paragraph should be highlighted
+      const firstPMarks = findMarks(tree.children[0] as Element);
+      expect(firstPMarks.length).toBeGreaterThanOrEqual(1);
+
+      // Mermaid block should be annotated
+      const pre = tree.children[1] as Element;
+      const code = pre.children[0] as Element;
+      expect(code.properties?.dataMermaidHighlight).toBeDefined();
+
+      // Last paragraph should also be highlighted via continuation
+      const lastP = tree.children[2];
+      // lastP might be wrapped in <mark> (block-level) or have inner marks
+      const lastPMarks = lastP.type === 'element' && (lastP as Element).tagName === 'mark'
+        ? [lastP as Element]
+        : findMarks(lastP as Element);
+      expect(lastPMarks.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('short text after mermaid is highlighted via mermaidCrossed flag', () => {
+      // When SVG text is long relative to post-mermaid text, the normal
+      // Strategy 3 thresholds reject the match. mermaidCrossed lowers them.
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makeParagraph(1, 'Intro text'),
+          makePreCode(3, 'mermaid', 'graph TD\n  A[Login]-->B[Dashboard]-->C[Settings]-->D[Profile]\n'),
+          makeParagraph(8, 'Done'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          // SVG labels are long, post-mermaid text is short
+          selectedText: 'Intro text Login Dashboard Settings Profile Done',
+          startLine: 1,
+        }],
+      });
+      transform(tree);
+
+      const lastP = tree.children[2];
+      const lastPMarks = lastP.type === 'element' && (lastP as Element).tagName === 'mark'
+        ? [lastP as Element]
+        : findMarks(lastP as Element);
+      expect(lastPMarks.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('highlight starting at mermaid annotates it and continues to text after', () => {
+      // User drags selection from text below UP into a preceding mermaid diagram.
+      // startLine lands on the mermaid block. The rehype plugin must annotate
+      // the mermaid and set up continuation so the text after is also highlighted.
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makePreCode(1, 'mermaid', 'graph TD\n  A[Start]-->B[End]\n'),
+          makeParagraph(5, 'Text after the diagram'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          // sel.toString() captures SVG labels + text after
+          selectedText: 'Start End Text after the diagram',
+          startLine: 1,
+        }],
+      });
+      transform(tree);
+
+      // Mermaid block should be annotated
+      const pre = tree.children[0] as Element;
+      const code = pre.children[0] as Element;
+      expect(code.properties?.dataMermaidHighlight).toBeDefined();
+      const parsed = JSON.parse(String(code.properties?.dataMermaidHighlight));
+      expect(parsed.threadId).toBe('t1');
+
+      // Text after should also be highlighted via continuation
+      const lastP = tree.children[1];
+      const lastPMarks = lastP.type === 'element' && (lastP as Element).tagName === 'mark'
+        ? [lastP as Element]
+        : findMarks(lastP as Element);
+      expect(lastPMarks.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('highlight starting near mermaid via lineOffset annotates it', () => {
+      // startLine is 1 line before the mermaid fence (e.g. empty line or
+      // thematic break). The 0-3 lineOffset loop should still find the match.
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makePreCode(4, 'mermaid', 'graph TD\n  A[Start]-->B[End]\n'),
+          makeParagraph(8, 'After text'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          selectedText: 'Start End After text',
+          startLine: 3, // 1 line before the mermaid fence at line 4
+        }],
+      });
+      transform(tree);
+
+      // Mermaid should be annotated via lineOffset match
+      const pre = tree.children[0] as Element;
+      const code = pre.children[0] as Element;
+      expect(code.properties?.dataMermaidHighlight).toBeDefined();
+      const parsed = JSON.parse(String(code.properties?.dataMermaidHighlight));
+      expect(parsed.threadId).toBe('t1');
+
+      // Text after should be highlighted via continuation
+      const lastP = tree.children[1];
+      const lastPMarks = lastP.type === 'element' && (lastP as Element).tagName === 'mark'
+        ? [lastP as Element]
+        : findMarks(lastP as Element);
+      expect(lastPMarks.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('highlight starting at mermaid with no text after only annotates diagram', () => {
+      // Selection entirely within mermaid — only SVG labels captured
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makeParagraph(1, 'Before the diagram'),
+          makePreCode(3, 'mermaid', 'graph TD\n  A[Login]-->B[Dashboard]\n'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          selectedText: 'Login Dashboard',
+          startLine: 3,
+        }],
+      });
+      transform(tree);
+
+      // Mermaid should be annotated
+      const pre = tree.children[1] as Element;
+      const code = pre.children[0] as Element;
+      expect(code.properties?.dataMermaidHighlight).toBeDefined();
+
+      // Before paragraph should NOT be highlighted (highlight starts at mermaid, not before)
+      const beforeMarks = findMarks(tree.children[0] as Element);
+      expect(beforeMarks).toHaveLength(0);
+    });
+
+    it('mermaid block NOT annotated when no continuation is active', () => {
+      // Mermaid block as first element — no highlight spans into it
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makePreCode(1, 'mermaid', 'graph TD\n  A-->B\n'),
+          makeParagraph(5, 'Some text after'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{ threadId: 't1', selectedText: 'Some text after', startLine: 5 }],
+      });
+      transform(tree);
+
+      // Mermaid should NOT have annotation
+      const pre = tree.children[0] as Element;
+      expect(pre.tagName).toBe('pre');
+      const code = pre.children[0] as Element;
+      expect(code.properties?.dataMermaidHighlight).toBeUndefined();
+
+      // Paragraph should have a mark
+      const marks = findMarks(tree);
+      expect(marks).toHaveLength(1);
+    });
+
+    it('pending class propagated to media wrapping marks', () => {
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makeParagraph(1, 'Before text'),
+          makeImgParagraph(3, 'photo.png'),
+          makeParagraph(5, 'After text'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          selectedText: 'Before text After text',
+          startLine: 1,
+          pending: true,
+        }],
+      });
+      transform(tree);
+
+      // The image paragraph wrapper should have pending class
+      const imgContainer = tree.children[1] as Element;
+      expect(imgContainer.tagName).toBe('mark');
+      expect((imgContainer.properties?.className as string[])).toContain('pending-highlight');
     });
   });
 

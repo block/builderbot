@@ -236,6 +236,8 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 - <a id="P-PENPAL-HIGHLIGHT-CROSS"></a>**P-PENPAL-HIGHLIGHT-CROSS**: A single highlight can span across formatting boundaries — bold, italic, code, links, and other inline markup — as well as cross between code blocks and surrounding prose.
 
+- <a id="P-PENPAL-HIGHLIGHT-MEDIA"></a>**P-PENPAL-HIGHLIGHT-MEDIA**: A highlight that intersects an image or mermaid diagram expands to encompass the entire media element. Selecting text that spans into, through, or starting within a diagram highlights the diagram with a visible yellow border and highlights the adjacent text normally. Dragging a selection out of a mermaid diagram transitions from rectangle selection to text selection, including the whole diagram in the resulting highlight.
+
 ---
 
 ## Mermaid Diagram Comments

@@ -230,12 +230,31 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
             // Use AST node position to set data-source-line at render time,
             // matching how the Go template sets it server-side.
             const sourceLine = node?.position?.start?.line;
+
+            // E-PENPAL-HIGHLIGHT-MEDIA: read highlight annotation from rehype plugin.
+            // Applied as className (not a <mark> wrapper) to avoid changing tree
+            // structure, which would cause React to recreate the DOM node and lose
+            // the imperatively-rendered mermaid SVG.
+            let highlightClass = 'mermaid-container';
+            let highlightThreadId: string | undefined;
+            const mermaidHighlightRaw = node?.properties?.dataMermaidHighlight;
+            if (typeof mermaidHighlightRaw === 'string') {
+              try {
+                const parsed = JSON.parse(mermaidHighlightRaw) as { threadId: string; pending?: boolean };
+                highlightClass += parsed.pending
+                  ? ' comment-highlight pending-highlight'
+                  : ' comment-highlight';
+                highlightThreadId = parsed.threadId;
+              } catch { /* ignore malformed */ }
+            }
+
             return (
               <div
-                className="mermaid-container"
+                className={highlightClass}
                 data-mermaid-source={String(children)}
                 data-unwrap-pre=""
                 {...(sourceLine ? { 'data-source-line': String(sourceLine) } : {})}
+                {...(highlightThreadId ? { 'data-thread-id': highlightThreadId } : {})}
               >
                 <pre>
                   <code>{children}</code>

@@ -125,6 +125,23 @@ describe('MarkdownViewer', () => {
     expect(combinedText).toBe('func main');
   });
 
+  // E-PENPAL-HIGHLIGHT-CROSS: cross-boundary highlight renders in code block
+  it('renders cross-boundary highlight spanning prose and code block', () => {
+    const md = 'Some text\n\n```js\nreturn 1;\n```';
+    const highlights = [
+      { threadId: 't-cross', selectedText: 'Some text return 1;', startLine: 1 },
+    ];
+    const { container } = render(
+      <MarkdownViewer content={md} rawMarkdown={md} highlights={highlights} />,
+    );
+    // Prose portion should be highlighted
+    const proseMarks = container.querySelectorAll('p mark.comment-highlight');
+    expect(proseMarks.length).toBeGreaterThan(0);
+    // Code portion should also be highlighted (via dataCrossHighlights → renderer)
+    const codeMarks = container.querySelectorAll('pre mark.comment-highlight[data-thread-id="t-cross"]');
+    expect(codeMarks.length).toBeGreaterThan(0);
+  });
+
   it('renders pending highlights with pending-highlight class', () => {
     const md = 'Hello world';
     const highlights = [

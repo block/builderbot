@@ -8,6 +8,7 @@ import type { Components } from 'react-markdown';
 import type { Heading } from './TableOfContents';
 import remarkSourceLine from './remarkSourceLine';
 import rehypeCommentHighlights from './rehypeCommentHighlights';
+import { nthIndexOf } from './rehypeCommentHighlights';
 import type { ThreadHighlight } from './rehypeCommentHighlights';
 
 // Customize Prism's Dracula to match Go's Chroma Dracula output.
@@ -96,7 +97,7 @@ function collectLeaves(node: RendererNode, offset: number, out: { node: Renderer
 }
 
 function createCodeHighlightRenderer(
-  codeHighlights: { selectedText: string; threadId: string; pending?: boolean }[],
+  codeHighlights: { selectedText: string; threadId: string; pending?: boolean; occurrenceIndex?: number }[],
 ) {
   return ({ rows, stylesheet, useInlineStyles }: { rows: RendererNode[]; stylesheet: Record<string, React.CSSProperties>; useInlineStyles: boolean }) => {
     // Build full code text and collect all text leaves across all rows
@@ -108,10 +109,10 @@ function createCodeHighlightRenderer(
     }
     const fullText = allLeaves.map(l => String(l.node.value ?? '')).join('');
 
-    // Find match ranges for each highlight
+    // Find match ranges for each highlight, respecting occurrenceIndex
     const matchRanges: { start: number; end: number; threadId: string; pending?: boolean }[] = [];
     for (const hl of codeHighlights) {
-      const idx = fullText.indexOf(hl.selectedText);
+      const idx = nthIndexOf(fullText, hl.selectedText, hl.occurrenceIndex ?? 0);
       if (idx !== -1) {
         matchRanges.push({ start: idx, end: idx + hl.selectedText.length, threadId: hl.threadId, pending: hl.pending });
       }
@@ -242,12 +243,22 @@ const MarkdownViewer = forwardRef<HTMLDivElement, MarkdownViewerProps>(
             const codeLineCount = codeText.split('\n').length;
 
             // Find highlights targeting lines within this code block
-            const codeHighlights = (highlights ?? []).filter(hl => {
-              if (!sourceLine) return false;
-              // Code block spans from sourceLine (``` fence) to sourceLine + codeLineCount + 1 (closing ```)
-              // Include fence line (>=) so anchors resolved to the opening ``` aren't silently dropped
-              return hl.startLine >= sourceLine && hl.startLine <= sourceLine + codeLineCount;
-            });
+            const codeHighlights: { selectedText: string; threadId: string; pending?: boolean; occurrenceIndex?: number }[] =
+              (highlights ?? []).filter(hl => {
+                if (!sourceLine) return false;
+                // Code block spans from sourceLine (``` fence) to sourceLine + codeLineCount + 1 (closing ```)
+                // Include fence line (>=) so anchors resolved to the opening ``` aren't silently dropped
+                return hl.startLine >= sourceLine && hl.startLine <= sourceLine + codeLineCount;
+              });
+
+            // E-PENPAL-HIGHLIGHT-CROSS: cross-boundary highlights from rehype plugin
+            const crossRaw = node?.properties?.dataCrossHighlights;
+            if (typeof crossRaw === 'string') {
+              try {
+                const parsed = JSON.parse(crossRaw) as { threadId: string; selectedText: string; pending?: boolean }[];
+                codeHighlights.push(...parsed);
+              } catch { /* ignore malformed */ }
+            }
 
             const rendererProp = codeHighlights.length > 0
               ? createCodeHighlightRenderer(codeHighlights)

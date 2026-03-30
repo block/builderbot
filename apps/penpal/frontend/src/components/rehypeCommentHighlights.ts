@@ -44,11 +44,18 @@ export default function rehypeCommentHighlights(options: Options) {
     visit(tree, 'element', (node: Element, index, parent) => {
       if (index === undefined || !parent) return;
 
-      // Skip fenced code blocks — SyntaxHighlighter re-parses children as
-      // a plain string, so inserting <mark> elements into the HAST tree
-      // corrupts the output (children become [string, object, string] which
-      // stringifies as ",[object Object],").
-      if (node.tagName === 'pre' || node.tagName === 'code') return SKIP;
+      // Inline <code> — already handled by parent's collectTextNodes
+      if (node.tagName === 'code') return SKIP;
+
+      // E-PENPAL-HIGHLIGHT-CROSS: fenced code blocks with syntax highlighting
+      // can't have <mark> elements (SyntaxHighlighter re-parses children as a
+      // string), so handleCodeBlock stores match info as data attributes instead.
+      // Language-less <pre> falls through to normal mark insertion.
+      if (node.tagName === 'pre') {
+        if (handleCodeBlock(node, continuing, byLine, applied)) {
+          return SKIP;
+        }
+      }
 
       const sourceLine = node.position?.start?.line;
       if (!sourceLine) return;
@@ -123,7 +130,21 @@ function collectTextNodes(node: Element): { nodes: { node: Text; parent: Element
   return { nodes: result, text };
 }
 
-// ── Shared normalization and mark-insertion helpers ───────────────────
+// ── Shared helpers ──────────────────────────────────────────────────
+
+/** Find the Nth occurrence of `search` in `text`. Falls back to first occurrence if target not found. */
+export function nthIndexOf(text: string, search: string, occurrence: number): number {
+  let pos = 0;
+  for (let i = 0; i <= occurrence; i++) {
+    const found = text.indexOf(search, pos);
+    if (found === -1) return i === 0 ? -1 : text.indexOf(search);
+    if (i === occurrence) return found;
+    pos = found + 1;
+  }
+  return -1;
+}
+
+// ── Normalization and mark-insertion helpers ─────────────────────────
 
 function normalizeHast(text: string): string {
   return text.replace(/[*_`]/g, '').replace(/\s+/g, ' ');
@@ -239,17 +260,8 @@ function applyHighlight(element: Element, highlight: ThreadHighlight): { remaini
   const normSelected = normalizeSelected(highlight.selectedText);
 
   // Use occurrenceIndex to find the Nth match within the block
-  let matchIndex = -1;
+  let matchIndex = nthIndexOf(normalizedText, normSelected, highlight.occurrenceIndex ?? 0);
   let matchLength = normSelected.length;
-  const targetOccurrence = highlight.occurrenceIndex ?? 0;
-  let pos = 0;
-  for (let i = 0; i <= targetOccurrence; i++) {
-    const found = normalizedText.indexOf(normSelected, pos);
-    if (found === -1) break;
-    if (i === targetOccurrence) matchIndex = found;
-    pos = found + 1;
-  }
-  if (matchIndex === -1) matchIndex = normalizedText.indexOf(normSelected);
 
   let isCrossElement = false;
 
@@ -393,4 +405,158 @@ function applyContinuation(element: Element, highlight: ThreadHighlight, remaini
   insertMarks(nodes, origMatchStart, origMatchEnd, highlight);
 
   return skippedChars + matchLength;
+}
+
+// ── Code block bridging ─────────────────────────────────────────────
+
+// E-PENPAL-HIGHLIGHT-CROSS: Handle syntax-highlighted code blocks for cross-boundary highlights.
+// Can't insert <mark> elements (SyntaxHighlighter re-parses children as a string),
+// so stores match info as dataCrossHighlights on the <code> element for
+// MarkdownViewer's code component to read at render time.
+// Returns true if the <pre> was handled (caller should SKIP), false to fall through.
+function handleCodeBlock(
+  preNode: Element,
+  continuing: Map<string, { highlight: ThreadHighlight; remaining: string }>,
+  byLine: Map<number, ThreadHighlight[]>,
+  applied: Set<string>,
+): boolean {
+  const codeChild = preNode.children.find(
+    (c): c is Element => c.type === 'element' && c.tagName === 'code'
+  );
+  if (!codeChild) return false;
+
+  const classes = Array.isArray(codeChild.properties?.className)
+    ? (codeChild.properties.className as string[]) : [];
+  const isMermaid = classes.some(c => c === 'language-mermaid');
+  const hasLanguage = classes.some(c => /^language-/.test(String(c)));
+
+  // Mermaid: skip for now (Phase 2 handles wrapping as media)
+  if (isMermaid) return true;
+
+  // Language-less code: fall through to normal mark insertion
+  // (SyntaxHighlighter is not used, so <mark> elements render fine)
+  if (!hasLanguage) return false;
+
+  const codeText = collectTextNodes(codeChild).text.replace(/\n$/, '');
+  if (!codeText) return true;
+
+  const preSourceLine = preNode.position?.start?.line;
+  if (!preSourceLine) return true;
+
+  const normalizedCode = normalizeHast(codeText);
+  const normToOrig = buildNormToOrigMap(codeText, normalizedCode);
+  const codeLineCount = codeText.split('\n').length;
+  const crossHighlights: { threadId: string; selectedText: string; pending?: boolean }[] = [];
+
+  // 1. Continue existing cross-element highlights into this code block
+  for (const [threadId, state] of continuing) {
+    if (preSourceLine <= state.highlight.startLine) continue;
+
+    const match = matchTextInCode(normalizedCode, state.remaining);
+    if (!match) continue;
+
+    const origStart = normToOrig[match.matchIndex];
+    const origEnd = normToOrig[match.matchIndex + match.matchLength];
+    crossHighlights.push({
+      threadId,
+      selectedText: codeText.slice(origStart, origEnd),
+      pending: state.highlight.pending,
+    });
+
+    const consumed = match.skippedChars + match.matchLength;
+    const newRemaining = state.remaining.slice(consumed).trim();
+    if (newRemaining.length === 0) {
+      continuing.delete(threadId);
+    } else {
+      state.remaining = newRemaining;
+    }
+  }
+
+  // 2. Start new highlights whose startLine falls within this code block
+  for (let lineOffset = 0; lineOffset <= codeLineCount; lineOffset++) {
+    const lineHighlights = byLine.get(preSourceLine + lineOffset);
+    if (!lineHighlights) continue;
+
+    for (const highlight of lineHighlights) {
+      if (applied.has(highlight.threadId)) continue;
+
+      const normSelected = normalizeSelected(highlight.selectedText);
+      const match = matchTextInCode(normalizedCode, normSelected, highlight.occurrenceIndex);
+      if (!match) continue;
+
+      applied.add(highlight.threadId);
+
+      // Full match (code-only highlight) — skip cross-highlight storage.
+      // MarkdownViewer's existing startLine filter handles these; storing
+      // here too would cause double-matching and text duplication.
+      if (match.matchLength >= normSelected.length) continue;
+
+      // Partial match — store cross-highlight for the code portion
+      const origStart = normToOrig[match.matchIndex];
+      const origEnd = normToOrig[match.matchIndex + match.matchLength];
+      crossHighlights.push({
+        threadId: highlight.threadId,
+        selectedText: codeText.slice(origStart, origEnd),
+        pending: highlight.pending,
+      });
+
+      // Set up continuation for remaining text past the code block
+      if (match.matchLength < normSelected.length) {
+        const remaining = normSelected.slice(match.matchLength).trim();
+        if (remaining.length >= 1) {
+          continuing.set(highlight.threadId, { highlight, remaining });
+        }
+      }
+    }
+  }
+
+  // Store cross-highlights on the <code> element for MarkdownViewer to read
+  if (crossHighlights.length > 0) {
+    codeChild.properties = codeChild.properties || {};
+    codeChild.properties.dataCrossHighlights = JSON.stringify(crossHighlights);
+  }
+
+  return true;
+}
+
+/** Match search text against normalized code text, returning match position or null. */
+function matchTextInCode(
+  normalizedCode: string,
+  searchText: string,
+  occurrenceIndex?: number,
+): { matchIndex: number; matchLength: number; skippedChars: number } | null {
+  // Try full match with occurrence index
+  const matchIndex = nthIndexOf(normalizedCode, searchText, occurrenceIndex ?? 0);
+  if (matchIndex !== -1) {
+    return { matchIndex, matchLength: searchText.length, skippedChars: 0 };
+  }
+
+  // Binary search for longest prefix
+  if (searchText.length > 3) {
+    let lo = 3, hi = Math.min(searchText.length - 1, normalizedCode.length);
+    while (lo <= hi) {
+      const mid = (lo + hi) >>> 1;
+      if (normalizedCode.indexOf(searchText.slice(0, mid)) !== -1) {
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (hi >= 3) {
+      const prefixLen = hi;
+      const prefixIdx = normalizedCode.indexOf(searchText.slice(0, prefixLen));
+      if (prefixIdx !== -1) {
+        return { matchIndex: prefixIdx, matchLength: prefixLen, skippedChars: 0 };
+      }
+    }
+  }
+
+  // Short text positional match
+  if (searchText.length < 3 && searchText.length >= 1) {
+    if (normalizedCode.startsWith(searchText)) {
+      return { matchIndex: 0, matchLength: searchText.length, skippedChars: 0 };
+    }
+  }
+
+  return null;
 }

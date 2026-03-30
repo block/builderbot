@@ -592,6 +592,269 @@ func extractTitle(path string) string {
 	return ""
 }
 
+// ResolveFileInfo resolves source membership for a single absolute .md file path
+// within a project. It applies the same source-priority, SkipDirs, RequireSibling,
+// and ClassifyFile rules as scanProjectSources but without walking the filesystem
+// or spawning a git check-ignore process. Returns FileInfo entries for each source
+// that claims the file (typically one typed source + __all_markdown__). Returns nil
+// if no source claims the file.
+// E-PENPAL-SCAN: single-file source resolution for incremental cache updates.
+func ResolveFileInfo(project *discovery.Project, absPath string) []FileInfo {
+	if !strings.HasSuffix(absPath, ".md") {
+		return nil
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil
+	}
+
+	relToProject, err := filepath.Rel(project.Path, absPath)
+	if err != nil || strings.HasPrefix(relToProject, "..") {
+		return nil
+	}
+
+	title := extractTitle(absPath)
+	var results []FileInfo
+	typedClaimed := false
+
+	for _, source := range project.Sources {
+		isAllMarkdown := source.Name == "__all_markdown__"
+
+		if source.Type == "thoughts" || source.Type == "tree" {
+			rootPath := source.RootPath
+			if rootPath == "" {
+				continue
+			}
+
+			// Check containment
+			if !strings.HasPrefix(absPath, rootPath+"/") && absPath != rootPath {
+				continue
+			}
+
+			relToSource, err := filepath.Rel(rootPath, absPath)
+			if err != nil {
+				continue
+			}
+
+			// Check SkipDirs against each path component
+			stName := source.SourceTypeName
+			if stName == "" {
+				stName = source.Name
+			}
+			st := discovery.GetSourceType(stName)
+
+			if !isAllMarkdown && typedClaimed {
+				continue // already claimed by an earlier typed source
+			}
+
+			if hasSkippedDir(relToSource, st) {
+				continue
+			}
+
+			// RequireSibling check
+			if st != nil && st.RequireSibling != "" {
+				siblingPath := filepath.Join(filepath.Dir(absPath), st.RequireSibling)
+				if _, err := os.Stat(siblingPath); err != nil {
+					continue
+				}
+			}
+
+			// ClassifyFile
+			fileType := "other"
+			if st != nil && st.ClassifyFile != nil {
+				fileType = st.ClassifyFile(relToSource)
+				if fileType == "" {
+					continue // skip this file for this source
+				}
+			} else {
+				if strings.Contains(relToSource, "research") {
+					fileType = "research"
+				} else if strings.Contains(relToSource, "plan") {
+					fileType = "plan"
+				}
+			}
+
+			if !isAllMarkdown {
+				typedClaimed = true
+			}
+
+			results = append(results, FileInfo{
+				Project:     project.QualifiedName(),
+				Workspace:   project.WorkspaceName,
+				ProjectPath: project.Path,
+				Source:      source.Name,
+				SourceType:  source.Type,
+				SourceAuto:  source.Auto,
+				Path:        relToSource,
+				FullPath:    relToProject,
+				Name:        filepath.Base(absPath),
+				Title:       title,
+				ModTime:     info.ModTime(),
+				FileType:    fileType,
+			})
+
+		} else if source.Type == "files" {
+			if !isAllMarkdown && typedClaimed {
+				continue
+			}
+			found := false
+			for _, f := range source.Files {
+				if f == absPath {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+
+			fileType := "other"
+			lower := strings.ToLower(filepath.Base(absPath))
+			if strings.Contains(lower, "research") {
+				fileType = "research"
+			} else if strings.Contains(lower, "plan") {
+				fileType = "plan"
+			}
+
+			if !isAllMarkdown {
+				typedClaimed = true
+			}
+
+			results = append(results, FileInfo{
+				Project:     project.QualifiedName(),
+				Workspace:   project.WorkspaceName,
+				ProjectPath: project.Path,
+				Source:      source.Name,
+				SourceType:  source.Type,
+				SourceAuto:  source.Auto,
+				Path:        filepath.Base(absPath),
+				FullPath:    relToProject,
+				Name:        filepath.Base(absPath),
+				Title:       title,
+				ModTime:     info.ModTime(),
+				FileType:    fileType,
+			})
+		}
+	}
+
+	return results
+}
+
+// hasSkippedDir checks whether any directory component between the source root
+// and the file matches the source type's SkipDirs.
+func hasSkippedDir(relToSource string, st *discovery.SourceType) bool {
+	if st == nil || len(st.SkipDirs) == 0 {
+		return false
+	}
+	dir := filepath.Dir(relToSource)
+	if dir == "." {
+		return false
+	}
+	for _, component := range strings.Split(dir, string(filepath.Separator)) {
+		if st.SkipDirs[component] {
+			return true
+		}
+	}
+	return false
+}
+
+// UpsertFile adds or updates file entries in the cache for the given absolute path.
+// For existing entries (matched by FullPath), re-stats for ModTime and re-extracts
+// Title. For new files, resolves source membership and inserts.
+// E-PENPAL-CACHE: incremental cache mutation without filesystem walk.
+func (c *Cache) UpsertFile(projectName string, project *discovery.Project, absPath string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	files := c.projectFiles[projectName]
+
+	// Check if any entries already exist for this path
+	relToProject, err := filepath.Rel(project.Path, absPath)
+	if err != nil {
+		return false
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return false
+	}
+
+	updated := false
+	for i := range files {
+		if files[i].FullPath == relToProject {
+			files[i].ModTime = info.ModTime()
+			files[i].Title = extractTitle(absPath)
+			updated = true
+		}
+	}
+
+	if updated {
+		sort.Slice(files, func(i, j int) bool {
+			return files[i].ModTime.After(files[j].ModTime)
+		})
+		c.projectFiles[projectName] = files
+		c.updateProjectMetadataLocked(projectName, files)
+		return true
+	}
+
+	// New file — resolve source membership
+	resolved := ResolveFileInfo(project, absPath)
+	if len(resolved) == 0 {
+		return false
+	}
+
+	files = append(files, resolved...)
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].ModTime.After(files[j].ModTime)
+	})
+	c.projectFiles[projectName] = files
+	c.updateProjectMetadataLocked(projectName, files)
+	return true
+}
+
+// RemoveFile removes all cache entries with the given project-relative path.
+// E-PENPAL-CACHE: incremental cache mutation without filesystem walk.
+func (c *Cache) RemoveFile(projectName, fullPath string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	files := c.projectFiles[projectName]
+	if files == nil {
+		return false
+	}
+
+	n := 0
+	for _, f := range files {
+		if f.FullPath != fullPath {
+			files[n] = f
+			n++
+		}
+	}
+	if n == len(files) {
+		return false // nothing removed
+	}
+
+	files = files[:n]
+	c.projectFiles[projectName] = files
+	c.updateProjectMetadataLocked(projectName, files)
+	return true
+}
+
+// updateProjectMetadataLocked updates HasFiles and LastModified for a project.
+// Must be called with c.mu held for writing.
+func (c *Cache) updateProjectMetadataLocked(projectName string, files []FileInfo) {
+	for i := range c.projects {
+		if c.projects[i].QualifiedName() == projectName {
+			c.projects[i].HasFiles = len(files) > 0
+			if len(files) > 0 {
+				c.projects[i].LastModified = files[0].ModTime
+			}
+			break
+		}
+	}
+}
+
 // ScanProjectSourcesForWorktree scans a project's sources remapped to a worktree path.
 // Each source's RootPath under the project is remapped to the equivalent path under
 // the worktree. Sources whose directory doesn't exist in the worktree are skipped.

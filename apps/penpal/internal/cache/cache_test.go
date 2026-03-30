@@ -701,3 +701,338 @@ func TestCache_FindFile(t *testing.T) {
 		})
 	}
 }
+
+// E-PENPAL-SCAN: verifies single-file source resolution matches scan behavior.
+func TestResolveFileInfo_ThoughtsSource(t *testing.T) {
+	tmpDir := t.TempDir()
+	thoughtsDir := filepath.Join(tmpDir, "thoughts")
+	os.MkdirAll(filepath.Join(thoughtsDir, "research"), 0755)
+
+	filePath := filepath.Join(thoughtsDir, "research", "topic.md")
+	os.WriteFile(filePath, []byte("# My Research"), 0644)
+
+	project := &discovery.Project{
+		Name: "test",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: thoughtsDir, Auto: true},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: tmpDir, Auto: true},
+		},
+	}
+
+	results := ResolveFileInfo(project, filePath)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results (thoughts + __all_markdown__), got %d", len(results))
+	}
+
+	// First result should be the typed source
+	if results[0].Source != "thoughts" {
+		t.Errorf("expected first source 'thoughts', got %q", results[0].Source)
+	}
+	if results[0].FileType != "research" {
+		t.Errorf("expected fileType 'research', got %q", results[0].FileType)
+	}
+	if results[0].Title != "My Research" {
+		t.Errorf("expected title 'My Research', got %q", results[0].Title)
+	}
+	if results[0].FullPath != "thoughts/research/topic.md" {
+		t.Errorf("expected fullPath 'thoughts/research/topic.md', got %q", results[0].FullPath)
+	}
+
+	// Second result should be __all_markdown__
+	if results[1].Source != "__all_markdown__" {
+		t.Errorf("expected second source '__all_markdown__', got %q", results[1].Source)
+	}
+}
+
+// E-PENPAL-SCAN: ResolveFileInfo respects SkipDirs.
+func TestResolveFileInfo_SkipDirs(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tmpDir, "node_modules", "pkg"), 0755)
+	filePath := filepath.Join(tmpDir, "node_modules", "pkg", "readme.md")
+	os.WriteFile(filePath, []byte("# Dep"), 0644)
+
+	project := &discovery.Project{
+		Name: "test",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: tmpDir, Auto: true},
+		},
+	}
+
+	results := ResolveFileInfo(project, filePath)
+	// __all_markdown__ has SkipDirs for node_modules
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results (node_modules is in SkipDirs), got %d", len(results))
+	}
+}
+
+// E-PENPAL-SCAN: ResolveFileInfo respects RequireSibling.
+func TestResolveFileInfo_RequireSibling(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Directory WITH ANCHORS.md sibling
+	withSibling := filepath.Join(tmpDir, "module-a")
+	os.MkdirAll(withSibling, 0755)
+	os.WriteFile(filepath.Join(withSibling, "ANCHORS.md"), []byte("---\nprefix: A\n---\n"), 0644)
+	os.WriteFile(filepath.Join(withSibling, "PRODUCT.md"), []byte("# Product"), 0644)
+
+	// Directory WITHOUT ANCHORS.md sibling
+	withoutSibling := filepath.Join(tmpDir, "module-b")
+	os.MkdirAll(withoutSibling, 0755)
+	os.WriteFile(filepath.Join(withoutSibling, "PRODUCT.md"), []byte("# Orphan"), 0644)
+
+	project := &discovery.Project{
+		Name: "test",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{Name: "anchors", Type: "tree", SourceTypeName: "anchors", RootPath: tmpDir, Auto: true},
+		},
+	}
+
+	// File with sibling should be included
+	results := ResolveFileInfo(project, filepath.Join(withSibling, "PRODUCT.md"))
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result for file with ANCHORS.md sibling, got %d", len(results))
+	}
+
+	// File without sibling should be excluded
+	results = ResolveFileInfo(project, filepath.Join(withoutSibling, "PRODUCT.md"))
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for file without ANCHORS.md sibling, got %d", len(results))
+	}
+}
+
+// E-PENPAL-SCAN: ResolveFileInfo returns nil for non-.md files.
+func TestResolveFileInfo_NonMdFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "readme.txt")
+	os.WriteFile(filePath, []byte("hello"), 0644)
+
+	project := &discovery.Project{
+		Name: "test",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: tmpDir, Auto: true},
+		},
+	}
+
+	results := ResolveFileInfo(project, filePath)
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for non-.md file, got %d", len(results))
+	}
+}
+
+// E-PENPAL-SCAN: ResolveFileInfo dedup — first typed source wins.
+func TestResolveFileInfo_SourcePriority(t *testing.T) {
+	tmpDir := t.TempDir()
+	thoughtsDir := filepath.Join(tmpDir, "thoughts")
+	os.MkdirAll(thoughtsDir, 0755)
+	filePath := filepath.Join(thoughtsDir, "plan.md")
+	os.WriteFile(filePath, []byte("# Plan"), 0644)
+
+	project := &discovery.Project{
+		Name: "test",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: thoughtsDir, Auto: true},
+			// A second typed source covering the same path
+			{Name: "manual", Type: "tree", SourceTypeName: "manual", RootPath: thoughtsDir},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: tmpDir, Auto: true},
+		},
+	}
+
+	results := ResolveFileInfo(project, filePath)
+	// Should get 2: first typed source (thoughts) + __all_markdown__
+	// The second typed source (manual) should be skipped
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Source != "thoughts" {
+		t.Errorf("expected first source 'thoughts', got %q", results[0].Source)
+	}
+	if results[1].Source != "__all_markdown__" {
+		t.Errorf("expected second source '__all_markdown__', got %q", results[1].Source)
+	}
+}
+
+// E-PENPAL-CACHE: verifies UpsertFile updates existing entries.
+func TestUpsertFile_ExistingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "thoughts", "plan.md")
+	os.MkdirAll(filepath.Join(tmpDir, "thoughts"), 0755)
+	os.WriteFile(filePath, []byte("# Old Title"), 0644)
+
+	c := New()
+	projectName := "test"
+	c.SetProjects([]discovery.Project{
+		{Name: "test", Path: tmpDir, Sources: []discovery.FileSource{
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: filepath.Join(tmpDir, "thoughts"), Auto: true},
+		}},
+	})
+
+	// Pre-populate cache with an entry
+	c.SetProjectFiles(projectName, []FileInfo{
+		{Project: "test", Source: "thoughts", FullPath: "thoughts/plan.md", Name: "plan.md", Title: "Old Title", ModTime: time.Now().Add(-1 * time.Hour)},
+	})
+
+	// Update the file on disk
+	os.WriteFile(filePath, []byte("# New Title"), 0644)
+
+	project := c.FindProject(projectName)
+	ok := c.UpsertFile(projectName, project, filePath)
+	if !ok {
+		t.Fatal("UpsertFile returned false, expected true")
+	}
+
+	files := c.ProjectFiles(projectName)
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].Title != "New Title" {
+		t.Errorf("expected title 'New Title', got %q", files[0].Title)
+	}
+}
+
+// E-PENPAL-CACHE: verifies UpsertFile adds new files via source resolution.
+func TestUpsertFile_NewFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	thoughtsDir := filepath.Join(tmpDir, "thoughts")
+	os.MkdirAll(thoughtsDir, 0755)
+	filePath := filepath.Join(thoughtsDir, "new-note.md")
+	os.WriteFile(filePath, []byte("# Fresh Note"), 0644)
+
+	c := New()
+	projectName := "test"
+	project := discovery.Project{
+		Name: "test", Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{Name: "thoughts", Type: "tree", SourceTypeName: "thoughts", RootPath: thoughtsDir, Auto: true},
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: tmpDir, Auto: true},
+		},
+	}
+	c.SetProjects([]discovery.Project{project})
+	c.SetProjectFiles(projectName, nil) // empty cache
+
+	ok := c.UpsertFile(projectName, &project, filePath)
+	if !ok {
+		t.Fatal("UpsertFile returned false, expected true")
+	}
+
+	files := c.ProjectFiles(projectName)
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files (thoughts + __all_markdown__), got %d", len(files))
+	}
+
+	// Check the typed source entry
+	found := false
+	for _, f := range files {
+		if f.Source == "thoughts" && f.FullPath == "thoughts/new-note.md" {
+			found = true
+			if f.Title != "Fresh Note" {
+				t.Errorf("expected title 'Fresh Note', got %q", f.Title)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected thoughts source entry for new file")
+	}
+}
+
+// E-PENPAL-CACHE: verifies UpsertFile returns false for excluded files.
+func TestUpsertFile_ExcludedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.MkdirAll(filepath.Join(tmpDir, "node_modules"), 0755)
+	filePath := filepath.Join(tmpDir, "node_modules", "readme.md")
+	os.WriteFile(filePath, []byte("# Dep"), 0644)
+
+	c := New()
+	projectName := "test"
+	project := discovery.Project{
+		Name: "test", Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: tmpDir, Auto: true},
+		},
+	}
+	c.SetProjects([]discovery.Project{project})
+	c.SetProjectFiles(projectName, nil)
+
+	ok := c.UpsertFile(projectName, &project, filePath)
+	if ok {
+		t.Error("UpsertFile should return false for file in SkipDirs")
+	}
+
+	files := c.ProjectFiles(projectName)
+	if len(files) != 0 {
+		t.Fatalf("expected 0 files, got %d", len(files))
+	}
+}
+
+// E-PENPAL-CACHE: verifies RemoveFile removes entries and updates metadata.
+func TestRemoveFile(t *testing.T) {
+	now := time.Now()
+	older := now.Add(-1 * time.Hour)
+
+	c := New()
+	projectName := "test"
+	c.SetProjects([]discovery.Project{
+		{Name: "test", Path: "/tmp/test"},
+	})
+	c.SetProjectFiles(projectName, []FileInfo{
+		{Project: "test", Source: "thoughts", FullPath: "thoughts/plan.md", Name: "plan.md", ModTime: now},
+		{Project: "test", Source: "thoughts", FullPath: "thoughts/old.md", Name: "old.md", ModTime: older},
+	})
+
+	ok := c.RemoveFile(projectName, "thoughts/plan.md")
+	if !ok {
+		t.Fatal("RemoveFile returned false, expected true")
+	}
+
+	files := c.ProjectFiles(projectName)
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].FullPath != "thoughts/old.md" {
+		t.Errorf("expected remaining file 'thoughts/old.md', got %q", files[0].FullPath)
+	}
+
+	// Verify metadata updated
+	project := c.FindProject(projectName)
+	if !project.HasFiles {
+		t.Error("project should still have files")
+	}
+	if !project.LastModified.Equal(older) {
+		t.Errorf("expected LastModified to be older time, got %v", project.LastModified)
+	}
+}
+
+// E-PENPAL-CACHE: verifies RemoveFile returns false for non-existent entries.
+func TestRemoveFile_NotFound(t *testing.T) {
+	c := New()
+	c.SetProjectFiles("test", []FileInfo{
+		{Project: "test", FullPath: "readme.md"},
+	})
+
+	ok := c.RemoveFile("test", "nonexistent.md")
+	if ok {
+		t.Error("RemoveFile should return false for non-existent file")
+	}
+}
+
+// E-PENPAL-CACHE: verifies RemoveFile clears HasFiles when last file removed.
+func TestRemoveFile_ClearsHasFiles(t *testing.T) {
+	c := New()
+	c.SetProjects([]discovery.Project{
+		{Name: "test", Path: "/tmp/test", HasFiles: true},
+	})
+	c.SetProjectFiles("test", []FileInfo{
+		{Project: "test", FullPath: "only.md", ModTime: time.Now()},
+	})
+
+	c.RemoveFile("test", "only.md")
+
+	project := c.FindProject("test")
+	if project.HasFiles {
+		t.Error("project should have HasFiles=false after removing last file")
+	}
+}

@@ -533,14 +533,22 @@ func (c *Cache) RefreshProjectGitInfo(name string) {
 // preserving existing git info for known projects.
 // E-PENPAL-CACHE: replaces the project list while preserving git enrichment.
 func (c *Cache) RescanWith(projects []discovery.Project) {
-	// Preserve enrichment data (git info) for projects we already know about
+	// Snapshot current state before replacing
 	c.mu.RLock()
 	existing := make(map[string]discovery.Project)
+	existingScanned := make(map[string]bool)
+	existingFiles := make(map[string][]FileInfo)
 	for _, p := range c.projects {
-		existing[p.QualifiedName()] = p
+		qn := p.QualifiedName()
+		existing[qn] = p
+		existingScanned[qn] = c.projectScanned[qn]
+		if files, ok := c.projectFiles[qn]; ok {
+			existingFiles[qn] = files
+		}
 	}
 	c.mu.RUnlock()
 
+	// Preserve git enrichment
 	for i := range projects {
 		if prev, ok := existing[projects[i].QualifiedName()]; ok {
 			projects[i].Git = prev.Git
@@ -548,7 +556,81 @@ func (c *Cache) RescanWith(projects []discovery.Project) {
 	}
 
 	c.SetProjects(projects)
-	c.RefreshAllProjects()
+
+	// Determine which projects need scanning
+	var toScan []string
+	newNames := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		qn := p.QualifiedName()
+		newNames[qn] = true
+
+		prev, existed := existing[qn]
+		if !existed {
+			// New project: needs scan
+			toScan = append(toScan, qn)
+		} else if !existingScanned[qn] {
+			// Existed but never scanned: needs scan
+			toScan = append(toScan, qn)
+		} else if SourcesChanged(prev.Sources, p.Sources) {
+			// Sources changed: needs rescan
+			toScan = append(toScan, qn)
+		} else {
+			// Unchanged: preserve cached files
+			c.mu.Lock()
+			c.projectFiles[qn] = existingFiles[qn]
+			c.projectScanned[qn] = true
+			c.mu.Unlock()
+		}
+	}
+
+	// Clean up removed projects
+	c.mu.Lock()
+	for name := range existingFiles {
+		if !newNames[name] {
+			delete(c.projectFiles, name)
+			delete(c.projectScanned, name)
+		}
+	}
+	c.mu.Unlock()
+
+	// Scan only the projects that need it, with concurrency limit
+	if len(toScan) > 0 {
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, 4)
+		for _, qn := range toScan {
+			wg.Add(1)
+			go func(qn string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				c.RefreshProject(qn)
+			}(qn)
+		}
+		wg.Wait()
+	}
+}
+
+// SourcesChanged returns true if two source lists differ materially.
+// E-PENPAL-CACHE: used by RescanWith to detect which projects need rescanning.
+func SourcesChanged(a, b []discovery.FileSource) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Type != b[i].Type ||
+			a[i].RootPath != b[i].RootPath || a[i].SourceTypeName != b[i].SourceTypeName {
+			return true
+		}
+		if len(a[i].Files) != len(b[i].Files) {
+			return true
+		}
+		for j := range a[i].Files {
+			if a[i].Files[j] != b[i].Files[j] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // EnrichTitles fills in missing Title fields for files in the given project.

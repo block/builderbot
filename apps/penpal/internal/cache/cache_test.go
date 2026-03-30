@@ -1036,3 +1036,148 @@ func TestRemoveFile_ClearsHasFiles(t *testing.T) {
 		t.Error("project should have HasFiles=false after removing last file")
 	}
 }
+
+// E-PENPAL-CACHE: verifies SourcesChanged detects material differences.
+func TestSourcesChanged(t *testing.T) {
+	base := []discovery.FileSource{
+		{Name: "thoughts", Type: "tree", RootPath: "/a/thoughts", SourceTypeName: "thoughts"},
+		{Name: "__all_markdown__", Type: "tree", RootPath: "/a", SourceTypeName: "__all_markdown__"},
+	}
+
+	// Identical
+	same := []discovery.FileSource{
+		{Name: "thoughts", Type: "tree", RootPath: "/a/thoughts", SourceTypeName: "thoughts"},
+		{Name: "__all_markdown__", Type: "tree", RootPath: "/a", SourceTypeName: "__all_markdown__"},
+	}
+	if SourcesChanged(base, same) {
+		t.Error("identical sources should not be reported as changed")
+	}
+
+	// Different count
+	fewer := base[:1]
+	if !SourcesChanged(base, fewer) {
+		t.Error("different count should be reported as changed")
+	}
+
+	// Different root path
+	moved := []discovery.FileSource{
+		{Name: "thoughts", Type: "tree", RootPath: "/b/thoughts", SourceTypeName: "thoughts"},
+		{Name: "__all_markdown__", Type: "tree", RootPath: "/a", SourceTypeName: "__all_markdown__"},
+	}
+	if !SourcesChanged(base, moved) {
+		t.Error("different RootPath should be reported as changed")
+	}
+
+	// Different name
+	renamed := []discovery.FileSource{
+		{Name: "rp1", Type: "tree", RootPath: "/a/thoughts", SourceTypeName: "rp1"},
+		{Name: "__all_markdown__", Type: "tree", RootPath: "/a", SourceTypeName: "__all_markdown__"},
+	}
+	if !SourcesChanged(base, renamed) {
+		t.Error("different Name should be reported as changed")
+	}
+
+	// Different files list
+	withFiles := []discovery.FileSource{
+		{Name: "manual", Type: "files", Files: []string{"/a/foo.md"}},
+	}
+	withDiffFiles := []discovery.FileSource{
+		{Name: "manual", Type: "files", Files: []string{"/a/bar.md"}},
+	}
+	if !SourcesChanged(withFiles, withDiffFiles) {
+		t.Error("different Files should be reported as changed")
+	}
+}
+
+// E-PENPAL-CACHE: verifies RescanWith preserves cache for unchanged projects.
+func TestRescanWith_PreservesUnchangedProjects(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Set up two projects
+	projADir := filepath.Join(tmpDir, "proj-a")
+	projBDir := filepath.Join(tmpDir, "proj-b")
+	os.MkdirAll(projADir, 0755)
+	os.MkdirAll(projBDir, 0755)
+	os.WriteFile(filepath.Join(projADir, "readme.md"), []byte("# A"), 0644)
+	os.WriteFile(filepath.Join(projBDir, "readme.md"), []byte("# B"), 0644)
+
+	sourcesA := []discovery.FileSource{
+		{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: projADir, Auto: true},
+	}
+	sourcesB := []discovery.FileSource{
+		{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: projBDir, Auto: true},
+	}
+
+	c := New()
+	c.SetProjects([]discovery.Project{
+		{Name: "proj-a", Path: projADir, Sources: sourcesA},
+		{Name: "proj-b", Path: projBDir, Sources: sourcesB},
+	})
+
+	// Simulate initial scan for proj-a
+	c.SetProjectFiles("proj-a", []FileInfo{
+		{Project: "proj-a", Source: "__all_markdown__", FullPath: "readme.md", Name: "readme.md", Title: "A", ModTime: time.Now()},
+	})
+
+	// proj-b is not scanned yet
+
+	// RescanWith the same projects (unchanged sources)
+	c.RescanWith([]discovery.Project{
+		{Name: "proj-a", Path: projADir, Sources: sourcesA},
+		{Name: "proj-b", Path: projBDir, Sources: sourcesB},
+	})
+
+	// proj-a should still have its cached files (not re-walked)
+	filesA := c.ProjectFiles("proj-a")
+	if len(filesA) != 1 {
+		t.Fatalf("expected proj-a to preserve 1 cached file, got %d", len(filesA))
+	}
+	if filesA[0].Title != "A" {
+		t.Errorf("expected preserved title 'A', got %q", filesA[0].Title)
+	}
+
+	// proj-b was never scanned, so RescanWith should scan it now
+	filesB := c.ProjectFiles("proj-b")
+	if len(filesB) != 1 {
+		t.Fatalf("expected proj-b to have 1 file after rescan, got %d", len(filesB))
+	}
+}
+
+// E-PENPAL-CACHE: verifies RescanWith cleans up removed projects.
+func TestRescanWith_RemovesOldProjects(t *testing.T) {
+	keepSources := []discovery.FileSource{
+		{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/keep", Auto: true},
+	}
+	removeSources := []discovery.FileSource{
+		{Name: "__all_markdown__", Type: "tree", SourceTypeName: "__all_markdown__", RootPath: "/tmp/remove", Auto: true},
+	}
+
+	c := New()
+	c.SetProjects([]discovery.Project{
+		{Name: "keep", Path: "/tmp/keep", Sources: keepSources},
+		{Name: "remove", Path: "/tmp/remove", Sources: removeSources},
+	})
+	c.SetProjectFiles("keep", []FileInfo{
+		{Project: "keep", FullPath: "readme.md"},
+	})
+	c.SetProjectFiles("remove", []FileInfo{
+		{Project: "remove", FullPath: "readme.md"},
+	})
+
+	// RescanWith only the "keep" project (same sources → preserved)
+	c.RescanWith([]discovery.Project{
+		{Name: "keep", Path: "/tmp/keep", Sources: keepSources},
+	})
+
+	// "remove" should be gone from cache
+	filesRemoved := c.ProjectFiles("remove")
+	if len(filesRemoved) != 0 {
+		t.Errorf("expected removed project to have 0 cached files, got %d", len(filesRemoved))
+	}
+
+	// "keep" should still have its files (unchanged sources → preserved)
+	filesKeep := c.ProjectFiles("keep")
+	if len(filesKeep) != 1 {
+		t.Errorf("expected kept project to preserve 1 cached file, got %d", len(filesKeep))
+	}
+}

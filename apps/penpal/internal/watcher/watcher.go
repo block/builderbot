@@ -703,9 +703,12 @@ func (w *Watcher) flushFileEvents(projectName string) {
 		return
 	}
 
-	// If the project hasn't been lazily scanned yet, skip incremental
-	// updates — the full scan on first access will pick these up.
+	// If the project hasn't been lazily scanned yet, fall back to a full
+	// RefreshProject so the file list is populated from scratch.
 	if !w.cache.IsProjectScanned(projectName) {
+		w.cache.RefreshProject(projectName)
+		w.cache.RefreshProjectGitInfo(projectName)
+		w.Broadcast(Event{Type: EventFilesChanged, Project: projectName})
 		return
 	}
 

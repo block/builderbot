@@ -1054,8 +1054,8 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cfgMu.Unlock()
 
-	// Refresh cache so the file disappears from listings
-	s.cache.RefreshProject(qualifiedName)
+	// E-PENPAL-CACHE: remove file from cache incrementally (no walk).
+	s.cache.RemoveFile(qualifiedName, filePath)
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventFilesChanged, Project: qualifiedName})
 	w.WriteHeader(http.StatusNoContent)
 }

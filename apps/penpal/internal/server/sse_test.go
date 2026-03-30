@@ -101,37 +101,41 @@ func TestSSE_BroadcastDelivery(t *testing.T) {
 	// Broadcast a change event
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventFilesChanged, Project: "test-proj"})
 
-	line1, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("reading event line 1: %v", err)
-	}
-	if line1 != "event: change\n" {
-		t.Errorf("expected %q, got %q", "event: change\n", line1)
-	}
+	// Read SSE events until we find our specific broadcast. Background
+	// goroutines (populateProjects) may emit events that race with ours.
+	var found bool
+	for attempts := 0; attempts < 10; attempts++ {
+		line1, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("reading event line: %v", err)
+		}
+		if line1 != "event: change\n" {
+			t.Fatalf("expected event line, got %q", line1)
+		}
 
-	line2, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("reading event line 2: %v", err)
-	}
-	dataStr := strings.TrimPrefix(line2, "data: ")
-	dataStr = strings.TrimSuffix(dataStr, "\n")
-	var evt watcher.Event
-	if err := json.Unmarshal([]byte(dataStr), &evt); err != nil {
-		t.Fatalf("parsing event JSON %q: %v", dataStr, err)
-	}
-	if evt.Type != "files" {
-		t.Errorf("expected event type %q, got %q", "files", evt.Type)
-	}
-	if evt.Project != "test-proj" {
-		t.Errorf("expected project %q, got %q", "test-proj", evt.Project)
-	}
+		line2, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("reading data line: %v", err)
+		}
+		dataStr := strings.TrimPrefix(line2, "data: ")
+		dataStr = strings.TrimSuffix(dataStr, "\n")
 
-	line3, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("reading event line 3: %v", err)
+		// Read blank separator
+		if _, err := reader.ReadString('\n'); err != nil {
+			t.Fatalf("reading separator: %v", err)
+		}
+
+		var evt watcher.Event
+		if err := json.Unmarshal([]byte(dataStr), &evt); err != nil {
+			t.Fatalf("parsing event JSON %q: %v", dataStr, err)
+		}
+		if evt.Type == "files" && evt.Project == "test-proj" {
+			found = true
+			break
+		}
 	}
-	if line3 != "\n" {
-		t.Errorf("expected blank separator, got %q", line3)
+	if !found {
+		t.Error("did not receive expected files event for test-proj")
 	}
 }
 

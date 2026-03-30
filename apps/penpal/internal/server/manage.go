@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/loganj/penpal/internal/config"
@@ -26,6 +27,9 @@ func expandTilde(path string) string {
 }
 
 // refreshAfterConfigChange saves the config and re-discovers all projects.
+// RescanWith preserves cached data for unchanged projects and only scans
+// new or source-changed ones, so we skip the redundant populateProjects
+// call and just enrich git info in the background.
 func (s *Server) refreshAfterConfigChange() {
 	if err := config.Save(s.cfgPath, s.cfg); err != nil {
 		log.Printf("Warning: could not save config: %v", err)
@@ -34,7 +38,33 @@ func (s *Server) refreshAfterConfigChange() {
 	s.cache.RescanWith(projects)
 	s.watcher.Refresh(s.workspacePaths(), projects)
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
-	go s.populateProjects()
+	go s.enrichGitInfo()
+}
+
+// enrichGitInfo updates git info for all projects that don't have it yet.
+func (s *Server) enrichGitInfo() {
+	projects := s.cache.Projects()
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+
+	for _, p := range projects {
+		if p.Name == "(root)" || p.Git != nil {
+			continue
+		}
+		wg.Add(1)
+		go func(p discovery.Project) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			git := discovery.GetGitInfo(p.Path)
+			s.cache.EnrichProject(p.QualifiedName(), git)
+		}(p)
+	}
+
+	wg.Wait()
+	if len(projects) > 0 {
+		s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
+	}
 }
 
 // handleAPIWorkspaces dispatches workspace management requests.

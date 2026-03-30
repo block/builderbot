@@ -54,6 +54,8 @@
   --diff-added-bg: rgba(63, 185, 80, 0.08);
   --diff-removed-bg: rgba(248, 81, 73, 0.08);
   --diff-changed-bg: rgba(255, 255, 255, 0.04);
+  --diff-modified-bg: rgba(227, 179, 65, 0.08);
+  --diff-modified-inline-bg: rgba(227, 179, 65, 0.25);
   --diff-range-border: #524d58;
   --diff-comment-highlight: rgba(88, 166, 255, 0.5);
 

@@ -63,9 +63,12 @@ export default function rehypeCommentHighlights(options: Options) {
         );
         const isMermaid = codeChild && Array.isArray(codeChild.properties?.className) &&
           (codeChild.properties.className as string[]).some(c => c === 'language-mermaid');
-        if (isMermaid && continuing.size > 0) {
+        if (isMermaid) {
           const sourceLine = node.position?.start?.line;
-          if (sourceLine) {
+          let annotated = false;
+
+          // Annotate mermaid during cross-element continuation
+          if (continuing.size > 0 && sourceLine) {
             for (const [, state] of continuing) {
               if (sourceLine > state.highlight.startLine) {
                 codeChild.properties = codeChild.properties || {};
@@ -77,10 +80,46 @@ export default function rehypeCommentHighlights(options: Options) {
                 // post-mermaid matching is lenient (remaining contains SVG
                 // text from sel.toString() that won't match any HAST element).
                 state.mermaidCrossed = true;
+                annotated = true;
                 break;
               }
             }
           }
+
+          // E-PENPAL-HIGHLIGHT-MEDIA: start highlights whose startLine falls on
+          // this mermaid block. The selectedText from sel.toString() contains SVG
+          // labels (not mermaid source), so we can't text-match — just annotate
+          // the mermaid and schedule the full selectedText for continuation so
+          // adjacent prose elements get highlighted.
+          if (sourceLine) {
+            for (let lineOffset = 0; lineOffset <= 3; lineOffset++) {
+              const lineHighlights = byLine.get(sourceLine - lineOffset);
+              if (!lineHighlights) continue;
+              for (const highlight of lineHighlights) {
+                if (applied.has(highlight.threadId)) continue;
+                applied.add(highlight.threadId);
+                if (!annotated) {
+                  codeChild.properties = codeChild.properties || {};
+                  codeChild.properties.dataMermaidHighlight = JSON.stringify({
+                    threadId: highlight.threadId,
+                    pending: highlight.pending,
+                  });
+                  annotated = true;
+                }
+                // Schedule continuation with the full text — mermaidCrossed
+                // ensures lenient matching past the SVG text in remaining.
+                const normSelected = normalizeSelected(highlight.selectedText);
+                if (normSelected.length >= 3) {
+                  continuing.set(highlight.threadId, {
+                    highlight,
+                    remaining: normSelected,
+                    mermaidCrossed: true,
+                  });
+                }
+              }
+            }
+          }
+
           return SKIP;
         }
 

@@ -189,6 +189,74 @@ export default function MermaidSelection({
           const dy = e2.clientY - startY;
           if (!dragging && Math.sqrt(dx * dx + dy * dy) < 5) return;
 
+          // E-PENPAL-HIGHLIGHT-MEDIA: when mouse leaves the mermaid container
+          // during drag, cancel SVG rect mode and switch to text selection
+          // that includes the whole diagram plus whatever text the user drags to.
+          const containerRect = containerEl.getBoundingClientRect();
+          const outsideContainer =
+            e2.clientX < containerRect.left || e2.clientX > containerRect.right ||
+            e2.clientY < containerRect.top || e2.clientY > containerRect.bottom;
+
+          if (outsideContainer) {
+            if (!dragging) {
+              // Never entered SVG mode — just cancel our tracking and let browser handle
+              document.removeEventListener('mousemove', onMouseMove);
+              document.removeEventListener('mouseup', onMouseUp);
+              dragActiveRef.current = false;
+              if (draggingRef) draggingRef.current = false;
+              return;
+            }
+
+            // Was in SVG mode — switch to text selection including the whole diagram
+            if (overlayRect) { overlayRect.remove(); overlayRect = null; }
+            containerEl.style.userSelect = '';
+            dragging = false;
+
+            // Create a text selection from the mermaid container to the mouse position
+            const sel = window.getSelection();
+            sel?.removeAllRanges();
+            const caretRange = document.caretRangeFromPoint(e2.clientX, e2.clientY);
+
+            if (sel && caretRange) {
+              const isAbove = e2.clientY < containerRect.top;
+              if (isAbove) {
+                // Dragging up: anchor at end of container, focus at mouse position
+                sel.setBaseAndExtent(
+                  containerEl, containerEl.childNodes.length,
+                  caretRange.startContainer, caretRange.startOffset,
+                );
+              } else {
+                // Dragging down/sideways: anchor at start of container, focus at mouse position
+                sel.setBaseAndExtent(
+                  containerEl, 0,
+                  caretRange.startContainer, caretRange.startOffset,
+                );
+              }
+            }
+
+            // Replace SVG handlers with text-extension handlers
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+
+            const onTextMove = (e3: MouseEvent) => {
+              const cr = document.caretRangeFromPoint(e3.clientX, e3.clientY);
+              if (cr && sel) {
+                try { sel.extend(cr.startContainer, cr.startOffset); } catch { /* ignore */ }
+              }
+            };
+            const onTextUp = () => {
+              document.removeEventListener('mousemove', onTextMove);
+              document.removeEventListener('mouseup', onTextUp);
+              dragActiveRef.current = false;
+              if (draggingRef) draggingRef.current = false;
+              // SelectionToolbar's mouseup handler on contentEl will fire and
+              // show the comment button for the text+diagram selection.
+            };
+            document.addEventListener('mousemove', onTextMove);
+            document.addEventListener('mouseup', onTextUp);
+            return;
+          }
+
           if (!dragging) {
             dragging = true;
             dragActiveRef.current = true;

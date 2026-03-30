@@ -736,6 +736,70 @@ describe('rehypeCommentHighlights', () => {
       expect(lastPMarks.length).toBeGreaterThanOrEqual(1);
     });
 
+    it('highlight starting at mermaid annotates it and continues to text after', () => {
+      // User drags selection from text below UP into a preceding mermaid diagram.
+      // startLine lands on the mermaid block. The rehype plugin must annotate
+      // the mermaid and set up continuation so the text after is also highlighted.
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makePreCode(1, 'mermaid', 'graph TD\n  A[Start]-->B[End]\n'),
+          makeParagraph(5, 'Text after the diagram'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          // sel.toString() captures SVG labels + text after
+          selectedText: 'Start End Text after the diagram',
+          startLine: 1,
+        }],
+      });
+      transform(tree);
+
+      // Mermaid block should be annotated
+      const pre = tree.children[0] as Element;
+      const code = pre.children[0] as Element;
+      expect(code.properties?.dataMermaidHighlight).toBeDefined();
+      const parsed = JSON.parse(String(code.properties?.dataMermaidHighlight));
+      expect(parsed.threadId).toBe('t1');
+
+      // Text after should also be highlighted via continuation
+      const lastP = tree.children[1];
+      const lastPMarks = lastP.type === 'element' && (lastP as Element).tagName === 'mark'
+        ? [lastP as Element]
+        : findMarks(lastP as Element);
+      expect(lastPMarks.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('highlight starting at mermaid with no text after only annotates diagram', () => {
+      // Selection entirely within mermaid — only SVG labels captured
+      const tree: Root = {
+        type: 'root',
+        children: [
+          makeParagraph(1, 'Before the diagram'),
+          makePreCode(3, 'mermaid', 'graph TD\n  A[Login]-->B[Dashboard]\n'),
+        ],
+      };
+      const transform = rehypeCommentHighlights({
+        highlights: [{
+          threadId: 't1',
+          selectedText: 'Login Dashboard',
+          startLine: 3,
+        }],
+      });
+      transform(tree);
+
+      // Mermaid should be annotated
+      const pre = tree.children[1] as Element;
+      const code = pre.children[0] as Element;
+      expect(code.properties?.dataMermaidHighlight).toBeDefined();
+
+      // Before paragraph should NOT be highlighted (highlight starts at mermaid, not before)
+      const beforeMarks = findMarks(tree.children[0] as Element);
+      expect(beforeMarks).toHaveLength(0);
+    });
+
     it('mermaid block NOT annotated when no continuation is active', () => {
       // Mermaid block as first element — no highlight spans into it
       const tree: Root = {

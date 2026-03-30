@@ -69,7 +69,8 @@ export default class BranchCardSessionManager {
   /** True when a new session will be queued rather than started immediately. */
   willQueue = $derived(
     !this.getTimeline() || // provisioning — no timeline yet
-      this.hasRunningSession // another session is active
+      this.hasRunningSession || // another session is active
+      this.isSessionStartPending // a session start is already in flight
   );
 
   /** True when new session actions (new commit, note, review) should be disabled. */

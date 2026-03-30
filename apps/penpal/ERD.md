@@ -136,6 +136,9 @@ see-also:
 - <a id="E-PENPAL-HIGHLIGHT-CROSS"></a>**E-PENPAL-HIGHLIGHT-CROSS**: The rehype plugin splits and wraps `<mark>` elements across inline formatting boundaries (bold, italic, code, links) and across block boundaries between code blocks and prose. Each contiguous segment of highlighted text gets its own `<mark>` wrapper so the highlight renders correctly regardless of intervening HTML structure.
   ← [P-PENPAL-HIGHLIGHT-CROSS](PRODUCT.md#P-PENPAL-HIGHLIGHT-CROSS)
 
+- <a id="E-PENPAL-HIGHLIGHT-MEDIA"></a>**E-PENPAL-HIGHLIGHT-MEDIA**: When a matched highlight range partially intersects an `<img>` or mermaid `<pre>` element while also spanning non-image/diagram text, the rehype plugin expands the highlight to encompass the entire media element. Inline images sandwiched between `<mark>` elements with the same `threadId` are wrapped in a matching `<mark>`. Block-level image paragraphs and mermaid `<pre>` blocks encountered during cross-element continuation are wrapped in `<mark>` without consuming text from the remaining match.
+  ← [P-PENPAL-HIGHLIGHT-MEDIA](PRODUCT.md#P-PENPAL-HIGHLIGHT-MEDIA)
+
 ---
 
 ## Mermaid Diagram Anchoring

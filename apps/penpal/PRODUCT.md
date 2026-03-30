@@ -236,6 +236,8 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 - <a id="P-PENPAL-HIGHLIGHT-CROSS"></a>**P-PENPAL-HIGHLIGHT-CROSS**: A single highlight can span across formatting boundaries — bold, italic, code, links, and other inline markup — as well as cross between code blocks and surrounding prose.
 
+- <a id="P-PENPAL-HIGHLIGHT-MEDIA"></a>**P-PENPAL-HIGHLIGHT-MEDIA**: A highlight that intersects an image or mermaid diagram while also containing other text expands to encompass the entire image or diagram. A highlight cannot contain only part of an image or diagram when it also includes non-image/diagram content.
+
 ---
 
 ## Mermaid Diagram Comments

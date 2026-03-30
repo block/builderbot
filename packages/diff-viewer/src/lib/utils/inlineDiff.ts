@@ -201,6 +201,17 @@ export function computeLineDiff(
       bi++;
       ai++;
     } else {
+      // Peek ahead: if the next after-line is a better match for the current
+      // before-line, skip the current after-line as a pure insertion.
+      if (ai + 1 < unmatchedAfter.length) {
+        const nextAIdx = unmatchedAfter[ai + 1];
+        const nextSim = similarity(beforeLines[bIdx], afterLines[nextAIdx]);
+        if (nextSim > SIMILARITY_THRESHOLD) {
+          afterClasses[aIdx] = 'added';
+          ai++;
+          continue;
+        }
+      }
       beforeClasses[bIdx] = 'removed';
       bi++;
     }

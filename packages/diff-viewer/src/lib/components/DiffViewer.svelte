@@ -54,6 +54,8 @@
     isLineInChangedAlignment as helperIsLineInChangedAlignment,
     isLineInIndexedRange,
     isLineSelected as helperIsLineSelected,
+    getLineClass as helperGetLineClass,
+    getCharHighlights as helperGetCharHighlights,
     buildLineCommentEditorLayout,
     buildLineSelectionToolbarLayout,
     buildRangeCommentEditorLayout,
@@ -63,6 +65,7 @@
     normalizeLineSelection,
     resolveLineSelectionToolbarLeft,
   } from '../utils/diffViewerHelpers';
+  import type { BeforeLineClass, AfterLineClass, CharHighlight } from '../utils/inlineDiff.js';
   import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
   import { pathsMatch } from '../utils/diffModalHelpers';
   import CommentEditor from './CommentEditor.svelte';
@@ -666,12 +669,13 @@
   // Search highlighting
   // ==========================================================================
 
-  /** A token segment that may be part of a search match */
+  /** A token segment that may be part of a search match or char-level diff highlight */
   interface HighlightedSegment {
     content: string;
     color: string;
     isMatch: boolean;
     isCurrent: boolean;
+    isCharChanged: boolean;
   }
 
   /**
@@ -738,6 +742,7 @@
         color: t.color,
         isMatch: false,
         isCurrent: false,
+        isCharChanged: false,
       }));
     }
 
@@ -760,6 +765,7 @@
           color: token.color,
           isMatch: false,
           isCurrent: false,
+          isCharChanged: false,
         });
       } else {
         // Token has matches - split at match boundaries
@@ -776,6 +782,7 @@
               color: token.color,
               isMatch: false,
               isCurrent: false,
+              isCharChanged: false,
             });
           }
 
@@ -785,6 +792,7 @@
             color: token.color,
             isMatch: true,
             isCurrent: match.isCurrent,
+            isCharChanged: false,
           });
 
           pos = matchEnd;
@@ -797,6 +805,7 @@
             color: token.color,
             isMatch: false,
             isCurrent: false,
+            isCharChanged: false,
           });
         }
       }
@@ -808,7 +817,73 @@
   }
 
   /**
-   * Get highlighted token segments for a line, with search matches applied.
+   * Apply character-level diff highlights to segments by splitting them at highlight boundaries.
+   * Works similarly to applySearchHighlights — walks through segments tracking column position.
+   */
+  function applyCharHighlights(
+    segments: HighlightedSegment[],
+    highlights: CharHighlight[]
+  ): HighlightedSegment[] {
+    if (highlights.length === 0) return segments;
+
+    const result: HighlightedSegment[] = [];
+    let charIndex = 0;
+
+    for (const segment of segments) {
+      const segStart = charIndex;
+      const segEnd = charIndex + segment.content.length;
+
+      // Find highlights that overlap with this segment
+      const overlapping = highlights.filter(
+        (h) => h.start < segEnd && h.end > segStart
+      );
+
+      if (overlapping.length === 0) {
+        result.push(segment);
+      } else {
+        let pos = 0; // Position within segment content
+
+        for (const hl of overlapping) {
+          const hlStart = Math.max(0, hl.start - segStart);
+          const hlEnd = Math.min(segment.content.length, hl.end - segStart);
+
+          // Add any content before the highlight
+          if (pos < hlStart) {
+            result.push({
+              ...segment,
+              content: segment.content.slice(pos, hlStart),
+              isCharChanged: false,
+            });
+          }
+
+          // Add the highlighted portion
+          result.push({
+            ...segment,
+            content: segment.content.slice(hlStart, hlEnd),
+            isCharChanged: true,
+          });
+
+          pos = hlEnd;
+        }
+
+        // Add any remaining content after all highlights
+        if (pos < segment.content.length) {
+          result.push({
+            ...segment,
+            content: segment.content.slice(pos),
+            isCharChanged: false,
+          });
+        }
+      }
+
+      charIndex = segEnd;
+    }
+
+    return result;
+  }
+
+  /**
+   * Get highlighted token segments for a line, with search matches and char-level diff applied.
    */
   function getHighlightedTokens(
     lineIndex: number,
@@ -816,7 +891,14 @@
   ): HighlightedSegment[] {
     const tokens = side === 'before' ? getBeforeTokens(lineIndex) : getAfterTokens(lineIndex);
     const matches = getSearchMatchesForLine(lineIndex, side);
-    return applySearchHighlights(tokens, matches);
+    let segments = applySearchHighlights(tokens, matches);
+
+    const charHL = getCharHighlightsForLine(side, lineIndex);
+    if (charHL && charHL.length > 0) {
+      segments = applyCharHighlights(segments, charHL);
+    }
+
+    return segments;
   }
 
   // ==========================================================================
@@ -829,6 +911,30 @@
       lineIndex,
       beforeLineToAlignment,
       afterLineToAlignment
+    );
+  }
+
+  function getLineClassForLine(side: 'before' | 'after', lineIndex: number): BeforeLineClass | AfterLineClass | null {
+    return helperGetLineClass(
+      side,
+      lineIndex,
+      beforeLineToAlignment,
+      afterLineToAlignment,
+      activeAlignments,
+      beforeLines,
+      afterLines
+    );
+  }
+
+  function getCharHighlightsForLine(side: 'before' | 'after', lineIndex: number): CharHighlight[] | null {
+    return helperGetCharHighlights(
+      side,
+      lineIndex,
+      beforeLineToAlignment,
+      afterLineToAlignment,
+      activeAlignments,
+      beforeLines,
+      afterLines
     );
   }
 
@@ -1760,7 +1866,8 @@
                       : { isStart: false, isEnd: false }}
                     {@const isInHoveredRange = isLineInHoveredRange('before', i)}
                     {@const isInFocusedHunk = isLineInFocusedHunk('before', i)}
-                    {@const isChanged = showRangeMarkers && isLineInChangedAlignment('before', i)}
+                    {@const lineClass = showRangeMarkers ? getLineClassForLine('before', i) : null}
+                    {@const isChanged = lineClass !== null && lineClass !== 'unchanged'}
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div
                       class="line"
@@ -1768,7 +1875,8 @@
                       class:range-end={boundary.isEnd}
                       class:range-hovered={isInHoveredRange}
                       class:range-focused={isInFocusedHunk}
-                      class:content-changed={isChanged}
+                      class:content-changed={isChanged && lineClass !== 'modified'}
+                      class:diff-modified={lineClass === 'modified'}
                       onmouseenter={() => handleLineMouseEnter('before', i)}
                       onmouseleave={handleLineMouseLeave}
                     >
@@ -1778,6 +1886,7 @@
                             style="color: {segment.color}"
                             class:search-match={segment.isMatch && !segment.isCurrent}
                             class:search-current={segment.isCurrent}
+                            class:char-changed={segment.isCharChanged}
                           >
                             {segment.content}
                           </span>
@@ -1851,6 +1960,7 @@
                           style="color: {segment.color}"
                           class:search-match={segment.isMatch && !segment.isCurrent}
                           class:search-current={segment.isCurrent}
+                          class:char-changed={segment.isCharChanged}
                         >
                           {segment.content}
                         </span>
@@ -1927,7 +2037,8 @@
                       : { isStart: false, isEnd: false }}
                     {@const isInHoveredRange = isLineInHoveredRange('after', i)}
                     {@const isInFocusedHunk = isLineInFocusedHunk('after', i)}
-                    {@const isChanged = showRangeMarkers && isLineInChangedAlignment('after', i)}
+                    {@const lineClass = showRangeMarkers ? getLineClassForLine('after', i) : null}
+                    {@const isChanged = lineClass !== null && lineClass !== 'unchanged'}
                     {@const isSelected = isLineSelected('after', i)}
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div
@@ -1936,7 +2047,8 @@
                       class:range-end={boundary.isEnd}
                       class:range-hovered={isInHoveredRange}
                       class:range-focused={isInFocusedHunk}
-                      class:content-changed={isChanged}
+                      class:content-changed={isChanged && lineClass !== 'modified'}
+                      class:diff-modified={lineClass === 'modified'}
                       class:line-selected={isSelected}
                       onmouseenter={() => handleLineMouseEnter('after', i)}
                       onmouseleave={handleLineMouseLeave}
@@ -1948,6 +2060,7 @@
                             style="color: {segment.color}"
                             class:search-match={segment.isMatch && !segment.isCurrent}
                             class:search-current={segment.isCurrent}
+                            class:char-changed={segment.isCharChanged}
                           >
                             {segment.content}
                           </span>
@@ -2551,6 +2664,15 @@
 
   .after-pane .line.content-changed {
     background-color: var(--diff-added-bg);
+  }
+
+  .line.diff-modified {
+    background-color: var(--diff-modified-bg);
+  }
+
+  .char-changed {
+    background-color: var(--diff-modified-inline-bg);
+    border-radius: 2px;
   }
 
   /* Range boundary markers */

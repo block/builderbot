@@ -87,5 +87,5 @@ export {
 	type FileSelectionWithSearchConfig
 } from './fileSelection';
 
-export { computeLineDiff, getLineDiffResult, createLineDiffCache } from './inlineDiff.js';
+export { computeLineDiff, createLineDiffCache } from './inlineDiff.js';
 export type { BeforeLineClass, AfterLineClass, CharHighlight, ModifiedPair, LineDiffResult, LineDiffCache } from './inlineDiff.js';

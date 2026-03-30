@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   computeLineDiff,
-  getLineDiffResult,
+  createLineDiffCache,
   type LineDiffResult,
   type CharHighlight,
 } from './inlineDiff';
@@ -428,20 +428,22 @@ describe('computeLineDiff', () => {
   });
 });
 
-describe('getLineDiffResult (caching)', () => {
+describe('createLineDiffCache', () => {
   it('returns same result object for identical inputs', () => {
+    const cache = createLineDiffCache();
     const before = ['const x = 1;'];
     const after = ['const x = 2;'];
 
-    const result1 = getLineDiffResult(before, after);
-    const result2 = getLineDiffResult(before, after);
+    const result1 = cache.get(before, after);
+    const result2 = cache.get(before, after);
 
     expect(result1).toBe(result2); // same reference
   });
 
   it('returns different result objects for different inputs', () => {
-    const result1 = getLineDiffResult(['a'], ['b']);
-    const result2 = getLineDiffResult(['c'], ['d']);
+    const cache = createLineDiffCache();
+    const result1 = cache.get(['a'], ['b']);
+    const result2 = cache.get(['c'], ['d']);
 
     expect(result1).not.toBe(result2);
   });

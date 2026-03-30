@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { getLineClass, getCharHighlights } from './diffViewerHelpers';
 import type { ChangedAlignmentEntry } from './diffViewerHelpers';
 import type { Alignment } from '../types';
+import { createLineDiffCache } from './inlineDiff';
 
 /**
  * Helper to build alignment lookup maps and the changedAlignments array
@@ -39,7 +40,7 @@ describe('getLineClass', () => {
 
     const result = getLineClass(
       'before', 1, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, ['a', 'b', 'c'], ['a', 'b', 'c'],
+      changedAlignments, ['a', 'b', 'c'], ['a', 'b', 'c'], createLineDiffCache(),
     );
     expect(result).toBeNull();
   });
@@ -55,7 +56,7 @@ describe('getLineClass', () => {
 
     const result = getLineClass(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, createLineDiffCache(),
     );
     expect(result).toBe('modified');
   });
@@ -70,7 +71,7 @@ describe('getLineClass', () => {
 
     const result = getLineClass(
       'after', 0, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, createLineDiffCache(),
     );
     expect(result).toBe('modified');
   });
@@ -86,7 +87,7 @@ describe('getLineClass', () => {
 
     const result = getLineClass(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, createLineDiffCache(),
     );
     expect(result).toBe('removed');
   });
@@ -102,7 +103,7 @@ describe('getLineClass', () => {
 
     const result = getLineClass(
       'after', 1, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, createLineDiffCache(),
     );
     expect(result).toBe('added');
   });
@@ -118,16 +119,18 @@ describe('getLineClass', () => {
     ];
     const { beforeLineToAlignment, afterLineToAlignment, changedAlignments } = buildLookups(alignments);
 
+    const cache = createLineDiffCache();
+
     // Line 2 before: "const a = 1;" should be modified (similar to "const a = 2;")
     expect(getLineClass(
       'before', 2, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, cache,
     )).toBe('modified');
 
     // Line 3 in after: "newLine();" should be added (no similar before-line)
     expect(getLineClass(
       'after', 3, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, cache,
     )).toBe('added');
   });
 });
@@ -141,7 +144,7 @@ describe('getCharHighlights', () => {
 
     const result = getCharHighlights(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, ['hello'], ['hello'],
+      changedAlignments, ['hello'], ['hello'], createLineDiffCache(),
     );
     expect(result).toBeNull();
   });
@@ -157,7 +160,7 @@ describe('getCharHighlights', () => {
     // Lines are too dissimilar to be "modified", so no char highlights
     const result = getCharHighlights(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, createLineDiffCache(),
     );
     expect(result).toBeNull();
   });
@@ -172,7 +175,7 @@ describe('getCharHighlights', () => {
 
     const result = getCharHighlights(
       'before', 0, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, createLineDiffCache(),
     );
     expect(result).not.toBeNull();
     expect(result!.length).toBeGreaterThan(0);
@@ -194,7 +197,7 @@ describe('getCharHighlights', () => {
 
     const result = getCharHighlights(
       'after', 0, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, createLineDiffCache(),
     );
     expect(result).not.toBeNull();
     // "slow" replaces "quick" -> highlight at position 4-8
@@ -212,7 +215,7 @@ describe('getCharHighlights', () => {
 
     const result = getCharHighlights(
       'after', 1, beforeLineToAlignment, afterLineToAlignment,
-      changedAlignments, beforeLines, afterLines,
+      changedAlignments, beforeLines, afterLines, createLineDiffCache(),
     );
     expect(result).not.toBeNull();
     expect(result!.length).toBeGreaterThan(0);

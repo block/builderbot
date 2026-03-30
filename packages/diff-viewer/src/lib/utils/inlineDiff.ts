@@ -278,14 +278,3 @@ export function createLineDiffCache(): LineDiffCache {
   };
 }
 
-/**
- * @deprecated Use createLineDiffCache() for component-scoped caching.
- * Kept for backward compatibility with tests.
- */
-const defaultCache = createLineDiffCache();
-export function getLineDiffResult(
-  beforeLines: string[],
-  afterLines: string[],
-): LineDiffResult {
-  return defaultCache.get(beforeLines, afterLines);
-}

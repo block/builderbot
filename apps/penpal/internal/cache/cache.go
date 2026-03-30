@@ -446,13 +446,12 @@ func (c *Cache) CheckAllProjectsHasFiles() {
 }
 
 // projectHasAnyMarkdown walks the directory tree and returns true as soon as
-// it finds any .md file. Aligns skip behavior with scanProjectSources: skips
-// .git, node_modules, .hg, .svn, nested worktrees/submodules, and gitignored dirs.
-// E-PENPAL-SCAN: lightweight startup check consistent with full scan filtering.
+// it finds any .md file. Skips .git, node_modules, .hg, .svn, and nested
+// worktrees/submodules. Does NOT use git check-ignore — a false positive
+// from a .md file in a gitignored directory is harmless since the full scan
+// on first access applies proper filtering.
+// E-PENPAL-SCAN: lightweight startup check — no subprocess spawned.
 func projectHasAnyMarkdown(projectPath string) bool {
-	gitChecker := newGitIgnoreChecker(projectPath)
-	defer gitChecker.Close()
-
 	err := filepath.WalkDir(projectPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -468,10 +467,6 @@ func projectHasAnyMarkdown(projectPath string) bool {
 				if fi, err := os.Lstat(gitEntry); err == nil && !fi.IsDir() {
 					return filepath.SkipDir
 				}
-			}
-			// E-PENPAL-SRC-GITIGNORE: skip gitignored directories.
-			if path != projectPath && gitChecker.IsIgnored(path) {
-				return filepath.SkipDir
 			}
 			return nil
 		}
@@ -548,9 +543,11 @@ func (c *Cache) RescanWith(projects []discovery.Project) {
 	}
 	c.mu.RUnlock()
 
-	// Preserve git enrichment
+	// Preserve git enrichment only when the project path hasn't changed.
+	// If the path changed, Git metadata would be stale and enrichGitInfo
+	// needs to re-discover it (it skips projects where Git != nil).
 	for i := range projects {
-		if prev, ok := existing[projects[i].QualifiedName()]; ok {
+		if prev, ok := existing[projects[i].QualifiedName()]; ok && prev.Path == projects[i].Path {
 			projects[i].Git = prev.Git
 		}
 	}
@@ -579,6 +576,7 @@ func (c *Cache) RescanWith(projects []discovery.Project) {
 			c.mu.Lock()
 			c.projectFiles[qn] = existingFiles[qn]
 			c.projectScanned[qn] = true
+			c.updateProjectMetadataLocked(qn, existingFiles[qn])
 			c.mu.Unlock()
 		}
 	}
@@ -688,6 +686,11 @@ func extractTitle(path string) string {
 // that claims the file (typically one typed source + __all_markdown__). Returns nil
 // if no source claims the file.
 // E-PENPAL-SCAN: single-file source resolution for incremental cache updates.
+// ResolveFileInfo resolves source membership for a single absolute .md file path
+// without a filesystem walk. It applies the same exclusion rules as
+// scanProjectSources: nested git worktree/submodule detection, gitignore
+// ancestor-directory checks (P-PENPAL-SRC-GITIGNORE), SkipDirs filtering, and
+// RequireSibling validation.
 func ResolveFileInfo(project *discovery.Project, absPath string) []FileInfo {
 	if !strings.HasSuffix(absPath, ".md") {
 		return nil
@@ -695,6 +698,9 @@ func ResolveFileInfo(project *discovery.Project, absPath string) []FileInfo {
 
 	info, err := os.Stat(absPath)
 	if err != nil {
+		return nil
+	}
+	if info.IsDir() {
 		return nil
 	}
 
@@ -718,6 +724,17 @@ func ResolveFileInfo(project *discovery.Project, absPath string) []FileInfo {
 
 			// Check containment
 			if !strings.HasPrefix(absPath, rootPath+"/") && absPath != rootPath {
+				continue
+			}
+
+			// Skip files under nested git worktrees/submodules.
+			if isUnderNestedGitRepo(absPath, rootPath) {
+				continue
+			}
+
+			// P-PENPAL-SRC-GITIGNORE: skip files whose ancestor directory
+			// is gitignored (source root itself is exempt).
+			if isAncestorDirGitIgnored(absPath, rootPath, project.Path) {
 				continue
 			}
 
@@ -848,17 +865,45 @@ func hasSkippedDir(relToSource string, st *discovery.SourceType) bool {
 	return false
 }
 
+// isUnderNestedGitRepo walks parent directories from absPath up to (but not
+// including) rootPath, returning true if any intermediate directory contains a
+// .git file (not directory), indicating a nested git worktree or submodule.
+// This mirrors the nested-repo check in scanProjectSources without spawning
+// a subprocess.
+func isUnderNestedGitRepo(absPath, rootPath string) bool {
+	dir := filepath.Dir(absPath)
+	for dir != rootPath && strings.HasPrefix(dir, rootPath+"/") {
+		gitEntry := filepath.Join(dir, ".git")
+		if fi, err := os.Lstat(gitEntry); err == nil && !fi.IsDir() {
+			return true
+		}
+		dir = filepath.Dir(dir)
+	}
+	return false
+}
+
+// isAncestorDirGitIgnored walks parent directories from absPath up to (but not
+// including) rootPath, running a one-shot `git check-ignore -q` on each.
+// Returns true if any ancestor directory is gitignored.
+// P-PENPAL-SRC-GITIGNORE: the source root itself is exempt (always scanned).
+func isAncestorDirGitIgnored(absPath, rootPath, projectPath string) bool {
+	dir := filepath.Dir(absPath)
+	for dir != rootPath && strings.HasPrefix(dir, rootPath+"/") {
+		cmd := exec.Command("git", "-C", projectPath, "check-ignore", "-q", dir)
+		if cmd.Run() == nil {
+			return true // exit code 0 means ignored
+		}
+		dir = filepath.Dir(dir)
+	}
+	return false
+}
+
 // UpsertFile adds or updates file entries in the cache for the given absolute path.
 // For existing entries (matched by FullPath), re-stats for ModTime and re-extracts
 // Title. For new files, resolves source membership and inserts.
 // E-PENPAL-CACHE: incremental cache mutation without filesystem walk.
 func (c *Cache) UpsertFile(projectName string, project *discovery.Project, absPath string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	files := c.projectFiles[projectName]
-
-	// Check if any entries already exist for this path
+	// Perform all filesystem and git I/O outside the lock.
 	relToProject, err := filepath.Rel(project.Path, absPath)
 	if err != nil {
 		return false
@@ -869,11 +914,21 @@ func (c *Cache) UpsertFile(projectName string, project *discovery.Project, absPa
 		return false
 	}
 
+	title := extractTitle(absPath)
+	resolved := ResolveFileInfo(project, absPath)
+
+	// Acquire lock only for the short critical section that mutates the cache.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	files := c.projectFiles[projectName]
+
+	// Check if any entries already exist for this path
 	updated := false
 	for i := range files {
 		if files[i].FullPath == relToProject {
 			files[i].ModTime = info.ModTime()
-			files[i].Title = extractTitle(absPath)
+			files[i].Title = title
 			updated = true
 		}
 	}
@@ -887,8 +942,7 @@ func (c *Cache) UpsertFile(projectName string, project *discovery.Project, absPa
 		return true
 	}
 
-	// New file — resolve source membership
-	resolved := ResolveFileInfo(project, absPath)
+	// New file — use pre-resolved source membership
 	if len(resolved) == 0 {
 		return false
 	}

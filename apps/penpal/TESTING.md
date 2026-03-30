@@ -64,7 +64,7 @@ see-also:
 | Source Types — anchors (P-PENPAL-SRC-ANCHORS, SRC-ANCHORS-GROUP, SRC-ANCHORS-NESTED) | discovery_test.go (TestClassifyAnchorsFile, TestGroupAnchorsPaths, TestGroupAnchorsPaths_MarkerOnlyModule, TestAnchorsFileOrder, TestAnchorsRequireSibling) | — | — | — |
 | Source Types — claude-plans (P-PENPAL-SRC-CLAUDE-PLANS) | — | — | — | — |
 | Source Types — manual (P-PENPAL-SRC-MANUAL) | — | — | grouping_test.go (TestBuildFileGroups_ManualSourceDirHeadings) | — |
-| Cache & File Scanning (E-PENPAL-CACHE, SCAN) | cache_test.go (TestCheckAllProjectsHasFiles, TestProjectHasAnyMarkdown_SkipsGitignored, TestProjectHasAnyMarkdown_SkipsVCSDirs, TestAllFiles_DeduplicatesAllMarkdown, TestEnsureProjectScanned_NoDuplicateScans, TestResolveFileInfo, TestUpsertFile, TestRemoveFile, TestRescanWith_PreservesUnchangedProjects, TestSourcesChanged) | — | — | — |
+| Cache & File Scanning (E-PENPAL-CACHE, SCAN) | cache_test.go (TestCheckAllProjectsHasFiles, TestProjectHasAnyMarkdown_IgnoresGitignore, TestProjectHasAnyMarkdown_SkipsVCSDirs, TestAllFiles_DeduplicatesAllMarkdown, TestEnsureProjectScanned_NoDuplicateScans, TestResolveFileInfo, TestUpsertFile, TestRemoveFile, TestRescanWith_PreservesUnchangedProjects, TestSourcesChanged) | — | — | — |
 | Worktree Support (P-PENPAL-WORKTREE) | discovery/worktree_test.go, cache/worktree_test.go | Layout.test.tsx | worktree_test.go (API + MCP) | — |
 | Worktree Dropdown (P-PENPAL-PROJECT-WORKTREE-DROPDOWN) | — | Layout.test.tsx | — | — |
 | Git Integration (P-PENPAL-GIT-INFO) | — | — | — | — |

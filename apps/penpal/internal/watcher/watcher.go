@@ -589,7 +589,22 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 	// E-PENPAL-WATCHER: only .md file events trigger cache updates. Non-.md
 	// Create events (e.g., scanner temp files, backup artifacts) are ignored.
+	// However, directory Create/Rename events may contain .md files that need
+	// to be discovered, so we walk those directories before returning.
 	if !strings.HasSuffix(path, ".md") {
+		if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				filepath.Walk(path, func(p string, fi os.FileInfo, err error) error {
+					if err != nil {
+						return nil
+					}
+					if !fi.IsDir() && strings.HasSuffix(p, ".md") {
+						w.debounceFileEvent(projectName, p, fsnotify.Create)
+					}
+					return nil
+				})
+			}
+		}
 		return
 	}
 
@@ -703,15 +718,9 @@ func (w *Watcher) flushFileEvents(projectName string) {
 		return
 	}
 
-	// If the project hasn't been lazily scanned yet, fall back to a full
-	// RefreshProject so the file list is populated from scratch.
-	if !w.cache.IsProjectScanned(projectName) {
-		w.cache.RefreshProject(projectName)
-		w.cache.RefreshProjectGitInfo(projectName)
-		w.Broadcast(Event{Type: EventFilesChanged, Project: projectName})
-		return
-	}
-
+	// Apply incremental updates regardless of scan state. For unscanned
+	// projects this adds files to a partial cache; the lazy scan on first
+	// access will reconcile with a full walk.
 	for absPath, op := range events {
 		if op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 			relPath, err := filepath.Rel(project.Path, absPath)

@@ -521,27 +521,23 @@ func TestCheckAllProjectsHasFiles(t *testing.T) {
 	}
 }
 
-// E-PENPAL-SCAN: verifies projectHasAnyMarkdown skips gitignored dirs.
-func TestProjectHasAnyMarkdown_SkipsGitignored(t *testing.T) {
+// E-PENPAL-SCAN: projectHasAnyMarkdown does NOT check gitignore — it's a
+// lightweight startup check where false positives are harmless. Verifying that
+// .md files in gitignored dirs still count as "has markdown".
+func TestProjectHasAnyMarkdown_IgnoresGitignore(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	runGit(t, tmpDir, "init")
 	runGit(t, tmpDir, "config", "user.email", "test@test.com")
 	runGit(t, tmpDir, "config", "user.name", "test")
 
-	// All .md files are in a gitignored directory
+	// .md files only in a gitignored directory — still returns true
 	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n"), 0644)
 	os.MkdirAll(filepath.Join(tmpDir, "build"), 0755)
 	os.WriteFile(filepath.Join(tmpDir, "build", "output.md"), []byte("# Gen"), 0644)
 
-	if projectHasAnyMarkdown(tmpDir) {
-		t.Error("expected false: only .md files are in gitignored dir")
-	}
-
-	// Add a non-gitignored .md file and re-check
-	os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# README"), 0644)
 	if !projectHasAnyMarkdown(tmpDir) {
-		t.Error("expected true: README.md is not gitignored")
+		t.Error("expected true: .md exists even though gitignored (gitignore not checked)")
 	}
 }
 

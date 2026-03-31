@@ -50,11 +50,24 @@ pub trait MessageWriter: Send + Sync {
     /// Flush all buffered text and close the current message block.
     async fn finalize(&self);
 
-    /// Record a tool call with its ID and title.
-    async fn record_tool_call(&self, tool_call_id: &str, title: &str);
+    /// Record a tool call with its ID, title, and optional raw input parameters.
+    async fn record_tool_call(
+        &self,
+        tool_call_id: &str,
+        title: &str,
+        raw_input: Option<&serde_json::Value>,
+    );
 
-    /// Update a previously recorded tool call's title.
-    async fn update_tool_call_title(&self, tool_call_id: &str, title: &str);
+    /// Update a previously recorded tool call's title and/or raw input.
+    ///
+    /// When `title` is `None`, the implementation should preserve the
+    /// existing title while updating only `raw_input`.
+    async fn update_tool_call_title(
+        &self,
+        tool_call_id: &str,
+        title: Option<&str>,
+        raw_input: Option<&serde_json::Value>,
+    );
 
     /// Record the result/output of a tool call.
     async fn record_tool_result(&self, content: &str);
@@ -841,10 +854,12 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
             RecordToolCall {
                 id: String,
                 title: String,
+                raw_input: Option<serde_json::Value>,
             },
             ToolCallUpdate {
                 id: String,
                 title: Option<String>,
+                raw_input: Option<serde_json::Value>,
                 result: Option<String>,
             },
             Ignore,
@@ -950,19 +965,22 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                         SessionUpdate::ToolCall(tool_call) => LiveAction::RecordToolCall {
                             id: tool_call.tool_call_id.0.to_string(),
                             title: tool_call.title.clone(),
+                            raw_input: tool_call.raw_input.clone(),
                         },
                         SessionUpdate::ToolCallUpdate(update) => {
                             let tc_id = update.tool_call_id.0.to_string();
                             let title = update.fields.title.clone();
+                            let raw_input = update.fields.raw_input.clone();
                             let result = update
                                 .fields
                                 .content
                                 .as_ref()
                                 .and_then(|c| extract_content_preview(c));
-                            if title.is_some() || result.is_some() {
+                            if title.is_some() || raw_input.is_some() || result.is_some() {
                                 LiveAction::ToolCallUpdate {
                                     id: tc_id,
                                     title,
+                                    raw_input,
                                     result,
                                 }
                             } else {
@@ -981,12 +999,25 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
             LiveAction::AppendText(text) => {
                 self.writer.append_text(&text).await;
             }
-            LiveAction::RecordToolCall { id, title } => {
-                self.writer.record_tool_call(&id, &title).await;
+            LiveAction::RecordToolCall {
+                id,
+                title,
+                raw_input,
+            } => {
+                self.writer
+                    .record_tool_call(&id, &title, raw_input.as_ref())
+                    .await;
             }
-            LiveAction::ToolCallUpdate { id, title, result } => {
-                if let Some(title) = title {
-                    self.writer.update_tool_call_title(&id, &title).await;
+            LiveAction::ToolCallUpdate {
+                id,
+                title,
+                raw_input,
+                result,
+            } => {
+                if title.is_some() || raw_input.is_some() {
+                    self.writer
+                        .update_tool_call_title(&id, title.as_deref(), raw_input.as_ref())
+                        .await;
                 }
                 if let Some(preview) = result {
                     self.writer.record_tool_result(&preview).await;
@@ -1255,12 +1286,22 @@ impl MessageWriter for BasicMessageWriter {
         // Nothing to do for basic implementation
     }
 
-    async fn record_tool_call(&self, _tool_call_id: &str, title: &str) {
+    async fn record_tool_call(
+        &self,
+        _tool_call_id: &str,
+        title: &str,
+        _raw_input: Option<&serde_json::Value>,
+    ) {
         let mut current = self.text.lock().await;
         current.push_str(&format!("\n[Tool: {}]\n", title));
     }
 
-    async fn update_tool_call_title(&self, _tool_call_id: &str, _title: &str) {
+    async fn update_tool_call_title(
+        &self,
+        _tool_call_id: &str,
+        _title: Option<&str>,
+        _raw_input: Option<&serde_json::Value>,
+    ) {
         // Nothing to do for basic implementation
     }
 

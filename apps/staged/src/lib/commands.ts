@@ -59,7 +59,8 @@ export function createProject(
   githubRepo?: string,
   subpath?: string,
   branchName?: string,
-  prNumber?: number
+  prNumber?: number,
+  defaultBranch?: string
 ): Promise<Project> {
   return invoke('create_project', {
     name,
@@ -68,6 +69,7 @@ export function createProject(
     subpath,
     branchName: branchName ?? null,
     prNumber: prNumber ?? null,
+    defaultBranch: defaultBranch ?? null,
   });
 }
 
@@ -89,7 +91,8 @@ export function addProjectRepo(
   branchName?: string,
   subpath?: string,
   setAsPrimary?: boolean,
-  prNumber?: number
+  prNumber?: number,
+  defaultBranch?: string
 ): Promise<ProjectRepo> {
   return invoke('add_project_repo', {
     projectId,
@@ -98,6 +101,7 @@ export function addProjectRepo(
     subpath: subpath ?? null,
     setAsPrimary: setAsPrimary ?? null,
     prNumber: prNumber ?? null,
+    defaultBranch: defaultBranch ?? null,
   });
 }
 

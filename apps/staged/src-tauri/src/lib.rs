@@ -314,18 +314,16 @@ fn create_project(
     subpath: Option<String>,
     branch_name: Option<String>,
     pr_number: Option<u64>,
+    default_branch: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("Project name is required".to_string());
     }
-    // Validate that the subpath exists as a directory in the repo before
-    // creating anything. This prevents projects being created with invalid
-    // subpaths that would fail later during worktree setup.
-    if let (Some(repo), Some(sub)) = (&github_repo, &subpath) {
-        git::validate_subpath_in_repo(repo, sub).map_err(|e| e.to_string())?;
-    }
+    // Subpath validation is handled by the frontend before submission
+    // (SubpathInput.waitForValidation). Skipping the redundant backend
+    // re-validation here removes a ~500ms-2s GitHub API round-trip.
 
     let project_location = match location.as_deref() {
         Some("remote") => store::ProjectLocation::Remote,
@@ -375,13 +373,9 @@ fn create_project(
 
         // Create the initial branch record for the first repo so each new
         // project starts with exactly one branch tracked for that repository.
-        let detected_base =
-            git::detect_default_branch_for_repo(&repo).unwrap_or_else(|_| "main".to_string());
-        let effective_base = if detected_base.starts_with("origin/") {
-            detected_base
-        } else {
-            format!("origin/{detected_base}")
-        };
+        // Use the frontend-prefetched default branch when available to avoid
+        // a ~500ms-2s GitHub API round-trip during project creation.
+        let effective_base = git::resolve_default_branch(default_branch, &repo);
 
         let (branch_id, is_local) = match project.location {
             store::ProjectLocation::Local => {
@@ -547,6 +541,7 @@ async fn add_project_repo(
     subpath: Option<String>,
     set_as_primary: Option<bool>,
     pr_number: Option<u64>,
+    default_branch: Option<String>,
 ) -> Result<store::ProjectRepo, String> {
     let store = get_store(&store)?;
     let repo = project_commands::add_project_repo_impl(
@@ -558,6 +553,7 @@ async fn add_project_repo(
         set_as_primary,
         None,
         pr_number,
+        default_branch,
     )
     .await?;
 

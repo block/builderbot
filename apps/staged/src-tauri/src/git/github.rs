@@ -209,10 +209,51 @@ fn run_gh_global(args: &[&str]) -> Result<String, GitError> {
         GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
     })?;
 
-    let output = Command::new(&gh_path)
+    let mut child = Command::new(&gh_path)
         .args(args)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| GitError::CommandFailed(format!("Failed to run gh: {e}")))?;
+
+    let timeout = Duration::from_secs(60);
+    let start = Instant::now();
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = child.stdout.take().map_or_else(Vec::new, |mut s| {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or_default();
+                    buf
+                });
+                let stderr = child.stderr.take().map_or_else(Vec::new, |mut s| {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or_default();
+                    buf
+                });
+                break std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                };
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(GitError::CommandFailed(
+                        "gh command timed out after 60s".to_string(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(GitError::CommandFailed(format!(
+                    "Failed to wait for gh: {e}"
+                )));
+            }
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -242,7 +242,17 @@ pub async fn refresh_pr_status(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
     let (github_repo, _) = resolve_branch_repo_and_subpath(&store, &project, &branch)?;
 
-    let pr_status = match git::fetch_pr_status_for_repo(&github_repo, pr_number) {
+    // Run the blocking gh CLI call on a background thread so we don't
+    // block the Tauri IPC thread and starve other commands.
+    let pr_status = {
+        let github_repo = github_repo.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            git::fetch_pr_status_for_repo(&github_repo, pr_number)
+        })
+        .await
+        .map_err(|e| format!("refresh_pr_status task failed: {e}"))?
+    };
+    let pr_status = match pr_status {
         Ok(status) => status,
         Err(e) => {
             log::error!(

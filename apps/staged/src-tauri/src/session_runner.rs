@@ -280,6 +280,7 @@ pub fn start_session(
             let writer = Arc::new(MessageWriter::new(
                 config.session_id.clone(),
                 Arc::clone(&store),
+                config.agent_session_id.is_some(),
             ));
 
             // Read and base64-encode images for the prompt content blocks.

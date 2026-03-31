@@ -46,6 +46,11 @@ pub struct MessageWriter {
     /// ACP can send multiple content updates for one tool call; we update
     /// the same row instead of inserting duplicates.
     current_tool_result_msg_id: Mutex<Option<i64>>,
+    /// Roles of previously persisted messages, loaded from DB on resume.
+    /// Used to skip replayed messages that the server sends again.
+    replay_messages: Mutex<Vec<MessageRole>>,
+    /// Index into `replay_messages`, tracking how far through replay we are.
+    replay_cursor: Mutex<usize>,
 }
 
 /// Strip backticks from agent-provided tool-call titles.
@@ -65,7 +70,17 @@ fn format_tool_call_content(title: &str, raw_input: Option<&serde_json::Value>) 
 }
 
 impl MessageWriter {
-    pub fn new(session_id: String, store: Arc<Store>) -> Self {
+    pub fn new(session_id: String, store: Arc<Store>, resuming: bool) -> Self {
+        let replay_roles = if resuming {
+            store
+                .get_session_messages(&session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|m| m.role)
+                .collect()
+        } else {
+            Vec::new()
+        };
         Self {
             session_id,
             store,
@@ -74,6 +89,21 @@ impl MessageWriter {
             last_flush_at: Mutex::new(Instant::now()),
             tool_call_rows: Mutex::new(HashMap::new()),
             current_tool_result_msg_id: Mutex::new(None),
+            replay_messages: Mutex::new(replay_roles),
+            replay_cursor: Mutex::new(0),
+        }
+    }
+
+    /// Check if the current message matches the next expected replay message.
+    /// If so, advance the cursor and return `true` (skip the write).
+    async fn try_skip_replay(&self, role: MessageRole) -> bool {
+        let mut cursor = self.replay_cursor.lock().await;
+        let messages = self.replay_messages.lock().await;
+        if *cursor < messages.len() && messages[*cursor] == role {
+            *cursor += 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -130,6 +160,10 @@ impl MessageWriter {
             return;
         }
 
+        if self.try_skip_replay(MessageRole::ToolCall).await {
+            return;
+        }
+
         match self
             .store
             .add_session_message(&self.session_id, MessageRole::ToolCall, &content)
@@ -175,6 +209,10 @@ impl MessageWriter {
             return;
         }
 
+        if self.try_skip_replay(MessageRole::ToolResult).await {
+            return;
+        }
+
         match self
             .store
             .add_session_message(&self.session_id, MessageRole::ToolResult, &content)
@@ -205,6 +243,9 @@ impl MessageWriter {
                 let _ = self.store.update_message_content(id, &text);
             }
             None => {
+                if self.try_skip_replay(MessageRole::Assistant).await {
+                    return;
+                }
                 match self.store.add_session_message(
                     &self.session_id,
                     MessageRole::Assistant,
@@ -276,7 +317,7 @@ mod tests {
         let store = Arc::new(Store::in_memory().expect("in-memory store"));
         let session = Session::new_running("test prompt", Path::new("."));
         store.create_session(&session).expect("create session");
-        let writer = MessageWriter::new(session.id.clone(), Arc::clone(&store));
+        let writer = MessageWriter::new(session.id.clone(), Arc::clone(&store), false);
         (store, session.id, writer)
     }
 

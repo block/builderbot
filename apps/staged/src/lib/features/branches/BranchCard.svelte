@@ -869,7 +869,9 @@
           }}
           onNewNote={() => sessionMgr.openNewSession('note')}
           onNewCommit={() => sessionMgr.openNewSession('commit')}
-          onNewReview={hasCodeChanges ? (e) => sessionMgr.openNewSession('review', e) : undefined}
+          onNewReview={hasCodeChanges || sessionMgr.hasCommitSessionInProgress
+            ? (e) => sessionMgr.openNewSession('review', e)
+            : undefined}
           newSessionDisabled={sessionMgr.isNewSessionDisabled}
           {provisioningLabel}
           {provisioningDetail}

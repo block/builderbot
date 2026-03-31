@@ -76,6 +76,21 @@ export default class BranchCardSessionManager {
   /** True when new session actions (new commit, note, review) should be disabled. */
   isNewSessionDisabled = $derived(this.showNewSession || this.isSessionStartPending);
 
+  /** True when a commit session is pending, queued, or actively running. */
+  hasCommitSessionInProgress = $derived.by(() => {
+    if (
+      this.pendingSessionItems.some(
+        (item) => item.type === 'pending-commit' || item.type === 'queued-commit'
+      )
+    ) {
+      return true;
+    }
+    const tl = this.getTimeline();
+    return (
+      !!tl && tl.commits.some((c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued')
+    );
+  });
+
   constructor(opts: {
     getBranch: () => Branch;
     getIsRemote: () => boolean;
@@ -162,22 +177,8 @@ export default class BranchCardSessionManager {
     this.autoReviewId = null;
   }
 
-  private hasPendingOrActiveCommitSession(): boolean {
-    if (
-      this.pendingSessionItems.some(
-        (item) => item.type === 'pending-commit' || item.type === 'queued-commit'
-      )
-    ) {
-      return true;
-    }
-    const tl = this.getTimeline();
-    return (
-      !!tl && tl.commits.some((c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued')
-    );
-  }
-
   async tryAdoptAutoReview(): Promise<boolean> {
-    if (this.hasPendingOrActiveCommitSession()) return false;
+    if (this.hasCommitSessionInProgress) return false;
 
     const branch = this.getBranch();
 

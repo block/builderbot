@@ -53,7 +53,7 @@ impl AgentDriver for SimpleDriverWrapper {
     async fn run(
         &self,
         session_id: &str,
-        prompt: &str,
+        prompt: Option<&str>,
         images: &[(String, String)],
         working_dir: &Path,
         store: &Arc<dyn crate::driver::Store>,
@@ -251,10 +251,16 @@ impl AgentDriver for SimpleDriverWrapper {
                     handler.transition_to_waiting().await;
                 }
 
+                // When prompt is None, skip sending a prompt (session-only setup).
+                let prompt_text = match prompt {
+                    Some(p) => p,
+                    None => return Ok::<_, String>(()),
+                };
+
                 // Build and send prompt
                 let prompt_request = PromptRequest::new(
                     agent_session_id,
-                    vec![AcpContentBlock::Text(TextContent::new(prompt))],
+                    vec![AcpContentBlock::Text(TextContent::new(prompt_text))],
                 );
 
                 if is_resuming {
@@ -317,7 +323,7 @@ pub async fn run_acp_prompt(agent: &AcpAgent, working_dir: &Path, prompt: &str) 
             driver
                 .run(
                     "simple-session",
-                    &prompt,
+                    Some(&prompt),
                     &[],
                     &working_dir,
                     &store,

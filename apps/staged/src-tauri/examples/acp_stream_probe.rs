@@ -188,7 +188,7 @@ fn main() -> Result<()> {
         let result = driver
             .run(
                 "probe-session",
-                &prompt,
+                Some(prompt.as_str()),
                 &[],
                 &workdir,
                 &store,

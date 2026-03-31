@@ -326,7 +326,7 @@ pub fn start_session(
             driver
                 .run(
                     &config.session_id,
-                    &config.prompt,
+                    Some(config.prompt.as_str()),
                     &image_data,
                     &config.working_dir,
                     &store_trait,

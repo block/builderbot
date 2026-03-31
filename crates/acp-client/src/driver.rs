@@ -121,10 +121,13 @@ pub trait AgentDriver {
     ///
     /// `images` contains `(base64_data, mime_type)` pairs that are sent as
     /// `ContentBlock::Image` entries alongside the text prompt.
+    ///
+    /// When `prompt` is `None`, the driver sets up / resumes the session but
+    /// does **not** send a prompt to the agent.
     async fn run(
         &self,
         session_id: &str,
-        prompt: &str,
+        prompt: Option<&str>,
         images: &[(String, String)],
         working_dir: &Path,
         store: &Arc<dyn Store>,
@@ -262,7 +265,7 @@ impl AgentDriver for AcpDriver {
     async fn run(
         &self,
         session_id: &str,
-        prompt: &str,
+        prompt: Option<&str>,
         images: &[(String, String)],
         working_dir: &Path,
         store: &Arc<dyn Store>,
@@ -1080,7 +1083,7 @@ fn notification_tool_call_id(update: &SessionUpdate) -> Option<String> {
 async fn run_acp_protocol(
     connection: &ClientSideConnection,
     working_dir: &Path,
-    prompt: &str,
+    prompt: Option<&str>,
     images: &[(String, String)],
     store: &Arc<dyn Store>,
     our_session_id: &str,
@@ -1132,7 +1135,13 @@ async fn run_acp_protocol(
         handler.transition_to_waiting_for_prompt().await;
     }
 
-    let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
+    // When prompt is None, skip sending a prompt (session-only setup).
+    let prompt_text = match prompt {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt_text))];
     for (data, mime_type) in images {
         content_blocks.push(AcpContentBlock::Image(ImageContent::new(
             data.as_str(),

@@ -371,7 +371,7 @@
       />
 
       <div class="form-actions">
-        <AgentSelector disabled={starting} {remote} />
+        <AgentSelector disabled={starting} {remote} dropUp />
         <div class="form-actions-right">
           <button type="button" class="cancel-btn" onclick={handleClose} disabled={starting}>
             Cancel

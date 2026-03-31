@@ -22,7 +22,10 @@ mod simple;
 mod types;
 
 // Re-export the main API
-pub use agent_client_protocol::{McpServer, McpServerHttp, McpServerSse};
+pub use agent_client_protocol::{
+    ConfigOptionUpdate, McpServer, McpServerHttp, McpServerSse, ModelInfo, SessionConfigOption,
+    SessionConfigOptionCategory, SessionInfoUpdate, SessionModelState,
+};
 pub use driver::{
     strip_code_fences, AcpDriver, AgentDriver, BasicMessageWriter, MessageWriter, Store,
 };

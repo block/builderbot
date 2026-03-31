@@ -248,10 +248,18 @@
         }
         try {
           prStatusRefreshing = true;
-          const timeout = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error('refreshPrStatus timed out after 60s')), 60_000)
-          );
-          await Promise.race([commands.refreshPrStatus(branch.id), timeout]);
+          let timeoutId: ReturnType<typeof setTimeout>;
+          const timeout = new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
+              () => reject(new Error('refreshPrStatus timed out after 60s')),
+              60_000
+            );
+          });
+          try {
+            await Promise.race([commands.refreshPrStatus(branch.id), timeout]);
+          } finally {
+            clearTimeout(timeoutId!);
+          }
         } catch (e) {
           console.error(`[BranchCardPrButton] Poll refresh failed for branch=${branch.id}:`, e);
         } finally {

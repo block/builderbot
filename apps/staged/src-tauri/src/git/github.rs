@@ -547,6 +547,24 @@ pub fn detect_default_branch_for_repo(github_repo: &str) -> Result<String, GitEr
     Ok(view.default_branch_ref.name)
 }
 
+/// Resolve the default branch for a repo, using a prefetched value when available
+/// and falling back to the GitHub API. Returns an `origin/`-prefixed ref.
+pub fn resolve_default_branch(prefetched: Option<String>, github_repo: &str) -> String {
+    let detected = prefetched
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            detect_default_branch_for_repo(github_repo).unwrap_or_else(|_| "main".to_string())
+        });
+    if detected.starts_with("origin/") {
+        detected
+    } else {
+        format!("origin/{detected}")
+    }
+}
+
 /// A git branch reference from the GitHub API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

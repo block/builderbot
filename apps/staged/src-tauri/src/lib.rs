@@ -375,19 +375,7 @@ fn create_project(
         // project starts with exactly one branch tracked for that repository.
         // Use the frontend-prefetched default branch when available to avoid
         // a ~500ms-2s GitHub API round-trip during project creation.
-        let detected_base = default_branch
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| {
-                git::detect_default_branch_for_repo(&repo).unwrap_or_else(|_| "main".to_string())
-            });
-        let effective_base = if detected_base.starts_with("origin/") {
-            detected_base
-        } else {
-            format!("origin/{detected_base}")
-        };
+        let effective_base = git::resolve_default_branch(default_branch, &repo);
 
         let (branch_id, is_local) = match project.location {
             store::ProjectLocation::Local => {

@@ -70,7 +70,7 @@
         branchName: normalizedBranch,
         subpath: normalizedSubpath,
         prNumber,
-        defaultBranch,
+        defaultBranch: defaultBranch ?? undefined,
       });
       onClose();
     } catch (e) {

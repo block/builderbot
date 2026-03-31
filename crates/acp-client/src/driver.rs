@@ -17,8 +17,8 @@ use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, ImageContent, Implementation,
     InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOptionId,
     PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption, SessionModelState,
-    SessionNotification, SessionUpdate, TextContent,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption, SessionInfoUpdate,
+    SessionModelState, SessionNotification, SessionUpdate, TextContent,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -59,12 +59,17 @@ pub trait MessageWriter: Send + Sync {
     /// Record the result/output of a tool call.
     async fn record_tool_result(&self, content: &str);
 
-    /// Called when the session title changes.
+    /// Called when session info is updated (title, timestamps, etc.).
     ///
-    /// `title` is `Some` when a title is set, `None` when explicitly cleared.
-    async fn on_session_title_update(&self, _title: Option<&str>) {}
+    /// Delivered via `SessionUpdate::SessionInfoUpdate` notifications during a
+    /// session, or extracted from setup responses.
+    async fn on_session_info_update(&self, _info: &SessionInfoUpdate) {}
 
-    /// Called when model state is received (from session setup or notification).
+    /// Called when model state is received from session setup responses.
+    ///
+    /// `SessionModelState` is only delivered in `NewSessionResponse` and
+    /// `LoadSessionResponse`. Mid-session model changes are surfaced through
+    /// `on_config_option_update` via `ConfigOptionUpdate` with category `Model`.
     async fn on_model_state_update(&self, _state: &SessionModelState) {}
 
     /// Called when session configuration options change.
@@ -848,11 +853,7 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         // Session metadata events are forwarded regardless of phase.
         match &notification.update {
             SessionUpdate::SessionInfoUpdate(info) => {
-                if let Some(title_opt) = info.title.as_opt_ref() {
-                    self.writer
-                        .on_session_title_update(title_opt.map(|s| s.as_str()))
-                        .await;
-                }
+                self.writer.on_session_info_update(info).await;
                 return Ok(());
             }
             SessionUpdate::ConfigOptionUpdate(update) => {

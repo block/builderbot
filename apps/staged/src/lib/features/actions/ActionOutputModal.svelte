@@ -42,6 +42,7 @@
     listenToActionOutput,
     listenToActionStatus,
   } from './actions';
+  import { processChunksToLines, type TerminalLine } from './processOutput';
 
   interface Props {
     executionId: string;
@@ -66,12 +67,6 @@
   // =========================================================================
   // State
   // =========================================================================
-
-  /** A processed terminal line ready for display. */
-  interface TerminalLine {
-    text: string;
-    stream: 'stdout' | 'stderr';
-  }
 
   let status = $state<ActionStatus>('running');
   let exitCode = $state<number | null>(null);
@@ -149,60 +144,6 @@
         saveError = null;
       }, 3000);
     }
-  }
-
-  /**
-   * Process raw output chunks into terminal lines, handling carriage returns.
-   *
-   * Terminal programs use \r (carriage return without newline) to overwrite the
-   * current line in-place — e.g. for progress bars. This function simulates
-   * that behavior:
-   *   - \n finalizes the current line and starts a new one
-   *   - \r (not followed by \n) resets the cursor to the start of the current
-   *     line so subsequent text overwrites it
-   */
-  function processChunksToLines(chunks: OutputChunk[]): TerminalLine[] {
-    const lines: TerminalLine[] = [];
-    let currentText = '';
-    let currentStream: 'stdout' | 'stderr' = 'stdout';
-
-    for (const chunk of chunks) {
-      const raw = chunk.chunk;
-      const stream = chunk.stream;
-
-      for (let i = 0; i < raw.length; i++) {
-        const ch = raw[i];
-
-        if (ch === '\n') {
-          // Newline: finalize the current line and start a new one
-          lines.push({ text: currentText, stream: currentStream });
-          currentText = '';
-          currentStream = stream;
-        } else if (ch === '\r') {
-          // Carriage return: check if it's \r\n (treat as plain newline)
-          if (i + 1 < raw.length && raw[i + 1] === '\n') {
-            lines.push({ text: currentText, stream: currentStream });
-            currentText = '';
-            currentStream = stream;
-            i++; // skip the \n
-          } else {
-            // Bare \r: reset cursor to start of current line (overwrite)
-            currentText = '';
-            currentStream = stream;
-          }
-        } else {
-          currentText += ch;
-          currentStream = stream;
-        }
-      }
-    }
-
-    // Don't forget the last in-progress line
-    if (currentText.length > 0) {
-      lines.push({ text: currentText, stream: currentStream });
-    }
-
-    return lines;
   }
 
   /** Derived display lines — recomputed whenever outputChunks changes. */

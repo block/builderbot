@@ -17,8 +17,8 @@ use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, ImageContent, Implementation,
     InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOptionId,
     PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
-    TextContent,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption, SessionInfoUpdate,
+    SessionModelState, SessionNotification, SessionUpdate, TextContent,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -58,6 +58,22 @@ pub trait MessageWriter: Send + Sync {
 
     /// Record the result/output of a tool call.
     async fn record_tool_result(&self, content: &str);
+
+    /// Called when session info is updated (title, timestamps, etc.).
+    ///
+    /// Delivered via `SessionUpdate::SessionInfoUpdate` notifications during a
+    /// session, or extracted from setup responses.
+    async fn on_session_info_update(&self, _info: &SessionInfoUpdate) {}
+
+    /// Called when model state is received from session setup responses.
+    ///
+    /// `SessionModelState` is only delivered in `NewSessionResponse` and
+    /// `LoadSessionResponse`. Mid-session model changes are surfaced through
+    /// `on_config_option_update` via `ConfigOptionUpdate` with category `Model`.
+    async fn on_model_state_update(&self, _state: &SessionModelState) {}
+
+    /// Called when session configuration options change.
+    async fn on_config_option_update(&self, _options: &[SessionConfigOption]) {}
 }
 
 /// Storage interface for persisting agent session data.
@@ -834,6 +850,21 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
+        // Session metadata events are forwarded regardless of phase.
+        match &notification.update {
+            SessionUpdate::SessionInfoUpdate(info) => {
+                self.writer.on_session_info_update(info).await;
+                return Ok(());
+            }
+            SessionUpdate::ConfigOptionUpdate(update) => {
+                self.writer
+                    .on_config_option_update(&update.config_options)
+                    .await;
+                return Ok(());
+            }
+            _ => {}
+        }
+
         // Determine the action to take under the lock, then drop the lock
         // before calling into the writer to avoid holding it across await points.
         enum LiveAction {
@@ -1032,6 +1063,7 @@ async fn run_acp_protocol(
             connection,
             working_dir,
             store,
+            &handler.writer,
             our_session_id,
             acp_session_id,
             mcp_servers,
@@ -1092,6 +1124,7 @@ async fn setup_acp_session(
     connection: &ClientSideConnection,
     working_dir: &Path,
     store: &Arc<dyn Store>,
+    writer: &Arc<dyn MessageWriter>,
     our_session_id: &str,
     acp_session_id: Option<&str>,
     mcp_servers: &[McpServer],
@@ -1136,13 +1169,20 @@ async fn setup_acp_session(
                 "Resuming ACP session {existing_id} via load_session for session {our_session_id}"
             );
 
-            connection
+            let load_response = connection
                 .load_session(
                     LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
                         .mcp_servers(mcp_servers.to_vec()),
                 )
                 .await
                 .map_err(|e| format!("Failed to load ACP session: {e:?}"))?;
+
+            if let Some(ref models) = load_response.models {
+                writer.on_model_state_update(models).await;
+            }
+            if let Some(ref options) = load_response.config_options {
+                writer.on_config_option_update(options).await;
+            }
 
             Ok(existing_id.to_string())
         }
@@ -1158,6 +1198,14 @@ async fn setup_acp_session(
             store
                 .set_agent_session_id(our_session_id, &new_id)
                 .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
+
+            if let Some(ref models) = session_response.models {
+                writer.on_model_state_update(models).await;
+            }
+            if let Some(ref options) = session_response.config_options {
+                writer.on_config_option_update(options).await;
+            }
+
             Ok(new_id)
         }
     }

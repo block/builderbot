@@ -93,7 +93,7 @@ function similarity(a: string, b: string): number {
 const SIMILARITY_THRESHOLD = 0.55;
 
 function splitWords(text: string): string[] {
-  return text.split(/(\s+)/);
+  return text.match(/\w+|\s+|[^\s\w]/g) ?? [];
 }
 
 function computeCharHighlights(

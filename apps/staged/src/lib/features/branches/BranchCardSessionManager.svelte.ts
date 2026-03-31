@@ -162,7 +162,23 @@ export default class BranchCardSessionManager {
     this.autoReviewId = null;
   }
 
+  private hasPendingOrActiveCommitSession(): boolean {
+    if (
+      this.pendingSessionItems.some(
+        (item) => item.type === 'pending-commit' || item.type === 'queued-commit'
+      )
+    ) {
+      return true;
+    }
+    const tl = this.getTimeline();
+    return (
+      !!tl && tl.commits.some((c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued')
+    );
+  }
+
   async tryAdoptAutoReview(): Promise<boolean> {
+    if (this.hasPendingOrActiveCommitSession()) return false;
+
     const branch = this.getBranch();
 
     try {

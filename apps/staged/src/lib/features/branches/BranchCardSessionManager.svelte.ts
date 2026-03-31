@@ -177,12 +177,8 @@ export default class BranchCardSessionManager {
     this.autoReviewId = null;
   }
 
-  private hasPendingOrActiveCommitSession(): boolean {
-    return this.hasCommitSessionInProgress;
-  }
-
   async tryAdoptAutoReview(): Promise<boolean> {
-    if (this.hasPendingOrActiveCommitSession()) return false;
+    if (this.hasCommitSessionInProgress) return false;
 
     const branch = this.getBranch();
 

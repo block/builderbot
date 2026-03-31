@@ -27,7 +27,9 @@ use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
 use nix::sys::signal::{self, Signal};
+#[cfg(unix)]
 use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
@@ -293,6 +295,7 @@ impl AgentDriver for AcpDriver {
         // which breaks zsh's job-control / precmd hooks — the shell either
         // hangs or exits immediately without running `exec`.
         if self.is_remote {
+            #[cfg(unix)]
             cmd.process_group(0);
         }
         // For local shells extra_env is set on the clean environment; for
@@ -433,6 +436,7 @@ impl AgentDriver for AcpDriver {
 ///
 /// For local agents (no separate process group), kills immediately.
 async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
+    #[cfg(unix)]
     if is_remote {
         let Some(pid) = child.id() else {
             return;

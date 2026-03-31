@@ -433,6 +433,44 @@ describe('computeLineDiff', () => {
       expect(totalHighlighted).toBeLessThan(after[0].length / 2);
     });
 
+    it('highlights only the changed accented word', () => {
+      const before = ['le café est bon'];
+      const after = ['le thé est bon'];
+      const result = computeLineDiff(before, after);
+
+      expect(result.modifiedPairs).toHaveLength(1);
+      const pair = result.modifiedPairs[0];
+
+      const beforeHighlightedText = pair.beforeHighlights.map(h =>
+        before[0].slice(h.start, h.end),
+      );
+      expect(beforeHighlightedText).toEqual(['café']);
+
+      const afterHighlightedText = pair.afterHighlights.map(h =>
+        after[0].slice(h.start, h.end),
+      );
+      expect(afterHighlightedText).toEqual(['thé']);
+    });
+
+    it('highlights only the changed emoji', () => {
+      const before = ['status: 🎉 done'];
+      const after = ['status: 🚀 done'];
+      const result = computeLineDiff(before, after);
+
+      expect(result.modifiedPairs).toHaveLength(1);
+      const pair = result.modifiedPairs[0];
+
+      const beforeHighlightedText = pair.beforeHighlights.map(h =>
+        before[0].slice(h.start, h.end),
+      );
+      expect(beforeHighlightedText).toEqual(['🎉']);
+
+      const afterHighlightedText = pair.afterHighlights.map(h =>
+        after[0].slice(h.start, h.end),
+      );
+      expect(afterHighlightedText).toEqual(['🚀']);
+    });
+
     it('handles interleaved unchanged and changed lines', () => {
       const before = ['A', 'B', 'C', 'D', 'E'];
       const after = ['A', 'B2', 'C', 'D2', 'E'];

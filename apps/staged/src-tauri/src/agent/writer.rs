@@ -39,8 +39,8 @@ pub struct MessageWriter {
     current_text: Mutex<String>,
     /// When we last wrote to the DB — used to throttle flush frequency.
     last_flush_at: Mutex<Instant>,
-    /// Maps external tool-call IDs → DB row IDs.
-    tool_call_rows: Mutex<HashMap<String, i64>>,
+    /// Maps external tool-call IDs → (DB row ID, last-known title).
+    tool_call_rows: Mutex<HashMap<String, (i64, String)>>,
     /// DB row id of the currently streaming tool result.
     ///
     /// ACP can send multiple content updates for one tool call; we update
@@ -51,6 +51,17 @@ pub struct MessageWriter {
 /// Strip backticks from agent-provided tool-call titles.
 fn sanitize_title(title: &str) -> String {
     title.replace('`', "")
+}
+
+/// Format a tool call for storage. When `raw_input` is present, produces a JSON
+/// object `{"name": title, "input": raw_input}` that the frontend can parse to
+/// display structured tool call info. Without raw_input, falls back to the plain
+/// title string.
+fn format_tool_call_content(title: &str, raw_input: Option<&serde_json::Value>) -> String {
+    match raw_input {
+        Some(input) => serde_json::json!({ "name": title, "input": input }).to_string(),
+        None => title.to_string(),
+    }
 }
 
 impl MessageWriter {
@@ -98,39 +109,60 @@ impl MessageWriter {
 
     /// Record a tool call. Finalizes any in-progress assistant text first
     /// to maintain correct message ordering.
-    pub async fn record_tool_call(&self, tool_call_id: &str, title: &str) {
+    pub async fn record_tool_call(
+        &self,
+        tool_call_id: &str,
+        title: &str,
+        raw_input: Option<&serde_json::Value>,
+    ) {
         self.finalize().await;
         *self.current_tool_result_msg_id.lock().await = None;
 
         let title = sanitize_title(title);
+        let content = format_tool_call_content(&title, raw_input);
 
         // Some providers may resend ToolCall for the same ID while streaming.
         // Treat those as updates to the existing row.
-        if let Some(&row_id) = self.tool_call_rows.lock().await.get(tool_call_id) {
-            let _ = self.store.update_message_content(row_id, &title);
+        let mut rows = self.tool_call_rows.lock().await;
+        if let Some((row_id, stored_title)) = rows.get_mut(tool_call_id) {
+            *stored_title = title.clone();
+            let _ = self.store.update_message_content(*row_id, &content);
             return;
         }
 
         match self
             .store
-            .add_session_message(&self.session_id, MessageRole::ToolCall, &title)
+            .add_session_message(&self.session_id, MessageRole::ToolCall, &content)
         {
             Ok(id) => {
-                self.tool_call_rows
-                    .lock()
-                    .await
-                    .insert(tool_call_id.to_string(), id);
+                rows.insert(tool_call_id.to_string(), (id, title));
             }
             Err(e) => log::error!("Failed to insert tool_call message: {e}"),
         }
     }
 
-    /// Update a previously recorded tool call's title.
-    pub async fn update_tool_call_title(&self, tool_call_id: &str, title: &str) {
-        let title = sanitize_title(title);
-        let rows = self.tool_call_rows.lock().await;
-        if let Some(&row_id) = rows.get(tool_call_id) {
-            let _ = self.store.update_message_content(row_id, &title);
+    /// Update a previously recorded tool call's title and/or raw input.
+    ///
+    /// When `title` is `None`, the last-known title stored at recording time
+    /// is reused so that a `raw_input`-only update doesn't blank the name.
+    pub async fn update_tool_call_title(
+        &self,
+        tool_call_id: &str,
+        title: Option<&str>,
+        raw_input: Option<&serde_json::Value>,
+    ) {
+        let mut rows = self.tool_call_rows.lock().await;
+        if let Some((row_id, stored_title)) = rows.get_mut(tool_call_id) {
+            let effective_title = match title {
+                Some(t) => {
+                    let sanitized = sanitize_title(t);
+                    *stored_title = sanitized.clone();
+                    sanitized
+                }
+                None => stored_title.clone(),
+            };
+            let content = format_tool_call_content(&effective_title, raw_input);
+            let _ = self.store.update_message_content(*row_id, &content);
         }
     }
 
@@ -208,12 +240,23 @@ impl acp_client::MessageWriter for MessageWriter {
         self.finalize().await
     }
 
-    async fn record_tool_call(&self, tool_call_id: &str, title: &str) {
-        self.record_tool_call(tool_call_id, title).await
+    async fn record_tool_call(
+        &self,
+        tool_call_id: &str,
+        title: &str,
+        raw_input: Option<&serde_json::Value>,
+    ) {
+        self.record_tool_call(tool_call_id, title, raw_input).await
     }
 
-    async fn update_tool_call_title(&self, tool_call_id: &str, title: &str) {
-        self.update_tool_call_title(tool_call_id, title).await
+    async fn update_tool_call_title(
+        &self,
+        tool_call_id: &str,
+        title: Option<&str>,
+        raw_input: Option<&serde_json::Value>,
+    ) {
+        self.update_tool_call_title(tool_call_id, title, raw_input)
+            .await
     }
 
     async fn record_tool_result(&self, content: &str) {
@@ -241,7 +284,9 @@ mod tests {
     async fn record_tool_result_updates_existing_row_for_streaming_updates() {
         let (store, session_id, writer) = setup_writer();
 
-        writer.record_tool_call("tc-1", "Run echo hello").await;
+        writer
+            .record_tool_call("tc-1", "Run echo hello", None)
+            .await;
         writer.record_tool_result("first chunk").await;
         writer.record_tool_result("second chunk").await;
 
@@ -258,8 +303,12 @@ mod tests {
     async fn record_tool_call_same_id_updates_instead_of_inserting() {
         let (store, session_id, writer) = setup_writer();
 
-        writer.record_tool_call("tc-dup", "Run first title").await;
-        writer.record_tool_call("tc-dup", "Run updated title").await;
+        writer
+            .record_tool_call("tc-dup", "Run first title", None)
+            .await;
+        writer
+            .record_tool_call("tc-dup", "Run updated title", None)
+            .await;
 
         let messages = store
             .get_session_messages(&session_id)
@@ -267,5 +316,49 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, MessageRole::ToolCall);
         assert_eq!(messages[0].content, "Run updated title");
+    }
+
+    #[tokio::test]
+    async fn record_tool_call_with_raw_input_stores_json() {
+        let (store, session_id, writer) = setup_writer();
+
+        let raw_input = serde_json::json!({"path": "foo.rs"});
+        writer
+            .record_tool_call("tc-json", "Read file", Some(&raw_input))
+            .await;
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, MessageRole::ToolCall);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&messages[0].content).expect("content should be valid JSON");
+        assert_eq!(parsed["name"], "Read file");
+        assert_eq!(parsed["input"]["path"], "foo.rs");
+    }
+
+    #[tokio::test]
+    async fn update_tool_call_raw_input_without_title_preserves_title() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.record_tool_call("tc-ri", "Read file", None).await;
+
+        // Update with raw_input only (no title).
+        let raw_input = serde_json::json!({"path": "bar.rs"});
+        writer
+            .update_tool_call_title("tc-ri", None, Some(&raw_input))
+            .await;
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        assert_eq!(messages.len(), 1);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&messages[0].content).expect("content should be valid JSON");
+        assert_eq!(parsed["name"], "Read file");
+        assert_eq!(parsed["input"]["path"], "bar.rs");
     }
 }

@@ -97,16 +97,6 @@ pub trait MessageWriter: Send + Sync {
 pub trait Store: Send + Sync {
     /// Save the agent's session ID for resumption.
     fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String>;
-
-    /// Retrieve existing session messages as `(role, content)` pairs.
-    ///
-    /// Used during session resumption to match replayed notifications
-    /// against previously persisted messages.  The default implementation
-    /// returns an empty list, which is correct for stores that do not
-    /// support message persistence (e.g. `NoOpStore`).
-    fn get_session_messages(&self, _session_id: &str) -> Result<Vec<(String, String)>, String> {
-        Ok(vec![])
-    }
 }
 
 /// Everything needed to run one turn of an agent.
@@ -406,14 +396,7 @@ impl AgentDriver for AcpDriver {
         let stdout_compat = incoming_reader.compat();
 
         let is_resuming = agent_session_id.is_some();
-        let db_messages = if is_resuming {
-            store.get_session_messages(session_id).unwrap_or_else(|e| {
-                log::warn!("Failed to load session messages for replay matching: {e}");
-                vec![]
-            })
-        } else {
-            vec![]
-        };
+        let db_messages = vec![];
         let handler = Arc::new(AcpNotificationHandler::new(
             Arc::clone(writer),
             is_resuming,

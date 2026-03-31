@@ -653,7 +653,14 @@
   {#if editingAction}
     <div class="editor">
       <input bind:value={editForm.name} placeholder="Action name" />
-      <input bind:value={editForm.command} placeholder="Command" />
+      <input
+        bind:value={editForm.command}
+        placeholder="Command"
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+      />
       <select bind:value={editForm.actionType}>
         <option value="run">run</option>
         <option value="prerun">prerun</option>

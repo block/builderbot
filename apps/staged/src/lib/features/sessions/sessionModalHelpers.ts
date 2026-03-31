@@ -64,6 +64,7 @@ const TOOL_VERBS: Record<string, [past: string, present: string]> = {
   Grep: ['Searched', 'Searching'],
   Search: ['Searched', 'Searching'],
   Glob: ['Listed', 'Listing'],
+  Edit: ['Edited', 'Editing'],
   StrReplace: ['Edited', 'Editing'],
   Delete: ['Deleted', 'Deleting'],
   EditNotebook: ['Edited', 'Editing'],
@@ -81,6 +82,7 @@ function primaryArg(toolName: string, args: Record<string, unknown>): string {
     case 'ReadFile':
     case 'Write':
     case 'WriteFile':
+    case 'Edit':
     case 'Delete':
     case 'EditNotebook':
     case 'StrReplace':
@@ -95,8 +97,10 @@ function primaryArg(toolName: string, args: Record<string, unknown>): string {
       return str('pattern') || str('query') || '';
     case 'Glob':
       return str('pattern') || str('glob') || '';
-    default:
-      return formatArgs(args);
+    default: {
+      const formatted = formatArgs(args);
+      return formatted.length > 200 ? formatted.slice(0, 200) + '…' : formatted;
+    }
   }
 }
 

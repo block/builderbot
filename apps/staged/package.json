@@ -13,7 +13,9 @@
     "tauri:build": "tauri build",
     "tauri:release:config": "node scripts/build-tauri-release-config.mjs",
     "release:updater:publish": "node scripts/publish-updater-to-github-release.mjs",
-    "release:dmg:publish": "node scripts/publish-dmg-to-github-release.mjs"
+    "release:dmg:publish": "node scripts/publish-dmg-to-github-release.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.1",
@@ -25,7 +27,8 @@
     "svelte": "^5.46.4",
     "svelte-check": "^4.3.4",
     "typescript": "~5.9.3",
-    "vite": "^7.2.4"
+    "vite": "^7.2.4",
+    "vitest": "^4.0.18"
   },
   "dependencies": {
     "@builderbot/diff-viewer": "workspace:*",

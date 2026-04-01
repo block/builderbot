@@ -299,6 +299,32 @@ fn test_transition_from_running_succeeds_when_running() {
 }
 
 #[test]
+fn test_completion_reason_round_trips() {
+    let store = Store::in_memory().unwrap();
+
+    for reason in [
+        CompletionReason::TurnComplete,
+        CompletionReason::Interrupted,
+        CompletionReason::Crashed,
+        CompletionReason::AppQuit,
+        CompletionReason::Unknown,
+    ] {
+        let session = Session::new_running("test reason", Path::new("/tmp"));
+        store.create_session(&session).unwrap();
+        store
+            .update_session_status(&session.id, SessionStatus::Completed, None, Some(&reason))
+            .unwrap();
+        let fetched = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            fetched.completion_reason.as_ref(),
+            Some(&reason),
+            "round-trip failed for {:?}",
+            reason
+        );
+    }
+}
+
+#[test]
 fn test_session_messages() {
     let store = Store::in_memory().unwrap();
 

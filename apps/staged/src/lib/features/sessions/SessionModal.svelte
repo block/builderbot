@@ -1119,8 +1119,7 @@
           <AlertCircle size={14} />
           <span>{session.errorMessage}</span>
         </div>
-      {/if}
-      {#if session && session.status !== 'running' && session.status !== 'queued'}
+      {:else if session && session.status !== 'running' && session.status !== 'queued'}
         {#if session.completionReason === 'crashed'}
           <div class="session-end-banner warning">
             <Info size={14} />
@@ -1790,12 +1789,12 @@
   }
 
   .session-end-banner.warning {
-    background: var(--ui-warning-bg, rgba(210, 153, 34, 0.1));
-    color: var(--ui-warning, #d29922);
+    background: rgba(210, 153, 34, 0.1);
+    color: #d29922;
   }
 
   .session-end-banner.neutral {
-    background: var(--bg-tertiary, rgba(127, 127, 127, 0.1));
+    background: rgba(127, 127, 127, 0.1);
     color: var(--text-muted);
   }
 

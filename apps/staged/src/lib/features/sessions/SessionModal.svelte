@@ -1120,22 +1120,14 @@
           <span>{session.errorMessage}</span>
         </div>
       {:else if session && session.status !== 'running' && session.status !== 'queued'}
-        {#if session.completionReason === 'crashed'}
+        {#if session.completionReason === 'crashed' || session.completionReason === 'app_quit'}
           <div class="session-end-banner warning">
             <Info size={14} />
-            <span>This session ended unexpectedly.</span>
-            <button
-              class="resume-btn"
-              onclick={() => sendMessage('Continue where you left off.')}
-              disabled={sending}
-            >
-              Resume
-            </button>
-          </div>
-        {:else if session.completionReason === 'app_quit'}
-          <div class="session-end-banner warning">
-            <Info size={14} />
-            <span>This session was interrupted when Staged closed.</span>
+            <span>
+              {session.completionReason === 'crashed'
+                ? 'This session ended unexpectedly.'
+                : 'This session was interrupted when Staged closed.'}
+            </span>
             <button
               class="resume-btn"
               onclick={() => sendMessage('Continue where you left off.')}

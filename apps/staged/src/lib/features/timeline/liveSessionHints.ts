@@ -1,6 +1,6 @@
 import * as commands from '../../api/commands';
 import type { BranchTimeline, SessionMessage } from '../../types';
-import { makePathsRelative } from '../sessions/sessionModalHelpers';
+import { formatToolDisplay } from '../sessions/sessionModalHelpers';
 
 const HINT_POLL_INTERVAL_MS = 750;
 const MAX_HINT_LENGTH = 72;
@@ -45,23 +45,9 @@ function withTrailingEllipsis(text: string): string {
 }
 
 function formatToolCallHint(content: string, repoDir?: string | null): string | undefined {
-  const normalized = normalizeHintText(makePathsRelative(content, repoDir));
-  if (!normalized) return undefined;
-
-  const withProgressVerb = normalized
-    .replace(/^Run\s+/i, 'Running ')
-    .replace(/^Read\s+/i, 'Reading ')
-    .replace(/^Write\s+/i, 'Writing ')
-    .replace(/^Open\s+/i, 'Opening ')
-    .replace(/^Search\s+/i, 'Searching ')
-    .replace(/^List\s+/i, 'Listing ')
-    .replace(/^Create\s+/i, 'Creating ')
-    .replace(/^Update\s+/i, 'Updating ')
-    .replace(/^Delete\s+/i, 'Deleting ')
-    .replace(/^Fetch\s+/i, 'Fetching ')
-    .replace(/^Draft\s+/i, 'Drafting ');
-
-  return normalizeHintText(withTrailingEllipsis(withProgressVerb));
+  const { verb, detail } = formatToolDisplay(content, repoDir, true);
+  const text = detail ? `${verb} ${detail}` : verb;
+  return normalizeHintText(withTrailingEllipsis(text));
 }
 
 function formatAssistantHint(content: string): string | undefined {

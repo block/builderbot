@@ -25,6 +25,13 @@ use acp_client::strip_code_fences;
 /// always forces an immediate flush regardless of this interval.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 
+/// Replay state: roles of previously persisted messages and a cursor tracking
+/// how far through replay we are.
+struct ReplayState {
+    roles: Vec<MessageRole>,
+    cursor: usize,
+}
+
 /// Streams agent output into the DB, one session at a time.
 ///
 /// All methods are `&self` + async — the struct uses interior mutability
@@ -46,11 +53,12 @@ pub struct MessageWriter {
     /// ACP can send multiple content updates for one tool call; we update
     /// the same row instead of inserting duplicates.
     current_tool_result_msg_id: Mutex<Option<i64>>,
-    /// Roles of previously persisted messages, loaded from DB on resume.
-    /// Used to skip replayed messages that the server sends again.
-    replay_messages: Mutex<Vec<MessageRole>>,
-    /// Index into `replay_messages`, tracking how far through replay we are.
-    replay_cursor: Mutex<usize>,
+    /// Replay dedup state, loaded from DB on resume.
+    replay: Mutex<ReplayState>,
+    /// Set to `true` while we are skipping a replayed assistant block.
+    /// Prevents double-advancing the cursor when `flush_text` is called
+    /// multiple times for the same block (throttled flush + finalize).
+    skipping_assistant: Mutex<bool>,
 }
 
 /// Strip backticks from agent-provided tool-call titles.
@@ -76,6 +84,7 @@ impl MessageWriter {
                 .get_session_messages(&session_id)
                 .unwrap_or_default()
                 .into_iter()
+                .filter(|m| m.role != MessageRole::User)
                 .map(|m| m.role)
                 .collect()
         } else {
@@ -89,18 +98,20 @@ impl MessageWriter {
             last_flush_at: Mutex::new(Instant::now()),
             tool_call_rows: Mutex::new(HashMap::new()),
             current_tool_result_msg_id: Mutex::new(None),
-            replay_messages: Mutex::new(replay_roles),
-            replay_cursor: Mutex::new(0),
+            replay: Mutex::new(ReplayState {
+                roles: replay_roles,
+                cursor: 0,
+            }),
+            skipping_assistant: Mutex::new(false),
         }
     }
 
     /// Check if the current message matches the next expected replay message.
     /// If so, advance the cursor and return `true` (skip the write).
     async fn try_skip_replay(&self, role: MessageRole) -> bool {
-        let mut cursor = self.replay_cursor.lock().await;
-        let messages = self.replay_messages.lock().await;
-        if *cursor < messages.len() && messages[*cursor] == role {
-            *cursor += 1;
+        let mut replay = self.replay.lock().await;
+        if replay.cursor < replay.roles.len() && replay.roles[replay.cursor] == role {
+            replay.cursor += 1;
             true
         } else {
             false
@@ -131,6 +142,7 @@ impl MessageWriter {
         self.flush_text().await;
         self.current_assistant_msg_id.lock().await.take();
         *self.current_text.lock().await = String::new();
+        *self.skipping_assistant.lock().await = false;
     }
 
     // =====================================================================
@@ -237,6 +249,12 @@ impl MessageWriter {
         if text.is_empty() {
             return;
         }
+        // If we already decided to skip this assistant block during replay,
+        // don't re-enter try_skip_replay (which would advance the cursor
+        // past a subsequent message).
+        if *self.skipping_assistant.lock().await {
+            return;
+        }
         let mut msg_id = self.current_assistant_msg_id.lock().await;
         match *msg_id {
             Some(id) => {
@@ -244,6 +262,7 @@ impl MessageWriter {
             }
             None => {
                 if self.try_skip_replay(MessageRole::Assistant).await {
+                    *self.skipping_assistant.lock().await = true;
                     return;
                 }
                 match self.store.add_session_message(
@@ -401,5 +420,47 @@ mod tests {
             serde_json::from_str(&messages[0].content).expect("content should be valid JSON");
         assert_eq!(parsed["name"], "Read file");
         assert_eq!(parsed["input"]["path"], "bar.rs");
+    }
+
+    #[tokio::test]
+    async fn resume_skips_replayed_messages_without_duplicates() {
+        let store = Arc::new(Store::in_memory().expect("in-memory store"));
+        let session = Session::new_running("test prompt", Path::new("."));
+        store.create_session(&session).expect("create session");
+
+        // Simulate a first run: user prompt + assistant + tool call + tool result.
+        store
+            .add_session_message(&session.id, MessageRole::User, "test prompt")
+            .expect("add user msg");
+        store
+            .add_session_message(&session.id, MessageRole::Assistant, "thinking...")
+            .expect("add assistant msg");
+        store
+            .add_session_message(&session.id, MessageRole::ToolCall, "Run ls")
+            .expect("add tool_call msg");
+        store
+            .add_session_message(&session.id, MessageRole::ToolResult, "file.txt")
+            .expect("add tool_result msg");
+
+        // Create a resuming writer — it should load the 3 non-User roles.
+        let writer = MessageWriter::new(session.id.clone(), Arc::clone(&store), true);
+
+        // Replay the same sequence the server would send (no User messages).
+        writer.append_text("thinking...").await;
+        writer.finalize().await;
+        writer.record_tool_call("tc-1", "Run ls", None).await;
+        writer.record_tool_result("file.txt").await;
+
+        // Now send a new message that goes beyond replay.
+        writer.append_text("new response").await;
+        writer.finalize().await;
+
+        let messages = store
+            .get_session_messages(&session.id)
+            .expect("query messages");
+        // Original 4 + 1 new assistant = 5
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[4].role, MessageRole::Assistant);
+        assert_eq!(messages[4].content, "new response");
     }
 }

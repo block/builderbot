@@ -2,6 +2,7 @@
 
 use std::process::Command;
 
+use crate::checks::CLONEFILE_FIX_COMMAND;
 use crate::resolve::format_command_output;
 use crate::types::{CheckStatus, DoctorCheck, FixType, ResolvedBinary};
 
@@ -237,7 +238,7 @@ pub fn check_single_ai_agent(
 pub fn lookup_fix_command(check_id: &str, fix_type: &FixType) -> Option<String> {
     // Tool checks with hardcoded fix commands
     if check_id == "git-clonefile" && *fix_type == FixType::Command {
-        return Some("git config --global core.clonefile true".to_string());
+        return Some(CLONEFILE_FIX_COMMAND.to_string());
     }
 
     // AI agent checks

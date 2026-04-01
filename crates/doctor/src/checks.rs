@@ -5,6 +5,9 @@ use std::process::Command;
 use crate::resolve::format_command_output;
 use crate::types::{CheckStatus, DoctorCheck, FixType, ResolvedBinary};
 
+/// Fix command for enabling copy-on-write git clones.
+pub(crate) const CLONEFILE_FIX_COMMAND: &str = "git config --global core.clonefile true";
+
 /// Check that `git` is installed and reachable.
 pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
     let label = "Git".to_string();
@@ -339,7 +342,7 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
 pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
     let label = "Copy on Write Git Clones".to_string();
     let id = "git-clonefile".to_string();
-    let fix_cmd = "git config --global core.clonefile true".to_string();
+    let fix_cmd = CLONEFILE_FIX_COMMAND.to_string();
     let header = "# Check: Copy on Write Git Clones — verify core.clonefile is enabled for disk space savings";
 
     let git_path = match &git.path {

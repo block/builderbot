@@ -859,7 +859,7 @@ export function runDoctor(): Promise<DoctorReport> {
 }
 
 /** Run a fix for a doctor check, identified by check ID and fix type. */
-export function runDoctorFix(checkId: string, fixType: string): Promise<void> {
+export function runDoctorFix(checkId: string, fixType: 'command' | 'bridge'): Promise<void> {
   return invoke('run_doctor_fix', { checkId, fixType });
 }
 

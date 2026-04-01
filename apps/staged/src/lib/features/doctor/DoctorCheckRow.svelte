@@ -78,7 +78,7 @@
     {/if}
   </div>
 
-  {#if check.fixType && check.status !== 'pass'}
+  {#if check.fixType && check.fixCommand && check.status !== 'pass'}
     <button class="fix-btn" onclick={promptFix}>
       <Wrench size={14} />
       Fix

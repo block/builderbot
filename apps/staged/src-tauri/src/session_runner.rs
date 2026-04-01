@@ -449,19 +449,20 @@ pub fn start_session(
 }
 
 // =============================================================================
-// Orphaned session cleanup
+// Orphaned session recovery
 // =============================================================================
 
-/// On startup, cancel any sessions whose owner process is no longer alive.
+/// On startup, recover any sessions whose owner process is no longer alive.
 ///
 /// Each session records the PID of the Staged process that started it
 /// (`owner_pid`). On startup we check each running session:
 /// - `owner_pid` is our own PID → shouldn't happen at startup, skip.
 /// - `owner_pid` belongs to a live process → another Staged instance owns
 ///   it; leave it alone.
-/// - `owner_pid` is dead (or NULL for pre-migration rows) → cancel and emit
-///   `session-status-changed` so the frontend learns the outcome.
-pub fn cancel_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
+/// - `owner_pid` is dead (or NULL for pre-migration rows) → transition to
+///   error with `AppQuit` reason and emit `session-status-changed` so the
+///   frontend learns the outcome.
+pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
     let sessions = match store.get_running_sessions() {
         Ok(s) => s,
         Err(e) => {

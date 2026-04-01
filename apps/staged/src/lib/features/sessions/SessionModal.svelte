@@ -1789,8 +1789,8 @@
   }
 
   .session-end-banner.warning {
-    background: rgba(210, 153, 34, 0.1);
-    color: #d29922;
+    background: var(--ui-warning-bg);
+    color: var(--ui-warning);
   }
 
   .session-end-banner.neutral {

@@ -1577,9 +1577,9 @@ pub fn run() {
                     let s =
                         Store::new(&db_path).map_err(|e| format!("Failed to open store: {e}"))?;
                     let store_arc = Arc::new(s);
-                    // Cancel sessions whose owner process is dead; leave sessions
+                    // Recover sessions whose owner process is dead; leave sessions
                     // owned by other live Staged instances untouched.
-                    session_runner::cancel_dead_sessions(
+                    session_runner::recover_dead_sessions(
                         Arc::clone(&store_arc),
                         app.handle().clone(),
                     );

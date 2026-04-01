@@ -446,6 +446,48 @@ impl SessionStatus {
     }
 }
 
+/// Why a session reached its terminal state.
+///
+/// Stored alongside `SessionStatus` to distinguish between different kinds
+/// of completion, cancellation, and failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionReason {
+    /// Agent finished its turn normally (`prompt()` → `Ok`).
+    TurnComplete,
+    /// User explicitly stopped the session.
+    Interrupted,
+    /// Agent process exited or connection was lost.
+    Crashed,
+    /// Staged closed while the session was still running.
+    AppQuit,
+    /// Legacy sessions or indeterminate cause.
+    Unknown,
+}
+
+impl CompletionReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TurnComplete => "turn_complete",
+            Self::Interrupted => "interrupted",
+            Self::Crashed => "crashed",
+            Self::AppQuit => "app_quit",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "turn_complete" => Some(Self::TurnComplete),
+            "interrupted" => Some(Self::Interrupted),
+            "crashed" => Some(Self::Crashed),
+            "app_quit" => Some(Self::AppQuit),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
 /// A unit of AI work. Sessions are standalone records; artifacts (commits,
 /// notes, reviews) point at them via `session_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -462,6 +504,8 @@ pub struct Session {
     /// resumption (e.g. the ACP session ID returned by `new_session`).
     pub agent_id: Option<String>,
     pub error_message: Option<String>,
+    /// Why the session reached its terminal state. `None` while running/queued.
+    pub completion_reason: Option<CompletionReason>,
     pub created_at: i64,
     pub updated_at: i64,
     /// PID of the Staged process that owns this session while it is running.
@@ -480,6 +524,7 @@ impl Session {
             provider: None,
             agent_id: None,
             error_message: None,
+            completion_reason: None,
             created_at: now,
             updated_at: now,
             owner_pid: Some(std::process::id()),
@@ -499,6 +544,7 @@ impl Session {
             provider: None,
             agent_id: None,
             error_message: None,
+            completion_reason: None,
             created_at: now,
             updated_at: now,
             owner_pid: None,

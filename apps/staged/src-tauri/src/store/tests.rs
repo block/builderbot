@@ -213,7 +213,7 @@ fn test_session_lifecycle() {
 
     // Complete
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
     let completed = store.get_session(&session.id).unwrap().unwrap();
     assert_eq!(completed.status, SessionStatus::Completed);
@@ -228,7 +228,7 @@ fn test_session_error() {
     store.create_session(&session).unwrap();
 
     store
-        .update_session_status(&session.id, SessionStatus::Error, Some("boom"))
+        .update_session_status(&session.id, SessionStatus::Error, Some("boom"), None)
         .unwrap();
     let failed = store.get_session(&session.id).unwrap().unwrap();
     assert_eq!(failed.status, SessionStatus::Error);
@@ -248,6 +248,7 @@ fn test_session_error_message_ignored_for_non_error() {
             &session.id,
             SessionStatus::Completed,
             Some("should be ignored"),
+            None,
         )
         .unwrap();
     let completed = store.get_session(&session.id).unwrap().unwrap();
@@ -264,14 +265,14 @@ fn test_transition_from_running() {
 
     // Simulate: cancel_session sets status to cancelled via direct update
     store
-        .update_session_status(&session.id, SessionStatus::Cancelled, None)
+        .update_session_status(&session.id, SessionStatus::Cancelled, None, None)
         .unwrap();
     let after_cancel = store.get_session(&session.id).unwrap().unwrap();
     assert_eq!(after_cancel.status, SessionStatus::Cancelled);
 
     // Simulate: background thread tries to set completed — should be a no-op
     let transitioned = store
-        .transition_from_running(&session.id, SessionStatus::Completed, None)
+        .transition_from_running(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
     assert!(!transitioned);
 
@@ -289,12 +290,38 @@ fn test_transition_from_running_succeeds_when_running() {
 
     // No concurrent cancel — transition should succeed
     let transitioned = store
-        .transition_from_running(&session.id, SessionStatus::Completed, None)
+        .transition_from_running(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
     assert!(transitioned);
 
     let final_state = store.get_session(&session.id).unwrap().unwrap();
     assert_eq!(final_state.status, SessionStatus::Completed);
+}
+
+#[test]
+fn test_completion_reason_round_trips() {
+    let store = Store::in_memory().unwrap();
+
+    for reason in [
+        CompletionReason::TurnComplete,
+        CompletionReason::Interrupted,
+        CompletionReason::Crashed,
+        CompletionReason::AppQuit,
+        CompletionReason::Unknown,
+    ] {
+        let session = Session::new_running("test reason", Path::new("/tmp"));
+        store.create_session(&session).unwrap();
+        store
+            .update_session_status(&session.id, SessionStatus::Completed, None, Some(&reason))
+            .unwrap();
+        let fetched = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            fetched.completion_reason.as_ref(),
+            Some(&reason),
+            "round-trip failed for {:?}",
+            reason
+        );
+    }
 }
 
 #[test]
@@ -590,7 +617,7 @@ fn test_completed_session_cleaned_up_on_branch_delete() {
     let session = Session::new_running("make changes", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);
@@ -617,7 +644,7 @@ fn test_session_not_cleaned_up_if_still_referenced() {
     let session = Session::new_running("shared work", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let commit_a = Commit::new_with_sha(&branch_a.id, "aaa").with_session(&session.id);
@@ -666,7 +693,7 @@ fn test_session_cleaned_up_via_note_delete() {
     let session = Session::new_running("write notes", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let note = Note::new(&branch.id, "Design", "content").with_session(&session.id);
@@ -689,7 +716,7 @@ fn test_session_cleaned_up_via_review_delete() {
     let session = Session::new_running("review code", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let review = Review::new(&branch.id, "abc123", ReviewScope::Commit).with_session(&session.id);
@@ -718,7 +745,7 @@ fn test_session_messages_cascade_from_session_cleanup() {
         .add_session_message(&session.id, MessageRole::Assistant, "hi")
         .unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);

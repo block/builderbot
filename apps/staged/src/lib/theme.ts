@@ -77,6 +77,8 @@ export interface Theme {
     accentHover: string; // Accent hover
     danger: string; // Destructive actions
     dangerBg: string; // Danger background (for error messages)
+    warning: string; // Warning/caution text
+    warningBg: string; // Warning background (for caution banners)
     selection: string; // Selected items background (theme-derived)
   };
 
@@ -410,6 +412,8 @@ export function createAdaptiveTheme(
       accentHover: isDark ? adjust(accentGreen, -0.15) : adjust(accentGreen, 0.15),
       danger: accentRed,
       dangerBg: overlay(accentRed, isDark ? 0.1 : 0.08),
+      warning: accentOrange,
+      warningBg: overlay(accentOrange, isDark ? 0.1 : 0.08),
       // Selection uses foreground color for a neutral, theme-consistent highlight
       selection: overlay(syntaxFg, isDark ? 0.08 : 0.1),
     },
@@ -492,6 +496,8 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--ui-accent-hover': t.ui.accentHover,
     '--ui-danger': t.ui.danger,
     '--ui-danger-bg': t.ui.dangerBg,
+    '--ui-warning': t.ui.warning,
+    '--ui-warning-bg': t.ui.warningBg,
     '--ui-selection': t.ui.selection,
 
     '--scrollbar-thumb': t.scrollbar.thumb,

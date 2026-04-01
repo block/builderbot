@@ -132,6 +132,29 @@
     return slide(node, { duration: 200 });
   }
 
+  const artifactNoun: Record<string, string> = {
+    commit: 'commit',
+    note: 'note',
+    review: 'comments',
+  };
+
+  function failedSubtitle(
+    completionReason: string | null | undefined,
+    kind: 'commit' | 'note' | 'review'
+  ): string {
+    const noun = artifactNoun[kind];
+    switch (completionReason) {
+      case 'crashed':
+        return `Session crashed — no ${noun} created`;
+      case 'app_quit':
+        return `Session interrupted — no ${noun} created`;
+      case 'interrupted':
+        return `Session stopped — no ${noun} created`;
+      default:
+        return `Session finished — no ${noun} created`;
+    }
+  }
+
   let liveSessionHints = $state<Record<string, string>>({});
   const liveSessionHintPoller = createLiveSessionHints(
     (nextHints) => {
@@ -228,7 +251,7 @@
 
       if (isFailed) {
         type = 'failed-commit';
-        secondaryMeta = 'Session finished — no commit created';
+        secondaryMeta = failedSubtitle(commit.completionReason, 'commit');
       } else if (isQueued) {
         type = 'queued-commit';
         secondaryMeta = 'Queued';
@@ -268,7 +291,7 @@
 
       if (isFailed) {
         type = 'failed-note';
-        secondaryMeta = 'Session finished — no note created';
+        secondaryMeta = failedSubtitle(note.completionReason, 'note');
       } else if (isQueued) {
         type = 'queued-note';
         secondaryMeta = 'Queued';
@@ -325,7 +348,7 @@
 
       if (isFailed) {
         type = 'failed-review';
-        meta = 'Session finished — no comments created';
+        meta = failedSubtitle(review.completionReason, 'review');
       } else if (isQueued) {
         type = 'queued-review';
         meta = 'Queued';

@@ -212,6 +212,14 @@ fn spawn_gh_with_timeout(cmd: &mut Command) -> Result<std::process::Output, GitE
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Join drain threads so they don't leak — pipe close
+                    // from kill makes them terminate quickly.
+                    if let Some(t) = stdout_thread {
+                        let _ = t.join();
+                    }
+                    if let Some(t) = stderr_thread {
+                        let _ = t.join();
+                    }
                     return Err(GitError::CommandFailed(
                         "gh command timed out after 60s".to_string(),
                     ));

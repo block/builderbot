@@ -843,6 +843,7 @@ export interface DoctorCheck {
   message: string;
   fixUrl: string | null;
   fixCommand: string | null;
+  fixType: 'command' | 'bridge' | null;
   path: string | null;
   bridgePath: string | null;
   rawOutput: string | null;
@@ -857,9 +858,9 @@ export function runDoctor(): Promise<DoctorReport> {
   return invoke('run_doctor');
 }
 
-/** Run a fix command from a doctor check. */
-export function runDoctorFix(command: string): Promise<void> {
-  return invoke('run_doctor_fix', { command });
+/** Run a fix for a doctor check, identified by check ID and fix type. */
+export function runDoctorFix(checkId: string, fixType: 'command' | 'bridge'): Promise<void> {
+  return invoke('run_doctor_fix', { checkId, fixType });
 }
 
 // =============================================================================

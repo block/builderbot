@@ -1120,13 +1120,20 @@
           <span>{session.errorMessage}</span>
         </div>
       {:else if session && session.status !== 'running' && session.status !== 'queued'}
-        {#if session.completionReason === 'crashed' || session.completionReason === 'app_quit'}
-          <div class="session-end-banner warning">
+        {#if session.completionReason === 'crashed' || session.completionReason === 'app_quit' || session.completionReason === 'interrupted'}
+          <div
+            class="session-end-banner"
+            class:warning={session.completionReason === 'crashed' ||
+              session.completionReason === 'app_quit'}
+            class:neutral={session.completionReason === 'interrupted'}
+          >
             <Info size={14} />
             <span>
               {session.completionReason === 'crashed'
                 ? 'This session ended unexpectedly.'
-                : 'This session was interrupted when Staged closed.'}
+                : session.completionReason === 'app_quit'
+                  ? 'This session was interrupted when Staged closed.'
+                  : 'You stopped this session.'}
             </span>
             <button
               class="resume-btn"
@@ -1135,11 +1142,6 @@
             >
               Resume
             </button>
-          </div>
-        {:else if session.completionReason === 'interrupted'}
-          <div class="session-end-banner neutral">
-            <Info size={14} />
-            <span>You stopped this session.</span>
           </div>
         {/if}
       {/if}
@@ -1800,10 +1802,10 @@
   .resume-btn {
     margin-left: auto;
     padding: 4px 12px;
-    border: 1px solid var(--ui-warning);
+    border: 1px solid currentColor;
     border-radius: 6px;
     background: transparent;
-    color: var(--ui-warning);
+    color: inherit;
     font-size: var(--size-xs);
     font-weight: 500;
     cursor: pointer;
@@ -1812,7 +1814,7 @@
   }
 
   .resume-btn:hover {
-    background: var(--ui-warning-bg);
+    background: color-mix(in srgb, currentColor 10%, transparent);
   }
 
   .resume-btn:disabled {

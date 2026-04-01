@@ -1120,17 +1120,21 @@
           <span>{session.errorMessage}</span>
         </div>
       {:else if session && session.status !== 'running' && session.status !== 'queued'}
-        {#if session.completionReason === 'crashed'}
+        {#if session.completionReason === 'crashed' || session.completionReason === 'app_quit'}
           <div class="session-end-banner warning">
             <Info size={14} />
-            <span>This session ended unexpectedly. Send a follow-up message to resume.</span>
-          </div>
-        {:else if session.completionReason === 'app_quit'}
-          <div class="session-end-banner warning">
-            <Info size={14} />
-            <span
-              >This session was interrupted when Staged closed. Send a follow-up message to resume.</span
+            <span>
+              {session.completionReason === 'crashed'
+                ? 'This session ended unexpectedly.'
+                : 'This session was interrupted when Staged closed.'}
+            </span>
+            <button
+              class="resume-btn"
+              onclick={() => sendMessage('Continue where you left off.')}
+              disabled={sending}
             >
+              Resume
+            </button>
           </div>
         {:else if session.completionReason === 'interrupted'}
           <div class="session-end-banner neutral">
@@ -1791,6 +1795,29 @@
   .session-end-banner.warning {
     background: var(--ui-warning-bg);
     color: var(--ui-warning);
+  }
+
+  .resume-btn {
+    margin-left: auto;
+    padding: 4px 12px;
+    border: 1px solid var(--ui-warning);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ui-warning);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+  }
+
+  .resume-btn:hover {
+    background: var(--ui-warning-bg);
+  }
+
+  .resume-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .session-end-banner.neutral {

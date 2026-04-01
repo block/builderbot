@@ -1,0 +1,9 @@
+[package]
+name = "doctor"
+version = "0.1.0"
+edition = "2021"
+description = "Health-check system for verifying external tool dependencies"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["rt", "macros"] }

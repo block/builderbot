@@ -335,7 +335,15 @@ pub async fn refresh_all_pr_statuses(
             }
         };
 
-        match git::fetch_pr_status_for_repo(&github_repo, pr_number) {
+        let pr_result = {
+            let github_repo = github_repo.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                git::fetch_pr_status_for_repo(&github_repo, pr_number)
+            })
+            .await
+            .map_err(|e| format!("refresh_all_pr_statuses task failed: {e}"))?
+        };
+        match pr_result {
             Ok(pr_status) => {
                 let mergeable = pr_status.mergeable == "MERGEABLE";
 

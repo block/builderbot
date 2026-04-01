@@ -46,7 +46,9 @@ use acp_client::{McpServer, McpServerHttp};
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
 use crate::git::Span;
-use crate::store::{Comment, CommentAuthor, CommentType, MessageRole, SessionStatus, Store};
+use crate::store::{
+    Comment, CommentAuthor, CommentType, CompletionReason, MessageRole, SessionStatus, Store,
+};
 
 // =============================================================================
 // Event types
@@ -59,6 +61,7 @@ pub struct SessionStatusEvent {
     pub session_id: String,
     pub status: String,
     pub error_message: Option<String>,
+    pub completion_reason: Option<String>,
     /// Set on `"running"` events emitted when an MCP tool starts a repo session,
     /// so the frontend can register the session and refresh the branch timeline.
     pub branch_id: Option<String>,
@@ -349,18 +352,20 @@ pub fn start_session(
         //
         // If the session was cancelled and then deleted, these DB writes
         // are harmless no-ops — see module-level docs on the race.
-        let (new_status, error_msg) = match result {
-            Ok(()) if cancel_token.is_cancelled() => ("cancelled", None),
-            Ok(()) => ("completed", None),
+        let (new_status, error_msg, completion_reason) = match result {
+            Ok(()) if cancel_token.is_cancelled() => {
+                ("cancelled", None, CompletionReason::Interrupted)
+            }
+            Ok(()) => ("completed", None, CompletionReason::TurnComplete),
             Err(ref e) if cancel_token.is_cancelled() => {
                 log::info!(
                     "Session {session_id_for_status} cancelled (error during teardown: {e})"
                 );
-                ("cancelled", None)
+                ("cancelled", None, CompletionReason::Interrupted)
             }
             Err(ref e) => {
                 log::error!("Session {session_id_for_status} failed: {e}");
-                ("error", Some(e.clone()))
+                ("error", Some(e.clone()), CompletionReason::Crashed)
             }
         };
 
@@ -381,11 +386,22 @@ pub fn start_session(
 
         let status_enum = SessionStatus::parse(new_status).unwrap();
         let transitioned = store_for_status
-            .transition_from_running(&session_id_for_status, status_enum, error_msg.as_deref())
+            .transition_from_running(
+                &session_id_for_status,
+                status_enum,
+                error_msg.as_deref(),
+                Some(&completion_reason),
+            )
             .unwrap_or(false);
 
         if transitioned {
-            emit_status(&app_handle, &session_id_for_status, new_status, error_msg);
+            emit_status(
+                &app_handle,
+                &session_id_for_status,
+                new_status,
+                error_msg,
+                Some(&completion_reason),
+            );
         }
 
         // Trigger auto review when a commit session completes successfully,
@@ -464,10 +480,21 @@ pub fn cancel_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
 
         if should_cancel {
             let transitioned = store
-                .transition_from_running(&session.id, SessionStatus::Cancelled, None)
+                .transition_from_running(
+                    &session.id,
+                    SessionStatus::Error,
+                    None,
+                    Some(&CompletionReason::AppQuit),
+                )
                 .unwrap_or(false);
             if transitioned {
-                emit_status(&app_handle, &session.id, "cancelled", None);
+                emit_status(
+                    &app_handle,
+                    &session.id,
+                    "error",
+                    None,
+                    Some(&CompletionReason::AppQuit),
+                );
             }
         }
     }
@@ -1035,11 +1062,18 @@ fn find_closing_fence(text: &str) -> Option<usize> {
     None
 }
 
-fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Option<String>) {
+fn emit_status(
+    app_handle: &AppHandle,
+    session_id: &str,
+    status: &str,
+    error: Option<String>,
+    completion_reason: Option<&CompletionReason>,
+) {
     let event = SessionStatusEvent {
         session_id: session_id.to_string(),
         status: status.to_string(),
         error_message: error,
+        completion_reason: completion_reason.map(|r| r.as_str().to_string()),
         branch_id: None,
         project_id: None,
         session_type: None,
@@ -1065,6 +1099,7 @@ pub fn emit_session_running(
         session_id: session_id.to_string(),
         status: "running".to_string(),
         error_message: None,
+        completion_reason: None,
         branch_id: Some(branch_id.to_string()),
         project_id: Some(project_id.to_string()),
         session_type: Some(session_type.to_string()),

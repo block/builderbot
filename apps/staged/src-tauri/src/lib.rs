@@ -117,6 +117,7 @@ pub struct CommitTimelineItem {
     pub order: i64,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
+    pub completion_reason: Option<String>,
 }
 
 /// Note with session status resolved.
@@ -128,6 +129,7 @@ pub struct NoteTimelineItem {
     pub content: String,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
+    pub completion_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -141,6 +143,7 @@ pub struct ReviewTimelineItem {
     pub scope: String,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
+    pub completion_reason: Option<String>,
     pub title: Option<String>,
     pub comment_count: usize,
     pub created_at: i64,
@@ -157,6 +160,7 @@ pub struct ImageTimelineItem {
     pub size_bytes: i64,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
+    pub completion_reason: Option<String>,
     pub created_at: i64,
 }
 

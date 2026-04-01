@@ -212,24 +212,24 @@ impl Store {
         Ok(store)
     }
 
-    /// Resolve an optional session_id into (session_id, session_status).
+    /// Resolve an optional session_id into (session_id, session_status, completion_reason).
     ///
-    /// Returns `(None, None)` when `session_id` is `None`, otherwise
-    /// looks up the session and returns its status string.
+    /// Returns `(None, None, None)` when `session_id` is `None`, otherwise
+    /// looks up the session and returns its status and completion reason strings.
     pub fn resolve_session_status(
         &self,
         session_id: Option<&str>,
-    ) -> (Option<String>, Option<String>) {
+    ) -> (Option<String>, Option<String>, Option<String>) {
         match session_id {
             Some(sid) => {
-                let status = self
-                    .get_session(sid)
-                    .ok()
-                    .flatten()
-                    .map(|s| s.status.as_str().to_string());
-                (Some(sid.to_string()), status)
+                let session = self.get_session(sid).ok().flatten();
+                let status = session.as_ref().map(|s| s.status.as_str().to_string());
+                let reason = session
+                    .as_ref()
+                    .and_then(|s| s.completion_reason.as_ref().map(|r| r.as_str().to_string()));
+                (Some(sid.to_string()), status, reason)
             }
-            None => (None, None),
+            None => (None, None, None),
         }
     }
 

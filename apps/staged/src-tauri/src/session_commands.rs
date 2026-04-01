@@ -298,6 +298,7 @@ pub async fn resume_session(
             session_id: session_id.clone(),
             status: "running".to_string(),
             error_message: None,
+            completion_reason: None,
             branch_id: None,
             project_id: mcp_project_id.clone(),
             session_type: None,
@@ -351,14 +352,19 @@ pub fn cancel_session(
             if session.status == store::SessionStatus::Running
                 || session.status == store::SessionStatus::Queued
             {
-                let _ =
-                    store.update_session_status(&session_id, store::SessionStatus::Cancelled, None);
+                let _ = store.update_session_status(
+                    &session_id,
+                    store::SessionStatus::Cancelled,
+                    None,
+                    Some(&store::CompletionReason::Interrupted),
+                );
                 let _ = app_handle.emit(
                     "session-status-changed",
                     session_runner::SessionStatusEvent {
                         session_id: session_id.clone(),
                         status: "cancelled".to_string(),
                         error_message: None,
+                        completion_reason: Some("interrupted".to_string()),
                         branch_id: None,
                         project_id: None,
                         session_type: None,
@@ -1069,6 +1075,7 @@ pub async fn drain_queued_sessions(
             session_id: session_id.clone(),
             status: "running".to_string(),
             error_message: None,
+            completion_reason: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some(session_type_str.to_string()),
@@ -1225,6 +1232,7 @@ pub async fn trigger_auto_review(
             session_id: session.id.clone(),
             status: "running".to_string(),
             error_message: None,
+            completion_reason: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some("review".to_string()),

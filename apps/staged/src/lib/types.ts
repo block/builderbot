@@ -101,6 +101,7 @@ export interface CommitTimelineItem {
   order: number;
   sessionId: string | null;
   sessionStatus: string | null;
+  completionReason: string | null;
 }
 
 export interface NoteTimelineItem {
@@ -109,6 +110,7 @@ export interface NoteTimelineItem {
   content: string;
   sessionId: string | null;
   sessionStatus: string | null;
+  completionReason: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -119,6 +121,7 @@ export interface ReviewTimelineItem {
   scope: string;
   sessionId: string | null;
   sessionStatus: string | null;
+  completionReason: string | null;
   title: string | null;
   commentCount: number;
   isAuto?: boolean;
@@ -133,6 +136,7 @@ export interface ImageTimelineItem {
   sizeBytes: number;
   sessionId: string | null;
   sessionStatus: string | null;
+  completionReason: string | null;
   createdAt: number;
 }
 
@@ -216,12 +220,15 @@ export interface ProjectSessionResponse {
 
 export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
 
+export type CompletionReason = 'turn_complete' | 'interrupted' | 'crashed' | 'app_quit' | 'unknown';
+
 export interface Session {
   id: string;
   prompt: string;
   status: SessionStatus;
   agentId: string | null;
   errorMessage: string | null;
+  completionReason: CompletionReason | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -258,6 +265,7 @@ export interface SessionStatusPayload {
   sessionId: string;
   status: string;
   errorMessage?: string | null;
+  completionReason?: string | null;
   branchId?: string;
   projectId?: string;
   sessionType?: string;

@@ -29,6 +29,7 @@
   import {
     X,
     AlertCircle,
+    Info,
     CircleStop,
     Send,
     Copy,
@@ -1119,6 +1120,26 @@
           <span>{session.errorMessage}</span>
         </div>
       {/if}
+      {#if session && session.status !== 'running' && session.status !== 'queued'}
+        {#if session.completionReason === 'crashed'}
+          <div class="session-end-banner warning">
+            <Info size={14} />
+            <span>This session ended unexpectedly. Send a follow-up message to resume.</span>
+          </div>
+        {:else if session.completionReason === 'app_quit'}
+          <div class="session-end-banner warning">
+            <Info size={14} />
+            <span
+              >This session was interrupted when Staged closed. Send a follow-up message to resume.</span
+            >
+          </div>
+        {:else if session.completionReason === 'interrupted'}
+          <div class="session-end-banner neutral">
+            <Info size={14} />
+            <span>You stopped this session.</span>
+          </div>
+        {/if}
+      {/if}
     </div>
 
     <!-- Input area with queued messages and image previews -->
@@ -1754,6 +1775,28 @@
     border-radius: 8px;
     font-size: var(--size-xs);
     line-height: 1.4;
+  }
+
+  /* Session end banners — softer than error for non-error conditions */
+  .session-end-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: var(--size-xs);
+    line-height: 1.4;
+  }
+
+  .session-end-banner.warning {
+    background: var(--ui-warning-bg, rgba(210, 153, 34, 0.1));
+    color: var(--ui-warning, #d29922);
+  }
+
+  .session-end-banner.neutral {
+    background: var(--bg-tertiary, rgba(127, 127, 127, 0.1));
+    color: var(--text-muted);
   }
 
   /* ----- Input wrapper + queue popover ----------------------------------- */

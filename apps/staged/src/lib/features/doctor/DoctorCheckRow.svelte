@@ -24,18 +24,18 @@
   let showFixDialog = $state(false);
 
   function promptFix() {
-    if (!check.fixCommand) return;
+    if (!check.fixType) return;
     fixError = null;
     fixing = false;
     showFixDialog = true;
   }
 
   async function confirmFix() {
-    if (!check.fixCommand) return;
+    if (!check.fixType) return;
     fixing = true;
     fixError = null;
     try {
-      await runDoctorFix(check.fixCommand);
+      await runDoctorFix(check.id, check.fixType);
       showFixDialog = false;
       onFixed?.();
     } catch (e) {
@@ -78,7 +78,7 @@
     {/if}
   </div>
 
-  {#if check.fixCommand && check.status !== 'pass'}
+  {#if check.fixType && check.status !== 'pass'}
     <button class="fix-btn" onclick={promptFix}>
       <Wrench size={14} />
       Fix

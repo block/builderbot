@@ -155,10 +155,9 @@ pub async fn execute_fix(check_id: String, fix_type: FixType) -> Result<(), Stri
 
 /// Run an arbitrary shell command in a login shell.
 ///
-/// This is the lower-level primitive used by [`execute_fix`] and can also be
-/// called directly by consumers that already have a validated command string
-/// (e.g. the Staged app's existing frontend API).
-pub async fn execute_command(command: String) -> Result<(), String> {
+/// Internal primitive used by [`execute_fix`]. Not exposed publicly — callers
+/// should use `execute_fix` which looks up the command from static definitions.
+pub(crate) async fn execute_command(command: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let (shell, args) = if std::path::Path::new("/bin/zsh").exists() {
             ("/bin/zsh", vec!["-l", "-c", &command])

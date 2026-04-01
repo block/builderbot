@@ -47,7 +47,6 @@ function withTrailingEllipsis(text: string): string {
 function formatToolCallHint(content: string, repoDir?: string | null): string | undefined {
   const { verb, detail } = formatToolDisplay(content, repoDir, true);
   const text = detail ? `${verb} ${detail}` : verb;
-  if (!text) return undefined;
   return normalizeHintText(withTrailingEllipsis(text));
 }
 

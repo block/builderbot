@@ -76,19 +76,33 @@ export function formatBaseBranch(baseBranch: string): string {
   return baseBranch.replace(/^origin\//, '');
 }
 
+function normalizePrUrl(candidate: string): string | null {
+  const trimmed = candidate.trim().replace(/^[<`'"\[(]+|[>`'"\]),.?!;:]+$/g, '');
+  const match = trimmed.match(
+    /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)(?:[/?#].*)?$/
+  );
+
+  if (!match) return null;
+
+  return `https://github.com/${match[1]}/${match[2]}/pull/${match[3]}`;
+}
+
 export function extractPrUrl(messages: { content: string; role: string }[]): string | null {
   for (const msg of messages) {
     if (msg.role !== 'assistant' && msg.role !== 'tool_result') continue;
-    const markerMatch = msg.content.match(/PR_URL:\s*(https?:\/\/\S+)/);
+    const markerMatch = msg.content.match(/PR_URL:\s*(\S+)/);
     if (markerMatch) {
-      // Strip trailing markdown characters (*, ), ], etc.) from the URL
-      return markerMatch[1].replace(/[\*\)\]]+$/, '');
+      const normalized = normalizePrUrl(markerMatch[1]);
+      if (normalized) return normalized;
     }
   }
 
   for (const msg of messages) {
-    const ghMatch = msg.content.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/);
-    if (ghMatch) return ghMatch[0];
+    const urlMatches = msg.content.match(/https?:\/\/\S+/g) ?? [];
+    for (const url of urlMatches) {
+      const normalized = normalizePrUrl(url);
+      if (normalized) return normalized;
+    }
   }
 
   return null;

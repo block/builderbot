@@ -807,7 +807,7 @@
 
   :global(.diff-viewer-container .comment-editor-hint) {
     background-color: color-mix(in srgb, var(--diff-comment-bg-emphasis) 88%, var(--bg-chrome));
-    border-top: 1px solid color-mix(in srgb, var(--diff-comment-border) 82%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--border-muted) 88%, transparent);
   }
 
   :global(.diff-viewer-container .comment-textarea::placeholder) {

@@ -207,11 +207,14 @@ pub async fn resume_session(
 
     // Check if this session is linked to a project note — if so, we need
     // to start the MCP server so the agent has access to project tools.
-    let mcp_project_id = store
+    let project_note = store
         .get_project_note_by_session(&session_id)
         .ok()
-        .flatten()
-        .map(|note| note.project_id);
+        .flatten();
+    let mcp_project_id = project_note.as_ref().map(|note| note.project_id.clone());
+    let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
+    let linked_note = store.get_note_by_session(&session_id).ok().flatten();
+    let linked_review = store.get_review_by_session(&session_id).ok().flatten();
 
     // If a branch_id is provided, look up the branch to get workspace_name
     // and resolve remote_working_dir. This takes priority over the
@@ -220,25 +223,45 @@ pub async fn resume_session(
         .as_deref()
         .and_then(|bid| store.get_branch(bid).ok().flatten());
 
+    let linked_branch = if branch_from_id.is_some() {
+        branch_from_id.clone()
+    } else if let Some(commit) = &linked_commit {
+        store.get_branch(&commit.branch_id).ok().flatten()
+    } else if let Some(note) = &linked_note {
+        store.get_branch(&note.branch_id).ok().flatten()
+    } else if let Some(review) = &linked_review {
+        store.get_branch(&review.branch_id).ok().flatten()
+    } else {
+        None
+    };
+
+    let session_type = if project_note.is_some() {
+        Some("note".to_string())
+    } else if linked_commit.is_some() {
+        Some("commit".to_string())
+    } else if linked_note.is_some() {
+        Some("note".to_string())
+    } else if linked_review.is_some() {
+        Some("review".to_string())
+    } else {
+        infer_branch_resume_session_type(&session.prompt).map(str::to_string)
+    };
+    let event_branch_id = linked_branch.as_ref().map(|branch| branch.id.clone());
+    let event_project_id = if let Some(note) = &project_note {
+        Some(note.project_id.clone())
+    } else {
+        linked_branch
+            .as_ref()
+            .map(|branch| branch.project_id.clone())
+    };
+
     // If this session is linked to a commit, capture the current HEAD so we
     // can detect new or amended commits when the session completes.
     // This applies both when the commit already has a SHA (amend case) and
     // when it's still pending (no SHA — the previous run didn't produce a
     // commit, so we need to detect if this resumed run does).
     let (pre_head_sha, workspace_name) = {
-        // Determine the branch to use: explicit branch_id takes priority,
-        // otherwise fall back to the commit-linked branch.
-        let branch = if branch_from_id.is_some() {
-            branch_from_id.clone()
-        } else {
-            store
-                .get_commit_by_session(&session_id)
-                .ok()
-                .flatten()
-                .and_then(|commit| store.get_branch(&commit.branch_id).ok().flatten())
-        };
-
-        if let Some(ref branch) = branch {
+        if let Some(ref branch) = linked_branch {
             let ws_name = branch.workspace_name.clone();
             let head = if let Some(ref ws) = ws_name {
                 let ws = ws.clone();
@@ -299,9 +322,9 @@ pub async fn resume_session(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
-            branch_id: None,
-            project_id: mcp_project_id.clone(),
-            session_type: None,
+            branch_id: event_branch_id,
+            project_id: event_project_id.or(mcp_project_id.clone()),
+            session_type,
             is_auto_review: false,
         },
     );
@@ -336,6 +359,20 @@ pub async fn resume_session(
     )?;
 
     Ok(())
+}
+
+fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static str> {
+    if prompt.contains("Create a draft pull request for the current branch.")
+        || prompt.contains("Create a pull request for the current branch.")
+    {
+        Some("pr")
+    } else if prompt.contains("Push the current branch to the remote using force-with-lease.")
+        || prompt.contains("Push the current branch to the remote.")
+    {
+        Some("push")
+    } else {
+        None
+    }
 }
 
 #[tauri::command]
@@ -2312,6 +2349,40 @@ Rules:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn infer_branch_resume_session_type_detects_pr_prompts() {
+        assert_eq!(
+            infer_branch_resume_session_type("Create a pull request for the current branch."),
+            Some("pr")
+        );
+        assert_eq!(
+            infer_branch_resume_session_type("Create a draft pull request for the current branch."),
+            Some("pr")
+        );
+    }
+
+    #[test]
+    fn infer_branch_resume_session_type_detects_push_prompts() {
+        assert_eq!(
+            infer_branch_resume_session_type("Push the current branch to the remote."),
+            Some("push")
+        );
+        assert_eq!(
+            infer_branch_resume_session_type(
+                "Push the current branch to the remote using force-with-lease."
+            ),
+            Some("push")
+        );
+    }
+
+    #[test]
+    fn infer_branch_resume_session_type_ignores_other_prompts() {
+        assert_eq!(
+            infer_branch_resume_session_type("Write a project note."),
+            None
+        );
+    }
 
     #[test]
     fn review_prompt_requires_strict_fence_lines() {

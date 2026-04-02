@@ -306,7 +306,7 @@
         secondaryMeta = liveHint ?? 'Generating note';
       } else {
         type = 'note';
-        secondaryMeta = formatRelativeTime(note.createdAt, nowMs);
+        secondaryMeta = formatRelativeTime(note.completedAt ?? note.createdAt, nowMs);
       }
 
       all.push({
@@ -315,8 +315,8 @@
         title: stripXmlTags(note.title),
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
-        // Note timestamps are in milliseconds, convert to seconds for sorting
-        timestamp: Math.floor(note.createdAt / 1000),
+        // Use completedAt so completed notes sort by completion time, not queue time
+        timestamp: Math.floor((note.completedAt ?? note.createdAt) / 1000),
         order: 0,
         sessionId: note.sessionId ?? undefined,
         noteId: note.id,
@@ -363,7 +363,7 @@
         meta = liveHint ?? 'Generating review';
       } else {
         type = 'review';
-        meta = formatRelativeTime(review.createdAt, nowMs);
+        meta = formatRelativeTime(review.completedAt ?? review.createdAt, nowMs);
       }
 
       all.push({
@@ -373,7 +373,8 @@
         meta: isDeleting ? 'Deleting...' : meta,
         badges: badges.length > 0 ? badges : undefined,
         deleting: isDeleting,
-        timestamp: Math.floor(review.createdAt / 1000),
+        // Use completedAt so completed reviews sort by completion time, not queue time
+        timestamp: Math.floor((review.completedAt ?? review.createdAt) / 1000),
         order: 0,
         sessionId: review.sessionId ?? undefined,
         reviewId: review.id,

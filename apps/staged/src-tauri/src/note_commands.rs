@@ -24,6 +24,7 @@ pub fn create_note(
         completion_reason: None,
         created_at: note.created_at,
         updated_at: note.updated_at,
+        completed_at: note.completed_at,
     })
 }
 

@@ -70,6 +70,66 @@ fn test_list_projects() {
 }
 
 #[test]
+fn test_project_note_sets_completed_at_when_created_with_content() {
+    let note = ProjectNote::new("project-1", "Title", "Body");
+    assert_eq!(note.completed_at, Some(note.created_at));
+}
+
+#[test]
+fn test_project_note_completion_is_write_once() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+
+    let note = ProjectNote::new(&project.id, "", "");
+    store.create_project_note(&note).unwrap();
+
+    let before = store.get_project_note(&note.id).unwrap().unwrap();
+    assert!(before.completed_at.is_none());
+
+    store
+        .update_project_note_title_and_content(&note.id, "First", "Initial content")
+        .unwrap();
+    let completed = store.get_project_note(&note.id).unwrap().unwrap();
+    let first_completed_at = completed.completed_at.unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_project_note_title_and_content(&note.id, "Second", "Updated content")
+        .unwrap();
+    let updated = store.get_project_note(&note.id).unwrap().unwrap();
+
+    assert_eq!(updated.completed_at, Some(first_completed_at));
+    assert!(updated.updated_at >= completed.updated_at);
+}
+
+#[test]
+fn test_list_project_notes_orders_by_completion_time() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+
+    let older = ProjectNote::new(&project.id, "", "").with_session("session-older");
+    store.create_project_note(&older).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    let newer = ProjectNote::new(&project.id, "", "").with_session("session-newer");
+    store.create_project_note(&newer).unwrap();
+
+    store
+        .update_project_note_title_and_content(&newer.id, "Newer", "Completed first")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_project_note_title_and_content(&older.id, "Older", "Completed second")
+        .unwrap();
+
+    let notes = store.list_project_notes(&project.id).unwrap();
+    let ordered_ids: Vec<_> = notes.iter().map(|note| note.id.as_str()).collect();
+    assert_eq!(ordered_ids, vec![older.id.as_str(), newer.id.as_str()]);
+}
+
+#[test]
 fn test_delete_project_cascades() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");
@@ -950,6 +1010,49 @@ fn test_review_with_comments_and_files() {
         .unwrap();
     let after_remove = store.get_review(&review.id).unwrap().unwrap();
     assert!(after_remove.reference_files.is_empty());
+}
+
+#[test]
+fn test_set_review_auto_restamps_completed_at_when_made_visible() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Branch).with_auto();
+    store.create_review(&review).unwrap();
+    store
+        .update_review_title(&review.id, "Auto review")
+        .unwrap();
+
+    let auto_review = store.get_review(&review.id).unwrap().unwrap();
+    let original_completed_at = auto_review.completed_at.unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store.set_review_auto(&review.id, false).unwrap();
+
+    let visible_review = store.get_review(&review.id).unwrap().unwrap();
+    assert!(!visible_review.is_auto);
+    assert!(visible_review.completed_at.unwrap() > original_completed_at);
+}
+
+#[test]
+fn test_set_review_auto_leaves_incomplete_review_uncompleted() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Branch).with_auto();
+    store.create_review(&review).unwrap();
+
+    store.set_review_auto(&review.id, false).unwrap();
+
+    let visible_review = store.get_review(&review.id).unwrap().unwrap();
+    assert!(!visible_review.is_auto);
+    assert!(visible_review.completed_at.is_none());
 }
 
 #[test]

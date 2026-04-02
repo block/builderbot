@@ -2025,7 +2025,7 @@ fn project_note_timeline_entries(
         let content =
             format_project_note_for_context(&note.id, &note.title, &note.content, workspace_name);
         entries.push(TimelineEntry {
-            timestamp: note.created_at / 1000,
+            timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
             order: 0,
             content,
         });

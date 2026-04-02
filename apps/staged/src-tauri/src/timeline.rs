@@ -160,6 +160,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 completion_reason,
                 created_at: n.created_at,
                 updated_at: n.updated_at,
+                completed_at: n.completed_at,
             }
         })
         .collect();
@@ -186,6 +187,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 comment_count,
                 created_at: r.created_at,
                 updated_at: r.updated_at,
+                completed_at: r.completed_at,
             }
         })
         .collect();

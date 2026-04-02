@@ -795,4 +795,41 @@
     min-width: 0;
     overflow: hidden;
   }
+
+  :global(.diff-viewer-container .comment-editor) {
+    background: var(--diff-comment-bg);
+    border-color: var(--diff-comment-border);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--diff-comment-accent) 18%, transparent),
+      0 0 0 3px color-mix(in srgb, var(--diff-comment-accent) 8%, transparent),
+      var(--shadow-elevated);
+  }
+
+  :global(.diff-viewer-container .comment-editor-hint) {
+    background-color: color-mix(in srgb, var(--diff-comment-bg-emphasis) 88%, var(--bg-chrome));
+    border-top: 1px solid color-mix(in srgb, var(--border-muted) 88%, transparent);
+  }
+
+  :global(.diff-viewer-container .comment-textarea::placeholder) {
+    color: color-mix(in srgb, var(--diff-comment-accent) 55%, var(--text-muted));
+  }
+
+  :global(.diff-viewer-container .range-toolbar),
+  :global(.diff-viewer-container .line-selection-toolbar) {
+    background-color: var(--diff-comment-bg);
+    border: 1px solid color-mix(in srgb, var(--diff-comment-border) 88%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--diff-comment-accent) 10%, transparent),
+      var(--shadow-elevated);
+  }
+
+  :global(.diff-viewer-container .range-btn.comment-btn),
+  :global(.diff-viewer-container .selection-info) {
+    color: var(--diff-comment-accent);
+  }
+
+  :global(.diff-viewer-container .range-btn.comment-btn:hover) {
+    color: var(--text-primary);
+    background-color: color-mix(in srgb, var(--diff-comment-accent) 14%, var(--diff-comment-bg));
+  }
 </style>

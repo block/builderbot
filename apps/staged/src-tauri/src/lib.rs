@@ -139,6 +139,7 @@ pub struct NoteTimelineItem {
     pub completion_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub completed_at: Option<i64>,
 }
 
 /// Review with session status resolved.
@@ -155,6 +156,7 @@ pub struct ReviewTimelineItem {
     pub comment_count: usize,
     pub created_at: i64,
     pub updated_at: i64,
+    pub completed_at: Option<i64>,
 }
 
 /// Image with session status resolved.

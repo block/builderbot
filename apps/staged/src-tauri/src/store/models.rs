@@ -688,11 +688,15 @@ pub struct Note {
     pub content: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// When the AI session finished producing this note's content.
+    /// `None` while the session is still running.
+    pub completed_at: Option<i64>,
 }
 
 impl Note {
     pub fn new(branch_id: &str, title: &str, content: &str) -> Self {
         let now = now_timestamp();
+        let has_content = !content.is_empty();
         Self {
             id: Uuid::new_v4().to_string(),
             branch_id: branch_id.to_string(),
@@ -701,6 +705,7 @@ impl Note {
             content: content.to_string(),
             created_at: now,
             updated_at: now,
+            completed_at: if has_content { Some(now) } else { None },
         }
     }
 
@@ -729,11 +734,15 @@ pub struct ProjectNote {
     pub content: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// When the AI session finished producing this project note's content.
+    /// `None` while the session is still running.
+    pub completed_at: Option<i64>,
 }
 
 impl ProjectNote {
     pub fn new(project_id: &str, title: &str, content: &str) -> Self {
         let now = now_timestamp();
+        let has_content = !content.is_empty();
         Self {
             id: Uuid::new_v4().to_string(),
             project_id: project_id.to_string(),
@@ -742,6 +751,7 @@ impl ProjectNote {
             content: content.to_string(),
             created_at: now,
             updated_at: now,
+            completed_at: if has_content { Some(now) } else { None },
         }
     }
 
@@ -983,6 +993,9 @@ pub struct Review {
     pub reference_files: Vec<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// When the AI session finished producing this review.
+    /// `None` while the session is still running.
+    pub completed_at: Option<i64>,
 }
 
 impl Review {
@@ -1001,6 +1014,7 @@ impl Review {
             reference_files: Vec::new(),
             created_at: now,
             updated_at: now,
+            completed_at: None,
         }
     }
 

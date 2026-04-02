@@ -727,6 +727,13 @@ fn run_post_completion_hooks(
                     }
                 } else {
                     log::warn!("Session {session_id}: {label} session completed but no --- found in assistant output");
+                    let result = match target.kind {
+                        NoteKind::Repo => store.mark_note_completed(&target.id),
+                        NoteKind::Project => store.mark_project_note_completed(&target.id),
+                    };
+                    if let Err(e) = result {
+                        log::error!("Failed to mark {label} completed: {e}");
+                    }
                 }
             }
         }
@@ -751,6 +758,11 @@ fn run_post_completion_hooks(
                     }
                 } else {
                     log::warn!("Session {session_id}: review session completed but no review-title block found");
+                    // Still mark the review as completed so completed_at is set
+                    // for timeline sorting, even without a title.
+                    if let Err(e) = store.mark_review_completed(&review.id) {
+                        log::error!("Failed to mark review completed: {e}");
+                    }
                 }
             }
 

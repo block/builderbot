@@ -2047,7 +2047,7 @@ fn note_timeline_entries(
             format_note_for_context(&note.id, &note.title, &note.content, workspace_name)
         {
             entries.push(TimelineEntry {
-                timestamp: note.created_at / 1000,
+                timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
                 order: 0,
                 content,
             });
@@ -2090,7 +2090,7 @@ fn project_note_timeline_entries(
         let content =
             format_project_note_for_context(&note.id, &note.title, &note.content, workspace_name);
         entries.push(TimelineEntry {
-            timestamp: note.created_at / 1000,
+            timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
             order: 0,
             content,
         });
@@ -2169,8 +2169,8 @@ fn review_timeline_entries(
             continue;
         }
         let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];
-        let review_ts_secs = review.created_at / 1000;
-        let is_old = max_commit_ts.is_some_and(|ts| review_ts_secs < ts);
+        let review_ts_secs = review.completed_at.unwrap_or(review.created_at) / 1000;
+        let is_old = max_commit_ts.is_some_and(|ts| review.created_at / 1000 < ts);
 
         let heading_title = match review.title.as_deref() {
             Some(title) => format!("Code review: {} — {}", title, short_sha),

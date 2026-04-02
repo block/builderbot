@@ -113,6 +113,7 @@ export interface NoteTimelineItem {
   completionReason: string | null;
   createdAt: number;
   updatedAt: number;
+  completedAt: number | null;
 }
 
 export interface ReviewTimelineItem {
@@ -127,6 +128,7 @@ export interface ReviewTimelineItem {
   isAuto?: boolean;
   createdAt: number;
   updatedAt: number;
+  completedAt: number | null;
 }
 
 export interface ImageTimelineItem {
@@ -207,6 +209,7 @@ export interface ProjectNote {
   content: string;
   createdAt: number;
   updatedAt: number;
+  completedAt: number | null;
 }
 
 export interface ProjectSessionResponse {

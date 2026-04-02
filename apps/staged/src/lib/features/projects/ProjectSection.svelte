@@ -341,7 +341,7 @@
       const aIsGenerating = !a.title.trim() && !a.content.trim();
       const bIsGenerating = !b.title.trim() && !b.content.trim();
       if (aIsGenerating !== bIsGenerating) return aIsGenerating ? 1 : -1;
-      return a.createdAt - b.createdAt;
+      return (a.completedAt ?? a.createdAt) - (b.completedAt ?? b.createdAt);
     })
   );
 
@@ -569,7 +569,7 @@
                 : note.title || 'Untitled note'}
             secondaryMeta={isRunning || isFailed
               ? undefined
-              : formatRelativeTime(note.createdAt, nowMs)}
+              : formatRelativeTime(note.completedAt ?? note.createdAt, nowMs)}
             deleting={deletingNoteIds.has(note.id)}
             isLast={index === timelineNotes.length - 1}
             sessionId={note.sessionId ?? undefined}

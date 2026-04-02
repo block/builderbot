@@ -857,14 +857,14 @@
           <GitBranch size={14} />
           Rename Branch
         </button>
-          <button
-            class="more-menu-item"
-            disabled={newCommitDisabled}
-            onclick={() => {
-              showMoreMenu = false;
-              onRebaseBranch?.();
-            }}
-          >
+        <button
+          class="more-menu-item"
+          disabled={newCommitDisabled}
+          onclick={() => {
+            showMoreMenu = false;
+            onRebaseBranch?.();
+          }}
+        >
           <GitBranch size={14} />
           Rebase Branch
         </button>

@@ -392,11 +392,11 @@ export function createAdaptiveTheme(
       changedBg: overlay(syntaxFg, isDark ? 0.08 : 0.1),
       // Range borders need to be visible but not distracting
       rangeBorder: mix(primaryBg, syntaxFg, isDark ? 0.2 : 0.15),
-      // Comments use a dedicated purple accent so overlays stay legible over diffs.
+      // Comments use a dedicated purple accent, with mostly neutral surfaces so the border carries the theme.
       commentHighlight: overlay(accentPurple, isDark ? 0.55 : 0.42),
-      commentBg: mix(chromeColor, accentPurple, isDark ? 0.22 : 0.12),
-      commentBgEmphasis: mix(chromeColor, accentPurple, isDark ? 0.34 : 0.2),
-      commentBorder: mix(primaryBg, accentPurple, isDark ? 0.55 : 0.4),
+      commentBg: mix(chromeColor, accentPurple, isDark ? 0.08 : 0.04),
+      commentBgEmphasis: mix(chromeColor, accentPurple, isDark ? 0.14 : 0.08),
+      commentBorder: mix(primaryBg, accentPurple, isDark ? 0.68 : 0.5),
       commentAccent: accentPurple,
     },
 

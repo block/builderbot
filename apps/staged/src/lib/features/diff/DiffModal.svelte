@@ -797,20 +797,17 @@
   }
 
   :global(.diff-viewer-container .comment-editor) {
-    background: linear-gradient(
-      180deg,
-      var(--diff-comment-bg-emphasis) 0%,
-      var(--diff-comment-bg) 100%
-    );
+    background: var(--diff-comment-bg);
     border-color: var(--diff-comment-border);
     box-shadow:
-      0 0 0 1px color-mix(in srgb, var(--diff-comment-accent) 12%, transparent),
+      0 0 0 1px color-mix(in srgb, var(--diff-comment-accent) 18%, transparent),
+      0 0 0 3px color-mix(in srgb, var(--diff-comment-accent) 8%, transparent),
       var(--shadow-elevated);
   }
 
   :global(.diff-viewer-container .comment-editor-hint) {
-    background-color: color-mix(in srgb, var(--diff-comment-bg-emphasis) 65%, transparent);
-    border-top: 1px solid color-mix(in srgb, var(--diff-comment-border) 70%, transparent);
+    background-color: color-mix(in srgb, var(--diff-comment-bg-emphasis) 88%, var(--bg-chrome));
+    border-top: 1px solid color-mix(in srgb, var(--diff-comment-border) 82%, transparent);
   }
 
   :global(.diff-viewer-container .comment-textarea::placeholder) {
@@ -820,8 +817,10 @@
   :global(.diff-viewer-container .range-toolbar),
   :global(.diff-viewer-container .line-selection-toolbar) {
     background-color: var(--diff-comment-bg);
-    border: 1px solid color-mix(in srgb, var(--diff-comment-border) 75%, transparent);
-    box-shadow: var(--shadow-elevated);
+    border: 1px solid color-mix(in srgb, var(--diff-comment-border) 88%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--diff-comment-accent) 10%, transparent),
+      var(--shadow-elevated);
   }
 
   :global(.diff-viewer-container .range-btn.comment-btn),
@@ -831,6 +830,6 @@
 
   :global(.diff-viewer-container .range-btn.comment-btn:hover) {
     color: var(--text-primary);
-    background-color: var(--diff-comment-bg-emphasis);
+    background-color: color-mix(in srgb, var(--diff-comment-accent) 14%, var(--diff-comment-bg));
   }
 </style>

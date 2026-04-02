@@ -482,7 +482,7 @@ pub async fn has_unpushed_commits(
 
 /// Push a branch to its remote by kicking off an agent session.
 #[tauri::command(rename_all = "camelCase")]
-pub fn push_branch(
+pub async fn push_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     app_handle: tauri::AppHandle,

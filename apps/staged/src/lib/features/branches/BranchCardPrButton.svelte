@@ -82,6 +82,7 @@
   // PR status polling state
   let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
   let prStatusRefreshing = $state(false);
+  let lastImmediateRefreshPrNumber = $state<number | null>(null);
 
   // PR status fields (local state, updated via events)
   let prStatusState = $state<string | null>(null);
@@ -305,6 +306,29 @@
     };
   });
 
+  // Kick off an immediate refresh whenever this branch gains a PR number.
+  // This covers branches hydrated after mount, such as project/repo creation from an existing PR.
+  $effect(() => {
+    const prNumber = branch.prNumber;
+
+    if (!prNumber) {
+      lastImmediateRefreshPrNumber = null;
+      return;
+    }
+
+    if (!isWindowFocused || prStatusRefreshing || lastImmediateRefreshPrNumber === prNumber) {
+      return;
+    }
+
+    lastImmediateRefreshPrNumber = prNumber;
+    console.info(
+      `[BranchCardPrButton] Fetching initial PR status for branch=${branch.id} pr=${prNumber}`
+    );
+    commands
+      .refreshPrStatus(branch.id)
+      .catch((e) => console.error('Failed to fetch initial PR status:', e));
+  });
+
   onMount(() => {
     window.addEventListener('keydown', handleOptionDown);
     window.addEventListener('keyup', handleOptionUp);
@@ -325,15 +349,6 @@
     };
     window.addEventListener('focus', handleFocus);
     window.addEventListener('blur', handleBlur);
-
-    if (branch.prNumber) {
-      console.info(
-        `[BranchCardPrButton] Fetching initial PR status for branch=${branch.id} pr=${branch.prNumber}`
-      );
-      commands
-        .refreshPrStatus(branch.id)
-        .catch((e) => console.error('Failed to fetch initial PR status:', e));
-    }
   });
 
   onDestroy(() => {

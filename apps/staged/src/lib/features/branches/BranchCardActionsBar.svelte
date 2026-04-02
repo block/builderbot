@@ -62,6 +62,7 @@
     isLocal: boolean;
     isRemote: boolean;
     remoteWorkspaceStatus: string | null;
+    worktreeError?: string;
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
     onNoteCreated?: () => void;
@@ -77,6 +78,7 @@
     isLocal,
     isRemote,
     remoteWorkspaceStatus,
+    worktreeError,
     onDelete,
     onRename,
     onNoteCreated,
@@ -377,7 +379,8 @@
   });
 
   let isInitializing = $derived(
-    (isLocal && !branch.worktreePath) || (isRemote && remoteWorkspaceStatus === 'starting')
+    (isLocal && !branch.worktreePath && !worktreeError) ||
+      (isRemote && remoteWorkspaceStatus === 'starting')
   );
 
   let primaryRunAction = $derived.by(() => {

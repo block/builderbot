@@ -809,6 +809,7 @@
           {isLocal}
           {isRemote}
           {remoteWorkspaceStatus}
+          {worktreeError}
           {onDelete}
           {onRename}
           onNoteCreated={() => loadTimeline()}

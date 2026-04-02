@@ -27,7 +27,9 @@ pub mod util_commands;
 
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use store::Store;
 use tauri::{Emitter, Manager};
 
@@ -42,6 +44,11 @@ use tauri::{Emitter, Manager};
 struct DbState {
     db_path: PathBuf,
     needs_reset: Mutex<Option<StoreIncompatibility>>,
+}
+
+#[derive(Default)]
+struct ShutdownState {
+    quit_in_progress: AtomicBool,
 }
 
 pub(crate) fn preferences_store_path_buf() -> Option<PathBuf> {
@@ -203,6 +210,29 @@ fn emit_setup_progress(
             detail,
         },
     );
+}
+
+fn stop_actions_for_app_shutdown(app_handle: &tauri::AppHandle) {
+    let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
+    let registry = app_handle.state::<Arc<actions::ActionRegistry>>();
+    let stopped_execution_ids = actions::commands::stop_all_actions(
+        &executor,
+        &registry,
+        actions::StopOptions {
+            force_kill_after: Some(Duration::from_secs(1)),
+        },
+    );
+
+    if stopped_execution_ids.is_empty() {
+        return;
+    }
+
+    if !executor.wait_for_executions(&stopped_execution_ids, Duration::from_secs(2)) {
+        log::warn!(
+            "Timed out waiting for {} action(s) to stop during app shutdown",
+            stopped_execution_ids.len()
+        );
+    }
 }
 
 // =============================================================================
@@ -1624,6 +1654,7 @@ pub fn run() {
             app.manage(Arc::new(session_runner::SessionRegistry::new()));
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
+            app.manage(ShutdownState::default());
             app.manage(DbState {
                 db_path,
                 needs_reset: Mutex::new(reset_info),
@@ -1797,13 +1828,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                // Stop all running actions on quit (fire-and-forget).
-                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
-                let registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                actions::commands::stop_all_actions(&executor, &registry);
-                // Brief grace period for processes to receive SIGTERM.
-                std::thread::sleep(std::time::Duration::from_secs(1));
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let shutdown = app_handle.state::<ShutdownState>();
+                if shutdown.quit_in_progress.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+
+                api.prevent_exit();
+                stop_actions_for_app_shutdown(app_handle);
+                app_handle.exit(0);
             }
         });
 }

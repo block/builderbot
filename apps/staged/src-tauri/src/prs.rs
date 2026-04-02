@@ -46,7 +46,7 @@ struct PrStatusEvent {
 
 /// Create a pull request for a branch by kicking off an agent session.
 #[tauri::command(rename_all = "camelCase")]
-pub fn create_pr(
+pub async fn create_pr(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     app_handle: tauri::AppHandle,

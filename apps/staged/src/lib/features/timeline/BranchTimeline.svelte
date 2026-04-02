@@ -14,6 +14,11 @@
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
   import {
+    formatRelativeTime,
+    formatRelativeTimeSeconds,
+    minuteNow,
+  } from '../../shared/relativeTime.svelte';
+  import {
     collectRunningSessionIds,
     createLiveSessionHints,
     fallbackHintForPendingType,
@@ -222,6 +227,7 @@
 
   // Merge commits, notes, and reviews into a single sorted list
   let items = $derived.by(() => {
+    const nowMs = minuteNow.now();
     const all: DisplayItem[] = [];
     const deletingCommitIds = new Set(
       deletingItems.filter((item) => item.type === 'commit').map((item) => item.id)
@@ -260,7 +266,7 @@
         secondaryMeta = liveHint ?? 'Generating commit';
       } else {
         type = 'commit';
-        secondaryMeta = formatRelativeTime(commit.timestamp);
+        secondaryMeta = formatRelativeTimeSeconds(commit.timestamp, nowMs);
       }
 
       all.push({
@@ -300,7 +306,7 @@
         secondaryMeta = liveHint ?? 'Generating note';
       } else {
         type = 'note';
-        secondaryMeta = formatRelativeTimeMs(note.createdAt);
+        secondaryMeta = formatRelativeTime(note.createdAt, nowMs);
       }
 
       all.push({
@@ -357,7 +363,7 @@
         meta = liveHint ?? 'Generating review';
       } else {
         type = 'review';
-        meta = formatRelativeTimeMs(review.createdAt);
+        meta = formatRelativeTime(review.createdAt, nowMs);
       }
 
       all.push({
@@ -382,7 +388,7 @@
         key: `image-${image.id}`,
         type: 'image' as TimelineItemType,
         title: image.filename,
-        secondaryMeta: isDeleting ? 'Deleting...' : formatRelativeTimeMs(image.createdAt),
+        secondaryMeta: isDeleting ? 'Deleting...' : formatRelativeTime(image.createdAt, nowMs),
         deleting: isDeleting,
         timestamp: Math.floor(image.createdAt / 1000),
         order: 0,
@@ -495,25 +501,6 @@
     } else if (item.type === 'image' && item.imageId && onDeleteImage) {
       onDeleteImage(item.imageId);
     }
-  }
-
-  function formatRelativeTime(timestamp: number): string {
-    const date = new Date(timestamp * 1000);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMins / 60);
-    const diffDays = Math.floor(diffHours / 24);
-
-    if (diffMins < 1) return 'just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return date.toLocaleDateString();
-  }
-
-  function formatRelativeTimeMs(timestamp: number): string {
-    return formatRelativeTime(Math.floor(timestamp / 1000));
   }
 </script>
 

@@ -130,7 +130,7 @@ pub fn get_session_messages_since(
 /// in the background, and messages stream into the DB in real-time.
 /// Returns the Session record (status will be "running").
 #[tauri::command]
-pub fn start_session(
+pub async fn start_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     app_handle: tauri::AppHandle,

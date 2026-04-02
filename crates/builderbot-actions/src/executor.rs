@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
@@ -103,6 +104,19 @@ pub struct ActionMetadata {
     pub action_id: String,
     pub action_name: String,
     pub auto_commit: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct StopOptions {
+    pub force_kill_after: Option<Duration>,
+}
+
+impl Default for StopOptions {
+    fn default() -> Self {
+        Self {
+            force_kill_after: Some(Duration::from_secs(5)),
+        }
+    }
 }
 
 /// Internal state for a running action
@@ -626,6 +640,11 @@ impl ActionExecutor {
     /// group. The completion thread will see the stopped flag and emit a
     /// `Stopped` status event once the process actually exits.
     pub fn stop(&self, execution_id: &str) -> Result<()> {
+        self.stop_with_options(execution_id, StopOptions::default())
+    }
+
+    /// Stop a running action with configurable shutdown timing.
+    pub fn stop_with_options(&self, execution_id: &str, options: StopOptions) -> Result<()> {
         // Mark as stopped BEFORE sending the signal so the completion thread
         // knows this was an intentional stop (not a crash/failure).
         {
@@ -660,20 +679,22 @@ impl ActionExecutor {
                     libc::kill(-(pid as i32), libc::SIGTERM);
                 }
 
-                // Escalate to SIGKILL after a short grace period in case the
-                // process group ignores SIGTERM (e.g. a process traps the signal).
-                thread::spawn(move || {
-                    thread::sleep(std::time::Duration::from_secs(5));
-                    // SAFETY: Same considerations as above. If the process group
-                    // already exited, kill() harmlessly returns ESRCH.
-                    unsafe {
-                        // Check if the process group still exists before sending SIGKILL
-                        let ret = libc::kill(-(pid as i32), 0);
-                        if ret == 0 {
-                            libc::kill(-(pid as i32), libc::SIGKILL);
+                if let Some(force_kill_after) = options.force_kill_after {
+                    // Escalate to SIGKILL after a short grace period in case the
+                    // process group ignores SIGTERM (e.g. a process traps the signal).
+                    thread::spawn(move || {
+                        thread::sleep(force_kill_after);
+                        // SAFETY: Same considerations as above. If the process group
+                        // already exited, kill() harmlessly returns ESRCH.
+                        unsafe {
+                            // Check if the process group still exists before sending SIGKILL
+                            let ret = libc::kill(-(pid as i32), 0);
+                            if ret == 0 {
+                                libc::kill(-(pid as i32), libc::SIGKILL);
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
 
             #[cfg(windows)]
@@ -686,6 +707,32 @@ impl ActionExecutor {
         }
 
         Ok(())
+    }
+
+    /// Wait until all listed executions are no longer running, or until the timeout elapses.
+    ///
+    /// Returns `true` if every execution completed before the timeout.
+    pub fn wait_for_executions(&self, execution_ids: &[String], timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            let all_stopped = {
+                let running = self.running.lock().unwrap();
+                execution_ids
+                    .iter()
+                    .all(|execution_id| !running.contains_key(execution_id))
+            };
+
+            if all_stopped {
+                return true;
+            }
+
+            if Instant::now() >= deadline {
+                return false;
+            }
+
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     /// Get buffered output for an execution

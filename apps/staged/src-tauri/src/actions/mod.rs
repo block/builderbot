@@ -13,6 +13,6 @@ pub mod run_detector;
 // Re-export types for convenience
 pub use builderbot_actions::{
     ActionDetector, ActionExecutor, ActionMetadata, ActionStatus, ActionType, OutputChunk,
-    SuggestedAction,
+    StopOptions, SuggestedAction,
 };
 pub use registry::{ActionRegistry, RunPhase, RunningActionInfo};

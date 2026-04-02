@@ -110,8 +110,9 @@ async function handlePrCompletion(sessionId: string, branchId: string, status: s
         if (prNumber) {
           try {
             await commands.updateBranchPr(branchId, prNumber);
+            await commands.refreshPrStatus(branchId);
           } catch (storageError) {
-            console.error('Failed to persist PR number to storage:', storageError);
+            console.error('Failed to persist or refresh PR state after creation:', storageError);
           }
         }
         prStateStore.setPrCreated(branchId, foundUrl);

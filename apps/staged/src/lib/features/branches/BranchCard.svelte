@@ -814,8 +814,8 @@
           onNoteCreated={() => loadTimeline()}
           onRebaseBranch={() =>
             sessionMgr.startOrQueueSession('commit', 'Rebase this branch. Do not push the branch.')}
-          onCollapseCommits={() =>
-            sessionMgr.startOrQueueSession('commit', "Collapse this branch's commits")}
+          onSquashCommits={() =>
+            sessionMgr.startOrQueueSession('commit', "Squash this branch's commits")}
           newCommitDisabled={sessionMgr.isNewSessionDisabled}
           {commitCount}
         />

@@ -66,7 +66,7 @@
     onRename?: (branchName: string) => void;
     onNoteCreated?: () => void;
     onRebaseBranch?: () => void;
-    onCollapseCommits?: () => void;
+    onSquashCommits?: () => void;
     newCommitDisabled?: boolean;
     commitCount?: number;
   }
@@ -81,7 +81,7 @@
     onRename,
     onNoteCreated,
     onRebaseBranch,
-    onCollapseCommits,
+    onSquashCommits,
     newCommitDisabled = false,
     commitCount = 0,
   }: Props = $props();
@@ -867,11 +867,11 @@
           disabled={newCommitDisabled}
           onclick={() => {
             showMoreMenu = false;
-            onCollapseCommits?.();
+            onSquashCommits?.();
           }}
         >
           <GitBranch size={14} />
-          Collapse Commits
+          Squash Commits
         </button>
       {/if}
       <div class="menu-separator"></div>

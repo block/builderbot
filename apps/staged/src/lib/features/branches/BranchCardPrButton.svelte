@@ -225,9 +225,6 @@
 
     if (prStatusState === 'MERGED' || prStatusState === 'CLOSED') {
       if (prStatusPollTimer) {
-        console.info(
-          `[BranchCardPrButton] Stopping PR status poll timer for branch=${branch.id} because PR state is ${prStatusState}`
-        );
         clearInterval(prStatusPollTimer);
         prStatusPollTimer = null;
       }
@@ -243,24 +240,15 @@
 
     if (shouldPoll) {
       if (prStatusPollTimer) {
-        console.info(
-          `[BranchCardPrButton] Resetting PR status poll timer for branch=${branch.id} interval=${pollInterval}ms checks=${prStatusChecks ?? 'null'} focused=${isWindowFocused}`
-        );
         clearInterval(prStatusPollTimer);
       }
 
       prStatusPollTimer = setInterval(async () => {
         if (prStatusRefreshing) {
-          console.info(
-            `[BranchCardPrButton] Skipping PR status poll for branch=${branch.id} because a refresh is already in flight`
-          );
           return;
         }
         try {
           prStatusRefreshing = true;
-          console.info(
-            `[BranchCardPrButton] Starting PR status poll for branch=${branch.id} pr=${branch.prNumber} interval=${pollInterval}ms checks=${prStatusChecks ?? 'null'} focused=${isWindowFocused}`
-          );
           let timeoutId: ReturnType<typeof setTimeout>;
           const timeout = new Promise<never>((_, reject) => {
             timeoutId = setTimeout(
@@ -270,26 +258,17 @@
           });
           try {
             await Promise.race([commands.refreshPrStatus(branch.id), timeout]);
-            console.info(
-              `[BranchCardPrButton] PR status poll succeeded for branch=${branch.id} pr=${branch.prNumber}`
-            );
           } finally {
             clearTimeout(timeoutId!);
           }
         } catch (e) {
-          console.info(`[BranchCardPrButton] PR status poll failed for branch=${branch.id}:`, e);
+          console.error(`[BranchCardPrButton] Poll refresh failed for branch=${branch.id}:`, e);
         } finally {
           prStatusRefreshing = false;
         }
       }, pollInterval);
-      console.info(
-        `[BranchCardPrButton] Started PR status poll timer for branch=${branch.id} pr=${branch.prNumber} interval=${pollInterval}ms checks=${prStatusChecks ?? 'null'} focused=${isWindowFocused}`
-      );
     } else {
       if (prStatusPollTimer) {
-        console.info(
-          `[BranchCardPrButton] Stopping PR status poll timer for branch=${branch.id} pr=${branch.prNumber} because focused=${isWindowFocused}`
-        );
         clearInterval(prStatusPollTimer);
         prStatusPollTimer = null;
       }
@@ -297,9 +276,6 @@
 
     return () => {
       if (prStatusPollTimer) {
-        console.info(
-          `[BranchCardPrButton] Cleaning up PR status poll timer for branch=${branch.id} pr=${branch.prNumber}`
-        );
         clearInterval(prStatusPollTimer);
         prStatusPollTimer = null;
       }
@@ -321,9 +297,6 @@
     }
 
     lastImmediateRefreshPrNumber = prNumber;
-    console.info(
-      `[BranchCardPrButton] Fetching initial PR status for branch=${branch.id} pr=${prNumber}`
-    );
     commands
       .refreshPrStatus(branch.id)
       .catch((e) => console.error('Failed to fetch initial PR status:', e));
@@ -336,9 +309,6 @@
     handleFocus = () => {
       isWindowFocused = true;
       if (branch.prNumber && !prStatusRefreshing) {
-        console.info(
-          `[BranchCardPrButton] Window focused; refreshing PR status immediately for branch=${branch.id} pr=${branch.prNumber}`
-        );
         commands
           .refreshPrStatus(branch.id)
           .catch((e) => console.error('Failed to refresh PR status on focus:', e));

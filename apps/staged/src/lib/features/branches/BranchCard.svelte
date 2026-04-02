@@ -808,8 +808,8 @@
           {repoLabel}
           {isLocal}
           {isRemote}
+          {isProvisioning}
           {remoteWorkspaceStatus}
-          {worktreeError}
           {onDelete}
           {onRename}
           onNoteCreated={() => loadTimeline()}

@@ -61,8 +61,8 @@
     repoLabel?: ProjectRepo | null;
     isLocal: boolean;
     isRemote: boolean;
+    isProvisioning: boolean;
     remoteWorkspaceStatus: string | null;
-    worktreeError?: string;
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
     onNoteCreated?: () => void;
@@ -77,8 +77,8 @@
     repoLabel = null,
     isLocal,
     isRemote,
+    isProvisioning,
     remoteWorkspaceStatus,
-    worktreeError,
     onDelete,
     onRename,
     onNoteCreated,
@@ -378,11 +378,6 @@
     return groupActionsByType(actions);
   });
 
-  let isInitializing = $derived(
-    (isLocal && !branch.worktreePath && !worktreeError) ||
-      (isRemote && remoteWorkspaceStatus === 'starting')
-  );
-
   let primaryRunAction = $derived.by(() => {
     return getPrimaryRunAction(groupedActions);
   });
@@ -619,7 +614,7 @@
     </div>
   {/each}
   <!-- Primary run action button -->
-  {#if !isInitializing && primaryRunAction}
+  {#if !isProvisioning && primaryRunAction}
     {@const execution = primaryActionExecution}
     {@const isRunning = execution?.status === 'running'}
     {@const isStopping = execution && stoppingExecutions.has(execution.executionId)}
@@ -757,7 +752,7 @@
   </button>
   {#if showMoreMenu}
     <div class="more-menu">
-      {#if !isInitializing}
+      {#if !isProvisioning}
         <!-- Remote-only: Copy workspace name -->
         {#if isRemote && branch.workspaceName}
           <button

@@ -246,11 +246,11 @@
   .comment-icon {
     display: flex;
     align-items: center;
-    color: var(--text-faint);
+    color: var(--diff-comment-accent);
   }
 
   .comment-icon.agent-icon {
-    color: var(--text-faint);
+    color: var(--diff-comment-accent);
   }
 
   .comment-icon.comment-icon-warning {

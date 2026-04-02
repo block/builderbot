@@ -246,7 +246,7 @@
   .comment-icon {
     display: flex;
     align-items: center;
-    color: var(--diff-comment-accent);
+    color: var(--text-faint);
   }
 
   .comment-icon.agent-icon {

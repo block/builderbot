@@ -242,6 +242,14 @@ pub async fn refresh_pr_status(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
     let (github_repo, _) = resolve_branch_repo_and_subpath(&store, &project, &branch)?;
 
+    log::info!(
+        "refresh_pr_status: starting branch_id={} project_id={} pr_number={} repo={}",
+        branch_id,
+        branch.project_id,
+        pr_number,
+        github_repo
+    );
+
     // Run the blocking gh CLI call on a background thread so we don't
     // block the Tauri IPC thread and starve other commands.
     let pr_status = {
@@ -255,6 +263,13 @@ pub async fn refresh_pr_status(
     let pr_status = match pr_status {
         Ok(status) => status,
         Err(e) => {
+            log::info!(
+                "refresh_pr_status: fetch failed branch_id={} pr_number={} repo={} error={}",
+                branch_id,
+                pr_number,
+                github_repo,
+                e
+            );
             log::error!(
                 "refresh_pr_status failed for branch_id={}, pr_number={}: {}",
                 branch_id,
@@ -279,6 +294,18 @@ pub async fn refresh_pr_status(
             pr_status.head_sha.clone(),
         )
         .map_err(|e| e.to_string())?;
+
+    log::info!(
+        "refresh_pr_status: success branch_id={} pr_number={} state={} checks={} review_decision={} mergeable={} draft={} head_sha={}",
+        branch_id,
+        pr_number,
+        pr_status.state,
+        pr_status.checks_summary.state,
+        pr_status.review_decision.as_deref().unwrap_or("null"),
+        mergeable,
+        pr_status.is_draft,
+        pr_status.head_sha.as_deref().unwrap_or("null")
+    );
 
     app_handle
         .emit(
@@ -318,6 +345,12 @@ pub async fn refresh_all_pr_statuses(
         .filter(|b| b.pr_number.is_some())
         .collect();
 
+    log::info!(
+        "refresh_all_pr_statuses: starting project_id={} branch_count_with_prs={}",
+        project_id,
+        branches_with_prs.len()
+    );
+
     let mut refreshed_count = 0u32;
 
     for branch in branches_with_prs {
@@ -325,6 +358,12 @@ pub async fn refresh_all_pr_statuses(
         let github_repo = match resolve_branch_repo_and_subpath(&store, &project, &branch) {
             Ok((repo, _)) => repo,
             Err(e) => {
+                log::info!(
+                    "refresh_all_pr_statuses: repo resolution failed branch_id={} pr_number={} error={}",
+                    branch.id,
+                    pr_number,
+                    e
+                );
                 log::warn!(
                     "Failed to resolve repo for branch {} (PR #{}): {}",
                     branch.id,
@@ -334,6 +373,14 @@ pub async fn refresh_all_pr_statuses(
                 continue;
             }
         };
+
+        log::info!(
+            "refresh_all_pr_statuses: polling branch_id={} project_id={} pr_number={} repo={}",
+            branch.id,
+            branch.project_id,
+            pr_number,
+            github_repo
+        );
 
         let pr_result = {
             let github_repo = github_repo.clone();
@@ -358,11 +405,29 @@ pub async fn refresh_all_pr_statuses(
                     None,
                     pr_status.head_sha.clone(),
                 ) {
+                    log::info!(
+                        "refresh_all_pr_statuses: store update failed branch_id={} pr_number={} error={}",
+                        branch.id,
+                        pr_number,
+                        e
+                    );
                     log::warn!("Failed to update PR status for branch {}: {}", branch.id, e);
                     continue;
                 }
 
                 refreshed_count += 1;
+
+                log::info!(
+                    "refresh_all_pr_statuses: success branch_id={} pr_number={} state={} checks={} review_decision={} mergeable={} draft={} head_sha={}",
+                    branch.id,
+                    pr_number,
+                    pr_status.state,
+                    pr_status.checks_summary.state,
+                    pr_status.review_decision.as_deref().unwrap_or("null"),
+                    mergeable,
+                    pr_status.is_draft,
+                    pr_status.head_sha.as_deref().unwrap_or("null")
+                );
 
                 if let Err(e) = app_handle.emit(
                     "pr-status-changed",
@@ -380,6 +445,13 @@ pub async fn refresh_all_pr_statuses(
                 }
             }
             Err(e) => {
+                log::info!(
+                    "refresh_all_pr_statuses: fetch failed branch_id={} pr_number={} repo={} error={}",
+                    branch.id,
+                    pr_number,
+                    github_repo,
+                    e
+                );
                 log::warn!(
                     "Failed to fetch PR status for branch {} (PR #{}): {}",
                     branch.id,
@@ -393,6 +465,12 @@ pub async fn refresh_all_pr_statuses(
     app_handle
         .emit("pr-statuses-refreshed", &project_id)
         .map_err(|e| format!("Failed to emit event: {}", e))?;
+
+    log::info!(
+        "refresh_all_pr_statuses: finished project_id={} refreshed_count={}",
+        project_id,
+        refreshed_count
+    );
 
     Ok(refreshed_count)
 }

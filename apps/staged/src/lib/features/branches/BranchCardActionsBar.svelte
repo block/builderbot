@@ -854,14 +854,14 @@
           <GitBranch size={14} />
           Rename Branch
         </button>
-        <button
-          class="more-menu-item"
-          disabled={newCommitDisabled}
-          onclick={() => {
-            showMoreMenu = false;
-            onRebaseBranch?.();
-          }}
-        >
+          <button
+            class="more-menu-item"
+            disabled={newCommitDisabled}
+            onclick={() => {
+              showMoreMenu = false;
+              onRebaseBranch?.();
+            }}
+          >
           <GitBranch size={14} />
           Rebase Branch
         </button>
@@ -871,11 +871,11 @@
             disabled={newCommitDisabled}
             onclick={() => {
               showMoreMenu = false;
-              onCollapseCommits?.();
+              onSquashCommits?.();
             }}
           >
             <GitBranch size={14} />
-            Collapse Commits
+            Squash Commits
           </button>
         {/if}
         <div class="menu-separator"></div>

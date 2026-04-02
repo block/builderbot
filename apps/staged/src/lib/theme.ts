@@ -394,8 +394,8 @@ export function createAdaptiveTheme(
       rangeBorder: mix(primaryBg, syntaxFg, isDark ? 0.2 : 0.15),
       // Comments use a dedicated purple accent, with mostly neutral surfaces so the border carries the theme.
       commentHighlight: overlay(accentPurple, isDark ? 0.55 : 0.42),
-      commentBg: mix(chromeColor, accentPurple, isDark ? 0.08 : 0.04),
-      commentBgEmphasis: mix(chromeColor, accentPurple, isDark ? 0.14 : 0.08),
+      commentBg: mix(chromeColor, accentPurple, isDark ? 0.04 : 0.02),
+      commentBgEmphasis: mix(chromeColor, accentPurple, isDark ? 0.08 : 0.04),
       commentBorder: mix(primaryBg, accentPurple, isDark ? 0.68 : 0.5),
       commentAccent: accentPurple,
     },

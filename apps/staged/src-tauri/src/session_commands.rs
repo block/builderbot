@@ -904,7 +904,27 @@ pub async fn drain_queued_sessions(
     provider: Option<String>,
 ) -> Result<bool, String> {
     let store = get_store(&store)?;
+    drain_queued_sessions_for_branch(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        provider,
+    )
+    .await
+}
 
+/// Start the oldest queued branch session if one exists and the branch is idle.
+///
+/// This is shared by the Tauri command and backend lifecycle hooks so queue
+/// progression remains owned by the backend.
+pub async fn drain_queued_sessions_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+) -> Result<bool, String> {
     // Bail out if the branch already has a running session to prevent
     // concurrent sessions on the same branch.
     if store

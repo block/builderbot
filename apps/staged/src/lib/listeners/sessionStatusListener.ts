@@ -90,13 +90,6 @@ async function handleSessionEnd(sessionId: string, status: string) {
 
   // Clean up the session from the unified registry (single point of cleanup).
   sessionRegistry.unregister(sessionId);
-
-  // Drain queued sessions for this branch so the next one starts automatically.
-  if (branchId) {
-    commands.drainQueuedSessions(branchId).catch((e) => {
-      console.error('[sessionStatusListener] Failed to drain queued sessions:', e);
-    });
-  }
 }
 
 async function handlePrCompletion(sessionId: string, branchId: string, status: string) {

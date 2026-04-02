@@ -402,41 +402,59 @@ pub fn start_session(
                 error_msg,
                 Some(&completion_reason),
             );
-        }
 
-        // Trigger auto review when a commit session completes successfully,
-        // but only if there are no queued sessions waiting for this branch.
-        // Queued sessions take priority — the next one will be drained instead.
-        if let Some(branch_id) = committed_branch_id {
-            let has_queued = store_for_status
-                .get_queued_sessions_for_branch(&branch_id)
-                .map(|q| !q.is_empty())
-                .unwrap_or(false);
+            let branch_id = store_for_status
+                .get_branch_id_for_session(&session_id_for_status)
+                .ok()
+                .flatten();
+            let auto_review_branch_id = committed_branch_id.clone();
 
-            if !has_queued {
-                let store_for_auto = Arc::clone(&store_for_status);
-                let registry_for_auto = Arc::clone(&registry);
-                let app_handle_for_auto = app_handle.clone();
+            if let Some(branch_id) = branch_id {
+                let store_for_follow_up = Arc::clone(&store_for_status);
+                let registry_for_follow_up = Arc::clone(&registry);
+                let app_handle_for_follow_up = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    match crate::session_commands::trigger_auto_review(
-                        store_for_auto,
-                        registry_for_auto,
-                        app_handle_for_auto,
+                    match crate::session_commands::drain_queued_sessions_for_branch(
+                        Arc::clone(&store_for_follow_up),
+                        Arc::clone(&registry_for_follow_up),
+                        app_handle_for_follow_up.clone(),
                         branch_id.clone(),
                         None,
                     )
                     .await
                     {
-                        Ok(resp) => {
-                            log::info!(
-                                "Auto review triggered for branch {branch_id}: session={}, review={}",
-                                resp.session_id,
-                                resp.artifact_id,
-                            );
+                        Ok(true) => {
+                            log::info!("Drained next queued session for branch {branch_id}");
+                        }
+                        Ok(false) => {
+                            if let Some(auto_review_branch_id) = auto_review_branch_id {
+                                match crate::session_commands::trigger_auto_review(
+                                    store_for_follow_up,
+                                    registry_for_follow_up,
+                                    app_handle_for_follow_up,
+                                    auto_review_branch_id.clone(),
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(resp) => {
+                                        log::info!(
+                                            "Auto review triggered for branch {auto_review_branch_id}: session={}, review={}",
+                                            resp.session_id,
+                                            resp.artifact_id,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "Failed to trigger auto review for branch {auto_review_branch_id}: {e}"
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             log::error!(
-                                "Failed to trigger auto review for branch {branch_id}: {e}"
+                                "Failed to drain queued sessions for branch {branch_id}: {e}"
                             );
                         }
                     }
@@ -462,7 +480,11 @@ pub fn start_session(
 /// - `owner_pid` is dead (or NULL for pre-migration rows) → transition to
 ///   error with `AppQuit` reason and emit `session-status-changed` so the
 ///   frontend learns the outcome.
-pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
+pub fn recover_dead_sessions(
+    store: Arc<Store>,
+    registry: Arc<SessionRegistry>,
+    app_handle: AppHandle,
+) {
     let sessions = match store.get_running_sessions() {
         Ok(s) => s,
         Err(e) => {
@@ -496,6 +518,36 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
                     None,
                     Some(&CompletionReason::AppQuit),
                 );
+
+                let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
+                if let Some(branch_id) = branch_id {
+                    let store_for_follow_up = Arc::clone(&store);
+                    let registry_for_follow_up = Arc::clone(&registry);
+                    let app_handle_for_follow_up = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match crate::session_commands::drain_queued_sessions_for_branch(
+                            store_for_follow_up,
+                            registry_for_follow_up,
+                            app_handle_for_follow_up,
+                            branch_id.clone(),
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                log::info!(
+                                    "Drained next queued session after orphan recovery for branch {branch_id}"
+                                );
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                log::error!(
+                                    "Failed to drain queued sessions after orphan recovery for branch {branch_id}: {e}"
+                                );
+                            }
+                        }
+                    });
+                }
             }
         }
     }

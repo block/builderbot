@@ -1,7 +1,5 @@
 class MinuteNowStore {
   private value = $state(Date.now());
-  private timeoutId: ReturnType<typeof setTimeout> | null = null;
-  private intervalId: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -17,9 +15,9 @@ class MinuteNowStore {
     this.value = Date.now();
 
     const msUntilNextMinute = 60000 - (this.value % 60000);
-    this.timeoutId = setTimeout(() => {
+    setTimeout(() => {
       this.value = Date.now();
-      this.intervalId = setInterval(() => {
+      setInterval(() => {
         this.value = Date.now();
       }, 60000);
     }, msUntilNextMinute);

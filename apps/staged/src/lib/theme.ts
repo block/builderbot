@@ -57,6 +57,10 @@ export interface Theme {
     changedBg: string; // Neutral background for changed lines (not add/remove specific)
     rangeBorder: string; // Border color for change range markers
     commentHighlight: string; // Highlight color for commented regions in spine
+    commentBg: string; // Floating comment editor background
+    commentBgEmphasis: string; // Stronger tint for comment controls
+    commentBorder: string; // Border color for comment surfaces
+    commentAccent: string; // Accent color for comment affordances
   };
 
   // Search highlight colors
@@ -336,12 +340,14 @@ export function createAdaptiveTheme(
   const fallbackGreen = isDark ? '#3fb950' : '#1a7f37';
   const fallbackRed = isDark ? '#f85149' : '#cf222e';
   const fallbackOrange = isDark ? '#d29922' : '#9a6700';
+  const fallbackPurple = isDark ? '#a78bfa' : '#8250df';
 
   // Use theme git colors when available, fallback otherwise
   const accentGreen = gitColors?.added ?? fallbackGreen;
   const accentRed = gitColors?.deleted ?? fallbackRed;
   const accentBlue = gitColors?.modified ?? fallbackBlue;
   const accentOrange = fallbackOrange; // Used for warnings/caution UI elements
+  const accentPurple = fallbackPurple;
 
   // Border that's visible but not harsh
   const borderBase = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
@@ -386,8 +392,12 @@ export function createAdaptiveTheme(
       changedBg: overlay(syntaxFg, isDark ? 0.08 : 0.1),
       // Range borders need to be visible but not distracting
       rangeBorder: mix(primaryBg, syntaxFg, isDark ? 0.2 : 0.15),
-      // Comment highlight - uses blue accent for "annotation" semantic
-      commentHighlight: overlay(accentBlue, isDark ? 0.5 : 0.4),
+      // Comments use a dedicated purple accent so overlays stay legible over diffs.
+      commentHighlight: overlay(accentPurple, isDark ? 0.55 : 0.42),
+      commentBg: mix(chromeColor, accentPurple, isDark ? 0.22 : 0.12),
+      commentBgEmphasis: mix(chromeColor, accentPurple, isDark ? 0.34 : 0.2),
+      commentBorder: mix(primaryBg, accentPurple, isDark ? 0.55 : 0.4),
+      commentAccent: accentPurple,
     },
 
     search: {
@@ -485,6 +495,10 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--diff-changed-bg': t.diff.changedBg,
     '--diff-range-border': t.diff.rangeBorder,
     '--diff-comment-highlight': t.diff.commentHighlight,
+    '--diff-comment-bg': t.diff.commentBg,
+    '--diff-comment-bg-emphasis': t.diff.commentBgEmphasis,
+    '--diff-comment-border': t.diff.commentBorder,
+    '--diff-comment-accent': t.diff.commentAccent,
 
     '--search-match-bg': t.search.matchBg,
     '--search-current-match-bg': t.search.currentMatchBg,

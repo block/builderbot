@@ -795,4 +795,42 @@
     min-width: 0;
     overflow: hidden;
   }
+
+  :global(.diff-viewer-container .comment-editor) {
+    background: linear-gradient(
+      180deg,
+      var(--diff-comment-bg-emphasis) 0%,
+      var(--diff-comment-bg) 100%
+    );
+    border-color: var(--diff-comment-border);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--diff-comment-accent) 12%, transparent),
+      var(--shadow-elevated);
+  }
+
+  :global(.diff-viewer-container .comment-editor-hint) {
+    background-color: color-mix(in srgb, var(--diff-comment-bg-emphasis) 65%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--diff-comment-border) 70%, transparent);
+  }
+
+  :global(.diff-viewer-container .comment-textarea::placeholder) {
+    color: color-mix(in srgb, var(--diff-comment-accent) 55%, var(--text-muted));
+  }
+
+  :global(.diff-viewer-container .range-toolbar),
+  :global(.diff-viewer-container .line-selection-toolbar) {
+    background-color: var(--diff-comment-bg);
+    border: 1px solid color-mix(in srgb, var(--diff-comment-border) 75%, transparent);
+    box-shadow: var(--shadow-elevated);
+  }
+
+  :global(.diff-viewer-container .range-btn.comment-btn),
+  :global(.diff-viewer-container .selection-info) {
+    color: var(--diff-comment-accent);
+  }
+
+  :global(.diff-viewer-container .range-btn.comment-btn:hover) {
+    color: var(--text-primary);
+    background-color: var(--diff-comment-bg-emphasis);
+  }
 </style>

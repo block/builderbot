@@ -57,7 +57,11 @@
   --diff-modified-bg: rgba(227, 179, 65, 0.08);
   --diff-modified-inline-bg: rgba(227, 179, 65, 0.25);
   --diff-range-border: #524d58;
-  --diff-comment-highlight: rgba(88, 166, 255, 0.5);
+  --diff-comment-highlight: rgba(167, 139, 250, 0.55);
+  --diff-comment-bg: rgba(167, 139, 250, 0.16);
+  --diff-comment-bg-emphasis: rgba(167, 139, 250, 0.24);
+  --diff-comment-border: rgba(167, 139, 250, 0.42);
+  --diff-comment-accent: #a78bfa;
 
   --search-match-bg: rgba(250, 200, 50, 0.35);
   --search-current-match-bg: rgba(255, 150, 50, 0.5);

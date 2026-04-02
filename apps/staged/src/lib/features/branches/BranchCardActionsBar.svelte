@@ -61,6 +61,7 @@
     repoLabel?: ProjectRepo | null;
     isLocal: boolean;
     isRemote: boolean;
+    isProvisioning: boolean;
     remoteWorkspaceStatus: string | null;
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
@@ -76,6 +77,7 @@
     repoLabel = null,
     isLocal,
     isRemote,
+    isProvisioning,
     remoteWorkspaceStatus,
     onDelete,
     onRename,
@@ -612,7 +614,7 @@
     </div>
   {/each}
   <!-- Primary run action button -->
-  {#if primaryRunAction}
+  {#if !isProvisioning && primaryRunAction}
     {@const execution = primaryActionExecution}
     {@const isRunning = execution?.status === 'running'}
     {@const isStopping = execution && stoppingExecutions.has(execution.executionId)}
@@ -750,131 +752,132 @@
   </button>
   {#if showMoreMenu}
     <div class="more-menu">
-      <!-- Remote-only: Copy workspace name -->
-      {#if isRemote && branch.workspaceName}
-        <button
-          class="more-menu-item"
-          onclick={() => {
-            showMoreMenu = false;
-            navigator.clipboard.writeText(branch.workspaceName!);
-          }}
-        >
-          <Copy size={14} />
-          Copy Workspace Name
-        </button>
-      {/if}
-
-      <!-- Actions submenu -->
-      {#if hasActionsForSubmenu}
-        <div class="submenu-container">
+      {#if !isProvisioning}
+        <!-- Remote-only: Copy workspace name -->
+        {#if isRemote && branch.workspaceName}
           <button
-            class="more-menu-item submenu-trigger"
-            onmouseenter={handleActionsSubmenuEnter}
-            onmouseleave={handleActionsSubmenuLeave}
+            class="more-menu-item"
+            onclick={() => {
+              showMoreMenu = false;
+              navigator.clipboard.writeText(branch.workspaceName!);
+            }}
           >
-            <Play size={14} />
-            Actions
-            <ChevronDown size={12} class="submenu-chevron" />
+            <Copy size={14} />
+            Copy Workspace Name
           </button>
-          {#if showActionsSubmenu}
-            <div
-              class="submenu"
-              role="group"
+        {/if}
+
+        <!-- Actions submenu -->
+        {#if hasActionsForSubmenu}
+          <div class="submenu-container">
+            <button
+              class="more-menu-item submenu-trigger"
               onmouseenter={handleActionsSubmenuEnter}
               onmouseleave={handleActionsSubmenuLeave}
             >
-              {#each ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as type}
-                {@const typeActions = type === 'run' ? remainingRunActions : groupedActions[type]}
-                {#if typeActions.length > 0}
-                  {#each typeActions as action (action.id)}
-                    {@const Icon = getActionIcon(type)}
-                    <button
-                      class="more-menu-item action-item"
-                      onclick={() => handleRunAction(action)}
-                    >
-                      <Icon size={14} />
-                      {action.name}
-                    </button>
-                  {/each}
-                {/if}
-              {/each}
-            </div>
-          {/if}
-        </div>
-      {/if}
+              <Play size={14} />
+              Actions
+              <ChevronDown size={12} class="submenu-chevron" />
+            </button>
+            {#if showActionsSubmenu}
+              <div
+                class="submenu"
+                role="group"
+                onmouseenter={handleActionsSubmenuEnter}
+                onmouseleave={handleActionsSubmenuLeave}
+              >
+                {#each ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as type}
+                  {@const typeActions = type === 'run' ? remainingRunActions : groupedActions[type]}
+                  {#if typeActions.length > 0}
+                    {#each typeActions as action (action.id)}
+                      {@const Icon = getActionIcon(type)}
+                      <button
+                        class="more-menu-item action-item"
+                        onclick={() => handleRunAction(action)}
+                      >
+                        <Icon size={14} />
+                        {action.name}
+                      </button>
+                    {/each}
+                  {/if}
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
 
-      <!-- Local-only: Open In submenu -->
-      {#if isLocal && branch.worktreePath && openerApps.length > 0}
-        <div class="menu-separator"></div>
-        <div class="submenu-container">
-          <button
-            class="more-menu-item submenu-trigger"
-            onmouseenter={handleOpenInSubmenuEnter}
-            onmouseleave={handleOpenInSubmenuLeave}
-          >
-            <ExternalLink size={14} />
-            Open In
-            <ChevronDown size={12} class="submenu-chevron" />
-          </button>
-          {#if showOpenInSubmenu}
-            <div
-              class="submenu"
-              role="group"
+        <!-- Local-only: Open In submenu -->
+        {#if isLocal && branch.worktreePath && openerApps.length > 0}
+          <div class="menu-separator"></div>
+          <div class="submenu-container">
+            <button
+              class="more-menu-item submenu-trigger"
               onmouseenter={handleOpenInSubmenuEnter}
               onmouseleave={handleOpenInSubmenuLeave}
             >
-              {#each openerApps as app (app.id)}
-                <button class="more-menu-item" onclick={() => handleOpenInApp(app.id)}>
-                  {app.name}
+              <ExternalLink size={14} />
+              Open In
+              <ChevronDown size={12} class="submenu-chevron" />
+            </button>
+            {#if showOpenInSubmenu}
+              <div
+                class="submenu"
+                role="group"
+                onmouseenter={handleOpenInSubmenuEnter}
+                onmouseleave={handleOpenInSubmenuLeave}
+              >
+                {#each openerApps as app (app.id)}
+                  <button class="more-menu-item" onclick={() => handleOpenInApp(app.id)}>
+                    {app.name}
+                  </button>
+                {/each}
+                <div class="menu-separator"></div>
+                <button class="more-menu-item" onclick={handleCopyPath}>
+                  <Copy size={14} />
+                  Copy Path
                 </button>
-              {/each}
-              <div class="menu-separator"></div>
-              <button class="more-menu-item" onclick={handleCopyPath}>
-                <Copy size={14} />
-                Copy Path
-              </button>
-            </div>
-          {/if}
-        </div>
-      {:else if isLocal && branch.worktreePath}
-        <div class="menu-separator"></div>
-        <button class="more-menu-item" onclick={handleCopyPath}>
-          <Copy size={14} />
-          Copy Worktree Path
-        </button>
-      {/if}
+              </div>
+            {/if}
+          </div>
+        {:else if isLocal && branch.worktreePath}
+          <div class="menu-separator"></div>
+          <button class="more-menu-item" onclick={handleCopyPath}>
+            <Copy size={14} />
+            Copy Worktree Path
+          </button>
+        {/if}
 
-      <!-- Delete last -->
-      <div class="menu-separator"></div>
-      <button class="more-menu-item" onclick={handleRenameFromMenu}>
-        <GitBranch size={14} />
-        Rename Branch
-      </button>
-      <button
-        class="more-menu-item"
-        disabled={newCommitDisabled}
-        onclick={() => {
-          showMoreMenu = false;
-          onRebaseBranch?.();
-        }}
-      >
-        <GitBranch size={14} />
-        Rebase Branch
-      </button>
-      {#if commitCount >= 2}
+        <div class="menu-separator"></div>
+        <button class="more-menu-item" onclick={handleRenameFromMenu}>
+          <GitBranch size={14} />
+          Rename Branch
+        </button>
         <button
           class="more-menu-item"
           disabled={newCommitDisabled}
           onclick={() => {
             showMoreMenu = false;
-            onSquashCommits?.();
+            onRebaseBranch?.();
           }}
         >
           <GitBranch size={14} />
-          Squash Commits
+          Rebase Branch
         </button>
+        {#if commitCount >= 2}
+          <button
+            class="more-menu-item"
+            disabled={newCommitDisabled}
+            onclick={() => {
+              showMoreMenu = false;
+              onSquashCommits?.();
+            }}
+          >
+            <GitBranch size={14} />
+            Squash Commits
+          </button>
+        {/if}
+        <div class="menu-separator"></div>
       {/if}
-      <div class="menu-separator"></div>
       <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
         <Trash2 size={14} />
         Delete Repo

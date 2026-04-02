@@ -808,6 +808,7 @@
           {repoLabel}
           {isLocal}
           {isRemote}
+          {isProvisioning}
           {remoteWorkspaceStatus}
           {onDelete}
           {onRename}

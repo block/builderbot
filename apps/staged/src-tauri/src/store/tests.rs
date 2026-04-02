@@ -839,6 +839,34 @@ fn test_notes() {
     assert!(notes[0].content.contains("Design"));
 }
 
+#[test]
+fn test_list_notes_for_branch_orders_by_completion_time() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let older = Note::new(&branch.id, "", "").with_session("session-older");
+    store.create_note(&older).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    let newer = Note::new(&branch.id, "", "").with_session("session-newer");
+    store.create_note(&newer).unwrap();
+
+    store
+        .update_note_title_and_content(&newer.id, "Newer", "Completed first")
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_note_title_and_content(&older.id, "Older", "Completed second")
+        .unwrap();
+
+    let notes = store.list_notes_for_branch(&branch.id).unwrap();
+    let ordered_ids: Vec<_> = notes.iter().map(|note| note.id.as_str()).collect();
+    assert_eq!(ordered_ids, vec![older.id.as_str(), newer.id.as_str()]);
+}
+
 // =============================================================================
 // Repo Actions
 // =============================================================================

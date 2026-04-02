@@ -41,7 +41,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at
-             FROM notes WHERE branch_id = ?1 ORDER BY created_at DESC",
+             FROM notes WHERE branch_id = ?1
+             ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_note)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

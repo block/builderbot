@@ -236,6 +236,9 @@ pub async fn resume_session(
     };
 
     let session_type = if project_note.is_some() {
+        // Project notes and branch notes intentionally share the "note"
+        // session type because the frontend only needs a single "note work is
+        // running" signal for project-level activity indicators.
         Some("note".to_string())
     } else if linked_commit.is_some() {
         Some("commit".to_string())
@@ -255,22 +258,26 @@ pub async fn resume_session(
             .map(|branch| branch.project_id.clone())
     };
 
-    // If this session is linked to a commit, capture the current HEAD so we
-    // can detect new or amended commits when the session completes.
-    // This applies both when the commit already has a SHA (amend case) and
-    // when it's still pending (no SHA — the previous run didn't produce a
-    // commit, so we need to detect if this resumed run does).
+    // Only resumed commit sessions need a pre-run HEAD snapshot. The
+    // completion hook ignores non-commit sessions anyway, but keeping this
+    // narrow makes the intent explicit and avoids unnecessary git lookups.
     let (pre_head_sha, workspace_name) = {
         if let Some(ref branch) = linked_branch {
             let ws_name = branch.workspace_name.clone();
-            let head = if let Some(ref ws) = ws_name {
-                let ws = ws.clone();
-                run_blox_blocking(move || crate::blox::ws_exec(&ws, &["git", "rev-parse", "HEAD"]))
+            let head = if linked_commit.is_some() {
+                if let Some(ref ws) = ws_name {
+                    let ws = ws.clone();
+                    run_blox_blocking(move || {
+                        crate::blox::ws_exec(&ws, &["git", "rev-parse", "HEAD"])
+                    })
                     .await
                     .map(|s| s.trim().to_string())
                     .ok()
+                } else {
+                    crate::git::get_head_sha(&working_dir).ok()
+                }
             } else {
-                crate::git::get_head_sha(&working_dir).ok()
+                None
             };
             (head, ws_name)
         } else {
@@ -362,6 +369,7 @@ pub async fn resume_session(
 }
 
 fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static str> {
+    // Keep these checks aligned with the action prompts built in `prs.rs`.
     if prompt.contains("Create a draft pull request for the current branch.")
         || prompt.contains("Create a pull request for the current branch.")
     {

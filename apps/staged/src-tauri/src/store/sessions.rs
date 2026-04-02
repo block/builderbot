@@ -189,6 +189,29 @@ impl Store {
         Ok(count > 0)
     }
 
+    /// Resolve the branch that owns a session through its linked artifact.
+    ///
+    /// Project-note sessions do not belong to a branch and therefore return `None`.
+    pub fn get_branch_id_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT branch_id FROM (
+                 SELECT branch_id FROM commits WHERE session_id = ?1
+                 UNION ALL
+                 SELECT branch_id FROM notes WHERE session_id = ?1
+                 UNION ALL
+                 SELECT branch_id FROM reviews WHERE session_id = ?1
+             ) LIMIT 1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;

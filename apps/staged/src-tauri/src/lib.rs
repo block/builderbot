@@ -1601,6 +1601,7 @@ pub fn run() {
             // Check compatibility *before* creating the store.
             let compat = store::check_db_compatibility(&db_path)
                 .map_err(|e| format!("Cannot check database: {e}"))?;
+            let session_registry = Arc::new(session_runner::SessionRegistry::new());
 
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
@@ -1611,6 +1612,7 @@ pub fn run() {
                     // owned by other live Staged instances untouched.
                     session_runner::recover_dead_sessions(
                         Arc::clone(&store_arc),
+                        Arc::clone(&session_registry),
                         app.handle().clone(),
                     );
                     // Clean up images left in "pending" state from compose
@@ -1651,7 +1653,7 @@ pub fn run() {
             };
 
             app.manage(store_slot);
-            app.manage(Arc::new(session_runner::SessionRegistry::new()));
+            app.manage(session_registry);
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
             app.manage(ShutdownState::default());

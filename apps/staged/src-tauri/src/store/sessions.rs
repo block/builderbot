@@ -192,6 +192,9 @@ impl Store {
     /// Resolve the branch that owns a session through its linked artifact.
     ///
     /// Project-note sessions do not belong to a branch and therefore return `None`.
+    /// This assumes all branch-linked artifacts for a session point at the same
+    /// branch; if a session somehow links artifacts across multiple branches,
+    /// the first row returned by SQLite wins.
     pub fn get_branch_id_for_session(
         &self,
         session_id: &str,

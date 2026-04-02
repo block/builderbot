@@ -480,7 +480,11 @@ pub fn start_session(
 /// - `owner_pid` is dead (or NULL for pre-migration rows) → transition to
 ///   error with `AppQuit` reason and emit `session-status-changed` so the
 ///   frontend learns the outcome.
-pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
+pub fn recover_dead_sessions(
+    store: Arc<Store>,
+    registry: Arc<SessionRegistry>,
+    app_handle: AppHandle,
+) {
     let sessions = match store.get_running_sessions() {
         Ok(s) => s,
         Err(e) => {
@@ -514,6 +518,36 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
                     None,
                     Some(&CompletionReason::AppQuit),
                 );
+
+                let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
+                if let Some(branch_id) = branch_id {
+                    let store_for_follow_up = Arc::clone(&store);
+                    let registry_for_follow_up = Arc::clone(&registry);
+                    let app_handle_for_follow_up = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match crate::session_commands::drain_queued_sessions_for_branch(
+                            store_for_follow_up,
+                            registry_for_follow_up,
+                            app_handle_for_follow_up,
+                            branch_id.clone(),
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                log::info!(
+                                    "Drained next queued session after orphan recovery for branch {branch_id}"
+                                );
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                log::error!(
+                                    "Failed to drain queued sessions after orphan recovery for branch {branch_id}: {e}"
+                                );
+                            }
+                        }
+                    });
+                }
             }
         }
     }

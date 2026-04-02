@@ -869,7 +869,7 @@ pub async fn drain_queued_sessions(
     .await
 }
 
-/// Start the oldest queued branch session, if any.
+/// Start the oldest queued branch session if one exists and the branch is idle.
 ///
 /// This is shared by the Tauri command and backend lifecycle hooks so queue
 /// progression remains owned by the backend.

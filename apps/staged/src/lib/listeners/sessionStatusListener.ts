@@ -10,6 +10,7 @@
  */
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import * as commands from '../api/commands';
 import {
   extractPrUrl,
   extractPrNumber,

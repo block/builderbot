@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -52,18 +52,15 @@ pub fn clone_bare(url: &str, dest: &Path) -> Result<String> {
     match try_clone_bare(url, dest) {
         Ok(()) => {
             configure_bare(dest);
-            return Ok(url.to_string());
+            Ok(url.to_string())
         }
         Err(_primary_err) => {
             // Try alternate protocol
-            if let Some(alt) = alternate_url(url) {
-                match try_clone_bare(&alt, dest) {
-                    Ok(()) => {
-                        configure_bare(dest);
-                        return Ok(alt);
-                    }
-                    Err(_) => {}
-                }
+            if let Some(alt) = alternate_url(url)
+                && let Ok(()) = try_clone_bare(&alt, dest)
+            {
+                configure_bare(dest);
+                return Ok(alt);
             }
             // Both failed — give a clean error
             bail!(
@@ -119,7 +116,7 @@ pub fn add_worktree(bare_path: &Path, worktree_path: &Path, branch: &str) -> Res
     let output = Command::new("git")
         .args(["worktree", "add", "--force", "-b", branch])
         .arg(worktree_path)
-        .arg(&format!("origin/{}", default))
+        .arg(format!("origin/{}", default))
         .current_dir(bare_path)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -220,10 +217,10 @@ pub fn default_branch(bare_path: &Path) -> Result<String> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .output();
-        if let Ok(o) = output {
-            if o.status.success() {
-                return Ok(candidate.to_string());
-            }
+        if let Ok(o) = output
+            && o.status.success()
+        {
+            return Ok(candidate.to_string());
         }
     }
 
@@ -254,12 +251,7 @@ pub fn is_branch_merged(bare_path: &Path, branch: &str, default: &str) -> Result
 #[allow(dead_code)]
 pub fn last_commit_date(bare_path: &Path, branch: &str) -> Result<Option<String>> {
     let output = Command::new("git")
-        .args([
-            "log",
-            "-1",
-            "--format=%ci",
-            &format!("origin/{}", branch),
-        ])
+        .args(["log", "-1", "--format=%ci", &format!("origin/{}", branch)])
         .current_dir(bare_path)
         .stderr(Stdio::null())
         .output()

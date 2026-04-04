@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use colored::Colorize;
 use std::collections::BTreeMap;
@@ -11,10 +11,8 @@ use crate::core::state::{self, RepoEntry, State};
 // ── init ────────────────────────────────────────────────────────────────
 
 pub fn init(base: &Path) -> Result<()> {
-    std::fs::create_dir_all(State::repos_dir(base))
-        .context("Failed to create repos directory")?;
-    std::fs::create_dir_all(State::pool_dir(base))
-        .context("Failed to create pool directory")?;
+    std::fs::create_dir_all(State::repos_dir(base)).context("Failed to create repos directory")?;
+    std::fs::create_dir_all(State::pool_dir(base)).context("Failed to create pool directory")?;
 
     let state = State::new(base.to_path_buf());
     state.save()?;
@@ -92,8 +90,7 @@ fn resolve_repo(state: &State, input: &str) -> (String, String, bool) {
     }
 
     // Full URL?
-    if input.starts_with("git@") || input.starts_with("https://") || input.starts_with("http://")
-    {
+    if input.starts_with("git@") || input.starts_with("https://") || input.starts_with("http://") {
         let name = state::repo_name_from_url(input);
         let already = state.repos.contains_key(&name);
         return (name, input.to_string(), !already);
@@ -111,7 +108,12 @@ fn resolve_repo(state: &State, input: &str) -> (String, String, bool) {
     (input.to_string(), input.to_string(), false)
 }
 
-pub fn add(base: &Path, project: &str, repo_input: &str, branch_override: Option<&str>) -> Result<()> {
+pub fn add(
+    base: &Path,
+    project: &str,
+    repo_input: &str,
+    branch_override: Option<&str>,
+) -> Result<()> {
     let mut state = State::load_or_err(base)?;
 
     // Ensure project exists (handle orphaned state)
@@ -149,11 +151,7 @@ pub fn add(base: &Path, project: &str, repo_input: &str, branch_override: Option
     // Clone into pool if needed
     if needs_clone {
         let bare_path = State::repos_dir(base).join(format!("{}.git", repo_name));
-        println!(
-            "{} Cloning {}...",
-            "→".blue().bold(),
-            repo_name.bold()
-        );
+        println!("{} Cloning {}...", "→".blue().bold(), repo_name.bold());
         let actual_url = git::clone_bare(&url, &bare_path)?;
 
         state.repos.insert(
@@ -194,12 +192,7 @@ pub fn add(base: &Path, project: &str, repo_input: &str, branch_override: Option
         .insert(repo_name.clone(), branch.clone());
 
     // Acquire pool slot → worktree
-    print!(
-        "  {} {}:{} ",
-        "→".dimmed(),
-        repo_name,
-        branch.dimmed()
-    );
+    print!("  {} {}:{} ", "→".dimmed(), repo_name, branch.dimmed());
 
     let slot_idx = pool::acquire_slot(&mut state, &repo_name, project, &branch)?;
     let slot_path = state.pool.slots[&repo_name][slot_idx].path.clone();
@@ -224,11 +217,7 @@ pub fn add(base: &Path, project: &str, repo_input: &str, branch_override: Option
     println!("{}", "✓".green());
 
     // Update last_activated
-    state
-        .projects
-        .get_mut(project)
-        .unwrap()
-        .last_activated = Some(Utc::now());
+    state.projects.get_mut(project).unwrap().last_activated = Some(Utc::now());
     state.save()?;
 
     println!(
@@ -268,11 +257,7 @@ pub fn rm(base: &Path, name: &str) -> Result<()> {
     state.projects.remove(name);
     state.save()?;
 
-    println!(
-        "{} Removed project {}",
-        "✓".green().bold(),
-        name.bold()
-    );
+    println!("{} Removed project {}", "✓".green().bold(), name.bold());
     Ok(())
 }
 
@@ -418,10 +403,10 @@ pub fn cleanup(base: &Path, stale_days: u64) -> Result<()> {
         for (repo_name, branch) in &project.repos {
             if let Some(repo) = state.repos.get(repo_name) {
                 let default = git::default_branch(&repo.bare_path).unwrap_or("main".to_string());
-                if branch != &default {
-                    if let Ok(true) = git::is_branch_merged(&repo.bare_path, branch, &default) {
-                        reasons.push(format!("{}:{} merged into {}", repo_name, branch, default));
-                    }
+                if branch != &default
+                    && let Ok(true) = git::is_branch_merged(&repo.bare_path, branch, &default)
+                {
+                    reasons.push(format!("{}:{} merged into {}", repo_name, branch, default));
                 }
             }
         }
@@ -442,16 +427,9 @@ pub fn cleanup(base: &Path, stale_days: u64) -> Result<()> {
     }
 
     if found == 0 {
-        println!(
-            "{} All projects look active.",
-            "✓".green().bold()
-        );
+        println!("{} All projects look active.", "✓".green().bold());
     } else {
-        println!(
-            "{} {} project(s) may be ready for cleanup.",
-            "📋",
-            found
-        );
+        println!("📋 {} project(s) may be ready for cleanup.", found);
     }
 
     Ok(())

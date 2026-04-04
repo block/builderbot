@@ -82,22 +82,25 @@ impl State {
         }
         let data = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read state from {}", path.display()))?;
-        let state: State = serde_json::from_str(&data)
-            .with_context(|| "Failed to parse state file")?;
+        let state: State =
+            serde_json::from_str(&data).with_context(|| "Failed to parse state file")?;
         Ok(Some(state))
     }
 
     /// Load state, error if not initialized
     pub fn load_or_err(base: &Path) -> Result<Self> {
-        Self::load(base)?
-            .with_context(|| format!("pm is not initialized in {}. Run `pm init` first.", base.display()))
+        Self::load(base)?.with_context(|| {
+            format!(
+                "pm is not initialized in {}. Run `pm init` first.",
+                base.display()
+            )
+        })
     }
 
     /// Save state to disk
     pub fn save(&self) -> Result<()> {
         let path = Self::state_file(&self.root);
-        let data = serde_json::to_string_pretty(self)
-            .context("Failed to serialize state")?;
+        let data = serde_json::to_string_pretty(self).context("Failed to serialize state")?;
         std::fs::write(&path, data)
             .with_context(|| format!("Failed to write state to {}", path.display()))?;
         Ok(())
@@ -121,7 +124,8 @@ impl State {
 /// e.g. "https://github.com/org/repo" -> "repo"
 pub fn repo_name_from_url(url: &str) -> String {
     let s = url.trim_end_matches('/').trim_end_matches(".git");
-    s.rsplit('/').next()
+    s.rsplit('/')
+        .next()
         .or_else(|| s.rsplit(':').next())
         .unwrap_or(s)
         .to_string()
@@ -133,9 +137,18 @@ mod tests {
 
     #[test]
     fn test_repo_name_from_url() {
-        assert_eq!(repo_name_from_url("git@github.com:org/myrepo.git"), "myrepo");
-        assert_eq!(repo_name_from_url("https://github.com/org/myrepo"), "myrepo");
-        assert_eq!(repo_name_from_url("https://github.com/org/myrepo.git"), "myrepo");
+        assert_eq!(
+            repo_name_from_url("git@github.com:org/myrepo.git"),
+            "myrepo"
+        );
+        assert_eq!(
+            repo_name_from_url("https://github.com/org/myrepo"),
+            "myrepo"
+        );
+        assert_eq!(
+            repo_name_from_url("https://github.com/org/myrepo.git"),
+            "myrepo"
+        );
         assert_eq!(repo_name_from_url("git@github.com:org/myrepo"), "myrepo");
     }
 }

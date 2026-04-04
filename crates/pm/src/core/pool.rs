@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use super::git;
@@ -53,7 +53,10 @@ pub fn acquire_slot(
     let slots = state.pool.slots.get_mut(repo_name).unwrap();
 
     // 1. Already owned by this project?
-    if let Some(slot) = slots.iter_mut().find(|s| s.owner.as_deref() == Some(project_name)) {
+    if let Some(slot) = slots
+        .iter_mut()
+        .find(|s| s.owner.as_deref() == Some(project_name))
+    {
         let idx = slot.index;
         let needs_checkout = slot.branch.as_deref() != Some(branch);
         slot.branch = Some(branch.to_string());
@@ -174,15 +177,15 @@ pub fn remove_slot_worktree(state: &State, repo_name: &str, slot: &Slot) -> Resu
 
 /// Resolve the worktree path for a given project's repo
 #[allow(dead_code)]
-pub fn resolve_slot_path(state: &State, repo_name: &str, project_name: &str) -> Option<std::path::PathBuf> {
-    state
-        .pool
-        .slots
-        .get(repo_name)
-        .and_then(|slots| {
-            slots
-                .iter()
-                .find(|s| s.owner.as_deref() == Some(project_name))
-                .map(|s| s.path.clone())
-        })
+pub fn resolve_slot_path(
+    state: &State,
+    repo_name: &str,
+    project_name: &str,
+) -> Option<std::path::PathBuf> {
+    state.pool.slots.get(repo_name).and_then(|slots| {
+        slots
+            .iter()
+            .find(|s| s.owner.as_deref() == Some(project_name))
+            .map(|s| s.path.clone())
+    })
 }

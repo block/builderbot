@@ -62,21 +62,9 @@ enum Commands {
 
 fn styling() -> clap::builder::Styles {
     clap::builder::Styles::styled()
-        .header(
-            clap::builder::styling::AnsiColor::Green
-                .on_default()
-                .bold(),
-        )
-        .usage(
-            clap::builder::styling::AnsiColor::Green
-                .on_default()
-                .bold(),
-        )
-        .literal(
-            clap::builder::styling::AnsiColor::Cyan
-                .on_default()
-                .bold(),
-        )
+        .header(clap::builder::styling::AnsiColor::Green.on_default().bold())
+        .usage(clap::builder::styling::AnsiColor::Green.on_default().bold())
+        .literal(clap::builder::styling::AnsiColor::Cyan.on_default().bold())
         .placeholder(clap::builder::styling::AnsiColor::Cyan.on_default())
 }
 
@@ -130,13 +118,11 @@ fn main() -> Result<()> {
             branch,
             project,
         } => {
-            let project_name = project
-                .or_else(|| infer_project(&base))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Can't infer project from cwd. Use --project or cd into a project dir."
-                    )
-                })?;
+            let project_name = project.or_else(|| infer_project(&base)).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Can't infer project from cwd. Use --project or cd into a project dir."
+                )
+            })?;
             cmd::add(&base, &project_name, &repo, branch.as_deref())
         }
         Commands::Rm { name } => cmd::rm(&base, &name),

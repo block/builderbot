@@ -41,6 +41,25 @@ enum Commands {
         /// Target project (default: inferred from cwd)
         #[arg(long)]
         project: Option<String>,
+
+        /// Use an existing local checkout instead of cloning (for heavy repos).
+        /// Default: symlinks directly (pm won't manage branches).
+        /// Combine with --worktree to get per-project branches without cloning.
+        #[arg(long)]
+        existing: Option<PathBuf>,
+
+        /// With --existing: create worktrees from the existing repo so pm manages branches.
+        /// Without this, --existing just symlinks the checkout directly.
+        #[arg(long, requires = "existing")]
+        worktree: bool,
+
+        /// Evict a specific project to free a pool slot (non-interactive)
+        #[arg(long)]
+        evict: Option<String>,
+
+        /// Grow the pool by one slot instead of evicting
+        #[arg(long, conflicts_with = "evict")]
+        grow_pool: bool,
     },
 
     /// Remove a project (also cleans up stale state from manual rm)
@@ -117,13 +136,25 @@ fn main() -> Result<()> {
             repo,
             branch,
             project,
+            existing,
+            worktree,
+            evict,
+            grow_pool,
         } => {
             let project_name = project.or_else(|| infer_project(&base)).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Can't infer project from cwd. Use --project or cd into a project dir."
                 )
             })?;
-            cmd::add(&base, &project_name, &repo, branch.as_deref())
+            cmd::add(
+                &base,
+                &project_name,
+                &repo,
+                branch.as_deref(),
+                existing,
+                worktree,
+                cmd::AddConflictOpts { evict, grow_pool },
+            )
         }
         Commands::Rm { name } => cmd::rm(&base, &name),
         Commands::Status => cmd::status(&base),

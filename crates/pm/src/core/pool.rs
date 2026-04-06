@@ -34,20 +34,45 @@ pub fn ensure_slots(state: &mut State, repo_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Info about a slot that could be evicted
+#[derive(Debug, Clone)]
+pub struct EvictionCandidate {
+    pub slot_index: usize,
+    pub owner: String,
+    pub branch: Option<String>,
+    pub last_used: chrono::DateTime<Utc>,
+}
+
+/// Returned when all slots are full and eviction is needed
+#[derive(Debug)]
+pub struct EvictionNeeded {
+    pub repo_name: String,
+    pub candidates: Vec<EvictionCandidate>,
+    pub current_max_slots: usize,
+}
+
+/// Result of trying to acquire a slot
+pub enum AcquireResult {
+    /// Slot acquired successfully
+    Acquired(usize),
+    /// All slots full — caller must decide what to do
+    NeedsEviction(EvictionNeeded),
+}
+
 /// Acquire a pool slot for a project+repo+branch.
 ///
 /// Strategy:
 /// 1. If this project already owns a slot for this repo, reuse it
 /// 2. If there's a free (unowned) slot, take it
-/// 3. Evict the least-recently-used non-pinned slot
+/// 3. Return eviction candidates for the caller to decide
 ///
-/// Returns the slot index.
+/// Returns `AcquireResult`.
 pub fn acquire_slot(
     state: &mut State,
     repo_name: &str,
     project_name: &str,
     branch: &str,
-) -> Result<usize> {
+) -> Result<AcquireResult> {
     ensure_slots(state, repo_name)?;
 
     let slots = state.pool.slots.get_mut(repo_name).unwrap();
@@ -70,7 +95,7 @@ pub fn acquire_slot(
                 git::add_worktree(&repo.bare_path, &slot.path, branch)?;
             }
         }
-        return Ok(idx);
+        return Ok(AcquireResult::Acquired(idx));
     }
 
     // 2. Free slot?
@@ -86,10 +111,10 @@ pub fn acquire_slot(
         } else {
             git::add_worktree(&repo.bare_path, &slot.path, branch)?;
         }
-        return Ok(idx);
+        return Ok(AcquireResult::Acquired(idx));
     }
 
-    // 3. Evict LRU non-pinned slot
+    // 3. All slots full — gather eviction candidates (non-pinned)
     let pinned_projects: Vec<String> = state
         .projects
         .values()
@@ -97,8 +122,8 @@ pub fn acquire_slot(
         .map(|p| p.name.clone())
         .collect();
 
-    let slots = state.pool.slots.get_mut(repo_name).unwrap();
-    let evict_idx = slots
+    let slots = state.pool.slots.get(repo_name).unwrap();
+    let candidates: Vec<EvictionCandidate> = slots
         .iter()
         .filter(|s| {
             s.owner
@@ -106,29 +131,108 @@ pub fn acquire_slot(
                 .map(|o| !pinned_projects.contains(o))
                 .unwrap_or(true)
         })
-        .min_by_key(|s| s.last_used)
-        .map(|s| s.index);
+        .map(|s| EvictionCandidate {
+            slot_index: s.index,
+            owner: s.owner.clone().unwrap_or_default(),
+            branch: s.branch.clone(),
+            last_used: s.last_used,
+        })
+        .collect();
 
-    let evict_idx = match evict_idx {
-        Some(idx) => idx,
-        None => bail!(
-            "No available pool slots for '{}'. All slots are pinned. \
-             Increase max_slots or unpin a project.",
-            repo_name
-        ),
-    };
+    if candidates.is_empty() {
+        bail!(
+            "No available pool slots for '{}'. All {} slots are pinned.\n\
+             Increase pool size with: pm add {} --grow-pool\n\
+             Or unpin a project first.",
+            repo_name,
+            slots.len(),
+            repo_name,
+        );
+    }
 
-    // Remove symlink from evicted project
+    let current_max_slots = state
+        .repos
+        .get(repo_name)
+        .map(|r| r.max_slots)
+        .unwrap_or(DEFAULT_MAX_SLOTS);
+
+    Ok(AcquireResult::NeedsEviction(EvictionNeeded {
+        repo_name: repo_name.to_string(),
+        candidates,
+        current_max_slots,
+    }))
+}
+
+/// Execute an eviction: take over a specific slot for a new project+branch.
+///
+/// This performs the git checkout first, then cleans up the evicted project's state.
+pub fn execute_eviction(
+    state: &mut State,
+    repo_name: &str,
+    evict_idx: usize,
+    project_name: &str,
+    branch: &str,
+) -> Result<usize> {
+    let slots = state.pool.slots.get(repo_name).unwrap();
     let evicted_owner = slots[evict_idx].owner.clone();
+
+    // Attempt git checkout/worktree BEFORE removing anything.
+    // If git fails, the evicted project's state is untouched.
+    let slot_path = slots[evict_idx].path.clone();
+    let repo = state.repos.get(repo_name).unwrap().clone();
+    if slot_path.exists() {
+        git::checkout(&slot_path, branch)?;
+    } else {
+        git::add_worktree(&repo.bare_path, &slot_path, branch)?;
+    }
+
+    // Git succeeded — now safe to update symlinks and state
+    let slots = state.pool.slots.get_mut(repo_name).unwrap();
     if let Some(ref owner) = evicted_owner {
         let project_dir = State::projects_dir(&state.root).join(owner);
         let link = project_dir.join(repo_name);
         if link.exists() || link.is_symlink() {
             let _ = std::fs::remove_file(&link);
         }
+        // Remove the repo from the evicted project's repo map
+        if let Some(evicted_project) = state.projects.get_mut(owner.as_str()) {
+            evicted_project.repos.remove(repo_name);
+        }
     }
 
     let slot = &mut slots[evict_idx];
+    slot.owner = Some(project_name.to_string());
+    slot.branch = Some(branch.to_string());
+    slot.last_used = Utc::now();
+
+    Ok(evict_idx)
+}
+
+/// Grow the pool for a repo by 1 slot, then acquire it for the given project+branch.
+pub fn grow_and_acquire(
+    state: &mut State,
+    repo_name: &str,
+    project_name: &str,
+    branch: &str,
+) -> Result<usize> {
+    // Bump max_slots
+    let repo = state
+        .repos
+        .get_mut(repo_name)
+        .with_context(|| format!("Repo '{}' not found", repo_name))?;
+    repo.max_slots += 1;
+    let new_max = repo.max_slots;
+
+    // Re-ensure slots so the new one is created
+    ensure_slots(state, repo_name)?;
+
+    let slots = state.pool.slots.get_mut(repo_name).unwrap();
+    let slot = slots
+        .iter_mut()
+        .find(|s| s.owner.is_none())
+        .expect("Just grew pool, should have a free slot");
+
+    let idx = slot.index;
     slot.owner = Some(project_name.to_string());
     slot.branch = Some(branch.to_string());
     slot.last_used = Utc::now();
@@ -140,7 +244,15 @@ pub fn acquire_slot(
         git::add_worktree(&repo.bare_path, &slot.path, branch)?;
     }
 
-    Ok(evict_idx)
+    use colored::Colorize;
+    eprintln!(
+        "  {} Pool for {} grown to {} slots.",
+        "↑".green().bold(),
+        repo_name.bold(),
+        new_max,
+    );
+
+    Ok(idx)
 }
 
 /// Release all slots owned by a project

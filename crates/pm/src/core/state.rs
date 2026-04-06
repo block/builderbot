@@ -22,10 +22,16 @@ pub struct RepoEntry {
     pub url: String,
     /// Short name derived from URL (e.g. "repo1")
     pub name: String,
-    /// Path to the bare clone
+    /// Path to the bare clone (unused for external repos)
     pub bare_path: PathBuf,
     /// Max pool slots for this repo
     pub max_slots: usize,
+    /// If true, this repo points to an existing local checkout (no bare clone, no worktree management)
+    #[serde(default)]
+    pub external: bool,
+    /// Path to the existing checkout (only set when external=true)
+    #[serde(default)]
+    pub external_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

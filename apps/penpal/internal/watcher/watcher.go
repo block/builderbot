@@ -71,8 +71,12 @@ type Watcher struct {
 	baseWatched    map[string]struct{}
 	dynamicWatched map[string]struct{}
 
-	// E-PENPAL-WORKTREE-WATCH: tracks .git/worktrees/ dirs to detect worktree add/remove.
+	// E-PENPAL-WORKTREE-WATCH: tracks watched dirs for worktree detection.
+	// worktreeWatchDirs: .git/worktrees/ dirs (projects with existing worktrees)
+	// gitDirWatches: .git/ dirs (projects without worktrees, to detect first add)
+	// Both are read in handleEvent and written in syncBaseWatchesLocked — protected by focusMu.
 	worktreeWatchDirs map[string]struct{}
+	gitDirWatches     map[string]struct{}
 }
 
 // New creates a new watcher
@@ -94,6 +98,7 @@ func New(c *cache.Cache, act *activity.Tracker) (*Watcher, error) {
 		baseWatched:       make(map[string]struct{}),
 		dynamicWatched:    make(map[string]struct{}),
 		worktreeWatchDirs: make(map[string]struct{}),
+		gitDirWatches:     make(map[string]struct{}),
 	}
 
 	return w, nil
@@ -334,16 +339,26 @@ func (w *Watcher) syncBaseWatchesLocked(workspacePaths []string, projects []disc
 		desired[filepath.Clean(p.Path)] = struct{}{}
 	}
 
-	// E-PENPAL-WORKTREE-WATCH: watch .git/worktrees/ dirs to detect worktree add/remove.
+	// E-PENPAL-WORKTREE-WATCH: watch .git/worktrees/ for projects with worktrees,
+	// and .git/ for projects without worktrees (to detect the first worktree add).
 	desiredWtDirs := make(map[string]struct{})
+	desiredGitDirs := make(map[string]struct{})
 	for _, p := range projects {
-		if len(p.Worktrees) == 0 {
+		if p.Name == "(root)" {
 			continue
 		}
-		if wtDir := discovery.GitWorktreesDir(p.Path); wtDir != "" {
-			clean := filepath.Clean(wtDir)
-			desiredWtDirs[clean] = struct{}{}
-			desired[clean] = struct{}{}
+		if len(p.Worktrees) > 0 {
+			if wtDir := discovery.GitWorktreesDir(p.Path); wtDir != "" {
+				clean := filepath.Clean(wtDir)
+				desiredWtDirs[clean] = struct{}{}
+				desired[clean] = struct{}{}
+			}
+		} else {
+			if gitDir := discovery.GitCommonDir(p.Path); gitDir != "" {
+				clean := filepath.Clean(gitDir)
+				desiredGitDirs[clean] = struct{}{}
+				desired[clean] = struct{}{}
+			}
 		}
 	}
 
@@ -374,6 +389,7 @@ func (w *Watcher) syncBaseWatchesLocked(workspacePaths []string, projects []disc
 	}
 
 	w.worktreeWatchDirs = desiredWtDirs
+	w.gitDirWatches = desiredGitDirs
 }
 
 func (w *Watcher) syncDynamicWatchesLocked() {
@@ -494,45 +510,49 @@ func (w *Watcher) loop() {
 	}
 }
 
+// rediscoverProjects runs full project discovery, updates the cache and watches,
+// and broadcasts a projects-changed SSE event.
+func (w *Watcher) rediscoverProjects() {
+	if w.discoverFn == nil {
+		return
+	}
+	projects, err := w.discoverFn()
+	if err != nil {
+		return
+	}
+	w.cache.RescanWith(projects)
+	w.focusMu.Lock()
+	w.syncBaseWatchesLocked(w.workspacePaths, projects)
+	w.syncDynamicWatchesLocked()
+	w.focusMu.Unlock()
+	w.Broadcast(Event{Type: EventProjectsChanged})
+}
+
 // E-PENPAL-WATCHER: routes fsnotify events to project/workspace refresh or SSE broadcast.
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := filepath.Clean(event.Name)
-
-	// E-PENPAL-WORKTREE-WATCH: detect worktree add/remove via .git/worktrees/ changes.
 	parentDir := filepath.Clean(filepath.Dir(path))
-	if _, ok := w.worktreeWatchDirs[parentDir]; ok {
-		w.debounceRefresh("worktrees:"+parentDir, func() {
-			if w.discoverFn != nil {
-				projects, err := w.discoverFn()
-				if err == nil {
-					w.cache.RescanWith(projects)
-					w.focusMu.Lock()
-					w.syncBaseWatchesLocked(w.workspacePaths, projects)
-					w.syncDynamicWatchesLocked()
-					w.focusMu.Unlock()
-					w.Broadcast(Event{Type: EventProjectsChanged})
-				}
-			}
-		})
+
+	// E-PENPAL-WORKTREE-WATCH: detect worktree add/remove via .git/worktrees/ changes,
+	// or first worktree creation via .git/ directory watch.
+	w.focusMu.Lock()
+	_, isWorktreeDir := w.worktreeWatchDirs[parentDir]
+	_, isGitDir := w.gitDirWatches[parentDir]
+	w.focusMu.Unlock()
+
+	if isWorktreeDir {
+		w.debounceRefresh("worktrees:"+parentDir, w.rediscoverProjects)
+		return
+	}
+	if isGitDir && filepath.Base(path) == "worktrees" && event.Op&fsnotify.Create != 0 {
+		w.debounceRefresh("worktrees:"+parentDir, w.rediscoverProjects)
 		return
 	}
 
 	// Check if this is a change in a workspace directory (new/removed project)
 	for _, ws := range w.workspacePaths {
 		if parentDir == filepath.Clean(ws) {
-			w.debounceRefresh("workspace:"+ws, func() {
-				if w.discoverFn != nil {
-					projects, err := w.discoverFn()
-					if err == nil {
-						w.cache.RescanWith(projects)
-						w.focusMu.Lock()
-						w.syncBaseWatchesLocked(w.workspacePaths, projects)
-						w.syncDynamicWatchesLocked()
-						w.focusMu.Unlock()
-						w.Broadcast(Event{Type: EventProjectsChanged})
-					}
-				}
-			})
+			w.debounceRefresh("workspace:"+ws, w.rediscoverProjects)
 			return
 		}
 	}
@@ -563,19 +583,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			if matched {
 				for _, p := range w.cache.Projects() {
 					if parentDir == filepath.Clean(p.Path) {
-						w.debounceRefresh("sources:"+p.QualifiedName(), func() {
-							if w.discoverFn != nil {
-								projects, err := w.discoverFn()
-								if err == nil {
-									w.cache.RescanWith(projects)
-									w.focusMu.Lock()
-									w.syncBaseWatchesLocked(w.workspacePaths, projects)
-									w.syncDynamicWatchesLocked()
-									w.focusMu.Unlock()
-									w.Broadcast(Event{Type: EventProjectsChanged})
-								}
-							}
-						})
+						w.debounceRefresh("sources:"+p.QualifiedName(), w.rediscoverProjects)
 						return
 					}
 				}

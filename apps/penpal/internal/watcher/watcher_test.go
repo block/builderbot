@@ -338,8 +338,8 @@ func TestWorktreeWatchDir(t *testing.T) {
 	}
 }
 
-// E-PENPAL-WORKTREE-WATCH: verifies that projects without worktrees don't get
-// a .git/worktrees/ watch.
+// E-PENPAL-WORKTREE-WATCH: verifies that projects without worktrees get a .git/
+// watch (to detect the first worktree add) but not a .git/worktrees/ watch.
 func TestWorktreeWatchDir_NoWorktrees(t *testing.T) {
 	mainDir := t.TempDir()
 	for _, args := range [][]string{
@@ -375,6 +375,13 @@ func TestWorktreeWatchDir_NoWorktrees(t *testing.T) {
 
 	if len(w.worktreeWatchDirs) != 0 {
 		t.Errorf("expected no worktreeWatchDirs, got %v", w.worktreeWatchDirs)
+	}
+
+	// The .git/ dir should be watched to detect first worktree creation
+	gitDir := filepath.Join(mainDir, ".git")
+	assertWatched(t, w, gitDir, true, ".git/ should be watched for first-worktree detection")
+	if _, ok := w.gitDirWatches[filepath.Clean(gitDir)]; !ok {
+		t.Errorf("expected %s in gitDirWatches", gitDir)
 	}
 }
 
@@ -419,6 +426,62 @@ func TestWorktreeWatchDir_EventTriggersRediscovery(t *testing.T) {
 		// success
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected discoverFn to be called after worktree dir event")
+	}
+}
+
+// E-PENPAL-WORKTREE-WATCH: verifies that creating a "worktrees" entry in a watched
+// .git/ dir triggers re-discovery (first worktree add scenario).
+func TestWorktreeWatchDir_FirstWorktreeCreation(t *testing.T) {
+	c := cache.New()
+	c.SetProjects([]discovery.Project{{Name: "proj", Path: "/tmp/proj"}})
+
+	w, err := New(c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	discovered := make(chan struct{}, 1)
+	w.discoverFn = func() ([]discovery.Project, error) {
+		select {
+		case discovered <- struct{}{}:
+		default:
+		}
+		return []discovery.Project{{Name: "proj", Path: "/tmp/proj"}}, nil
+	}
+	w.workspacePaths = nil
+
+	fakeGitDir := t.TempDir()
+	w.focusMu.Lock()
+	w.gitDirWatches = map[string]struct{}{
+		filepath.Clean(fakeGitDir): {},
+	}
+	w.focusMu.Unlock()
+
+	// A non-"worktrees" event in .git/ should NOT trigger rediscovery
+	w.handleEvent(fsnotify.Event{
+		Name: filepath.Join(fakeGitDir, "FETCH_HEAD"),
+		Op:   fsnotify.Write,
+	})
+
+	select {
+	case <-discovered:
+		t.Fatal("should not trigger rediscovery for non-worktrees events in .git/")
+	case <-time.After(200 * time.Millisecond):
+		// good
+	}
+
+	// A Create event for "worktrees" in .git/ SHOULD trigger rediscovery
+	w.handleEvent(fsnotify.Event{
+		Name: filepath.Join(fakeGitDir, "worktrees"),
+		Op:   fsnotify.Create,
+	})
+
+	select {
+	case <-discovered:
+		// success
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected discoverFn to be called when worktrees dir is created in .git/")
 	}
 }
 

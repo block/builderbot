@@ -13,7 +13,7 @@ import TabBar from './TabBar';
 import HomeSidebar from './HomeSidebar';
 import ProjectSidebar from './ProjectSidebar';
 import type { Heading } from './TableOfContents';
-import type { APIProject, APIFileGroupView, APIFileInReview, SSEEvent } from '../types';
+import type { APIProject, APIFavoriteEntry, APIFileGroupView, APIFileInReview, SSEEvent } from '../types';
 import { parseProjectWorktree } from '../utils/worktree';
 import { useProjectSort } from '../hooks/useProjectSort';
 
@@ -144,11 +144,13 @@ export default function Layout() {
 
   // Project sidebar state
   const [projectFiles, setProjectFiles] = useState<APIFileGroupView[]>([]);
+  const [favorites, setFavorites] = useState<APIFavoriteEntry[]>([]);
   const [projectReviews, setProjectReviews] = useState<Record<string, APIFileInReview>>({});
   const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [showWorktreeDropdown, setShowWorktreeDropdown] = useState(false);
   const worktreeDropdownRef = useRef<HTMLDivElement>(null);
+  const favoritesAutoExpandedKey = useRef('');
 
   // Clear headings when navigating away from file pages
   useEffect(() => {
@@ -164,6 +166,19 @@ export default function Layout() {
       const count = groups.reduce((sum, g) => sum + (g.files?.length ?? 0), 0);
       setReviewCount(count);
     }).catch(() => {});
+  }, []);
+
+  const refreshProjectView = useCallback((projectQN: string, worktree?: string) => {
+    api.getProjectFiles(projectQN, worktree).then(setProjectFiles).catch(() => setProjectFiles([]));
+    api.getFavorites(projectQN, worktree).then(setFavorites).catch(() => setFavorites([]));
+  }, []);
+
+  const refreshProjectReviewState = useCallback((projectQN: string, worktree?: string) => {
+    api.getReviews(projectQN, worktree).then((reviews) => {
+      const map: Record<string, APIFileInReview> = {};
+      for (const review of reviews) map[review.filePath] = review;
+      setProjectReviews(map);
+    }).catch(() => setProjectReviews({}));
   }, []);
 
   const clearWindowFocusOnClose = useCallback(
@@ -289,18 +304,29 @@ export default function Layout() {
   useEffect(() => {
     if (!activeProject) {
       setProjectFiles([]);
+      setFavorites([]);
       setProjectReviews({});
+      favoritesAutoExpandedKey.current = '';
       return;
     }
     const qn = activeProject.qualifiedName;
     const wt = activeWorktree || undefined;
-    api.getProjectFiles(qn, wt).then(setProjectFiles).catch(() => setProjectFiles([]));
-    api.getReviews(qn, wt).then((reviews) => {
-      const map: Record<string, APIFileInReview> = {};
-      for (const r of reviews) map[r.filePath] = r;
-      setProjectReviews(map);
-    }).catch(() => setProjectReviews({}));
-  }, [activeProject?.qualifiedName, activeWorktree]); // eslint-disable-line react-hooks/exhaustive-deps
+    refreshProjectView(qn, wt);
+    refreshProjectReviewState(qn, wt);
+  }, [activeProject?.qualifiedName, activeWorktree, refreshProjectReviewState, refreshProjectView]);
+
+  useEffect(() => {
+    if (!activeProject || favorites.length === 0) return;
+    const autoExpandKey = `${activeProject.qualifiedName}@${activeWorktree || '(main)'}`;
+    if (favoritesAutoExpandedKey.current === autoExpandKey) return;
+    favoritesAutoExpandedKey.current = autoExpandKey;
+    setExpandedSources(prev => {
+      if (prev.has('__favorites__')) return prev;
+      const next = new Set(prev);
+      next.add('__favorites__');
+      return next;
+    });
+  }, [activeProject, activeWorktree, favorites.length]);
 
   // Refresh project files on SSE file/comment events
   useSSE(
@@ -309,18 +335,14 @@ export default function Layout() {
         if (!activeProject) return;
         if (event.type === 'files' && event.project === activeProject.qualifiedName) {
           const wt = activeWorktree || undefined;
-          api.getProjectFiles(activeProject.qualifiedName, wt).then(setProjectFiles).catch(() => {});
+          refreshProjectView(activeProject.qualifiedName, wt);
         }
         if (event.type === 'comments' && event.project === activeProject.qualifiedName) {
           const wt = activeWorktree || undefined;
-          api.getReviews(activeProject.qualifiedName, wt).then((reviews) => {
-            const map: Record<string, APIFileInReview> = {};
-            for (const r of reviews) map[r.filePath] = r;
-            setProjectReviews(map);
-          }).catch(() => {});
+          refreshProjectReviewState(activeProject.qualifiedName, wt);
         }
       },
-      [activeProject?.qualifiedName, activeWorktree],
+      [activeProject?.qualifiedName, activeWorktree, refreshProjectReviewState, refreshProjectView],
     ),
     useCallback(() => {}, []),
   );
@@ -550,8 +572,27 @@ export default function Layout() {
     if (!qn) return;
     clearTimeout(refreshFilesTimer.current);
     refreshFilesTimer.current = setTimeout(() => {
-      api.getProjectFiles(qn, activeWorktree || undefined).then(setProjectFiles).catch(() => {});
+      refreshProjectView(qn, activeWorktree || undefined);
     }, 200);
+  }
+
+  function handleToggleFavorite(path: string, _kind: 'file' | 'tree', favorited: boolean) {
+    if (!qn) return;
+    const request = favorited
+      ? api.removeFavorite(qn, path)
+      : api.addFavorite(qn, path, activeWorktree || undefined);
+    request
+      .then(() => {
+        if (!favorited) {
+          setExpandedSources(prev => {
+            const next = new Set(prev);
+            next.add('__favorites__');
+            return next;
+          });
+        }
+        refreshProjectView(qn, activeWorktree || undefined);
+      })
+      .catch((err) => alert(`Failed to ${favorited ? 'remove from' : 'add to'} Favorites: ${err.message}`));
   }
 
   function showContextMenu(e: React.MouseEvent, items: ContextMenuItem[]) {
@@ -806,6 +847,7 @@ export default function Layout() {
             isFilePage={isFilePage}
             headings={headings}
             projectFiles={projectFiles}
+            favorites={favorites}
             projectReviews={projectReviews}
             expandedSources={expandedSources}
             expandedDirs={expandedDirs}
@@ -816,6 +858,7 @@ export default function Layout() {
             onSetShowWorktreeDropdown={setShowWorktreeDropdown}
             onToggleSource={toggleSource}
             onToggleDir={toggleDir}
+            onToggleFavorite={handleToggleFavorite}
             onFileClick={handleFileClick}
             onFileContextMenu={fileContextMenu}
             onSourceContextMenu={sourceContextMenu}

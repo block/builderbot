@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,7 +27,8 @@ func testServer(t *testing.T) (*Server, *cache.Cache, *comments.Store) {
 	}
 	cs := comments.NewStore(c, act)
 	cfg := &config.Config{}
-	s := New(c, w, cs, nil, nil, act, cfg, "")
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	s := New(c, w, cs, nil, nil, act, cfg, cfgPath)
 	// Trigger ensureLoaded so it doesn't interfere with tests
 	s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 	return s, c, cs

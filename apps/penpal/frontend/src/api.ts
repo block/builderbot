@@ -2,6 +2,7 @@ import type {
   APIProject,
   APIFileGroupView,
   APIFile,
+  APIFavoriteEntry,
   ReviewGroup,
   ThreadResponse,
   ThreadWithFile,
@@ -106,6 +107,8 @@ export const api = {
   // Project files
   getProjectFiles: (qn: string, worktree?: string) =>
     apiFetch<APIFileGroupView[]>(`/api/project/${qn}${worktree ? '?worktree=' + encodeURIComponent(worktree) : ''}`),
+  getFavorites: (project: string, worktree?: string) =>
+    apiFetch<APIFavoriteEntry[]>(`/api/favorites?project=${encodeURIComponent(project)}${worktree ? '&worktree=' + encodeURIComponent(worktree) : ''}`),
   getProjectInfo: (name: string) =>
     apiFetch<ProjectInfo>(`/api/project-info?name=${encodeURIComponent(name)}`),
   deleteProject: (project: string) =>
@@ -171,6 +174,10 @@ export const api = {
     apiVoid('/api/sources', { method: 'POST', body: JSON.stringify({ project, path, name }) }),
   removeSource: (project: string, name?: string, file?: string) =>
     apiVoid('/api/sources', { method: 'DELETE', body: JSON.stringify({ project, name, file }) }),
+  addFavorite: (project: string, path: string, worktree?: string) =>
+    apiVoid('/api/favorites', { method: 'POST', body: JSON.stringify({ project, path, worktree }) }),
+  removeFavorite: (project: string, path: string) =>
+    apiVoid('/api/favorites', { method: 'DELETE', body: JSON.stringify({ project, path }) }),
 
   // Publish
   publish: (project: string, path: string) =>

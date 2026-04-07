@@ -29,6 +29,7 @@ export interface APIFile {
   name: string;
   title?: string;
   path: string;
+  displayPath?: string;
   dir?: string;
   source?: string;
   sourceType?: string;
@@ -49,6 +50,14 @@ export interface APIFileGroupView {
   badgeText?: string;
   badgeColor?: string;
   badgeBg?: string;
+  files: APIFile[];
+}
+
+export interface APIFavoriteEntry {
+  id: string;
+  path: string;
+  kind: 'file' | 'tree';
+  label: string;
   files: APIFile[];
 }
 

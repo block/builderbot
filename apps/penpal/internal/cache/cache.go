@@ -377,7 +377,7 @@ func (c *Cache) RefreshProject(projectName string) {
 		return
 	}
 
-	files := scanProjectSources(project)
+	files := filterManualFileInfos(project, scanProjectSources(project))
 	c.SetProjectFiles(projectName, files)
 
 	// Update project metadata
@@ -915,7 +915,7 @@ func (c *Cache) UpsertFile(projectName string, project *discovery.Project, absPa
 	}
 
 	title := extractTitle(absPath)
-	resolved := ResolveFileInfo(project, absPath)
+	resolved := filterManualFileInfos(project, ResolveFileInfo(project, absPath))
 
 	// Acquire lock only for the short critical section that mutates the cache.
 	c.mu.Lock()
@@ -954,6 +954,26 @@ func (c *Cache) UpsertFile(projectName string, project *discovery.Project, absPa
 	c.projectFiles[projectName] = files
 	c.updateProjectMetadataLocked(projectName, files)
 	return true
+}
+
+func filterManualFileInfos(project *discovery.Project, files []FileInfo) []FileInfo {
+	manualSources := make(map[string]bool)
+	for _, source := range project.Sources {
+		if source.SourceTypeName == "manual" {
+			manualSources[source.Name] = true
+		}
+	}
+	if len(manualSources) == 0 {
+		return files
+	}
+	filtered := make([]FileInfo, 0, len(files))
+	for _, file := range files {
+		if manualSources[file.Source] {
+			continue
+		}
+		filtered = append(filtered, file)
+	}
+	return filtered
 }
 
 // RemoveFile removes all cache entries with the given project-relative path.

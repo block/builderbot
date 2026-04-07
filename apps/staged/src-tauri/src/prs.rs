@@ -44,6 +44,61 @@ struct PrStatusEvent {
     pr_head_sha: Option<String>,
 }
 
+struct GitContext {
+    log: String,
+    stat: String,
+}
+
+/// Run the two deterministic git analysis commands in parallel and return
+/// their output. Returns `None` if any command fails so the caller can fall
+/// back to letting the agent run them itself.
+fn pre_compute_git_context(
+    is_remote: bool,
+    working_dir: &Path,
+    workspace_name: Option<&str>,
+    store: &Arc<Store>,
+    branch: &store::Branch,
+    base_branch: &str,
+) -> Option<GitContext> {
+    let log_range = format!("origin/{}..HEAD", base_branch);
+    let diff_range = format!("origin/{}...HEAD", base_branch);
+
+    if is_remote {
+        let ws_name = workspace_name?;
+        let repo_subpath = match crate::branches::resolve_branch_workspace_subpath(store, branch) {
+            Ok(sp) => sp,
+            Err(_) => return None,
+        };
+        let sp = repo_subpath.as_deref();
+
+        // For remote branches, run_workspace_git goes over SSH and cannot
+        // benefit from std::thread::scope parallelism (the SSH transport
+        // serialises anyway), so run them sequentially.
+        let log_output =
+            crate::branches::run_workspace_git(ws_name, sp, &["log", "--oneline", &log_range])
+                .ok()?;
+        let stat_output =
+            crate::branches::run_workspace_git(ws_name, sp, &["diff", &diff_range, "--stat"])
+                .ok()?;
+
+        Some(GitContext {
+            log: log_output,
+            stat: stat_output,
+        })
+    } else {
+        let (log_result, stat_result) = std::thread::scope(|s| {
+            let log = s.spawn(|| git::cli::run(working_dir, &["log", "--oneline", &log_range]));
+            let stat = s.spawn(|| git::cli::run(working_dir, &["diff", &diff_range, "--stat"]));
+            (log.join().unwrap(), stat.join().unwrap())
+        });
+
+        Some(GitContext {
+            log: log_result.ok()?,
+            stat: stat_result.ok()?,
+        })
+    }
+}
+
 /// Create a pull request for a branch by kicking off an agent session.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn create_pr(
@@ -105,8 +160,53 @@ pub async fn create_pr(
         "pull request"
     };
 
-    let prompt = format!(
-        r#"<action>
+    // Pre-compute git context in parallel so the agent can skip straight to
+    // pushing and creating the PR instead of running these deterministic
+    // commands itself.
+    let git_context = pre_compute_git_context(
+        is_remote,
+        &working_dir,
+        workspace_name.as_deref(),
+        &store,
+        &branch,
+        base_branch,
+    );
+
+    let prompt = if let Some(ctx) = git_context {
+        format!(
+            r#"<action>
+Create a {pr_type} for the current branch.
+
+The initial analysis has already been done:
+
+$ git log --oneline origin/{base_branch}..HEAD
+{log_output}
+
+$ git diff origin/{base_branch}...HEAD --stat
+{stat_output}
+
+Steps:
+1. Push the current branch to the remote: `git push -u origin {branch_name}`
+2. Create a PR using the GitHub CLI: `gh pr create --base {base_branch} --fill-first{draft_flag}`
+   - Title MUST use conventional commit style (e.g., "feat: add user authentication", "fix: resolve null pointer in parser", "refactor: extract validation logic")
+   - Choose the most appropriate conventional commit type (feat, fix, refactor, docs, style, test, chore, perf, ci, build) based on the actual changes
+   - The body should be a concise summary of the changes
+
+IMPORTANT: After creating the PR, you MUST output the PR URL on its own line in this exact format:
+PR_URL: https://github.com/...
+
+This is critical - the application parses this to link the PR.
+</action>"#,
+            pr_type = pr_type,
+            base_branch = base_branch,
+            branch_name = branch.branch_name,
+            draft_flag = draft_flag,
+            log_output = ctx.log,
+            stat_output = ctx.stat,
+        )
+    } else {
+        format!(
+            r#"<action>
 Create a {pr_type} for the current branch.
 
 Steps:
@@ -122,11 +222,12 @@ PR_URL: https://github.com/...
 
 This is critical - the application parses this to link the PR.
 </action>"#,
-        pr_type = pr_type,
-        base_branch = base_branch,
-        branch_name = branch.branch_name,
-        draft_flag = draft_flag,
-    );
+            pr_type = pr_type,
+            base_branch = base_branch,
+            branch_name = branch.branch_name,
+            draft_flag = draft_flag,
+        )
+    };
 
     let mut session = store::Session::new_running(&prompt, &working_dir);
     if let Some(ref p) = provider {

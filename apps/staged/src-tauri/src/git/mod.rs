@@ -1,4 +1,4 @@
-mod cli;
+pub(crate) mod cli;
 mod commit;
 mod diff;
 mod files;

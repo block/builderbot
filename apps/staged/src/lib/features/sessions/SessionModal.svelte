@@ -594,7 +594,7 @@
     const segments: ContentSegment[] = [];
     let remaining = content;
 
-    const tagPattern = /<(action|branch-history)>([\s\S]*?)<\/\1>/g;
+    const tagPattern = /<(action|branch-history)>([\s\S]*)<\/\1>/g;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
 
@@ -841,7 +841,7 @@
       <div class="header-content">
         <span class="header-title">
           {session?.prompt
-            ? session.prompt.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim() ||
+            ? session.prompt.replace(/<(action|branch-history)>[\s\S]*<\/\1>/g, '').trim() ||
               'Session'
             : 'Session'}
         </span>

@@ -485,6 +485,114 @@ func TestWorktreeWatchDir_FirstWorktreeCreation(t *testing.T) {
 	}
 }
 
+// E-PENPAL-WORKTREE-WATCH: verifies that rediscoverProjects updates the cache with
+// new project data from discoverFn and broadcasts a projects-changed event.
+func TestRediscoverProjects_UpdatesCache(t *testing.T) {
+	c := cache.New()
+	original := discovery.Project{Name: "repo", Path: "/tmp/repo"}
+	c.SetProjects([]discovery.Project{original})
+
+	w, err := New(c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	updated := discovery.Project{
+		Name: "repo", Path: "/tmp/repo",
+		Worktrees: []discovery.Worktree{
+			{Name: "repo", Path: "/tmp/repo", Branch: "main", IsMain: true},
+			{Name: "feature", Path: "/tmp/wt/feature", Branch: "feature", IsMain: false},
+		},
+	}
+	w.discoverFn = func() ([]discovery.Project, error) {
+		return []discovery.Project{updated}, nil
+	}
+
+	events := w.Subscribe()
+	defer w.Unsubscribe(events)
+
+	w.rediscoverProjects()
+
+	// Verify cache was updated with new worktree data
+	projects := c.Projects()
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(projects))
+	}
+	if len(projects[0].Worktrees) != 2 {
+		t.Errorf("expected 2 worktrees in cache, got %d", len(projects[0].Worktrees))
+	}
+
+	// Verify a projects-changed event was broadcast
+	select {
+	case evt := <-events:
+		if evt.Type != EventProjectsChanged {
+			t.Errorf("expected EventProjectsChanged, got %v", evt.Type)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected projects-changed event to be broadcast")
+	}
+}
+
+// E-PENPAL-WATCHER: verifies that non-.md file events are filtered out
+// and do not trigger project rescans.
+func TestEventFilter_NonMdFilesIgnored(t *testing.T) {
+	projDir := t.TempDir()
+	thoughtsDir := filepath.Join(projDir, "thoughts")
+	os.MkdirAll(thoughtsDir, 0o755)
+
+	project := discovery.Project{
+		Name: "proj", Path: projDir,
+		Sources: []discovery.FileSource{{
+			Name: "thoughts", Type: "tree", SourceTypeName: "thoughts",
+			RootPath: thoughtsDir, Auto: true,
+		}},
+	}
+
+	c := cache.New()
+	c.SetProjects([]discovery.Project{project})
+
+	w, err := New(c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	events := w.Subscribe()
+	defer w.Unsubscribe(events)
+
+	// Focus the project so the thoughts dir is watched and events reach the filter
+	w.FocusProject("proj")
+
+	// Create event for a .js file should NOT trigger a files-changed broadcast
+	w.handleEvent(fsnotify.Event{
+		Name: filepath.Join(thoughtsDir, "script.js"),
+		Op:   fsnotify.Create,
+	})
+
+	select {
+	case evt := <-events:
+		t.Fatalf("expected no event for .js file, got %v", evt)
+	case <-time.After(200 * time.Millisecond):
+		// good — no event
+	}
+
+	// Create event for a .md file SHOULD trigger a files-changed broadcast
+	w.handleEvent(fsnotify.Event{
+		Name: filepath.Join(thoughtsDir, "notes.md"),
+		Op:   fsnotify.Create,
+	})
+
+	select {
+	case evt := <-events:
+		if evt.Type != EventFilesChanged {
+			t.Errorf("expected EventFilesChanged, got %v", evt.Type)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected files-changed event for .md file")
+	}
+}
+
 func assertWatched(t *testing.T, w *Watcher, dir string, expected bool, context string) {
 	t.Helper()
 	watched := w.watcher.WatchList()

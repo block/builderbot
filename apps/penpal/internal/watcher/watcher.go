@@ -544,8 +544,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		w.debounceRefresh("worktrees:"+parentDir, w.rediscoverProjects)
 		return
 	}
-	if isGitDir && filepath.Base(path) == "worktrees" && event.Op&fsnotify.Create != 0 {
-		w.debounceRefresh("worktrees:"+parentDir, w.rediscoverProjects)
+	if isGitDir {
+		if filepath.Base(path) == "worktrees" && event.Op&fsnotify.Create != 0 {
+			w.debounceRefresh("worktrees:"+parentDir, w.rediscoverProjects)
+		}
+		// Ignore all other .git/ events (index, FETCH_HEAD, etc.)
 		return
 	}
 
@@ -623,8 +626,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// Only care about .md files for file list updates
-	if !strings.HasSuffix(path, ".md") && event.Op&fsnotify.Create == 0 {
+	// Only care about .md files for file list updates. Directory creation
+	// events are handled above by the source-detection and dynamic-watch paths.
+	if !strings.HasSuffix(path, ".md") {
 		return
 	}
 

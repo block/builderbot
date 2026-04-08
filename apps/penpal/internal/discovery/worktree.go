@@ -82,68 +82,6 @@ func parseWorktreeList(projectPath string, output string) []Worktree {
 	return worktrees
 }
 
-// ResolveWorktree finds the worktree that contains the given absolute path.
-// Returns the worktree name and the main project path, or empty strings if
-// the path doesn't belong to any worktree.
-func ResolveWorktree(projectPath string, absPath string) (worktreeName string, mainProjectPath string) {
-	absPath = filepath.Clean(absPath)
-
-	// First check if this path is inside the main project
-	mainPath := filepath.Clean(projectPath)
-	if strings.HasPrefix(absPath, mainPath+"/") || absPath == mainPath {
-		// Check if it's inside a worktree subdirectory
-		worktrees := DiscoverWorktrees(projectPath)
-		for _, wt := range worktrees {
-			if !wt.IsMain && (strings.HasPrefix(absPath, wt.Path+"/") || absPath == wt.Path) {
-				return wt.Name, mainPath
-			}
-		}
-		return "", mainPath
-	}
-
-	return "", ""
-}
-
-// FindMainWorktree returns the path to the main worktree for a given path
-// that might be inside a worktree. It reads the .git file to find the
-// gitdir and traces back to the main worktree.
-func FindMainWorktree(path string) string {
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--git-common-dir")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	commonDir := strings.TrimSpace(string(out))
-	if commonDir == "" || commonDir == "." {
-		return ""
-	}
-
-	// commonDir is the .git directory of the main worktree
-	// If it's relative, resolve it relative to the path
-	if !filepath.IsAbs(commonDir) {
-		// Get the actual git dir for this worktree first
-		cmd2 := exec.Command("git", "-C", path, "rev-parse", "--git-dir")
-		out2, err := cmd2.Output()
-		if err != nil {
-			return ""
-		}
-		gitDir := strings.TrimSpace(string(out2))
-		if !filepath.IsAbs(gitDir) {
-			gitDir = filepath.Join(path, gitDir)
-		}
-		commonDir = filepath.Join(gitDir, commonDir)
-	}
-
-	commonDir = filepath.Clean(commonDir)
-
-	// The main worktree is the parent of the .git directory
-	if filepath.Base(commonDir) == ".git" {
-		return filepath.Dir(commonDir)
-	}
-
-	return ""
-}
-
 // GitCommonDir returns the shared .git directory for the repository at
 // projectPath (e.g. "/repo/.git"). Returns "" for non-git directories.
 // Works for both main worktrees and linked worktrees.

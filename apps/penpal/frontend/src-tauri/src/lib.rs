@@ -142,6 +142,7 @@ fn ready_probe_request(addr: &str) -> String {
     format!("GET /api/ready HTTP/1.0\r\nHost: {}\r\n\r\n", addr)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn file_open_request(addr: &str, body: &str) -> String {
     format!(
         "POST /api/open HTTP/1.0\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",

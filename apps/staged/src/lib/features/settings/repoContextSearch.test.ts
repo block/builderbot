@@ -21,6 +21,22 @@ describe('matchesRepoContextSearch', () => {
     expect(matchesRepoContextSearch(context, 'builderbot apps')).toBe(true);
   });
 
+  it('matches case-insensitively', () => {
+    expect(matchesRepoContextSearch(context, 'BLOCK STAGED')).toBe(true);
+  });
+
+  it('handles missing subpaths', () => {
+    expect(
+      matchesRepoContextSearch(
+        {
+          ...context,
+          subpath: null,
+        },
+        'builderbot'
+      )
+    ).toBe(true);
+  });
+
   it('requires every token to match some repo term', () => {
     expect(matchesRepoContextSearch(context, 'staged unknown')).toBe(false);
   });

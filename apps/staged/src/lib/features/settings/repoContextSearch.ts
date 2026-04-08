@@ -4,8 +4,9 @@ function searchTerms(context: ActionContext): string[] {
   const githubRepo = context.githubRepo.toLowerCase();
   const [org = '', repoName = ''] = githubRepo.split('/');
   const subpath = context.subpath?.toLowerCase() ?? '';
+  const subpathParts = subpath.split('/').filter(Boolean);
 
-  return [githubRepo, org, repoName, subpath].filter(Boolean);
+  return [githubRepo, org, repoName, subpath, ...subpathParts].filter(Boolean);
 }
 
 export function matchesRepoContextSearch(context: ActionContext, query: string): boolean {

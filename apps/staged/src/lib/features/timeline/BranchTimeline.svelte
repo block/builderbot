@@ -24,6 +24,7 @@
     fallbackHintForPendingType,
     type PendingHintItemType,
   } from './liveSessionHints';
+  import { isEmptyFailedReview } from './reviewState';
 
   type PendingItem = {
     key: string;
@@ -333,7 +334,12 @@
       const totalCount = commentCount + annotationCount;
       const isRunning = review.sessionStatus === 'running';
       const isQueued = review.sessionStatus === 'queued';
-      const isFailed = !isRunning && !isQueued && !!review.sessionId && totalCount === 0;
+      const isFailed = isEmptyFailedReview({
+        sessionStatus: review.sessionStatus,
+        sessionId: review.sessionId,
+        title: review.title,
+        totalCount,
+      });
       const isDeleting = deletingReviewIds.has(review.id);
       const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
 

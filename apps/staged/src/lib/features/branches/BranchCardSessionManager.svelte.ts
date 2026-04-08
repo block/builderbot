@@ -382,10 +382,6 @@ export default class BranchCardSessionManager {
       return;
     }
 
-    if (data.mode === 'review' && this.autoReviewSessionId) {
-      this.cancelAutoReview();
-    }
-
     const prompt =
       data.prompt || (data.mode === 'review' ? 'Review the code changes on this branch.' : '');
     void this.startOrQueueSession(data.mode, prompt, data.imageIds);

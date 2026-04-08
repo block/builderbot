@@ -90,6 +90,32 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// Transition session status only if it is currently `queued` or `running`.
+    ///
+    /// Returns `true` if the row was updated, `false` if the session already
+    /// moved to another state or didn't exist. This is the safe path for
+    /// cancelling work that may still be in the queue.
+    pub fn transition_from_active(
+        &self,
+        id: &str,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let error_msg = if new_status == SessionStatus::Error {
+            error_message
+        } else {
+            None
+        };
+        let rows = conn.execute(
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
+             WHERE id = ?5 AND status IN ('queued', 'running')",
+            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Atomically transition a session to `Running`, but only if it is NOT
     /// already running. Returns `true` if the row was updated, `false` if
     /// the session was already running (or didn't exist).

@@ -1429,14 +1429,25 @@ fn cancel_in_flight_auto_review_for_branch(
     }
 
     registry.cancel(session_id);
-    store
-        .update_session_status(
+    let cancelled = store
+        .transition_from_active(
             session_id,
             store::SessionStatus::Cancelled,
             None,
             Some(&store::CompletionReason::Interrupted),
         )
         .map_err(|e| e.to_string())?;
+    if !cancelled {
+        let current = store.get_session(session_id).map_err(|e| e.to_string())?;
+        return match current.map(|session| session.status) {
+            None => Ok(true),
+            Some(store::SessionStatus::Cancelled) => {
+                store.delete_review(&review.id).map_err(|e| e.to_string())?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        };
+    }
     store.delete_review(&review.id).map_err(|e| e.to_string())?;
 
     Ok(true)
@@ -2452,8 +2463,14 @@ mod tests {
         status: store::SessionStatus,
     ) -> (store::Session, store::Review) {
         let session = match status {
+            store::SessionStatus::Running => {
+                store::Session::new_running("auto review", Path::new("/tmp"))
+            }
             store::SessionStatus::Queued => store::Session::new_queued("auto review"),
-            _ => store::Session::new_running("auto review", Path::new("/tmp")),
+            store::SessionStatus::Completed => {
+                store::Session::new_running("auto review", Path::new("/tmp"))
+            }
+            other => panic!("unsupported auto review test status: {}", other.as_str()),
         };
         store.create_session(&session).unwrap();
         if status != store::SessionStatus::Running && status != store::SessionStatus::Queued {

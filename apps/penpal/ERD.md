@@ -450,6 +450,25 @@ see-also:
 
 ---
 
+## Session Persistence
+
+- <a id="E-PENPAL-SESSION-FILE"></a>**E-PENPAL-SESSION-FILE**: A Rust-managed session file at `~/.config/penpal/window-state.json` stores the window registry: an array of `{label, x, y, width, height, activePath}` objects. Written atomically (temp + rename). Version field enables future migrations. Tauri reads this file on startup to restore windows; writes on window move/resize/close and on app quit.
+  ← [P-PENPAL-PERSIST-GEO](PRODUCT.md#P-PENPAL-PERSIST-GEO), [P-PENPAL-PERSIST-TABS](PRODUCT.md#P-PENPAL-PERSIST-TABS)
+
+- <a id="E-PENPAL-PROGRAMMATIC-WINDOWS"></a>**E-PENPAL-PROGRAMMATIC-WINDOWS**: The `tauri.conf.json` `windows` array is empty — no auto-created window. All windows are created programmatically in `setup` via a shared `create_penpal_window(app, label, url, x, y, w, h)` helper. On startup: if a session file exists, each saved window is created with its saved geometry and `activePath` as the URL; otherwise a single default `main` window is created at 1200×800. The same helper is used for Cmd+N, dock reopen, and file-open events.
+  ← [P-PENPAL-PERSIST-GEO](PRODUCT.md#P-PENPAL-PERSIST-GEO), [P-PENPAL-PERSIST-FALLBACK](PRODUCT.md#P-PENPAL-PERSIST-FALLBACK)
+
+- <a id="E-PENPAL-GEO-TRACK"></a>**E-PENPAL-GEO-TRACK**: An in-memory `HashMap<String, WindowGeometry>` (mutex-protected) tracks each window's current position and size. Updated on `WindowEvent::Moved` and `WindowEvent::Resized`. On window close, the entry is removed and the session file is rewritten. On app quit (`RunEvent::Exit`), the full map is flushed to the session file.
+  ← [P-PENPAL-PERSIST-GEO](PRODUCT.md#P-PENPAL-PERSIST-GEO)
+
+- <a id="E-PENPAL-TAB-PERSIST"></a>**E-PENPAL-TAB-PERSIST**: Each window's tab state (tabs array with path, title, history, historyIndex; activeTabId) is persisted to `localStorage` under key `penpal:tabs:{windowLabel}`. `useTabs` saves on every tab mutation and restores from the key matching the current Tauri window label on mount. Tab IDs use `crypto.randomUUID()` to avoid collisions across sessions.
+  ← [P-PENPAL-PERSIST-TABS](PRODUCT.md#P-PENPAL-PERSIST-TABS)
+
+- <a id="E-PENPAL-SESSION-FALLBACK"></a>**E-PENPAL-SESSION-FALLBACK**: If the session file is missing, unreadable, or has an unknown version, startup falls back to a single `main` window at 1200×800 with URL `/`. If a window's `localStorage` tab key is missing or corrupt, `useTabs` falls back to a single tab at the current URL.
+  ← [P-PENPAL-PERSIST-FALLBACK](PRODUCT.md#P-PENPAL-PERSIST-FALLBACK)
+
+---
+
 ## Open Questions
 
 (none)

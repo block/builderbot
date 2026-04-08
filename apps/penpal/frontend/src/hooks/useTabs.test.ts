@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
@@ -44,6 +44,9 @@ describe('deriveTitleFromPath', () => {
 
 // E-PENPAL-TABS: verifies tab lifecycle, history stacks, back/forward, and tab switching.
 describe('useTabs', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
   it('initializes with one tab from current URL', () => {
     const { result } = renderHook(() => useTabs(), { wrapper });
     expect(result.current.tabs).toHaveLength(1);
@@ -132,5 +135,63 @@ describe('useTabs', () => {
     expect(result.current.activeTabId).toBe(tabId);
     expect(result.current.tabs[0].path).toBe('/recent');
     expect(result.current.tabs[0].historyIndex).toBe(0);
+  });
+});
+
+// E-PENPAL-TAB-PERSIST: verifies tab state persistence to localStorage.
+describe('useTabs persistence', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('saves tab state to localStorage keyed by window label', async () => {
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    // In browser mode the key is penpal:tabs:browser
+    act(() => result.current.openTab('/in-review', 'In Review'));
+
+    // Wait for the async label resolution + save effect
+    await act(async () => {
+      await new Promise(r => setTimeout(r, 50));
+    });
+
+    const key = 'penpal:tabs:browser';
+    const raw = localStorage.getItem(key);
+    expect(raw).toBeTruthy();
+    const parsed = JSON.parse(raw!);
+    expect(parsed.version).toBe(1);
+    expect(parsed.tabs).toHaveLength(2);
+    expect(parsed.tabs[1].path).toBe('/in-review');
+  });
+
+  it('generates unique tab IDs using randomUUID', () => {
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    act(() => result.current.openTab('/in-review'));
+    const ids = result.current.tabs.map(t => t.id);
+    expect(ids[0]).not.toBe(ids[1]);
+    // Both should start with 'tab-'
+    expect(ids[0]).toMatch(/^tab-/);
+    expect(ids[1]).toMatch(/^tab-/);
+  });
+
+  // E-PENPAL-SESSION-FALLBACK: corrupt localStorage gracefully falls back.
+  it('falls back to default tab when localStorage is corrupt', () => {
+    localStorage.setItem('penpal:tabs:browser', 'not-json');
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    expect(result.current.tabs).toHaveLength(1);
+    expect(result.current.tabs[0].path).toBe('/recent');
+  });
+
+  it('falls back to default tab when localStorage has empty tabs array', () => {
+    localStorage.setItem('penpal:tabs:browser', JSON.stringify({ version: 1, activeTabId: 'x', tabs: [] }));
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    expect(result.current.tabs).toHaveLength(1);
+    expect(result.current.tabs[0].path).toBe('/recent');
+  });
+
+  it('falls back to default tab when localStorage has wrong version', () => {
+    localStorage.setItem('penpal:tabs:browser', JSON.stringify({ version: 99, activeTabId: 'x', tabs: [{ id: 'x', path: '/', title: 'Home', history: ['/'], historyIndex: 0 }] }));
+    const { result } = renderHook(() => useTabs(), { wrapper });
+    expect(result.current.tabs).toHaveLength(1);
+    expect(result.current.tabs[0].path).toBe('/recent');
   });
 });

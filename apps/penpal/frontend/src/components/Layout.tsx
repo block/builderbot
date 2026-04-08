@@ -209,6 +209,14 @@ export default function Layout() {
     };
   }, [clearWindowFocusOnClose]);
 
+  // E-PENPAL-SESSION-FILE: sync active path to Tauri GeoRegistry on navigation
+  useEffect(() => {
+    if (!isDesktopApp) return;
+    import('@tauri-apps/api/core').then(({ invoke }) =>
+      invoke('update_active_path', { path: location.pathname + location.search }),
+    ).catch(() => {});
+  }, [location.pathname, location.search]);
+
   const debouncedRefreshProjects = useCallback(
     () => debounce(refreshProjects, 200)(),
     [refreshProjects],

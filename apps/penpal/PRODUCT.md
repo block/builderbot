@@ -332,6 +332,16 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 ---
 
+## Session Persistence
+
+- <a id="P-PENPAL-PERSIST-TABS"></a>**P-PENPAL-PERSIST-TABS**: When the user quits and relaunches Penpal, all previously open windows reappear with the same tabs (paths, titles, and per-tab back/forward history) they had when the app was closed.
+
+- <a id="P-PENPAL-PERSIST-GEO"></a>**P-PENPAL-PERSIST-GEO**: Each window's position and size are restored on relaunch, so the user's multi-window layout is preserved.
+
+- <a id="P-PENPAL-PERSIST-FALLBACK"></a>**P-PENPAL-PERSIST-FALLBACK**: If the saved session is missing or corrupt, the app launches a single default window (1200×800, centered) with one tab on Home — the same behavior as a fresh install.
+
+---
+
 ## Open Questions
 
 (none)

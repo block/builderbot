@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::menu::*;
 use tauri::Manager;
@@ -17,9 +18,124 @@ struct ServerPort(Mutex<String>);
 #[cfg(target_os = "macos")]
 static WINDOW_CLOSED: AtomicBool = AtomicBool::new(false);
 
+// E-PENPAL-SESSION-FILE, E-PENPAL-GEO-TRACK: session persistence types.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct WindowGeometry {
+    label: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    #[serde(default, rename = "activePath")]
+    active_path: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct SessionState {
+    version: u32,
+    windows: Vec<WindowGeometry>,
+}
+
+/// In-memory geometry registry, updated on move/resize events.
+struct GeoRegistry(Mutex<HashMap<String, WindowGeometry>>);
+
+fn session_file_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::Path::new(&home).join(".config/penpal/window-state.json")
+}
+
+fn load_session() -> Option<SessionState> {
+    let path = session_file_path();
+    let data = std::fs::read_to_string(&path).ok()?;
+    let session: SessionState = serde_json::from_str(&data).ok()?;
+    if session.version != 1 { return None; }
+    if session.windows.is_empty() { return None; }
+    Some(session)
+}
+
+fn save_session(windows: &[WindowGeometry]) {
+    let path = session_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let session = SessionState { version: 1, windows: windows.to_vec() };
+    if let Ok(data) = serde_json::to_string_pretty(&session) {
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, &data).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+// E-PENPAL-PROGRAMMATIC-WINDOWS: shared helper for all window creation.
+fn create_penpal_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    url: &str,
+    x: Option<i32>,
+    y: Option<i32>,
+    width: f64,
+    height: f64,
+) -> Option<tauri::WebviewWindow> {
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        label,
+        tauri::WebviewUrl::App(url.into()),
+    )
+    .title("Penpal")
+    .inner_size(width, height)
+    .min_inner_size(800.0, 600.0);
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .hidden_title(true)
+            .title_bar_style(tauri::TitleBarStyle::Overlay);
+    }
+
+    if let (Some(x), Some(y)) = (x, y) {
+        builder = builder.position(x as f64, y as f64);
+    }
+
+    let win = builder.build().ok()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_plugin_decorum::WebviewWindowExt;
+        win.set_traffic_lights_inset(15.0, 18.0).ok();
+    }
+
+    // Register initial geometry
+    if let Some(geo_reg) = app.try_state::<GeoRegistry>() {
+        if let Ok(mut map) = geo_reg.0.lock() {
+            let pos = win.outer_position().unwrap_or(tauri::PhysicalPosition { x: 0, y: 0 });
+            let size = win.outer_size().unwrap_or(tauri::PhysicalSize { width: width as u32, height: height as u32 });
+            map.insert(label.to_string(), WindowGeometry {
+                label: label.to_string(),
+                x: pos.x,
+                y: pos.y,
+                width: size.width,
+                height: size.height,
+                active_path: url.to_string(),
+            });
+        }
+    }
+
+    Some(win)
+}
+
 #[tauri::command]
 fn get_platform() -> String {
     std::env::consts::OS.to_string()
+}
+
+#[tauri::command]
+fn update_active_path(window: tauri::Window, path: String, geo: tauri::State<'_, GeoRegistry>) {
+    if let Ok(mut map) = geo.0.lock() {
+        if let Some(entry) = map.get_mut(window.label()) {
+            entry.active_path = path;
+        }
+    }
 }
 
 pub fn run() {
@@ -28,13 +144,26 @@ pub fn run() {
         .plugin(tauri_plugin_decorum::init())
         .manage(Sidecar(Mutex::new(None)))
         .manage(ServerPort(Mutex::new(String::new())))
+        .manage(GeoRegistry(Mutex::new(HashMap::new())))
         .setup(|app| {
-            // macOS traffic light positioning
-            #[cfg(target_os = "macos")]
-            {
-                let win = app.get_webview_window("main").unwrap();
-                use tauri_plugin_decorum::WebviewWindowExt;
-                win.set_traffic_lights_inset(15.0, 18.0).ok();
+            // E-PENPAL-PROGRAMMATIC-WINDOWS: create windows from saved session or default.
+            let session = load_session();
+            if let Some(ref s) = session {
+                for wg in &s.windows {
+                    let url = if wg.active_path.is_empty() { "/" } else { &wg.active_path };
+                    create_penpal_window(
+                        app.handle(),
+                        &wg.label,
+                        url,
+                        Some(wg.x),
+                        Some(wg.y),
+                        wg.width as f64,
+                        wg.height as f64,
+                    );
+                }
+            }
+            if app.webview_windows().is_empty() {
+                create_penpal_window(app.handle(), "main", "/", None, None, 1200.0, 800.0);
             }
 
             // Build application menu
@@ -92,14 +221,7 @@ pub fn run() {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis());
-                    let _ = tauri::WebviewWindowBuilder::new(
-                        app_handle,
-                        &label,
-                        tauri::WebviewUrl::App("/".into()),
-                    )
-                    .title("Penpal")
-                    .inner_size(1200.0, 800.0)
-                    .build();
+                    create_penpal_window(app_handle, &label, "/", None, None, 1200.0, 800.0);
                     return;
                 }
 
@@ -150,16 +272,74 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_platform])
+        .invoke_handler(tauri::generate_handler![get_platform, update_active_path])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            #[cfg(target_os = "macos")]
+            // E-PENPAL-GEO-TRACK: update geometry on move/resize.
+            if let tauri::RunEvent::WindowEvent {
+                ref label,
+                event: ref win_event,
+                ..
+            } = event
+            {
+                match win_event {
+                    tauri::WindowEvent::Moved(pos) => {
+                        if let Ok(mut map) = app_handle.state::<GeoRegistry>().0.lock() {
+                            if let Some(entry) = map.get_mut(label) {
+                                entry.x = pos.x;
+                                entry.y = pos.y;
+                            } else if let Some(win) = app_handle.get_webview_window(label) {
+                                let size = win.outer_size().unwrap_or(tauri::PhysicalSize { width: 1200, height: 800 });
+                                map.insert(label.to_string(), WindowGeometry {
+                                    label: label.to_string(),
+                                    x: pos.x,
+                                    y: pos.y,
+                                    width: size.width,
+                                    height: size.height,
+                                    active_path: String::new(),
+                                });
+                            }
+                        }
+                    }
+                    tauri::WindowEvent::Resized(size) => {
+                        if let Ok(mut map) = app_handle.state::<GeoRegistry>().0.lock() {
+                            if let Some(entry) = map.get_mut(label) {
+                                entry.width = size.width;
+                                entry.height = size.height;
+                            } else if let Some(win) = app_handle.get_webview_window(label) {
+                                let pos = win.outer_position().unwrap_or(tauri::PhysicalPosition { x: 0, y: 0 });
+                                map.insert(label.to_string(), WindowGeometry {
+                                    label: label.to_string(),
+                                    x: pos.x,
+                                    y: pos.y,
+                                    width: size.width,
+                                    height: size.height,
+                                    active_path: String::new(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             if let tauri::RunEvent::WindowEvent {
                 event: tauri::WindowEvent::Destroyed,
+                label,
                 ..
             } = &event
             {
+                // Remove from geometry registry so closed windows aren't persisted.
+                // On non-macOS, the last window close triggers Exit immediately after
+                // Destroyed, so save the session while the registry still has this entry.
+                if let Ok(mut map) = app_handle.state::<GeoRegistry>().0.lock() {
+                    if map.len() == 1 && map.contains_key(label) {
+                        let windows: Vec<WindowGeometry> = map.values().cloned().collect();
+                        save_session(&windows);
+                    }
+                    map.remove(label);
+                }
+                #[cfg(target_os = "macos")]
                 if app_handle.webview_windows().is_empty() {
                     WINDOW_CLOSED.store(true, Ordering::SeqCst);
                 }
@@ -175,14 +355,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 if app_handle.webview_windows().is_empty() {
-                    let _ = tauri::WebviewWindowBuilder::new(
-                        app_handle,
-                        "main",
-                        tauri::WebviewUrl::App("/".into()),
-                    )
-                    .title("Penpal")
-                    .inner_size(1200.0, 800.0)
-                    .build();
+                    create_penpal_window(app_handle, "main", "/", None, None, 1200.0, 800.0);
                 }
             }
             // E-PENPAL-FILE-HANDLER-EVENT: handle macOS file open events (Finder "Open With", `open -a`).
@@ -190,14 +363,7 @@ pub fn run() {
             if let tauri::RunEvent::Opened { urls } = &event {
                 // Ensure a window exists to display the file
                 if app_handle.webview_windows().is_empty() {
-                    let _ = tauri::WebviewWindowBuilder::new(
-                        app_handle,
-                        "main",
-                        tauri::WebviewUrl::App("/".into()),
-                    )
-                    .title("Penpal")
-                    .inner_size(1200.0, 800.0)
-                    .build();
+                    create_penpal_window(app_handle, "main", "/", None, None, 1200.0, 800.0);
                 }
 
                 // E-PENPAL-FILE-HANDLER-EVENT: dispatch HTTP on a background thread to avoid blocking the main thread.
@@ -223,7 +389,17 @@ pub fn run() {
                     });
                 }
             }
+            // E-PENPAL-SESSION-FILE: flush geometry to session file on quit.
             if let tauri::RunEvent::Exit = event {
+                if let Ok(map) = app_handle.state::<GeoRegistry>().0.lock() {
+                    let windows: Vec<WindowGeometry> = map.values().cloned().collect();
+                    if !windows.is_empty() {
+                        save_session(&windows);
+                    }
+                    // When the map is empty, the Destroyed handler already saved
+                    // the session with the last window's geometry, so we preserve
+                    // that file instead of deleting it.
+                }
                 if let Some(child) = app_handle.state::<Sidecar>().0.lock().unwrap().take() {
                     let _ = child.kill();
                 }

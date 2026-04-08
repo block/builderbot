@@ -470,11 +470,7 @@
       <div class="sidebar-title">Repos</div>
       <label class="sidebar-search">
         <Search size={14} />
-        <FormInput
-          bind:value={repoSearch}
-          placeholder="Search repos, orgs, or subpaths"
-          aria-label="Search repos"
-        />
+        <FormInput bind:value={repoSearch} placeholder="Search" aria-label="Search repos" />
       </label>
       {#if loadingContexts}
         <div class="loading-side"><Spinner size={14} /> Loading...</div>

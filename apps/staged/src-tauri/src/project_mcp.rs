@@ -321,7 +321,6 @@ impl ProjectToolsHandler {
         action_executor: Option<Arc<ActionExecutor>>,
         action_registry: Option<Arc<ActionRegistry>>,
         cancel_token: CancellationToken,
-        _workspace_name: Option<String>,
     ) -> Self {
         Self {
             tool_router: Self::tool_router(),
@@ -488,22 +487,22 @@ impl ProjectToolsHandler {
             Err(e) => return e,
         };
 
-        let session = match self.store.get_session(&handle.session_id) {
-            Ok(Some(session)) => session,
-            Ok(None) => return format!("Repo session not found for id: {}", p.repo_session_id),
-            Err(e) => return format!("Error loading repo session: {e}"),
+        // Atomically try to cancel from queued state first. If the session
+        // was already picked up by the drain loop (transitioned to running),
+        // this returns false and we fall through to the running-cancel path.
+        let was_queued = match self.store.transition_from_queued(
+            &handle.session_id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&crate::store::CompletionReason::Interrupted),
+        ) {
+            Ok(updated) => updated,
+            Err(e) => return format!("Error cancelling repo session: {e}"),
         };
 
-        if session.status == SessionStatus::Queued {
-            if let Err(e) = self.store.update_session_status(
-                &handle.session_id,
-                SessionStatus::Cancelled,
-                None,
-                Some(&crate::store::CompletionReason::Interrupted),
-            ) {
-                return format!("Error cancelling queued repo session: {e}");
-            }
-
+        if was_queued {
+            // Successfully cancelled from queued state. Drain the next
+            // queued session for this branch so it can start.
             if let Ok(Some(branch_id)) = self.store.get_branch_id_for_session(&handle.session_id) {
                 let _ = crate::session_commands::drain_queued_sessions_for_branch(
                     Arc::clone(&self.store),
@@ -515,17 +514,8 @@ impl ProjectToolsHandler {
                 .await;
             }
         } else {
+            // Session is running (or already terminal). Ask the runner to cancel.
             self.registry.cancel(&handle.session_id);
-            if !self.registry.is_running(&handle.session_id)
-                && matches!(session.status, SessionStatus::Running)
-            {
-                let _ = self.store.update_session_status(
-                    &handle.session_id,
-                    SessionStatus::Cancelled,
-                    None,
-                    Some(&crate::store::CompletionReason::Interrupted),
-                );
-            }
         }
 
         match self.repo_session_payload(&p.repo_session_id, &handle) {
@@ -756,7 +746,6 @@ pub async fn start_project_mcp_server(
     action_executor: Option<Arc<ActionExecutor>>,
     action_registry: Option<Arc<ActionRegistry>>,
     cancel_token: CancellationToken,
-    workspace_name: Option<String>,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -774,7 +763,6 @@ pub async fn start_project_mcp_server(
         action_executor,
         action_registry,
         cancel_token,
-        workspace_name,
     );
     log::debug!(
         "[project_mcp] HTTP server bound on port {port} for project {}",

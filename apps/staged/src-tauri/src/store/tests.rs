@@ -359,6 +359,41 @@ fn test_transition_from_running_succeeds_when_running() {
 }
 
 #[test]
+fn test_transition_from_active_succeeds_when_queued() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_queued("queued");
+    store.create_session(&session).unwrap();
+
+    let transitioned = store
+        .transition_from_active(&session.id, SessionStatus::Cancelled, None, None)
+        .unwrap();
+    assert!(transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Cancelled);
+}
+
+#[test]
+fn test_transition_from_active_does_not_overwrite_completed_session() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("completed first", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
+        .unwrap();
+
+    let transitioned = store
+        .transition_from_active(&session.id, SessionStatus::Cancelled, None, None)
+        .unwrap();
+    assert!(!transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Completed);
+}
+
+#[test]
 fn test_completion_reason_round_trips() {
     let store = Store::in_memory().unwrap();
 

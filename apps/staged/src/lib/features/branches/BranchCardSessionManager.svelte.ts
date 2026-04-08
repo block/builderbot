@@ -212,7 +212,7 @@ export default class BranchCardSessionManager {
     const branch = this.getBranch();
     const isRemote = this.getIsRemote();
 
-    if (this.autoReviewSessionId && mode !== 'review') {
+    if (this.autoReviewSessionId && mode !== 'note') {
       this.cancelAutoReview();
     }
 
@@ -270,7 +270,7 @@ export default class BranchCardSessionManager {
     const branch = this.getBranch();
     const isRemote = this.getIsRemote();
 
-    if (this.autoReviewSessionId && mode !== 'review') {
+    if (this.autoReviewSessionId && mode !== 'note') {
       this.cancelAutoReview();
     }
 
@@ -380,10 +380,6 @@ export default class BranchCardSessionManager {
         data.imageIds
       );
       return;
-    }
-
-    if (data.mode === 'review' && this.autoReviewSessionId) {
-      this.cancelAutoReview();
     }
 
     const prompt =

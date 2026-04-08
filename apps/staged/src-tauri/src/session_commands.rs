@@ -626,6 +626,13 @@ pub async fn start_branch_session(
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
 
+    if matches!(
+        session_type,
+        BranchSessionType::Commit | BranchSessionType::Review
+    ) {
+        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
+    }
+
     // Resolve branch → project
     let branch = store
         .get_branch(&branch_id)
@@ -835,6 +842,7 @@ pub async fn start_branch_session(
 #[tauri::command(rename_all = "camelCase")]
 pub fn queue_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     branch_id: String,
     prompt: String,
     session_type: BranchSessionType,
@@ -842,6 +850,13 @@ pub fn queue_branch_session(
     image_ids: Option<Vec<String>>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
+
+    if matches!(
+        session_type,
+        BranchSessionType::Commit | BranchSessionType::Review
+    ) {
+        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
+    }
 
     // Validate that the branch exists.
     let _branch = store
@@ -1383,6 +1398,48 @@ fn latest_git_commit_ms(store: &Arc<Store>, branch_id: &str) -> i64 {
     };
     // CommitInfo.timestamp is in seconds; convert to milliseconds.
     commits.iter().map(|c| c.timestamp).max().unwrap_or(0) * 1000
+}
+
+fn cancel_in_flight_auto_review_for_branch(
+    store: &Arc<Store>,
+    registry: &session_runner::SessionRegistry,
+    branch_id: &str,
+) -> Result<bool, String> {
+    let git_ts = latest_git_commit_ms(store, branch_id);
+    let Some(review) = store
+        .find_fresh_auto_review(branch_id, git_ts)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+
+    let Some(session_id) = review.session_id.as_deref() else {
+        return Ok(false);
+    };
+
+    let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+
+    if !matches!(
+        session.status,
+        store::SessionStatus::Running | store::SessionStatus::Queued
+    ) {
+        return Ok(false);
+    }
+
+    registry.cancel(session_id);
+    store
+        .update_session_status(
+            session_id,
+            store::SessionStatus::Cancelled,
+            None,
+            Some(&store::CompletionReason::Interrupted),
+        )
+        .map_err(|e| e.to_string())?;
+    store.delete_review(&review.id).map_err(|e| e.to_string())?;
+
+    Ok(true)
 }
 
 /// Find an auto review created after all commits on a branch.
@@ -2377,6 +2434,40 @@ Rules:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn setup_branch_store() -> (Arc<Store>, store::Branch) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        (store, branch)
+    }
+
+    fn create_auto_review(
+        store: &Arc<Store>,
+        branch_id: &str,
+        status: store::SessionStatus,
+    ) -> (store::Session, store::Review) {
+        let session = match status {
+            store::SessionStatus::Queued => store::Session::new_queued("auto review"),
+            _ => store::Session::new_running("auto review", Path::new("/tmp")),
+        };
+        store.create_session(&session).unwrap();
+        if status != store::SessionStatus::Running && status != store::SessionStatus::Queued {
+            store
+                .update_session_status(&session.id, status, None, None)
+                .unwrap();
+        }
+
+        let review = store::Review::new(branch_id, "abc123", store::ReviewScope::Branch)
+            .with_session(&session.id)
+            .with_auto();
+        store.create_review(&review).unwrap();
+        (session, review)
+    }
 
     #[test]
     fn infer_branch_resume_session_type_detects_pr_prompts() {
@@ -2433,5 +2524,52 @@ mod tests {
             "Put only the JSON array inside the review-comments block (no prose or markdown)."
         ));
         assert!(prompt.contains("do not output any preamble, commentary, or thinking before it"));
+    }
+
+    #[test]
+    fn cancel_in_flight_auto_review_cancels_running_review() {
+        let (store, branch) = setup_branch_store();
+        let (session, review) =
+            create_auto_review(&store, &branch.id, store::SessionStatus::Running);
+        let registry = session_runner::SessionRegistry::new();
+
+        let cancelled =
+            cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
+
+        assert!(cancelled);
+        assert!(store.get_session(&session.id).unwrap().is_none());
+        assert!(store.get_review(&review.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn cancel_in_flight_auto_review_cancels_queued_review() {
+        let (store, branch) = setup_branch_store();
+        let (session, review) =
+            create_auto_review(&store, &branch.id, store::SessionStatus::Queued);
+        let registry = session_runner::SessionRegistry::new();
+
+        let cancelled =
+            cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
+
+        assert!(cancelled);
+        assert!(store.get_session(&session.id).unwrap().is_none());
+        assert!(store.get_review(&review.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn cancel_in_flight_auto_review_leaves_completed_review_available_for_adoption() {
+        let (store, branch) = setup_branch_store();
+        let (session, review) =
+            create_auto_review(&store, &branch.id, store::SessionStatus::Completed);
+        let registry = session_runner::SessionRegistry::new();
+
+        let cancelled =
+            cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
+
+        assert!(!cancelled);
+        let session = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Completed);
+        let review = store.get_review(&review.id).unwrap().unwrap();
+        assert!(review.is_auto);
     }
 }

@@ -24,6 +24,7 @@
   import * as commands from '../../api/commands';
   import { detectRepoActions, type ActionType } from '../actions/actions';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { matchesRepoContextSearch } from './repoContextSearch';
 
   type RepoAttachment = {
     projectId: string;
@@ -431,19 +432,10 @@
   });
 
   let filteredContexts = $derived.by(() => {
-    const query = repoSearch.trim().toLowerCase();
+    const query = repoSearch.trim();
     if (!query) return sortedContexts;
 
-    return sortedContexts.filter((context) => {
-      const [org = '', repoName = ''] = context.githubRepo.toLowerCase().split('/');
-      const subpath = context.subpath?.toLowerCase() ?? '';
-      return (
-        context.githubRepo.toLowerCase().includes(query) ||
-        org.includes(query) ||
-        repoName.includes(query) ||
-        subpath.includes(query)
-      );
-    });
+    return sortedContexts.filter((context) => matchesRepoContextSearch(context, query));
   });
 
   let groupedActions = $derived.by(() => {

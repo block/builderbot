@@ -21,9 +21,9 @@ export interface ProjectSidebarProps {
   onSetShowWorktreeDropdown: (show: boolean) => void;
   onToggleSource: (name: string) => void;
   onToggleDir: (key: string) => void;
-  onToggleFavorite: (path: string, kind: 'file' | 'tree', favorited: boolean) => void;
   onFileClick: (e: React.MouseEvent, filePath: string, allFilePaths: string[]) => void;
   onFileContextMenu: (e: React.MouseEvent, file: { path: string; sourceType?: string }, source: APIFileGroupView) => void;
+  onDirectoryContextMenu: (e: React.MouseEvent, dirPath: string) => void;
   onSourceContextMenu: (e: React.MouseEvent, group: APIFileGroupView) => void;
 }
 
@@ -110,20 +110,25 @@ export default function ProjectSidebar({
   onSetShowWorktreeDropdown,
   onToggleSource,
   onToggleDir,
-  onToggleFavorite,
   onFileClick,
   onFileContextMenu,
+  onDirectoryContextMenu,
   onSourceContextMenu,
 }: ProjectSidebarProps) {
   const navigate = useNavigate();
 
-  const favoriteFilePaths = new Set(favorites.filter(entry => entry.kind === 'file').map(entry => entry.path));
-  const favoriteDirPaths = new Set(favorites.filter(entry => entry.kind === 'tree').map(entry => entry.path));
   const favoriteGroup: APIFileGroupView = {
     name: '__favorites__',
     source: '__favorites__',
     sourceType: 'favorites',
     auto: false,
+    files: [],
+  };
+  const reviewGroup: APIFileGroupView = {
+    name: '__in_review__',
+    source: '__in_review__',
+    sourceType: 'review',
+    auto: true,
     files: [],
   };
   const allFavoriteFilePaths = Array.from(new Set(
@@ -134,28 +139,6 @@ export default function ProjectSidebar({
     onFileClick(e, path, allFilePaths);
     if (e.defaultPrevented) return;
     navigate(fileUrl(activeProject, activeWorktree, { path }));
-  }
-
-  function renderFavoriteToggle(path: string, kind: 'file' | 'tree', favorited: boolean) {
-    return (
-      <button
-        type="button"
-        className={`favorite-toggle${favorited ? ' active' : ''}`}
-        title={favorited ? 'Remove from Favorites' : 'Add to Favorites'}
-        aria-label={favorited ? 'Remove from Favorites' : 'Add to Favorites'}
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onToggleFavorite(path, kind, favorited);
-        }}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-        }}
-      >
-        {favorited ? '★' : '☆'}
-      </button>
-    );
   }
 
   function renderFileRow(
@@ -176,7 +159,6 @@ export default function ProjectSidebar({
         onClick={(e) => handleFileRowClick(e, path, allFilePaths)}
         onContextMenu={(e) => onFileContextMenu(e, { path, sourceType: group.sourceType }, group)}
       >
-        {renderFavoriteToggle(path, 'file', favoriteFilePaths.has(path))}
         <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
         <span className="label" title={file?.title || label}>{label}</span>
         {file?.fileType && file.fileType !== 'other' && <span className={`badge-file-type badge-file-type-${file.fileType}`}>{file.fileType}</span>}
@@ -199,8 +181,7 @@ export default function ProjectSidebar({
         const isDirExpanded = expandedDirs.has(dirKey);
         return (
           <div key={dirKey}>
-            <div className="tree-item" onClick={() => onToggleDir(dirKey)}>
-              {renderFavoriteToggle(dirPath, 'tree', favoriteDirPaths.has(dirPath))}
+            <div className="tree-item" onClick={() => onToggleDir(dirKey)} onContextMenu={(e) => onDirectoryContextMenu(e, dirPath)}>
               <span className={`chevron${isDirExpanded ? ' open' : ''}`}>▶</span>
               <span className="label" title={child.name + '/'}>{child.name}/</span>
             </div>
@@ -243,8 +224,11 @@ export default function ProjectSidebar({
 
     return (
       <div key={entry.id}>
-        <div className={`tree-item${isEmpty ? ' deemphasized' : ''}`} onClick={isEmpty ? undefined : () => onToggleDir(dirKey)}>
-          {renderFavoriteToggle(entry.path, 'tree', true)}
+        <div
+          className={`tree-item${isEmpty ? ' deemphasized' : ''}`}
+          onClick={isEmpty ? undefined : () => onToggleDir(dirKey)}
+          onContextMenu={(e) => onDirectoryContextMenu(e, entry.path)}
+        >
           {isEmpty ? (
             <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
           ) : (
@@ -433,7 +417,12 @@ export default function ProjectSidebar({
                       const name = filePath.split('/').pop() || filePath;
                       const isActive = currentFilePath === filePath;
                       return (
-                        <Link key={filePath} to={url} className={`tree-item${isActive ? ' active' : ''}`}>
+                        <Link
+                          key={filePath}
+                          to={url}
+                          className={`tree-item${isActive ? ' active' : ''}`}
+                          onContextMenu={(e) => onFileContextMenu(e, { path: filePath, sourceType: reviewGroup.sourceType }, reviewGroup)}
+                        >
                           <span className="chevron" style={{ visibility: 'hidden' }}>▶</span>
                           <span className="label" title={name}>{name}</span>
                         </Link>

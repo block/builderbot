@@ -151,6 +151,14 @@ export default function Layout() {
   const [showWorktreeDropdown, setShowWorktreeDropdown] = useState(false);
   const worktreeDropdownRef = useRef<HTMLDivElement>(null);
   const favoritesAutoExpandedKey = useRef('');
+  const favoriteFilePaths = useMemo(
+    () => new Set(favorites.filter(entry => entry.kind === 'file').map(entry => entry.path)),
+    [favorites],
+  );
+  const favoriteDirPaths = useMemo(
+    () => new Set(favorites.filter(entry => entry.kind === 'tree').map(entry => entry.path)),
+    [favorites],
+  );
 
   // Clear headings when navigating away from file pages
   useEffect(() => {
@@ -576,7 +584,7 @@ export default function Layout() {
     }, 200);
   }
 
-  function handleToggleFavorite(path: string, _kind: 'file' | 'tree', favorited: boolean) {
+  function handleToggleFavorite(path: string, favorited: boolean) {
     if (!qn) return;
     const request = favorited
       ? api.removeFavorite(qn, path)
@@ -603,10 +611,16 @@ export default function Layout() {
 
   // File actions
   function fileContextMenu(e: React.MouseEvent, file: { path: string; sourceType?: string }, source: APIFileGroupView) {
+    const isFavorite = favoriteFilePaths.has(file.path);
     const items: ContextMenuItem[] = [
       { label: 'Copy markdown', onClick: () => api.getRawFile(qn, file.path).then(t => navigator.clipboard.writeText(t)).catch(() => {}) },
       { label: 'Copy relative path', onClick: () => navigator.clipboard.writeText('@' + file.path) },
       { label: 'Copy absolute path', onClick: () => navigator.clipboard.writeText((activeProject?.projectPath || '') + '/' + file.path) },
+      { label: '---', onClick: () => {} },
+      {
+        label: isFavorite ? 'Remove from Favorites' : 'Add to Favorites',
+        onClick: () => handleToggleFavorite(file.path, isFavorite),
+      },
       { label: '---', onClick: () => {} },
       { label: 'Publish', onClick: () => api.publish(qn, file.path).then(d => navigator.clipboard.writeText(d.url)).catch(err => alert(err.message)) },
     ];
@@ -616,6 +630,20 @@ export default function Layout() {
     }
     items.push({ label: '---', onClick: () => {} });
     items.push({ label: 'Delete from disk', className: 'menu-danger', onClick: () => setDeleteFiles([{ project: qn, path: file.path }]) });
+    showContextMenu(e, items);
+  }
+
+  function directoryContextMenu(e: React.MouseEvent, dirPath: string) {
+    const isFavorite = favoriteDirPaths.has(dirPath);
+    const items: ContextMenuItem[] = [
+      { label: 'Copy relative path', onClick: () => navigator.clipboard.writeText('@' + dirPath) },
+      { label: 'Copy absolute path', onClick: () => navigator.clipboard.writeText((activeProject?.projectPath || '') + '/' + dirPath) },
+      { label: '---', onClick: () => {} },
+      {
+        label: isFavorite ? 'Remove from Favorites' : 'Add to Favorites',
+        onClick: () => handleToggleFavorite(dirPath, isFavorite),
+      },
+    ];
     showContextMenu(e, items);
   }
 
@@ -858,9 +886,9 @@ export default function Layout() {
             onSetShowWorktreeDropdown={setShowWorktreeDropdown}
             onToggleSource={toggleSource}
             onToggleDir={toggleDir}
-            onToggleFavorite={handleToggleFavorite}
             onFileClick={handleFileClick}
             onFileContextMenu={fileContextMenu}
+            onDirectoryContextMenu={directoryContextMenu}
             onSourceContextMenu={sourceContextMenu}
           />
         ) : (

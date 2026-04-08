@@ -10,8 +10,44 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/loganj/penpal/internal/cache"
 	"github.com/loganj/penpal/internal/config"
+	"github.com/loganj/penpal/internal/discovery"
 )
+
+func TestBuildFavoriteEntries_TreeFallsBackWithoutAllMarkdown(t *testing.T) {
+	projectPath := t.TempDir()
+	project := &discovery.Project{
+		Path: projectPath,
+		Sources: []discovery.FileSource{{
+			Name:           "docs",
+			Type:           "tree",
+			SourceTypeName: "manual",
+			RootPath:       filepath.Join(projectPath, "docs"),
+		}},
+	}
+
+	favorites := buildFavoriteEntries(project, []cache.FileInfo{
+		{Source: "anchors", FullPath: "docs/guide.md", Name: "guide.md", Title: "Guide"},
+		{Source: "anchors", FullPath: "docs/proposals/idea.md", Name: "idea.md", Title: "Idea"},
+	})
+
+	if len(favorites) != 1 {
+		t.Fatalf("expected 1 favorite, got %d", len(favorites))
+	}
+	if favorites[0].Kind != "tree" || favorites[0].Path != "docs" {
+		t.Fatalf("expected docs tree favorite, got %+v", favorites[0])
+	}
+	if len(favorites[0].Files) != 2 {
+		t.Fatalf("expected docs tree to expose 2 files, got %+v", favorites[0].Files)
+	}
+	if favorites[0].Files[0].Path != "docs/guide.md" || favorites[0].Files[0].DisplayPath != "guide.md" {
+		t.Fatalf("expected first docs file to be guide.md, got %+v", favorites[0].Files[0])
+	}
+	if favorites[0].Files[1].Path != "docs/proposals/idea.md" || favorites[0].Files[1].DisplayPath != "proposals/idea.md" {
+		t.Fatalf("expected nested docs file to preserve subtree display path, got %+v", favorites[0].Files[1])
+	}
+}
 
 func TestAPIFavorites_ListExistingManualSources(t *testing.T) {
 	s, _, _ := testServer(t)

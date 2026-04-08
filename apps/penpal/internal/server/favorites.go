@@ -206,14 +206,10 @@ func buildFavoriteEntries(project *discovery.Project, cachedFiles []cache.FileIn
 		}
 	}
 
-	allMarkdown := make(map[string]cache.FileInfo)
 	preferred := make(map[string]cache.FileInfo)
 	for _, f := range cachedFiles {
 		if existing, ok := preferred[f.FullPath]; !ok || preferredFavoriteFile(existing, f, manualSources) {
 			preferred[f.FullPath] = f
-		}
-		if f.Source == "__all_markdown__" {
-			allMarkdown[f.FullPath] = f
 		}
 	}
 
@@ -237,7 +233,7 @@ func buildFavoriteEntries(project *discovery.Project, cachedFiles []cache.FileIn
 				continue
 			}
 			seenEntries[entryID] = true
-			files := favoriteTreeFiles(rootPath, allMarkdown, preferred)
+			files := favoriteTreeFiles(rootPath, preferred)
 			entries = append(entries, APIFavoriteEntry{
 				ID:    entryID,
 				Path:  rootPath,
@@ -263,9 +259,6 @@ func buildFavoriteEntries(project *discovery.Project, cachedFiles []cache.FileIn
 			seenEntries[entryID] = true
 			meta, ok := preferred[relPath]
 			if !ok {
-				meta, ok = allMarkdown[relPath]
-			}
-			if !ok {
 				continue
 			}
 			entries = append(entries, APIFavoriteEntry{
@@ -290,15 +283,15 @@ func favoriteFilePriority(info cache.FileInfo, manualSources map[string]bool) in
 		return 0
 	}
 	if info.Source == "__all_markdown__" {
-		return 1
+		return 2
 	}
-	return 2
+	return 1
 }
 
-func favoriteTreeFiles(rootPath string, allMarkdown map[string]cache.FileInfo, preferred map[string]cache.FileInfo) []APIFile {
+func favoriteTreeFiles(rootPath string, preferred map[string]cache.FileInfo) []APIFile {
 	paths := make([]string, 0)
 	prefix := rootPath + string(filepath.Separator)
-	for path := range allMarkdown {
+	for path := range preferred {
 		if rootPath == "" || path == rootPath || strings.HasPrefix(path, prefix) {
 			paths = append(paths, path)
 		}
@@ -307,10 +300,7 @@ func favoriteTreeFiles(rootPath string, allMarkdown map[string]cache.FileInfo, p
 
 	files := make([]APIFile, 0, len(paths))
 	for _, path := range paths {
-		meta, ok := preferred[path]
-		if !ok {
-			meta = allMarkdown[path]
-		}
+		meta := preferred[path]
 		displayPath := path
 		if rootPath != "" {
 			displayPath = strings.TrimPrefix(path, prefix)

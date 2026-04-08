@@ -138,6 +138,19 @@ fn update_active_path(window: tauri::Window, path: String, geo: tauri::State<'_,
     }
 }
 
+fn ready_probe_request(addr: &str) -> String {
+    format!("GET /api/ready HTTP/1.0\r\nHost: {}\r\n\r\n", addr)
+}
+
+fn file_open_request(addr: &str, body: &str) -> String {
+    format!(
+        "POST /api/open HTTP/1.0\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        addr,
+        body.len(),
+        body
+    )
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -192,7 +205,7 @@ pub fn run() {
             for _ in 0..300 {
                 if let Ok(mut stream) = std::net::TcpStream::connect(&addr) {
                     use std::io::{Read, Write};
-                    let req = format!("GET /api/ready HTTP/1.0\r\nHost: {}\r\n\r\n", addr);
+                    let req = ready_probe_request(&addr);
                     if stream.write_all(req.as_bytes()).is_ok() {
                         // Set a generous timeout — initialization may take a while
                         stream.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
@@ -379,10 +392,7 @@ pub fn run() {
                             let body = serde_json::json!({"path": path_str}).to_string();
                             if let Ok(mut stream) = std::net::TcpStream::connect(&addr) {
                                 use std::io::Write;
-                                let req = format!(
-                                    "POST /api/open HTTP/1.0\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                    addr, body.len(), body
-                                );
+                                let req = file_open_request(&addr, &body);
                                 let _ = stream.write_all(req.as_bytes());
                             }
                         }
@@ -405,6 +415,30 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_open_request, ready_probe_request};
+
+    #[test]
+    fn ready_probe_request_targets_ready_endpoint() {
+        // E-PENPAL-TAURI: verifies desktop shell readiness probe targets /api/ready.
+        let req = ready_probe_request("127.0.0.1:8080");
+        assert!(req.starts_with("GET /api/ready HTTP/1.0\r\n"));
+        assert!(req.contains("Host: 127.0.0.1:8080\r\n"));
+    }
+
+    #[test]
+    fn open_request_targets_api_open_with_json_body() {
+        // E-PENPAL-FILE-HANDLER-EVENT: verifies desktop file-open dispatch targets /api/open.
+        let body = r#"{"path":"notes.md"}"#;
+        let req = file_open_request("127.0.0.1:8080", body);
+        assert!(req.starts_with("POST /api/open HTTP/1.0\r\n"));
+        assert!(req.contains("Content-Type: application/json\r\n"));
+        assert!(req.contains(&format!("Content-Length: {}\r\n", body.len())));
+        assert!(req.ends_with(body));
+    }
 }
 
 fn build_menu(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> {

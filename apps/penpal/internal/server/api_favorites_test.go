@@ -15,6 +15,7 @@ import (
 	"github.com/loganj/penpal/internal/discovery"
 )
 
+// E-PENPAL-FAVORITES: verifies directory favorites populate from known markdown metadata even without __all_markdown__.
 func TestBuildFavoriteEntries_TreeFallsBackWithoutAllMarkdown(t *testing.T) {
 	projectPath := t.TempDir()
 	project := &discovery.Project{
@@ -49,6 +50,7 @@ func TestBuildFavoriteEntries_TreeFallsBackWithoutAllMarkdown(t *testing.T) {
 	}
 }
 
+// P-PENPAL-FAVORITES, E-PENPAL-FAVORITES: verifies persisted favorites list separately from normal project sources.
 func TestAPIFavorites_ListExistingManualSources(t *testing.T) {
 	s, _, _ := testServer(t)
 
@@ -116,6 +118,7 @@ func TestAPIFavorites_ListExistingManualSources(t *testing.T) {
 	}
 }
 
+// P-PENPAL-FAVORITES, P-PENPAL-FAVORITE-ACTIONS, E-PENPAL-FAVORITES: verifies add/remove favorites API round-trip.
 func TestAPIFavorites_AddAndRemove(t *testing.T) {
 	s, _, _ := testServer(t)
 

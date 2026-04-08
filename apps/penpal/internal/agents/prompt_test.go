@@ -27,7 +27,7 @@ func TestBuildPrompt(t *testing.T) {
 		t.Error("expected prompt to mention 10 consecutive timeouts exit condition")
 	}
 
-	// E-PENPAL-INCORPORATE-ANSWERS: verify open questions handling guideline
+	// E-PENPAL-AGENT-PROMPT, P-PENPAL-INCORPORATE-ANSWERS: verify open questions handling guideline
 	if !strings.Contains(prompt, "incorporate the answer into the relevant section") {
 		t.Error("expected prompt to include open questions incorporation guideline")
 	}

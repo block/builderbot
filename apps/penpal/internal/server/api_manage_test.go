@@ -234,6 +234,28 @@ func TestAPIOpen_RejectsNonMarkdown(t *testing.T) {
 	}
 }
 
+// E-PENPAL-FILE-HANDLER-PLIST: verifies Info.plist registers Penpal as an alternate markdown handler.
+func TestMacOSInfoPlist_FileHandlerRegistration(t *testing.T) {
+	plistPath := filepath.Join("..", "..", "frontend", "src-tauri", "Info.plist")
+	contents, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatalf("read Info.plist: %v", err)
+	}
+	plist := string(contents)
+	for _, fragment := range []string{
+		"CFBundleDocumentTypes",
+		"net.daringfireball.markdown",
+		"<string>md</string>",
+		"<string>markdown</string>",
+		"LSHandlerRank",
+		"<string>Alternate</string>",
+	} {
+		if !strings.Contains(plist, fragment) {
+			t.Fatalf("expected Info.plist to contain %q", fragment)
+		}
+	}
+}
+
 // E-PENPAL-DELETE-FILE: verifies POST /api/delete-file removes file from disk.
 func TestAPIDeleteFile_Success(t *testing.T) {
 	s, c, _ := testServer(t)

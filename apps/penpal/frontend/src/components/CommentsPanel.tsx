@@ -37,7 +37,7 @@ function CommentBody({ text }: { text: string }) {
   );
 }
 
-// E-PENPAL-AGENT-STATUS: color-coded agent context usage in the status bar.
+// E-PENPAL-AGENT-STREAM: color-coded agent context usage in the status bar.
 function agentContextColorClass(pct: number): string {
   if (pct >= 85) return 'critical';
   if (pct >= 60) return 'warning';

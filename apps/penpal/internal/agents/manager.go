@@ -216,7 +216,7 @@ func (m *Manager) Stop(projectName string) error {
 }
 
 // AgentStatus contains the status of an agent for a project.
-// E-PENPAL-AGENT-STATUS: context/cost fields populated from NDJSON stdout parsing.
+// E-PENPAL-AGENT-STREAM: context/cost fields populated from NDJSON stdout parsing.
 type AgentStatus struct {
 	Project        string    `json:"project"`
 	PID            int       `json:"pid"`

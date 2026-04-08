@@ -512,16 +512,26 @@ This is a remote-workspace project. Use the project MCP tools to orchestrate wor
 
     let start_repo_session_desc = if is_remote {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
-`expected_outcome=\"commit\"` for code changes/commits. For remote branches this subagent \
-runs on the remote workspace, where file access, notes, and commits must happen."
+repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
+`expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
+code changes/commits. For remote branches this subagent runs on the remote workspace, where \
+file access, notes, and commits must happen.\n\
+- wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
+`repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
+or `failed`) and any available artifacts.\n\
+- cancel_repo_session: Use this to cancel a queued or running repo session by `repo_session_id`."
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
-`expected_outcome=\"commit\"` for code changes/commits. Do not ask for both a note and a \
-commit in a single start_repo_session request — choose one outcome per call. All reasoning \
-specific to a repo must be done within a repo session rather than in this project-wide context. \
-You MUST NOT write files directly — all file writes MUST go through start_repo_session with expected_outcome=\"commit\"."
+repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
+`expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
+code changes/commits. Do not ask for both a note and a commit in a single start_repo_session \
+request — choose one outcome per call. All reasoning specific to a repo must be done within a \
+repo session rather than in this project-wide context. You MUST NOT write files directly — all \
+file writes MUST go through start_repo_session with expected_outcome=\"commit\".\n\
+- wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
+`repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
+or `failed`) and any available artifacts.\n\
+- cancel_repo_session: Use this to cancel a queued or running repo session by `repo_session_id`."
     };
 
     let coordinator_reminder = if is_remote {

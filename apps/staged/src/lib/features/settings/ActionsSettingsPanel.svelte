@@ -13,8 +13,10 @@
     Save,
     Pencil,
     Code2,
+    Search,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import FormInput from '../../shared/FormInput.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import RepoBadge from '../../shared/RepoBadge.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
@@ -22,6 +24,7 @@
   import * as commands from '../../api/commands';
   import { detectRepoActions, type ActionType } from '../actions/actions';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { matchesRepoContextSearch } from './repoContextSearch';
 
   type RepoAttachment = {
     projectId: string;
@@ -36,6 +39,7 @@
   let loadingRepoAttachments = $state(false);
   let repoAttachmentsByContext = $state<Record<string, RepoAttachment[]>>({});
   let repoAttachmentLoadGeneration = 0;
+  let repoSearch = $state('');
 
   let actions = $state<ProjectAction[]>([]);
   let loadingActions = $state(false);
@@ -427,6 +431,13 @@
     });
   });
 
+  let filteredContexts = $derived.by(() => {
+    const query = repoSearch.trim();
+    if (!query) return sortedContexts;
+
+    return sortedContexts.filter((context) => matchesRepoContextSearch(context, query));
+  });
+
   let groupedActions = $derived.by(() => {
     const groups: Record<string, ProjectAction[]> = {
       prerun: [],
@@ -457,13 +468,19 @@
   <div class="panel-body">
     <aside class="sidebar">
       <div class="sidebar-title">Repos</div>
+      <label class="sidebar-search">
+        <Search size={14} />
+        <FormInput bind:value={repoSearch} placeholder="Search" aria-label="Search repos" />
+      </label>
       {#if loadingContexts}
         <div class="loading-side"><Spinner size={14} /> Loading...</div>
       {:else if contexts.length === 0}
         <div class="empty-side">No repo contexts yet</div>
+      {:else if filteredContexts.length === 0}
+        <div class="empty-side">No repos match "{repoSearch.trim()}"</div>
       {:else}
         <div class="context-list">
-          {#each sortedContexts as context (context.id)}
+          {#each filteredContexts as context (context.id)}
             {@const badge = repoBadgeStore.lookup(context.githubRepo, context.subpath)}
             <button
               class="context-item"
@@ -787,6 +804,23 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     margin: 4px 6px 10px;
+  }
+
+  .sidebar-search {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    padding: 0 2px;
+    color: var(--text-faint);
+  }
+
+  .sidebar-search :global(.form-input) {
+    min-width: 0;
+    min-height: 36px;
+    padding: 8px 12px;
+    font-size: var(--size-sm);
   }
 
   .context-list {

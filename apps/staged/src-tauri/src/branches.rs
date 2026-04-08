@@ -2393,3 +2393,494 @@ pub(crate) async fn run_prerun_actions_for_branch(
 
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blox::BloxError;
+    use crate::store::WorkspaceStatus;
+
+    // ── infer_branch_name ──────────────────────────────────────────────
+
+    #[test]
+    fn infer_branch_name_simple() {
+        assert_eq!(infer_branch_name("My Feature"), "my-feature");
+    }
+
+    #[test]
+    fn infer_branch_name_underscores_and_spaces() {
+        assert_eq!(infer_branch_name("fix_the bug"), "fix-the-bug");
+    }
+
+    #[test]
+    fn infer_branch_name_special_chars_stripped() {
+        assert_eq!(infer_branch_name("hello@world!#$%"), "helloworld");
+    }
+
+    #[test]
+    fn infer_branch_name_dots_and_slashes_become_dashes() {
+        assert_eq!(infer_branch_name("feat/add.thing"), "feat-add-thing");
+    }
+
+    #[test]
+    fn infer_branch_name_collapses_consecutive_dashes() {
+        assert_eq!(infer_branch_name("a---b"), "a-b");
+    }
+
+    #[test]
+    fn infer_branch_name_empty_input() {
+        assert_eq!(infer_branch_name(""), "feature");
+    }
+
+    #[test]
+    fn infer_branch_name_only_special_chars() {
+        assert_eq!(infer_branch_name("@#$%^&*"), "feature");
+    }
+
+    #[test]
+    fn infer_branch_name_preserves_numbers() {
+        assert_eq!(infer_branch_name("issue 42"), "issue-42");
+    }
+
+    #[test]
+    fn infer_branch_name_leading_trailing_dashes() {
+        assert_eq!(infer_branch_name("--hello--"), "hello");
+    }
+
+    // ── infer_workspace_name ───────────────────────────────────────────
+
+    #[test]
+    fn infer_workspace_name_simple() {
+        assert_eq!(infer_workspace_name("my-feature"), "stg-my-feature");
+    }
+
+    #[test]
+    fn infer_workspace_name_with_slashes() {
+        assert_eq!(infer_workspace_name("feat/add-thing"), "stg-feat-add-thing");
+    }
+
+    #[test]
+    fn infer_workspace_name_truncates_at_32_chars() {
+        let long = "a-very-long-branch-name-that-exceeds-the-limit";
+        let result = infer_workspace_name(long);
+        assert!(result.len() <= 32, "got len {}", result.len());
+        assert!(result.starts_with("stg-"));
+        // Should not end with a dash after truncation
+        assert!(!result.ends_with('-'));
+    }
+
+    #[test]
+    fn infer_workspace_name_empty_input() {
+        assert_eq!(infer_workspace_name(""), "stg-feature");
+    }
+
+    #[test]
+    fn infer_workspace_name_collapses_dashes() {
+        assert_eq!(infer_workspace_name("a---b"), "stg-a-b");
+    }
+
+    // ── repo_name_from_github_repo ─────────────────────────────────────
+
+    #[test]
+    fn repo_name_simple_slug() {
+        assert_eq!(repo_name_from_github_repo("squareup/g2"), "g2");
+    }
+
+    #[test]
+    fn repo_name_bare_name() {
+        assert_eq!(repo_name_from_github_repo("myrepo"), "myrepo");
+    }
+
+    #[test]
+    fn repo_name_with_special_chars() {
+        assert_eq!(
+            repo_name_from_github_repo("org/my repo!here"),
+            "my-repo-here"
+        );
+    }
+
+    #[test]
+    fn repo_name_preserves_dots_and_underscores() {
+        assert_eq!(repo_name_from_github_repo("org/my_repo.v2"), "my_repo.v2");
+    }
+
+    #[test]
+    fn repo_name_empty_after_slash() {
+        assert_eq!(repo_name_from_github_repo("org/"), "repo");
+    }
+
+    #[test]
+    fn repo_name_empty_string() {
+        assert_eq!(repo_name_from_github_repo(""), "repo");
+    }
+
+    #[test]
+    fn repo_name_collapses_consecutive_dashes() {
+        assert_eq!(repo_name_from_github_repo("org/a--b"), "a-b");
+    }
+
+    // ── validate_workspace_subpath ─────────────────────────────────────
+
+    #[test]
+    fn validate_subpath_simple() {
+        assert_eq!(
+            validate_workspace_subpath("apps/staged").unwrap(),
+            "apps/staged"
+        );
+    }
+
+    #[test]
+    fn validate_subpath_trims_slashes() {
+        assert_eq!(
+            validate_workspace_subpath("/apps/staged/").unwrap(),
+            "apps/staged"
+        );
+    }
+
+    #[test]
+    fn validate_subpath_trims_whitespace() {
+        assert_eq!(
+            validate_workspace_subpath("  apps/staged  ").unwrap(),
+            "apps/staged"
+        );
+    }
+
+    #[test]
+    fn validate_subpath_rejects_empty() {
+        assert!(validate_workspace_subpath("").is_err());
+        assert!(validate_workspace_subpath("   ").is_err());
+        assert!(validate_workspace_subpath("///").is_err());
+    }
+
+    #[test]
+    fn validate_subpath_strips_leading_slash_and_accepts() {
+        // Leading slashes are trimmed before the absolute check, so
+        // "/absolute/path" becomes "absolute/path" which is valid.
+        assert_eq!(
+            validate_workspace_subpath("/absolute/path").unwrap(),
+            "absolute/path"
+        );
+    }
+
+    #[test]
+    fn validate_subpath_rejects_dot_segments() {
+        assert!(validate_workspace_subpath("apps/../etc").is_err());
+        assert!(validate_workspace_subpath("./apps").is_err());
+    }
+
+    #[test]
+    fn validate_subpath_rejects_empty_segments() {
+        assert!(validate_workspace_subpath("apps//staged").is_err());
+    }
+
+    // ── normalize_branch_ref ───────────────────────────────────────────
+
+    #[test]
+    fn normalize_branch_ref_strips_origin() {
+        assert_eq!(normalize_branch_ref("origin/main"), "main");
+    }
+
+    #[test]
+    fn normalize_branch_ref_no_prefix() {
+        assert_eq!(normalize_branch_ref("main"), "main");
+    }
+
+    #[test]
+    fn normalize_branch_ref_nested() {
+        assert_eq!(normalize_branch_ref("origin/feat/thing"), "feat/thing");
+    }
+
+    // ── resolve_workspace_repo_path ────────────────────────────────────
+
+    #[test]
+    fn resolve_repo_path_home_prefix() {
+        let result = resolve_workspace_repo_path("ws1", "home:myrepo").unwrap();
+        assert_eq!(result, "/home/bloxer/myrepo");
+    }
+
+    #[test]
+    fn resolve_repo_path_home_prefix_nested() {
+        let result = resolve_workspace_repo_path("ws1", "home:myrepo/sub").unwrap();
+        assert_eq!(result, "/home/bloxer/myrepo/sub");
+    }
+
+    #[test]
+    fn resolve_repo_path_no_prefix() {
+        let result = resolve_workspace_repo_path("ws1", "/some/path").unwrap();
+        assert_eq!(result, "/some/path");
+    }
+
+    // ── workspace_home_dir ─────────────────────────────────────────────
+
+    #[test]
+    fn workspace_home_dir_always_bloxer() {
+        assert_eq!(workspace_home_dir("anything").unwrap(), "/home/bloxer");
+    }
+
+    // ── is_worktree_path_exists_error ──────────────────────────────────
+
+    #[test]
+    fn worktree_path_exists_error_positive() {
+        assert!(is_worktree_path_exists_error(
+            "fatal: Worktree already exists at '/some/path'"
+        ));
+    }
+
+    #[test]
+    fn worktree_path_exists_error_negative() {
+        assert!(!is_worktree_path_exists_error("some other error"));
+    }
+
+    #[test]
+    fn worktree_path_exists_error_empty() {
+        assert!(!is_worktree_path_exists_error(""));
+    }
+
+    // ── is_blox_onboarding_precondition_error ──────────────────────────
+
+    #[test]
+    fn onboarding_error_both_keywords() {
+        let err = BloxError::CommandFailed(
+            "FAILED_PRECONDITION: user has not completed onboarding".into(),
+        );
+        assert!(is_blox_onboarding_precondition_error(&err));
+    }
+
+    #[test]
+    fn onboarding_error_onboard_keyword() {
+        let err = BloxError::CommandFailed("failed_precondition: please onboard first".into());
+        assert!(is_blox_onboarding_precondition_error(&err));
+    }
+
+    #[test]
+    fn onboarding_error_not_precondition() {
+        let err = BloxError::CommandFailed("some other error about onboarding".into());
+        assert!(!is_blox_onboarding_precondition_error(&err));
+    }
+
+    #[test]
+    fn onboarding_error_not_command_failed() {
+        let err = BloxError::NotAuthenticated;
+        assert!(!is_blox_onboarding_precondition_error(&err));
+    }
+
+    #[test]
+    fn onboarding_error_precondition_without_onboard() {
+        let err = BloxError::CommandFailed("FAILED_PRECONDITION: quota exceeded".into());
+        assert!(!is_blox_onboarding_precondition_error(&err));
+    }
+
+    // ── map_blox_status_to_workspace_status ────────────────────────────
+
+    #[test]
+    fn map_status_running() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("running"), None),
+            WorkspaceStatus::Running
+        );
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("ready"), None),
+            WorkspaceStatus::Running
+        );
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("active"), None),
+            WorkspaceStatus::Running
+        );
+    }
+
+    #[test]
+    fn map_status_running_case_insensitive() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("Running"), None),
+            WorkspaceStatus::Running
+        );
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("READY"), None),
+            WorkspaceStatus::Running
+        );
+    }
+
+    #[test]
+    fn map_status_stopped_from_running() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("stopped"), Some(&WorkspaceStatus::Running)),
+            WorkspaceStatus::Stopped
+        );
+    }
+
+    #[test]
+    fn map_status_stopped_while_starting_stays_starting() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("stopped"), Some(&WorkspaceStatus::Starting)),
+            WorkspaceStatus::Starting
+        );
+    }
+
+    #[test]
+    fn map_status_starting_variants() {
+        for status in &["starting", "provisioning", "creating"] {
+            assert_eq!(
+                map_blox_status_to_workspace_status(Some(status), None),
+                WorkspaceStatus::Starting,
+                "failed for status: {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn map_status_suspended() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("suspended"), None),
+            WorkspaceStatus::Suspended
+        );
+    }
+
+    #[test]
+    fn map_status_deleted_is_stopped() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("deleted"), None),
+            WorkspaceStatus::Stopped
+        );
+    }
+
+    #[test]
+    fn map_status_shutting_down_while_starting_stays_starting() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(
+                Some("shutting_down"),
+                Some(&WorkspaceStatus::Starting)
+            ),
+            WorkspaceStatus::Starting
+        );
+    }
+
+    #[test]
+    fn map_status_shutting_down_otherwise_stopped() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(
+                Some("shutting_down"),
+                Some(&WorkspaceStatus::Running)
+            ),
+            WorkspaceStatus::Stopped
+        );
+    }
+
+    #[test]
+    fn map_status_error_variants() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("error"), None),
+            WorkspaceStatus::Error
+        );
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("failed"), None),
+            WorkspaceStatus::Error
+        );
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("degraded"), None),
+            WorkspaceStatus::Error
+        );
+    }
+
+    #[test]
+    fn map_status_none_defaults_to_starting() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(None, None),
+            WorkspaceStatus::Starting
+        );
+    }
+
+    #[test]
+    fn map_status_unknown_defaults_to_starting() {
+        assert_eq!(
+            map_blox_status_to_workspace_status(Some("wat"), None),
+            WorkspaceStatus::Starting
+        );
+    }
+
+    // ── bootstrap_command_type_name ────────────────────────────────────
+
+    #[test]
+    fn command_type_names() {
+        assert_eq!(bootstrap_command_type_name(1), "checkout");
+        assert_eq!(bootstrap_command_type_name(2), "execute_process");
+        assert_eq!(bootstrap_command_type_name(3), "project_bootstrap");
+        assert_eq!(bootstrap_command_type_name(4), "provision_workspace");
+        assert_eq!(bootstrap_command_type_name(0), "unknown");
+        assert_eq!(bootstrap_command_type_name(99), "unknown");
+    }
+
+    // ── parse_git_progress_line ────────────────────────────────────────
+
+    #[test]
+    fn parse_progress_counting_objects() {
+        let (phase, pct) =
+            parse_git_progress_line("remote: Counting objects:   3% (62/2054)").unwrap();
+        assert_eq!(phase, "Counting objects");
+        assert_eq!(pct, 3);
+    }
+
+    #[test]
+    fn parse_progress_receiving_objects() {
+        let (phase, pct) = parse_git_progress_line(
+            "Receiving objects:  27% (11893/44046), 6.93 MiB | 13.84 MiB/s",
+        )
+        .unwrap();
+        assert_eq!(phase, "Receiving objects");
+        assert_eq!(pct, 27);
+    }
+
+    #[test]
+    fn parse_progress_resolving_deltas() {
+        let (phase, pct) =
+            parse_git_progress_line("remote: Resolving deltas: 100% (1234/1234)").unwrap();
+        assert_eq!(phase, "Resolving deltas");
+        assert_eq!(pct, 100);
+    }
+
+    #[test]
+    fn parse_progress_no_percentage() {
+        assert!(parse_git_progress_line("remote: Enumerating objects: 2054, done.").is_none());
+    }
+
+    #[test]
+    fn parse_progress_empty_line() {
+        assert!(parse_git_progress_line("").is_none());
+    }
+
+    #[test]
+    fn parse_progress_no_colon() {
+        assert!(parse_git_progress_line("just some text 50%").is_none());
+    }
+
+    // ── fallback_worktree_path_for ─────────────────────────────────────
+
+    #[test]
+    fn fallback_path_returns_original_when_not_exists() {
+        let path = PathBuf::from("/tmp/definitely-does-not-exist-staged-test-12345");
+        let result = fallback_worktree_path_for(&path);
+        assert_eq!(result, Some(path));
+    }
+
+    #[test]
+    fn fallback_path_appends_suffix_when_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("my-branch");
+        std::fs::create_dir(&existing).unwrap();
+
+        let result = fallback_worktree_path_for(&existing).unwrap();
+        assert_eq!(result, dir.path().join("my-branch-2"));
+        assert!(!result.exists());
+    }
+
+    #[test]
+    fn fallback_path_skips_occupied_suffixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("my-branch");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::create_dir(dir.path().join("my-branch-2")).unwrap();
+        std::fs::create_dir(dir.path().join("my-branch-3")).unwrap();
+
+        let result = fallback_worktree_path_for(&base).unwrap();
+        assert_eq!(result, dir.path().join("my-branch-4"));
+    }
+}

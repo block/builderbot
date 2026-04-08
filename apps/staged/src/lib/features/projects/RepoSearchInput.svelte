@@ -254,7 +254,7 @@
       bind:this={inputEl}
       bind:value={query}
       type="text"
-      placeholder="Search or paste a repository..."
+      placeholder="Search"
       autocomplete="off"
       autocorrect="off"
       spellcheck="false"

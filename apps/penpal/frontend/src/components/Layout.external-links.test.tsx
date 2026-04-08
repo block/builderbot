@@ -42,6 +42,7 @@ vi.mock('../api', () => ({
       },
     ]),
     getInReview: vi.fn().mockResolvedValue([]),
+    getFavorites: vi.fn().mockResolvedValue([]),
     getProjectFiles: vi.fn().mockResolvedValue([]),
     getReviews: vi.fn().mockResolvedValue([]),
     clearFocus: vi.fn().mockResolvedValue(undefined),

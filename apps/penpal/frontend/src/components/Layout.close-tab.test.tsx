@@ -56,6 +56,7 @@ vi.mock('../api', () => ({
       },
     ]),
     getInReview: vi.fn().mockResolvedValue([]),
+    getFavorites: vi.fn().mockResolvedValue([]),
     clearFocus: vi.fn().mockResolvedValue(undefined),
     checkInstallStatus: vi.fn().mockResolvedValue({ cli: { installed: true }, plugin: { installed: true } }),
   },

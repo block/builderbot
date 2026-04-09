@@ -156,18 +156,33 @@
   // Lifecycle
   // =========================================================================
 
-  onMount(async () => {
+  onMount(() => {
     document.addEventListener('selectionchange', handleSelectionChange);
-    await loadBufferedOutput();
-    await setupListeners();
-    // Scroll to bottom after initial load
-    tick().then(() => scrollToBottom());
   });
 
   onDestroy(() => {
     document.removeEventListener('selectionchange', handleSelectionChange);
     if (saveTimeout) clearTimeout(saveTimeout);
     cleanup();
+  });
+
+  // React to executionId changes (e.g. when "Run again" switches to a new execution)
+  $effect(() => {
+    void executionId; // subscribe to executionId changes
+    // Reset state for the new execution
+    status = 'running';
+    exitCode = null;
+    outputChunks = [];
+    loading = true;
+    error = null;
+    shouldAutoScroll = true;
+    cleanup();
+
+    (async () => {
+      await loadBufferedOutput();
+      await setupListeners();
+      tick().then(() => scrollToBottom());
+    })();
   });
 
   // =========================================================================

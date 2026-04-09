@@ -896,10 +896,48 @@
     actionName={actionOutputModal.actionName}
     isStopping={actionOutputModal.isStopping}
     onClose={() => (actionOutputModal = null)}
-    onRunAgain={() => {
+    onRunAgain={async () => {
       const action = actions.find((a) => a.id === actionOutputModal?.actionId);
-      actionOutputModal = null;
-      if (action) handleRunAction(action);
+      if (!action) return;
+
+      // Clean up stale executions of this action
+      const staleExecutions = runningActions.filter(
+        (a) => a.actionId === action.id && a.status !== 'running'
+      );
+      for (const stale of staleExecutions) {
+        clearActionExecution(stale.executionId).catch(() => {});
+      }
+      runningActions = runningActions.filter(
+        (a) => !(a.actionId === action.id && a.status !== 'running')
+      );
+
+      // If already running, just switch the modal to that execution
+      const existingExecution = runningActions.find(
+        (a) => a.actionId === action.id && a.status === 'running'
+      );
+      if (existingExecution) {
+        actionOutputModal = {
+          executionId: existingExecution.executionId,
+          actionId: action.id,
+          actionName: action.name,
+          isStopping: stoppingExecutions.has(existingExecution.executionId),
+        };
+        return;
+      }
+
+      try {
+        const newExecutionId = await runBranchAction(branch.id, action.id);
+        // Keep the modal open and switch to the new execution
+        actionOutputModal = {
+          executionId: newExecutionId,
+          actionId: action.id,
+          actionName: action.name,
+          isStopping: false,
+        };
+      } catch (e) {
+        console.error('Failed to run action:', e);
+        notifyError(`Failed to run action "${action.name}"`, e);
+      }
     }}
     {onNoteCreated}
   />

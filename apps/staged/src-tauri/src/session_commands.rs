@@ -2363,12 +2363,15 @@ two nullable string fields:
 ```
 
 Guidelines for suggested next steps:
+- Keep suggestions very concise (a few words). They are shown alongside the note title, \
+so you can assume the user has already read the title for context. \
+Do NOT repeat information from the title.
 - If the note is a plan, suggest a commit to implement it: \
 {\"suggestedNextCommitStep\": \"Implement this plan\", \"suggestedNextNoteStep\": null}
 - If the note is a plan with multiple options, pick the best option: \
-{\"suggestedNextCommitStep\": \"Implement plan with option 2: use Redis cache\", \"suggestedNextNoteStep\": null}
+{\"suggestedNextCommitStep\": \"Implement option 2: use Redis cache\", \"suggestedNextNoteStep\": null}
 - If the note is bug research, suggest both a fix and a deeper plan: \
-{\"suggestedNextCommitStep\": \"Fix this bug\", \"suggestedNextNoteStep\": \"Make a plan to fix this bug\"}
+{\"suggestedNextCommitStep\": \"Fix this bug\", \"suggestedNextNoteStep\": \"Plan a fix for this bug\"}
 - If the note is pure research or informational with no clear next action: \
 {\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}
 

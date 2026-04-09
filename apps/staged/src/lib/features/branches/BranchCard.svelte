@@ -1020,7 +1020,12 @@
     !sessionMgr.draftPrompt &&
     ((sessionMgr.newSessionMode === 'commit' && !!commitPrefill) ||
       (sessionMgr.newSessionMode === 'note' && !!notePrefill))}
-  {@const prefillText = sessionMgr.newSessionMode === 'note' ? notePrefill : commitPrefill}
+  {@const prefillText =
+    sessionMgr.newSessionMode === 'note'
+      ? notePrefill
+      : sessionMgr.newSessionMode === 'commit'
+        ? commitPrefill
+        : ''}
   <NewSessionModal
     {branch}
     mode={sessionMgr.newSessionMode}
@@ -1036,7 +1041,9 @@
       // Don't persist prefilled text as a draft — it should be re-evaluated
       // each time the dialog opens based on the current timeline state.
       const prompt =
-        draft.prompt === commitPrefill || draft.prompt === notePrefill ? '' : draft.prompt;
+        draft.prompt.trim() === commitPrefill.trim() || draft.prompt.trim() === notePrefill.trim()
+          ? ''
+          : draft.prompt;
       sessionMgr.handleNewSessionClose({ ...draft, prompt });
     }}
     onSubmit={(data) => sessionMgr.handleNewSessionSubmit(data)}

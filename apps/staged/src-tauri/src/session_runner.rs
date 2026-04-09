@@ -1693,4 +1693,68 @@ Second batch:
             "leftover</action>\nreal prompt"
         );
     }
+
+    // ── extract_suggested_next_steps ────────────────────────────────────
+
+    #[test]
+    fn extract_steps_valid_both_fields() {
+        let text = r#"Here are the notes.
+
+```suggested-next-steps
+{"suggestedNextCommitStep": "Implement the plan", "suggestedNextNoteStep": "Research alternatives"}
+```
+
+---
+# Title
+Body
+"#;
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(
+            steps.suggested_next_commit_step.as_deref(),
+            Some("Implement the plan")
+        );
+        assert_eq!(
+            steps.suggested_next_note_step.as_deref(),
+            Some("Research alternatives")
+        );
+    }
+
+    #[test]
+    fn extract_steps_null_fields() {
+        let text = "```suggested-next-steps\n{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}\n```\n";
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(steps.suggested_next_commit_step, None);
+        assert_eq!(steps.suggested_next_note_step, None);
+    }
+
+    #[test]
+    fn extract_steps_partial_fields() {
+        let text = "```suggested-next-steps\n{\"suggestedNextCommitStep\": \"Fix the bug\", \"suggestedNextNoteStep\": null}\n```\n";
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(
+            steps.suggested_next_commit_step.as_deref(),
+            Some("Fix the bug")
+        );
+        assert_eq!(steps.suggested_next_note_step, None);
+    }
+
+    #[test]
+    fn extract_steps_missing_block() {
+        let text = "Just a normal assistant message with no fenced blocks.";
+        assert!(extract_suggested_next_steps(text).is_none());
+    }
+
+    #[test]
+    fn extract_steps_malformed_json() {
+        let text = "```suggested-next-steps\n{not valid json}\n```\n";
+        assert!(extract_suggested_next_steps(text).is_none());
+    }
+
+    #[test]
+    fn extract_steps_inside_code_fence_ignored() {
+        // The marker appears mid-line (inside another code block), so
+        // find_opening_fence should not match it.
+        let text = "````markdown\n```suggested-next-steps\n{\"suggestedNextCommitStep\": \"x\", \"suggestedNextNoteStep\": null}\n```\n````\n";
+        assert!(extract_suggested_next_steps(text).is_none());
+    }
 }

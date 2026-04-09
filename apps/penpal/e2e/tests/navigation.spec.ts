@@ -21,8 +21,3 @@ test('in-review page loads', async ({ page }) => {
   await expect(page.locator('body')).toBeVisible();
 });
 
-// E-PENPAL-SPA-SERVE: verifies SPA serves the search page at /search.
-test('search page loads', async ({ page }) => {
-  await page.goto('/search');
-  await expect(page.locator('body')).toBeVisible();
-});

@@ -45,7 +45,6 @@ export default function Layout() {
   useEffect(() => { tabsRef.current = tabs; }, [tabs]);
   const [projects, setProjects] = useState<APIProject[]>([]);
   const [reviewCount, setReviewCount] = useState(0);
-  const [searchQuery, setSearchQuery] = useState('');
   const [headings, setHeadings] = useState<Heading[]>([]);
   const isFilePage = location.pathname.startsWith('/file/');
 
@@ -482,13 +481,6 @@ export default function Layout() {
 
   // (activeProject/activeWorktree/isProjectMode computed earlier, near line 45)
 
-  function handleSearch(e: React.FormEvent) {
-    e.preventDefault();
-    if (searchQuery.trim()) {
-      navigate(`/search?q=${encodeURIComponent(searchQuery.trim())}`);
-    }
-  }
-
   function handleAddWorkspace() {
     if (!addPath.trim()) return;
     setAddLoading(true);
@@ -793,9 +785,6 @@ export default function Layout() {
         canGoForward={canGoForward}
         goBack={goBack}
         goForward={goForward}
-        searchQuery={searchQuery}
-        onSearchQueryChange={setSearchQuery}
-        onSearchSubmit={handleSearch}
         theme={theme}
         onToggleTheme={toggle}
         isDesktopApp={isDesktopApp}

@@ -57,7 +57,7 @@ beforeEach(() => {
 // verifies sidebar rendering, tab bar, SSE reconnect, and internal link navigation.
 // E-PENPAL-REVIEW-COUNT: verifies review count refresh on SSE events.
 describe('Layout', () => {
-  it('renders topbar with logo and search', async () => {
+  it('renders topbar with logo', async () => {
     render(
       <MemoryRouter>
         <Layout />
@@ -65,7 +65,6 @@ describe('Layout', () => {
     );
 
     expect(screen.getByText('Penpal')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Search all thoughts...')).toBeInTheDocument();
   });
 
   it('renders tab bar', async () => {

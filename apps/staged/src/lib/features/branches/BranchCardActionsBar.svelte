@@ -177,6 +177,7 @@
   let runningActions = $state<RunningAction[]>([]);
   let actionOutputModal = $state<{
     executionId: string;
+    actionId: string;
     actionName: string;
     isStopping: boolean;
   } | null>(null);
@@ -468,6 +469,7 @@
     if (existingExecution) {
       actionOutputModal = {
         executionId: existingExecution.executionId,
+        actionId: action.id,
         actionName: action.name,
         isStopping: stoppingExecutions.has(existingExecution.executionId),
       };
@@ -503,6 +505,7 @@
   function handleShowActionOutput(execution: RunningAction) {
     actionOutputModal = {
       executionId: execution.executionId,
+      actionId: execution.actionId,
       actionName: execution.actionName,
       isStopping: stoppingExecutions.has(execution.executionId),
     };
@@ -893,6 +896,11 @@
     actionName={actionOutputModal.actionName}
     isStopping={actionOutputModal.isStopping}
     onClose={() => (actionOutputModal = null)}
+    onRunAgain={() => {
+      const action = actions.find((a) => a.id === actionOutputModal?.actionId);
+      actionOutputModal = null;
+      if (action) handleRunAction(action);
+    }}
     {onNoteCreated}
   />
 {/if}

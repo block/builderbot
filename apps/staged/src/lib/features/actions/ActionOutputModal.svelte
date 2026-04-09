@@ -28,6 +28,7 @@
     XCircle,
     Check,
     StickyNote,
+    RotateCw,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import Convert from 'ansi-to-html';
@@ -52,6 +53,7 @@
     onClose: () => void;
     onRemove?: (executionId: string) => void;
     onNoteCreated?: () => void;
+    onRunAgain?: () => void;
   }
 
   let {
@@ -62,6 +64,7 @@
     onClose,
     onRemove,
     onNoteCreated,
+    onRunAgain,
   }: Props = $props();
 
   // =========================================================================
@@ -419,6 +422,11 @@
             <CircleStop size={14} />
             <span>{isCurrentlyStopping ? 'Stopping…' : 'Stop'}</span>
           </button>
+        {:else if onRunAgain}
+          <button class="run-again-btn" onclick={onRunAgain} title="Run again">
+            <RotateCw size={14} />
+            <span>Run again</span>
+          </button>
         {/if}
         {#if status === 'failed' && onRemove}
           <button class="remove-btn" onclick={handleRemove} title="Remove this failed run">
@@ -577,6 +585,26 @@
   .stop-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  .run-again-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .run-again-btn:hover {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: rgba(59, 130, 246, 0.3);
   }
 
   .remove-btn {

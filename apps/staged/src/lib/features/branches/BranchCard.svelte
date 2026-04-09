@@ -212,13 +212,13 @@
 
     for (const review of timeline.reviews) {
       if (review.sessionStatus === 'running') continue;
-      const ts = Math.floor(review.createdAt / 1000);
+      const ts = Math.floor((review.completedAt ?? review.createdAt) / 1000);
       candidates.push({ kind: 'review', commentCount: review.commentCount, timestamp: ts });
     }
 
     for (const note of timeline.notes) {
       if (note.sessionStatus === 'running') continue;
-      const ts = Math.floor(note.createdAt / 1000);
+      const ts = Math.floor((note.completedAt ?? note.createdAt) / 1000);
       candidates.push({ kind: 'note', title: note.title, timestamp: ts });
     }
 

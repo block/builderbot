@@ -104,6 +104,9 @@ see-also:
 | File Handler (P-PENPAL-FILE-HANDLER) | — | — | api_manage_test.go | — |
 | Source Disambiguation (P-PENPAL-SRC-DISAMBIG) | — | Layout.test.tsx | — | — |
 | Home Label (P-PENPAL-HOME-LABEL) | — | Layout.test.tsx | — | — |
+| Session Persistence — Tabs (P-PENPAL-PERSIST-TABS) | — | useTabs.test.ts | — | — |
+| Session Persistence — Geometry (P-PENPAL-PERSIST-GEO) | — | — | — | — |
+| Session Persistence — Fallback (P-PENPAL-PERSIST-FALLBACK) | — | useTabs.test.ts | — | — |
 | File View Margins (P-PENPAL-VIEW-MARGINS) | — | file-view-layout.test.ts | — | — |
 | View Options Panel (P-PENPAL-VIEW-OPTIONS) | — | Layout.test.tsx | — | — |
 | View Options — Sort (P-PENPAL-VIEW-OPTIONS-SORT) | — | useProjectSort.test.ts, Layout.test.tsx | — | — |

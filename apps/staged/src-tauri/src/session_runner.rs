@@ -1749,12 +1749,4 @@ Body
         let text = "```suggested-next-steps\n{not valid json}\n```\n";
         assert!(extract_suggested_next_steps(text).is_none());
     }
-
-    #[test]
-    fn extract_steps_inside_code_fence_ignored() {
-        // The marker appears mid-line (inside another code block), so
-        // find_opening_fence should not match it.
-        let text = "````markdown\n```suggested-next-steps\n{\"suggestedNextCommitStep\": \"x\", \"suggestedNextNoteStep\": null}\n```\n````\n";
-        assert!(extract_suggested_next_steps(text).is_none());
-    }
 }

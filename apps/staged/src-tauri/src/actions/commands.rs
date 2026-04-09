@@ -538,9 +538,18 @@ pub async fn run_prerun_actions(
             },
         );
 
-        let detected = detect_actions_for_repo_context(&github_repo, subpath.as_deref())
-            .await
-            .unwrap_or_default();
+        let detected = match detect_actions_for_repo_context(&github_repo, subpath.as_deref()).await
+        {
+            Ok(actions) => actions,
+            Err(e) => {
+                log::warn!(
+                    "[run_prerun_actions] action detection failed for repo {} (subpath: {:?}): {e}",
+                    github_repo,
+                    subpath
+                );
+                Vec::new()
+            }
+        };
 
         let existing_actions = store
             .list_repo_actions(&context.id)

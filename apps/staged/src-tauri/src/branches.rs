@@ -38,6 +38,22 @@ fn cached_workstation_id(workspace_name: &str) -> Option<u64> {
         .and_then(|cache| cache.get(workspace_name).copied())
 }
 
+/// Per-branch lock that serializes worktree setup so that `setup_worktree`
+/// (frontend) and `setup_worktree_sync` (backend/MCP) do not race each other.
+/// Follows the same pattern as `REPO_CLONE_LOCKS` in `git/github.rs`.
+static WORKTREE_SETUP_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn worktree_setup_lock_for(branch_id: &str) -> Arc<Mutex<()>> {
+    let locks = WORKTREE_SETUP_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = locks.lock().unwrap_or_else(|p| p.into_inner());
+    // Opportunistically drop lock entries that are no longer referenced by any
+    // active setup operation so the map does not grow without bound.
+    map.retain(|_, v| Arc::strong_count(v) > 1);
+    map.entry(branch_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
     store
         .lock()
@@ -823,6 +839,20 @@ pub async fn setup_worktree(
         git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
 
+    // Serialize worktree creation per branch so that concurrent callers
+    // (frontend `setup_worktree` vs backend `setup_worktree_sync`) do not race.
+    let lock = worktree_setup_lock_for(&branch.id);
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    // Re-check the DB fast-path under the lock — the other caller may have
+    // finished while we were waiting.
+    if let Some(existing) = store
+        .get_workdir_for_branch(&branch.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(to_branch_with_workdir(branch, Some(existing.path)));
+    }
+
     // Reuse any existing worktree for this branch; otherwise create one.
     let existing_worktree_path =
         find_existing_worktree_for_branch(&repo_path, &branch.branch_name)?;
@@ -923,6 +953,7 @@ pub async fn setup_worktree(
         }
     }
 
+    // _guard dropped here, releasing the per-branch lock.
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
 }
 
@@ -2109,27 +2140,35 @@ pub(crate) fn setup_worktree_sync(
         crate::git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
 
+    // Serialize worktree creation per branch so that concurrent callers
+    // (frontend `setup_worktree` vs backend `setup_worktree_sync`) do not race.
+    let lock = worktree_setup_lock_for(&branch.id);
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+
+    // Re-check the DB fast-path under the lock — the other caller may have
+    // finished while we were waiting.
+    if let Some(existing) = store
+        .get_workdir_for_branch(&branch.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(existing.path);
+    }
+
     emit_progress("creating_worktree", None);
     // Reuse any existing worktree for this branch; otherwise create one.
-    let existing_worktree_path = crate::git::list_worktrees(&repo_path)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find_map(|(path, wt_branch)| match wt_branch.as_deref() {
-            Some(name) if name == branch.branch_name => Some(path),
-            _ => None,
-        });
+    let existing_worktree_path =
+        find_existing_worktree_for_branch(&repo_path, &branch.branch_name)?;
 
     let worktree_path = if let Some(path) = existing_worktree_path {
         path
     } else if crate::git::branch_exists(&repo_path, &branch.branch_name)
         .map_err(|e| e.to_string())?
     {
-        crate::git::create_worktree_for_existing_branch_at_path(
+        create_worktree_for_existing_branch_with_fallback(
             &repo_path,
             &branch.branch_name,
             &desired_worktree_path,
-        )
-        .map_err(|e| e.to_string())?
+        )?
     } else {
         // If the branch exists on the remote (e.g. from an existing PR),
         // start the new local branch from the remote tracking ref so it
@@ -2143,7 +2182,7 @@ pub(crate) fn setup_worktree_sync(
         } else {
             &branch.base_branch
         };
-        match crate::git::create_worktree_at_path(
+        match create_worktree_with_fallback(
             &repo_path,
             &branch.branch_name,
             start_point,
@@ -2151,21 +2190,29 @@ pub(crate) fn setup_worktree_sync(
         ) {
             Ok(path) => path,
             Err(create_err) => {
-                if crate::git::branch_exists(&repo_path, &branch.branch_name)
+                if let Some(path) =
+                    find_existing_worktree_for_branch(&repo_path, &branch.branch_name)?
+                {
+                    log::warn!(
+                        "[setup_worktree_sync] Reusing existing worktree '{}' for branch '{}' after create failure",
+                        path.display(),
+                        branch.branch_name
+                    );
+                    path
+                } else if crate::git::branch_exists(&repo_path, &branch.branch_name)
                     .map_err(|e| e.to_string())?
                 {
                     log::warn!(
-                        "[project_mcp] Branch '{}' already exists after create attempt; retrying with existing branch",
+                        "[setup_worktree_sync] Branch '{}' already exists after create attempt; retrying with existing branch",
                         branch.branch_name
                     );
-                    crate::git::create_worktree_for_existing_branch_at_path(
+                    create_worktree_for_existing_branch_with_fallback(
                         &repo_path,
                         &branch.branch_name,
                         &desired_worktree_path,
-                    )
-                    .map_err(|e| e.to_string())?
+                    )?
                 } else {
-                    return Err(create_err.to_string());
+                    return Err(create_err);
                 }
             }
         }
@@ -2205,6 +2252,7 @@ pub(crate) fn setup_worktree_sync(
         }
     }
 
+    // _guard dropped here, releasing the per-branch lock.
     Ok(worktree_str)
 }
 
@@ -2249,11 +2297,6 @@ pub(crate) async fn run_prerun_actions_for_branch(
 
     // If actions haven't been detected yet for this repo+subpath, detect now
     if !context.has_detected_actions {
-        log::info!(
-            "[project_mcp] detecting actions for repo {} (subpath: {:?})",
-            github_repo,
-            subpath
-        );
         store
             .set_action_context_detecting(&context.id, true)
             .map_err(|e| format!("Failed to set detection status: {e}"))?;
@@ -2268,12 +2311,22 @@ pub(crate) async fn run_prerun_actions_for_branch(
         );
 
         // Run detection (may call out to AI)
-        let detected = crate::actions::commands::detect_actions_for_repo_context(
+        let detected = match crate::actions::commands::detect_actions_for_repo_context(
             &github_repo,
             subpath.as_deref(),
         )
         .await
-        .unwrap_or_default();
+        {
+            Ok(actions) => actions,
+            Err(e) => {
+                log::warn!(
+                    "[run_prerun_actions_for_branch] action detection failed for repo {} (subpath: {:?}): {e}",
+                    github_repo,
+                    subpath
+                );
+                Vec::new()
+            }
+        };
 
         // Persist detected actions (skip duplicates)
         let existing_actions = store
@@ -2375,11 +2428,6 @@ pub(crate) async fn run_prerun_actions_for_branch(
         {
             Ok(_execution_id) => {
                 count += 1;
-                log::info!(
-                    "[project_mcp] prerun action '{}' completed for branch {}",
-                    action.id,
-                    branch_id
-                );
             }
             Err(e) => {
                 log::warn!(
